@@ -3,8 +3,10 @@ defmodule Arbor.Common.SkillImporter do
   Import external skills with security validation and taint tagging.
 
   All imported skills receive `taint: :untrusted` by default. The importer
-  validates SKILL.md format per the Agent Skills spec, records provenance
-  metadata, and runs reflex checks on skill names and bodies.
+  validates SKILL.md format per the Agent Skills spec and records provenance
+  metadata. When a skill-import security module is configured, names and
+  bodies are screened through that provider. Standalone Common (no provider)
+  admits parsed skills.
 
   ## Two-Phase Import
 
@@ -22,9 +24,17 @@ defmodule Arbor.Common.SkillImporter do
       # => %{count: 3, skills: [...], preview: false}
   """
 
+  alias Arbor.Common.Config
   alias Arbor.Common.SkillLibrary.SkillAdapter
 
   require Logger
+
+  @admitted_security_errors [
+    :blocked,
+    :invalid_skill,
+    :malformed_reflex_result,
+    :reflex_unavailable
+  ]
 
   @doc """
   Scan a directory for SKILL.md files and optionally import them.
@@ -45,7 +55,7 @@ defmodule Arbor.Common.SkillImporter do
         |> Enum.map(&parse_and_tag/1)
         |> Enum.filter(&match?({:ok, _}, &1))
         |> Enum.map(fn {:ok, skill} -> skill end)
-        |> Enum.filter(&passes_reflex_checks?/1)
+        |> Enum.filter(&passes_security_checks?/1)
 
       if approve do
         registered = register_skills(results, opts)
@@ -166,42 +176,73 @@ defmodule Arbor.Common.SkillImporter do
     end
   end
 
-  defp passes_reflex_checks?(skill) do
-    reflex_mod = Arbor.Security.Reflex
+  defp passes_security_checks?(skill) do
+    case Config.skill_import_security_module() do
+      nil ->
+        true
 
-    if Code.ensure_loaded?(reflex_mod) and function_exported?(reflex_mod, :check, 2) do
-      name = Map.get(skill, :name, "")
-      body = Map.get(skill, :body, "")
+      provider when is_atom(provider) ->
+        check_with_provider(provider, skill)
 
-      # Check skill name against reflex patterns
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      name_ok =
-        case apply(reflex_mod, :check, [:command, %{command: name}]) do
-          :ok -> true
-          {:blocked, _} -> false
-        end
+      _invalid ->
+        log_reject(skill, :invalid_provider)
+        false
+    end
+  end
 
-      # Check body for suspicious content (using url context as closest fit)
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      body_ok =
-        case apply(reflex_mod, :check, [:url, %{url: body}]) do
-          :ok -> true
-          {:blocked, _} -> false
-        end
+  defp check_with_provider(provider, skill) do
+    case provider.validate_imported_skill(skill) do
+      :ok ->
+        true
 
-      if not name_ok do
-        Logger.warning("[SkillImporter] Reflex blocked skill name: #{name}")
-      end
+      {:error, reason} when reason in @admitted_security_errors ->
+        log_reject(skill, reason)
+        false
 
-      name_ok and body_ok
-    else
-      # No reflex system — allow all
-      true
+      {:error, _other} ->
+        log_reject(skill, :malformed_result)
+        false
+
+      _other ->
+        log_reject(skill, :malformed_result)
+        false
     end
   rescue
-    _ -> true
+    exception ->
+      log_reject(skill, :provider_raised, exception.__struct__)
+      false
   catch
-    :exit, _ -> true
+    :throw, _ ->
+      log_reject(skill, :provider_threw)
+      false
+
+    :exit, _ ->
+      log_reject(skill, :provider_exited)
+      false
+  end
+
+  defp log_reject(skill, reason) do
+    Logger.warning("[SkillImporter] rejected imported skill #{skill_name(skill)}: #{reason}")
+  end
+
+  defp log_reject(skill, :provider_raised, exception_struct) do
+    Logger.warning(
+      "[SkillImporter] rejected imported skill #{skill_name(skill)}: provider_raised #{inspect(exception_struct)}"
+    )
+  end
+
+  defp skill_name(skill) do
+    case Map.get(skill, :name) || Map.get(skill, "name") do
+      name when is_binary(name) ->
+        if Regex.match?(~r/\A[a-z0-9][a-z0-9\-]{0,63}\z/, name) do
+          name
+        else
+          "unknown"
+        end
+
+      _ ->
+        "unknown"
+    end
   end
 
   defp validate_name_format(skill) do

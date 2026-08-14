@@ -104,6 +104,8 @@ config :arbor_common, tool_catalog_enabled: true
 # config :arbor_common, skill_embedding_module: nil
 # config :arbor_common, skill_persistence_module: nil
 # config :arbor_common, telemetry_persistence_module: nil
+# config :arbor_common, action_capability_uri_module: nil
+# config :arbor_common, skill_import_security_module: nil
 # config :arbor_common, skill_embedding_dimensions: 768
 
 # Hands — independent Claude Code sessions for delegated work

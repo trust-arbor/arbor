@@ -10,6 +10,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
   @behaviour Arbor.Contracts.CapabilityProvider
 
   alias Arbor.Common.ActionRegistry
+  alias Arbor.Common.Config
   alias Arbor.Contracts.CapabilityDescriptor
 
   @impl true
@@ -57,8 +58,6 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
     end
   end
 
-  @actions_mod Arbor.Actions
-
   @doc false
   def module_to_descriptor(canonical_name, module, metadata) do
     {description, tags} = extract_module_info(module)
@@ -84,16 +83,23 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
     }
   end
 
-  # Runtime bridge to Arbor.Actions.canonical_uri_for/2 (Level 2).
   defp resolve_capability_uri(module) do
-    if Code.ensure_loaded?(@actions_mod) and
-         function_exported?(@actions_mod, :canonical_uri_for, 2) do
-      apply(@actions_mod, :canonical_uri_for, [module, %{}])
-    else
-      nil
+    case Config.action_capability_uri_module() do
+      provider when is_atom(provider) and not is_nil(provider) ->
+        try do
+          case provider.canonical_uri_for(module, %{}) do
+            uri when is_binary(uri) -> uri
+            _ -> nil
+          end
+        rescue
+          _ -> nil
+        catch
+          _, _ -> nil
+        end
+
+      _ ->
+        nil
     end
-  rescue
-    _ -> nil
   end
 
   defp parse_action_id("action:" <> name), do: {:ok, name}

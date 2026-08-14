@@ -80,6 +80,16 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert Actions.canonical_uri_for(Arbor.Actions.Shell.Execute, %{}) == "arbor://shell/exec"
     end
 
+    test "implements Arbor.Common.CapabilityProviders.ActionCapabilityURI" do
+      behaviours =
+        Actions.module_info(:attributes)
+        |> Keyword.get_values(:behaviour)
+        |> List.flatten()
+
+      assert Arbor.Common.CapabilityProviders.ActionCapabilityURI in behaviours
+      assert Actions.canonical_uri_for(Arbor.Actions.File.Read, %{}) == "arbor://fs/read"
+    end
+
     test "pipeline run and validate have distinct canonical action URIs" do
       assert Actions.canonical_uri_for(Arbor.Actions.Pipeline.Run, %{}) ==
                "arbor://action/pipeline/run"

@@ -62,14 +62,14 @@ defmodule Arbor.Contracts.Security.Reflex do
   typedstruct do
     @typedoc "A reflex safety check definition"
 
-    field :id, String.t(), enforce: true
-    field :name, String.t(), enforce: true
-    field :type, reflex_type(), enforce: true
-    field :trigger, trigger(), enforce: true
-    field :response, response(), default: :block
-    field :message, String.t() | nil, default: nil
-    field :enabled, boolean(), default: true
-    field :priority, integer(), default: 50
+    field(:id, String.t(), enforce: true)
+    field(:name, String.t(), enforce: true)
+    field(:type, reflex_type(), enforce: true)
+    field(:trigger, trigger(), enforce: true)
+    field(:response, response(), default: :block)
+    field(:message, String.t() | nil, default: nil)
+    field(:enabled, boolean(), default: true)
+    field(:priority, integer(), default: 50)
   end
 
   @doc """
@@ -132,6 +132,10 @@ defmodule Arbor.Contracts.Security.Reflex do
     Regex.match?(regex, command)
   end
 
+  def matches?(%__MODULE__{trigger: {:pattern, regex}}, %{url: url}) when is_binary(url) do
+    Regex.match?(regex, url)
+  end
+
   def matches?(%__MODULE__{trigger: {:action, action_atom}}, %{action: action})
       when is_atom(action) do
     action == action_atom
@@ -192,7 +196,9 @@ defimpl Jason.Encoder, for: Arbor.Contracts.Security.Reflex do
     |> Jason.Encode.map(opts)
   end
 
-  defp encode_trigger({:pattern, %Regex{} = regex}), do: %{type: "pattern", value: Regex.source(regex)}
+  defp encode_trigger({:pattern, %Regex{} = regex}),
+    do: %{type: "pattern", value: Regex.source(regex)}
+
   defp encode_trigger({:action, atom}), do: %{type: "action", value: Atom.to_string(atom)}
   defp encode_trigger({:path, glob}), do: %{type: "path", value: glob}
   defp encode_trigger({:custom, _fun}), do: %{type: "custom", value: "<function>"}

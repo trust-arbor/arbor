@@ -89,6 +89,8 @@ defmodule Arbor.Actions do
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Signals
 
+  @behaviour Arbor.Common.CapabilityProviders.ActionCapabilityURI
+
   @max_reconciliation_principal_bytes 256
   @validation_resource_id_re ~r/\Avalidation_[0-9a-f]{32}\z/
   @live_workspace_id_re ~r/\Aws_[0-9a-f]{32}\z/
@@ -3239,6 +3241,7 @@ defmodule Arbor.Actions do
       "arbor://agent/profile/x"
   """
   @spec canonical_uri_for(module(), map()) :: String.t()
+  @impl true
   def canonical_uri_for(action_module, params) do
     case Map.get(@canonical_uri_map, action_module) do
       nil -> default_action_uri_for(action_module)
