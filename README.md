@@ -30,26 +30,38 @@ Arbor is built on the [BEAM](https://www.erlang.org/) — the same runtime that 
 
 ## Prerequisites
 
-- Elixir 1.18+
-- Erlang/OTP 27+
-- PostgreSQL (for persistence backends)
+- [mise](https://mise.jdx.dev/getting-started.html) (installs the Erlang/Elixir versions pinned in `.tool-versions`)
+- Git and a C toolchain (for building Erlang on some platforms)
+
+SQLite is the default database — **PostgreSQL is optional** (power-user / production).
+No OIDC provider or paid LLM key is required for a first local run.
 
 ## Getting Started
 
+Follow the guided walkthrough:
+
+**→ [docs/QUICKSTART.md](docs/QUICKSTART.md)** — clone → setup → free OpenRouter key → start → first agent reply
+
+Short version:
+
 ```bash
-# Clone the repository
 git clone https://github.com/trust-arbor/arbor.git
 cd arbor
+mise install
+./bin/mix arbor.setup
 
-# Install dependencies
-mix deps.get
+# Free first reply: https://openrouter.ai/keys → OPENROUTER_API_KEY in .env
+./bin/mix arbor.doctor --configure
 
-# Run tests
-mix test
-
-# Run quality checks (format + credo)
-mix quality
+set -a && source .env && set +a
+./bin/mix arbor.start
+./bin/mix arbor.agent start conversationalist --name "Hello"
+./bin/mix arbor.agent chat Hello "Say hello in one short sentence."
 ```
+
+Dashboard: http://localhost:4001 (open-dev auto-signs you in as Local Dev Operator).
+
+Always use `./bin/mix` (not bare `mix`) so the pinned toolchain is active.
 
 ## License
 

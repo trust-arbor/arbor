@@ -61,6 +61,50 @@ defmodule Arbor.Dashboard.OidcAuthTest do
                "(got #{conn.status}) — P0-1 regression"
     end
 
+    test "dev_local_operator establishes stable human session when enabled" do
+      expected_id = OidcAuth.dev_local_operator_agent_id()
+      assert String.starts_with?(expected_id, "human_")
+      assert expected_id == "human_42c59f5a4559b27790d3d45016e3515b1fb13c9a"
+
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{})
+        |> OidcAuth.call(OidcAuth.init(dev_local_operator: true))
+
+      refute conn.halted
+      assert get_session(conn, "agent_id") == expected_id
+      assert get_session(conn, "user_display_name") == "Local Dev Operator"
+      assert conn.assigns.current_agent_id == expected_id
+      assert conn.assigns.current_user_display_name == "Local Dev Operator"
+      assert is_binary(get_session(conn, "session_token")) or is_nil(get_session(conn, "session_token"))
+    end
+
+    test "dev_local_operator does not clobber an existing session agent_id" do
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{
+          "agent_id" => "human_existing_operator",
+          "user_display_name" => "Existing User"
+        })
+        |> OidcAuth.call(OidcAuth.init(dev_local_operator: true))
+
+      refute conn.halted
+      assert get_session(conn, "agent_id") == "human_existing_operator"
+      assert get_session(conn, "user_display_name") == "Existing User"
+      assert conn.assigns.current_agent_id == "human_existing_operator"
+    end
+
+    test "dev_local_operator does not fire when require_auth is true" do
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{})
+        |> OidcAuth.call(OidcAuth.init(require_auth: true, dev_local_operator: true))
+
+      assert conn.halted
+      assert conn.status == 503
+      refute get_session(conn, "agent_id")
+    end
+
     test "login route returns 404" do
       conn =
         conn(:get, "/auth/login")

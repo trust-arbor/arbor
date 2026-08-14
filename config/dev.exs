@@ -47,6 +47,11 @@ if System.get_env("ARBOR_DB") == "postgres" do
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
     embedding_dedup_enabled: true
+
+  # Oban on Postgres: LISTEN/NOTIFY notifier + Basic engine
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Basic,
+    notifier: Oban.Notifiers.Postgres
 else
   # SQLite — zero-config default
   config :arbor_persistence,
@@ -96,10 +101,19 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   check_origin: false,
   server: true
 
+# When OIDC is unset and require_auth is false, OidcAuth establishes a stable
+# local human operator session so External Agents registration works without
+# Zitadel. Must NEVER be enabled in prod (prod sets require_auth: true anyway).
+config :arbor_dashboard, dev_local_operator: true
+# Write external-agent private keys to ~/.arbor/keys (mode 600) and show a
+# ready-to-paste MCP config after Register New. Disabled outside local-dev so a
+# remote dashboard cannot drop private keys onto the server filesystem.
+config :arbor_dashboard, auto_save_external_agent_keys: true
+
 # Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)
 config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
-  event_log_backend: Arbor.Persistence.EventLog.Postgres
+  event_log_backend: Arbor.Persistence.EventLog.Ecto
 
 # Durable interaction terminals use the same SQL record store. Despite the
 # backend's historical name, it supports both configured Ecto adapters.

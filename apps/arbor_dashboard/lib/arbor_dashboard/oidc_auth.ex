@@ -14,7 +14,12 @@ defmodule Arbor.Dashboard.OidcAuth do
 
   - If OIDC is configured and user has no session → redirect to `/auth/login`
   - If OIDC is configured and user has session → pass through with `current_agent_id` assign
-  - If OIDC is not configured → open access (dev/test), same as previous Basic Auth behavior
+  - If OIDC is not configured and `require_auth` is true → 503 (fail closed; production)
+  - If OIDC is not configured, `require_auth` is false, and `dev_local_operator` is
+    enabled (dev default) → establish a stable local human operator session so
+    External Agents registration and other principal-scoped features work without Zitadel
+  - If OIDC is not configured and `dev_local_operator` is false → open access with
+    empty session (test / gated UI path)
   """
 
   import Plug.Conn
@@ -24,6 +29,10 @@ defmodule Arbor.Dashboard.OidcAuth do
   require Logger
 
   @behaviour Plug
+
+  @local_operator_display_name "Local Dev Operator"
+  @local_operator_iss "arbor"
+  @local_operator_sub "dev_local_operator"
 
   @impl true
   def init(opts), do: opts
@@ -60,8 +69,7 @@ defmodule Arbor.Dashboard.OidcAuth do
           )
           |> halt()
         else
-          # OIDC not configured — open access (dev/test)
-          conn
+          maybe_dev_local_operator(conn, opts)
         end
 
       _provider ->
@@ -84,6 +92,18 @@ defmodule Arbor.Dashboard.OidcAuth do
             |> assign(:current_user_display_name, display_name)
         end
     end
+  end
+
+  @doc """
+  Stable `human_*` agent id for the local-dev operator principal.
+
+  Derived the same way as OIDC humans: `human_` + first 40 hex of
+  `sha256(iss <> ":" <> sub)` with `iss=arbor`, `sub=dev_local_operator`
+  (i.e. sha256 of `"arbor:dev_local_operator"`).
+  """
+  @spec dev_local_operator_agent_id() :: String.t()
+  def dev_local_operator_agent_id do
+    IdentityStore.derive_agent_id(%{iss: @local_operator_iss, sub: @local_operator_sub})
   end
 
   # --- Route handlers ---
@@ -301,6 +321,108 @@ defmodule Arbor.Dashboard.OidcAuth do
     case Keyword.fetch(opts, :require_auth) do
       {:ok, value} -> value
       :error -> Application.get_env(:arbor_dashboard, :require_auth, false)
+    end
+  end
+
+  # Dev-only local operator auto-login. Hard gates (all required):
+  #   - no OIDC provider (caller already branched on `oidc_provider() == nil`)
+  #   - `require_auth` is false (caller already branched)
+  #   - `:dev_local_operator` app env / plug opt is true (defaults to Mix.env() == :dev)
+  #
+  # Production sets `require_auth: true` and never enables `:dev_local_operator`,
+  # so this path cannot fire there even if misconfigured.
+  defp maybe_dev_local_operator(conn, opts) do
+    if dev_local_operator?(opts) do
+      establish_dev_local_operator(conn)
+    else
+      # OIDC not configured — open access without a principal (test / gated UI)
+      conn
+    end
+  end
+
+  defp establish_dev_local_operator(conn) do
+    conn = fetch_session(conn)
+
+    case get_session(conn, "agent_id") do
+      agent_id when is_binary(agent_id) and agent_id != "" ->
+        display_name = get_session(conn, "user_display_name")
+
+        conn
+        |> assign(:current_agent_id, agent_id)
+        |> assign(:current_user_display_name, display_name)
+
+      _ ->
+        agent_id = ensure_dev_local_operator_identity()
+        session_token = generate_session_token(agent_id)
+
+        conn
+        |> put_session("agent_id", agent_id)
+        |> put_session("user_display_name", @local_operator_display_name)
+        |> put_session("session_token", session_token)
+        |> assign(:current_agent_id, agent_id)
+        |> assign(:current_user_display_name, @local_operator_display_name)
+    end
+  end
+
+  defp ensure_dev_local_operator_identity do
+    agent_id = dev_local_operator_agent_id()
+
+    claims = %{
+      "iss" => @local_operator_iss,
+      "sub" => @local_operator_sub,
+      "name" => @local_operator_display_name
+    }
+
+    case IdentityStore.load_or_create(claims) do
+      {:ok, identity, _status} ->
+        resolved = resolve_identity_alias(identity.agent_id)
+        ensure_role(resolved)
+        ensure_workspace(resolved)
+        resolved
+
+      {:error, reason} ->
+        Logger.debug(
+          "[OidcAuth] Dev local operator identity store unavailable: #{inspect(reason)}; " <>
+            "continuing with stable agent_id #{agent_id}"
+        )
+
+        ensure_workspace(agent_id)
+        agent_id
+    end
+  rescue
+    error ->
+      Logger.debug(
+        "[OidcAuth] Dev local operator identity setup failed: #{inspect(error)}; " <>
+          "continuing with stable agent_id"
+      )
+
+      agent_id = dev_local_operator_agent_id()
+      ensure_workspace(agent_id)
+      agent_id
+  catch
+    :exit, reason ->
+      Logger.debug(
+        "[OidcAuth] Dev local operator identity setup exited: #{inspect(reason)}; " <>
+          "continuing with stable agent_id"
+      )
+
+      agent_id = dev_local_operator_agent_id()
+      ensure_workspace(agent_id)
+      agent_id
+  end
+
+  # `dev_local_operator` resolution, in precedence order:
+  #
+  #   1. explicit `:dev_local_operator` plug option (per-call; used by unit tests)
+  #   2. application env (`config/dev.exs` sets true; prod must never set it)
+  #   3. default: `Mix.env() == :dev` only
+  defp dev_local_operator?(opts) do
+    case Keyword.fetch(opts, :dev_local_operator) do
+      {:ok, value} ->
+        value == true
+
+      :error ->
+        Application.get_env(:arbor_dashboard, :dev_local_operator, Mix.env() == :dev) == true
     end
   end
 

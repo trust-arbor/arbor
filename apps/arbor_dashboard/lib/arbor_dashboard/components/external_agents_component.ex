@@ -64,7 +64,10 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
       ) do
     case do_register(name, type, socket) do
       {:ok, profile, identity} ->
-        view = ExternalAgentsCore.build_just_registered_view(profile, identity, type)
+        view =
+          profile
+          |> ExternalAgentsCore.build_just_registered_view(identity, type)
+          |> maybe_persist_key_file()
 
         socket
         |> assign(:just_registered, view)
@@ -209,28 +212,51 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp do_register(display_name, agent_type, socket) do
-    character = Character.new(name: display_name, tone: "external")
+    with :ok <- require_authenticated_principal(socket) do
+      character = Character.new(name: display_name, tone: "external")
 
-    opts =
-      ExternalAgentsCore.build_registration_opts(
-        display_name,
-        agent_type,
-        socket.assigns[:tenant_context]
-      )
-      |> Keyword.put(:character, character)
+      opts =
+        ExternalAgentsCore.build_registration_opts(
+          display_name,
+          agent_type,
+          socket.assigns[:tenant_context]
+        )
+        |> Keyword.put(:character, character)
 
-    try do
-      case Lifecycle.create(display_name, opts) do
-        {:ok, profile, identity} -> {:ok, profile, identity}
-        {:ok, _profile} -> {:error, :return_identity_not_honored}
-        {:error, reason} -> {:error, reason}
+      try do
+        case Lifecycle.create(display_name, opts) do
+          {:ok, profile, identity} -> {:ok, profile, identity}
+          {:ok, _profile} -> {:error, :return_identity_not_honored}
+          {:error, reason} -> {:error, reason}
+        end
+      catch
+        :exit, _ -> {:error, :security_unavailable}
       end
-    catch
-      :exit, _ -> {:error, :security_unavailable}
     end
   end
 
-  defp do_revoke(_agent_id, nil), do: {:error, :not_owner}
+  # Server-side gate: the UI hides Register when unauthenticated, but events can
+  # still be pushed. Refuse Lifecycle.create without a real human principal.
+  defp require_authenticated_principal(socket) do
+    tenant = socket.assigns[:tenant_context]
+    principal_id = Arbor.Contracts.TenantContext.principal_id(tenant)
+
+    cond do
+      socket.assigns[:authenticated?] != true ->
+        {:error, :unauthenticated}
+
+      not is_binary(socket.assigns[:current_agent_id]) ->
+        {:error, :unauthenticated}
+
+      not is_binary(principal_id) ->
+        {:error, :unauthenticated}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp do_revoke(_agent_id, nil), do: {:error, :unauthenticated}
 
   defp do_revoke(agent_id, owner) do
     with {:ok, profile} <- safe_restore(agent_id),
@@ -262,7 +288,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     :exit, _ -> {:error, :security_unavailable}
   end
 
-  defp do_rename(_agent_id, _new_name, nil), do: {:error, :not_owner}
+  defp do_rename(_agent_id, _new_name, nil), do: {:error, :unauthenticated}
 
   defp do_rename(agent_id, new_name, owner) do
     with {:ok, profile} <- safe_restore(agent_id),
@@ -307,10 +333,10 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
 
       <.card title="External Agents">
         <p style="margin-bottom: 1rem; color: var(--aw-text-muted, #888);">
-          Register external tools (Claude Code, Codex, others) to authenticate to this Arbor cluster.
-          Each registration generates an Ed25519 keypair; the private key is shown
-          <strong>once</strong>
-          and must be copied or downloaded before dismissal.
+          Register external tools (Claude Code, Codex, OpenCode, others) to authenticate
+          to this Arbor cluster. Each registration generates an Ed25519 keypair. In local
+          dev the key is written to <code>~/.arbor/keys/</code> (mode 600) and a ready-to-paste
+          MCP config is shown — still one-shot; revoke and re-register if you lose it.
         </p>
 
         <%= if not @authenticated? do %>
@@ -499,13 +525,13 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     <.modal
       id="just-registered-modal"
       show={@just_registered != nil}
-      title="Save Your Private Key"
+      title="External Agent Ready"
       on_cancel={Phoenix.LiveView.JS.push("external_agents:dismiss_just_registered")}
     >
       <%= if @just_registered do %>
         <div style="background: var(--aw-warning-bg, #fff8e1); border: 1px solid var(--aw-warning, #f5a623); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem;">
-          <strong>This key is shown only once.</strong>
-          Copy it now or download it as a file. After you dismiss this dialog, you cannot retrieve it again — only revoke and re-register.
+          <strong>Private key access is one-shot.</strong>
+          After you dismiss this dialog you cannot retrieve the key again — only revoke and re-register.
         </div>
 
         <div style="margin-bottom: 1rem;">
@@ -517,38 +543,78 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
           <code style="font-family: monospace; font-size: 0.85em;">{@just_registered.agent_id}</code>
         </div>
 
-        <div style="margin-bottom: 1rem;">
-          <strong>Private key (base64, Ed25519):</strong>
+        <%= if @just_registered.key_path do %>
+          <div style="background: var(--aw-success-bg, #e8f5e9); border: 1px solid var(--aw-success, #4caf50); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem;">
+            <strong>Key saved</strong> to
+            <code style="font-family: monospace; font-size: 0.85em;">{@just_registered.key_path}</code>
+            (mode 600).
+          </div>
+        <% end %>
+
+        <%= if @just_registered.key_write_error do %>
+          <div style="background: var(--aw-warning-bg, #fff8e1); border: 1px solid var(--aw-warning, #f5a623); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem;">
+            Could not auto-save the key file: {@just_registered.key_write_error}.
+            Download it below instead.
+          </div>
+        <% end %>
+
+        <%= if @just_registered.mcp_config_json do %>
+          <div style="margin-bottom: 1rem;">
+            <strong>MCP host config</strong>
+            <p style="color: var(--aw-text-muted, #888); font-size: 0.85em; margin: 0.25rem 0 0.5rem;">
+              Paste into your MCP client config, or give this block to an agent and ask it to add the Arbor MCP server.
+            </p>
+            <textarea
+              id="just-registered-mcp-config"
+              readonly
+              rows="12"
+              style="width: 100%; font-family: monospace; font-size: 0.75em; padding: 0.5rem; border: 1px solid var(--aw-border, #ddd); border-radius: 0.25rem;"
+            >{@just_registered.mcp_config_json}</textarea>
+            <button
+              type="button"
+              onclick="navigator.clipboard.writeText(document.getElementById('just-registered-mcp-config').value); this.textContent='Copied!'"
+              class="aw-button-secondary"
+              style="margin-top: 0.5rem;"
+            >
+              Copy MCP config
+            </button>
+          </div>
+        <% end %>
+
+        <details style="margin-bottom: 1rem;">
+          <summary style="cursor: pointer; font-weight: 500;">Private key (base64) — advanced</summary>
           <textarea
             id="just-registered-key"
             readonly
             rows="4"
-            style="width: 100%; font-family: monospace; font-size: 0.8em; margin-top: 0.25rem; padding: 0.5rem; border: 1px solid var(--aw-border, #ddd); border-radius: 0.25rem;"
+            style="width: 100%; font-family: monospace; font-size: 0.8em; margin-top: 0.5rem; padding: 0.5rem; border: 1px solid var(--aw-border, #ddd); border-radius: 0.25rem;"
           >{@just_registered.private_key_b64}</textarea>
-        </div>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+            <button
+              type="button"
+              onclick="navigator.clipboard.writeText(document.getElementById('just-registered-key').value); this.textContent='Copied!'"
+              class="aw-button-secondary"
+            >
+              Copy key
+            </button>
+            <a
+              href={download_data_url(@just_registered)}
+              download={download_filename(@just_registered)}
+              class="aw-button-secondary"
+              style="display: inline-block; padding: 0.5rem 1rem; text-decoration: none;"
+            >
+              Download .key
+            </a>
+          </div>
+        </details>
 
         <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
-          <button
-            type="button"
-            onclick="navigator.clipboard.writeText(document.getElementById('just-registered-key').value); this.textContent='Copied!'"
-            class="aw-button-secondary"
-          >
-            Copy
-          </button>
-          <a
-            href={download_data_url(@just_registered)}
-            download={download_filename(@just_registered)}
-            class="aw-button-secondary"
-            style="display: inline-block; padding: 0.5rem 1rem; text-decoration: none;"
-          >
-            Download .key
-          </a>
           <button
             type="button"
             phx-click="external_agents:dismiss_just_registered"
             class="aw-button-primary"
           >
-            I have saved it
+            Done
           </button>
         </div>
       <% end %>
@@ -566,7 +632,74 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
     "data:application/octet-stream;base64," <> encoded
   end
 
+  defp download_filename(%{display_name: name, agent_id: agent_id}) do
+    ExternalAgentsCore.key_basename(name, agent_id)
+  end
+
   defp download_filename(%{display_name: name}) do
     ExternalAgentsCore.sanitize_filename(name) <> ".arbor.key"
+  end
+
+  # Local-dev convenience: write the key next to other Arbor runtime files and
+  # surface a ready-to-paste MCP config. Gated by
+  # `:arbor_dashboard, :auto_save_external_agent_keys` (enabled in config/dev.exs)
+  # so a remote dashboard cannot silently drop private keys onto the server.
+  defp maybe_persist_key_file(view) do
+    if Application.get_env(:arbor_dashboard, :auto_save_external_agent_keys, false) do
+      case persist_key_file(view) do
+        {:ok, path} ->
+          repo_root = Path.expand(File.cwd!())
+          mcp = ExternalAgentsCore.build_mcp_config_json(repo_root, path)
+
+          view
+          |> Map.put(:key_path, path)
+          |> Map.put(:mcp_config_json, mcp)
+          |> Map.put(:key_write_error, nil)
+
+        {:error, reason} ->
+          Logger.warning(
+            "[ExternalAgentsComponent] Auto-save key failed: #{inspect(reason)}"
+          )
+
+          view
+          |> Map.put(:key_path, nil)
+          |> Map.put(:mcp_config_json, nil)
+          |> Map.put(:key_write_error, ExternalAgentsCore.format_error(reason))
+      end
+    else
+      view
+    end
+  end
+
+  defp persist_key_file(%{display_name: name, agent_id: agent_id, private_key_b64: key_b64}) do
+    dir = Path.expand("~/.arbor/keys")
+    File.mkdir_p!(dir)
+
+    path = Path.join(dir, ExternalAgentsCore.key_basename(name, agent_id))
+    contents = ExternalAgentsCore.build_key_file_contents(agent_id, key_b64)
+
+    case File.open(path, [:write, :exclusive, :raw]) do
+      {:ok, io} ->
+        try do
+          IO.binwrite(io, contents)
+        after
+          File.close(io)
+        end
+
+        case File.chmod(path, 0o600) do
+          :ok ->
+            {:ok, path}
+
+          {:error, chmod_reason} ->
+            _ = File.rm(path)
+            {:error, chmod_reason}
+        end
+
+      {:error, :eexist} ->
+        {:error, :key_file_exists}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 end

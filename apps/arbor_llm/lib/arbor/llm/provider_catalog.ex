@@ -161,7 +161,7 @@ defmodule Arbor.LLM.ProviderCatalog do
   end
 
   defp build_cloud_entry(provider) do
-    env_key = ProviderRegistry.default_env_key(provider)
+    env_key = effective_env_key(provider)
     capabilities = ProviderRegistry.capabilities(provider)
 
     {:ok, contract} =
@@ -185,6 +185,27 @@ defmodule Arbor.LLM.ProviderCatalog do
       check_result: check_result,
       adapter_module: Arbor.LLM.Adapter.ReqLLM
     }
+  end
+
+  # ReqLLM's Google provider reads GOOGLE_API_KEY. Arbor also accepts
+  # GEMINI_API_KEY (propagated in Arbor.AI.Application). Prefer the live
+  # key so `mix arbor.doctor` marks Google ready when either is set.
+  defp effective_env_key("google") do
+    cond do
+      present_env?("GOOGLE_API_KEY") -> "GOOGLE_API_KEY"
+      present_env?("GEMINI_API_KEY") -> "GEMINI_API_KEY"
+      true -> ProviderRegistry.default_env_key("google")
+    end
+  end
+
+  defp effective_env_key(provider), do: ProviderRegistry.default_env_key(provider)
+
+  defp present_env?(name) do
+    case System.get_env(name) do
+      nil -> false
+      "" -> false
+      _ -> true
+    end
   end
 
   defp bounded_local_check(provider, base_url) do

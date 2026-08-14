@@ -448,8 +448,13 @@ config :arbor_scheduler,
     "scheduler_priv" => Path.expand("../apps/arbor_scheduler/priv/pipelines", __DIR__)
   }
 
+# Default to SQLite-compatible Oban substrate (Lite + PG notifier).
+# Postgres deployments override engine/notifier in config/dev.exs or
+# config/prod.exs when ARBOR_DB=postgres.
 config :arbor_scheduler, Oban,
   repo: Arbor.Persistence.Repo,
+  engine: Oban.Engines.Lite,
+  notifier: Oban.Notifiers.PG,
   queues: [default: 10, pipelines: 5, maintenance: 2],
   plugins: [
     Oban.Plugins.Pruner,

@@ -244,6 +244,9 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       assert view.agent_type == "claude_code"
       assert view.private_key_b64 == Base.encode64(<<1, 2, 3, 4>>)
       assert view.public_key_hex == "fffefdfc"
+      assert view.key_path == nil
+      assert view.mcp_config_json == nil
+      assert view.key_write_error == nil
     end
   end
 
@@ -253,6 +256,49 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       assert String.contains?(contents, "agent_id=agent_xyz")
       assert String.contains?(contents, "private_key_b64=BASE64KEY==")
       assert String.ends_with?(contents, "\n")
+    end
+  end
+
+  describe "key_basename/2" do
+    test "combines sanitized name with a short agent-id suffix" do
+      assert ExternalAgentsCore.key_basename(
+               "Dev Claude Bridge",
+               "agent_9f322746b81c6d8c68130daba2f828f8"
+             ) == "dev_claude_bridge_9f322746.arbor.key"
+    end
+  end
+
+  describe "build_mcp_config_json/3" do
+    test "embeds absolute repo and key paths in a sh -c arbor.signer invocation" do
+      json =
+        ExternalAgentsCore.build_mcp_config_json(
+          "/workspace",
+          "/home/me/.arbor/keys/dev.arbor.key",
+          "http://localhost:4000/mcp"
+        )
+
+      decoded = Jason.decode!(json)
+      assert %{"mcpServers" => %{"arbor" => server}} = decoded
+      assert server["command"] == "sh"
+      [flag, cmd] = server["args"]
+      assert flag == "-c"
+      assert String.contains?(cmd, "cd '/workspace'")
+      assert String.contains?(cmd, "./bin/mix arbor.signer")
+      assert String.contains?(cmd, "--key-file '/home/me/.arbor/keys/dev.arbor.key'")
+      assert String.contains?(cmd, "--upstream 'http://localhost:4000/mcp'")
+    end
+
+    test "POSIX-single-quotes paths that contain spaces or quotes" do
+      json =
+        ExternalAgentsCore.build_mcp_config_json(
+          "/path/with space",
+          "/tmp/it's.key",
+          "http://localhost:4000/mcp"
+        )
+
+      cmd = Jason.decode!(json)["mcpServers"]["arbor"]["args"] |> Enum.at(1)
+      assert String.contains?(cmd, "cd '/path/with space'")
+      assert String.contains?(cmd, "--key-file '/tmp/it'\\''s.key'")
     end
   end
 
@@ -273,22 +319,13 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
     end
   end
 
-  describe "format_time/1" do
-    test "formats DateTime as YYYY-MM-DD HH:MM" do
-      assert ExternalAgentsCore.format_time(~U[2026-04-11 12:30:00Z]) == "2026-04-11 12:30"
-    end
-
-    test "returns em-dash for non-DateTime input" do
-      assert ExternalAgentsCore.format_time(nil) == "—"
-      assert ExternalAgentsCore.format_time("2026-04-11") == "—"
-    end
-  end
-
   describe "format_error/1" do
     test "translates known reasons to user-friendly messages" do
+      assert ExternalAgentsCore.format_error(:unauthenticated) =~ "Sign in required"
       assert ExternalAgentsCore.format_error(:not_owner) =~ "only modify agents you registered"
       assert ExternalAgentsCore.format_error(:security_unavailable) =~ "Security subsystem"
       assert ExternalAgentsCore.format_error(:return_identity_not_honored) =~ "Internal error"
+      assert ExternalAgentsCore.format_error(:key_file_exists) =~ "already exists"
     end
 
     test "stringifies unknown error tuples" do
@@ -297,6 +334,17 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
 
     test "stringifies unknown atom reasons" do
       assert ExternalAgentsCore.format_error(:weird_thing) == "Error: weird_thing"
+    end
+  end
+
+  describe "format_time/1" do
+    test "formats DateTime as YYYY-MM-DD HH:MM" do
+      assert ExternalAgentsCore.format_time(~U[2026-04-11 12:30:00Z]) == "2026-04-11 12:30"
+    end
+
+    test "returns em-dash for non-DateTime input" do
+      assert ExternalAgentsCore.format_time(nil) == "—"
+      assert ExternalAgentsCore.format_time("2026-04-11") == "—"
     end
   end
 

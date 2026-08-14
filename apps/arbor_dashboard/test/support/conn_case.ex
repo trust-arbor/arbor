@@ -30,6 +30,11 @@ defmodule Arbor.Dashboard.ConnCase do
     # deterministically open-access regardless of how it got flipped.
     Application.put_env(:arbor_dashboard, :require_auth, false)
 
+    # Pin local-operator auto-login OFF so LiveView tests exercise the gated
+    # unauthenticated UI by default. Tests that need the operator session set
+    # `:dev_local_operator` true themselves (prefer async: false when doing so).
+    Application.put_env(:arbor_dashboard, :dev_local_operator, false)
+
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
 end
