@@ -402,7 +402,7 @@ defmodule Mix.Tasks.Arbor.Setup do
 
       Database: #{adapter_name}#{if opts[:skip_db], do: " (skipped)", else: ""}
 
-      Next steps:
+      Next steps (full walkthrough: docs/QUICKSTART.md):
         mix arbor.start       # Start the Arbor server
         mix phx.server        # Or start interactively
         open http://localhost:4001  # Dashboard
@@ -411,6 +411,8 @@ defmodule Mix.Tasks.Arbor.Setup do
         1. Create a free key at https://openrouter.ai/keys
         2. Add OPENROUTER_API_KEY=... to .env
         3. mix arbor.doctor --configure   # picks OpenRouter free default
+        4. mix arbor.agent start conversationalist --name Hello
+        5. mix arbor.agent chat Hello "Say hello in one short sentence."
 
       Or use an already-authenticated CLI (claude/codex/gemini) — doctor will detect ACP.
       Local models: install Ollama, then re-run doctor --configure.

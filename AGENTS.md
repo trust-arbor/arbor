@@ -13,8 +13,9 @@ Elixir `1.19.5-otp-28` in `.tool-versions`). Always use **`./bin/mix`** — bare
 `mix`/`iex` are not on PATH in non-interactive shells; for raw `iex` prepend
 `"$(mise where erlang)/bin"` and `"$(mise where elixir)/bin"`.
 
-Standard commands live in root `mix.exs` aliases (`setup`, `quality`, `test.fast`,
-`test.all`) and `mix arbor.*` (`arbor.setup`, `arbor.start`, `arbor.doctor`, …).
+Human first-run walkthrough: **`docs/QUICKSTART.md`**. Standard commands live in
+root `mix.exs` aliases (`setup`, `quality`, `test.fast`, `test.all`) and
+`mix arbor.*` (`arbor.setup`, `arbor.start`, `arbor.doctor`, …).
 
 ### Non-obvious caveats
 
