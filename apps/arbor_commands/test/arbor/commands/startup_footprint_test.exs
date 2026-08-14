@@ -180,8 +180,10 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
   test "check mode compares injected samples against policy and does not write" do
     root = tmp_root()
+
     policy_path =
       Path.join(root, "apps/arbor_commands/priv/packaging/startup_footprint_policy.v1.json")
+
     before = File.read!(policy_path)
 
     samples = %{

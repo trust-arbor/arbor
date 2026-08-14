@@ -172,7 +172,9 @@ defmodule Arbor.Commands.StartupFootprint do
     end
   end
 
-  defp packaging_root?(dir) when is_binary(dir), do: File.regular?(Path.join([dir | @root_marker]))
+  defp packaging_root?(dir) when is_binary(dir),
+    do: File.regular?(Path.join([dir | @root_marker]))
+
   defp packaging_root?(_), do: false
 
   defp resolve_policy_path(root, nil), do: SafePath.safe_join(root, @default_policy_rel)

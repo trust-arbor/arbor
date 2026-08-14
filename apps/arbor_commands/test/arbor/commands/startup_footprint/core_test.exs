@@ -120,10 +120,12 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
   test "normalize_sample rejects malformed snapshots" do
     raw = raw_sample("baseline")
     raw = put_in(raw, ["before", "process_count"], "nope")
+
     assert {:error, {:invalid_snapshot, "baseline", "before", ["process_count"]}} =
              Core.normalize_sample(raw)
 
     assert {:error, :malformed_sample} = Core.normalize_sample(:not_a_map)
+
     assert {:error, {:invalid_scenario, "merged"}} =
              Core.normalize_sample(%{"scenario" => "merged"})
   end

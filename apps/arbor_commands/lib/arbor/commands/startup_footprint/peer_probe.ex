@@ -158,8 +158,11 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
     |> Enum.reject(&MapSet.member?(@external_runtime_exclusions, &1))
     |> Enum.each(fn dep ->
       case Application.ensure_all_started(dep) do
-        {:ok, _} -> :ok
-        {:error, reason} -> raise "merged runtime start failed: #{inspect(dep)} #{inspect(reason)}"
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          raise "merged runtime start failed: #{inspect(dep)} #{inspect(reason)}"
       end
     end)
   end
