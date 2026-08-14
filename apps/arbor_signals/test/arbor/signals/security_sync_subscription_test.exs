@@ -34,26 +34,16 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
   ]
 
   setup do
-    original_authorizer = Application.get_env(:arbor_signals, :authorizer)
-    original_allow_open = Application.get_env(:arbor_signals, :allow_open_authorizer)
-    original_subscribers = Application.get_env(:arbor_signals, :security_sync_subscribers)
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:authorizer, __MODULE__.DenyAuthorizer)
+    Arbor.Signals.Config.Testing.delete(:allow_open_authorizer)
 
-    Application.put_env(:arbor_signals, :authorizer, __MODULE__.DenyAuthorizer)
-    Application.delete_env(:arbor_signals, :allow_open_authorizer)
-
-    Application.put_env(
-      :arbor_signals,
+    Arbor.Signals.Config.Testing.put(
       :security_sync_subscribers,
       Map.new(@roles, fn {role, {owner, events}} ->
         {role, %{owner: owner, events: events}}
       end)
     )
-
-    on_exit(fn ->
-      restore_env(:authorizer, original_authorizer)
-      restore_env(:allow_open_authorizer, original_allow_open)
-      restore_env(:security_sync_subscribers, original_subscribers)
-    end)
 
     :ok
   end
@@ -84,17 +74,17 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
     owner_name = :"Elixir.Arbor.Security.Identity.NonceCache"
     owner_pid = start_registered_owner(owner_name)
 
-    Application.delete_env(:arbor_signals, :security_sync_subscribers)
+    Arbor.Signals.Config.Testing.delete(:security_sync_subscribers)
     assert {:error, :unauthorized} = owner_subscribe(owner_pid, :nonce_cache, :nonce_seen)
 
-    Application.put_env(:arbor_signals, :security_sync_subscribers, %{
+    Arbor.Signals.Config.Testing.put(:security_sync_subscribers, %{
       nonce_cache: %{owner: owner_name, events: ["nonce_seen"]}
     })
 
     assert {:error, :unauthorized} = owner_subscribe(owner_pid, :nonce_cache, :nonce_seen)
 
     for malformed_event <- [:*, :"foo.bar"] do
-      Application.put_env(:arbor_signals, :security_sync_subscribers, %{
+      Arbor.Signals.Config.Testing.put(:security_sync_subscribers, %{
         nonce_cache: %{owner: owner_name, events: [malformed_event]}
       })
 
@@ -216,7 +206,4 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
       eventually(fun, attempts - 1)
     end
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:arbor_signals, key)
-  defp restore_env(key, value), do: Application.put_env(:arbor_signals, key, value)
 end

@@ -7,18 +7,18 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
   @moduletag :fast
 
   setup_all do
-    previous_signal_start_children = Application.get_env(:arbor_signals, :start_children)
     previous_start_children = Application.get_env(:arbor_security, :start_children)
+    previous_signals = Arbor.Signals.Config.Testing.snapshot_namespace()
 
     _ = Application.stop(:arbor_security)
     _ = Application.stop(:arbor_signals)
-    Application.put_env(:arbor_signals, :start_children, true)
+    Arbor.Signals.Config.Testing.put(:start_children, true)
     Application.put_env(:arbor_security, :start_children, true)
 
     on_exit(fn ->
       _ = Application.stop(:arbor_security)
       _ = Application.stop(:arbor_signals)
-      Application.put_env(:arbor_signals, :start_children, previous_signal_start_children)
+      Arbor.Signals.Config.Testing.restore_namespace(previous_signals)
       Application.put_env(:arbor_security, :start_children, previous_start_children)
     end)
 

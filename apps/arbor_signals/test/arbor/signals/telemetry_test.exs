@@ -7,13 +7,11 @@ defmodule Arbor.Signals.TelemetryTest do
 
   test "bridge honors explicit signal metadata from telemetry events" do
     bridge_id = "arbor-signals-telemetry-test-#{System.unique_integer([:positive])}"
-    original_restricted = Application.get_env(:arbor_signals, :restricted_topics)
-
-    Application.put_env(:arbor_signals, :restricted_topics, [])
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:restricted_topics, [])
 
     on_exit(fn ->
       Telemetry.detach(bridge_id)
-      restore_env(:arbor_signals, :restricted_topics, original_restricted)
     end)
 
     parent = self()
@@ -57,7 +55,4 @@ defmodule Arbor.Signals.TelemetryTest do
     assert signal.data.principal_id == "agent_001"
     assert signal.data.resource_uri == "arbor://fs/read"
   end
-
-  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
-  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

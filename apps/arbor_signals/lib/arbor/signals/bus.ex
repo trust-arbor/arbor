@@ -703,8 +703,7 @@ defmodule Arbor.Signals.Bus do
             %{signal | data: %{__decryption_failed__: true}}
 
           subscriber_id ->
-            channels_module =
-              Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
+            channels_module = Config.channels_module()
 
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
             case apply(channels_module, :decrypt_for_member, [

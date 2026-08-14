@@ -1,27 +1,32 @@
 defmodule Arbor.Signals.Config do
   @moduledoc """
-  Runtime configuration for the signal bus.
+  Owner-scoped application env for Signals.
 
-  Resolves authorizer module and restricted topics from application config,
-  with sensible defaults for backward compatibility.
+  Values live under `config :arbor_kernel, signals: [...]` and are read through
+  `Arbor.Kernel.ConfigCompat` during the compatibility window. Durable-sink,
+  security, crypto, and identity seams default to `nil` (disabled). Umbrella
+  runtime or tests inject concrete modules; this library never hardcodes those
+  providers.
 
   ## Configuration Keys
 
-      config :arbor_signals,
-        authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
-        restricted_topics: [:security, :identity],
-        security_sync_subscribers: %{},
-        durable_sink_module: nil,
-        security_module: nil,
-        crypto_module: nil,
-        identity_registry_module: nil,
-        channel_auto_rotate_interval_ms: 86_400_000,
-        channel_rotate_on_leave: true,
-        relay_enabled: true,
-        relay_batch_interval_ms: 50,
-        relay_max_batch_size: 500,
-        relay_category_rate_limit: 100,
-        relay_node_rate_limit: 1000
+      config :arbor_kernel,
+        signals: [
+          authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
+          restricted_topics: [:security, :identity],
+          security_sync_subscribers: %{},
+          durable_sink_module: nil,
+          security_module: nil,
+          crypto_module: nil,
+          identity_registry_module: nil,
+          channel_auto_rotate_interval_ms: 86_400_000,
+          channel_rotate_on_leave: true,
+          relay_enabled: true,
+          relay_batch_interval_ms: 50,
+          relay_max_batch_size: 500,
+          relay_category_rate_limit: 100,
+          relay_node_rate_limit: 1000
+        ]
   """
 
   require Logger
@@ -32,6 +37,12 @@ defmodule Arbor.Signals.Config do
   @security_sync_event_pattern ~r/^[a-z][a-z0-9_]*$/
   @default_auto_rotate_interval_ms 86_400_000
   @default_rotate_on_leave true
+  @default_channels_module Arbor.Signals.Channels
+  @default_checkpoint_interval_ms 60_000
+  @default_category_rate_limit 100
+  @default_node_rate_limit 1000
+  @default_batch_interval_ms 50
+  @default_max_batch_size 500
 
   @doc """
   Return the configured subscription authorizer module.
@@ -42,10 +53,10 @@ defmodule Arbor.Signals.Config do
   """
   @spec authorizer() :: module()
   def authorizer do
-    configured = Application.get_env(:arbor_signals, :authorizer, @default_authorizer)
+    configured = get(:authorizer, @default_authorizer)
 
     if configured == Arbor.Signals.Adapters.OpenAuthorizer and
-         not Application.get_env(:arbor_signals, :allow_open_authorizer, false) do
+         not get(:allow_open_authorizer, false) do
       Logger.warning(
         "OpenAuthorizer rejected without allow_open_authorizer flag, using CapabilityAuthorizer"
       )
@@ -63,18 +74,13 @@ defmodule Arbor.Signals.Config do
   """
   @spec restricted_topics() :: [atom()]
   def restricted_topics do
-    Application.get_env(:arbor_signals, :restricted_topics, @default_restricted_topics)
+    get(:restricted_topics, @default_restricted_topics)
   end
 
   @doc false
   @spec security_sync_owner(atom(), atom()) :: {:ok, atom()} | :error
   def security_sync_owner(role, event) when is_atom(role) and is_atom(event) do
-    subscribers =
-      Application.get_env(
-        :arbor_signals,
-        :security_sync_subscribers,
-        @default_security_sync_subscribers
-      )
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
 
     with true <- is_map(subscribers),
          %{owner: owner, events: events} <- Map.get(subscribers, role),
@@ -106,11 +112,7 @@ defmodule Arbor.Signals.Config do
   """
   @spec channel_auto_rotate_interval_ms() :: pos_integer()
   def channel_auto_rotate_interval_ms do
-    Application.get_env(
-      :arbor_signals,
-      :channel_auto_rotate_interval_ms,
-      @default_auto_rotate_interval_ms
-    )
+    get(:channel_auto_rotate_interval_ms, @default_auto_rotate_interval_ms)
   end
 
   @doc """
@@ -121,7 +123,7 @@ defmodule Arbor.Signals.Config do
   """
   @spec channel_rotate_on_leave?() :: boolean()
   def channel_rotate_on_leave? do
-    Application.get_env(:arbor_signals, :channel_rotate_on_leave, @default_rotate_on_leave)
+    get(:channel_rotate_on_leave, @default_rotate_on_leave)
   end
 
   @doc """
@@ -131,9 +133,7 @@ defmodule Arbor.Signals.Config do
   a concrete module; this library never hardcodes that provider.
   """
   @spec durable_sink_module() :: module() | nil | term()
-  def durable_sink_module do
-    Application.get_env(:arbor_signals, :durable_sink_module, nil)
-  end
+  def durable_sink_module, do: get(:durable_sink_module, nil)
 
   @doc """
   Module implementing `Arbor.Signals.Contracts.Authorization`, or `nil`.
@@ -142,9 +142,7 @@ defmodule Arbor.Signals.Config do
   a concrete module; this library never hardcodes that provider.
   """
   @spec security_module() :: module() | nil | term()
-  def security_module do
-    Application.get_env(:arbor_signals, :security_module, nil)
-  end
+  def security_module, do: get(:security_module, nil)
 
   @doc """
   Module implementing `Arbor.Signals.Contracts.Crypto`, or `nil`.
@@ -153,9 +151,7 @@ defmodule Arbor.Signals.Config do
   a concrete module; this library never hardcodes that provider.
   """
   @spec crypto_module() :: module() | nil | term()
-  def crypto_module do
-    Application.get_env(:arbor_signals, :crypto_module, nil)
-  end
+  def crypto_module, do: get(:crypto_module, nil)
 
   @doc """
   Module implementing `Arbor.Signals.Contracts.IdentityKeys`, or `nil`.
@@ -164,7 +160,53 @@ defmodule Arbor.Signals.Config do
   a concrete module; this library never hardcodes that provider.
   """
   @spec identity_registry_module() :: module() | nil | term()
-  def identity_registry_module do
-    Application.get_env(:arbor_signals, :identity_registry_module, nil)
+  def identity_registry_module, do: get(:identity_registry_module, nil)
+
+  @doc "Whether Signals starts its optional supervised children (default true)."
+  @spec start_children?() :: boolean() | nil
+  def start_children?, do: get(:start_children, true)
+
+  @doc "Whether the security telemetry-to-signal bridge attaches (default true)."
+  @spec security_telemetry_bridge?() :: boolean() | nil
+  def security_telemetry_bridge?, do: get(:security_telemetry_bridge, true)
+
+  @doc "Whether the cross-node relay is enabled (default true)."
+  @spec relay_enabled?() :: boolean() | nil
+  def relay_enabled?, do: get(:relay_enabled, true)
+
+  @doc "Per-category relay tokens per second (default 100)."
+  @spec relay_category_rate_limit() :: non_neg_integer()
+  def relay_category_rate_limit, do: get(:relay_category_rate_limit, @default_category_rate_limit)
+
+  @doc "Per-node ingress relay rate limit (default 1000)."
+  @spec relay_node_rate_limit() :: non_neg_integer()
+  def relay_node_rate_limit, do: get(:relay_node_rate_limit, @default_node_rate_limit)
+
+  @doc "Relay batch flush interval in milliseconds (default 50)."
+  @spec relay_batch_interval_ms() :: pos_integer()
+  def relay_batch_interval_ms, do: get(:relay_batch_interval_ms, @default_batch_interval_ms)
+
+  @doc "Relay maximum outbound batch size (default 500)."
+  @spec relay_max_batch_size() :: pos_integer()
+  def relay_max_batch_size, do: get(:relay_max_batch_size, @default_max_batch_size)
+
+  @doc "Checkpoint adapter module, or `nil`."
+  @spec checkpoint_module() :: module() | nil
+  def checkpoint_module, do: get(:checkpoint_module, nil)
+
+  @doc "Checkpoint store backend, or `nil`."
+  @spec checkpoint_store() :: term()
+  def checkpoint_store, do: get(:checkpoint_store, nil)
+
+  @doc "Checkpoint save interval in milliseconds (default 60_000)."
+  @spec checkpoint_interval_ms() :: pos_integer()
+  def checkpoint_interval_ms, do: get(:checkpoint_interval_ms, @default_checkpoint_interval_ms)
+
+  @doc "Channel decrypt module (default `Arbor.Signals.Channels`)."
+  @spec channels_module() :: module()
+  def channels_module, do: get(:channels_module, @default_channels_module)
+
+  defp get(key, default) do
+    Arbor.Kernel.ConfigCompat.get_env(:arbor_signals, key, default)
   end
 end

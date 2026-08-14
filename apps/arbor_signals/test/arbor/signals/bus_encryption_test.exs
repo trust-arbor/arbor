@@ -4,6 +4,7 @@ defmodule Arbor.Signals.BusEncryptionTest do
   @moduletag :fast
 
   alias Arbor.Signals.Bus
+  alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Signal
   alias Arbor.Signals.TopicKeys
 
@@ -20,17 +21,8 @@ defmodule Arbor.Signals.BusEncryptionTest do
   setup do
     Arbor.Signals.TestCase.ensure_processes()
 
-    # Use our permissive authorizer
-    original_authorizer = Application.get_env(:arbor_signals, :authorizer)
-    Application.put_env(:arbor_signals, :authorizer, AllowAllAuthorizer)
-
-    on_exit(fn ->
-      if original_authorizer do
-        Application.put_env(:arbor_signals, :authorizer, original_authorizer)
-      else
-        Application.delete_env(:arbor_signals, :authorizer)
-      end
-    end)
+    Testing.isolate_namespace()
+    Testing.put(:authorizer, AllowAllAuthorizer)
 
     :ok
   end
@@ -219,12 +211,6 @@ defmodule Arbor.Signals.BusEncryptionTest do
       parent = self()
       handler = fn signal -> send(parent, {:oq7_signal, signal.data}) end
 
-      Application.put_env(
-        :arbor_signals,
-        :subscription_authorizer_module,
-        Arbor.Signals.BusEncryptionTest.AllowAllAuthorizer
-      )
-
       {:ok, sub_id} = Bus.subscribe("oq7.*", handler, principal_id: non_member)
 
       signal_a = %{
@@ -274,12 +260,6 @@ defmodule Arbor.Signals.BusEncryptionTest do
 
       parent = self()
       handler = fn signal -> send(parent, {:oq7_signal_pos, signal.data}) end
-
-      Application.put_env(
-        :arbor_signals,
-        :subscription_authorizer_module,
-        Arbor.Signals.BusEncryptionTest.AllowAllAuthorizer
-      )
 
       {:ok, sub_id} = Bus.subscribe("oq7pos.*", handler, principal_id: member)
 

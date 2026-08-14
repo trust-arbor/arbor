@@ -33,27 +33,26 @@ defmodule Arbor.Signals.Relay do
 
   ## Configuration
 
-      config :arbor_signals,
-        relay_batch_interval_ms: 50,
-        relay_max_batch_size: 500,
-        relay_enabled: true,
-        # Per-category tokens per second (default 100/s per category)
-        relay_category_rate_limit: 100,
-        # Per-node ingress rate limit (signals per second, default 1000/s)
-        relay_node_rate_limit: 1000
+      config :arbor_kernel,
+        signals: [
+          relay_batch_interval_ms: 50,
+          relay_max_batch_size: 500,
+          relay_enabled: true,
+          # Per-category tokens per second (default 100/s per category)
+          relay_category_rate_limit: 100,
+          # Per-node ingress rate limit (signals per second, default 1000/s)
+          relay_node_rate_limit: 1000
+        ]
   """
 
   use GenServer
 
   require Logger
 
+  alias Arbor.Signals.Config
   alias Arbor.Signals.Signal
 
   @pg_group {:arbor, :signal_relays}
-  @default_batch_interval_ms 50
-  @default_max_batch_size 500
-  @default_category_rate_limit 100
-  @default_node_rate_limit 1000
 
   # Priority levels for load shedding (lower = higher priority = shed last)
   @category_priority %{
@@ -103,7 +102,7 @@ defmodule Arbor.Signals.Relay do
   @doc "Check if the relay is enabled."
   @spec enabled?() :: boolean()
   def enabled? do
-    Application.get_env(:arbor_signals, :relay_enabled, true)
+    Config.relay_enabled?()
   end
 
   # ── Server Callbacks ────────────────────────────────────────────────
@@ -137,7 +136,14 @@ defmodule Arbor.Signals.Relay do
          }
        }}
     else
-      {:ok, %{batch: [], batch_size: 0, rate_buckets: %{}, node_counters: %{}, stats: %{status: :disabled}}}
+      {:ok,
+       %{
+         batch: [],
+         batch_size: 0,
+         rate_buckets: %{},
+         node_counters: %{},
+         stats: %{status: :disabled}
+       }}
     end
   end
 
@@ -196,23 +202,17 @@ defmodule Arbor.Signals.Relay do
         |> Map.put(:peers_seen, count_peers())
 
       if rejected_count > 0 do
-        Logger.warning(
-          "[SignalRelay] Rate limited #{rejected_count} signals from #{from_node}"
-        )
+        Logger.warning("[SignalRelay] Rate limited #{rejected_count} signals from #{from_node}")
       end
 
-      Logger.debug(
-        "[SignalRelay] Received #{count} signals from #{from_node}"
-      )
+      Logger.debug("[SignalRelay] Received #{count} signals from #{from_node}")
 
       {:noreply, %{state | stats: stats}}
     else
       # Phase 6: Reject signals from unknown nodes
       count = length(signals)
 
-      Logger.warning(
-        "[SignalRelay] Rejected #{count} signals from unknown peer #{from_node}"
-      )
+      Logger.warning("[SignalRelay] Rejected #{count} signals from unknown peer #{from_node}")
 
       stats = Map.update!(state.stats, :signals_rejected, &(&1 + count))
       {:noreply, %{state | stats: stats}}
@@ -296,16 +296,14 @@ defmodule Arbor.Signals.Relay do
     else
       buckets = Map.put(state.rate_buckets, category, {0, last_refill})
 
-      Logger.debug(
-        "[SignalRelay] Rate limited category #{category} (#{limit}/s)"
-      )
+      Logger.debug("[SignalRelay] Rate limited category #{category} (#{limit}/s)")
 
       {false, %{state | rate_buckets: buckets}}
     end
   end
 
   defp category_rate_limit do
-    Application.get_env(:arbor_signals, :relay_category_rate_limit, @default_category_rate_limit)
+    Config.relay_category_rate_limit()
   end
 
   # ── Phase 6: Security Hardening ─────────────────────────────────────
@@ -348,7 +346,7 @@ defmodule Arbor.Signals.Relay do
   end
 
   defp node_rate_limit do
-    Application.get_env(:arbor_signals, :relay_node_rate_limit, @default_node_rate_limit)
+    Config.relay_node_rate_limit()
   end
 
   defp sanitize_remote_signal(%Signal{} = signal) do
@@ -408,9 +406,7 @@ defmodule Arbor.Signals.Relay do
       # New signal is lower or equal priority — drop it
       stats = Map.update!(state.stats, :signals_dropped, &(&1 + 1))
 
-      Logger.debug(
-        "[SignalRelay] Dropped signal category=#{new_signal.category} (batch full)"
-      )
+      Logger.debug("[SignalRelay] Dropped signal category=#{new_signal.category} (batch full)")
 
       %{state | stats: stats}
     end
@@ -461,10 +457,10 @@ defmodule Arbor.Signals.Relay do
   end
 
   defp batch_interval_ms do
-    Application.get_env(:arbor_signals, :relay_batch_interval_ms, @default_batch_interval_ms)
+    Config.relay_batch_interval_ms()
   end
 
   defp max_batch_size do
-    Application.get_env(:arbor_signals, :relay_max_batch_size, @default_max_batch_size)
+    Config.relay_max_batch_size()
   end
 end

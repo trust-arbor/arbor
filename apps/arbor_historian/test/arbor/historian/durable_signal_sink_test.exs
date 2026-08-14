@@ -10,16 +10,15 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   setup do
     originals = %{
-      sink: Application.get_env(:arbor_signals, :durable_sink_module, :unset),
       hot: Application.get_env(:arbor_historian, :hot_event_log_target, :unset),
       durable: Application.get_env(:arbor_historian, :durable_event_log_target, :unset),
       starter: Application.get_env(:arbor_historian, :durable_task_starter, :unset)
     }
 
+    Arbor.Signals.Config.Testing.isolate_namespace()
     Application.delete_env(:arbor_historian, :durable_task_starter)
 
     on_exit(fn ->
-      restore(:arbor_signals, :durable_sink_module, originals.sink)
       restore(:arbor_historian, :hot_event_log_target, originals.hot)
       restore(:arbor_historian, :durable_event_log_target, originals.durable)
       restore(:arbor_historian, :durable_task_starter, originals.starter)
@@ -43,7 +42,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   test "hot append is visible before durable_emit returns and durable runs asynchronously" do
     ctx = start_isolated_targets()
     ensure_signals()
-    Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
     stream_id = "k1e_async_#{System.unique_integer([:positive])}"
     type = :"async_probe_#{System.unique_integer([:positive])}"
@@ -72,7 +71,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   test "security regression: durable_emit preserves lineage and caller metadata at EventLog boundary" do
     ctx = start_isolated_targets()
     ensure_signals()
-    Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
     suffix = System.unique_integer([:positive])
     stream_id = "audit_lineage_#{suffix}"
@@ -122,7 +121,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   test "security regression: absent lineage opts stay nil without empty sentinels" do
     ctx = start_isolated_targets()
     ensure_signals()
-    Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
     suffix = System.unique_integer([:positive])
     stream_id = "audit_lineage_absent_#{suffix}"
@@ -144,7 +143,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   test "writes isolated Config targets rather than leftover hardcoded names" do
     ctx = start_isolated_targets()
     ensure_signals()
-    Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
     stream_id = "k1e_isolated_#{System.unique_integer([:positive])}"
     type = :"isolated_#{System.unique_integer([:positive])}"
@@ -158,7 +157,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   test "invalid or unavailable targets and append failures log bounded gaps and stay :ok" do
     ensure_signals()
-    Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
     stream_id = "k1e_gap_#{System.unique_integer([:positive])}"
     payload = %{secret: "payload"}

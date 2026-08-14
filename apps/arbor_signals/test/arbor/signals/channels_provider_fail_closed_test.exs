@@ -4,62 +4,53 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
   @moduletag :fast
 
   alias Arbor.Signals.Channels
+  alias Arbor.Signals.Config.Testing
 
   setup do
     Arbor.Signals.TestCase.ensure_processes()
-
-    originals = %{
-      crypto: Application.get_env(:arbor_signals, :crypto_module, :unset),
-      identity: Application.get_env(:arbor_signals, :identity_registry_module, :unset)
-    }
-
-    on_exit(fn ->
-      restore(:crypto_module, originals.crypto)
-      restore(:identity_registry_module, originals.identity)
-    end)
-
+    Testing.isolate_namespace()
     :ok
   end
 
   test "create fails closed for absent invalid missing raise throw exit crypto" do
-    Application.delete_env(:arbor_signals, :crypto_module)
+    Testing.delete(:crypto_module)
     assert {:error, :crypto_unavailable} = Channels.create("absent", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, true)
+    Testing.put(:crypto_module, true)
     assert {:error, :crypto_unavailable} = Channels.create("true", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, "not-a-module")
+    Testing.put(:crypto_module, "not-a-module")
     assert {:error, :crypto_unavailable} = Channels.create("string", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.Empty)
+    Testing.put(:crypto_module, __MODULE__.Empty)
     assert {:error, :crypto_unavailable} = Channels.create("empty", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.RaiseCrypto)
+    Testing.put(:crypto_module, __MODULE__.RaiseCrypto)
     assert {:error, :crypto_failed} = Channels.create("raise", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.ThrowCrypto)
+    Testing.put(:crypto_module, __MODULE__.ThrowCrypto)
     assert {:error, :crypto_failed} = Channels.create("throw", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.ExitCrypto)
+    Testing.put(:crypto_module, __MODULE__.ExitCrypto)
     assert {:error, :crypto_failed} = Channels.create("exit", "agent_creator")
     assert_alive()
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.MalformedCrypto)
+    Testing.put(:crypto_module, __MODULE__.MalformedCrypto)
     assert {:error, :crypto_failed} = Channels.create("malformed", "agent_creator")
     assert_alive()
   end
 
   test "send fails closed when crypto becomes unavailable after create" do
-    Application.put_env(:arbor_signals, :crypto_module, Arbor.Signals.Test.MockCrypto)
+    Testing.put(:crypto_module, Arbor.Signals.Test.MockCrypto)
     assert {:ok, channel, _key} = Channels.create("send-fail", "agent_sender")
 
-    Application.put_env(:arbor_signals, :crypto_module, __MODULE__.RaiseCrypto)
+    Testing.put(:crypto_module, __MODULE__.RaiseCrypto)
 
     assert {:error, :crypto_failed} =
              Channels.send(channel.id, "agent_sender", :hello, %{body: "hi"})
@@ -68,8 +59,8 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
   end
 
   test "invite fails closed for absent invalid missing malformed raise throw exit identity" do
-    Application.put_env(:arbor_signals, :crypto_module, Arbor.Signals.Test.MockCrypto)
-    Application.delete_env(:arbor_signals, :identity_registry_module)
+    Testing.put(:crypto_module, Arbor.Signals.Test.MockCrypto)
+    Testing.delete(:identity_registry_module)
 
     assert {:ok, channel, _key} = Channels.create("invite-fail", "agent_inviter")
 
@@ -84,49 +75,49 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, true)
+    Testing.put(:identity_registry_module, true)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, "not-a-module")
+    Testing.put(:identity_registry_module, "not-a-module")
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, __MODULE__.Empty)
+    Testing.put(:identity_registry_module, __MODULE__.Empty)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, __MODULE__.MalformedRegistry)
+    Testing.put(:identity_registry_module, __MODULE__.MalformedRegistry)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, __MODULE__.RaiseRegistry)
+    Testing.put(:identity_registry_module, __MODULE__.RaiseRegistry)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, __MODULE__.ThrowRegistry)
+    Testing.put(:identity_registry_module, __MODULE__.ThrowRegistry)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
 
     assert_alive()
 
-    Application.put_env(:arbor_signals, :identity_registry_module, __MODULE__.ExitRegistry)
+    Testing.put(:identity_registry_module, __MODULE__.ExitRegistry)
 
     assert {:error, :registry_unavailable} =
              Channels.invite(channel.id, "agent_invitee", keychain)
@@ -139,9 +130,6 @@ defmodule Arbor.Signals.ChannelsProviderFailClosedTest do
     assert is_pid(pid)
     assert Process.alive?(pid)
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_signals, key)
-  defp restore(key, value), do: Application.put_env(:arbor_signals, key, value)
 
   defmodule Empty do
   end

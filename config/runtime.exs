@@ -449,13 +449,16 @@ if config_env() != :test do
 end
 
 # ============================================================================
-# Signals durable sink (injected into arbor_signals; nil by default in lib)
+# Signals durable sink (injected into arbor_kernel :signals; nil by default in lib)
 # ============================================================================
 if config_env() != :test do
-  config :arbor_signals, durable_sink_module: Arbor.Historian
-  config :arbor_signals, security_module: Arbor.Security
-  config :arbor_signals, crypto_module: Arbor.Security
-  config :arbor_signals, identity_registry_module: Arbor.Security
+  config :arbor_kernel,
+    signals: [
+      durable_sink_module: Arbor.Historian,
+      security_module: Arbor.Security,
+      crypto_module: Arbor.Security,
+      identity_registry_module: Arbor.Security
+    ]
 end
 
 # ============================================================================

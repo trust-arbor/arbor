@@ -77,23 +77,10 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
 
   setup do
     Arbor.Signals.TestCase.ensure_processes()
-
-    original_crypto = Application.get_env(:arbor_signals, :crypto_module)
-    Application.put_env(:arbor_signals, :crypto_module, MockCrypto)
-    Application.put_env(:arbor_signals, :identity_registry_module, MockRegistry)
-    Application.put_env(:arbor_signals, :channel_rotate_on_leave, true)
-
-    on_exit(fn ->
-      if original_crypto do
-        Application.put_env(:arbor_signals, :crypto_module, original_crypto)
-      else
-        Application.delete_env(:arbor_signals, :crypto_module)
-      end
-
-      Application.delete_env(:arbor_signals, :identity_registry_module)
-      Application.delete_env(:arbor_signals, :channel_rotate_on_leave)
-    end)
-
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:crypto_module, MockCrypto)
+    Arbor.Signals.Config.Testing.put(:identity_registry_module, MockRegistry)
+    Arbor.Signals.Config.Testing.put(:channel_rotate_on_leave, true)
     :ok
   end
 

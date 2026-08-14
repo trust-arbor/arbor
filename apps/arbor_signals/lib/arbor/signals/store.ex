@@ -21,6 +21,7 @@ defmodule Arbor.Signals.Store do
 
   require Logger
 
+  alias Arbor.Signals.Config
   alias Arbor.Signals.Signal
   alias Arbor.Signals.Store.CheckpointIO
   alias Arbor.Signals.Store.MemoryPrivacyCore
@@ -28,7 +29,6 @@ defmodule Arbor.Signals.Store do
   @default_max_signals 10_000
   @default_ttl_seconds 3600
   @cleanup_interval_ms 60_000
-  @default_checkpoint_interval_ms 60_000
 
   # Client API
 
@@ -547,8 +547,8 @@ defmodule Arbor.Signals.Store do
   end
 
   defp resolve_checkpoint_mode do
-    module = Application.get_env(:arbor_signals, :checkpoint_module)
-    store = Application.get_env(:arbor_signals, :checkpoint_store)
+    module = Config.checkpoint_module()
+    store = Config.checkpoint_store()
 
     cond do
       is_nil(module) and is_nil(store) ->
@@ -671,23 +671,18 @@ defmodule Arbor.Signals.Store do
   end
 
   defp schedule_checkpoint_save do
-    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
+    checkpoint_mod = Config.checkpoint_module()
 
     if checkpoint_mod && checkpoint_available?(checkpoint_mod) do
-      interval =
-        Application.get_env(
-          :arbor_signals,
-          :checkpoint_interval_ms,
-          @default_checkpoint_interval_ms
-        )
+      interval = Config.checkpoint_interval_ms()
 
       Process.send_after(self(), :save_checkpoint, interval)
     end
   end
 
   defp maybe_restore_checkpoint(state) do
-    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
-    checkpoint_store = Application.get_env(:arbor_signals, :checkpoint_store)
+    checkpoint_mod = Config.checkpoint_module()
+    checkpoint_store = Config.checkpoint_store()
 
     if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
       restore_from_checkpoint(checkpoint_mod, checkpoint_store, state)
@@ -734,8 +729,8 @@ defmodule Arbor.Signals.Store do
   end
 
   defp save_checkpoint(state) do
-    checkpoint_mod = Application.get_env(:arbor_signals, :checkpoint_module)
-    checkpoint_store = Application.get_env(:arbor_signals, :checkpoint_store)
+    checkpoint_mod = Config.checkpoint_module()
+    checkpoint_store = Config.checkpoint_store()
 
     if checkpoint_mod && checkpoint_store && checkpoint_available?(checkpoint_mod) do
       snapshot_data = %{

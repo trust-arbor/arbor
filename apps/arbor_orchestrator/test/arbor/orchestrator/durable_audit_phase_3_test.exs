@@ -97,8 +97,8 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
       prev = Application.get_env(:arbor_orchestrator, :event_log_name)
       Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
 
-      prev_sink = Application.get_env(:arbor_signals, :durable_sink_module, :unset)
-      Application.put_env(:arbor_signals, :durable_sink_module, Arbor.Historian)
+      Arbor.Signals.Config.Testing.isolate_namespace()
+      Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
       prev_hot = Application.get_env(:arbor_historian, :hot_event_log_target, :unset)
 
@@ -112,10 +112,6 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
         if prev,
           do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
           else: Application.delete_env(:arbor_orchestrator, :event_log_name)
-
-        if prev_sink == :unset,
-          do: Application.delete_env(:arbor_signals, :durable_sink_module),
-          else: Application.put_env(:arbor_signals, :durable_sink_module, prev_sink)
 
         if prev_hot == :unset,
           do: Application.delete_env(:arbor_historian, :hot_event_log_target),

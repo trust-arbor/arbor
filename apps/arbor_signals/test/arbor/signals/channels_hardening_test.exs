@@ -47,26 +47,10 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
   setup do
     Arbor.Signals.TestCase.ensure_processes()
-
-    # Configure mock modules
-    original_crypto = Application.get_env(:arbor_signals, :crypto_module)
-    Application.put_env(:arbor_signals, :crypto_module, MockCrypto)
-    Application.put_env(:arbor_signals, :identity_registry_module, MockRegistry)
-    Application.put_env(:arbor_signals, :channel_rotate_on_leave, true)
-
-    on_exit(fn ->
-      # Restore global MockCrypto (set in test_helper), don't delete
-      if original_crypto do
-        Application.put_env(:arbor_signals, :crypto_module, original_crypto)
-      else
-        Application.delete_env(:arbor_signals, :crypto_module)
-      end
-
-      Application.delete_env(:arbor_signals, :identity_registry_module)
-      Application.delete_env(:arbor_signals, :channel_rotate_on_leave)
-      Application.delete_env(:arbor_signals, :channel_auto_rotate_interval_ms)
-    end)
-
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:crypto_module, MockCrypto)
+    Arbor.Signals.Config.Testing.put(:identity_registry_module, MockRegistry)
+    Arbor.Signals.Config.Testing.put(:channel_rotate_on_leave, true)
     :ok
   end
 
@@ -120,7 +104,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
     end
 
     test "leaving member does not rotate key when config disabled" do
-      Application.put_env(:arbor_signals, :channel_rotate_on_leave, false)
+      Arbor.Signals.Config.Testing.put(:channel_rotate_on_leave, false)
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -355,7 +339,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       channel_id = channel.id
 
       # Configure very short interval for testing
-      Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, 50)
+      Arbor.Signals.Config.Testing.put(:channel_auto_rotate_interval_ms, 50)
 
       # Schedule rotation
       :ok = Channels.schedule_rotation(channel_id, creator_id)
@@ -380,7 +364,7 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       {:ok, channel, _key} = Channels.create("test-channel", creator_id)
       channel_id = channel.id
 
-      Application.put_env(:arbor_signals, :channel_auto_rotate_interval_ms, 50)
+      Arbor.Signals.Config.Testing.put(:channel_auto_rotate_interval_ms, 50)
 
       :ok = Channels.schedule_rotation(channel_id, creator_id)
       :ok = Channels.cancel_scheduled_rotation(channel_id, creator_id)

@@ -5,14 +5,12 @@ defmodule Arbor.Signals.DurableSinkTest do
 
   @moduletag :fast
 
+  alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.DurableSink
 
   setup do
-    original = Application.get_env(:arbor_signals, :durable_sink_module, :unset)
-    Application.delete_env(:arbor_signals, :durable_sink_module)
-
-    on_exit(fn -> restore(:durable_sink_module, original) end)
-
+    Testing.isolate_namespace()
+    Testing.delete(:durable_sink_module)
     :ok
   end
 
@@ -21,53 +19,51 @@ defmodule Arbor.Signals.DurableSinkTest do
   end
 
   test "invalid providers skip before invocation" do
-    Application.put_env(:arbor_signals, :durable_sink_module, "not-a-module")
+    Testing.put(:durable_sink_module, "not-a-module")
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :invalid_provider}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, true)
+    Testing.put(:durable_sink_module, true)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :invalid_provider}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, false)
+    Testing.put(:durable_sink_module, false)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :invalid_provider}
   end
 
   test "missing callback skips before invocation" do
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.Empty)
+    Testing.put(:durable_sink_module, __MODULE__.Empty)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :missing_callback}
   end
 
   test "admitted :ok and persist_failed; rejects malformed results" do
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.OkSink)
+    Testing.put(:durable_sink_module, __MODULE__.OkSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == :ok
 
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.PersistFailedSink)
+    Testing.put(:durable_sink_module, __MODULE__.PersistFailedSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:error, :persist_failed}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.BoomErrorSink)
+    Testing.put(:durable_sink_module, __MODULE__.BoomErrorSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :malformed_result}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.OtherOkSink)
+    Testing.put(:durable_sink_module, __MODULE__.OtherOkSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :malformed_result}
   end
 
   test "normalizes raise, throw, and exit" do
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.RaiseSink)
+    Testing.put(:durable_sink_module, __MODULE__.RaiseSink)
 
     assert DurableSink.dispatch("s", :t, %{}, []) ==
              {:skip, :provider_raised, RuntimeError}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.ThrowSink)
+    Testing.put(:durable_sink_module, __MODULE__.ThrowSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :provider_threw}
 
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.ExitSink)
+    Testing.put(:durable_sink_module, __MODULE__.ExitSink)
     assert DurableSink.dispatch("s", :t, %{}, []) == {:skip, :provider_exited}
   end
 
   test "forwards stream, type, original data, and bounded opts only" do
-    Application.put_env(:arbor_signals, :durable_sink_test_pid, self())
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.RecordingSink)
-
-    on_exit(fn -> Application.delete_env(:arbor_signals, :durable_sink_test_pid) end)
+    Testing.put(:durable_sink_test_pid, self())
+    Testing.put(:durable_sink_module, __MODULE__.RecordingSink)
 
     opts = [
       stream_id: "custom_stream",
@@ -95,10 +91,8 @@ defmodule Arbor.Signals.DurableSinkTest do
   end
 
   test "omits nil lineage and coerces non-map metadata" do
-    Application.put_env(:arbor_signals, :durable_sink_test_pid, self())
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.RecordingSink)
-
-    on_exit(fn -> Application.delete_env(:arbor_signals, :durable_sink_test_pid) end)
+    Testing.put(:durable_sink_test_pid, self())
+    Testing.put(:durable_sink_module, __MODULE__.RecordingSink)
 
     assert DurableSink.dispatch("s", :t, %{},
              correlation_id: nil,
@@ -125,7 +119,7 @@ defmodule Arbor.Signals.DurableSinkTest do
     refute log =~ "secret"
     refute log =~ "payload"
 
-    Application.put_env(:arbor_signals, :durable_sink_module, true)
+    Testing.put(:durable_sink_module, true)
 
     log =
       capture_log(fn ->
@@ -139,7 +133,7 @@ defmodule Arbor.Signals.DurableSinkTest do
   end
 
   test "security regression: long stream_id is bounded and tail is absent from logs" do
-    Application.put_env(:arbor_signals, :durable_sink_module, true)
+    Testing.put(:durable_sink_module, true)
     tail = "TAIL_MUST_NOT_APPEAR_k1e"
     stream_id = String.duplicate("s", 80) <> tail
 
@@ -158,7 +152,7 @@ defmodule Arbor.Signals.DurableSinkTest do
   end
 
   test "security regression: invalid UTF-8 stream_id cannot escape logs or raise" do
-    Application.put_env(:arbor_signals, :durable_sink_module, true)
+    Testing.put(:durable_sink_module, true)
     tail = "TAIL_INVALID_UTF8_k1e"
     stream_id = <<"head", 0xFF, 0xFE>> <> String.duplicate("x", 80) <> tail
 
@@ -175,9 +169,6 @@ defmodule Arbor.Signals.DurableSinkTest do
     refute log =~ stream_id
     refute log =~ "secret"
   end
-
-  defp restore(key, :unset), do: Application.delete_env(:arbor_signals, key)
-  defp restore(key, value), do: Application.put_env(:arbor_signals, key, value)
 
   defmodule Empty do
   end
@@ -236,7 +227,7 @@ defmodule Arbor.Signals.DurableSinkTest do
 
     @impl true
     def persist_durable_event(stream_id, type, data, opts) do
-      if pid = Application.get_env(:arbor_signals, :durable_sink_test_pid) do
+      if pid = Arbor.Signals.Config.Testing.get(:durable_sink_test_pid) do
         send(pid, {:sink, stream_id, type, data, opts})
       end
 

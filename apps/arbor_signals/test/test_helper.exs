@@ -3,7 +3,7 @@ Application.ensure_all_started(:arbor_signals)
 
 # Use a test-local crypto fake. arbor_signals is L1 and must not depend on
 # arbor_security (L2); the production provider is injected only outside test.
-Application.put_env(:arbor_signals, :crypto_module, Arbor.Signals.Test.MockCrypto)
+Arbor.Signals.Config.Testing.put(:crypto_module, Arbor.Signals.Test.MockCrypto)
 
 # Add children to the supervisor (start_children: false leaves it empty in test config)
 children = [

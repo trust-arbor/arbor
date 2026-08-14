@@ -5,6 +5,7 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
   @moduletag spec: "VP-05D2C3I0C4B"
 
   alias Arbor.Signals
+  alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Signal
   alias Arbor.Signals.Store
   alias Arbor.Signals.Test.MemoryCheckpointFake
@@ -14,32 +15,16 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
   @other "agent_privacy_other"
 
   setup do
-    prev_mod = Application.get_env(:arbor_signals, :checkpoint_module)
-    prev_store = Application.get_env(:arbor_signals, :checkpoint_store)
-
+    Testing.isolate_namespace()
     # Default live-only for isolation unless a test configures checkpointing.
-    Application.put_env(:arbor_signals, :checkpoint_module, nil)
-    Application.put_env(:arbor_signals, :checkpoint_store, nil)
+    Testing.put(:checkpoint_module, nil)
+    Testing.put(:checkpoint_store, nil)
 
     restart_store()
     Store.clear()
 
     on_exit(fn ->
       MemoryCheckpointFake.stop()
-
-      if prev_mod do
-        Application.put_env(:arbor_signals, :checkpoint_module, prev_mod)
-      else
-        Application.put_env(:arbor_signals, :checkpoint_module, nil)
-      end
-
-      if prev_store do
-        Application.put_env(:arbor_signals, :checkpoint_store, prev_store)
-      else
-        Application.delete_env(:arbor_signals, :checkpoint_store)
-      end
-
-      # Restore a clean store for other tests.
       if Process.whereis(Store), do: Store.clear()
     end)
 
@@ -150,8 +135,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
           notify: self()
         )
 
-      Application.put_env(:arbor_signals, :checkpoint_module, MemoryCheckpointFake)
-      Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
+      Testing.put(:checkpoint_module, MemoryCheckpointFake)
+      Testing.put(:checkpoint_store, MemoryCheckpointFake)
       restart_store()
       Store.clear()
       # Arm blocking only after restart_store/1's anti-hang neutralize completes.
@@ -310,8 +295,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
 
   describe "checkpoint configuration modes" do
     test "both-nil is live-only and never calls checkpoint module" do
-      Application.put_env(:arbor_signals, :checkpoint_module, nil)
-      Application.put_env(:arbor_signals, :checkpoint_store, nil)
+      Testing.put(:checkpoint_module, nil)
+      Testing.put(:checkpoint_store, nil)
 
       {:ok, _} = MemoryCheckpointFake.start_link(name: MemoryCheckpointFake)
       target = memory_signal(@target, :mem_target)
@@ -324,14 +309,14 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
     end
 
     test "partial configuration fails closed" do
-      Application.put_env(:arbor_signals, :checkpoint_module, MemoryCheckpointFake)
-      Application.put_env(:arbor_signals, :checkpoint_store, nil)
+      Testing.put(:checkpoint_module, MemoryCheckpointFake)
+      Testing.put(:checkpoint_store, nil)
 
       assert {:error, :checkpoint_configuration_invalid} =
                Signals.delete_memory_agent_content(@target, timeout_ms: 1_000)
 
-      Application.put_env(:arbor_signals, :checkpoint_module, nil)
-      Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
+      Testing.put(:checkpoint_module, nil)
+      Testing.put(:checkpoint_store, MemoryCheckpointFake)
 
       assert {:error, :checkpoint_configuration_invalid} =
                Signals.memory_agent_content_absent?(@target, timeout_ms: 1_000)
@@ -341,8 +326,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
   describe "configured checkpoint success, restart, and failure injection" do
     setup do
       {:ok, _} = MemoryCheckpointFake.start_link(name: MemoryCheckpointFake, mode: :ok)
-      Application.put_env(:arbor_signals, :checkpoint_module, MemoryCheckpointFake)
-      Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
+      Testing.put(:checkpoint_module, MemoryCheckpointFake)
+      Testing.put(:checkpoint_store, MemoryCheckpointFake)
       restart_store()
       Store.clear()
       :ok
@@ -454,8 +439,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
     end
 
     test "missing save/load exports fail closed pre-dispatch" do
-      Application.put_env(:arbor_signals, :checkpoint_module, Enum)
-      Application.put_env(:arbor_signals, :checkpoint_store, :some_store)
+      Testing.put(:checkpoint_module, Enum)
+      Testing.put(:checkpoint_store, :some_store)
 
       assert {:error, :checkpoint_configuration_invalid} =
                Signals.delete_memory_agent_content(@target, timeout_ms: 1_000)
@@ -474,8 +459,8 @@ defmodule Arbor.Signals.MemoryAgentContentPrivacyTest do
           notify: test
         )
 
-      Application.put_env(:arbor_signals, :checkpoint_module, MemoryCheckpointFake)
-      Application.put_env(:arbor_signals, :checkpoint_store, MemoryCheckpointFake)
+      Testing.put(:checkpoint_module, MemoryCheckpointFake)
+      Testing.put(:checkpoint_store, MemoryCheckpointFake)
       # restart_store/1 neutralizes any blocking mode during terminate; arm
       # :block_save only after restart + clear so killable tests actually block.
       restart_store()

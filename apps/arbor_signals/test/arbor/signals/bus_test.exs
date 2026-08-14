@@ -4,10 +4,12 @@ defmodule Arbor.Signals.BusTest do
   @moduletag :fast
 
   alias Arbor.Signals.Bus
+  alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Signal
 
   setup do
     Arbor.Signals.TestCase.ensure_processes()
+    Testing.isolate_namespace()
     :ok
   end
 
@@ -367,17 +369,7 @@ defmodule Arbor.Signals.BusTest do
     end
 
     test "restricted topic requires principal_id when authorizer denies" do
-      # Configure a denying authorizer for this test
-      original = Application.get_env(:arbor_signals, :authorizer)
-      Application.put_env(:arbor_signals, :authorizer, __MODULE__.DenyAuthorizer)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:arbor_signals, :authorizer, original)
-        else
-          Application.delete_env(:arbor_signals, :authorizer)
-        end
-      end)
+      Testing.put(:authorizer, __MODULE__.DenyAuthorizer)
 
       # No principal_id + restricted topic = denied
       assert {:error, :unauthorized} = Bus.subscribe("security.*", fn _ -> :ok end)
@@ -388,16 +380,7 @@ defmodule Arbor.Signals.BusTest do
     end
 
     test "wildcard pattern with no principal_id is denied when authorizer denies" do
-      original = Application.get_env(:arbor_signals, :authorizer)
-      Application.put_env(:arbor_signals, :authorizer, __MODULE__.DenyAuthorizer)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:arbor_signals, :authorizer, original)
-        else
-          Application.delete_env(:arbor_signals, :authorizer)
-        end
-      end)
+      Testing.put(:authorizer, __MODULE__.DenyAuthorizer)
 
       # "*" overlaps restricted topics, no principal = denied
       assert {:error, :unauthorized} = Bus.subscribe("*", fn _ -> :ok end)
@@ -406,16 +389,7 @@ defmodule Arbor.Signals.BusTest do
     test "delivery-time filtering blocks restricted signals for unauthorized subs" do
       test_pid = self()
 
-      original = Application.get_env(:arbor_signals, :authorizer)
-      Application.put_env(:arbor_signals, :authorizer, __MODULE__.AllowActivityOnlyAuthorizer)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:arbor_signals, :authorizer, original)
-        else
-          Application.delete_env(:arbor_signals, :authorizer)
-        end
-      end)
+      Testing.put(:authorizer, __MODULE__.AllowActivityOnlyAuthorizer)
 
       # Subscribe to "*" with an authorizer that only authorizes :activity-like topics
       # The AllowActivityOnlyAuthorizer denies :security and :identity
@@ -442,16 +416,7 @@ defmodule Arbor.Signals.BusTest do
     end
 
     test "stats tracks auth denied count" do
-      original = Application.get_env(:arbor_signals, :authorizer)
-      Application.put_env(:arbor_signals, :authorizer, __MODULE__.DenyAuthorizer)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:arbor_signals, :authorizer, original)
-        else
-          Application.delete_env(:arbor_signals, :authorizer)
-        end
-      end)
+      Testing.put(:authorizer, __MODULE__.DenyAuthorizer)
 
       stats_before = Bus.stats()
 

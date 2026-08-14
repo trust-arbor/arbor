@@ -1,10 +1,16 @@
 defmodule Arbor.Signals.RelayTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Relay
   alias Arbor.Signals.Signal
 
   @moduletag :fast
+
+  setup do
+    Testing.isolate_namespace()
+    :ok
+  end
 
   # Reset the (supervised) Relay's internal state in place.
   #
@@ -15,7 +21,7 @@ defmodule Arbor.Signals.RelayTest do
   # supervisor's restart fails — repeated across the stop/start tests in this file
   # this churns restart intensity and can take the whole supervisor down. All of
   # the relay's tunables (rate limits, batch size, batch interval) are read
-  # dynamically from Application env on every operation, so a restart is never
+  # dynamically from Signals.Config on every operation, so a restart is never
   # required to pick up new config — only to get clean state. Reset the state in
   # place instead of bouncing a shared supervised process.
   defp reset_relay_state do
@@ -190,11 +196,7 @@ defmodule Arbor.Signals.RelayTest do
   describe "load shedding" do
     test "drops lower priority signals when batch is full" do
       # Set a very small max batch size for testing
-      Application.put_env(:arbor_signals, :relay_max_batch_size, 3)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_max_batch_size)
-      end)
+      Testing.put(:relay_max_batch_size, 3)
 
       # Restart relay with new config
       # Config is read dynamically per-op; reset state instead of bouncing the
@@ -214,11 +216,7 @@ defmodule Arbor.Signals.RelayTest do
     end
 
     test "security signals are never dropped in favor of agent signals" do
-      Application.put_env(:arbor_signals, :relay_max_batch_size, 2)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_max_batch_size)
-      end)
+      Testing.put(:relay_max_batch_size, 2)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -239,11 +237,7 @@ defmodule Arbor.Signals.RelayTest do
   describe "batch flushing" do
     test "flushes batch periodically" do
       # Set a very short batch interval
-      Application.put_env(:arbor_signals, :relay_batch_interval_ms, 10)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_batch_interval_ms)
-      end)
+      Testing.put(:relay_batch_interval_ms, 10)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -285,11 +279,7 @@ defmodule Arbor.Signals.RelayTest do
   describe "per-category rate limiting" do
     test "allows signals within rate limit" do
       # High limit — should allow all
-      Application.put_env(:arbor_signals, :relay_category_rate_limit, 1000)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_category_rate_limit)
-      end)
+      Testing.put(:relay_category_rate_limit, 1000)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -305,14 +295,9 @@ defmodule Arbor.Signals.RelayTest do
 
     test "rate limits signals exceeding per-category limit" do
       # Very low limit — should rate limit quickly
-      Application.put_env(:arbor_signals, :relay_category_rate_limit, 2)
+      Testing.put(:relay_category_rate_limit, 2)
       # Large batch so shedding doesn't interfere
-      Application.put_env(:arbor_signals, :relay_max_batch_size, 1000)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_category_rate_limit)
-        Application.delete_env(:arbor_signals, :relay_max_batch_size)
-      end)
+      Testing.put(:relay_max_batch_size, 1000)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -328,13 +313,8 @@ defmodule Arbor.Signals.RelayTest do
     end
 
     test "rate limits are per-category" do
-      Application.put_env(:arbor_signals, :relay_category_rate_limit, 3)
-      Application.put_env(:arbor_signals, :relay_max_batch_size, 1000)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_category_rate_limit)
-        Application.delete_env(:arbor_signals, :relay_max_batch_size)
-      end)
+      Testing.put(:relay_category_rate_limit, 3)
+      Testing.put(:relay_max_batch_size, 1000)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -394,11 +374,7 @@ defmodule Arbor.Signals.RelayTest do
 
   describe "per-node ingress rate limiting" do
     test "allows signals within node rate limit" do
-      Application.put_env(:arbor_signals, :relay_node_rate_limit, 100)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_node_rate_limit)
-      end)
+      Testing.put(:relay_node_rate_limit, 100)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).
@@ -415,11 +391,7 @@ defmodule Arbor.Signals.RelayTest do
     end
 
     test "rejects signals exceeding per-node rate" do
-      Application.put_env(:arbor_signals, :relay_node_rate_limit, 5)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_signals, :relay_node_rate_limit)
-      end)
+      Testing.put(:relay_node_rate_limit, 5)
 
       # Config is read dynamically per-op; reset state instead of bouncing the
       # supervised Relay (see reset_relay_state/0).

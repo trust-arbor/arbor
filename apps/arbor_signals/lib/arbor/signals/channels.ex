@@ -35,11 +35,13 @@ defmodule Arbor.Signals.Channels do
 
   Modules are resolved via application config:
 
-      config :arbor_signals,
-        crypto_module: nil,
-        identity_registry_module: nil,
-        channel_auto_rotate_interval_ms: 86_400_000,
-        channel_rotate_on_leave: true
+      config :arbor_kernel,
+        signals: [
+          crypto_module: nil,
+          identity_registry_module: nil,
+          channel_auto_rotate_interval_ms: 86_400_000,
+          channel_rotate_on_leave: true
+        ]
   """
 
   use GenServer

@@ -3,10 +3,12 @@ defmodule Arbor.Signals.Application do
 
   use Application
 
+  alias Arbor.Signals.Config
+
   @impl true
   def start(_type, _args) do
     children =
-      if Application.get_env(:arbor_signals, :start_children, true) do
+      if Config.start_children?() do
         [
           {Arbor.Signals.Store, []},
           {Arbor.Signals.TopicKeys, []},
@@ -31,7 +33,7 @@ defmodule Arbor.Signals.Application do
   end
 
   defp attach_telemetry_bridges do
-    if Application.get_env(:arbor_signals, :security_telemetry_bridge, true) do
+    if Config.security_telemetry_bridge?() do
       Arbor.Signals.Telemetry.attach_security_bridge()
     end
 

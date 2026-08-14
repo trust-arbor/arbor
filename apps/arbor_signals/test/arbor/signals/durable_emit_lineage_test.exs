@@ -7,14 +7,13 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
 
   import ExUnit.CaptureLog
 
+  alias Arbor.Signals.Config.Testing
+
   @moduletag :fast
 
   setup do
-    original = Application.get_env(:arbor_signals, :durable_sink_module, :unset)
-    Application.delete_env(:arbor_signals, :durable_sink_module)
-
-    on_exit(fn -> restore(:durable_sink_module, original) end)
-
+    Testing.isolate_namespace()
+    Testing.delete(:durable_sink_module)
     :ok
   end
 
@@ -40,10 +39,8 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
   end
 
   test "recording sink receives original data and lineage without :permanent" do
-    Application.put_env(:arbor_signals, :durable_sink_test_pid, self())
-    Application.put_env(:arbor_signals, :durable_sink_module, __MODULE__.RecordingSink)
-
-    on_exit(fn -> Application.delete_env(:arbor_signals, :durable_sink_test_pid) end)
+    Testing.put(:durable_sink_test_pid, self())
+    Testing.put(:durable_sink_module, __MODULE__.RecordingSink)
 
     suffix = System.unique_integer([:positive])
     stream_id = "audit_lineage_#{suffix}"
@@ -99,7 +96,7 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
     ]
 
     Enum.each(providers, fn {provider, reason} ->
-      Application.put_env(:arbor_signals, :durable_sink_module, provider)
+      Testing.put(:durable_sink_module, provider)
 
       log =
         capture_log(fn ->
@@ -116,15 +113,12 @@ defmodule Arbor.Signals.DurableEmitLineageTest do
     end)
   end
 
-  defp restore(key, :unset), do: Application.delete_env(:arbor_signals, key)
-  defp restore(key, value), do: Application.put_env(:arbor_signals, key, value)
-
   defmodule RecordingSink do
     @behaviour Arbor.Signals.Contracts.DurableSink
 
     @impl true
     def persist_durable_event(stream_id, type, data, opts) do
-      if pid = Application.get_env(:arbor_signals, :durable_sink_test_pid) do
+      if pid = Arbor.Signals.Config.Testing.get(:durable_sink_test_pid) do
         send(pid, {:sink, stream_id, type, data, opts})
       end
 

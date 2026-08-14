@@ -199,7 +199,7 @@ config :arbor_security,
 #   ]
 
 # Signals — allow OpenAuthorizer in dev (production requires CapabilityAuthorizer)
-config :arbor_signals, allow_open_authorizer: true
+config :arbor_kernel, signals: [allow_open_authorizer: true]
 
 # Monitor — short suppression window for demo (30 seconds instead of 30 minutes)
 config :arbor_kernel, monitor: [suppression_window_ms: :timer.seconds(30)]

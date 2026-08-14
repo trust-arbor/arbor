@@ -298,8 +298,9 @@ defmodule Arbor.Memory.EventsContentCleanupTest do
       restart_signals_store()
     end)
 
-    lease_env!(:arbor_signals, :checkpoint_module, SignalsCheckpointFake)
-    lease_env!(:arbor_signals, :checkpoint_store, fake_name)
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:checkpoint_module, SignalsCheckpointFake)
+    Arbor.Signals.Config.Testing.put(:checkpoint_store, fake_name)
     restart_signals_store()
     _ = Store.clear()
 

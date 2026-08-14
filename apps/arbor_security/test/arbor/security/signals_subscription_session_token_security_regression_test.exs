@@ -72,13 +72,7 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
       reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
       uri: Application.get_env(:arbor_security, :uri_registry_enforcement),
       secret: Application.get_env(:arbor_security, :session_token_secret),
-      token_mod: Application.get_env(:arbor_security, :session_token_module),
-      security_module: Application.get_env(:arbor_signals, :security_module, :unset),
-      crypto_module: Application.get_env(:arbor_signals, :crypto_module, :unset),
-      identity_registry_module:
-        Application.get_env(:arbor_signals, :identity_registry_module, :unset),
-      authorizer: Application.get_env(:arbor_signals, :authorizer),
-      allow_open: Application.get_env(:arbor_signals, :allow_open_authorizer)
+      token_mod: Application.get_env(:arbor_security, :session_token_module)
     }
 
     Application.put_env(:arbor_security, :identity_verification, true)
@@ -93,11 +87,12 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
       "k1f-test-secret-#{System.unique_integer([:positive])}"
     )
 
-    Application.put_env(:arbor_signals, :security_module, Security)
-    Application.put_env(:arbor_signals, :crypto_module, Security)
-    Application.put_env(:arbor_signals, :identity_registry_module, Security)
-    Application.put_env(:arbor_signals, :authorizer, CapabilityAuthorizer)
-    Application.delete_env(:arbor_signals, :allow_open_authorizer)
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:security_module, Security)
+    Arbor.Signals.Config.Testing.put(:crypto_module, Security)
+    Arbor.Signals.Config.Testing.put(:identity_registry_module, Security)
+    Arbor.Signals.Config.Testing.put(:authorizer, CapabilityAuthorizer)
+    Arbor.Signals.Config.Testing.delete(:allow_open_authorizer)
 
     ensure_signals_children()
 
@@ -109,11 +104,6 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
       restore_security(:uri_registry_enforcement, prev.uri)
       restore_security(:session_token_secret, prev.secret)
       restore_security(:session_token_module, prev.token_mod)
-      restore_signals(:security_module, prev.security_module)
-      restore_signals(:crypto_module, prev.crypto_module)
-      restore_signals(:identity_registry_module, prev.identity_registry_module)
-      restore_signals(:authorizer, prev.authorizer)
-      restore_signals(:allow_open_authorizer, prev.allow_open)
     end)
 
     :ok
@@ -245,8 +235,4 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
 
   defp restore_security(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_security(key, value), do: Application.put_env(:arbor_security, key, value)
-
-  defp restore_signals(key, :unset), do: Application.delete_env(:arbor_signals, key)
-  defp restore_signals(key, nil), do: Application.delete_env(:arbor_signals, key)
-  defp restore_signals(key, value), do: Application.put_env(:arbor_signals, key, value)
 end

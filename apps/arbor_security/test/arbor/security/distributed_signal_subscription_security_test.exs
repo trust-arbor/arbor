@@ -31,24 +31,16 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
   @stores [Registry, NonceCache, CapabilityStore]
 
   setup do
-    original_authorizer = Application.get_env(:arbor_signals, :authorizer)
-    original_allow_open = Application.get_env(:arbor_signals, :allow_open_authorizer)
     original_distributed_signals = Application.get_env(:arbor_security, :distributed_signals)
 
-    Application.put_env(
-      :arbor_signals,
-      :authorizer,
-      Arbor.Signals.Adapters.CapabilityAuthorizer
-    )
-
-    Application.delete_env(:arbor_signals, :allow_open_authorizer)
+    Arbor.Signals.Config.Testing.isolate_namespace()
+    Arbor.Signals.Config.Testing.put(:authorizer, Arbor.Signals.Adapters.CapabilityAuthorizer)
+    Arbor.Signals.Config.Testing.delete(:allow_open_authorizer)
     Application.put_env(:arbor_security, :distributed_signals, true)
     ensure_signals_children()
     restart_security_stores()
 
     on_exit(fn ->
-      restore_env(:authorizer, original_authorizer)
-      restore_env(:allow_open_authorizer, original_allow_open)
       restore_security_env(:distributed_signals, original_distributed_signals)
       restart_security_stores()
     end)
@@ -226,9 +218,6 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
       eventually(fun, attempts - 1)
     end
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:arbor_signals, key)
-  defp restore_env(key, value), do: Application.put_env(:arbor_signals, key, value)
 
   defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)

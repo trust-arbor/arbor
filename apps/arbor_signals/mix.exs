@@ -34,6 +34,7 @@ defmodule ArborSignals.MixProject do
 
   defp deps do
     [
+      {:arbor_kernel, in_umbrella: true},
       {:arbor_contracts, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
