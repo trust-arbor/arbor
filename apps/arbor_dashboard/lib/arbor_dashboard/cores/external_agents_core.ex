@@ -209,7 +209,10 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
       agent_id: profile.agent_id,
       agent_type: agent_type,
       private_key_b64: Base.encode64(identity.private_key),
-      public_key_hex: Base.encode16(identity.public_key, case: :lower)
+      public_key_hex: Base.encode16(identity.public_key, case: :lower),
+      key_path: nil,
+      mcp_config_json: nil,
+      key_write_error: nil
     }
   end
 
@@ -220,6 +223,51 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
   @spec build_key_file_contents(String.t(), String.t()) :: String.t()
   def build_key_file_contents(agent_id, private_key_b64) do
     "agent_id=" <> agent_id <> "\nprivate_key_b64=" <> private_key_b64 <> "\n"
+  end
+
+  @doc """
+  Basename for an on-disk `.arbor.key` under `~/.arbor/keys/`.
+
+  Combines a sanitized display name with a short agent-id suffix so re-registers
+  do not collide on name alone.
+  """
+  @spec key_basename(String.t(), String.t()) :: String.t()
+  def key_basename(display_name, agent_id)
+      when is_binary(display_name) and is_binary(agent_id) do
+    suffix =
+      agent_id
+      |> String.replace_prefix("agent_", "")
+      |> String.slice(0, 8)
+
+    sanitize_filename(display_name) <> "_" <> suffix <> ".arbor.key"
+  end
+
+  @doc """
+  Build a ready-to-paste MCP host config JSON for the stdio signing proxy.
+
+  Pure: caller supplies absolute `repo_root` and `key_path`. Paths are
+  POSIX-single-quoted inside the `sh -c` string so spaces are safe.
+  """
+  @spec build_mcp_config_json(String.t(), String.t(), String.t()) :: String.t()
+  def build_mcp_config_json(repo_root, key_path, upstream \\ "http://localhost:4000/mcp")
+      when is_binary(repo_root) and is_binary(key_path) and is_binary(upstream) do
+    shell_cmd =
+      "cd #{posix_single_quote(repo_root)} && exec ./bin/mix arbor.signer " <>
+        "--key-file #{posix_single_quote(key_path)} --upstream #{posix_single_quote(upstream)}"
+
+    %{
+      "mcpServers" => %{
+        "arbor" => %{
+          "command" => "sh",
+          "args" => ["-c", shell_cmd]
+        }
+      }
+    }
+    |> Jason.encode!(pretty: true)
+  end
+
+  defp posix_single_quote(path) when is_binary(path) do
+    "'" <> String.replace(path, "'", "'\\''") <> "'"
   end
 
   @doc """
@@ -254,6 +302,9 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   def format_error(:return_identity_not_honored),
     do: "Internal error: registration did not return an identity."
+
+  def format_error(:key_file_exists),
+    do: "A key file with that name already exists — download the key instead, or revoke and re-register with a new name."
 
   def format_error({:error, reason}), do: "Registration failed: #{inspect(reason)}"
   def format_error(reason) when is_atom(reason), do: "Error: #{reason}"

@@ -138,35 +138,21 @@ conversationalist chat above.
 
 1. Open [Settings](http://localhost:4001/settings) → **External Agents** →
    **Register New** (pick a type, e.g. Claude Code).
-2. **Download or copy the private key immediately** — it is shown once. Save it
-   somewhere durable, e.g. `~/.arbor/keys/dev-claude.arbor.key` (mode `600`).
-3. Keep Arbor running (`arbor.start`). The Gateway MCP endpoint is
-   `http://localhost:4000/mcp`.
-4. Point your MCP host at Arbor’s **stdio signing proxy**, which holds the key
-   and signs each request:
+2. On success, local-dev **auto-saves** the private key to
+   `~/.arbor/keys/<name>_<id8>.arbor.key` (mode `600`) and shows a ready-to-paste
+   **MCP host config**. Copy that JSON into your client config, or hand it to an
+   agent and ask it to add the Arbor MCP server.
+3. Keep Arbor running (`arbor.start`). Gateway MCP is `http://localhost:4000/mcp`.
+4. Smoke-test the signing proxy (optional — your MCP host will spawn this):
 
 ```bash
-# Smoke-test the proxy from the repo root (stdout is MCP JSON-RPC — Ctrl-C to stop)
 ./bin/mix arbor.signer \
-  --key-file ~/.arbor/keys/dev-claude.arbor.key \
+  --key-file ~/.arbor/keys/<the-file-shown-in-the-modal>.arbor.key \
   --upstream http://localhost:4000/mcp
 ```
 
-Example Claude Code `mcpServers` entry (use absolute paths):
-
-```json
-{
-  "mcpServers": {
-    "arbor": {
-      "command": "sh",
-      "args": [
-        "-c",
-        "cd /absolute/path/to/arbor && exec ./bin/mix arbor.signer --key-file /absolute/path/to/dev-claude.arbor.key --upstream http://localhost:4000/mcp"
-      ]
-    }
-  }
-}
-```
+If auto-save is disabled (non-dev) or fails, use **Download .key** from the modal
+and substitute that path in the MCP config.
 
 Full detail (Bearer vs signed proxy, tool disclosure, coding-task dispatch):
 [EXTERNAL_MCP_CLIENT.md](arbor/EXTERNAL_MCP_CLIENT.md).

@@ -105,6 +105,10 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 # local human operator session so External Agents registration works without
 # Zitadel. Must NEVER be enabled in prod (prod sets require_auth: true anyway).
 config :arbor_dashboard, dev_local_operator: true
+# Write external-agent private keys to ~/.arbor/keys (mode 600) and show a
+# ready-to-paste MCP config after Register New. Disabled outside local-dev so a
+# remote dashboard cannot drop private keys onto the server filesystem.
+config :arbor_dashboard, auto_save_external_agent_keys: true
 
 # Actions — use Postgres backends for durable job tracking (both adapters use the same Ecto queries)
 config :arbor_actions, :persistence,

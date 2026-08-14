@@ -30,8 +30,10 @@ root `mix.exs` aliases (`setup`, `quality`, `test.fast`, `test.all`) and
 - **Dev External Agents need no OIDC.** With `dev_local_operator: true` (set in
   `config/dev.exs`), `OidcAuth` auto-establishes a stable
   `human_42c59f5a…` / "Local Dev Operator" session when OIDC is unset and
-  `require_auth` is false. `/settings` shows **Register New**. Prod stays
-  fail-closed (`require_auth: true` → 503 without OIDC).
+  `require_auth` is false. `/settings` shows **Register New**. Local-dev also
+  sets `auto_save_external_agent_keys: true` — keys land in `~/.arbor/keys/`
+  (mode 600) with a ready-to-paste MCP config. Prod stays fail-closed
+  (`require_auth: true` → 503 without OIDC).
 - **Free first LLM response:** add `OPENROUTER_API_KEY` (free account at
   openrouter.ai) then `./bin/mix arbor.doctor --configure`. Defaults are
   already `openrouter` / `openai/gpt-oss-120b:free`. Doctor priority is
