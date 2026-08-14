@@ -104,13 +104,11 @@ directory retirement are out of scope for this gate.
 ## K3B startup-footprint probe
 
 Isolated measurement of the reversible Common / Signals / Monitor merge
-candidate. The probe fixture lives under
-`apps/arbor_kernel/priv/packaging/startup_footprint_probe/` and is not a
-production application. Candidate budgets are checked in as
+candidate. Scenario execution lives in the compiled Commands-owned peer
+probe. Candidate budgets are checked in as
 `startup_footprint_policy.v1.json`.
 
-Not installed in the root `quality` alias. Nested compile is too expensive
-for a default suite. The exact commands are:
+Not installed in the root `quality` alias. The exact commands are:
 
 ```bash
 ./bin/mix arbor.packaging.startup_footprint
@@ -118,20 +116,18 @@ for a default suite. The exact commands are:
 ./bin/mix arbor.packaging.startup_footprint --check --json
 ```
 
-Each run copies the selected dependency cache (`MIX_DEPS_PATH` or umbrella
-`deps/`) with symlinks dereferenced into an exclusive owner-private temp
-workspace, sets `HEX_OFFLINE=1`, and points only that copy at
-`MIX_DEPS_PATH`. The canonical cache and umbrella lock stay unchanged.
-External probe commands run through Arbor.Shell's process-group facade.
+Each run measures baseline, proposed-gated, and proposed-eager in three
+fresh OS-level BEAM instances controlled by OTP `:peer` over
+`standard_io`. Each peer invokes only the fixed Commands-owned probe MFA.
+The current pinned Erlang executable and a validated current code path
+are the only runtime inputs. There is no nested Mix compile, dependency
+cache copy, mise lookup, or temporary probe project.
 Baseline starts only passive `arbor_contracts` so eager-start owner
 callbacks remain a visible regression. Proposed scenarios start the merged
 app's non-owner runtime extras, including `:os_mon`, and load
-scenario-specific applications inside the timed action. The proposed
-`arbor_kernel` owner is excluded from external runtime dependencies.
-Temporary workspace output is deleted only after ownership and private
-mode are re-verified.
-The production-path ExUnit smoke is skipped unless
-`ARBOR_STARTUP_FOOTPRINT_PROBE=1`.
+scenario-specific applications inside the timed action. Retired owner
+names, the synthetic proposed owner, and `:arbor_kernel` are excluded
+from external runtime evidence.
 Comparison uses numeric regression budgets, not byte-identical runtime
 samples. Non-empty raw measurement errors and omitted app lists fail
 closed. Elapsed time is `boot_time_us` (converted from monotonic native

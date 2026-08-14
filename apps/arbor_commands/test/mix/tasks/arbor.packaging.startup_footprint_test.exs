@@ -38,17 +38,33 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     assert policy["decision"]["choice"] == "measure_only"
     assert policy["scenarios"] == Core.scenarios()
 
-    dead_probe = Path.join(root, "apps/arbor_commands/priv/packaging/startup_footprint_probe")
+    shell =
+      File.read!(Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint.ex"))
 
-    for rel <- [
-          "mix.exs",
-          "README.md",
-          "config/config.exs",
-          "lib/arbor_kernel_startup_footprint_probe.ex",
-          "lib/arbor_kernel_startup_footprint_probe/application.ex"
-        ] do
-      refute File.exists?(Path.join(dead_probe, rel))
-    end
+    runner =
+      File.read!(
+        Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint/peer_runner.ex")
+      )
+
+    refute File.exists?(
+             Path.join(root, "apps/arbor_commands/priv/packaging/startup_footprint_probe")
+           )
+
+    refute File.exists?(
+             Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe")
+           )
+
+    refute String.contains?(shell, "startup_footprint_probe")
+    refute String.contains?(shell, "System.cmd")
+    refute String.contains?(shell, "execute_process_tree")
+    refute String.contains?(shell, "validate_mise")
+    refute String.contains?(shell, "allocate_workspace")
+    refute String.contains?(shell, "Task.yield")
+    refute String.contains?(runner, "System.cmd")
+    refute String.contains?(runner, "Task.yield")
+    refute String.contains?(runner, "Task.shutdown")
+    assert String.contains?(runner, "connection: :standard_io")
+    assert String.contains?(runner, "spawn_monitor")
   end
 
   test "check mode compares injected samples against policy and does not write" do

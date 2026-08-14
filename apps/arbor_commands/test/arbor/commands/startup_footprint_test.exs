@@ -3,160 +3,116 @@ defmodule Arbor.Commands.StartupFootprintTest do
 
   alias Arbor.Commands.StartupFootprint
   alias Arbor.Commands.StartupFootprint.Core
+  alias Arbor.Commands.StartupFootprint.PeerRunner
 
   @moduletag :fast
 
-  test "mise fallback is rejected unless the path is an executable regular file" do
-    dir =
-      Path.join(
-        System.tmp_dir!(),
-        "sf-mise-#{System.unique_integer([:positive])}"
-      )
+  test "production run refuses synthetic sample and peer injection" do
+    assert {:error, {:production_opts_forbid_synthetic, _}} =
+             StartupFootprint.run(mode: "report", samples: %{})
 
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
-
-    missing = Path.join(dir, "missing-mise")
-    assert {:error, :mise_unavailable} = StartupFootprint.validate_mise_path(missing)
-
-    not_exec = Path.join(dir, "mise")
-    File.write!(not_exec, "#!/bin/sh\n")
-    File.chmod!(not_exec, 0o644)
-    assert {:error, {:mise_not_executable, ^not_exec}} =
-             StartupFootprint.validate_mise_path(not_exec)
-
-    File.chmod!(not_exec, 0o755)
-    assert {:ok, ^not_exec} = StartupFootprint.validate_mise_path(not_exec)
+    assert {:error, {:production_opts_forbid_synthetic, _}} =
+             StartupFootprint.run(mode: "report", run_peer: fn _scenario -> {:ok, %{}} end)
   end
 
-  test "classify_command_result returns structured timeout, output-limit, and containment failures" do
-    assert {:error, {:probe_timeout, :compile}} =
-             StartupFootprint.classify_command_result(
-               %{timed_out: true, exit_code: 137, stdout: ""},
-               :compile
-             )
+  test "peer start opts are fixed and do not accept caller exec or MFA" do
+    assert {Arbor.Commands.StartupFootprint.PeerProbe, :measure, 1} = PeerRunner.probe_mfa()
+    assert {:ok, opts} = PeerRunner.start_opts()
+    assert opts.connection == :standard_io
+    assert opts.peer_down == :crash
+    assert match?({:halt, _}, opts.shutdown)
+    refute Map.has_key?(opts, :args)
+    refute Map.has_key?(opts, :env)
+    refute Map.has_key?(opts, :name)
 
-    assert {:error, {:probe_output_limit, :compile}} =
-             StartupFootprint.classify_command_result(
-               %{output_limit_exceeded: true, exit_code: 137, stdout: "x"},
-               :compile
-             )
-
-    assert {:error, {:probe_containment_failure, :compile}} =
-             StartupFootprint.classify_command_result(
-               %{containment_failure: true, exit_code: 137, stdout: ""},
-               :compile
-             )
-
-    assert {:ok, "ok\n"} =
-             StartupFootprint.classify_command_result(
-               %{exit_code: 0, stdout: "ok\n", timed_out: false},
-               :compile
-             )
+    {:ok, exec} = PeerRunner.pinned_erlang_executable()
+    assert opts.exec == String.to_charlist(exec)
+    assert File.regular?(exec)
+    assert Bitwise.band(File.stat!(exec).mode, 0o111) != 0
+    refute function_exported?(PeerRunner, :measure_scenario, 2)
+    refute function_exported?(StartupFootprint, :run, 2)
   end
 
-  test "security regression: pre-created symlink workspace is rejected and not followed" do
-    victim =
+  test "code-path admission fails closed on control bytes, missing dirs, and ceilings" do
+    assert {:error, :peer_code_path_empty} = PeerRunner.admit_paths([])
+    assert {:error, :peer_code_path_control_byte} = PeerRunner.admit_paths(["/tmp/\nmissing"])
+    assert {:error, :peer_code_path_control_byte} = PeerRunner.admit_paths(["/tmp/" <> <<0>>])
+
+    missing =
       Path.join(
         System.tmp_dir!(),
-        "sf-victim-#{System.unique_integer([:positive])}"
+        "sf-missing-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(victim)
-    secret = Path.join(victim, "secret.txt")
-    File.write!(secret, "keep")
+    assert {:error, {:peer_code_path_unresolved, ^missing, _}} =
+             PeerRunner.admit_paths([missing])
 
-    planted =
+    file =
       Path.join(
         System.tmp_dir!(),
-        "arbor-startup-footprint-planted-#{System.unique_integer([:positive])}"
+        "sf-file-#{System.unique_integer([:positive])}"
       )
 
-    File.ln_s!(victim, planted)
+    File.write!(file, "not-a-dir")
+    on_exit(fn -> File.rm(file) end)
 
-    on_exit(fn ->
-      File.rm(planted)
-      File.rm_rf(victim)
-    end)
+    assert {:error, {:peer_code_path_not_directory, ^file}} = PeerRunner.admit_paths([file])
 
-    assert {:error, :root_exists} = StartupFootprint.allocate_workspace_at(planted)
-    assert File.read!(secret) == "keep"
-    refute File.exists?(Path.join(victim, "mix.exs"))
-    refute File.exists?(Path.join(victim, "deps"))
-    assert {:ok, %{type: :symlink}} = File.lstat(planted)
+    too_long = "/" <> String.duplicate("a", 4_097)
+    assert {:error, {:peer_code_path_entry_bytes, 4_098}} = PeerRunner.admit_paths([too_long])
+
+    overflow = Enum.map(1..513, fn i -> "/tmp/sf-#{i}" end)
+    assert {:error, {:peer_code_path_count, 513}} = PeerRunner.admit_paths(overflow)
   end
 
-  test "security regression: pre-created directory workspace is rejected" do
-    planted =
-      Path.join(
-        System.tmp_dir!(),
-        "arbor-startup-footprint-existing-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(planted)
-    marker = Path.join(planted, "keep.txt")
-    File.write!(marker, "keep")
-
-    on_exit(fn -> File.rm_rf(planted) end)
-
-    assert {:error, :root_exists} = StartupFootprint.allocate_workspace_at(planted)
-    assert File.read!(marker) == "keep"
+  test "current code path admits existing canonical directories" do
+    assert {:ok, paths} = PeerRunner.admit_current_code_path()
+    assert paths != []
+    assert Enum.all?(paths, &is_binary/1)
+    assert Enum.all?(paths, &File.dir?/1)
+    assert Enum.all?(paths, &(not String.contains?(&1, <<0>>)))
   end
 
-  test "production-path hermeticity: mutating child MIX_DEPS_PATH cannot mutate the source cache" do
-    root = hermetic_root()
-    source_deps = Path.join(root, "deps")
-    sentinel = Path.join(source_deps, "jason/sentinel.txt")
-    link = Path.join(source_deps, "jason/link")
-    before = File.read!(sentinel)
-    previous_deps = System.get_env("MIX_DEPS_PATH")
-    System.put_env("MIX_DEPS_PATH", source_deps)
+  test "check mode compares injected samples against policy and does not write" do
+    root = tmp_root()
+    policy_path =
+      Path.join(root, "apps/arbor_commands/priv/packaging/startup_footprint_policy.v1.json")
+    before = File.read!(policy_path)
 
-    on_exit(fn ->
-      restore_env("MIX_DEPS_PATH", previous_deps)
-      File.rm_rf(root)
-    end)
-
-    test_pid = self()
-
-    runner = fn scenario, ctx ->
-      send(test_pid, {:workspace, scenario, ctx})
-      assert ctx.deps_path != source_deps
-      assert ctx.env["MIX_DEPS_PATH"] == ctx.deps_path
-      assert ctx.env["HEX_OFFLINE"] == "1"
-      assert {:ok, %{type: :regular}} = File.lstat(Path.join(ctx.deps_path, "jason/link"))
-      File.write!(Path.join(ctx.deps_path, "jason/link"), "mutated-through-copy")
-      File.write!(Path.join(ctx.deps_path, "mutated"), "child-only")
-
-      {:ok,
-       sample(
-         scenario,
-         :erlang.unique_integer([:positive, :monotonic])
-       )}
-    end
+    samples = %{
+      "baseline" => sample("baseline", 101, 0, 0),
+      "proposed_gated" => sample("proposed_gated", 102, 0, 0),
+      "proposed_eager" => sample("proposed_eager", 103, 5, 1)
+    }
 
     assert {:ok, report} =
              StartupFootprint.run_for_test(
                mode: "check",
                root: root,
-               use_production_workspace: true,
-               run_child: runner
+               json: true,
+               samples: samples
              )
 
     assert report["status"] == "ok"
-    assert_received {:workspace, "baseline", _}
-    assert_received {:workspace, "proposed_gated", _}
-    assert_received {:workspace, "proposed_eager", _}
-    assert File.read!(sentinel) == before
-    assert File.read!(link) == before
-    assert {:ok, %{type: :symlink}} = File.lstat(link)
-    refute File.exists?(Path.join(source_deps, "mutated"))
+    assert report["mode"] == "check"
+    assert File.read!(policy_path) == before
+
+    over = put_in(samples, ["baseline", "process_count_delta"], 9_999)
+
+    assert {:ok, failed} =
+             StartupFootprint.run_for_test(
+               mode: "check",
+               root: root,
+               samples: over
+             )
+
+    assert failed["status"] == "failed"
+    assert File.read!(policy_path) == before
+
+    File.rm_rf(root)
   end
 
-  defp sample(scenario, pid) do
-    side = if scenario == "proposed_eager", do: 1, else: 0
-    children = if scenario == "proposed_eager", do: 5, else: 0
-
+  defp sample(scenario, pid, children, side_effects) do
     %{
       "scenario" => scenario,
       "os_pid" => pid,
@@ -166,8 +122,8 @@ defmodule Arbor.Commands.StartupFootprintTest do
       "ets_memory_words_delta" => 100,
       "beam_memory_bytes_delta" => 1_000,
       "boot_time_us" => 50,
-      "logger_filter_count" => side,
-      "telemetry_handler_count" => side,
+      "logger_filter_count" => side_effects,
+      "telemetry_handler_count" => side_effects,
       "started_owner_apps" => [],
       "started_runtime_apps" =>
         if(scenario in ["proposed_gated", "proposed_eager"], do: ["os_mon"], else: []),
@@ -175,33 +131,16 @@ defmodule Arbor.Commands.StartupFootprintTest do
     }
   end
 
-  defp hermetic_root do
+  defp tmp_root do
     root =
       Path.join(
         System.tmp_dir!(),
-        "sf-hermetic-#{System.unique_integer([:positive])}"
+        "sf-cli-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe/lib"))
-    File.mkdir_p!(Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe/config"))
+    File.mkdir_p!(Path.join(root, "apps/arbor_kernel"))
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
-    File.mkdir_p!(Path.join(root, "deps/jason"))
     File.write!(Path.join(root, "apps/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
-    File.write!(Path.join(root, "mix.lock"), "%{}\n")
-
-    File.write!(
-      Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe/lib/probe.ex"),
-      "# probe\n"
-    )
-
-    File.write!(
-      Path.join(root, "apps/arbor_kernel/priv/packaging/startup_footprint_probe/config/config.exs"),
-      "import Config\n"
-    )
-
-    sentinel = Path.join(root, "deps/jason/sentinel.txt")
-    File.write!(sentinel, "original-source-bytes")
-    File.ln_s!("sentinel.txt", Path.join(root, "deps/jason/link"))
 
     policy = %{
       "schema" => Core.policy_schema(),
@@ -210,7 +149,7 @@ defmodule Arbor.Commands.StartupFootprintTest do
       "decision" => %{
         "status" => "candidate",
         "choice" => "measure_only",
-        "rationale" => "Hermeticity fixture policy.",
+        "rationale" => "CLI closure test policy.",
         "reversible" => true
       },
       "scenarios" => Core.scenarios(),
@@ -240,11 +179,5 @@ defmodule Arbor.Commands.StartupFootprintTest do
       "logger_filter_count" => %{"min" => min_side, "max" => max_side},
       "telemetry_handler_count" => %{"min" => min_side, "max" => max_side}
     }
-  end
-
-  defp restore_env(name, nil), do: System.delete_env(name)
-
-  defp restore_env(name, value) when is_binary(value) do
-    System.put_env(name, value)
   end
 end

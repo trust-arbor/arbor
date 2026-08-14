@@ -2,27 +2,25 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Commands.StartupFootprint
+  alias Arbor.Commands.StartupFootprint.PeerRunner
 
   @moduletag :slow
   @moduletag timeout: 300_000
 
-  # Nested `mix compile` of the owner apps will OOM/timeout a root-wide
-  # umbrella suite (validator exit 137). The Mix task remains the
-  # executable artifact-side probe. Opt in with
-  # ARBOR_STARTUP_FOOTPRINT_PROBE=1.
-  if System.get_env("ARBOR_STARTUP_FOOTPRINT_PROBE") != "1" do
-    @moduletag skip:
-                 "set ARBOR_STARTUP_FOOTPRINT_PROBE=1 or run mix arbor.packaging.startup_footprint"
-  end
+  @isolation_names [
+    Arbor.Common.Supervisor,
+    Arbor.Signals.Supervisor,
+    Arbor.Monitor.Supervisor,
+    Arbor.Commands.StartupFootprint.ProposedSupervisor,
+    Arbor.Monitor.HealingSupervisor,
+    Arbor.Signals.Bus,
+    Arbor.Signals.Relay
+  ]
 
-  test "isolated production probe emits required metrics for all three scenarios" do
+  test "isolated production probe measures three descendant BEAMs without changing parent registrations" do
     root = umbrella_root()
-    lock_path = Path.join(root, "mix.lock")
-    source_deps = selected_deps(root)
-    canary = Path.join(source_deps, "jason/mix.exs")
-    before_lock = File.read!(lock_path)
-    before_mtime = File.stat!(lock_path).mtime
-    before_canary = canary_snapshot(canary)
+    parent_pid = parent_os_pid()
+    before = snapshot_registered()
 
     assert {:ok, report} = StartupFootprint.run(root: root, json: true)
 
@@ -37,6 +35,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
       assert is_map(sample), "missing sample for #{scenario}"
       assert sample["scenario"] == scenario
       assert is_integer(sample["os_pid"]) and sample["os_pid"] > 0
+      assert sample["os_pid"] != parent_pid
       assert is_integer(sample["process_count_delta"]) and sample["process_count_delta"] >= 0
       assert is_integer(sample["supervisor_children"]) and sample["supervisor_children"] >= 0
       assert is_integer(sample["ets_table_count_delta"]) and sample["ets_table_count_delta"] >= 0
@@ -47,13 +46,18 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
       assert is_integer(sample["logger_filter_count"]) and sample["logger_filter_count"] >= 0
       assert is_integer(sample["telemetry_handler_count"]) and
                sample["telemetry_handler_count"] >= 0
+      assert is_list(sample["started_owner_apps"])
+      assert is_list(sample["started_runtime_apps"])
+      assert sample["raw_errors"] == []
     end
 
     pids =
       Enum.map(["baseline", "proposed_gated", "proposed_eager"], fn scenario ->
         report["samples"][scenario]["os_pid"]
       end)
+
     assert length(Enum.uniq(pids)) == 3
+    assert Enum.all?(pids, &(&1 != parent_pid))
 
     gated = report["samples"]["proposed_gated"]
     assert gated["logger_filter_count"] == 0
@@ -70,29 +74,25 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     refute "arbor_kernel" in List.wrap(baseline["started_runtime_apps"])
     refute "arbor_kernel" in List.wrap(gated["started_runtime_apps"])
     refute "arbor_kernel" in List.wrap(eager["started_runtime_apps"])
+    refute "arbor_startup_footprint_proposed" in List.wrap(baseline["started_runtime_apps"])
+    refute "arbor_startup_footprint_proposed" in List.wrap(gated["started_runtime_apps"])
+    refute "arbor_startup_footprint_proposed" in List.wrap(eager["started_runtime_apps"])
     assert "os_mon" in List.wrap(gated["started_runtime_apps"])
     assert "os_mon" in List.wrap(eager["started_runtime_apps"])
     assert eager["logger_filter_count"] >= 1
     assert eager["telemetry_handler_count"] >= 1
 
-    assert File.read!(lock_path) == before_lock
-    assert File.stat!(lock_path).mtime == before_mtime
-    assert canary_snapshot(canary) == before_canary
+    assert snapshot_registered() == before
+    assert PeerRunner.probe_mfa() == {Arbor.Commands.StartupFootprint.PeerProbe, :measure, 1}
   end
 
-  defp selected_deps(root) do
-    case System.get_env("MIX_DEPS_PATH") do
-      nil -> Path.expand("deps", root)
-      path -> Path.expand(path, root)
-    end
+  defp snapshot_registered do
+    Map.new(@isolation_names, fn name -> {name, Process.whereis(name)} end)
   end
 
-  defp canary_snapshot(path) do
-    if File.regular?(path) do
-      {File.read!(path), File.stat!(path).mtime}
-    else
-      :absent
-    end
+  defp parent_os_pid do
+    {pid, ""} = Integer.parse(System.pid())
+    pid
   end
 
   defp umbrella_root do

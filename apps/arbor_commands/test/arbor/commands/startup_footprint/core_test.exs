@@ -282,6 +282,18 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
 
     assert {:error, :malformed_decision} = Core.admit_policy(unknown_choice)
 
+    accepted_measure_only =
+      policy(%{
+        "decision" => %{
+          "status" => "accepted",
+          "choice" => "measure_only",
+          "rationale" => "Accepted measure_only is not a closed K3 pair.",
+          "reversible" => true
+        }
+      })
+
+    assert {:error, :malformed_decision} = Core.admit_policy(accepted_measure_only)
+
     omitted_owner =
       normalized_sample("baseline", baseline_opts())
       |> Map.delete("started_owner_apps")
@@ -295,6 +307,13 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
 
     assert {:error, {:invalid_started_runtime_apps, "proposed_gated"}} =
              Core.admit_normalized_sample(omitted_runtime)
+
+    omitted_raw_errors =
+      normalized_sample("baseline", baseline_opts())
+      |> Map.delete("raw_errors")
+
+    assert {:error, {:invalid_raw_errors, "baseline"}} =
+             Core.admit_normalized_sample(omitted_raw_errors)
 
     irreversible =
       policy(%{
@@ -346,16 +365,58 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     refute String.contains?(bytes, "before")
   end
 
-  test "scenario commands stay isolated and do not start owner apps in the parent" do
-    assert StartupFootprint.scenarios() == ["baseline", "proposed_gated", "proposed_eager"]
+  test "only the closed K3 decision pairs admit" do
+    for {status, choice} <- [
+          {"candidate", "measure_only"},
+          {"accepted", "eager_startup"},
+          {"accepted", "nested_child_gates"},
+          {"accepted", "split_passive_protocols"}
+        ] do
+      raw =
+        policy(%{
+          "decision" => %{
+            "status" => status,
+            "choice" => choice,
+            "rationale" => "Closed K3 decision pair #{status}/#{choice}.",
+            "reversible" => true
+          }
+        })
 
-    assert StartupFootprint.scenario_command("baseline") ==
-             ["run", "--no-start", "-e", "ArborKernelStartupFootprintProbe.run()"]
+      assert {:ok, admitted} = Core.admit_policy(raw)
+      assert admitted["decision"]["status"] == status
+      assert admitted["decision"]["choice"] == choice
+    end
+
+    for {status, choice} <- [
+          {"candidate", "eager_startup"},
+          {"candidate", "nested_child_gates"},
+          {"candidate", "split_passive_protocols"},
+          {"accepted", "measure_only"},
+          {"accepted", "merge_gated"},
+          {"accepted", "keep_separate"},
+          {"draft", "measure_only"}
+        ] do
+      raw =
+        policy(%{
+          "decision" => %{
+            "status" => status,
+            "choice" => choice,
+            "rationale" => "Rejected pair #{status}/#{choice}.",
+            "reversible" => true
+          }
+        })
+
+      assert {:error, :malformed_decision} = Core.admit_policy(raw)
+    end
+  end
+
+  test "injected peer results stay isolated and do not start owner apps in the parent" do
+    assert StartupFootprint.scenarios() == ["baseline", "proposed_gated", "proposed_eager"]
 
     test_pid = self()
 
-    runner = fn scenario, ctx ->
-      send(test_pid, {:child, scenario, ctx.command, System.pid()})
+    runner = fn scenario ->
+      send(test_pid, {:peer, scenario, System.pid()})
 
       opts =
         case scenario do
@@ -383,18 +444,17 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
              StartupFootprint.run_for_test(
                mode: "check",
                root: root,
-               run_child: runner
+               run_peer: runner
              )
 
     assert report["status"] == "ok"
-    assert_received {:child, "baseline", command, _}
-    assert command == StartupFootprint.scenario_command("baseline")
-    assert_received {:child, "proposed_gated", _, _}
-    assert_received {:child, "proposed_eager", _, _}
+    assert_received {:peer, "baseline", _}
+    assert_received {:peer, "proposed_gated", _}
+    assert_received {:peer, "proposed_eager", _}
     refute Process.whereis(Arbor.Common.Supervisor)
     refute Process.whereis(Arbor.Signals.Supervisor)
     refute Process.whereis(Arbor.Monitor.Supervisor)
-    refute Process.whereis(ArborKernelStartupFootprintProbe.Supervisor)
+    refute Process.whereis(Arbor.Commands.StartupFootprint.ProposedSupervisor)
 
     File.rm_rf(root)
   end

@@ -30,8 +30,12 @@ defmodule Arbor.Commands.StartupFootprint.Core do
   ]
   @max_failures 50
   @max_raw_errors 20
-  @decision_statuses ["candidate", "accepted"]
-  @decision_choices ["measure_only"]
+  @decision_pairs [
+    {"candidate", "measure_only"},
+    {"accepted", "eager_startup"},
+    {"accepted", "nested_child_gates"},
+    {"accepted", "split_passive_protocols"}
+  ]
 
   @spec policy_schema() :: String.t()
   def policy_schema, do: @policy_schema
@@ -183,7 +187,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
       not Enum.all?(@compared_metrics, &non_neg_int?(raw[&1])) ->
         {:error, {:invalid_metric, scenario}}
 
-      not valid_raw_errors?(raw["raw_errors"] || []) ->
+      not Map.has_key?(raw, "raw_errors") or not valid_raw_errors?(raw["raw_errors"]) ->
         {:error, {:invalid_raw_errors, scenario}}
 
       true ->
@@ -194,7 +198,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
              raw
              |> Map.put("started_owner_apps", started)
              |> Map.put("started_runtime_apps", runtime)
-             |> Map.put_new("raw_errors", [])
+             |> Map.put("raw_errors", raw["raw_errors"])
            )}
         end
     end
@@ -252,10 +256,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
     reversible = decision["reversible"]
 
     cond do
-      status not in @decision_statuses ->
-        {:error, :malformed_decision}
-
-      choice not in @decision_choices ->
+      {status, choice} not in @decision_pairs ->
         {:error, :malformed_decision}
 
       not is_binary(rationale) or String.trim(rationale) == "" ->
