@@ -132,7 +132,7 @@ defmodule Arbor.Commands.KernelMaterialization.Evidence do
     kind = entry["kind"]
     mode = entry["mode"]
     oid = entry["oid"]
-    collisions = collision_dests(plan)
+    transform_destinations = Core.transform_destinations(plan)
 
     cond do
       not is_binary(dest) or dest == "" ->
@@ -154,7 +154,7 @@ defmodule Arbor.Commands.KernelMaterialization.Evidence do
       not exact_keys?(entry, @allowed_entry_keys) ->
         {:error, :transform_evidence_unbound}
 
-      kind == "transform" and not MapSet.member?(collisions, dest) ->
+      kind == "transform" and not MapSet.member?(transform_destinations, dest) ->
         {:error, :transform_evidence_unbound}
 
       kind == "generated" and not generated_root?(dest) ->
@@ -163,7 +163,7 @@ defmodule Arbor.Commands.KernelMaterialization.Evidence do
       kind == "generated" and MapSet.member?(reserved, dest) ->
         {:error, :evidence_path_overlap}
 
-      kind == "generated" and MapSet.member?(collisions, dest) ->
+      kind == "generated" and MapSet.member?(transform_destinations, dest) ->
         {:error, :evidence_path_overlap}
 
       true ->
@@ -184,16 +184,8 @@ defmodule Arbor.Commands.KernelMaterialization.Evidence do
       |> Enum.filter(&(&1["disposition"] == "retain"))
       |> Enum.map(& &1["path"])
 
-    transform = MapSet.to_list(collision_dests(plan))
+    transform = MapSet.to_list(Core.transform_destinations(plan))
     MapSet.new(exact ++ retain ++ transform)
-  end
-
-  defp collision_dests(plan) do
-    from_groups =
-      (plan["collision_groups"] || [])
-      |> Enum.map(& &1["destination_path"])
-
-    MapSet.new(from_groups ++ MapSet.to_list(Core.collision_destinations()))
   end
 
   defp generated_root?(path) do

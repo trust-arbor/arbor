@@ -2,7 +2,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   @moduledoc """
   Pure K4A projector and comparer.
 
-  Generic `project/2` does not assert the production 640/632/8/4 inventory.
+  Generic `project/2` does not assert the production 640/610/30/4 inventory.
   `enforce_production_policy/1` is the separate production gate.
   """
 
@@ -39,6 +39,30 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
                             "apps/arbor_kernel_runtime/mix.exs",
                             "apps/arbor_kernel_runtime/test/test_helper.exs"
                           ])
+  @semantic_transform_source_paths MapSet.new([
+                                     "apps/arbor_common/README.md",
+                                     "apps/arbor_common/lib/arbor/common/skill_library.ex",
+                                     "apps/arbor_common/lib/arbor/eval/suites/library_construction.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands/spawn.ex",
+                                     "apps/arbor_common/test/arbor/common/agent_telemetry/source_guard_test.exs",
+                                     "apps/arbor_common/test/arbor/common/k1c_source_guard_test.exs",
+                                     "apps/arbor_common/test/mix/tasks/arbor/readiness_test.exs",
+                                     "apps/arbor_common/test/mix/tasks/arbor/start_daemon_launch_test.exs",
+                                     "apps/arbor_contracts/README.md",
+                                     "apps/arbor_contracts/lib/arbor/contracts_census.ex",
+                                     "apps/arbor_contracts/test/arbor/contracts/admission_test.exs",
+                                     "apps/arbor_contracts/test/arbor/contracts/coding/plan_test.exs",
+                                     "apps/arbor_contracts/test/arbor/contracts/coding/source_inventory_test.exs",
+                                     "apps/arbor_contracts/test/arbor/contracts/coding/work_packet_test.exs",
+                                     "apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs",
+                                     "apps/arbor_contracts/test/mix_project_paths_test.exs",
+                                     "apps/arbor_monitor/test/arbor/monitor/k1d_source_guard_test.exs",
+                                     "apps/arbor_signals/test/arbor/signals/cluster_integration_test.exs",
+                                     "apps/arbor_signals/test/arbor/signals/k1e_source_guard_test.exs",
+                                     "apps/arbor_signals/test/arbor/signals/k1f_source_guard_test.exs",
+                                     "apps/arbor_signals/test/arbor/signals/subsystem_cluster_test.exs",
+                                     "apps/arbor_signals/test/support/signal_test_case.ex"
+                                   ])
   @kernel_identity [
     {"apps/arbor_kernel/mix.exs", "transform_input"},
     {"apps/arbor_kernel/test/test_helper.exs", "transform_input"},
@@ -92,10 +116,12 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   def production_policy do
     %{
       "source_entries" => 640,
-      "exact_moves" => 632,
-      "transform_inputs" => 8,
+      "exact_moves" => 610,
+      "transform_inputs" => 30,
       "collision_destinations" => 4,
       "collision_destination_paths" => MapSet.to_list(@collision_destinations) |> Enum.sort(),
+      "semantic_transform_source_paths" =>
+        MapSet.to_list(@semantic_transform_source_paths) |> Enum.sort(),
       "kernel_identity" =>
         Enum.map(@kernel_identity, fn {path, disposition} ->
           %{"path" => path, "disposition" => disposition}
@@ -111,6 +137,30 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
 
   @spec collision_destinations() :: MapSet.t(String.t())
   def collision_destinations, do: @collision_destinations
+
+  @spec semantic_transform_source_paths() :: MapSet.t(String.t())
+  def semantic_transform_source_paths, do: @semantic_transform_source_paths
+
+  @spec transform_destinations(map()) :: MapSet.t(String.t())
+  def transform_destinations(plan) when is_map(plan) do
+    entry_destinations =
+      (plan["entries"] || [])
+      |> Enum.filter(&(&1["disposition"] == "transform_input"))
+      |> Enum.map(& &1["destination_path"])
+
+    retained_destinations =
+      (plan["retained_targets"] || [])
+      |> Enum.filter(&(&1["disposition"] == "transform_input"))
+      |> Enum.map(& &1["path"])
+
+    collision_destinations =
+      (plan["collision_groups"] || [])
+      |> Enum.map(& &1["destination_path"])
+
+    MapSet.new(entry_destinations ++ retained_destinations ++ collision_destinations)
+  end
+
+  def transform_destinations(_plan), do: MapSet.new()
 
   @spec source_apps() :: [String.t()]
   def source_apps, do: @source_apps
@@ -155,6 +205,10 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   def project(files, opts) when is_list(files) and is_list(opts) do
     owners = Keyword.get(opts, :source_owners, @default_source_owners)
     collisions = Keyword.get(opts, :collision_destinations, @collision_destinations)
+
+    semantic_transforms =
+      Keyword.get(opts, :semantic_transform_source_paths, @semantic_transform_source_paths)
+
     object_format = Keyword.get(opts, :object_format) || infer_format(files)
     base_commit = Keyword.get(opts, :base_commit, @base_commit)
 
@@ -162,7 +216,8 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
          {:ok, split} <- split_from_owners(owners),
          {:ok, sources, preexisting} <- partition_files(files),
          {:ok, mapped} <- map_destinations(sources, owners),
-         {:ok, entries, groups} <- classify_entries(mapped, preexisting, collisions) do
+         {:ok, entries, groups} <-
+           classify_entries(mapped, preexisting, collisions, semantic_transforms) do
       retained = classify_retained(preexisting, collisions)
       entries = Enum.sort_by(entries, & &1["source_path"])
       retained = Enum.sort_by(retained, & &1["path"])
@@ -203,6 +258,12 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
     dests = groups |> Enum.map(& &1["destination_path"]) |> Enum.sort()
     by_path = Map.new(retained, &{&1["path"], &1["disposition"]})
 
+    semantic_transform_sources =
+      entries
+      |> Enum.filter(&(&1["disposition"] == "transform_input" and &1["collision_group"] == ""))
+      |> Enum.map(& &1["source_path"])
+      |> Enum.sort()
+
     identity_ok? =
       Enum.all?(@kernel_identity, fn {path, disposition} ->
         Map.get(by_path, path) == disposition
@@ -214,6 +275,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
         derived["transform_inputs"] != policy["transform_inputs"] or
         derived["collision_destinations"] != policy["collision_destinations"] or
         dests != policy["collision_destination_paths"] or
+        semantic_transform_sources != policy["semantic_transform_source_paths"] or
         plan["split"] != policy["split"] or
         plan["base_commit"] != policy["base_commit"] or
           plan["policy_version"] != policy["policy_version"] ->
@@ -546,7 +608,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
 
   defp rewrite_destination(path, _), do: {:error, {:invalid_path, path}}
 
-  defp classify_entries(mapped, preexisting, collisions) do
+  defp classify_entries(mapped, preexisting, collisions, semantic_transforms) do
     preexisting_paths =
       MapSet.new(preexisting, fn file -> field(file, :path) end)
 
@@ -573,6 +635,14 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
 
         collision? ->
           {:halt, {:error, {:unclassified_collision, dest}}}
+
+        Enum.any?(group, &MapSet.member?(semantic_transforms, &1.source_path)) ->
+          classified =
+            Enum.map(group, fn item ->
+              to_entry(item, "transform_input", "", "expected_absent")
+            end)
+
+          {:cont, {:ok, classified ++ entries, groups}}
 
         true ->
           classified =
@@ -840,7 +910,10 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
             end
 
           "transform_input" ->
-            if group == dest and MapSet.member?(group_dests, dest) do
+            collision_transform? = group == dest and MapSet.member?(group_dests, dest)
+            semantic_transform? = group == "" and precondition == "expected_absent"
+
+            if collision_transform? or semantic_transform? do
               {:cont, :ok}
             else
               {:halt, {:error, :plan_not_immutable}}
@@ -1147,10 +1220,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   end
 
   defp materialized_transform_failures(failures, plan, evidence, dest_files) do
-    dests =
-      (plan["collision_groups"] || [])
-      |> Enum.map(& &1["destination_path"])
-      |> Enum.uniq()
+    dests = plan |> transform_destinations() |> MapSet.to_list() |> Enum.sort()
 
     by_dest =
       (evidence["entries"] || [])
@@ -1207,9 +1277,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
       |> Enum.filter(&(&1["disposition"] == "retain"))
       |> MapSet.new(& &1["path"])
 
-    transform_dests =
-      (plan["collision_groups"] || [])
-      |> MapSet.new(& &1["destination_path"])
+    transform_dests = transform_destinations(plan)
 
     generated_dests =
       (evidence["entries"] || [])

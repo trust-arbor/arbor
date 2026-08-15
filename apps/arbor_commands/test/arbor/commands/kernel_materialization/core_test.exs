@@ -62,6 +62,48 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
            end)
   end
 
+  test "reviewed semantic transforms remain distinct from collision transforms" do
+    semantic_source = "apps/arbor_contracts/lib/a.ex"
+
+    assert {:ok, plan} =
+             Core.project(fixture_files(),
+               semantic_transform_source_paths: MapSet.new([semantic_source])
+             )
+
+    semantic_entry = Enum.find(plan["entries"], &(&1["source_path"] == semantic_source))
+    assert semantic_entry["disposition"] == "transform_input"
+    assert semantic_entry["collision_group"] == ""
+    assert semantic_entry["target_precondition"] == "expected_absent"
+    assert plan["counts"]["exact_moves"] == 1
+    assert plan["counts"]["transform_inputs"] == 9
+    assert plan["counts"]["collision_destinations"] == 4
+    assert {:ok, _} = Core.admit_plan(plan)
+
+    rows =
+      plan
+      |> Core.transform_destinations()
+      |> Enum.map(&evidence_row(&1, "transform", "merged #{&1}\n"))
+
+    assert {:ok, evidence} = Evidence.admit(evidence_doc(plan["entries_digest"], rows), plan)
+
+    dest_files = materialized_dest_files(plan, fixture_files(), evidence)
+    presence_none = Map.new(Core.source_apps(), &{&1, false})
+
+    assert {:ok, report} =
+             KernelMaterialization.run_for_test(
+               mode: "check",
+               phase: "materialized",
+               root: tmp_root(),
+               plan_map: plan,
+               evidence_map: evidence,
+               dest_files: dest_files,
+               target_files: Map.values(dest_files),
+               source_presence: presence_none
+             )
+
+    assert report["status"] == "ok"
+  end
+
   test "unclassified collision fails outside the reviewed dest set" do
     files =
       fixture_files() ++
@@ -83,9 +125,10 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
   test "enforce_production_policy derives counts from rows, not declared counts" do
     policy = Core.production_policy()
     assert policy["source_entries"] == 640
-    assert policy["exact_moves"] == 632
-    assert policy["transform_inputs"] == 8
+    assert policy["exact_moves"] == 610
+    assert policy["transform_inputs"] == 30
     assert policy["collision_destinations"] == 4
+    assert length(policy["semantic_transform_source_paths"]) == 22
 
     stub = production_stub_plan()
     assert {:error, :accepted_count_mismatch} = Core.enforce_production_policy(stub)
@@ -561,8 +604,8 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
     %{
       "counts" => %{
         "source_entries" => 640,
-        "exact_moves" => 632,
-        "transform_inputs" => 8,
+        "exact_moves" => 610,
+        "transform_inputs" => 30,
         "collision_destinations" => 4,
         "retained_targets" => 3
       },
