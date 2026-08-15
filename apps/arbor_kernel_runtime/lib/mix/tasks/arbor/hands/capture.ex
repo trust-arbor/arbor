@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands.Capture do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Capture recent output from a Hand"
   @moduledoc """
   Captures recent terminal output from a running Hand.

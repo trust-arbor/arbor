@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Sobelow.Umbrella do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
+
   @moduledoc """
   Runs Sobelow security scanner against all Phoenix apps in the umbrella.
 

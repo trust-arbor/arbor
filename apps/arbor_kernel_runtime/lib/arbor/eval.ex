@@ -51,6 +51,11 @@ defmodule Arbor.Eval do
       }
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Contracts, Arbor.Common, Jason],
+    exports: :all
+
   @type violation :: %{
           type: atom(),
           message: String.t(),

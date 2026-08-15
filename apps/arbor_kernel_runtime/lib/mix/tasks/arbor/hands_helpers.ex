@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Arbor.HandsHelpers do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
+
   @moduledoc """
   Shared helpers for Arbor Hands management.
 

@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Cluster do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "View and manage the Arbor cluster"
   @moduledoc """
   View cluster status, node capabilities, and manage connections.

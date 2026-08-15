@@ -27,6 +27,11 @@ defmodule Arbor.Types do
   - `operation` - Operations that can be performed
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [],
+    exports: :all
+
   # Identifier types
   @type agent_id :: String.t()
   @type session_id :: String.t()

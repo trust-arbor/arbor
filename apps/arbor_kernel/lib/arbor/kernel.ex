@@ -18,4 +18,9 @@ defmodule Arbor.Kernel do
   configuration wrapper; each owner library keeps its own `Arbor.*.Config`
   facade and reads only its namespace.
   """
+
+  use Boundary,
+    top_level?: true,
+    deps: [],
+    exports: []
 end

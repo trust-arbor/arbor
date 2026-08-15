@@ -19,6 +19,13 @@ defmodule Arbor.Kernel.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
+      compilers: [:boundary] ++ Mix.compilers(),
+      boundary: [
+        default: [
+          type: :strict,
+          check: [aliases: true]
+        ]
+      ],
       deps: deps(),
       docs: docs(),
       package: package(),
@@ -36,6 +43,7 @@ defmodule Arbor.Kernel.MixProject do
     [
       {:typed_struct, "~> 0.3"},
       {:jason, "~> 1.4"},
+      {:boundary, "~> 0.10", runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Signals do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "View recent signals from the running Arbor server"
   @moduledoc """
   Displays recent signals from the Arbor signals system.

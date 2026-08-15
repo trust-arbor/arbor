@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Doctor do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Provider health + runtime axis introspection"
   @moduledoc """
   Multi-mode triage tool. With no flags, runs the LLM provider health

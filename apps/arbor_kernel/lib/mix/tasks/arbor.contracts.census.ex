@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Contracts.Census do
+  use Boundary, classify_to: Arbor.Kernel.DevTools
   @shortdoc "Inventory arbor_contracts consumers (AC-1.0 / AC-02)"
 
   @moduledoc """

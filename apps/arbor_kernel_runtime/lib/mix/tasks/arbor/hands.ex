@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "List active Hands (independent Claude Code sessions)"
   @moduledoc """
   Lists all active Hands — independent Claude Code sessions doing focused work.

@@ -23,6 +23,11 @@ defmodule Arbor.Common do
       Arbor.Common.SafeAtom.atomize_keys(map, [:name])  # => %{name: "value"}
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],
+    exports: :all
+
   @doc "Whether the system tool catalog is enabled (default false)."
   @spec tool_catalog_enabled?() :: term()
   def tool_catalog_enabled?, do: Arbor.Common.Config.tool_catalog_enabled?()

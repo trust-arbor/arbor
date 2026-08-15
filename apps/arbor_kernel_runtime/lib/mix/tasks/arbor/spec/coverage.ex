@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Spec.Coverage do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Report spec-statement → test traceability (conformance coverage)"
 
   @moduledoc """

@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Start do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Start Arbor as a background daemon"
   @moduledoc """
   Starts Arbor as a detached background process for development.

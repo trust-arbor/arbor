@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Arbor.Helpers do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
+
   @moduledoc """
   Shared configuration and helpers for Arbor lifecycle mix tasks.
 

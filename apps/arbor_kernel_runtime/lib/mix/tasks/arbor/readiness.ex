@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Arbor.Readiness do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
+
   @moduledoc """
   Pure readiness helpers for Arbor lifecycle mix tasks.
 

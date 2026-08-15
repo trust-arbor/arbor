@@ -26,6 +26,11 @@ defmodule Arbor.Monitor do
       Arbor.Monitor.skills()
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Contracts, Arbor.Signals, Logger],
+    exports: :all
+
   alias Arbor.Monitor.{Config, MetricsStore}
 
   @doc """

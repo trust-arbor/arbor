@@ -48,6 +48,11 @@ defmodule Arbor.Signals do
       end
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Contracts, Arbor.Identifiers, Jason, Logger, TypedStruct],
+    exports: :all
+
   @behaviour Arbor.Contracts.API.Signals
 
   alias Arbor.Signals.{Bus, Config, DurableSink, Relay, Signal, Store, Taint, TopicKeys}

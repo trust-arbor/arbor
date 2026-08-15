@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands.Stop do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Stop a running Hand"
   @moduledoc """
   Stops a running Hand session.

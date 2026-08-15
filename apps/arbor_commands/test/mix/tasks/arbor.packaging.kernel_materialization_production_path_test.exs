@@ -27,8 +27,8 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
 
     counts = report["counts"]
     assert counts["source_entries"] == 640
-    assert counts["exact_moves"] == 607
-    assert counts["transform_inputs"] == 33
+    assert counts["exact_moves"] == 568
+    assert counts["transform_inputs"] == 72
     assert counts["collision_destinations"] == 4
 
     assert {:ok, check} =
@@ -73,7 +73,7 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
     retained = Map.new(admitted["retained_targets"], &{&1["path"], &1["disposition"]})
     assert retained["apps/arbor_kernel/mix.exs"] == "transform_input"
     assert retained["apps/arbor_kernel/test/test_helper.exs"] == "transform_input"
-    assert retained["apps/arbor_kernel/lib/arbor/kernel.ex"] == "retain"
+    assert retained["apps/arbor_kernel/lib/arbor/kernel.ex"] == "transform_input"
 
     assert {:ok, via_task} =
              Task.execute(["--check", "--phase", "materialized", "--root", root])

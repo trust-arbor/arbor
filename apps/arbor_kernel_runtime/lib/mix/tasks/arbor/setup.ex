@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Setup do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Set up Arbor for development"
   @moduledoc """
   Sets up Arbor for development from a fresh clone.

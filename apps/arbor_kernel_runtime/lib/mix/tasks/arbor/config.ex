@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Config do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Show app config for an Arbor application"
   @moduledoc """
   Displays runtime configuration for an Arbor application from the running server.

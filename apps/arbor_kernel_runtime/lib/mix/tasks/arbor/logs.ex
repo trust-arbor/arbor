@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Logs do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Tail Arbor server log output"
   @moduledoc """
   Tails the Arbor server log file.

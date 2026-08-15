@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Restart do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Restart the Arbor server"
   @moduledoc """
   Stops and restarts the Arbor background server.

@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Status do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Show Arbor server status"
   @moduledoc """
   Displays the status of the running Arbor server.

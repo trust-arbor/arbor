@@ -1,6 +1,11 @@
 defmodule Arbor.Signals.Config.Testing do
   @moduledoc false
 
+  use Boundary,
+    top_level?: true,
+    deps: [ExUnit.Callbacks],
+    exports: :all
+
   @namespace :signals
 
   @spec snapshot_namespace() :: :error | {:ok, term()}

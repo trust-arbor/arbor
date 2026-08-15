@@ -219,10 +219,12 @@ Check mode never writes. It admits the indexed plan and transform
 evidence blobs, projects the current selected inventory, and
 byte-compares the encoded plan. `--write-plan` writes the plan and an
 empty transform-evidence file bound to that plan digest when evidence
-entries are empty. Transform inputs include the four collision destinations
-plus every reviewed source file whose content names a retiring application or
-physical root; single-file semantic transforms have an empty collision group.
+entries are empty. Transform inputs include the four collision destinations,
+every reviewed source file whose content names a retiring application or physical
+root, and the K4C package roots, Mix tasks, and test helpers that receive explicit
+Boundary declarations. Single-file semantic transforms have an empty collision
+group.
 SPIKE-2 is not authority; accepted main
 `207d47486485e554d4e725d9cc898b56a9f327eb` is the source truth.
-Production policy asserts 640 source entries, 607 exact moves, 33 transform
+Production policy asserts 640 source entries, 568 exact moves, 72 transform
 inputs, and four collision destinations.

@@ -1,6 +1,11 @@
 defmodule Arbor.Monitor.Config.Testing do
   @moduledoc false
 
+  use Boundary,
+    top_level?: true,
+    deps: [ExUnit.Callbacks],
+    exports: :all
+
   @namespace :monitor
 
   @spec snapshot_namespace() :: :error | {:ok, term()}

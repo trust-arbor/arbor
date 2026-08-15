@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands.Send do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Send a message to a running Hand"
   @moduledoc """
   Sends a message to a running Hand's Claude session.

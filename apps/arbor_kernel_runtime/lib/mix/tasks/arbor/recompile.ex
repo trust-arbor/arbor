@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Recompile do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Hot-reload changed modules on the running Arbor server"
   @moduledoc """
   Hot-reloads compiled Arbor modules whose on-disk BEAM differs from the code

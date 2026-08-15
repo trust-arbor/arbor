@@ -2,7 +2,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   @moduledoc """
   Pure K4A projector and comparer.
 
-  Generic `project/2` does not assert the production 640/607/33/4 inventory.
+  Generic `project/2` does not assert the production 640/568/72/4 inventory.
   `enforce_production_policy/1` is the separate production gate.
   """
 
@@ -39,7 +39,51 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
                             "apps/arbor_kernel_runtime/mix.exs",
                             "apps/arbor_kernel_runtime/test/test_helper.exs"
                           ])
+  @retained_transform_paths MapSet.new([
+                              "apps/arbor_kernel/lib/arbor/kernel.ex"
+                            ])
   @semantic_transform_source_paths MapSet.new([
+                                     # K4C adds strict Boundary declarations to package roots,
+                                     # test support, and explicitly classified Mix tasks.
+                                     "apps/arbor_common/lib/arbor/common/model_profile.ex",
+                                     "apps/arbor_common/lib/arbor/eval.ex",
+                                     "apps/arbor_common/lib/arbor_common.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/apps.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/arbor_helpers.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/attach.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/cluster.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/config.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/doctor.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/eval.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands/capture.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands/cleanup.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands/send.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands/stop.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/hands_helpers.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/lifecycle_identity.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/logs.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/phone.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/readiness.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/recompile.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/restart.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/security.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/setup.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/signals.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/spec/coverage.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/start.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/status.ex",
+                                     "apps/arbor_common/lib/mix/tasks/arbor/stop.ex",
+                                     "apps/arbor_common/test/support/arbor/common/config/testing.ex",
+                                     "apps/arbor_contracts/lib/arbor/contracts.ex",
+                                     "apps/arbor_contracts/lib/arbor/identifiers.ex",
+                                     "apps/arbor_contracts/lib/arbor/types.ex",
+                                     "apps/arbor_contracts/lib/mix/tasks/arbor.contracts.census.ex",
+                                     "apps/arbor_monitor/lib/arbor/monitor.ex",
+                                     "apps/arbor_monitor/test/support/arbor/monitor/config/testing.ex",
+                                     "apps/arbor_signals/lib/arbor/signals.ex",
+                                     "apps/arbor_signals/test/support/cluster_test_helpers.ex",
+                                     "apps/arbor_signals/test/support/arbor/signals/config/testing.ex",
                                      "apps/arbor_common/README.md",
                                      "apps/arbor_common/lib/arbor/common/skill_library.ex",
                                      "apps/arbor_common/lib/arbor/eval/suites/library_construction.ex",
@@ -69,7 +113,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   @kernel_identity [
     {"apps/arbor_kernel/mix.exs", "transform_input"},
     {"apps/arbor_kernel/test/test_helper.exs", "transform_input"},
-    {"apps/arbor_kernel/lib/arbor/kernel.ex", "retain"}
+    {"apps/arbor_kernel/lib/arbor/kernel.ex", "transform_input"}
   ]
   @forbidden_plan_keys MapSet.new([
                          "phase",
@@ -119,8 +163,8 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   def production_policy do
     %{
       "source_entries" => 640,
-      "exact_moves" => 607,
-      "transform_inputs" => 33,
+      "exact_moves" => 568,
+      "transform_inputs" => 72,
       "collision_destinations" => 4,
       "collision_destination_paths" => MapSet.to_list(@collision_destinations) |> Enum.sort(),
       "semantic_transform_source_paths" =>
@@ -683,7 +727,11 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   defp classify_retained(preexisting, collisions) do
     Enum.map(preexisting, fn file ->
       path = field(file, :path)
-      disposition = if MapSet.member?(collisions, path), do: "transform_input", else: "retain"
+
+      disposition =
+        if MapSet.member?(collisions, path) or MapSet.member?(@retained_transform_paths, path),
+          do: "transform_input",
+          else: "retain"
 
       Encode.order_retained(%{
         "path" => path,
@@ -971,14 +1019,16 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
       if source_app(path) == passive_owner do
         case entry["disposition"] do
           "transform_input" ->
-            if MapSet.member?(group_dests, path),
-              do: {:cont, :ok},
-              else: {:halt, {:error, :plan_not_immutable}}
+            if MapSet.member?(group_dests, path) or
+                 MapSet.member?(@retained_transform_paths, path),
+               do: {:cont, :ok},
+               else: {:halt, {:error, :plan_not_immutable}}
 
           "retain" ->
-            if MapSet.member?(group_dests, path),
-              do: {:halt, {:error, :plan_not_immutable}},
-              else: {:cont, :ok}
+            if MapSet.member?(group_dests, path) or
+                 MapSet.member?(@retained_transform_paths, path),
+               do: {:halt, {:error, :plan_not_immutable}},
+               else: {:cont, :ok}
 
           _ ->
             {:halt, {:error, :plan_not_immutable}}

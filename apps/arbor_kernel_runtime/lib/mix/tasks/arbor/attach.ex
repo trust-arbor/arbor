@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Attach do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Attach an IEx session to the running Arbor server"
   @moduledoc """
   Prints the command to attach an IEx remote shell to the running Arbor server.

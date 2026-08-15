@@ -70,6 +70,11 @@ defmodule Arbor.Contracts do
   - Dev tooling and code generation
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Types, Arbor.Identifiers, Jason, TypedStruct],
+    exports: :all
+
   @doc """
   Returns the version of the contracts package.
   """

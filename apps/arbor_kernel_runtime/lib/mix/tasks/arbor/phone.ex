@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Phone do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Provision and manage phone nodes in the Arbor cluster"
   @moduledoc """
   Provisions an Android phone node with Elixir + Arbor modules

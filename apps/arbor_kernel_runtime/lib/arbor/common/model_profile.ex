@@ -337,11 +337,10 @@ defmodule Arbor.Common.ModelProfile do
     end
   end
 
-  # llm_db module reference — declared here so refresh/1 (defined below
-  # in this section) and the lookup helpers (further down) can both use
-  # it. Module attributes have to be in scope at point of use; can't
-  # forward-reference.
-  @llmdb_module LLMDB
+  # llm_db is an optional, non-starting dependency of the runtime package.
+  # Keep the module name dynamic so this package also compiles cleanly when
+  # consumers omit the optional dependency.
+  @llmdb_module :"Elixir.LLMDB"
 
   @doc """
   Reload the llm_db catalog and report what changed.
@@ -361,16 +360,17 @@ defmodule Arbor.Common.ModelProfile do
   `config :llm_db, ...` settings — i.e. just rebuilds from the
   packaged snapshot.
 
-  Returns `{:error, :llm_db_unavailable}` if `LLMDB` isn't loaded
-  (unit tests without the dep). Wraps `LLMDB.load/1` errors as
-  `{:error, {:llm_db_error, reason}}` so the failure shape is
-  caller-friendly.
+  Returns `{:error, :llm_db_unavailable}` if `LLMDB` isn't installed. Starts
+  the optional `:llm_db` application on demand so its generated atoms and
+  packaged snapshot are initialized before reloading. Start and load errors are
+  wrapped as `{:error, {:llm_db_error, reason}}`.
   """
   @spec refresh(keyword()) ::
           {:ok, %{before: non_neg_integer(), after: non_neg_integer(), duration_ms: integer()}}
           | {:error, term()}
   def refresh(opts \\ []) do
-    if llmdb_available?() do
+    with true <- llmdb_available?(),
+         {:ok, _started} <- Application.ensure_all_started(:llm_db) do
       before_count = safe_model_count()
       started_at = System.monotonic_time(:millisecond)
 
@@ -392,7 +392,8 @@ defmodule Arbor.Common.ModelProfile do
           {:error, {:llm_db_error, reason}}
       end
     else
-      {:error, :llm_db_unavailable}
+      false -> {:error, :llm_db_unavailable}
+      {:error, reason} -> {:error, {:llm_db_error, {:start_failed, reason}}}
     end
   end
 
@@ -425,10 +426,9 @@ defmodule Arbor.Common.ModelProfile do
     :exit, _ -> :ok
   end
 
-  # llm_db is a transitive dep via req_llm — not a compile-time dep of
-  # arbor_common, so use apply/3 to keep the compiler quiet. Matches the
-  # pattern in arbor_llm/lib/arbor/llm/client.ex. (@llmdb_module is
-  # declared earlier in the file so refresh/1 above can also use it.)
+  # llm_db is a direct optional, non-starting dependency of the runtime
+  # package. Use apply/3 so the package still compiles when consumers omit it.
+  # (@llmdb_module is declared earlier so refresh/1 can also use it.)
 
   defp llmdb_available?, do: Code.ensure_loaded?(@llmdb_module)
 

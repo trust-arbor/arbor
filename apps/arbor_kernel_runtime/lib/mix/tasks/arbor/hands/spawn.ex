@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands.Spawn do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Spawn a new Hand (independent Claude Code session)"
   @moduledoc """
   Spawns a new Hand to work on a task independently.

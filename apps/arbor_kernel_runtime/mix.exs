@@ -20,6 +20,13 @@ defmodule Arbor.KernelRuntime.MixProject do
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      compilers: [:boundary] ++ Mix.compilers(),
+      boundary: [
+        default: [
+          type: :strict,
+          check: [aliases: true]
+        ]
+      ],
       deps: deps(),
       package: package(),
       docs: docs(),
@@ -61,10 +68,12 @@ defmodule Arbor.KernelRuntime.MixProject do
       # OAuth's bounded HTTP/1 pool relies on Mint's parser-level response
       # header limit and the response-smuggling fixes released in 1.9.3.
       {:mint, "~> 1.9.3", override: true},
+      {:llm_db, "~> 2026.1", optional: true, runtime: false},
       {:req, "~> 0.5"},
       {:zoi, "~> 0.17"},
       {:telemetry, "~> 1.0"},
       {:recon, "~> 2.5"},
+      {:boundary, "~> 0.10", runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}

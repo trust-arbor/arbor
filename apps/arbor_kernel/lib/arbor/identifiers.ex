@@ -21,6 +21,11 @@ defmodule Arbor.Identifiers do
   Example: `arbor://agent/agent_abc123def456`
   """
 
+  use Boundary,
+    top_level?: true,
+    deps: [Arbor.Types],
+    exports: :all
+
   alias Arbor.Types
 
   # URI format validations

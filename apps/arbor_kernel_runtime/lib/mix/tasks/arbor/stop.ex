@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Stop do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Stop the running Arbor server"
   @moduledoc """
   Gracefully stops the Arbor background server.

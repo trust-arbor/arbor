@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Apps do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "List running Arbor applications with status"
   @moduledoc """
   Lists all Arbor applications and their status on the running server.

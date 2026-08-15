@@ -125,10 +125,23 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
   test "enforce_production_policy derives counts from rows, not declared counts" do
     policy = Core.production_policy()
     assert policy["source_entries"] == 640
-    assert policy["exact_moves"] == 607
-    assert policy["transform_inputs"] == 33
+    assert policy["exact_moves"] == 568
+    assert policy["transform_inputs"] == 72
     assert policy["collision_destinations"] == 4
-    assert length(policy["semantic_transform_source_paths"]) == 25
+    assert length(policy["semantic_transform_source_paths"]) == 64
+
+    assert "apps/arbor_contracts/lib/arbor/contracts.ex" in policy[
+             "semantic_transform_source_paths"
+           ]
+
+    assert "apps/arbor_common/lib/mix/tasks/arbor/apps.ex" in policy[
+             "semantic_transform_source_paths"
+           ]
+
+    assert %{
+             "path" => "apps/arbor_kernel/lib/arbor/kernel.ex",
+             "disposition" => "transform_input"
+           } in policy["kernel_identity"]
 
     stub = production_stub_plan()
     assert {:error, :accepted_count_mismatch} = Core.enforce_production_policy(stub)
@@ -377,7 +390,7 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
   end
 
   test "materialized compare fail-closes on source presence, dest drift, and empty evidence" do
-    files = fixture_files()
+    files = fixture_files() ++ [file("apps/arbor_kernel/priv/retained.txt", "retained\n")]
     {:ok, plan} = Core.project(files)
     digest = plan["entries_digest"]
     {:ok, empty} = Evidence.admit(Evidence.empty(digest), plan)
@@ -420,8 +433,9 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
            )
 
     transform_rows =
-      Enum.map(plan["collision_groups"], fn group ->
-        dest = group["destination_path"]
+      plan
+      |> Core.transform_destinations()
+      |> Enum.map(fn dest ->
         evidence_row(dest, "transform", "merged #{dest}\n")
       end)
 
@@ -604,8 +618,8 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
     %{
       "counts" => %{
         "source_entries" => 640,
-        "exact_moves" => 607,
-        "transform_inputs" => 33,
+        "exact_moves" => 568,
+        "transform_inputs" => 72,
         "collision_destinations" => 4,
         "retained_targets" => 3
       },

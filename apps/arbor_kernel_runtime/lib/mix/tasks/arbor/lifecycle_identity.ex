@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Arbor.LifecycleIdentity do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
+
   @moduledoc """
   Pure decision core for the Arbor lifecycle mix tasks (start/stop/restart).
 

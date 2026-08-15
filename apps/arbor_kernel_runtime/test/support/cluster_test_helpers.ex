@@ -9,6 +9,13 @@ defmodule Arbor.Signals.ClusterTestHelpers do
   so the GenServer survives the :erpc caller process exiting.
   """
 
+  # This remote integration harness deliberately drives higher-level applications.
+  # Keep that exception isolated from the production Arbor.Signals boundary.
+  use Boundary,
+    top_level?: true,
+    check: [in: false, out: false],
+    exports: []
+
   # ── Signal Infrastructure ─────────────────────────────────────────────
 
   @doc "Start signal infrastructure children on the current node."

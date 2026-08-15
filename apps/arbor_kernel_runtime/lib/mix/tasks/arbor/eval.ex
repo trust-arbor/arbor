@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Rpc do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Evaluate an expression on the running Arbor server via RPC"
   @moduledoc """
   Evaluates an Elixir expression on the running Arbor server via RPC.

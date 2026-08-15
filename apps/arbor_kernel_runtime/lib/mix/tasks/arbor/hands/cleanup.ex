@@ -1,4 +1,5 @@
 defmodule Mix.Tasks.Arbor.Hands.Cleanup do
+  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Clean up a Hand's worktree and branch"
   @moduledoc """
   Removes a Hand's git worktree, branch, and directory after review/merge.

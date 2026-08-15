@@ -1,6 +1,11 @@
 defmodule Arbor.Common.Config.Testing do
   @moduledoc false
 
+  use Boundary,
+    top_level?: true,
+    deps: [ExUnit.Callbacks],
+    exports: :all
+
   @namespace :common
 
   @spec snapshot_namespace() :: :error | {:ok, term()}
