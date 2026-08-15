@@ -184,6 +184,44 @@ the runtime starts, while the optional service children and Signals telemetry
 bridge remain disabled. These exact values do not weaken passive isolation:
 contracts-only consumers start `:arbor_kernel`, not the runtime application.
 
+## Safe-recovery profile evidence (E0B1)
+
+Reviewed `safe_recovery` profile intent. Production reads only the fixed
+candidate `safe_recovery_profile.v1.json` through a repo-contained,
+non-symlink, ceiling-bounded file boundary. There is no caller-selected
+profile name, path, MFA, executable, or decoder.
+
+The root `quality` alias runs check mode:
+
+```bash
+./bin/mix arbor.packaging.safe_recovery_profile --check
+./bin/mix arbor.packaging.safe_recovery_profile --check --json
+```
+
+`--check` never writes. It exits successfully only after the exact fixed
+candidate is admitted. `evidence_status=conformant` with
+`architecture_status=blocked` is a successful E0B1 evidence check, not
+architecture readiness. The frozen blocker set remaining exact is what
+check verifies; it does not promote the architecture to ready.
+
+```bash
+./bin/mix arbor.packaging.safe_recovery_profile
+./bin/mix arbor.packaging.safe_recovery_profile --json
+```
+
+Report mode prints the same admitted evidence. Missing, malformed, stale,
+widened, reordered, or unreadable candidates fail closed in both modes.
+
+The `profile_digest` is the lowercase 64-hex SHA-256 of the
+domain-separated canonical profile bytes. It is computed after admission
+and is not stored on the candidate. Two consecutive `--json` renders must
+be byte-identical and bind the same digest.
+
+E0B1 is profile-intent evidence only. E0B2 binds exact artifact payload
+identity; E0B3 measures fresh-VM executable closure. This command does
+not implement either, and a passing E0B1 check is not an E0B2 or E0B3
+result.
+
 ## Retired K migration gates
 
 The PK-K0 migration census and K4 materialization plan were one-time proof
