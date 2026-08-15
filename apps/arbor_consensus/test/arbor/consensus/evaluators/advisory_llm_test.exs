@@ -1,5 +1,5 @@
 defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Consensus.Evaluators.AdvisoryLLM
   alias Arbor.Consensus.TestHelpers
@@ -22,6 +22,42 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     :consistency,
     :adversarial
   ]
+
+  @portable_models %{
+    brainstorming: "openrouter:google/gemini-3.7-flash",
+    user_experience: "openrouter:google/gemini-3.7-flash",
+    security: "openrouter:deepseek/deepseek-v4-pro-0813",
+    privacy: "openrouter:google/gemini-3.7-flash",
+    stability: "openrouter:deepseek/deepseek-v4-pro-0813",
+    capability: "openrouter:google/gemini-3.7-flash",
+    emergence: "openrouter:google/gemini-3.7-flash",
+    vision: "openrouter:google/gemini-3.7-flash",
+    performance: "openrouter:deepseek/deepseek-v4-pro-0813",
+    generalization: "openrouter:deepseek/deepseek-v4-pro-0813",
+    resource_usage: "openrouter:google/gemini-3.7-flash",
+    consistency: "openrouter:deepseek/deepseek-v4-pro-0813",
+    adversarial: "openrouter:deepseek/deepseek-v4-pro-0813"
+  }
+
+  @model_config_keys [:council_model, :perspective_models_json, :perspective_models]
+
+  setup do
+    previous =
+      Map.new(@model_config_keys, fn key ->
+        {key, Application.fetch_env(:arbor_consensus, key)}
+      end)
+
+    Enum.each(@model_config_keys, &Application.delete_env(:arbor_consensus, &1))
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_consensus, key, value)
+        {key, :error} -> Application.delete_env(:arbor_consensus, key)
+      end)
+    end)
+
+    :ok
+  end
 
   # LLM function that returns a mock JSON response (replaces ai_module: MockAI)
   defp mock_llm_fn do
@@ -268,21 +304,14 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         assert is_binary(Map.get(map, p)), "provider:model for #{p} should be a string"
       end
 
-      # All perspectives use the same high-quality model (Gemini 3 Flash Preview)
       unique_models = map |> Map.values() |> Enum.uniq()
 
-      assert unique_models != [],
-             "expected at least 1 model, got: #{inspect(unique_models)}"
+      assert length(unique_models) == 2,
+             "expected 2 portable model families, got: #{inspect(unique_models)}"
     end
 
     test "each perspective has a default provider:model assignment" do
-      map = AdvisoryLLM.provider_map()
-
-      # All perspectives use Gemini 3 Flash Preview — best intelligence/cost ratio
-      for p <- @all_perspectives do
-        assert map[p] == "openrouter:google/gemini-3-flash-preview",
-               "expected kimi-k2.5 for #{p}, got: #{map[p]}"
-      end
+      assert AdvisoryLLM.provider_map() == @portable_models
     end
 
     test "caller can override provider_model via opts" do
@@ -311,14 +340,70 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       assert eval.sealed == true
     end
+
+    test "forwards the evaluator timeout to the LLM bridge" do
+      proposal = TestHelpers.build_proposal(%{description: "Timeout propagation test"})
+      parent = self()
+
+      complete_fun = fn _system_prompt, _user_prompt, opts ->
+        send(parent, {:bridge_opts, opts})
+
+        {:ok,
+         Jason.encode!(%{
+           "analysis" => "Mock analysis",
+           "considerations" => [],
+           "alternatives" => [],
+           "recommendation" => "ok"
+         }), %{}}
+      end
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming,
+                 timeout: 75_000,
+                 complete_fun: complete_fun
+               )
+
+      assert eval.sealed
+      assert_receive {:bridge_opts, opts}
+      assert opts[:timeout] == 75_000
+      assert opts[:max_tokens] == nil
+    end
+
+    test "forwards an explicit response-token cap" do
+      proposal = TestHelpers.build_proposal(%{description: "Token cap propagation test"})
+      parent = self()
+
+      complete_fun = fn _system_prompt, _user_prompt, opts ->
+        send(parent, {:bridge_opts, opts})
+
+        {:ok,
+         Jason.encode!(%{
+           "analysis" => "Mock analysis",
+           "considerations" => [],
+           "alternatives" => [],
+           "recommendation" => "ok"
+         }), %{}}
+      end
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming,
+                 max_tokens: 12_345,
+                 complete_fun: complete_fun
+               )
+
+      assert eval.sealed
+      assert_receive {:bridge_opts, opts}
+      assert opts[:max_tokens] == 12_345
+    end
   end
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:security)
 
-      assert {"openrouter", "google/gemini-3-flash-preview"} = AdvisoryLLM.resolve_provider_model(:privacy)
+      assert {"openrouter", "google/gemini-3.7-flash"} =
+               AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
     test "per-call override via provider_model opt" do
@@ -350,26 +435,90 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
     test "adversarial perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:adversarial)
     end
 
     test "OpenRouter model defaults resolve correctly" do
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "google/gemini-3.7-flash"} =
                AdvisoryLLM.resolve_provider_model(:brainstorming)
 
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
 
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
   end
 
+  describe "parse_perspective_models_json/1" do
+    test "parses closed perspective names and preserves model tag colons" do
+      json =
+        Jason.encode!(%{
+          "security" => "openai_oauth:gpt-daybreak-blue-latest",
+          "performance" => "ollama:kimi-k2.7-code:cloud"
+        })
+
+      assert {:ok,
+              %{
+                security: "openai_oauth:gpt-daybreak-blue-latest",
+                performance: "ollama:kimi-k2.7-code:cloud"
+              }} = AdvisoryLLM.parse_perspective_models_json(json)
+    end
+
+    test "rejects malformed JSON and non-object values" do
+      assert {:error, :invalid_json} = AdvisoryLLM.parse_perspective_models_json("{")
+      assert {:error, :expected_json_object} = AdvisoryLLM.parse_perspective_models_json("[]")
+    end
+
+    test "rejects unknown perspective names without creating atoms" do
+      assert {:error, {:unknown_perspective, "security_review"}} =
+               AdvisoryLLM.parse_perspective_models_json(
+                 ~s({"security_review":"openrouter:model"})
+               )
+    end
+
+    test "rejects malformed provider:model routes" do
+      assert {:error, {:invalid_provider_model, "security"}} =
+               AdvisoryLLM.parse_perspective_models_json(~s({"security":"model-only"}))
+    end
+  end
+
   describe "runtime configuration" do
-    setup do
-      # Reset to defaults after each test
-      on_exit(fn -> AdvisoryLLM.reset_perspective_models() end)
+    test "per-perspective JSON overrides the uniform model" do
+      Application.put_env(:arbor_consensus, :council_model, "openrouter:uniform")
+
+      Application.put_env(
+        :arbor_consensus,
+        :perspective_models_json,
+        ~s({"security":"openai_oauth:gpt-daybreak-blue-latest"})
+      )
+
+      assert {"openai_oauth", "gpt-daybreak-blue-latest"} =
+               AdvisoryLLM.resolve_provider_model(:security)
+
+      assert {"openrouter", "uniform"} = AdvisoryLLM.resolve_provider_model(:privacy)
+    end
+
+    test "programmatic configuration overrides environment JSON" do
+      Application.put_env(
+        :arbor_consensus,
+        :perspective_models_json,
+        ~s({"security":"openai_oauth:gpt-daybreak-blue-latest"})
+      )
+
+      AdvisoryLLM.configure_perspective(:security, "ollama:local-model")
+
+      assert {"ollama", "local-model"} = AdvisoryLLM.resolve_provider_model(:security)
+    end
+
+    test "invalid environment JSON fails loudly when the council resolves models" do
+      Application.put_env(:arbor_consensus, :perspective_models_json, ~s({"unknown":"x:y"}))
+
+      assert_raise ArgumentError, ~r/invalid ARBOR_COUNCIL_PERSPECTIVE_MODELS/, fn ->
+        AdvisoryLLM.provider_map()
+      end
     end
 
     test "configure_perspective/2 overrides a single perspective" do
@@ -379,7 +528,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                AdvisoryLLM.resolve_provider_model(:security)
 
       # Other perspectives unchanged
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "google/gemini-3.7-flash"} =
                AdvisoryLLM.resolve_provider_model(:privacy)
     end
 
@@ -390,10 +539,12 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       })
 
       assert {"xai", "grok-3"} = AdvisoryLLM.resolve_provider_model(:security)
-      assert {"openrouter", "deepseek/deepseek-r1"} = AdvisoryLLM.resolve_provider_model(:brainstorming)
+
+      assert {"openrouter", "deepseek/deepseek-r1"} =
+               AdvisoryLLM.resolve_provider_model(:brainstorming)
 
       # Other perspectives unchanged
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:stability)
     end
 
@@ -402,7 +553,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert {"ollama", "test"} = AdvisoryLLM.resolve_provider_model(:security)
 
       AdvisoryLLM.reset_perspective_models()
-      assert {"openrouter", "google/gemini-3-flash-preview"} =
+
+      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:security)
     end
 
@@ -411,7 +563,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       map = AdvisoryLLM.provider_map()
       assert map[:adversarial] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
-      assert map[:security] == "openrouter:google/gemini-3-flash-preview"
+      assert map[:security] == "openrouter:deepseek/deepseek-v4-pro-0813"
     end
 
     test "per-call provider_model opt still takes precedence over config" do
@@ -419,7 +571,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       # Per-call override should win
       assert {"gemini", "gemini-2.5-flash"} =
-               AdvisoryLLM.resolve_provider_model(:security, provider_model: "gemini:gemini-2.5-flash")
+               AdvisoryLLM.resolve_provider_model(:security,
+                 provider_model: "gemini:gemini-2.5-flash"
+               )
     end
   end
 

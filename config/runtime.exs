@@ -554,19 +554,16 @@ if provider =
   config :arbor_agent, summarizer_provider: provider
 end
 
-# --- Advisory council model (all 13 perspectives) ---
+# --- Advisory council models (13 perspectives) ---
+# Keep these values inert in runtime config. AdvisoryLLM owns the closed
+# perspective table and validates the JSON when the consensus app uses it;
+# lower-level app-specific Mix tasks must not need arbor_consensus on their path.
 if council_model = System.get_env("ARBOR_COUNCIL_MODEL") do
-  # Apply the same model to all perspectives as a base default.
-  # Individual perspectives can still be overridden at runtime via
-  # AdvisoryLLM.configure_perspective/2.
-  perspectives =
-    ~w(security brainstorming vision emergence resource_usage user_experience
-       consistency generalization capability performance privacy design_review
-       risk_assessment feasibility)a
-    |> Enum.map(fn p -> {p, council_model} end)
-    |> Map.new()
+  config :arbor_consensus, council_model: council_model
+end
 
-  config :arbor_consensus, perspective_models: perspectives
+if perspective_models_json = System.get_env("ARBOR_COUNCIL_PERSPECTIVE_MODELS") do
+  config :arbor_consensus, perspective_models_json: perspective_models_json
 end
 
 # --- Memory / reflection model ---

@@ -245,7 +245,7 @@ defmodule Mix.Tasks.Arbor.ImportConsultations do
     str = String.trim(str)
 
     cond do
-      # "openrouter:google/gemini-3-flash-preview"
+      # "openrouter:google/gemini-3.7-flash"
       String.contains?(str, ":") ->
         [provider | rest] = String.split(str, ":", parts: 2)
         {provider, Enum.join(rest, ":")}

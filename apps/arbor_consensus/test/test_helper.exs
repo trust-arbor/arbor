@@ -33,14 +33,9 @@ for topic <- [:code_modification, :test_change] do
   })
 end
 
-# Security processes — force_approve/force_reject check admin capabilities
-for child <- [
-      {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.Reflex.Registry, []}
-    ] do
-  Supervisor.start_child(Arbor.Security.Supervisor, child)
-end
+# Security processes and their durable backing stores — force_approve/force_reject
+# check admin capabilities.
+:ok = Arbor.Security.TestBootstrap.start!()
 
 # Grant consensus admin capabilities to test agents used in force_approve/force_reject tests.
 # We create capabilities directly because Capability.new validates principal_id starts

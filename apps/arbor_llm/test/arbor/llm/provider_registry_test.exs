@@ -1,5 +1,5 @@
 defmodule Arbor.LLM.ProviderRegistryTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.LLM.ProviderRegistry
@@ -79,6 +79,31 @@ defmodule Arbor.LLM.ProviderRegistryTest do
     test "unknown providers pass through as their string form" do
       assert ProviderRegistry.normalize("totally-made-up") == "totally-made-up"
       assert ProviderRegistry.normalize(:some_future_provider) == "some_future_provider"
+    end
+  end
+
+  describe "env_available?/1" do
+    test "recognizes a key propagated into ReqLLM application config" do
+      env_key = "ZAI_API_KEY"
+      config_key = :zai_coding_plan_api_key
+      previous_env = System.get_env(env_key)
+      previous_config = Application.fetch_env(:req_llm, config_key)
+
+      on_exit(fn ->
+        if previous_env,
+          do: System.put_env(env_key, previous_env),
+          else: System.delete_env(env_key)
+
+        case previous_config do
+          {:ok, value} -> Application.put_env(:req_llm, config_key, value)
+          :error -> Application.delete_env(:req_llm, config_key)
+        end
+      end)
+
+      System.delete_env(env_key)
+      Application.put_env(:req_llm, config_key, "test-coding-plan-key")
+
+      assert ProviderRegistry.env_available?("zai_coding_plan")
     end
   end
 end

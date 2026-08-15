@@ -73,6 +73,32 @@ defmodule Arbor.LLM.ClientTest do
   end
 
   describe "public adapter boundary" do
+    test "an explicit known cloud provider resolves after the client was cached" do
+      parent = self()
+
+      middleware = fn request, _next ->
+        send(parent, {:resolved_provider, request.provider})
+        {:ok, %Response{text: "resolved lazily"}}
+      end
+
+      client = Client.new(adapters: %{}, middleware: [middleware])
+      request = %Request{provider: "zai_coding_plan", model: "glm-5.3", messages: []}
+
+      assert {:ok, %Response{text: "resolved lazily"}} = Client.complete(client, request)
+      assert_received {:resolved_provider, "zai_coding_plan"}
+    end
+
+    test "an explicit unknown provider remains rejected before middleware" do
+      middleware = fn _request, _next ->
+        flunk("unknown providers must not reach middleware")
+      end
+
+      client = Client.new(adapters: %{}, middleware: [middleware])
+      request = %Request{provider: "not_a_provider", model: "model", messages: []}
+
+      assert {:error, {:unknown_provider, "not_a_provider"}} = Client.complete(client, request)
+    end
+
     test "generation retry stays inside one deadline worker" do
       Process.delete(:retry_adapter_calls)
       parent = self()

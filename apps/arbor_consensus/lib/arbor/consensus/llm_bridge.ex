@@ -49,9 +49,10 @@ defmodule Arbor.Consensus.LLMBridge do
 
   - `:provider` — provider string (e.g., `"anthropic"`, `"openai"`)
   - `:model` — model identifier (e.g., `"claude-sonnet-4-5-20250929"`)
-  - `:max_tokens` — max response tokens (default: 4096)
+  - `:max_tokens` — optional response-token cap; omitted by default so the
+    provider/model's native limit applies
   - `:temperature` — sampling temperature (default: 0.7)
-  - `:timeout` — call timeout in ms (not used directly, caller manages)
+  - `:timeout` — call timeout in ms, forwarded to the transport deadline
   - `:runtime` — `:acp` to force CLI subprocess (agents can read source
     code), `:arbor` to force in-BEAM HTTP via arbor_llm. Default:
     auto-detect.
@@ -200,8 +201,9 @@ defmodule Arbor.Consensus.LLMBridge do
   defp complete_via_unified(system_prompt, user_prompt, opts) do
     provider = Keyword.get(opts, :provider)
     model = Keyword.get(opts, :model, "claude-sonnet-4-5-20250929")
-    max_tokens = Keyword.get(opts, :max_tokens, 4096)
+    max_tokens = Keyword.get(opts, :max_tokens)
     temperature = Keyword.get(opts, :temperature, 0.7)
+    timeout = Keyword.get(opts, :timeout)
 
     # Build messages via apply/3
     system_msg = apply(@message_mod, :new, [:system, system_prompt])
@@ -214,7 +216,8 @@ defmodule Arbor.Consensus.LLMBridge do
         model: model,
         messages: [system_msg, user_msg],
         max_tokens: max_tokens,
-        temperature: temperature
+        temperature: temperature,
+        receive_timeout: timeout
       })
 
     # Get or create default client
@@ -251,10 +254,18 @@ defmodule Arbor.Consensus.LLMBridge do
       cli_provider = resolve_cli_provider(Keyword.get(opts, :provider))
 
       ai_opts = [
-        max_tokens: Keyword.get(opts, :max_tokens, 4096),
         temperature: Keyword.get(opts, :temperature, 0.7),
         runtime: :acp
       ]
+
+      ai_opts =
+        case Keyword.get(opts, :max_tokens) do
+          max_tokens when is_integer(max_tokens) and max_tokens > 0 ->
+            Keyword.put(ai_opts, :max_tokens, max_tokens)
+
+          _other ->
+            ai_opts
+        end
 
       # Only pass provider if it maps to a real CLI backend;
       # otherwise let CliImpl use its fallback chain

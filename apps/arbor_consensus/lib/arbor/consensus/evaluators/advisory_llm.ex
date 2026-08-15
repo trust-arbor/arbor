@@ -23,9 +23,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   ## Model Selection
 
-  All perspectives default to Gemini 3 Flash Preview via OpenRouter — best
-  speed/quality/cost ratio tested (~$0.059 per 13-perspective run in ~9 seconds).
-  Kimi K2.5 available as override for deep analysis when needed.
+  The portable defaults deliberately use multiple OpenRouter models so a council
+  consultation gets independent model-family judgments without requiring local
+  subscription credentials. Operators can replace individual seats with OAuth,
+  coding-plan, or local/cloud Ollama routes through runtime configuration.
   Sessions persist per perspective via `session_context`, so a security
   evaluator remembers what it reviewed last time.
 
@@ -86,40 +87,38 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     :adversarial
   ]
 
+  @perspective_names Map.new(@perspectives, &{Atom.to_string(&1), &1})
+  @max_perspective_models_json_bytes 16_384
+  @max_provider_model_bytes 512
+
   @vision_doc_path Path.expand("../../../../../../VISION.md", __DIR__)
 
-  # Default provider:model per perspective — Gemini 3 Flash Preview.
-  # Best speed/quality/cost ratio tested (2026-02-16):
-  # - 13 perspectives in ~9 seconds ($0.059 total)
-  # - Comparable quality to Kimi K2.5 with 17x faster response
-  # - Enables real-time council consultations for live decision-making
-  #
-  # Kimi K2.5 ("openrouter:moonshotai/kimi-k2.5") available for deep analysis
-  # when model diversity or maximum depth is needed (~$0.066, 50-125s/perspective).
-  #
-  # Configure via:
+  # Portable defaults use OpenRouter-only routes so a fresh installation needs
+  # one credential. Private/subscription routes belong in operator overrides.
+  # Configure programmatically via:
   #   Application.put_env(:arbor_consensus, :perspective_models, %{
-  #     security: "openrouter:moonshotai/kimi-k2.5",
-  #     brainstorming: "openrouter:google/gemini-3-flash-preview",
+  #     security: "openai_oauth:gpt-5.6-sol",
+  #     brainstorming: "xai_oauth:grok-4.6",
   #     ...
   #   })
-  @default_model "openrouter:google/gemini-3-flash-preview"
+  @gemini_model "openrouter:google/gemini-3.7-flash"
+  @deepseek_model "openrouter:deepseek/deepseek-v4-pro-0813"
   @default_perspective_models %{
     # Override per-perspective at runtime via configure_perspective/2 or
     # Application config :arbor_consensus, :perspective_models.
-    security: @default_model,
-    vision: @default_model,
-    consistency: @default_model,
-    performance: @default_model,
-    privacy: @default_model,
-    brainstorming: @default_model,
-    emergence: @default_model,
-    capability: @default_model,
-    stability: @default_model,
-    resource_usage: @default_model,
-    user_experience: @default_model,
-    generalization: @default_model,
-    adversarial: @default_model
+    brainstorming: @gemini_model,
+    user_experience: @gemini_model,
+    security: @deepseek_model,
+    privacy: @gemini_model,
+    stability: @deepseek_model,
+    capability: @gemini_model,
+    emergence: @gemini_model,
+    vision: @gemini_model,
+    performance: @deepseek_model,
+    generalization: @deepseek_model,
+    resource_usage: @gemini_model,
+    consistency: @deepseek_model,
+    adversarial: @deepseek_model
   }
 
   # ============================================================================
@@ -138,24 +137,131 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   @doc """
   Returns the current provider:model mapping for each perspective.
 
-  Reads from application config (`:arbor_consensus, :perspective_models`),
-  falling back to compiled defaults. Each perspective can be individually
-  overridden at runtime via `configure_perspective/2`.
+  Resolution order, from lowest to highest precedence, is compiled portable
+  defaults, `ARBOR_COUNCIL_MODEL`, `ARBOR_COUNCIL_PERSPECTIVE_MODELS`, explicit
+  application config, and finally a per-call override during evaluation.
   """
   @spec provider_map() :: %{atom() => String.t()}
   def provider_map do
+    uniform = uniform_model_overrides()
+    environment = perspective_models_json_overrides!()
     configured = Application.get_env(:arbor_consensus, :perspective_models, %{})
-    Map.merge(@default_perspective_models, configured)
+
+    @default_perspective_models
+    |> Map.merge(uniform)
+    |> Map.merge(environment)
+    |> Map.merge(configured)
   end
+
+  @doc """
+  Parse the bounded JSON object used by `ARBOR_COUNCIL_PERSPECTIVE_MODELS`.
+
+  Perspective names come from a closed table and are never converted to atoms
+  dynamically. Every value must be a non-empty `provider:model` route; model
+  names may themselves contain colons (for example an Ollama `:cloud` tag).
+  """
+  @spec parse_perspective_models_json(String.t()) ::
+          {:ok, %{atom() => String.t()}} | {:error, term()}
+  def parse_perspective_models_json(json) when is_binary(json) do
+    with :ok <- validate_json_size(json),
+         {:ok, decoded} <- decode_json_object(json),
+         {:ok, entries} <- validate_perspective_entries(decoded) do
+      {:ok, Map.new(entries)}
+    end
+  end
+
+  def parse_perspective_models_json(_json), do: {:error, :expected_json_string}
+
+  defp uniform_model_overrides do
+    case Application.get_env(:arbor_consensus, :council_model) do
+      model when is_binary(model) and model != "" ->
+        Map.new(@perspectives, &{&1, model})
+
+      _unset ->
+        %{}
+    end
+  end
+
+  defp perspective_models_json_overrides! do
+    case Application.get_env(:arbor_consensus, :perspective_models_json) do
+      json when is_binary(json) and json != "" ->
+        case parse_perspective_models_json(json) do
+          {:ok, overrides} ->
+            overrides
+
+          {:error, reason} ->
+            raise ArgumentError,
+                  "invalid ARBOR_COUNCIL_PERSPECTIVE_MODELS: #{inspect(reason)}"
+        end
+
+      _unset ->
+        %{}
+    end
+  end
+
+  defp validate_json_size(json) do
+    cond do
+      not String.valid?(json) -> {:error, :invalid_utf8}
+      byte_size(json) > @max_perspective_models_json_bytes -> {:error, :json_too_large}
+      true -> :ok
+    end
+  end
+
+  defp decode_json_object(json) do
+    case Jason.decode(json) do
+      {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+      {:ok, _decoded} -> {:error, :expected_json_object}
+      {:error, _reason} -> {:error, :invalid_json}
+    end
+  end
+
+  defp validate_perspective_entries(decoded) do
+    decoded
+    |> Enum.sort_by(fn {name, _route} -> name end)
+    |> Enum.reduce_while({:ok, []}, fn {name, route}, {:ok, entries} ->
+      with {:ok, perspective} <- fetch_perspective(name),
+           {:ok, normalized_route} <- validate_provider_model(name, route) do
+        {:cont, {:ok, [{perspective, normalized_route} | entries]}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp fetch_perspective(name) do
+    case Map.fetch(@perspective_names, name) do
+      {:ok, perspective} -> {:ok, perspective}
+      :error -> {:error, {:unknown_perspective, name}}
+    end
+  end
+
+  defp validate_provider_model(name, route) when is_binary(route) do
+    route = String.trim(route)
+
+    case String.split(route, ":", parts: 2) do
+      [provider, model] ->
+        if byte_size(route) <= @max_provider_model_bytes and String.trim(provider) != "" and
+             String.trim(model) != "" do
+          {:ok, route}
+        else
+          {:error, {:invalid_provider_model, name}}
+        end
+
+      _other ->
+        {:error, {:invalid_provider_model, name}}
+    end
+  end
+
+  defp validate_provider_model(name, _route), do: {:error, {:invalid_provider_model, name}}
 
   @doc """
   Configure the provider:model for a specific perspective at runtime.
 
   ## Examples
 
-      AdvisoryLLM.configure_perspective(:security, "anthropic:claude-sonnet-4-5-20250929")
-      AdvisoryLLM.configure_perspective(:brainstorming, "gemini:gemini-2.5-pro")
-      AdvisoryLLM.configure_perspective(:performance, "ollama:qwen3-coder:latest")
+      AdvisoryLLM.configure_perspective(:security, "openai_oauth:gpt-5.6-sol")
+      AdvisoryLLM.configure_perspective(:brainstorming, "xai_oauth:grok-4.6")
+      AdvisoryLLM.configure_perspective(:performance, "ollama:kimi-k2.7-code:cloud")
   """
   @spec configure_perspective(atom(), String.t()) :: :ok
   def configure_perspective(perspective, provider_model)
@@ -175,9 +281,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   ## Examples
 
       AdvisoryLLM.configure_perspectives(%{
-        security: "anthropic:claude-sonnet-4-5-20250929",
-        brainstorming: "gemini:gemini-2.5-pro",
-        stability: "ollama:llama3.2:latest"
+        security: "openai_oauth:gpt-5.6-sol",
+        brainstorming: "xai_oauth:grok-4.6",
+        stability: "zai_coding_plan:glm-5.3"
       })
   """
   @spec configure_perspectives(%{atom() => String.t()}) :: :ok
@@ -188,7 +294,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   end
 
   @doc """
-  Reset all perspective models to compiled defaults.
+  Remove programmatic perspective overrides.
+
+  Environment-backed uniform or per-perspective configuration remains active;
+  without those settings this reveals the compiled portable defaults.
   """
   @spec reset_perspective_models() :: :ok
   def reset_perspective_models do
@@ -334,6 +443,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
     # Support :llm_fn override for testing (same pattern as orchestrator handlers)
     backend = Keyword.get(opts, :backend)
+    complete_fun = Keyword.get(opts, :complete_fun)
 
     llm_fn =
       Keyword.get_lazy(opts, :llm_fn, fn ->
@@ -341,12 +451,18 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
           bridge_opts = [
             provider: provider,
             model: model,
-            max_tokens: Keyword.get(opts, :max_tokens, 4096),
-            temperature: Keyword.get(opts, :temperature, 0.7)
+            max_tokens: Keyword.get(opts, :max_tokens),
+            temperature: Keyword.get(opts, :temperature, 0.7),
+            timeout: timeout
           ]
 
           bridge_opts =
             if backend, do: Keyword.put(bridge_opts, :backend, backend), else: bridge_opts
+
+          bridge_opts =
+            if is_function(complete_fun, 3),
+              do: Keyword.put(bridge_opts, :complete_fun, complete_fun),
+              else: bridge_opts
 
           LLMBridge.complete(sys, usr, bridge_opts)
         end

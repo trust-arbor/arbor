@@ -21,7 +21,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       end)
 
       # Ask a single perspective
-      {:ok, eval} = Consult.ask_one(AdvisoryLLM, "How should TopicMatcher work?", :design_review,
+      {:ok, eval} = Consult.ask_one(AdvisoryLLM, "How should TopicMatcher work?", :user_experience,
         context: %{options: ["pattern matching", "LLM classification", "hybrid"]}
       )
   """

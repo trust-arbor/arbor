@@ -507,7 +507,12 @@ defmodule Arbor.LLM.Client do
         ) :: {:ok, Response.t()} | {:error, term()}
   def complete_streaming_single_attempt(client, request, callback, opts \\ [])
 
-  def complete_streaming_single_attempt(%__MODULE__{} = client, %Request{} = request, callback, opts)
+  def complete_streaming_single_attempt(
+        %__MODULE__{} = client,
+        %Request{} = request,
+        callback,
+        opts
+      )
       when is_function(callback, 1) do
     with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -1520,7 +1525,7 @@ defmodule Arbor.LLM.Client do
     canonical = ProviderRegistry.normalize(provider)
 
     case Map.get(adapters, canonical) do
-      nil -> {:error, {:unknown_provider, provider}}
+      nil -> resolve_known_cloud_adapter(canonical, provider)
       adapter -> {:ok, adapter}
     end
   end
@@ -1535,6 +1540,19 @@ defmodule Arbor.LLM.Client do
       with {:ok, provider} <- infer_provider(model) do
         {:error, {:provider_not_explicit, provider}}
       end
+    end
+  end
+
+  # Provider registration and credential readiness are independent. A cached
+  # client may predate an operator installing a key, so an explicit request for
+  # a ReqLLM-known cloud provider must still reach the generic adapter and let
+  # that adapter return the precise credential/transport result. Local providers
+  # remain probe-gated because their endpoint inventory is part of admission.
+  defp resolve_known_cloud_adapter(canonical, original) do
+    if ProviderRegistry.known?(canonical) and not ProviderRegistry.local?(canonical) do
+      {:ok, @generic_adapter}
+    else
+      {:error, {:unknown_provider, original}}
     end
   end
 

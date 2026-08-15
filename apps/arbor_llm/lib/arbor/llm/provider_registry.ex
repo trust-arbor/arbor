@@ -235,15 +235,41 @@ defmodule Arbor.LLM.ProviderRegistry do
   # ── Availability ────────────────────────────────────────────────────
 
   @doc """
-  True if a cloud provider's API key env var is set, false otherwise.
-  Local-LM providers always return false here (their availability is
-  determined by an HTTP probe, not env-var presence).
+  True if a cloud provider's API key is available through either its standard
+  environment variable or ReqLLM application config, false otherwise. Checking
+  both matters for provider-specific aliases such as Arbor's
+  `ZAI_CODING_PLAN_API_KEY` propagation.
+
+  Local-LM providers always return false here (their availability is determined
+  by an HTTP probe, not credential presence).
   """
   @spec env_available?(String.t()) :: boolean()
   def env_available?(provider) do
+    if local?(provider) do
+      false
+    else
+      env_available_for?(provider) or configured_key_available?(provider)
+    end
+  end
+
+  defp env_available_for?(provider) do
     case default_env_key(provider) do
       nil -> false
       key -> not blank?(System.get_env(key))
+    end
+  end
+
+  defp configured_key_available?(provider) do
+    case req_llm_atom(provider) do
+      nil ->
+        false
+
+      provider_atom ->
+        provider_atom
+        |> ReqLLM.Keys.config_key()
+        |> ReqLLM.get_key()
+        |> blank?()
+        |> Kernel.not()
     end
   end
 

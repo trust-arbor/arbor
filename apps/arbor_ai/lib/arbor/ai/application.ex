@@ -50,14 +50,19 @@ defmodule Arbor.AI.Application do
     ]
   end
 
-  # Propagate API keys from environment variables to ReqLLM
-  defp propagate_api_keys do
+  # Propagate API keys from environment variables to ReqLLM. The coding-plan
+  # alias is Arbor-specific because ReqLLM's provider expects ZAI_API_KEY.
+  @doc false
+  def propagate_api_keys do
     key_mappings = [
       {"OPENROUTER_API_KEY", :openrouter_api_key},
       {"ANTHROPIC_API_KEY", :anthropic_api_key},
       {"OPENAI_API_KEY", :openai_api_key},
       {"GOOGLE_API_KEY", :google_api_key},
-      {"GEMINI_API_KEY", :google_api_key}
+      {"GEMINI_API_KEY", :google_api_key},
+      {"ZAI_API_KEY", :zai_api_key},
+      {"ZAI_API_KEY", :zai_coding_plan_api_key},
+      {"ZAI_CODING_PLAN_API_KEY", :zai_coding_plan_api_key}
     ]
 
     Enum.each(key_mappings, fn {env_var, config_key} ->
