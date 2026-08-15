@@ -54,7 +54,9 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
                Encode.validate_profile(Map.delete(profile, "blockers"))
 
       assert {:error, {:field_mismatch, %{missing: [], extra_count: 1}}} =
-               Encode.validate_profile(Map.put(profile, "profile_digest", String.duplicate("a", 64)))
+               Encode.validate_profile(
+                 Map.put(profile, "profile_digest", String.duplicate("a", 64))
+               )
 
       mixed = profile |> Map.delete("version") |> Map.put(:version, 1)
       assert {:error, :mixed_keys} = Encode.validate_profile(mixed)
@@ -92,6 +94,9 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
 
       assert {:error, :invalid_profile} = Encode.validate_profile(Date.utc_today())
       assert {:error, :invalid_profile} = Encode.validate_profile([profile])
+
+      oversized_map = Map.new(1..17, fn index -> {"field_#{index}", index} end)
+      assert {:error, :unbounded} = Encode.validate_profile(oversized_map)
 
       assert {:error, {:invalid_field, "blockers", :duplicate_ids}} =
                Encode.validate_profile(%{
@@ -180,6 +185,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
       assert {:ok, ^bytes} = Encode.encode_profile(profile)
       refute String.contains?(bytes, "\n")
       refute String.contains?(bytes, "\": ")
+
       assert String.starts_with?(
                bytes,
                "{\"schema\":\"arbor.packaging.safe_recovery_profile.intent.v1\",\"version\":1,\"profile\":\"safe_recovery\",\"evidence_status\":\"conformant\",\"architecture_status\":\"blocked\""

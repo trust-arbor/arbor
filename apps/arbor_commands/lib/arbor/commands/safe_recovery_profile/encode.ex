@@ -395,37 +395,57 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
   end
 
   defp validate_fields(map, specs) when is_map(map) and not is_struct(map) do
-    keys = Map.keys(map)
-    expected_keys = Enum.map(specs, &elem(&1, 0))
-
-    cond do
-      map_size(map) > @max_map_keys ->
-        {:error, :unbounded}
-
-      not Enum.all?(keys, &is_binary/1) ->
-        if Enum.any?(keys, &is_atom/1) and Enum.any?(keys, &is_binary/1) do
-          {:error, :mixed_keys}
-        else
-          {:error, :non_string_keys}
-        end
-
-      true ->
-        with :ok <- admit_map_keys(keys) do
-          if MapSet.new(keys) != MapSet.new(expected_keys) do
-            field_mismatch(keys, expected_keys)
-          else
-            Enum.reduce_while(specs, :ok, fn {key, validator}, :ok ->
-              case validator.(Map.fetch!(map, key)) do
-                :ok -> {:cont, :ok}
-                {:error, reason} -> {:halt, {:error, {:invalid_field, key, reason}}}
-              end
-            end)
-          end
-        end
+    if map_size(map) > @max_map_keys do
+      {:error, :unbounded}
+    else
+      validate_bounded_fields(map, specs)
     end
   end
 
   defp validate_fields(_, _), do: {:error, :invalid_map}
+
+  defp validate_bounded_fields(map, specs) do
+    keys = Map.keys(map)
+    expected_keys = Enum.map(specs, &elem(&1, 0))
+
+    if Enum.all?(keys, &is_binary/1) do
+      validate_string_fields(map, keys, expected_keys, specs)
+    else
+      classify_non_string_keys(keys)
+    end
+  end
+
+  defp classify_non_string_keys(keys) do
+    if Enum.any?(keys, &is_atom/1) and Enum.any?(keys, &is_binary/1) do
+      {:error, :mixed_keys}
+    else
+      {:error, :non_string_keys}
+    end
+  end
+
+  defp validate_string_fields(map, keys, expected_keys, specs) do
+    with :ok <- admit_map_keys(keys),
+         :ok <- admit_exact_fields(keys, expected_keys) do
+      validate_field_values(map, specs)
+    end
+  end
+
+  defp admit_exact_fields(keys, expected_keys) do
+    if MapSet.new(keys) == MapSet.new(expected_keys) do
+      :ok
+    else
+      field_mismatch(keys, expected_keys)
+    end
+  end
+
+  defp validate_field_values(map, specs) do
+    Enum.reduce_while(specs, :ok, fn {key, validator}, :ok ->
+      case validator.(Map.fetch!(map, key)) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:invalid_field, key, reason}}}
+      end
+    end)
+  end
 
   defp admit_map_keys(keys) do
     Enum.reduce_while(keys, :ok, fn key, :ok ->

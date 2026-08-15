@@ -238,6 +238,9 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
       assert {:error, :invalid_candidate} = Core.project(Date.utc_today())
       assert {:error, :invalid_candidate} = Core.project("not-a-map")
 
+      oversized_map = Map.new(1..17, fn index -> {"field_#{index}", index} end)
+      assert {:error, :unbounded} = Core.project(oversized_map)
+
       assert {:error, {:invalid_field, "schema", :not_a_string}} =
                Core.project(%{candidate | "schema" => self()})
 

@@ -109,32 +109,39 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
   end
 
   defp normalize_map(map, atom_keys) when is_map(map) and not is_struct(map) do
-    keys = Map.keys(map)
-
-    cond do
-      map_size(map) > @max_map_keys ->
-        {:error, :unbounded}
-
-      Enum.any?(keys, &(is_nil(&1) or (not is_atom(&1) and not is_binary(&1)))) ->
-        {:error, :invalid_map_keys}
-
-      true ->
-        with :ok <- admit_map_keys(keys) do
-          cond do
-            Enum.all?(keys, &is_atom/1) ->
-              admit_key_style(map, keys, atom_keys, :atom)
-
-            Enum.all?(keys, &is_binary/1) ->
-              admit_key_style(map, keys, atom_keys, :string)
-
-            true ->
-              {:error, :mixed_keys}
-          end
-        end
+    if map_size(map) > @max_map_keys do
+      {:error, :unbounded}
+    else
+      normalize_bounded_map(map, atom_keys)
     end
   end
 
   defp normalize_map(_, _), do: {:error, :invalid_map}
+
+  defp normalize_bounded_map(map, atom_keys) do
+    keys = Map.keys(map)
+
+    with :ok <- admit_key_types(keys),
+         :ok <- admit_map_keys(keys) do
+      normalize_key_style(map, keys, atom_keys)
+    end
+  end
+
+  defp admit_key_types(keys) do
+    if Enum.any?(keys, &(is_nil(&1) or (not is_atom(&1) and not is_binary(&1)))) do
+      {:error, :invalid_map_keys}
+    else
+      :ok
+    end
+  end
+
+  defp normalize_key_style(map, keys, atom_keys) do
+    cond do
+      Enum.all?(keys, &is_atom/1) -> admit_key_style(map, keys, atom_keys, :atom)
+      Enum.all?(keys, &is_binary/1) -> admit_key_style(map, keys, atom_keys, :string)
+      true -> {:error, :mixed_keys}
+    end
+  end
 
   defp admit_key_style(map, keys, atom_keys, :atom) do
     if MapSet.new(keys) == MapSet.new(atom_keys) do
@@ -232,8 +239,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
   defp sort_profile(profile) do
     %{
       profile
-      | "selected_applications" =>
-          Enum.sort_by(profile["selected_applications"], & &1["name"]),
+      | "selected_applications" => Enum.sort_by(profile["selected_applications"], & &1["name"]),
         "mandatory_host_responsibilities" =>
           Enum.sort_by(profile["mandatory_host_responsibilities"], & &1["id"]),
         "forbidden_facilities" => Enum.sort_by(profile["forbidden_facilities"], & &1["id"]),
