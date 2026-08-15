@@ -153,78 +153,28 @@ services in a separately started runtime application. Regression ceilings keep
 structural invariants tight while giving memory and boot-time measurements
 bounded CI headroom. Generated probe output is never committed.
 
-## PK-K0 kernel-migration gate
+## Retired K migration gates
 
-Executable pre-migration evidence gate. It reuses the Git-index source-coupling
-census, derives K-upward runtime vs Mix-task inventories, and validates the
-reviewed disposition, Boundary, and formatter manifests.
+The PK-K0 migration census and K4 materialization plan were one-time proof
+machinery, not permanent architecture guards. K4's final materialized check was
+repeated during K5 on the exact K4 tree plus the post-move root-discovery fix. It
+admitted plan digest
+`5a2cedf23de88acfbf2591f69b3f1e6b41853030efd33adc633cf4c09383469b`
+with 640 source entries, 568 exact moves, 72 transform inputs, four collision
+destinations, and zero failures.
 
-Not installed in the root `quality` alias: `quality` already runs a full
-source-coupling scan, and a second identical inventory load is not
-demonstrably fast. The exact gate is:
+K5 removed both Mix tasks, their implementation modules, frozen manifests, and
+tests. The materialization evidence binds destination blob IDs, so retaining it
+would reject every legitimate edit to a moved file after the migration. The K0
+gate likewise describes pre-migration paths and dispositions that no longer
+exist. Their accepted history remains recoverable from the K0 through K4 commits
+and the packaging roadmap; do not regenerate those artifacts against later
+trees.
 
-```bash
-./bin/mix arbor.packaging.kernel_migration --check --json
-```
+The durable post-migration controls remain active:
 
-```bash
-./bin/mix arbor.packaging.kernel_migration
-./bin/mix arbor.packaging.kernel_migration --json
-./bin/mix arbor.packaging.kernel_migration --write-report
-```
-
-Check mode never writes. It admits the checked-in
-`kernel_migration_report.v1.json` and compares canonical bytes; a missing,
-invalid, tampered, or stale report fails closed. `--write-report` writes only
-that normative report. The disposition, Boundary, and formatter manifests are
-reviewed inputs and are never rewritten by check or write-report. The general
-`source_coupling_baseline.v1.json` stays byte-for-byte unchanged.
-
-Two consecutive `--check --json` runs must be byte-identical with
-`status: "ok"`. The report identity binds the scan-manifest digest and
-reviewed manifests; Git tree OID is non-normative provenance only.
-
-## K4A kernel-materialization plan
-
-Immutable Git-index-backed pre-move plan for the accepted passive
-`arbor_kernel` / active `arbor_kernel_runtime` split. Contracts map into
-`apps/arbor_kernel`; Common, Signals, and Monitor map into
-`apps/arbor_kernel_runtime`. The four source applications are not moved
-in this packet.
-
-The checked plan (`kernel_materialization_plan.v1.json`) is
-phase-independent: it records source paths, modes, object IDs,
-destinations, exact-move versus transform-input dispositions, target
-preconditions, and collision groups. It must not contain `phase`,
-`status`, or a planned tree OID. Phase and status belong only to the
-runtime report.
-
-`--phase` is required and never inferred from old-root absence. Root
-discovery uses `mix.exs` plus `apps/arbor_commands` and
-`apps/arbor_kernel`, not `apps/arbor_contracts`.
-
-Not installed in the root `quality` alias. The exact gate is:
-
-```bash
-./bin/mix arbor.packaging.kernel_materialization --check --phase planned
-```
-
-```bash
-./bin/mix arbor.packaging.kernel_materialization --phase planned --json
-./bin/mix arbor.packaging.kernel_materialization --check --phase materialized
-./bin/mix arbor.packaging.kernel_materialization --write-plan
-```
-
-Check mode never writes. It admits the indexed plan and transform
-evidence blobs, projects the current selected inventory, and
-byte-compares the encoded plan. `--write-plan` writes the plan and an
-empty transform-evidence file bound to that plan digest when evidence
-entries are empty. Transform inputs include the four collision destinations,
-every reviewed source file whose content names a retiring application or physical
-root, and the K4C package roots, Mix tasks, and test helpers that receive explicit
-Boundary declarations. Single-file semantic transforms have an empty collision
-group.
-SPIKE-2 is not authority; accepted main
-`207d47486485e554d4e725d9cc898b56a9f327eb` is the source truth.
-Production policy asserts 640 source entries, 568 exact moves, 72 transform
-inputs, and four collision destinations.
+- source-coupling baseline and drift detection;
+- app-env zero-residue detection for the four retired application keys;
+- startup-footprint regression budgets;
+- machine-checked dependency hierarchy and strict Boundary declarations; and
+- warning-strict compilation, xref, release, and package test evidence.

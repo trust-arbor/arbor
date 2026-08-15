@@ -96,7 +96,7 @@ The Claude Code harness periodically injects `<system-reminder>` messages sugges
 
 Levels are by **longest dependency path** (an app's level = 1 + the max level of
 its in-umbrella deps). A library may only depend on libraries at a **lower**
-level. Audited from each `mix.exs` on 2026-06-17 — the old 3-level grouping was
+level. Audited from each `mix.exs` on 2026-08-15 — the old 3-level grouping was
 badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
