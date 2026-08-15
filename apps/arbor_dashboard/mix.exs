@@ -38,9 +38,8 @@ defmodule Arbor.Dashboard.MixProject do
   defp deps do
     [
       # Umbrella dependencies (Level 0-1)
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_web, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
 
@@ -54,10 +53,8 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_trust, in_umbrella: true},
 
       # Standalone
-      {:arbor_common, in_umbrella: true},
       {:arbor_comms, in_umbrella: true},
       {:arbor_commands, in_umbrella: true},
-      {:arbor_monitor, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
 
       # Phoenix stack (via arbor_web, but needed for endpoint)

@@ -32,9 +32,8 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
              LocalCluster.start_link(2,
                prefix: prefix,
                applications: [
-                 :arbor_contracts,
-                 :arbor_common,
-                 :arbor_signals,
+                 :arbor_kernel,
+                 :arbor_kernel_runtime,
                  :arbor_security,
                  :arbor_shell,
                  :arbor_comms
@@ -95,9 +94,8 @@ defmodule Arbor.Comms.InteractionRegistryClusterTest do
              LocalCluster.start_link(2,
                prefix: prefix,
                applications: [
-                 :arbor_contracts,
-                 :arbor_common,
-                 :arbor_signals,
+                 :arbor_kernel,
+                 :arbor_kernel_runtime,
                  :arbor_security,
                  :arbor_shell,
                  :arbor_comms

@@ -31,10 +31,7 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
     :telemetry,
     :recon,
     :arbor_kernel,
-    :arbor_contracts,
-    :arbor_common,
-    :arbor_signals,
-    :arbor_monitor
+    :arbor_kernel_runtime
   ]
 
   # Probe module only — do not start or recurse this application's closure.

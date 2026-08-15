@@ -49,11 +49,9 @@ defmodule Arbor.Trust.MixProject do
   defp deps do
     [
       # Umbrella dependencies
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
 
       # Core dependencies
       {:telemetry, "~> 1.0"},

@@ -48,9 +48,7 @@ defmodule Arbor.LLM.MixProject do
       # reference; arbor_common for PromptSanitizer, AgentTelemetry.Store, and
       # ActionRegistry ToolLoop + ArborActionsExecutor reference. req_llm
       # comes in a later session with the generic adapter.
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:plug_cowboy, "~> 2.9"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},

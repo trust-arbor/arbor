@@ -101,8 +101,8 @@ badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
 ```
-L0  arbor_contracts, arbor_kernel          (zero in-umbrella deps)
-L1  arbor_common, arbor_signals, arbor_cartographer, arbor_web, arbor_monitor
+L0  arbor_kernel          (zero in-umbrella deps)
+L1  arbor_kernel_runtime, arbor_cartographer, arbor_web
 L2  arbor_llm, arbor_security
 L3  arbor_persistence, arbor_shell, arbor_sandbox
 L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms, arbor_consensus
@@ -114,10 +114,11 @@ L9  arbor_dashboard
 ```
 
 Notes (the counterintuitive parts; the levels themselves are machine-checked by
-`apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs`):
-- **Nothing is standalone except `arbor_contracts` and `arbor_kernel` (L0).**
-  `arbor_kernel` is a temporary passive config-namespace owner with no
-  in-umbrella deps — not a replacement for contracts or monitor.
+`apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs`):
+- **Nothing is standalone except `arbor_kernel` (L0).** It is the passive owner
+  of contracts, types, and identifiers. Active Common, Signals, and Monitor
+  services live in `arbor_kernel_runtime` (L1), which depends only on the
+  passive kernel in-umbrella.
   In particular `arbor_orchestrator` is L7, not a low kernel — it really deps
   arbor_actions/security/ai/memory/trust/shell/comms (exec nodes, capability +
   egress authorization, LLM/ACP routing, goals/percepts, sandboxed shell), and
@@ -135,7 +136,7 @@ for the exact, current deps — this graph is a snapshot.
 
 ## Key Patterns
 
-- **Contract-First**: Shared types and behaviours in `arbor_contracts`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
+- **Contract-First**: Shared types and behaviours in `arbor_kernel`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
 - **Facade Pattern**: Each library exposes one public facade (e.g., `Arbor.Security`). Never alias internal modules from another library.
 - **CRC (Construct-Reduce-Convert)**: Pure functional cores in `cores/` directories. Business logic with zero side effects — see Core Concepts above and [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md). The core's counterpart — the thin impure boundary that performs the core's decided effects — is [`.claude/skills/imperative-shell.md`](.claude/skills/imperative-shell.md). Reducer cores return **effects as data**; the shell interprets them. Time/randomness are impure (inject them); purity is mechanically enforced by a lint test over `*_core.ex`. Extract a core when a pure decision lacks a unit test — not to chase coverage.
 - **Socket-First Components**: Dashboard components in `components/` directories with namespaced events — see [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).

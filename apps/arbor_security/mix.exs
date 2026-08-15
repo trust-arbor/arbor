@@ -30,9 +30,7 @@ defmodule ArborSecurity.MixProject do
 
   defp deps do
     [
-      {:arbor_common, in_umbrella: true},
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:plug_crypto, "~> 2.0"},

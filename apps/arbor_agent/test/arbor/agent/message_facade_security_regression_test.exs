@@ -217,15 +217,15 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     pid
   end
 
-  # Test config sets arbor_signals start_children: false, so ensure_all_started
+  # Test config sets arbor_kernel_runtime start_children: false, so ensure_all_started
   # leaves Store/Bus absent. Start only missing children under the real
   # Arbor.Signals.Supervisor, track ownership, and remove exactly those on exit.
   defp ensure_signals_topology! do
-    {:ok, _apps} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _apps} = Application.ensure_all_started(:arbor_kernel_runtime)
     sup = Process.whereis(Arbor.Signals.Supervisor)
 
     assert is_pid(sup),
-           "Arbor.Signals.Supervisor must be running after ensure_all_started(:arbor_signals)"
+           "Arbor.Signals.Supervisor must be running after ensure_all_started(:arbor_kernel_runtime)"
 
     started =
       for {mod, child_spec} <- [

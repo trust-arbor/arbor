@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
-    {:ok, _} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
     :ok
   end
 

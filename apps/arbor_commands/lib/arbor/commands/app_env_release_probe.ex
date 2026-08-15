@@ -14,10 +14,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
   @production_opt_keys [:json, :root]
   @owner_mix_rel [
     ["apps", "arbor_kernel", "mix.exs"],
-    ["apps", "arbor_contracts", "mix.exs"],
-    ["apps", "arbor_common", "mix.exs"],
-    ["apps", "arbor_signals", "mix.exs"],
-    ["apps", "arbor_monitor", "mix.exs"]
+    ["apps", "arbor_kernel_runtime", "mix.exs"]
   ]
 
   @warning_needles [
@@ -209,10 +206,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
 
   defp generated_mix_exs(root) do
     kernel = Path.expand("apps/arbor_kernel", root)
-    contracts = Path.expand("apps/arbor_contracts", root)
-    common = Path.expand("apps/arbor_common", root)
-    signals = Path.expand("apps/arbor_signals", root)
-    monitor = Path.expand("apps/arbor_monitor", root)
+    kernel_runtime = Path.expand("apps/arbor_kernel_runtime", root)
 
     """
     # Probe-only fixture; not a production release.
@@ -239,10 +233,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
       defp deps do
         [
           {:arbor_kernel, path: #{inspect(kernel)}},
-          {:arbor_contracts, path: #{inspect(contracts)}},
-          {:arbor_common, path: #{inspect(common)}},
-          {:arbor_signals, path: #{inspect(signals)}},
-          {:arbor_monitor, path: #{inspect(monitor)}}
+          {:arbor_kernel_runtime, path: #{inspect(kernel_runtime)}}
         ]
       end
 
@@ -252,10 +243,7 @@ defmodule Arbor.Commands.AppEnvReleaseProbe do
             include_executables_for: [:unix],
             applications: [
               arbor_kernel: :permanent,
-              arbor_contracts: :permanent,
-              arbor_common: :permanent,
-              arbor_signals: :permanent,
-              arbor_monitor: :permanent,
+              arbor_kernel_runtime: :permanent,
               arbor_kernel_app_env_probe: :permanent
             ]
           ]

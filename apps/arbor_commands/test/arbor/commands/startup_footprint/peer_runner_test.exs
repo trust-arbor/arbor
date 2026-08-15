@@ -13,6 +13,7 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunnerTest do
     Arbor.Signals.Supervisor,
     Arbor.Monitor.Supervisor,
     Arbor.Commands.StartupFootprint.ProposedSupervisor,
+    Arbor.KernelRuntime.Supervisor,
     Arbor.Monitor.HealingSupervisor,
     Arbor.Signals.Bus,
     Arbor.Signals.Relay

@@ -610,7 +610,7 @@ defmodule Arbor.LLM.ToolLoopTypedSteeringSecurityRegressionTest do
   end
 
   defp ensure_signal_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
 
     for child <- [
           {Arbor.Signals.Store, []},

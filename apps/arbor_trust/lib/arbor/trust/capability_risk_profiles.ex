@@ -56,8 +56,8 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     # and never graduation-earned — it is explicitly granted (facade/dashboard).
     {"arbor://approval/answer", :arbor_agent, :critical, :irreversible, :governance, :restricted,
      false, :require_human, false, :cheap},
-    {"arbor://monitor/remediate", :arbor_monitor, :high, :reversible, :process_spawn, :restricted,
-     true, :require_human, false, :cheap},
+    {"arbor://monitor/remediate", :arbor_kernel_runtime, :high, :reversible, :process_spawn,
+     :restricted, true, :require_human, false, :cheap},
     {"arbor://code/write", :arbor_actions, :high, :reversible, :local_write, :confidential, true,
      :require_human, true, :cheap},
     {"arbor://code/compile", :arbor_actions, :high, :reversible, :process_spawn, :confidential,

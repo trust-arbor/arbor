@@ -146,7 +146,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "memory"}), do: :arbor_memory
   defp owner_for_parsed(%CapabilityUri{domain: "consensus"}), do: :arbor_consensus
   defp owner_for_parsed(%CapabilityUri{domain: "comms"}), do: :arbor_comms
-  defp owner_for_parsed(%CapabilityUri{domain: "signals"}), do: :arbor_signals
+  defp owner_for_parsed(%CapabilityUri{domain: "signals"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "mcp"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "tool"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
@@ -155,7 +155,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "ai"}), do: :arbor_ai
   defp owner_for_parsed(%CapabilityUri{domain: "net"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "eval"}), do: :arbor_actions
-  defp owner_for_parsed(%CapabilityUri{domain: "monitor"}), do: :arbor_monitor
+  defp owner_for_parsed(%CapabilityUri{domain: "monitor"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "trust"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "acp"}), do: :arbor_gateway

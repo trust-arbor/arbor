@@ -12,7 +12,7 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
       high_risk_paths = [
         "apps/arbor_security/lib/arbor/security.ex",
         "apps/arbor_trust/lib/arbor/trust.ex",
-        "apps/arbor_contracts/lib/arbor/contracts/security/capability.ex",
+        "apps/arbor_kernel/lib/arbor/contracts/security/capability.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine.ex",
         "apps/arbor_orchestrator/lib/arbor/orchestrator/engine/checkpoint.ex",
         "apps/arbor_agent/priv/templates/coding_agent.md",

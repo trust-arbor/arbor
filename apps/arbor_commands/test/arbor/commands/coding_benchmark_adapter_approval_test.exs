@@ -245,7 +245,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterApprovalTest do
   end
 
   defp ensure_signals! do
-    Application.ensure_all_started(:arbor_signals)
+    Application.ensure_all_started(:arbor_kernel_runtime)
 
     for child <- [
           {Signals.Store, []},

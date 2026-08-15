@@ -173,7 +173,7 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
   end
 
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
 
     for child <- [
           {Arbor.Signals.Store, []},

@@ -9,16 +9,21 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
   @moduletag :slow
   @moduletag timeout: 300_000
 
-  test "production path projects the accepted inventory and planned check is stable" do
+  test "production path verifies the accepted materialized inventory deterministically" do
     root = umbrella_root()
 
     assert {:ok, report} =
              SourceCoupling.with_direct_runtime(fn ->
-               KernelMaterialization.run(mode: "report", phase: "planned", root: root, json: true)
+               KernelMaterialization.run(
+                 mode: "report",
+                 phase: "materialized",
+                 root: root,
+                 json: true
+               )
              end)
 
     assert report["schema"] == "arbor.packaging.kernel_materialization.report.v1"
-    assert report["phase"] == "planned"
+    assert report["phase"] == "materialized"
 
     counts = report["counts"]
     assert counts["source_entries"] == 640
@@ -28,16 +33,26 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
 
     assert {:ok, check} =
              SourceCoupling.with_direct_runtime(fn ->
-               KernelMaterialization.run(mode: "check", phase: "planned", root: root, json: true)
+               KernelMaterialization.run(
+                 mode: "check",
+                 phase: "materialized",
+                 root: root,
+                 json: true
+               )
              end)
 
     assert {:ok, check_again} =
              SourceCoupling.with_direct_runtime(fn ->
-               KernelMaterialization.run(mode: "check", phase: "planned", root: root, json: true)
+               KernelMaterialization.run(
+                 mode: "check",
+                 phase: "materialized",
+                 root: root,
+                 json: true
+               )
              end)
 
     assert check["status"] == "ok",
-           "planned check failed: #{inspect(get_in(check, ["comparison", "failures"]))}"
+           "materialized check failed: #{inspect(get_in(check, ["comparison", "failures"]))}"
 
     assert {:ok, bytes} = Encode.encode_report(check)
     assert {:ok, bytes_again} = Encode.encode_report(check_again)
@@ -60,14 +75,16 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
     assert retained["apps/arbor_kernel/test/test_helper.exs"] == "transform_input"
     assert retained["apps/arbor_kernel/lib/arbor/kernel.ex"] == "retain"
 
-    assert {:ok, via_task} = Task.execute(["--check", "--phase", "planned", "--root", root])
+    assert {:ok, via_task} =
+             Task.execute(["--check", "--phase", "materialized", "--root", root])
+
     assert via_task["status"] == "ok"
-    assert via_task["phase"] == "planned"
+    assert via_task["phase"] == "materialized"
   end
 
   test "standalone Mix task uses direct runtime and does not start arbor_shell" do
     root = umbrella_root()
-    build_path = Mix.Project.build_path() <> "-k4a-standalone-dev"
+    build_path = Mix.Project.build_path() <> "-k4b-standalone-dev"
 
     {output, status} =
       System.cmd(
@@ -76,7 +93,7 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
           "arbor.packaging.kernel_materialization",
           "--check",
           "--phase",
-          "planned",
+          "materialized",
           "--root",
           root
         ],
@@ -91,7 +108,7 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
       )
 
     assert status == 0, output
-    assert output =~ "kernel-materialization check phase=planned"
+    assert output =~ "kernel-materialization check phase=materialized"
     assert output =~ "runtime=direct"
     refute output =~ "git_shell_unavailable"
     refute output =~ "journal"

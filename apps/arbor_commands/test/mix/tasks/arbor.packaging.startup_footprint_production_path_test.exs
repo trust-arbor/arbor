@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     Arbor.Signals.Supervisor,
     Arbor.Monitor.Supervisor,
     Arbor.Commands.StartupFootprint.ProposedSupervisor,
+    Arbor.KernelRuntime.Supervisor,
     Arbor.Monitor.HealingSupervisor,
     Arbor.Signals.Bus,
     Arbor.Signals.Relay
@@ -66,9 +67,13 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     assert Enum.all?(pids, &(&1 != parent_pid))
 
     gated = report["samples"]["proposed_gated"]
-    assert gated["logger_filter_count"] == 0
+    # Common.Application installs the Logger filter unconditionally, and the
+    # three nested Common/Signals/Monitor Application MFAs always start under
+    # Arbor.KernelRuntime.Supervisor, so neither is forced to zero anymore —
+    # only the *optional* children (and the telemetry bridge) are gated.
+    assert gated["logger_filter_count"] >= 1
     assert gated["telemetry_handler_count"] == 0
-    assert gated["supervisor_children"] == 0
+    assert gated["supervisor_children"] >= 1
 
     baseline = report["samples"]["baseline"]
     eager = report["samples"]["proposed_eager"]
@@ -80,6 +85,9 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     refute "arbor_kernel" in List.wrap(baseline["started_runtime_apps"])
     refute "arbor_kernel" in List.wrap(gated["started_runtime_apps"])
     refute "arbor_kernel" in List.wrap(eager["started_runtime_apps"])
+    refute "arbor_kernel_runtime" in List.wrap(baseline["started_runtime_apps"])
+    refute "arbor_kernel_runtime" in List.wrap(gated["started_runtime_apps"])
+    refute "arbor_kernel_runtime" in List.wrap(eager["started_runtime_apps"])
     refute "arbor_startup_footprint_proposed" in List.wrap(baseline["started_runtime_apps"])
     refute "arbor_startup_footprint_proposed" in List.wrap(gated["started_runtime_apps"])
     refute "arbor_startup_footprint_proposed" in List.wrap(eager["started_runtime_apps"])

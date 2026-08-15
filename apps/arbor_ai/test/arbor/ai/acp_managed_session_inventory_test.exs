@@ -11,18 +11,18 @@ defmodule Arbor.AI.AcpManagedSessionInventoryTest do
     previous_signals = Arbor.Signals.Config.Testing.snapshot_namespace()
 
     _ = Application.stop(:arbor_security)
-    _ = Application.stop(:arbor_signals)
+    _ = Application.stop(:arbor_kernel_runtime)
     Arbor.Signals.Config.Testing.put(:start_children, true)
     Application.put_env(:arbor_security, :start_children, true)
 
     on_exit(fn ->
       _ = Application.stop(:arbor_security)
-      _ = Application.stop(:arbor_signals)
+      _ = Application.stop(:arbor_kernel_runtime)
       Arbor.Signals.Config.Testing.restore_namespace(previous_signals)
       Application.put_env(:arbor_security, :start_children, previous_start_children)
     end)
 
-    {:ok, _started_signals} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _started_signals} = Application.ensure_all_started(:arbor_kernel_runtime)
     {:ok, _started} = Application.ensure_all_started(:arbor_security)
 
     {:ok, registry} = SessionRegistry.start_link([])

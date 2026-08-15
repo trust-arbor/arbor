@@ -34,8 +34,7 @@ defmodule ArborCommands.MixProject do
   # side-effecting Command implementations that need to reach beyond Context.
   defp deps do
     [
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
@@ -49,7 +48,6 @@ defmodule ArborCommands.MixProject do
       {:arbor_ai, in_umbrella: true},
       # L1 signals facade — coding-benchmark approval accounting queries
       # interaction audit events by task correlation_id.
-      {:arbor_signals, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

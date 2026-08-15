@@ -3302,8 +3302,8 @@ defmodule Arbor.Actions.Mix do
       safe_app_dir(:arbor_actions),
       safe_lib_dir(:arbor_actions),
       safe_module_dir(),
-      safe_app_dir(:arbor_common),
-      safe_lib_dir(:arbor_common)
+      safe_app_dir(:arbor_kernel_runtime),
+      safe_lib_dir(:arbor_kernel_runtime)
     ]
     |> Enum.reject(&is_nil/1)
   end

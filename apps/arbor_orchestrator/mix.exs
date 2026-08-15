@@ -45,8 +45,7 @@ defmodule Arbor.Orchestrator.MixProject do
       # ...) — declared explicitly here instead of leaning on the transitive path
       # through arbor_signals. arbor_contracts has zero in-umbrella deps, so this
       # introduces no cycle.
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       # arbor_actions is a hard dep: the orchestrator executes Jido actions
       # (syscalls) via Arbor.Actions directly. arbor_actions does NOT depend on
       # arbor_orchestrator (verified acyclic), and only arbor_commands +
@@ -69,7 +68,6 @@ defmodule Arbor.Orchestrator.MixProject do
       {:arbor_shell, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
       # Source-owned engagement binding after authenticated receipt consumption.
       # arbor_comms is L4 and does not depend on arbor_orchestrator, so this
       # remains a downward, acyclic facade dependency.

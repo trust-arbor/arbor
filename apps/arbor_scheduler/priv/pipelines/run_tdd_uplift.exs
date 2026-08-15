@@ -19,8 +19,8 @@ defmodule RunTddUplift do
   @logs_root "/tmp/tdd_uplift_logs"
 
   @extra_caps [
-    "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/lib/arbor/common/**",
-    "arbor://fs/write/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/test/arbor/common/**",
+    "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime/lib/arbor/common/**",
+    "arbor://fs/write/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime/test/arbor/common/**",
     "arbor://action/mix/test"
   ]
 
@@ -67,7 +67,7 @@ defmodule RunTddUplift do
 
     # Quick sanity check that the cap chain is healthy.
     write_path =
-      "/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/test/arbor/common/log_redactor_test.exs"
+      "/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime/test/arbor/common/log_redactor_test.exs"
 
     direct_fs =
       Arbor.Security.authorize(principal, "arbor://fs/write", :execute,

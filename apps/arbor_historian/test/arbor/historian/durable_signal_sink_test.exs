@@ -363,7 +363,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   end
 
   defp ensure_signals do
-    Application.ensure_all_started(:arbor_signals)
+    Application.ensure_all_started(:arbor_kernel_runtime)
 
     Enum.each([Arbor.Signals.Store, Arbor.Signals.Bus], fn mod ->
       unless Process.whereis(mod) do

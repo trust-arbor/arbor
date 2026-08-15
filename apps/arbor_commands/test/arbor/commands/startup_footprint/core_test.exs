@@ -212,7 +212,7 @@ defmodule Arbor.Commands.StartupFootprint.CoreTest do
     assert ok["status"] == "ok"
 
     started =
-      put_in(clean, ["baseline", "started_owner_apps"], ["arbor_common"])
+      put_in(clean, ["baseline", "started_owner_apps"], ["arbor_kernel_runtime"])
 
     assert {:ok, apps_failed} = Core.compare(policy(), evidence(started))
     assert apps_failed["status"] == "failed"

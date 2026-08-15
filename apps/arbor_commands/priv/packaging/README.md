@@ -122,7 +122,7 @@ fresh OS-level BEAM instances controlled by OTP `:peer` over
 The current pinned Erlang executable and a validated current code path
 are the only runtime inputs. There is no nested Mix compile, dependency
 cache copy, mise lookup, or temporary probe project.
-Baseline starts only passive `arbor_contracts` so eager-start owner
+Baseline starts only passive `arbor_kernel` so eager-start owner
 callbacks remain a visible regression. Proposed scenarios start the merged
 app's non-owner runtime extras, including `:os_mon`, and load
 scenario-specific applications inside the timed action. Retired owner

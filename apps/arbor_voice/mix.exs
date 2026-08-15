@@ -33,9 +33,7 @@ defmodule ArborVoice.MixProject do
   # (1 + their L7); direct security/trust deps support realtime egress gates.
   defp deps do
     [
-      {:arbor_contracts, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_comms, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},

@@ -2808,11 +2808,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   defp restore_application_env(key, value),
     do: Application.put_env(:arbor_security, key, value)
 
-  # The arbor_signals supervision tree is not started by default in the
+  # The arbor_kernel_runtime supervision tree is not started by default in the
   # arbor_security test profile; start it so the store's direct cluster
   # signal is observable on the bus.
   defp ensure_signals_children do
-    {:ok, _started} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
 
     started =
       Enum.reduce(

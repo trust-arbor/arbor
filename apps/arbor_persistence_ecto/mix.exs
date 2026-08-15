@@ -31,7 +31,7 @@ defmodule Arbor.Persistence.Ecto.MixProject do
   defp deps do
     [
       # Umbrella deps
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
 
       # EventStore - battle-tested Postgres event store (Commanded's backend)

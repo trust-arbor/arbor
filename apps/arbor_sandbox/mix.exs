@@ -33,9 +33,8 @@ defmodule Arbor.Sandbox.MixProject do
 
   defp deps do
     [
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
       {:dune, "~> 0.3.15"},
       # Pinned to an immutable ref (not branch: main) — see root mix.exs.
       {:jido_sandbox,

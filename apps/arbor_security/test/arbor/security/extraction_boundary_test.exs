@@ -54,7 +54,7 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
         |> Enum.map(fn parts -> {relative(path), parts} end)
       end)
 
-    if mix_exs() =~ ":arbor_signals" do
+    if mix_exs() =~ ":arbor_kernel_runtime" do
       allowed_sync_files =
         MapSet.new([
           "apps/arbor_security/lib/arbor/security/capability_store.ex",

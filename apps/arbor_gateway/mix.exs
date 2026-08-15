@@ -31,10 +31,9 @@ defmodule ArborGateway.MixProject do
   defp deps do
     [
       {:arbor_actions, in_umbrella: true},
-      {:arbor_common, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},
       {:plug, "~> 1.14"},
       {:plug_cowboy, "~> 2.6"},

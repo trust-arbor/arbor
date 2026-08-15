@@ -227,7 +227,7 @@ defmodule Arbor.Agent.SpecTest do
     test "contracts spec source has no Arbor.Agent.Character token" do
       src =
         __DIR__
-        |> Path.join("../../../../arbor_contracts/lib/arbor/contracts/agent/spec.ex")
+        |> Path.join("../../../../arbor_kernel/lib/arbor/contracts/agent/spec.ex")
         |> Path.expand()
         |> File.read!()
 

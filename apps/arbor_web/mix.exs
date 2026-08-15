@@ -40,7 +40,7 @@ defmodule Arbor.Web.MixProject do
   defp deps do
     [
       # Umbrella dependencies
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel, in_umbrella: true},
 
       # Phoenix stack
       {:phoenix, "~> 1.7"},

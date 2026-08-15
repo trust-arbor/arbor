@@ -97,13 +97,13 @@ defmodule Arbor.Actions.Security.DetectorSynthesisLoopTest do
 
       # target_path / registration_edits are correct for S1.
       assert proposal.target_path ==
-               "apps/arbor_common/lib/arbor/eval/checks/synthesized_fail_open_authz.ex"
+               "apps/arbor_kernel_runtime/lib/arbor/eval/checks/synthesized_fail_open_authz.ex"
 
       assert [%{kind: :append_to_suite_evals}, %{kind: :add_static_scan_mappings}] =
                proposal.registration_edits
 
       assert proposal.test_path ==
-               "apps/arbor_common/test/arbor/eval/checks/synthesized_fail_open_authz_test.exs"
+               "apps/arbor_kernel_runtime/test/arbor/eval/checks/synthesized_fail_open_authz_test.exs"
 
       # module_source compiles.
       mod_name = "Arbor.Eval.Checks.Synthesized.LoopChk_#{System.unique_integer([:positive])}"

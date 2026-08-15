@@ -32,10 +32,8 @@ defmodule ArborShell.MixProject do
 
   defp deps do
     [
-      {:arbor_common, in_umbrella: true},
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_signals, in_umbrella: true},
       {:bash, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:toml, "~> 0.7"},

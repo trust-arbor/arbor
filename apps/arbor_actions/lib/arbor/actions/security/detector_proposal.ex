@@ -20,7 +20,7 @@ defmodule Arbor.Actions.Security.DetectorProposal do
       per-run-unique synthesis name); the proposal's `target_path` carries the
       canonical name the human would rename it to
     * `target_path` — where the detector module WOULD be written:
-      * S1 → `apps/arbor_common/lib/arbor/eval/checks/<name>.ex`
+      * S1 → `apps/arbor_kernel_runtime/lib/arbor/eval/checks/<name>.ex`
       * S3 → `apps/arbor_actions/lib/arbor/actions/security/detectors/<name>.ex`
     * `registration_edits` — the suite-registration changes needed, **as a
       description (data), NOT applied** — see `t:registration_edit/0`:
@@ -85,7 +85,7 @@ defmodule Arbor.Actions.Security.DetectorProposal do
 
   @doc """
   The canonical filesystem path a synthesized detector of `spec` WOULD be written
-  to (NOT created here). S1 detectors live in `arbor_common`'s eval checks; S3
+  to (NOT created here). S1 detectors live in `arbor_kernel_runtime`'s eval checks; S3
   detectors in `arbor_actions`'s security detectors.
   """
   @spec target_path(DetectorSpec.t()) :: String.t()
@@ -93,7 +93,7 @@ defmodule Arbor.Actions.Security.DetectorProposal do
     do: "apps/arbor_actions/lib/arbor/actions/security/detectors/#{file_basename(name)}.ex"
 
   def target_path(%DetectorSpec{name: name}),
-    do: "apps/arbor_common/lib/arbor/eval/checks/#{file_basename(name)}.ex"
+    do: "apps/arbor_kernel_runtime/lib/arbor/eval/checks/#{file_basename(name)}.ex"
 
   @doc """
   The canonical filesystem path the generated G4 test WOULD be written to (NOT
@@ -104,7 +104,7 @@ defmodule Arbor.Actions.Security.DetectorProposal do
     do: "apps/arbor_actions/test/arbor/actions/security/detectors/#{file_basename(name)}_test.exs"
 
   def test_path(%DetectorSpec{name: name}),
-    do: "apps/arbor_common/test/arbor/eval/checks/#{file_basename(name)}_test.exs"
+    do: "apps/arbor_kernel_runtime/test/arbor/eval/checks/#{file_basename(name)}_test.exs"
 
   @doc """
   The canonical module name a synthesized detector of `spec` WOULD use once
@@ -143,7 +143,7 @@ defmodule Arbor.Actions.Security.DetectorProposal do
     [
       %{
         kind: :append_to_suite_evals,
-        file: "apps/arbor_common/lib/arbor/eval/suites/security.ex",
+        file: "apps/arbor_kernel_runtime/lib/arbor/eval/suites/security.ex",
         module: module,
         description: "Append #{module} to Arbor.Eval.Suites.Security.evals/0.",
         details: %{function: "evals/0"}

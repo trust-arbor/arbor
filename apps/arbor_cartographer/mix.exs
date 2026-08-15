@@ -43,7 +43,7 @@ defmodule Arbor.Cartographer.MixProject do
   defp deps do
     [
       # Umbrella dependencies
-      {:arbor_contracts, in_umbrella: true},
+      {:arbor_kernel, in_umbrella: true},
 
       # Core dependencies
       {:telemetry, "~> 1.0"},

@@ -355,7 +355,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
 
   defp admit_snapshot(_, scenario, label), do: {:error, {:invalid_snapshot, scenario, label, []}}
 
-  @owner_app_names ["arbor_common", "arbor_signals", "arbor_monitor"]
+  @owner_app_names ["arbor_kernel_runtime"]
 
   defp admit_started_owner_apps(list, scenario) when is_list(list) do
     if Enum.all?(list, &(&1 in @owner_app_names)) and length(list) == length(Enum.uniq(list)) do

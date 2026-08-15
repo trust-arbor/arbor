@@ -101,7 +101,7 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverageTest do
 
   describe "regression against real signed structs" do
     test "capability.ex stays fully covered (C1 + @signing_excluded hold)" do
-      findings = SignedFieldCoverage.detect(root: "apps/arbor_contracts")
+      findings = SignedFieldCoverage.detect(root: "apps/arbor_kernel")
       cap = Enum.filter(findings, &String.contains?(&1.location[:file], "capability.ex"))
       assert cap == [], "capability.ex regained an unsigned field: #{inspect(cap)}"
     end

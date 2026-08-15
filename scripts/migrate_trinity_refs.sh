@@ -27,12 +27,12 @@ OLD_BARE="trinity-large-preview:free"
 # Files with live or doc references to trinity (verified 2026-06-10).
 FILES=(
   "apps/arbor_agent/lib/arbor/agent/spec.ex"                       # LIVE: agent default model_config
-  "apps/arbor_common/lib/mix/tasks/arbor/doctor.ex"                # LIVE: doctor default map
+  "apps/arbor_kernel_runtime/lib/mix/tasks/arbor/doctor.ex"                # LIVE: doctor default map
   "apps/arbor_orchestrator/specs/pipelines/dev/homelab-handlers-port.dot"  # LIVE dev pipeline (x5)
   "apps/arbor_orchestrator/specs/pipelines/dev/skill-library.dot"  # LIVE-ish: embedded prompt would reintroduce trinity
   "apps/arbor_agent/lib/arbor/agent/api_config.ex"                 # doc examples
   "apps/arbor_agent/lib/arbor/agent/research_agent.ex"             # docstring
-  "apps/arbor_common/lib/arbor/common/model_profile.ex"            # doc examples (catalog entry handled manually)
+  "apps/arbor_kernel_runtime/lib/arbor/common/model_profile.ex"            # doc examples (catalog entry handled manually)
   "apps/arbor_orchestrator/specs/pipelines/eval-heartbeat.dot"     # comment example
   "apps/arbor_orchestrator/lib/mix/tasks/arbor.eval.ex"            # doc examples (bare form)
   "apps/arbor_ai/lib/arbor/ai.ex"                                  # doc example
@@ -67,7 +67,7 @@ fi
 echo ""
 echo "POST-APPLY CHECKLIST:"
 echo "  [ ] Add ModelProfile catalog entry for $NEW_MODEL (context_size, max_output_tokens, family)"
-echo "      apps/arbor_common/lib/arbor/common/model_profile.ex (~line 120, next to gpt-oss entries)"
+echo "      apps/arbor_kernel_runtime/lib/arbor/common/model_profile.ex (~line 120, next to gpt-oss entries)"
 echo "  [ ] grep -rn 'trinity' config apps --include='*.ex' --include='*.exs' --include='*.dot' | grep -v _build"
-echo "  [ ] mix test apps/arbor_common/test/arbor/common/model_profile_test.exs apps/arbor_ai/test"
+echo "  [ ] mix test apps/arbor_kernel_runtime/test/arbor/common/model_profile_test.exs apps/arbor_ai/test"
 echo "  [ ] Update .arbor/roadmap/0-inbox/default-model-retired-trinity-large-preview.md -> status: done"

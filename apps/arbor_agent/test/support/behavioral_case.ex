@@ -43,7 +43,13 @@ defmodule Arbor.Test.BehavioralCase do
 
   setup_all do
     # Ensure all required apps are loaded
-    for app <- [:arbor_signals, :arbor_security, :arbor_memory, :arbor_consensus, :arbor_agent] do
+    for app <- [
+          :arbor_kernel_runtime,
+          :arbor_security,
+          :arbor_memory,
+          :arbor_consensus,
+          :arbor_agent
+        ] do
       Application.ensure_all_started(app)
     end
 

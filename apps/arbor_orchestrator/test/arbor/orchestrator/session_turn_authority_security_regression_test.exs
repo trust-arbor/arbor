@@ -611,7 +611,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   end
 
   # ── Signals topology ownership ───────────────────────────────────────
-  # config/test.exs sets arbor_signals start_children: false.
+  # config/test.exs sets arbor_kernel_runtime start_children: false.
   # Snapshot live / present-dead / absent per child. Start only missing Store
   # then Bus. Ownership kinds:
   #   :new_child       — we inserted the child spec → terminate + delete
@@ -621,7 +621,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   @signals_needed [Arbor.Signals.Store, Arbor.Signals.Bus]
 
   defp ensure_signals_stack! do
-    {:ok, _} = Application.ensure_all_started(:arbor_signals)
+    {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
     sup = Arbor.Signals.Supervisor
     needed = @signals_needed
 
@@ -743,7 +743,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     @tag voice_id: "VOICE-17"
     @tag spec: "VOICE-17"
     test "pre-existing live is preserved; present-dead is terminate-only; new child is deleted" do
-      {:ok, _} = Application.ensure_all_started(:arbor_signals)
+      {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
       sup = Arbor.Signals.Supervisor
       store = Arbor.Signals.Store
       bus = Arbor.Signals.Bus

@@ -30,7 +30,7 @@ digraph TddUpliftLogRedactor {
     type="exec",
     target="action",
     action="file_read",
-    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/lib/arbor/common/log_redactor.ex"
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime/lib/arbor/common/log_redactor.ex"
   ]
 
   // ── First-attempt prompt: module source only ────────────────────
@@ -73,7 +73,7 @@ digraph TddUpliftLogRedactor {
     type="exec",
     target="action",
     action="file_write",
-    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/test/arbor/common/log_redactor_test.exs",
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime/test/arbor/common/log_redactor_test.exs",
     param.create_dirs="true",
     context_keys="content"
   ]
@@ -84,7 +84,7 @@ digraph TddUpliftLogRedactor {
     type="exec",
     target="action",
     action="mix_test",
-    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common",
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_kernel_runtime",
     param.tags="fast"
   ]
 

@@ -7,33 +7,30 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
   counters, starts exactly one scenario, and returns the complete normalized
   envelope from `Core.normalize_sample/1`.
 
-  Baseline starts only passive `:arbor_contracts` after the pre-start
+  Baseline starts only passive `:arbor_kernel` after the pre-start
   snapshot so owner callbacks stay a visible regression. Proposed scenarios
-  load the retired owners, start the merged non-owner runtime extras, and
-  start the synthetic proposed owner. Callers cannot choose the module,
+  load `:arbor_kernel` then the real `:arbor_kernel_runtime` owner, starting
+  its merged runtime extras first. Callers cannot choose the module,
   function, environment, or executable; `PeerRunner` pins those and installs
   the admitted code path before this MFA runs.
   """
 
   alias Arbor.Commands.StartupFootprint.Core
-  alias Arbor.Commands.StartupFootprint.ProposedApplication
 
   @scenarios ["baseline", "proposed_gated", "proposed_eager"]
-  @owner_apps [:arbor_common, :arbor_signals, :arbor_monitor]
+  @owner_apps [:arbor_kernel_runtime]
   @retired_owners [:arbor_contracts, :arbor_common, :arbor_signals, :arbor_monitor]
-  @proposed_owner :arbor_startup_footprint_proposed
   @kernel_owner :arbor_kernel
   @external_runtime_exclusions MapSet.new([
-                                 @proposed_owner,
-                                 @kernel_owner | @retired_owners
+                                 @kernel_owner,
+                                 :arbor_kernel_runtime | @retired_owners
                                ])
   @security_bridge_id "arbor-signals-security-telemetry-bridge"
   @security_bridge_event [:arbor, :security, :authorization_granted]
-  @proposed_supervisor Arbor.Commands.StartupFootprint.ProposedSupervisor
 
   @spec measure(String.t()) :: {:ok, map()} | {:error, term()}
   def measure(scenario) when scenario in @scenarios do
-    :ok = configure_kernel_gates()
+    :ok = configure_kernel_gates(scenario)
     before_apps = started_app_names()
     before = snapshot()
     started_at = :erlang.monotonic_time()
@@ -80,26 +77,33 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
     def __test_app_applications__(_), do: {:error, :invalid_app}
   end
 
-  defp configure_kernel_gates do
+  defp configure_kernel_gates(scenario) do
     :ok = load_app!(:arbor_kernel)
 
-    Application.put_env(:arbor_kernel, :common, [start_children: true], persistent: true)
+    start_children = scenario == "proposed_eager"
+
+    Application.put_env(:arbor_kernel, :common, [start_children: start_children],
+      persistent: true
+    )
 
     Application.put_env(
       :arbor_kernel,
       :signals,
-      [start_children: true, security_telemetry_bridge: true],
+      [start_children: start_children, security_telemetry_bridge: start_children],
       persistent: true
     )
 
-    Application.put_env(:arbor_kernel, :monitor, [start_children: true], persistent: true)
+    Application.put_env(:arbor_kernel, :monitor, [start_children: start_children],
+      persistent: true
+    )
+
     :ok
   end
 
   defp start_scenario("baseline") do
     load_scenario_apps("baseline")
 
-    case Application.ensure_all_started(:arbor_contracts) do
+    case Application.ensure_all_started(:arbor_kernel) do
       {:ok, _} -> :ok
       {:error, reason} -> raise "baseline start failed: #{inspect(reason)}"
     end
@@ -107,21 +111,21 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
 
   defp start_scenario(scenario) when scenario in ["proposed_gated", "proposed_eager"] do
     load_scenario_apps(scenario)
-    start_merged_runtime_deps()
 
-    case Application.ensure_all_started(@proposed_owner) do
+    case Application.ensure_all_started(:arbor_kernel) do
       {:ok, _} -> :ok
       {:error, reason} -> raise "proposed start failed: #{inspect(reason)}"
     end
+
+    start_merged_runtime_deps()
   end
 
   defp load_scenario_apps("baseline") do
-    load_app!(:arbor_contracts)
+    load_app!(:arbor_kernel)
   end
 
-  defp load_scenario_apps(scenario) do
-    Enum.each([:arbor_contracts | @owner_apps], &load_app!/1)
-    load_proposed_owner(scenario)
+  defp load_scenario_apps(_scenario) do
+    Enum.each([:arbor_kernel | @owner_apps], &load_app!/1)
   end
 
   defp load_app!(app) do
@@ -132,29 +136,9 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
     end
   end
 
-  defp load_proposed_owner(scenario) do
-    spec =
-      {:application, @proposed_owner,
-       [
-         {:description, ~c"K3B proposed owner fixture"},
-         {:vsn, ~c"0.0.0"},
-         {:modules, [ProposedApplication]},
-         {:registered, [@proposed_supervisor]},
-         {:applications, [:kernel, :stdlib, :elixir, :logger]},
-         {:mod, {ProposedApplication, [scenario]}}
-       ]}
-
-    case :application.load(spec) do
-      :ok -> :ok
-      {:error, {:already_loaded, _}} -> :ok
-      {:error, reason} -> raise "proposed owner load failed: #{inspect(reason)}"
-    end
-  end
-
   defp start_merged_runtime_deps do
-    [@proposed_owner | @retired_owners]
-    |> Enum.flat_map(&app_applications!/1)
-    |> Enum.uniq()
+    :arbor_kernel_runtime
+    |> app_applications!()
     |> Enum.reject(&MapSet.member?(@external_runtime_exclusions, &1))
     |> Enum.each(fn dep ->
       case Application.ensure_all_started(dep) do
@@ -165,6 +149,11 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
           raise "merged runtime start failed: #{inspect(dep)} #{inspect(reason)}"
       end
     end)
+
+    case Application.ensure_all_started(:arbor_kernel_runtime) do
+      {:ok, _} -> :ok
+      {:error, reason} -> raise "proposed start failed: #{inspect(reason)}"
+    end
   end
 
   defp app_applications!(app) do
@@ -205,7 +194,7 @@ defmodule Arbor.Commands.StartupFootprint.PeerProbe do
     )
   end
 
-  defp supervisor_children(_proposed), do: count_tree(@proposed_supervisor)
+  defp supervisor_children(_proposed), do: count_tree(Arbor.KernelRuntime.Supervisor)
 
   defp count_tree(name_or_pid) do
     case children_of(name_or_pid) do
