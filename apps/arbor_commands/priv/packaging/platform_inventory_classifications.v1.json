@@ -1,0 +1,1820 @@
+[
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer.ex",
+    "blob_oid": "473e9ab760c87d0d08fd79d4ac44572bc2510f77",
+    "class": "optional_extension",
+    "rationale": "This facade combines hardware and model observation, capability queries, and local or RPC agent deployment. Its callers tolerate absence and it is not needed for boot or recovery; future extraction should split observation from the effectful deployment proxy."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/application.ex",
+    "blob_oid": "37f2ee69a7e6d88f86afbd1406cffccc982dc2a8",
+    "class": "optional_extension",
+    "rationale": "This application reads Cartographer-specific intervals and tags, then starts the topology and hardware-observation supervision tree. It owns startup for an omittable placement feature, not safe-boot or recovery infrastructure."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/capability_registry.ex",
+    "blob_oid": "df74d42540c82944369231908123bdb866d60a51",
+    "class": "optional_extension",
+    "rationale": "This GenServer owns public ETS tables of observed node capabilities and load, plus best-effort RPC synchronization. The data guides placement but is neither authenticated activation state nor an authority source, so it belongs to the optional topology provider."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/cluster_keeper.ex",
+    "blob_oid": "671633f7536456c8a221e1f94712ac9a37ca1044",
+    "class": "optional_extension",
+    "rationale": "This process remembers peer nodes, retries distribution connections, checks RPC health, and emits cluster signals. That is best-effort cluster convenience rather than the Platform recovery service required to revoke or repair extensions."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/hardware.ex",
+    "blob_oid": "055df20b2f7a3783934b21b0e7e01d242beea003",
+    "class": "optional_extension",
+    "rationale": "This module probes OS files, executables, devices, GPUs, memory, and Android APIs and converts observations into scheduling tags. Hardware discovery is an omittable first-party feature and must remain outside provider-free safe boot."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/hardware/osquery.ex",
+    "blob_oid": "47ea6d4b70edcc09e48006bff8060da4cba14986",
+    "class": "optional_extension",
+    "rationale": "This is Arbor's optional osqueryi adapter for enriching hardware observations and caching query results. It is a first-party adapter despite invoking an external tool, and absence explicitly falls back to built-in detection."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/scheduler.ex",
+    "blob_oid": "bf611063451645724fb460437bff142994f48000",
+    "class": "optional_extension",
+    "rationale": "This module ranks observed nodes by requirements, load, strategy, and a local circuit breaker. Orchestrator and Agent resolve it dynamically and retain local or explicit failure behavior when absent, so placement policy is optional rather than host enforcement."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/scout.ex",
+    "blob_oid": "6b2a8c8c6d6f357370556cdb9583d05530124129",
+    "class": "optional_extension",
+    "rationale": "This per-node worker periodically detects hardware and load, registers local observations, and broadcasts them to peers. It is the active observation component of the optional Cartographer provider, not a prerequisite for extension admission."
+  },
+  {
+    "path": "apps/arbor_cartographer/lib/arbor/cartographer/supervisor.ex",
+    "blob_oid": "aecc511254fbd8bbd0025e5e023eb1394cae67e3",
+    "class": "optional_extension",
+    "rationale": "This supervisor owns only Cartographer's registry, scout, and reconnect worker. The whole child set is topology and placement support that should be omitted from the safe profile."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian.ex",
+    "blob_oid": "a5a3824665c30d31378b48052d8e221e7a094b4d",
+    "class": "system_extension",
+    "rationale": "This normal-profile facade combines the configured durable-sink callback, history queries, stream-content lifecycle, and optional views. Its query authorization is bypassable through raw query functions and its sink is not synchronous, so a future trusted audit-intent spool must be split from this provider facade."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/application.ex",
+    "blob_oid": "f3015e9a5a834ec673fc395d17f94c5c510fb7c2",
+    "class": "system_extension",
+    "rationale": "This application boots the Historian ETS cache and metadata registry, then replays provider identity metadata from the configured durable Repo. It preserves normal-profile append coherence but depends on replaceable persistence and is not the provider-free recovery host."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/config.ex",
+    "blob_oid": "1b51a08e81ea952a2ede1c9b01ba536b49a1cb02",
+    "class": "system_extension",
+    "rationale": "This module validates mutable hot and durable EventLog backend targets used by Historian append and stream-content operations. Backend selection is system-provider configuration, not immutable host policy or a pre-Platform primitive."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/durable_signal_sink.ex",
+    "blob_oid": "8b49594d807ead80ccaf2a45bcec0e485b10e3d4",
+    "class": "system_extension",
+    "rationale": "This is the normal-profile Signals-to-Persistence adapter: it appends to the hot target and spawns a durable write. Because it can report success after missing hot storage and before durable completion, it is not the mandatory audit boundary; the synchronous pre-effect spool must be split into trusted host code."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/event.ex",
+    "blob_oid": "2c3f069289e0e4bbbb9d64ecef6f8cf9ec2b522b",
+    "class": "system_extension",
+    "rationale": "This file defines and validates Historian's versioned domain event with subject, causality, stream-position, and metadata fields. It is provider-specific storage and query vocabulary, not a generic mechanism required before extensions can exist."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/event_converter.ex",
+    "blob_oid": "d4bb42b9fa26deb76dd889c003a18e2f94699e49",
+    "class": "system_extension",
+    "rationale": "This converter maps Historian events to and from Persistence.Event, including provider type conventions and safe atom decoding. It is adapter glue inside the normal Historian provider rather than a host verification boundary."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/history_entry.ex",
+    "blob_oid": "b44efd1a9e40b0f92441b9110516b7eb0b604426",
+    "class": "system_extension",
+    "rationale": "This struct is Historian's persisted-event query projection and implements its filter semantics. It belongs to the normal history provider's read contract and has no boot, recovery, or reference-monitor role."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/query_engine.ex",
+    "blob_oid": "fc79d9fd6e8e838521d7d2e2b765dfe149c1df17",
+    "class": "system_extension",
+    "rationale": "This engine reads normal-profile history from the ETS cache with best-effort Ecto fallthrough and converts results into query projections. Durable and query backends are replaceable provider behavior, not the minimal append-only audit mechanism required for safe recovery."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
+    "blob_oid": "7da1b6fe227a1eefc6433a2e6cd8515931a69ccb",
+    "class": "optional_extension",
+    "rationale": "This module derives counts, distributions, and activity summaries from query results. These analytical views are explicitly optional and are unnecessary for normal event capture, boot, or recovery."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/stream_content.ex",
+    "blob_oid": "b6d966a056d77eeb7defb9af69df0909a910c905",
+    "class": "system_extension",
+    "rationale": "This imperative shell coordinates bounded purge and independent absence proof across Historian's durable and hot provider targets. It is normal-profile data-lifecycle behavior over replaceable backends; strong uncertainty handling does not make it a Platform recovery reference monitor."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/stream_content/core.ex",
+    "blob_oid": "617523b2ad5fae8d8d8b47c3231522a593ed936c",
+    "class": "system_extension",
+    "rationale": "This pure core validates Historian stream-deletion requests and reduces backend purge and absence replies into progress envelopes. The mechanism is specific to the complete-history provider contract, so purity and fail-closed classification do not make it a K primitive or trusted host."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/stream_ids.ex",
+    "blob_oid": "606e473513d795dbe058ff9d10bcda11b72256e2",
+    "class": "system_extension",
+    "rationale": "This helper defines Historian's agent, category, session, and correlation stream naming convention. Those names are provider-domain query vocabulary rather than the generic capability or activation namespace."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/stream_registry.ex",
+    "blob_oid": "35f352f59c0fa4d596a04ea8c1481ed3de8ea83c",
+    "class": "optional_extension",
+    "rationale": "This public Agent stores resettable stream counts and timestamps for fast statistics, and no production append path currently records into it. It is an optional operational projection, not authoritative durable state or an audit invariant."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/taint_query.ex",
+    "blob_oid": "f82d56b0ab795ec9b4f96f3dda53c50c87534a10",
+    "class": "optional_extension",
+    "rationale": "This module filters stored security events and reconstructs historical taint chains and summaries. It observes past enforcement outcomes but does not enforce taint policy, so it is an optional historical view."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/timeline.ex",
+    "blob_oid": "bfe7c98e44b7d80f5599881c09c0851541d62e51",
+    "class": "optional_extension",
+    "rationale": "This module merges and deduplicates streams, applies span filters, and reconstructs causality timelines and summaries. Timeline reconstruction is a first-party historical view and is not required for event capture or recovery."
+  },
+  {
+    "path": "apps/arbor_historian/lib/arbor/historian/timeline/span.ex",
+    "blob_oid": "f4c494259c2f1385d947b0f31d44ad9ce34fa8fa",
+    "class": "optional_extension",
+    "rationale": "This struct describes time-bounded filters for the optional timeline reconstruction feature. It is query-view vocabulary with no role in mandatory audit append, boot, or extension recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm.ex",
+    "blob_oid": "44387519b1b93d8636b48540a3a7ab0463b9f798",
+    "class": "system_extension",
+    "rationale": "This is the first-party LLM facade for generation, streaming, embeddings, structured output, and normal client dispatch, so its governing responsibility is the normal-profile LLM system extension. The file is mixed: OAuth login and eval entry points should move to optional extensions, tool-loop execution should move to Cognition, and the bounded-result helper facade should remain behind the fixed host boundary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/abort_error.ex",
+    "blob_oid": "2eebf8c7d818f1feacca51ba7fd1e42f82b76c60",
+    "class": "system_extension",
+    "rationale": "Defines the closed error used when a normal LLM operation is aborted; it is LLM domain vocabulary, not an authorization or recovery service."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/adapter/lm_studio.ex",
+    "blob_oid": "bd52f86b8be5e14ce2ce741e4fe9d0344152e64d",
+    "class": "optional_extension",
+    "rationale": "Implements Arbor's opt-in owned LM Studio transport and model-specific request translation. A normal profile can use another provider, so this bundled local-provider adapter is optional."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/adapter/oauth_responses.ex",
+    "blob_oid": "483885d434278fd2088077d7e73eb7cf05dd820f",
+    "class": "optional_extension",
+    "rationale": "Translates Arbor requests to the OpenAI/xAI subscription Responses transport. Subscription OAuth is one first-party provider option, not required for normal LLM operation or recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/adapter/req_llm.ex",
+    "blob_oid": "7de9512bf5be74102a1a8d2db7f110d758f77272",
+    "class": "system_extension",
+    "rationale": "Provides Arbor's bundled general transport adapter over ReqLLM, including request translation and dispatch across the ordinary provider set. Its internal limits and usage hooks do not make this replaceable transport a reference monitor."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
+    "blob_oid": "78365394ba8c2fcb1ab1bd81936db129e9b59951",
+    "class": "system_extension",
+    "rationale": "Owns the ReqLLM-specific streaming worker and bounded stream translation. It is part of the bundled transport implementation, even though it applies defensive resource limits."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/application.ex",
+    "blob_oid": "ff7bda53651cc00499736aa8af3bfcc3c54331b9",
+    "class": "system_extension",
+    "rationale": "Starts the active LLM supervision tree used by the normal profile. The file currently mixes optional OAuth login children with the credential recovery-proof owner; future packaging must move login supervisors out and place only the fixed credential owner in the trusted host so safe boot does not start the whole LLM app."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/arbor_actions_executor.ex",
+    "blob_oid": "9a1b5872402558504b501a14349a77f6ebdafe0c",
+    "class": "system_extension",
+    "rationale": "Converts the first-party Actions catalog to LLM tools and delegates execution to Orchestrator. This is normal-profile Cognition integration and must move out of Platform LLM, not become part of the trusted host."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/boundary.ex",
+    "blob_oid": "e3d1d7de0111e53a7b33172968ac029d00b4d646",
+    "class": "trusted_host",
+    "rationale": "Owns admission of provider completions, stream events, embeddings, usage, provider receipts, and delegated limits. This is the fixed validation point that must sit after any replaceable transport and fail closed on malformed or over-budget provider output."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/call.ex",
+    "blob_oid": "43d93cf45151c9c4548bca52a41aba99bb96e208",
+    "class": "system_extension",
+    "rationale": "Defines the mutable call envelope used to compose Arbor's LLM plug pipeline. It is LLM middleware state rather than a generic pre-Platform activation primitive or reference monitor."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/client.ex",
+    "blob_oid": "2e9767f324493d83f95f686fe45e24dcc3edf478",
+    "class": "system_extension",
+    "rationale": "Owns normal-profile provider routing, adapter registration, completion, streaming, embedding, and middleware orchestration. The file is mixed with Cognition-owned tool hooks and provider preference; those paths should split out while the client invokes only Platform-authorized provider handles."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/configuration_error.ex",
+    "blob_oid": "db1b9819389b72940175b582d5bf6aea2ea3bef5",
+    "class": "system_extension",
+    "rationale": "Defines an LLM client configuration failure and carries no policy, enforcement, or recovery responsibility."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/content_part.ex",
+    "blob_oid": "c4110919435997dd17da398de6863c0972a3e510",
+    "class": "system_extension",
+    "rationale": "Defines and normalizes LLM-domain message parts such as text, media, tool calls, and thinking content. This provider-consumer protocol belongs with the normal LLM system extension."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/deadline.ex",
+    "blob_oid": "d1868d1232f759de5a293bb10fd46c3aa596a550",
+    "class": "trusted_host",
+    "rationale": "Closes caller and delegated timeouts, propagates inherited deadlines, owns workers, and terminates overdue provider operations. The invocation host must retain this resource-enforcement responsibility rather than trust a provider to stop itself."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/dispatcher.ex",
+    "blob_oid": "d05ce2c5c3b963bc80ec16c19b2d68b8ebcd6bab",
+    "class": "system_extension",
+    "rationale": "Defines the high-level dispatch seam for model selection, runtime resolution, telemetry, and fallback, with Arbor.AI as the canonical implementation. That is normal-profile Cognition strategy and should consume authorized candidates rather than live in the Platform host."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/endpoint.ex",
+    "blob_oid": "2728268021bde7e365511802811b617bed3aef5b",
+    "class": "system_extension",
+    "rationale": "Validates provider-specific HTTP origins and paths for ReqLLM, local, eval, and OAuth transports. It is a strong first-party endpoint-policy helper, but it is not the caller-bound non-bypassable egress gate; provider endpoint tables should split into contributions enforced by the Platform egress proxy."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/eval/provider_resolver.ex",
+    "blob_oid": "caf520e6b19f0f3446c78d07bde0c5e5b3de4b28",
+    "class": "optional_extension",
+    "rationale": "Resolves and preflights transports specifically for the evaluation subject. Evaluation provider selection is first-party tooling that is not needed by the normal runtime or recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/eval/subject.ex",
+    "blob_oid": "6bc736b0d2e502b552db9e6a54902e6ffe4dcfdf",
+    "class": "optional_extension",
+    "rationale": "Implements an evaluation subject that runs prompts through selectable LLM providers and reports eval measurements. Evals are an optional first-party feature, despite the file's careful transport bounds."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/external_term.ex",
+    "blob_oid": "e95aa90aecec332c9e337db31405a8581070643b",
+    "class": "trusted_host",
+    "rationale": "Bounds and redacts arbitrary provider terms and exceptions before they cross the LLM boundary or enter errors and logs. This supports the fixed result-admission boundary and must not be supplied by the provider being constrained."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/fallback_loop.ex",
+    "blob_oid": "d27c7c84b161c968a46c032c6831739638594283",
+    "class": "system_extension",
+    "rationale": "Executes model/runtime fallback strategy for Arbor.AI and Orchestrator call paths. Fallback preference is normal-profile Cognition behavior, not provider authorization or recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/file_receipt.ex",
+    "blob_oid": "a10eb5e2a54e80f0b6d34ed956c0380e19ca6399",
+    "class": "optional_extension",
+    "rationale": "Provides race-resistant bounded file reads and publication for record/replay fixtures. Its strong filesystem checks protect optional fixture tooling; they do not make fixture storage a mandatory host service."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/json_preflight.ex",
+    "blob_oid": "3b575b01bd3b90dc9d8455e51fe285e3feb120a1",
+    "class": "trusted_host",
+    "rationale": "Scans untrusted JSON source before decoding to enforce byte, node, depth, collection, string, and numeric limits. It is a support mechanism for the fixed provider-result and credential boundary, not an LLM provider implementation."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/message.ex",
+    "blob_oid": "086a919ef697dbe6634cd3e9f1f0d81e15a05739",
+    "class": "system_extension",
+    "rationale": "Defines the LLM request message value and content normalization used by clients and adapters. It is domain protocol for the normal LLM extension."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/no_object_generated_error.ex",
+    "blob_oid": "fa6831488d346fbd67fd633b8b84afe93c35cdad",
+    "class": "system_extension",
+    "rationale": "Defines the LLM-domain failure returned when structured generation produces no object; it has no enforcement ownership."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth.ex",
+    "blob_oid": "ffd22d0ff9e68c659a04914eaea65d856830a77e",
+    "class": "trusted_host",
+    "rationale": "Owns credential envelopes, secret validation, token custody, atomic publication, generation binding, single-flight refresh, one-shot recovery leases, and bounded provenance. The file is mixed with OpenAI/xAI-specific aliases, refresh policy, and wire calls; those provider implementations must split to optional extensions while credential custody and receipt issuance remain fixed host responsibilities."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/jwt_payload.ex",
+    "blob_oid": "76f7679c36aa17c36b6d4ba77fe41282c509a576",
+    "class": "trusted_host",
+    "rationale": "Performs bounded decoding of credential JWT payloads used to determine expiry without exposing token material. It is part of the fixed credential-validation boundary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login.ex",
+    "blob_oid": "63c47840598e788e3482461ce376d809495898d2",
+    "class": "optional_extension",
+    "rationale": "Coordinates the pinned OpenAI PKCE and xAI device-code acquisition flows. These are provider-specific first-party login implementations and are not needed when another credential or provider mode is used."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/authorization_prompt.ex",
+    "blob_oid": "2f5ece9bf9ec97c96ee5468a01e6e2d48ef599fe",
+    "class": "optional_extension",
+    "rationale": "Defines the redacted user prompt for the optional OpenAI authorization-code login flow."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/device_prompt.ex",
+    "blob_oid": "4213204c25f932b424541ae9672fcce2e7fdd989",
+    "class": "optional_extension",
+    "rationale": "Defines the redacted user-facing values for the optional xAI device-code login flow."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback.ex",
+    "blob_oid": "b30553672ea6e2a11edfa58c05bcfc6f898fa5df",
+    "class": "optional_extension",
+    "rationale": "Starts and resolves the localhost callback flow for OpenAI login. Automatic loopback acquisition is optional operational functionality and must be absent from safe boot."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_flow_supervisor.ex",
+    "blob_oid": "3b5cd83d9b7793e07ed35cd63f60e59033497683",
+    "class": "optional_extension",
+    "rationale": "Supervises one optional OAuth loopback listener, owner, plug, and transport flow."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_owner.ex",
+    "blob_oid": "b29c2770848220b4ea9334c3c70e87644fb2a860",
+    "class": "optional_extension",
+    "rationale": "Owns the lifecycle, correlation state, timeout, and cleanup for one optional loopback login flow; it is not general credential custody."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_plug.ex",
+    "blob_oid": "721b3dde05f83053e311ea2d1dce6116d21cee57",
+    "class": "optional_extension",
+    "rationale": "Handles HTTP callbacks for the optional local OAuth listener and forwards parsed results to the flow owner."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_prompt.ex",
+    "blob_oid": "b30a30d03ca5418a0a3157687b73fc884140771b",
+    "class": "optional_extension",
+    "rationale": "Carries the deliberately redacted authorization URL for the optional automatic loopback login flow."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_query.ex",
+    "blob_oid": "4a96f6218ca970f32d75cef24f79cdbc16c620c9",
+    "class": "optional_extension",
+    "rationale": "Parses and bounds callback query parameters for the optional OAuth loopback transport."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_registry_owner.ex",
+    "blob_oid": "e94971e57025775d9e37c47a78da89973bebbfd1",
+    "class": "optional_extension",
+    "rationale": "Owns the process registry used only to correlate optional loopback login flows."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_resolver.ex",
+    "blob_oid": "1db30426562de20e91aaaf0d95f041cd93e14807",
+    "class": "optional_extension",
+    "rationale": "Resolves and validates loopback IPv4/IPv6 addresses for the optional local OAuth listener."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_root_supervisor.ex",
+    "blob_oid": "5af9d27312d5551ff34f979834c06e81076b61bc",
+    "class": "optional_extension",
+    "rationale": "Starts the registry owner and dynamic supervisor for optional OAuth loopback flows."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_supervisor.ex",
+    "blob_oid": "c31ab7574939dda57bb2b766ebd18c03f96ba2f5",
+    "class": "optional_extension",
+    "rationale": "Dynamically supervises optional per-login loopback flow processes."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/loopback_transport.ex",
+    "blob_oid": "2cbd237b4b54d2272dd996d8d2ed64a9947b908f",
+    "class": "optional_extension",
+    "rationale": "Implements the Ranch socket transport restricted to the optional OAuth loopback listener. Its socket hardening does not make the login transport part of recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/login/pending_store.ex",
+    "blob_oid": "a9934e4f37cd5834c11104b9a003785fdf3147c0",
+    "class": "optional_extension",
+    "rationale": "Stores one-shot PKCE and device-code correlation state for optional provider login flows. It does not own durable provider credentials after acquisition."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/model_catalog.ex",
+    "blob_oid": "90a1ed71511a68b93cbb97cc74ecca0e7f32e0a3",
+    "class": "optional_extension",
+    "rationale": "Fetches and validates subscription-specific OpenAI/xAI model catalogs. Model discovery for these optional provider routes is not required by a normal profile using another transport."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/model_catalog_failure.ex",
+    "blob_oid": "c0174d9fecf8e48aa145fe97c1e7e7cf69d8dfc5",
+    "class": "optional_extension",
+    "rationale": "Defines bounded redacted failures for the optional subscription model-catalog transport."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/provider_policy.ex",
+    "blob_oid": "dea8515af5f5c4d549c52f57653dc528de61a2f4",
+    "class": "optional_extension",
+    "rationale": "Hardcodes OpenAI and xAI OAuth endpoints, client identities, scopes, and refresh settings. This provider policy is replaceable first-party implementation data, not the credential reference monitor."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/recovery_proof_store.ex",
+    "blob_oid": "dd9f7c02f88214d2dd33c18fff04e93eab4f1134",
+    "class": "trusted_host",
+    "rationale": "Issues, binds, consumes, expires, and owner-cleans one-shot proofs that authorize credential recovery after a failed provider request. This is part of the non-replayable credential recovery boundary and cannot be delegated to the provider."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/responses.ex",
+    "blob_oid": "8e5ddb5f13fd88673136285b7de4dd78d4ca6ddb",
+    "class": "optional_extension",
+    "rationale": "Implements the OpenAI/xAI subscription Responses wire protocol, SSE parsing, and tool-call translation. It is a bundled provider transport that remains optional despite using fixed host credential and result helpers."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/oauth/responses_failure.ex",
+    "blob_oid": "deb7adab09a159686fdcc82f2b7eab22ea22f64b",
+    "class": "optional_extension",
+    "rationale": "Defines the closed failure vocabulary for the optional subscription Responses transport; bounded errors do not make the transport mandatory host code."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/owned_stream.ex",
+    "blob_oid": "8919fbc5101a42daaa9723b5e54ceee6a2b3115c",
+    "class": "trusted_host",
+    "rationale": "Owns provider stream producers, enforces single-consumer claims and deadlines, validates each event, and guarantees cancellation and cleanup. This is invocation containment that the constrained provider cannot own for itself."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/pipeline.ex",
+    "blob_oid": "eccd4b208b59eaeed122c379a8957972579905b1",
+    "class": "system_extension",
+    "rationale": "Composes configurable LLM plugs over the call envelope. The composition facility is normal LLM middleware; mandatory host checks must be outside or immutable within this configurable sequence."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plug.ex",
+    "blob_oid": "9a8162041a87f63e124dced1f625c452179355d6",
+    "class": "system_extension",
+    "rationale": "Defines the behavior and convenience macro for LLM call middleware. This is an extension-internal composition protocol, not a generic Kernel activation primitive."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/dispatch.ex",
+    "blob_oid": "b593b614b128b6a843a39b48bb4a2a68efe75868",
+    "class": "system_extension",
+    "rationale": "Invokes ReqLLM operations and translates transport results and errors. It is the effecting portion of the bundled provider implementation; its defensive limits must be backed by the separate host admission boundary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/fixture.ex",
+    "blob_oid": "d4f6c4255cc4ab18380694766da8f0da15a14f28",
+    "class": "optional_extension",
+    "rationale": "Owns hashing, typed serialization, loading, and publication of record/replay fixtures. This developer and test capability is not required by normal LLM operation."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/rate_limit_backoff.ex",
+    "blob_oid": "155a23819bda9416927c57dd158b35f9a37a8ff0",
+    "class": "system_extension",
+    "rationale": "Applies same-provider rate-limit retry policy around dispatch. Retry behavior is normal-profile transport policy rather than provider authorization or recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/record.ex",
+    "blob_oid": "37a1854eb7319b9fe9ddf5b55d1ae87f9f00e2f4",
+    "class": "optional_extension",
+    "rationale": "Records provider results as fixtures for later replay. Recording is optional developer tooling and must not sit in the mandatory invocation path."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/replay.ex",
+    "blob_oid": "54a3649009fe8695a24066b128f8c3f31823e700",
+    "class": "optional_extension",
+    "rationale": "Short-circuits LLM dispatch with persisted fixtures for deterministic tests. Replay is optional tooling, not a normal provider or host service."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/response_limit.ex",
+    "blob_oid": "aa018863f0312f442952b0671d97872befbe79d4",
+    "class": "trusted_host",
+    "rationale": "Closes all caller and delegated response-size aliases to one maximum receipt before transport dispatch. This limit must become an immutable host step so a provider or configurable pipeline cannot widen or omit it."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/staleness_warn.ex",
+    "blob_oid": "239b1985f11ccbea07424471400cfdfe4b83fa79",
+    "class": "optional_extension",
+    "rationale": "Warns when optional replay fixtures are old and has no effect on live call authority or recovery."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/usage.ex",
+    "blob_oid": "b65165ec4c3825182fe49edb2622c4b792b16e20",
+    "class": "system_extension",
+    "rationale": "Emits bounded exactly-once usage telemetry from accepted ReqLLM results, but explicitly rescues failures and returns the call unchanged. It is normal-profile accounting observation, not the missing fail-closed accounting enforcement point."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/plugs/usage/accounted_stream.ex",
+    "blob_oid": "916770aa45a482b9750dfe321c83b1ccfa69add0",
+    "class": "system_extension",
+    "rationale": "Wraps a stream to preserve provenance for the usage telemetry plug. Its responsibility follows the observational normal-profile accounting implementation."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/post_processors.ex",
+    "blob_oid": "a52dd0ecadf4f41f17700b141d97815c07d78b68",
+    "class": "system_extension",
+    "rationale": "Normalizes provider-specific reasoning fields and wrapped JSON into Arbor response content. This is ordinary first-party response adaptation, not result admission authority."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/preflight.ex",
+    "blob_oid": "b2624675ddc114649d6618a05518a2837e92719e",
+    "class": "optional_extension",
+    "rationale": "Performs a warn-only live check of Orchestrator-configured local models against LM Studio and Ollama inventories. This optional operational check must move out of Platform and receive configuration through an injected boundary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/provider_adapter.ex",
+    "blob_oid": "4405347e6ce93b605468f4259320b7ac8567d369",
+    "class": "system_extension",
+    "rationale": "Defines the LLM-domain callback contract implemented by first-party provider transports. Shared provider protocol does not make it a generic pre-Platform primitive or a reference monitor."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/provider_catalog.ex",
+    "blob_oid": "07f38cb71309e391608a8471996878c3e34f6e4a",
+    "class": "system_extension",
+    "rationale": "Discovers and caches available first-party LLM provider capabilities for the normal profile. The file is mixed with ACP adapter selection and direct module identities; Cognition preference must split out and the catalog must consume authorized provider handles."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/provider_error.ex",
+    "blob_oid": "882f27775207c38b00321df6da710034551200a3",
+    "class": "system_extension",
+    "rationale": "Defines the normalized failure returned by LLM provider adapters. It is provider-domain error vocabulary without enforcement ownership."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/provider_registry.ex",
+    "blob_oid": "bf278102ff2399b6669cfa9e46d167209f0f3f6d",
+    "class": "system_extension",
+    "rationale": "Catalogs ReqLLM and local provider names, environment keys, default URLs, and capabilities. This normal-profile implementation registry must be replaced by authorized generation handles, but it is not itself the Platform reference monitor."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/request.ex",
+    "blob_oid": "2664223a93e36de69aaeb9395139b671c60d8fa1",
+    "class": "system_extension",
+    "rationale": "Defines the LLM request struct used by clients, adapters, and Cognition. Its AI runtime selection fields should split from the transport request contract, but the file is governed by normal-profile LLM domain data."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/request_timeout_error.ex",
+    "blob_oid": "97f68b890c267bab731113ec8921353e7a952601",
+    "class": "system_extension",
+    "rationale": "Defines the public timeout failure for LLM calls. The host enforces the deadline, while this error remains ordinary LLM protocol vocabulary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/response.ex",
+    "blob_oid": "56cc8309e9e9645372dc266fa716807577d1a1f5",
+    "class": "system_extension",
+    "rationale": "Defines the normalized LLM response and provider receipt values consumed by normal Arbor profiles. ACP-specific runtime metadata should split from the transport response, while host code separately revalidates any receipt."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/response_budget.ex",
+    "blob_oid": "5eef183735a5560797501924364b5f8bc5baac10",
+    "class": "trusted_host",
+    "rationale": "Enforces hard aggregate limits on provider terms and JSON, installs bounded non-decompressing non-redirecting Req response collection, and validates embedded tool JSON. It is resource enforcement supporting the fixed provider-output boundary."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/retry.ex",
+    "blob_oid": "a46d8d24594afc0a09f5e0b68a3fe14af8d40d46",
+    "class": "system_extension",
+    "rationale": "Classifies LLM failures and executes bounded retry policy shared by AI and Orchestrator call paths. Retry choice is normal-profile strategy rather than host authorization."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/stream_error.ex",
+    "blob_oid": "9ae9dbe09bab6965eaab0e3aa8fb7302bb69551f",
+    "class": "system_extension",
+    "rationale": "Defines the bounded public error raised by an owned LLM stream; it is protocol vocabulary even though the host owns stream containment."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/stream_event.ex",
+    "blob_oid": "3ee53fc61703276b64fdcd5189f47b576c4c8bd6",
+    "class": "system_extension",
+    "rationale": "Defines the normalized event value emitted by LLM streaming adapters. It is LLM provider-consumer protocol, not an enforcement service."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/tool.ex",
+    "blob_oid": "d708fe2ecb44bb6cfd313dfe17369f92bdfd91ad",
+    "class": "system_extension",
+    "rationale": "Defines LLM tool schemas and converts them to provider definitions for the normal agent profile. Tool selection belongs with Cognition rather than the Platform host."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/tool_call_validator.ex",
+    "blob_oid": "0c5a79cc1386543d3c654276bd7754b7fa65b97b",
+    "class": "system_extension",
+    "rationale": "Validates and optionally repairs model-produced tool calls against declared tool schemas. This is Cognition/tool-loop behavior and does not authorize tool execution."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/tool_error.ex",
+    "blob_oid": "93a6ac99e3a6cccb7f00dfeb5fd2cbb03eea1571",
+    "class": "system_extension",
+    "rationale": "Defines failures produced by normal-profile LLM tool processing and carries no grant or execution authority."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/tool_loop.ex",
+    "blob_oid": "d8688b19e76c4516b7e53a96e3c5ad6046897444",
+    "class": "system_extension",
+    "rationale": "Runs multi-turn model/tool interaction, validates Engine authorization context, invokes first-party tool executors, and feeds results back to the model. This is required Cognition behavior for the normal agent profile and must move out of Platform LLM; it consumes authority but is not the reference monitor that grants it."
+  },
+  {
+    "path": "apps/arbor_llm/lib/arbor/llm/tool_result_budget.ex",
+    "blob_oid": "5dccd3509c7ba4b5a40ce106a503ed307bd21a36",
+    "class": "system_extension",
+    "rationale": "Accounts and JSON-encodes aggregate tool results for the LLM tool loop. The bounds are important, but this helper follows the Cognition-owned tool-loop responsibility rather than becoming a host service."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence.ex",
+    "blob_oid": "30e39b948e19a8201e4df9c5ff786bc658bd293d",
+    "class": "system_extension",
+    "rationale": "This public facade dispatches normal-profile key-value, event, vector, session, relationship, telemetry, and Ecto operations to concrete Persistence implementations. Its authorization and durability-reporting clauses are mixed into a provider-facing facade and must split into the future host admission and invocation boundary rather than making the whole file trusted host."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/agent_telemetry.ex",
+    "blob_oid": "f257f2cef2edf8efcfd197c5cd385e5e8486148a",
+    "class": "system_extension",
+    "rationale": "This module inserts and queries historical agent telemetry through the configured Ecto Repo, including adapter-specific SQL. Runtime configuration wires Arbor.Persistence as the normal telemetry provider; the history remains outside safe boot and host recovery."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/application.ex",
+    "blob_oid": "654f8db6291d4904a25cbe8edda0076cf012c637",
+    "class": "system_extension",
+    "rationale": "This OTP application supervises the normal-profile checkpoint, jobs, and hot EventLog providers and conditionally starts Repo, backup, and snapshot children. It is provider lifecycle wiring; safe mode must omit it and use the planned host-owned minimal state service instead."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/backup.ex",
+    "blob_oid": "1bd5eb1a595d5fbdf0b3348da003fb68b000a608",
+    "class": "optional_extension",
+    "rationale": "This file owns PostgreSQL dump, age encryption, restore, retention, and backup-file management. It is provider-specific operator recovery tooling, not the mandatory provider-independent recovery service required by safe mode."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/backup/scheduler.ex",
+    "blob_oid": "5a652a91c7a3f259d7ef37853ee57cb1c8c2751f",
+    "class": "optional_extension",
+    "rationale": "This disabled-by-default GenServer schedules and invokes PostgreSQL backups. Scheduled backups are an optional operational feature and do not participate in host boot or reference-monitor recovery."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/buffered_store.ex",
+    "blob_oid": "bfb2fa8758eff176cf9388f001ca987aa9112bd2",
+    "class": "system_extension",
+    "rationale": "This GenServer implements a normal-profile ETS cache over a pluggable Store backend, including hydration, replication, and acknowledged write modes. Its authority-mode and authoritative-read API is mixed with replaceable cache/backend mechanics; the future minimal host store and durability admission must be split out before this remains a provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/channel_store.ex",
+    "blob_oid": "68eba538096fa72d921ceb2daf09846d3b91dc29",
+    "class": "system_extension",
+    "rationale": "This Ecto context persists communication channels, membership, and messages. Normal Comms resolves this provider when Persistence is available, while provider-free safe mode does not require channel history."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint.ex",
+    "blob_oid": "8860984d1e66ce5f271dd7967341915a79f4cc66",
+    "class": "system_extension",
+    "rationale": "This module provides process checkpoint save, retrying load, periodic scheduling, and callback-based restore over a caller-selected Store. It supports normal agent recovery but is not the extension-platform boot recovery mechanism and is not non-bypassable host code."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint/store/agent.ex",
+    "blob_oid": "b9f49b30bdb67be474c154822aa69a09b6bc0414",
+    "class": "optional_extension",
+    "rationale": "This process-lifetime Agent checkpoint backend is documented for isolated tests and small scenarios. It is an optional first-party test/development provider, not the normal checkpoint backend."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint/store/ets.ex",
+    "blob_oid": "41faed39cf5cf81fecc64a6eb7131b67805bdcf2",
+    "class": "system_extension",
+    "rationale": "This GenServer owns the named ETS checkpoint table started by the Persistence application and configured for normal agent checkpointing. It is a process-lifetime provider and cannot satisfy safe-mode durable recovery."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/config.ex",
+    "blob_oid": "5f4a4c0d09171e8de63fa82e858ea51c2f365283",
+    "class": "system_extension",
+    "rationale": "This file selects the first-party vector provider from application environment and defaults to the fail-closed unsupported adapter. Target architecture replaces this module-atom selection with authorized provider resolution, so the current responsibility remains with the system vector extension."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/database_case.ex",
+    "blob_oid": "6964092e4cb544700af7c463c6225e578a80cd3c",
+    "class": "optional_extension",
+    "rationale": "This release-inert ExUnit case template starts and sandboxes the Ecto Repo for cross-app database tests. It is first-party validation tooling, not production host or normal-profile provider runtime."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/engagement_store.ex",
+    "blob_oid": "f05d547b38fcb030a1816e587186ed38e05f2a34",
+    "class": "system_extension",
+    "rationale": "This Ecto adapter durably stores Comms engagement records and converts them to and from the Comms contract. The normal Comms profile writes through to it for restart continuity, but safe mode can use neither Comms nor this provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/file_store.ex",
+    "blob_oid": "f662d056fee0b18ccc58d4381595acbf1a6750ac",
+    "class": "optional_extension",
+    "rationale": "This bounded private-directory JSON store persists evaluation runs with path, file-identity, and publication checks. Those checks constrain an optional eval backend; they do not turn evaluation storage into a host reference monitor."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/run_identity.ex",
+    "blob_oid": "70bf2f3acdc73bf08241789264cd9c39eb2ad7cd",
+    "class": "optional_extension",
+    "rationale": "This eval helper captures Git state, dataset hashes, and configuration fingerprints for run provenance. Evaluation provenance is feature-specific tooling and is not needed to boot or recover Arbor."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/store.ex",
+    "blob_oid": "e8d1d428bf1191b77fd0ae50ef6d5f62fda5e1fe",
+    "class": "optional_extension",
+    "rationale": "This high-level evaluation store chooses database or JSON-file persistence and manages eval runs and results. It is an optional first-party evaluation feature, not a normal-profile storage prerequisite."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event.ex",
+    "blob_oid": "7a5508922e2306cda75e7c390dddca5e03b12c7f",
+    "class": "system_extension",
+    "rationale": "This typed event value and constructor are the in-app representation used by the first-party EventLog providers. The generic cross-extension envelope belongs in Kernel, while this Persistence event model belongs with the normal-profile event provider protocol."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log.ex",
+    "blob_oid": "c23e18df5c4d8e60bead1308d59eff3c7d1d6c97",
+    "class": "system_extension",
+    "rationale": "This file defines the EventLog callback surface and implements bounded request, deadline, fingerprint, receipt, and reconciliation rules shared by its adapters. It is the normal first-party event-provider protocol, not the mandatory security audit spool or a pre-Platform primitive."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/agent.ex",
+    "blob_oid": "ccb33d0ee421ae9456ad4b5c886111a15050a5c6",
+    "class": "optional_extension",
+    "rationale": "This Agent-backed in-memory EventLog is described as a lightweight testing alternative. It is an optional process-lifetime provider rather than the normal hot or durable event store."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/bounded_worker.ex",
+    "blob_oid": "4983605d027e9a7494628aeb60f92b14fabffcce",
+    "class": "system_extension",
+    "rationale": "This helper owns deadline-bounded worker execution, owner liveness, termination, and mailbox cleanup for EventLog adapter effects. It is provider-operation containment scoped to the EventLog protocol; extension-wide invocation ownership must be supplied by Platform."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ecto.ex",
+    "blob_oid": "810a12a298be22c382b3475e33fe7779c04f4057",
+    "class": "system_extension",
+    "rationale": "This adapter implements durable EventLog operations, reconciliation, purge, and absence checks on Arbor.Persistence.Repo for SQLite or PostgreSQL. It is a replaceable first-party database provider used by the normal profile."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ets.ex",
+    "blob_oid": "e841ad173c55014653672b547eacf6231d8a5381",
+    "class": "system_extension",
+    "rationale": "This supervised ETS EventLog owns bounded hot event state, stream positions, identities, subscriptions, retention, and reconciliation. It is the normal-profile in-memory event provider and does not provide durable safe-mode audit recovery."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/postgres_repair.ex",
+    "blob_oid": "473f3fd258acef886596477c72a50b585bae564c",
+    "class": "optional_extension",
+    "rationale": "This explicit PostgreSQL maintenance module audits and repairs legacy EventLog positions and identities with operator-bound rollback data. It is optional provider-specific repair tooling, not a mandatory host recovery service."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/snapshotter.ex",
+    "blob_oid": "905a8d38892d5517a107434b735e24a508958e0b",
+    "class": "optional_extension",
+    "rationale": "This disabled-by-default GenServer snapshots EventLog.ETS into a selected Store and prunes retained snapshots. Snapshot acceleration is an optional feature layered on providers, not safe-mode recovery authority."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/filter.ex",
+    "blob_oid": "b78cc17305842205c37717afa4ced5eeaccface8",
+    "class": "system_extension",
+    "rationale": "This compatibility facade delegates query-filter construction and evaluation to the Kernel contract used by QueryableStore providers. The primitive already lives in Kernel; this Persistence namespace shim belongs with the normal provider API."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/legacy_embedding_store.ex",
+    "blob_oid": "603b66f073272de6d07e74756f49a13fe7b72a86",
+    "class": "optional_extension",
+    "rationale": "This module validates and operates the retired memory_embeddings representation alongside the strict vector path. It is a compatibility provider retained for migration and is not required by the target normal profile."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/migration_helper.ex",
+    "blob_oid": "0325b687ce042188e14c2e5136771c2e470c9e7c",
+    "class": "system_extension",
+    "rationale": "This helper supplies adapter-aware schema inspection and SQL fragments for the normal SQLite/PostgreSQL Repo migrations. It is lifecycle support for the first-party database provider, not host-owned boot state."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/postgrex_types.ex",
+    "blob_oid": "e938eb8e1833ddb9e542858a80a82e7eb51bf9b9",
+    "class": "system_extension",
+    "rationale": "This compile-time Postgrex type definition adds pgvector and Ecto PostgreSQL extensions for Arbor.Persistence.Repo. It is concrete PostgreSQL provider plumbing required only when that first-party backend is selected."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/agent.ex",
+    "blob_oid": "8027b7bb1fd3a5cf1a0273e8b6af9870040d6182",
+    "class": "optional_extension",
+    "rationale": "This Agent-backed QueryableStore offers process-lifetime filtering and CAS for tests and small datasets. It is an optional first-party alternative, not the normal jobs or durable record provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/ets.ex",
+    "blob_oid": "a409b4ebd8971417329e6b02a1bb468ca9f671d5",
+    "class": "system_extension",
+    "rationale": "This GenServer owns the bounded ETS QueryableStore started as the normal-profile jobs store, including record revision and CAS semantics. It is a replaceable process-lifetime provider and is not safe-mode durable state."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/postgres.ex",
+    "blob_oid": "d666e98595674d6aec252a5045f8cf34725828a1",
+    "class": "system_extension",
+    "rationale": "This Ecto-backed QueryableStore implements namespaced records, bounded listing, filtering, aggregation, tombstones, and linearizable CAS. It is the normal first-party durable key-value provider, not the host durability reference monitor."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/record.ex",
+    "blob_oid": "d4a2e57eaf46e4495a7c0d7be47ab4dadd58e385",
+    "class": "system_extension",
+    "rationale": "This Persistence namespace wrapper delegates record construction and update to the Kernel contract used by Store implementations. The stable value primitive is already Kernel-owned; this shim belongs to the system provider surface."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/relationship_store.ex",
+    "blob_oid": "7f5641ab330c862ccbff2dfe93b09015007299fe",
+    "class": "system_extension",
+    "rationale": "This bounded Ecto store owns tenant-scoped relationship rows, transactional deletion, and plain-map conversion for normal agent memory. It is a first-party normal-profile memory provider and carries no safe-boot reference-monitor role."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/repo.ex",
+    "blob_oid": "1ffc646a1d5a7951e0c5ebb5c41a31f96226de7e",
+    "class": "system_extension",
+    "rationale": "This Ecto.Repo selects and owns the SQLite or PostgreSQL connection pool used by normal durable Persistence features. A concrete database runtime is replaceable provider infrastructure and is explicitly excluded from safe mode."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/channel.ex",
+    "blob_oid": "248f268e63a362f6f4766c86d11694f3a1d73e9b",
+    "class": "system_extension",
+    "rationale": "This Ecto schema defines communication channel rows and membership metadata. It is the storage representation used by the normal first-party Comms persistence provider, outside safe boot."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/channel_message.ex",
+    "blob_oid": "5351b7334da6a9f2676418e54abb1e6456a54a53",
+    "class": "system_extension",
+    "rationale": "This Ecto schema defines channel message rows, sender fields, content, and timestamps. It is storage representation for the normal first-party Comms channel provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/engagement.ex",
+    "blob_oid": "5a06869da5c6bb9ab1d99d30d0b72f0afab2981f",
+    "class": "system_extension",
+    "rationale": "This Ecto schema persists device-independent Comms engagement state. It is concrete storage for the normal Comms continuity provider and is excluded from provider-free safe mode."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/eval_result.ex",
+    "blob_oid": "7957a238de5769ea4bf893996d8fb3f34a9e545e",
+    "class": "optional_extension",
+    "rationale": "This schema owns individual evaluation result rows and validation. Eval result retention is optional experimentation infrastructure, not boot or recovery state."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/eval_run.ex",
+    "blob_oid": "09bef3187afee89bdceecb7b7773ae3bed52a81e",
+    "class": "optional_extension",
+    "rationale": "This schema owns evaluation run metadata, status, provenance, and aggregate metrics. It supports the optional eval subsystem rather than a normal-profile persistence requirement."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event.ex",
+    "blob_oid": "19b2d63881c1e1121c97f89eac6f71652f35f3d1",
+    "class": "system_extension",
+    "rationale": "This Ecto schema maps canonical Persistence events to durable rows with stream, global-position, and operation identity constraints. It is concrete storage representation for the normal EventLog database provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event_log_operation.ex",
+    "blob_oid": "156992639e1fe61f25191638a8e0e078e6d1717b",
+    "class": "system_extension",
+    "rationale": "This Ecto schema stores EventLog operation fences, identity, status, and abort reason for reconciliation. It is internal durable state of the first-party EventLog provider, not generic Platform transaction state."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/memory_embedding.ex",
+    "blob_oid": "1ad14272fc5f0205af03e07c5ade982e38785516",
+    "class": "optional_extension",
+    "rationale": "This schema maps the legacy memory_embeddings table and pgvector field, with strict-vector ownership markers kept read-only. It belongs to the optional legacy embedding compatibility path."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/record.ex",
+    "blob_oid": "7527479b9951eda53bcc2b77b49f19f53644e255",
+    "class": "system_extension",
+    "rationale": "This Ecto schema maps namespaced QueryableStore records and backend-owned generation, revision, and tombstone fields. It is concrete representation for the normal durable key-value provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/relationship.ex",
+    "blob_oid": "d23ab11b8b0c57b59ed165477f49a7e60014544a",
+    "class": "system_extension",
+    "rationale": "This Ecto schema defines tenant-owned relationship memory and closed plain-map conversion. It is storage representation for the normal first-party relationship-memory provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/session.ex",
+    "blob_oid": "c6aa0f8efc3c3ebdc87ad5875b8ce530bb669d44",
+    "class": "system_extension",
+    "rationale": "This Ecto schema owns agent session identity, lifecycle status, model context, and entry association. Durable sessions are part of the normal agent profile but are not required for provider-free safe boot."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/session_entry.ex",
+    "blob_oid": "b677b3cf383912cd32e2d608eaed53f807ae2be7",
+    "class": "system_extension",
+    "rationale": "This Ecto schema defines append-only session transcript entries, ordering, roles, tool content, and metadata. It is normal-profile agent session storage, not host recovery authority."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/skill_record.ex",
+    "blob_oid": "7a5e060c7e92a22af432622c3994a4d4e7bf7df6",
+    "class": "system_extension",
+    "rationale": "This Ecto schema stores skill content, provenance, taint, full-text fields, and embeddings for hybrid search. Runtime wires the persistent skill provider into the normal profile; it must remain distinct from extension activation authority."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/telemetry_event.ex",
+    "blob_oid": "2c5e90674d8614084c25ed878946c19017fca289",
+    "class": "system_extension",
+    "rationale": "This schema represents historical telemetry rows and normalizes telemetry payloads for JSON storage. It is concrete storage for the telemetry provider wired into the normal runtime profile."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/session_store.ex",
+    "blob_oid": "d3071f4eb6390ea6f5849b18731b8fb125b212e8",
+    "class": "system_extension",
+    "rationale": "This Ecto context manages normal agent sessions and append-only transcript entries, including tenant checks, transaction deadlines, SQLite contention handling, and export. Those strong provider invariants do not make session persistence a safe-boot host service."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/skill_search.ex",
+    "blob_oid": "6c766e14e48c28b68109c766424b2d36daf44470",
+    "class": "system_extension",
+    "rationale": "This module owns PostgreSQL hybrid skill search, indexing, embedding metadata, and fallback reporting. Runtime selects Arbor.Persistence as the normal skill provider, but this index is not the mandatory extension contribution registry."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/store/agent.ex",
+    "blob_oid": "ba71375f9a8e8f9b98433c3258b05ba65b07ba02",
+    "class": "optional_extension",
+    "rationale": "This Agent-backed Store provides process-lifetime values, revision fencing, and CAS for tests and small datasets. It is an optional in-memory provider, not normal durable or safe-mode state."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/store/ets.ex",
+    "blob_oid": "b3a0143f4d71bb33a76c939a38aa416f137b5546",
+    "class": "optional_extension",
+    "rationale": "This supervised ETS Store supplies bounded process-lifetime key-value storage and CAS, primarily as an injected test or lightweight backend. The normal application starts QueryableStore.ETS instead, so this is an optional provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_boundary.ex",
+    "blob_oid": "a3538f890aee91eb9e2852f07e6c133a4e7780ad",
+    "class": "system_extension",
+    "rationale": "This boundary validates vector requests and results, enforces tenant consistency, resolves the configured backend, and dispatches vector operations. It is the normal vector provider protocol boundary; authenticated caller and exact provider-generation authorization must be added outside it by Platform."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store.ex",
+    "blob_oid": "f66e6b1f330fed15ea0f7eab6fa462a07d538aa9",
+    "class": "system_extension",
+    "rationale": "This behaviour defines the strict vector provider operations for execute, reconcile, fetch, list, search, and destroy. It is the first-party vector protocol selected for the system-extension proof, not a generic pre-Platform ABI."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto.ex",
+    "blob_oid": "04b92296fa35c6203fc53244e2eeffb418b4d323",
+    "class": "system_extension",
+    "rationale": "This Ecto implementation owns strict vector rows, agent fences, mutation receipts, transactional reconciliation, search, and destructive cleanup. It is the concrete release-bundled vector provider chosen for the system-extension lifecycle proof."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/agent_fence_row.ex",
+    "blob_oid": "3e34488056223c459c54c923d2af84b29aa695aa",
+    "class": "system_extension",
+    "rationale": "This Ecto schema records per-agent vector destruction fences. It is internal state of the strict first-party vector database provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/codec.ex",
+    "blob_oid": "bf3813b1fe739da735c6d8cd7566f36f704e26d6",
+    "class": "system_extension",
+    "rationale": "This codec serializes vector operation preflight ledgers and receipts, converts vectors, enforces encoding limits, and computes provider digests. It is protocol plumbing for the strict system vector provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/operation_receipt_row.ex",
+    "blob_oid": "b16f1099cb1d9225e3e69fa18ead04e552633c53",
+    "class": "system_extension",
+    "rationale": "This Ecto schema stores strict vector operation fingerprints, receipts, and reconciliation status. It is provider-owned operation state and must not be confused with Platform activation receipts."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/vector_row.ex",
+    "blob_oid": "88b2c967943935caf32b7d410b11b23992953a96",
+    "class": "system_extension",
+    "rationale": "This Ecto schema defines tenant-scoped strict vector records, source identity, model descriptor, category, metadata, and pgvector value. It is the concrete data model of the normal first-party vector provider."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/unsupported.ex",
+    "blob_oid": "17e5edad1feb7b35be17858317f24daca6cdfc71",
+    "class": "system_extension",
+    "rationale": "This inert adapter returns unsupported for every vector operation when no concrete backend is configured. It is the fail-closed default implementation of the system vector provider seam, not a host reference monitor."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/arbor/persistence/verdict_log.ex",
+    "blob_oid": "20fc4c3af885d77d846dbefd7388d118f19de70d",
+    "class": "optional_extension",
+    "rationale": "This module projects council verdicts and findings into eval-run persistence when the Repo is available. Council result history is an optional Cognition feature and is distinct from mandatory security lifecycle audit."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup.ex",
+    "blob_oid": "04be9edad4d44d0964f30520673bbe8129e2ad40",
+    "class": "optional_extension",
+    "rationale": "This Mix task presents the encrypted PostgreSQL backup operation and its prerequisites to an operator. It is optional development/operator tooling and is excluded from the safe release profile."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup/list.ex",
+    "blob_oid": "3e3b70d16aa13e64278b356ae887f7658bc2f9d6",
+    "class": "optional_extension",
+    "rationale": "This Mix task lists and formats encrypted database backup files. It is optional operator presentation over the backup feature."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup/restore.ex",
+    "blob_oid": "7e408c6ba810a98f3bb9f904dc7aa46636b4146f",
+    "class": "optional_extension",
+    "rationale": "This Mix task confirms and invokes destructive PostgreSQL restore using an age private key. It is provider-specific operator tooling, not the mandatory headless safe-mode recovery API."
+  },
+  {
+    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/event_log/repair.ex",
+    "blob_oid": "bfcfd661a02dd660c599e40e4b9b2e3d7d7e6558",
+    "class": "optional_extension",
+    "rationale": "This Mix task starts database dependencies and exposes audited legacy EventLog repair modes. It is optional PostgreSQL maintenance presentation and should not ship in the safe host payload."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto.ex",
+    "blob_oid": "25005a4374beeb85b7ca87dbe3d455c1116ca83d",
+    "class": "optional_extension",
+    "rationale": "This facade exposes an explicitly configured EventStore-backed Postgres adapter and availability probe. The separate EventStore package is an opt-in first-party alternative to the normal Repo-backed EventLog provider."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/application.ex",
+    "blob_oid": "4e88aecdca1a849b7efcc755ff1e56e5f21e0e51",
+    "class": "optional_extension",
+    "rationale": "This application starts an empty supervisor and requires users to add the EventStore child explicitly. It is lifecycle scaffolding for the opt-in EventStore provider, not normal-profile or safe-host startup."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log.ex",
+    "blob_oid": "008c04f2e2d046a7b6c32142c0ca4419cb81ebe1",
+    "class": "optional_extension",
+    "rationale": "This adapter implements the Persistence EventLog contract over the external EventStore library and PostgreSQL, including operation fences and reconciliation. It is Arbor-supplied but opt-in, so it is an optional rather than third-party extension."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log_schema.ex",
+    "blob_oid": "400ad34bfe411c2cde51f93cc57af7b15a280541",
+    "class": "optional_extension",
+    "rationale": "This module migrates and verifies the exact PostgreSQL schema, constraints, locks, triggers, and protocol version required by the opt-in EventStore adapter. Strong schema admission remains provider implementation responsibility."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_serializer.ex",
+    "blob_oid": "4eab62c0fecc3657a5a4fe95a60aed949bfeb7b6",
+    "class": "optional_extension",
+    "rationale": "This JSON serializer adapts Arbor's string-typed event contract to the EventStore library. It is implementation plumbing for the optional first-party Postgres provider."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_store.ex",
+    "blob_oid": "743d92b62cf2ca2435a6aa8eda50e4e8aa1b7a7f",
+    "class": "optional_extension",
+    "rationale": "This module instantiates the external EventStore library with Arbor configuration and serializer. It is an independently selectable Arbor-supplied database adapter, not independently supplied third-party extension code."
+  },
+  {
+    "path": "apps/arbor_persistence_ecto/lib/mix/tasks/arbor.event_log.migrate.ex",
+    "blob_oid": "1469df74b3fa6b25c055625fb6d66c8b875fd3fc",
+    "class": "optional_extension",
+    "rationale": "This Mix task runs and verifies the optional EventStore provider's PostgreSQL migrations. It is provider-specific operator tooling and is not part of normal or safe boot."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox.ex",
+    "blob_oid": "517851ba2ac6ef5aa76cae474f7574ecd5542ee1",
+    "class": "trusted_host",
+    "rationale": "Owns the public sandbox admission facade and capability checks for lifecycle effects. The direct create, destroy, VFS, and eval provider calls are mixed lower-level surfaces that must split behind the future host invocation proxy."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/application.ex",
+    "blob_oid": "2c4821d21619cf36ecfcd33bced33101d91e9dcf",
+    "class": "system_extension",
+    "rationale": "Starts the in-VM sandbox registry and Dune session supervision used by the normal Arbor profile; this provider runtime is not part of provider-free boot or recovery."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/code.ex",
+    "blob_oid": "28edf1b58b10b8187e71620ad176ba44fd31b7f6",
+    "class": "system_extension",
+    "rationale": "Implements the current AST allowlist and dangerous-call filter for the in-VM code sandbox. It is policy inside a replaceable execution implementation, not the non-bypassable isolation admission point."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/exec_session.ex",
+    "blob_oid": "7ab01c71aea30bd767bfeaab8bbc69ff318ec605",
+    "class": "system_extension",
+    "rationale": "Owns persistent per-agent evaluation state through Dune.Session, including provider-specific reduction, heap, and timeout options. This is the normal-profile Dune provider implementation."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/exec_supervisor.ex",
+    "blob_oid": "52108b18468f38853374c7fe76870c83e0396515",
+    "class": "system_extension",
+    "rationale": "Supervises and registers Dune-backed ExecSession processes by agent identity. Its lifecycle belongs to the normal-profile sandbox provider, while host admission must precede calls into it."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/filesystem.ex",
+    "blob_oid": "5573130954993b984fc324f93f455d44d1850409",
+    "class": "system_extension",
+    "rationale": "Implements the current per-agent directory sandbox, SafePath resolution, and level-based file permissions. These checks are part of a replaceable filesystem sandbox implementation rather than the fixed invocation reference monitor."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/registry.ex",
+    "blob_oid": "cd80411877f02532490b8618aeda4e211b823bfb",
+    "class": "system_extension",
+    "rationale": "Stores mutable lifecycle state for the current in-VM sandbox implementation and exposes direct registration and removal. It should remain provider-owned state behind authenticated host handles."
+  },
+  {
+    "path": "apps/arbor_sandbox/lib/arbor/sandbox/virtual.ex",
+    "blob_oid": "07829820e0e8eb30ca94231bdf25e0aeba4b11f4",
+    "class": "optional_extension",
+    "rationale": "Adapts JidoSandbox as an in-memory preview VFS with snapshots and Lua evaluation. Preview and dry-run VFS behavior is a first-party feature not required by a normal profile or recovery."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security.ex",
+    "blob_oid": "5ae2543809dfeb5e1ae21083cb0f9602b0ac3161",
+    "class": "trusted_host",
+    "rationale": "This facade owns the authoritative capability, identity, revocation, egress, and signing-authority entrypoints. Its OIDC, role, keychain, and event-query conveniences must split to extensions, but the file is currently governed by its non-bypassable reference-monitor API."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/application.ex",
+    "blob_oid": "4851dd323f47abd7fb94065284def9f8e2fbe64d",
+    "class": "trusted_host",
+    "rationale": "This application callback statically assembles the identity, issuer, nonce, authority, capability, URI, and receipt services that currently form the reference monitor. The BufferedStore-backed children must later split from the fixed host bootstrap so recovery does not require a persistence provider."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/auth_decision.ex",
+    "blob_oid": "fa3b453303b4843584f44b218dfb2cfe6e0c7ec8",
+    "class": "trusted_host",
+    "rationale": "This pure evaluator orders canonical URI, identity, capability, signature, delegation, constraint, file, egress, and approval checks and returns the reference-monitor decision. It is the mandatory fail-closed authorization mechanism, not a policy provider."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/capability/signer.ex",
+    "blob_oid": "d38e54d12d116b795ea1c86925011b2c1c20e508",
+    "class": "trusted_host",
+    "rationale": "This module signs and verifies canonical capability and delegation payloads. Those proofs define Platform authority, so the mechanism belongs with the capability reference monitor even though it is pure and delegates raw Ed25519 operations to the lower cryptographic primitive."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/capability_store.ex",
+    "blob_oid": "f197bc6a1bd9a255c3720b0dc57ec3ad8a9fd968",
+    "class": "trusted_host",
+    "rationale": "This service is the authoritative live capability index and owns replacement, expiration, usage, cascading revocation, acknowledged mutation, and peer invalidation. Its configurable durable backend must split, but capability and revocation state must remain available to safe recovery."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/capability_store/serializer.ex",
+    "blob_oid": "347b7700658935c9f417655bfc85742cf88aec7c",
+    "class": "trusted_host",
+    "rationale": "This serializer preserves signed capability fields, constraints, and delegation records across authority-state recovery. It is part of the host-owned capability state format; a replaceable storage provider may carry the bytes but cannot redefine this authorization record."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/config.ex",
+    "blob_oid": "6bbeb544373775b31439812ffc4427f84ac49b44",
+    "class": "trusted_host",
+    "rationale": "This module supplies identity, signing, replay, quota, constraint, authority, and distributed-security controls consumed by the reference monitor. OIDC and approval-delivery settings need a provider split, and weakening host controls must become boot-bound rather than mutable application configuration."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/constraint.ex",
+    "blob_oid": "3359ca2c9d27fe9fb722e7f8376b1e90028f5351",
+    "class": "trusted_host",
+    "rationale": "This evaluator enforces time, path, and rate constraints carried by an admitted capability before use. Constraint enforcement is part of the non-bypassable capability decision, while approval policy is deliberately handled at a separate integration point."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/constraint/rate_limiter.ex",
+    "blob_oid": "e5e5c4aaf38a247160ac91e7f0fe688399a0967e",
+    "class": "trusted_host",
+    "rationale": "This GenServer owns per-principal and resource token buckets used by capability constraint enforcement. Because authorization depends on consuming this state and must fail closed when it is unavailable, it is reference-monitor state rather than an optional metrics limiter."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/crypto.ex",
+    "blob_oid": "2ac651a5972c919d822d60fbd36e36efbf2f3476",
+    "class": "k_primitive",
+    "rationale": "This stateless module exposes provider-independent Ed25519, X25519, HKDF, AES-GCM, hashing, and deterministic identity derivation operations. These generic cryptographic mechanisms are needed to verify boot and extension evidence before Platform policy or a provider can be trusted."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/delivery_receipt_broker.ex",
+    "blob_oid": "253c4683aa3849aa9a60daef3d6846ffca219c19",
+    "class": "trusted_host",
+    "rationale": "This private broker mints, binds, expires, consumes, and discards one-use receipts that transfer an authorization decision to an exact resource and action. Its anti-replay state is part of the host invocation boundary and intentionally cannot be supplied by an extension."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/disclosure_capability.ex",
+    "blob_oid": "bc3251fd6cd90eeab444f98c25c1e02d2fbae0d4",
+    "class": "optional_extension",
+    "rationale": "This module defines the specialized first-party grant convention for an authenticated human to disclose one bounded turn to an external model route. Interactive disclosure is a future Voice/ingress feature, not required for boot or recovery; actual grant signing and enforcement remain host services."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/double_ratchet.ex",
+    "blob_oid": "ad9293092f459c81cd670b2251a2ee18228530a5",
+    "class": "optional_extension",
+    "rationale": "This module implements per-message forward secrecy and out-of-order key handling for two-party encrypted communications. Secure peer messaging is a first-party feature above the recovery boundary, while the underlying generic cryptography remains available independently."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/egress_gate.ex",
+    "blob_oid": "71dc3d06adf339e7ba27c0f75a231dce74ac9bab",
+    "class": "trusted_host",
+    "rationale": "This module combines destination tier, taint classification, capability constraints, and resolved policy mode into the final egress allow, ask, or block decision. Extensions cannot authenticate or constrain their own outbound data flow, so this gate belongs to the fixed host."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/escalation.ex",
+    "blob_oid": "ef412f8aebc64258242c57d406130c85067b2ce8",
+    "class": "system_extension",
+    "rationale": "This adapter packages pending approvals and delivers them through first-party Comms or Consensus integrations. A normal interactive profile needs an approval provider, but safe recovery only needs the host to fail closed when none is available; the upward runtime bridges must leave Security."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/events.ex",
+    "blob_oid": "d6d902d4a5834c6a00ebf292d7435085dd373756",
+    "class": "system_extension",
+    "rationale": "This file owns best-effort persistence and query helpers for normal security history through configurable Historian/Persistence modules. The future mandatory pre-effect audit intent and spool must split into the host because this implementation deliberately swallows backend failure."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/file_guard.ex",
+    "blob_oid": "68c7de7397e2a0d502643f333f6d00551bda874a",
+    "class": "trusted_host",
+    "rationale": "This module resolves requested paths against path-scoped filesystem capabilities and enforces roots, patterns, exclusions, depth, and expiry. It is the mandatory filesystem reference monitor beneath any replaceable file or execution provider."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
+    "blob_oid": "a6d70b1de520f9cec5b8b67d37782e02195abdbc",
+    "class": "trusted_host",
+    "rationale": "This service performs check-and-record replay prevention for signed requests and propagates observed nonces across nodes. Replay state is mandatory verification state; the current Signals transport may be replaced, but an extension cannot own or bypass the check."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/identity/registry.ex",
+    "blob_oid": "39844d34c9607f7622b12285174d0f13cacf9468",
+    "class": "trusted_host",
+    "rationale": "This registry is the authoritative source of active public keys and identity lifecycle status used by request and issuer verification. Its OIDC registration path and BufferedStore persistence are mixed provider concerns that must split from the host-owned lookup, suspension, revocation, and cache coherence."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/identity/verifier.ex",
+    "blob_oid": "96e89617bda60f8a55f6c0b126a60b29b3e7a753",
+    "class": "trusted_host",
+    "rationale": "This pipeline canonicalizes signed requests, checks timestamp freshness and active identity keys, verifies signatures, and atomically admits nonces. It is the mandatory principal-authentication path for host authorization."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/issuer_registry.ex",
+    "blob_oid": "8b0c84ef94f70691260c7b8d65f1f9f39fb6e6d3",
+    "class": "trusted_host",
+    "rationale": "This registry decides which active identities may sign capability declarations and bounds each issuer by enrolled authority envelopes. Its persistence backend is replaceable, but issuer enrollment, revocation, and envelope admission are reference-monitor authority state."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/kernel.ex",
+    "blob_oid": "749bf984ca9b9b0a168b6086b887f81605a0c5e1",
+    "class": "trusted_host",
+    "rationale": "Despite its name, this module is a Platform capability command helper that asks SystemAuthority to sign grants and CapabilityStore to commit or revoke them. It mutates security authority and therefore belongs to the trusted host, not the pre-Platform Kernel primitive set."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/key_file.ex",
+    "blob_oid": "2332de78d64e2ff27331f4ca40d63d73de346c08",
+    "class": "optional_extension",
+    "rationale": "This parser and disk-reading convenience supports operator, scheduler, and registration tooling for the optional .arbor.key format. Safe boot verification must use boot-protected key material and does not depend on this user-file adapter."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/keychain.ex",
+    "blob_oid": "a066499c11035d61aebfee5b46b2ac702361ce53",
+    "class": "optional_extension",
+    "rationale": "This value object manages peer keys, channel keys, ratchet sessions, and encrypted checkpoint serialization for agent communications. Those peer-messaging facilities are optional and do not own Platform principal or capability verification."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc.ex",
+    "blob_oid": "cfd148f97560afc14200befa5065b31a11eb385b",
+    "class": "optional_extension",
+    "rationale": "This facade orchestrates external OIDC login, human key binding, token caching, role grants, and operator signing-authority acquisition. OIDC is a first-party authentication method that can be absent in safe mode; resulting identities and grants must still pass host registration and authority checks."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/auth_code_flow.ex",
+    "blob_oid": "a18ff3aa7998684a2167d9ed8eefc6ef827ea67f",
+    "class": "optional_extension",
+    "rationale": "This module implements the browser Authorization Code and PKCE transport, including bounded provider input and token exchange. It is one optional external authentication flow and does not define the fixed principal-verification boundary."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/config.ex",
+    "blob_oid": "16a6f5976b709f4479320b55bd7b629c696d6093",
+    "class": "optional_extension",
+    "rationale": "This reader owns configured OIDC providers, device-flow settings, and the token-cache path. Those are configuration inputs for an optional authentication adapter, not boot-bound host security policy."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/device_flow.ex",
+    "blob_oid": "904e28b0ef309d5219c274deb807c820dfee5994",
+    "class": "optional_extension",
+    "rationale": "This module composes RFC 8628 device authorization, polling, refresh, and trusted endpoint discovery for CLI login. It is an optional first-party OIDC transport whose absence cannot prevent host recovery."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/discovery.ex",
+    "blob_oid": "f0d7ff711f67f6a04b5260aaa7c6e48e673a8660",
+    "class": "optional_extension",
+    "rationale": "This module validates OIDC issuers and discovers operation-specific endpoints with origin, scheme, size, and timeout controls. Those strong checks secure a replaceable external identity method; they do not make that method part of the recovery host."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/identity_store.ex",
+    "blob_oid": "d9ec2431ad434fa564d53f00a7fa6d37e5825c78",
+    "class": "optional_extension",
+    "rationale": "This adapter maps OIDC issuer and subject claims to persistent human keypairs and human principal IDs. It is explicitly an identity-store implementation for the optional OIDC method; host identity admission and status remain separate."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/oidc/token_verifier.ex",
+    "blob_oid": "f29a45f3a2906ef89a95e014d7cc13fbb54b74dc",
+    "class": "optional_extension",
+    "rationale": "This implementation fetches and caches external JWKS data and verifies OIDC JWT signatures, issuer, audience, expiry, and subject claims. It secures one independently replaceable authentication method rather than the host's native signed-request verifier."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/reflex.ex",
+    "blob_oid": "5489ada5c7e6ccd1676e12ce00c33d5c88fd4a62",
+    "class": "system_extension",
+    "rationale": "This module evaluates and administers first-party pattern and path reflex policies before capability authorization. Reflex advice is a normal-profile defense layer, but policy definitions are replaceable inputs and cannot replace the capability reference monitor; registration controls must be narrowed."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/reflex/builtin.ex",
+    "blob_oid": "3fdeb4e81e4331f68eb956940c9a117b6b34d906",
+    "class": "system_extension",
+    "rationale": "This file owns Arbor's bundled shell, filesystem, network, and infrastructure danger patterns. They are first-party normal-profile policy content, not generic pre-Platform mechanism or the final authorization authority."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/reflex/registry.ex",
+    "blob_oid": "c6c46fec0803ffde04fe64936d923d4594330843",
+    "class": "system_extension",
+    "rationale": "This public ETS registry stores mutable reflex policy definitions and loads the bundled set. It is currently the source for a normal-profile policy provider; future activation must make built-ins immutable and admit signed generations without allowing registry mutation to replace the host monitor."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
+    "blob_oid": "59554fdcfee625d1aabb2584b4f8e01de7a0fe0c",
+    "class": "trusted_host",
+    "rationale": "This pure module defines the closed acknowledged-revoke fence, capability digest, bounds, and exact observed-record matching used around authoritative deletion. It is host revocation and recovery protocol, not a storage-provider schema."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/role.ex",
+    "blob_oid": "ff323991c1973faa33c105ca3534f66156ee4b3a",
+    "class": "system_extension",
+    "rationale": "This module supplies bundled and operator-configured role-to-capability policy, including the default OIDC human role and opt-in development role. Roles are first-party policy input for a normal profile; every resulting grant remains subject to host issuance and authorization."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/session_token.ex",
+    "blob_oid": "29243da9b1dc4b2f226be25e6f19e4641766c759",
+    "class": "optional_extension",
+    "rationale": "This module issues and verifies short-lived HMAC session tokens so OIDC-authenticated humans can use UI and API sessions without per-call Ed25519 signatures. That convenience authentication method is optional; safe recovery can use native signed principals."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/signal_sync.ex",
+    "blob_oid": "c801b5e42b1adcc651afa72cc87132d3ecd33fc6",
+    "class": "trusted_host",
+    "rationale": "This helper establishes and maintains the cluster subscriptions currently used for nonce, identity, and capability security-state coherence. Signals is migration debt, but the authenticated synchronization responsibility is load-bearing host behavior until an explicit transport replaces it."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/signing_authority_broker.ex",
+    "blob_oid": "dc1c4cb11ecd8dabeab3e6fc81396391385ed2b2",
+    "class": "trusted_host",
+    "rationale": "The broker and one-shot KeyHolder own proof-bound acquisition, wrapping, lease ownership, restart grace, signing, secret derivation, expiry, and revocation of private signing authority. Key custody and authority lifetime are mandatory host responsibilities."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/signing_authority_state_owner.ex",
+    "blob_oid": "23cd41f7f1753c3fd8c770ea120bc419dc86515e",
+    "class": "trusted_host",
+    "rationale": "This protected GenServer retains finalized persistent signing-authority metadata across broker-only restarts and restricts replacement to the live broker. It is a recovery component for host key authority, not provider state."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/signing_key_store.ex",
+    "blob_oid": "f875d3ca50a32402b3d5a5fb2bb8c48ac1177dc8",
+    "class": "trusted_host",
+    "rationale": "This module encrypts, retrieves, reports, and deletes agent and system private key material under a purpose-derived master key. Key custody is fixed-host authority; the current BufferedStore and filesystem persistence mechanisms must be separated behind sealed host state or an admitted backend."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/store/json_file.ex",
+    "blob_oid": "3c7dae5c08b88a441b76d72d83f05cad57b2c844",
+    "class": "system_extension",
+    "rationale": "This is a generic first-party JSON file Persistence.Store backend with local locking, CAS, migration, fsync, and node-restart durability. It is the normal local authority-state provider today, but safe recovery must not make this replaceable filesystem implementation its only state mechanism."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/subagent_isolation.ex",
+    "blob_oid": "528c34a93b0ad0625461b9fcfbdb02c7c7af6425",
+    "class": "optional_extension",
+    "rationale": "This helper creates and cleans up task-scoped attenuated capability sets for Cognition worker subagents. Delegated-work orchestration is an optional first-party feature; the host still owns capability validation, signing, storage, and revocation."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/system_authority.ex",
+    "blob_oid": "ace627e3f126e289d30a71177a139896221b2de2",
+    "class": "trusted_host",
+    "rationale": "This service holds the local root signing identity and signs or verifies capabilities, receipts, and agent endorsements. Its current persistence through SigningKeyStore and BufferedStore must split from the authority mechanism, but no extension may supply its own root of trust."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/telemetry.ex",
+    "blob_oid": "6f051b0ca864f3046d70104dabba03ad81c53250",
+    "class": "system_extension",
+    "rationale": "This best-effort helper projects security events into telemetry metadata for the normal Signals observability bridge and intentionally rescues emission failures. It is instrumentation, not the future mandatory audit-intent boundary required for safe recovery."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/test_bootstrap.ex",
+    "blob_oid": "3c5f0baea5cb51cb47271e0019747989d3f6879d",
+    "class": "optional_extension",
+    "rationale": "This inert release module starts Security and BufferedStore children only for isolated ExUnit consumers when normal children are disabled. It is first-party development support and has no production boot, authorization, or recovery responsibility."
+  },
+  {
+    "path": "apps/arbor_security/lib/arbor/security/uri_registry.ex",
+    "blob_oid": "155802244f3464ad45dca5a5192b5aa1f8602810",
+    "class": "trusted_host",
+    "rationale": "This registry enforces the canonical capability namespace and denies authorization for unregistered URIs. Core prefixes and overlap policy are host-owned; public runtime mutation must become an authenticated generation-bound activation transaction rather than an extension-controlled registry call."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell.ex",
+    "blob_oid": "00ba8dc08a961619385fc0fe9110adca31a93ede",
+    "class": "trusted_host",
+    "rationale": "Owns the public Shell facade, agent authorization, command disclosure boundary, and effect lifecycle entry points. Its trusted-system bypasses and native or Apple provider dispatch are mixed responsibilities that must split into narrow host bootstrap and authorized provider proxies."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_admission_core.ex",
+    "blob_oid": "c69ad83fafe6c0a39f9dc2152605777e4b3ee1fb",
+    "class": "optional_extension",
+    "rationale": "Validates Apple Container-specific image, dependency, signing, platform, and control-plane evidence. The strong checks admit one platform-specific provider and do not make that provider part of the fixed host."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_control_plane_admission_core.ex",
+    "blob_oid": "49b35a6a281690edfbd329c7ace2baa0570192a0",
+    "class": "optional_extension",
+    "rationale": "Validates fixed Apple CLI, apiserver, plugin, signing, and startup-binding evidence for the Apple Container control plane. This is provider-specific admission logic for an optional macOS backend."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_control_plane_authority.ex",
+    "blob_oid": "ba6bdc594919c66f2b929b226f458c9e57f29413",
+    "class": "optional_extension",
+    "rationale": "Pins and privately owns Apple Container control-plane artifact bindings for later provider checkout. It is authority internal to the optional Apple provider; generic host artifact verification must remain outside it."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_execution_core.ex",
+    "blob_oid": "dc228a1d5c08225c21a770e5bbdaea9b9599248b",
+    "class": "optional_extension",
+    "rationale": "Converts spawn-capable Mix requests and Apple admission receipts into Apple Container plans and bounded settings. Its request vocabulary and planning are specific to the optional provider."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_executor.ex",
+    "blob_oid": "0ed1316b3c764a1642c195dfd86075145ff6f41b",
+    "class": "optional_extension",
+    "rationale": "Composes Apple probing, unit creation, worker ownership, registry publication, and settlement for the spawn-capable backend. Generic invocation authorization and cleanup receipts must be split into the host before this provider is replaceable."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_image_policy_authority.ex",
+    "blob_oid": "0cc6f12c30f460b634c2e835afc2d8db133ca454",
+    "class": "optional_extension",
+    "rationale": "Owns startup-pinned Apple workload and init image policy bound to the Linux dependency receipt. This is provider-specific image evidence, not Platform's generic activation or invocation authority."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_plan_core.ex",
+    "blob_oid": "d271aa9a23c8569dd3d46a0421251eb8e712afae",
+    "class": "optional_extension",
+    "rationale": "Builds immutable Apple Container create, start, mount, resource, and cleanup argv from a closed request. Those plans encode one optional macOS launcher and are not a generic host primitive."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_probe_core.ex",
+    "blob_oid": "e9b7392dfdcfee6dd0b706b65f310969f35e365d",
+    "class": "optional_extension",
+    "rationale": "Projects bounded Apple CLI, service, image, and filesystem probe output into provider admission evidence. It has no responsibility outside the optional Apple Container backend."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_probe_runtime.ex",
+    "blob_oid": "d8f59e5dba42ca33fa5119327c97142adfa09766",
+    "class": "optional_extension",
+    "rationale": "Performs Apple-specific probe execution, authority checkout, identity verification, and bounded config reads. It is the imperative probe adapter for an optional provider, despite reusing host executable verification."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_prober.ex",
+    "blob_oid": "a0343f8345bb2058400be252f183e800c8be4ee5",
+    "class": "optional_extension",
+    "rationale": "Orchestrates collection and admission of Apple Container host, control-plane, image, and dependency evidence. This is provider readiness logic invoked only by the optional Apple executor."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_core.ex",
+    "blob_oid": "5831e65ac1dd9c344e100c51a9619e336f1c6a8e",
+    "class": "optional_extension",
+    "rationale": "Defines the Apple unit create, start, force-stop, delete, and absence-verification lifecycle reducer. Its cleanup rigor is provider-specific; generic receipt-driven recovery must be host-owned separately."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_drain_coordinator.ex",
+    "blob_oid": "9ae99e69a88c06409f37bb8f6a2b3c535047d538",
+    "class": "optional_extension",
+    "rationale": "Coordinates Apple unit admission, planned drain, journal convergence, orphan recovery, and settlement. It mixes provider operation with recovery guarantees, so generic shutdown and receipt recovery must move to the host while Apple reconciliation remains optional."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_drain_coordinator_core.ex",
+    "blob_oid": "b3f89a36930e7be1000442b5c20b8426442c827d",
+    "class": "optional_extension",
+    "rationale": "Matches Apple unit workers to Apple journal records for provider-specific drain reconstruction. It proposes lifecycle pairings for the optional backend and is not a generic recovery mechanism."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_journal.ex",
+    "blob_oid": "6dda3032947c5584a01bd3ad80e86e3724f57587",
+    "class": "optional_extension",
+    "rationale": "Persists Apple unit-name intents and completion state before provider create effects. The current provider-specific journal is not the future generic host audit or activation receipt store and must be mediated by that host boundary."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_journal_core.ex",
+    "blob_oid": "a93ae8c586760a924a42ac63f880b979bb48c091",
+    "class": "optional_extension",
+    "rationale": "Defines the Apple unit-intent schema, owner lineage, reserve and complete transitions, and inventory projection. Its durable vocabulary is tied to one optional provider."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_name.ex",
+    "blob_oid": "8e2aad6e335f2422353effe16cc4144b89fe4547",
+    "class": "optional_extension",
+    "rationale": "Defines versioned names used to distinguish Arbor-owned Apple Container units during provider cleanup. This identity contract is local to the optional Apple backend."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_core.ex",
+    "blob_oid": "a32ffaad1656539f175dc6f7cccdb2bfbea0e7cf",
+    "class": "optional_extension",
+    "rationale": "Reduces Apple-specific force-stop, force-delete, and exact-absence recovery steps. It recovers one replaceable provider; the host must separately own mandatory generic recovery admission and receipts."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_reconciler.ex",
+    "blob_oid": "5b093d505ee98ce3cd5b31b46712ebe36442e654",
+    "class": "optional_extension",
+    "rationale": "Reconciles Apple journal records with temporary recovery workers and exact provider receipts. Its sealed caller checks strengthen the optional backend but do not turn provider-specific reconciliation into the fixed host."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_reconciler_core.ex",
+    "blob_oid": "b807c94f8e6c19fb672205209165bcd7b59967ab",
+    "class": "optional_extension",
+    "rationale": "Decides Apple recovery startup barriers, worker deduplication, receipt matching, retries, and settlement notifications. The state machine is specific to Apple unit intents and workers."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_runtime.ex",
+    "blob_oid": "63c77b3c991777deb52195a5db734e606608be3c",
+    "class": "optional_extension",
+    "rationale": "Runs pinned structured Apple cleanup argv through the native executor for durable unit recovery. This is an optional provider runtime adapter, not the host recovery policy itself."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_supervisor.ex",
+    "blob_oid": "156f96d0cf3f523b551cd1744f0b58c4486df280",
+    "class": "optional_extension",
+    "rationale": "Supervises Apple-specific recovery workers and the Apple journal reconciler with ordered restart semantics. The future host needs generic recovery supervision, but this physical tree remains tied to the optional provider."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_recovery_worker.ex",
+    "blob_oid": "94405172fd349c7936b38be7bdb5408e7d49900b",
+    "class": "optional_extension",
+    "rationale": "Executes Apple unit stop, delete, absence proof, and journal completion for one durable provider intent. It is a provider cleanup worker that must run only through host-authorized recovery."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_runtime.ex",
+    "blob_oid": "f9c59dd9ce9b55618c27bc58310fab11832df701",
+    "class": "optional_extension",
+    "rationale": "Adapts Apple unit commands to PortSession start, kill, identity, and result operations. It is the runtime binding for the optional Apple backend."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_worker.ex",
+    "blob_oid": "e3ee7f0b9b439a619e0f35186c3556376ace3f88",
+    "class": "optional_extension",
+    "rationale": "Owns one Apple unit lifecycle from admitted plan through cleanup, durable journal completion, and result publication. Host-owned process and receipt authority must be split from this provider-specific worker before extraction."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/application.ex",
+    "blob_oid": "22861d6ecde00779a74cec8640db41a9e6a77ceb",
+    "class": "trusted_host",
+    "rationale": "Owns Shell's ordered supervision and the planned shutdown barrier that protects process ownership and recovery. It currently starts optional Apple and Linux provider children directly; profile activation must split those children from the minimal host tree."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/cap_policy.ex",
+    "blob_oid": "4f86bbce70919b484619ad1f6e7b5d65ebcb3b4c",
+    "class": "trusted_host",
+    "rationale": "Projects granted shell capability URIs into a fail-closed command-name disclosure allowlist. This is fixed authorization support, although schema-specific execution remains the stronger boundary."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/cap_shell.ex",
+    "blob_oid": "9ea195f104c16c05fef809852c718ecd390eb346",
+    "class": "trusted_host",
+    "rationale": "Owns the fail-closed compound-shell gate and guarantees no parser, session, filesystem, or process effect occurs while runtime argv and ownership proofs are incomplete. This denial must remain non-replaceable host policy."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/config.ex",
+    "blob_oid": "e052c68e2ed5fbd24bc28e307dd12b74d3380290",
+    "class": "optional_extension",
+    "rationale": "Validates only Apple Container locators, Linux baseline locators, Apple image policy, and Apple journal path. Its configuration surface belongs to that optional platform-specific provider family."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/executable_policy.ex",
+    "blob_oid": "7f4564b27590039ac2471d5571adfe3ed9cda6f6",
+    "class": "trusted_host",
+    "rationale": "Pins startup executable identities, constrains PATH-derived commands, verifies exact name and file identity, and fails closed when unavailable. Apple fixed paths are mixed provider entries that should move to provider admission without weakening the generic launch verifier."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/execution_registry.ex",
+    "blob_oid": "2fc17296e614f5fa338f710fb5f8ddeaa6893aac",
+    "class": "trusted_host",
+    "rationale": "Owns process-derived execution registration, adoption, cancellation, terminal publication, and redacted inventory. These owner-only transitions are the fixed lifecycle authority that provider processes must not replace."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/execution_worker.ex",
+    "blob_oid": "5602a58e2bc741a23e11a47e547c662ac8fdcb8a",
+    "class": "trusted_host",
+    "rationale": "Binds an execution to its controller, forwards cancellation, and permits the owned worker to publish one terminal registry result. The injected runner effect must ultimately be reached only through the authorized provider proxy."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/executor.ex",
+    "blob_oid": "0b5b10538196aeb6145849dafe4fdfc5f36e2e37",
+    "class": "system_extension",
+    "rationale": "Implements bounded native direct-argv execution and maps native process-group terminals into Shell results. It is the first-party native executor required by the normal profile, while enforcement independent of backend choice must remain in the host."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_authority.ex",
+    "blob_oid": "79a32ac2aacea8be0b37ff24199b06fb808191f5",
+    "class": "optional_extension",
+    "rationale": "Pins the operator-configured Linux dependency source and returns evidence-only materialization plans for Apple workloads. It is support authority internal to the optional Apple provider family."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_builder.ex",
+    "blob_oid": "043eee2b6cccaa5763f8036e9c823ef9beae86f5",
+    "class": "optional_extension",
+    "rationale": "Builds bounded Linux arm64 dependency manifests from an explicit source tree, including ELF architecture checks. This operator tooling provisions an optional provider dependency set."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_core.ex",
+    "blob_oid": "26c457f1751286b6ab1883acdb98d82cb6d21701",
+    "class": "optional_extension",
+    "rationale": "Validates and fingerprints the Linux dependency manifest consumed by Apple Container materialization. The receipt is provider evidence rather than generic Platform activation authority."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_filesystem.ex",
+    "blob_oid": "d1f7a7a4eb83ca28d9ef57f827c2f10a78202f93",
+    "class": "optional_extension",
+    "rationale": "Provides symlink, device, identity, and bounded-file operations for building and verifying the Linux dependency baseline. Its responsibility is scoped to optional provider provisioning."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_materializer.ex",
+    "blob_oid": "a5b127835df6deecaa8fbe7fa1f53037254d8ebc",
+    "class": "optional_extension",
+    "rationale": "Creates process-bound private copies of verified Linux dependencies and cleans them on release or owner loss. Generic lease cleanup must be host-mediated, but this materialized payload and workflow are Apple provider support."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_source.ex",
+    "blob_oid": "cd6bac746e36c01d186c258f4218113a0cd6e7e9",
+    "class": "optional_extension",
+    "rationale": "Pins and re-verifies the Linux dependency source root and manifest before producing a materialization plan. The binding is specific to optional Apple Container dependency supply."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/owned_tree.ex",
+    "blob_oid": "c0902da01c8d7afb6cc688f7cd6be1e2513ce993",
+    "class": "optional_extension",
+    "rationale": "Creates and identity-checks private temporary trees used by the Linux baseline materializer, with bounded no-symlink cleanup. As currently scoped and consumed, it is provider materialization support; a reusable host cleanup primitive would need extraction."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/port_session.ex",
+    "blob_oid": "c54f27d28577ec9812708ecda6d918ad4f1d335e",
+    "class": "system_extension",
+    "rationale": "Implements supervised streaming sessions over the native ProcessGroup backend, including stdin, subscribers, output limits, and cleanup. It mixes provider transport with owner-loss termination, so backend-independent ownership enforcement must split into the host."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/process_group.ex",
+    "blob_oid": "e82ed5628896f049cdb8d4bc4c4b0fa94178b29b",
+    "class": "system_extension",
+    "rationale": "Owns the native port protocol and process-group launcher used by the host OS executor, including input framing and group termination. This is a normal-profile native backend; independent host verification must constrain its launch and terminal receipts."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/runtime_config_loader.ex",
+    "blob_oid": "c725d11237a292c30af395c3dc4cede7b0a8aef9",
+    "class": "optional_extension",
+    "rationale": "Loads a root-owned bounded JSON document containing only Apple, Linux baseline, image policy, and unit journal configuration. It is configuration tooling for the optional Apple provider family."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/sandbox.ex",
+    "blob_oid": "1222558b989f4c86cabce3c31b4e45ae7f9a41d8",
+    "class": "trusted_host",
+    "rationale": "Owns Shell command parsing, metacharacter rejection, command and flag policy, capability-derived argv checks, and executable preparation. These checks form the fixed argument policy that every shell provider invocation must satisfy."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/spawn_capable_argv_limits.ex",
+    "blob_oid": "0b06bc30c2be2e6b0517185671ae2521686ed6f7",
+    "class": "trusted_host",
+    "rationale": "Defines closed system ceilings for argument count and byte size on spawn-capable effects. Provider plans may consume these values but cannot choose or weaken them."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/spawn_capable_timeout.ex",
+    "blob_oid": "fcd3990185d3234a9733eced2c66a1df8abc28b0",
+    "class": "trusted_host",
+    "rationale": "Defines and validates non-bypassable wall-clock ceilings by closed resource profile, plus bounded probe deadlines. These resource limits constrain providers and therefore remain fixed host policy."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/startup_epoch.ex",
+    "blob_oid": "14277828d36342d64f041766e71033e7061eaded",
+    "class": "optional_extension",
+    "rationale": "Maintains fingerprint-only boot-epoch binding and poisoning for Apple control-plane, image, and Linux baseline authorities. Its current responsibility is internal consistency across the optional provider's restarts, not generic Platform activation."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_path.ex",
+    "blob_oid": "17ec99949ca22067e22d3be3246a6d1629048694",
+    "class": "trusted_host",
+    "rationale": "Canonicalizes paths and pins root-owned regular files or directories to stable metadata and content identity before privileged launch. This is generic launch-verification machinery required to constrain provider executable and configuration artifacts."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust.ex",
+    "blob_oid": "9ff6885bf095007423d9607292d207971fce0c86",
+    "class": "trusted_host",
+    "rationale": "This facade owns the current end-to-end authorization integration: policy preflight, Security authorization, and approval gating. Profile lifecycle, event history, enumeration, and graduation APIs are mixed provider or optional concerns that must split from the fixed host authorization surface."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/application.ex",
+    "blob_oid": "5b3e3ebe36d4a17b0ded99da1217e9811a3776c2",
+    "class": "system_extension",
+    "rationale": "This callback starts the full Trust supervision tree as a configurable application. That tree selects persistence and advisory services needed by the normal Arbor profile, while the deterministic ceiling and authorization pieces must be extracted for provider-free safe boot."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/approval_guard.ex",
+    "blob_oid": "0d6ef569329bfcdd7c4027ee8197f75c2f0b5457",
+    "class": "trusted_host",
+    "rationale": "This gate turns an already-held capability plus resolved trust policy into proceed, human approval, or denial and applies the signed-capability exemption rules. The escalation delivery adapter should split, but the final approval decision must be non-bypassable."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/authority.ex",
+    "blob_oid": "fb35633ab6cfbc8053b5940d71de124389e04e66",
+    "class": "system_extension",
+    "rationale": "This CRC core primarily constructs, mutates, serializes, and evaluates operator trust profiles and model constraints. It currently mixes mandatory ceilings and taint into profile evaluation; those deterministic conjuncts must split to the host while profile state remains a normal-profile policy source."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
+    "blob_oid": "c719281c56c82ca2f7116de3fea719a86165d3ac",
+    "class": "optional_extension",
+    "rationale": "This read-only utility combines held capabilities with caller-supplied URIs that policy could mint, for inspection without mutation. Authority visualization and discovery are useful tooling but are not required to authorize or recover the system."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/behaviour.ex",
+    "blob_oid": "ca82847a4e419a923506c26dae47707f78db88c3",
+    "class": "system_extension",
+    "rationale": "This internal behaviour defines the profile, event, freeze, and lifecycle interface implemented only by Trust.Manager. It is the contract of the first-party policy-state provider, not a shared pre-Platform ABI or host reference-monitor contract."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
+    "blob_oid": "89170b2d1808813c7d12a4f3ecd51214eb708fc7",
+    "class": "optional_extension",
+    "rationale": "This module explicitly declares an audit matrix of soft and intended hard enforcement targets and does not enforce authorization. It is architecture and diagnostics support, so it is optional even though it documents security-critical gaps."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/capability_profile_registry.ex",
+    "blob_oid": "f68067c7afdc6d3c140b15124e72e80369c8d072",
+    "class": "system_extension",
+    "rationale": "This projection maps registered URIs to first-party risk-profile defaults and runtime action-profile contributions. It is a normal-profile policy source; the upward Actions provider and mutable contribution path must be replaced without letting it define host authority."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/capability_risk_profiles.ex",
+    "blob_oid": "d39984f2cdd07f32f3be1bc445d107b63c37eaf2",
+    "class": "trusted_host",
+    "rationale": "This module owns the source risk metadata from which high-risk ceilings and graduation prohibitions are derived. The mandatory ceiling projection constrains extensions and must be host-controlled; operator overrides need boot-bound tightening rules and must not relax the fixed maximum."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/capability_sync.ex",
+    "blob_oid": "bb13de44345f4996256276f60cb081346dc02172",
+    "class": "system_extension",
+    "rationale": "This listener translates profile creation, freeze, and unfreeze events into baseline capability grant and revocation effects. It is a normal-profile policy adapter; the target split must turn its strategy output into bounded recommendations and leave every authority mutation to the host."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
+    "blob_oid": "553ec8bae6dce0ebb423e959e8774a3bcebd5a4e",
+    "class": "optional_extension",
+    "rationale": "This service applies configurable anomaly heuristics to trust events and requests profile freezes or recovery transitions. It is a first-party protective strategy, but its thresholds and reactions are advisory policy rather than the mandatory reference monitor."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/config.ex",
+    "blob_oid": "374f6baa30ea2e111c5ae594e1ddfaecb12a30f4",
+    "class": "system_extension",
+    "rationale": "This reader supplies Trust policy modules, persistence and PubSub settings, baseline capability generation, and the upward action-profile provider. Host approval and policy-enforcer switches are mixed in and must become frozen host configuration, while the remaining settings configure normal-profile providers."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
+    "blob_oid": "e71006872209ee62d41b5811be27b37ed58cef45",
+    "class": "optional_extension",
+    "rationale": "This transient tracker records approval streaks and emits human-facing graduation suggestions; authorization explicitly does not read its graduated flag. Confirm-then-automate advice is an optional first-party feature, not a host decision source."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/event_converter.ex",
+    "blob_oid": "224724df3c4efa24443619405e17f806e912e236",
+    "class": "optional_extension",
+    "rationale": "This boundary adapter converts Trust events to and from the Persistence event format and stream naming convention. It belongs with optional durable trust history, not the host's authorization or recovery state."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/event_handler.ex",
+    "blob_oid": "105ceeb7937db5e2a22b5439d8b10789a6c72b47",
+    "class": "optional_extension",
+    "rationale": "This subscriber translates agent, self-improvement, compilation, reload, and security activity into trust-affecting events. Learned behavioral policy input is optional and may advise profile management, but it cannot grant authority or replace fixed enforcement."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/event_store.ex",
+    "blob_oid": "60b32c297585a7283faf537fc487e81b59304b90",
+    "class": "optional_extension",
+    "rationale": "This service persists, indexes, queries, aggregates, and signals trust history through the Persistence EventLog. Historical analysis and progression views are optional provider functionality and are not needed for safe boot or capability recovery."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/manager.ex",
+    "blob_oid": "fb5b86f90ab70e9857794c887ee8828bffda0096",
+    "class": "system_extension",
+    "rationale": "This GenServer coordinates first-party trust profile creation, mutation, freeze lifecycle, event recording, persistence, and baseline capability synchronization. It is the normal-profile policy-state provider; direct grant effects must move behind the host reference monitor."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/policy.ex",
+    "blob_oid": "52e70ceb6cd68684fffc5b1ac81b9f40fb190f48",
+    "class": "trusted_host",
+    "rationale": "This module is the runtime bridge from supplied profile state to effective mode, egress mode, and capability authorization behavior. Its base-grant and profile lookup conveniences are mixed provider concerns, but deterministic ceiling application and fail-closed integration govern the file."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/policy_enforcer.ex",
+    "blob_oid": "fcc1d4ca0fcac14e738f8e1092b20f6166d3a6c0",
+    "class": "trusted_host",
+    "rationale": "This is the current policy-side pre-authorization boundary that decides whether a bounded capability may be minted before Security performs concrete authorization. It mixes provider profile lookup with grant effects; the target host must consume a recommendation and exclusively own issuance."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/presets.ex",
+    "blob_oid": "e9327c184e8e0862f02f9072cc659454e48c6af9",
+    "class": "system_extension",
+    "rationale": "This file primarily defines first-party onboarding baselines and URI rules for cautious through full-trust profiles. Its delegated default-security-ceiling function is a mixed host concern that must split so replaceable presets cannot alter mandatory ceilings."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
+    "blob_oid": "9ec4132981ed7df28c8b12ab5af258562685eac7",
+    "class": "optional_extension",
+    "rationale": "This module audits and migrates legacy permissive profiles before restart and can grant missing explicit capabilities during an operator-selected migration. It is bounded operational tooling, not part of normal authorization or safe recovery."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex",
+    "blob_oid": "d9a319fff504f1e25740f956da5efcf88804f88c",
+    "class": "trusted_host",
+    "rationale": "This resolver performs segment-aware longest-prefix evaluation and takes the most restrictive result across user policy, system ceilings, model constraints, and taint. That deterministic conjunction is the host mechanism, though mutable ceiling overrides must be restricted to tightening boot-bound policy."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/store.ex",
+    "blob_oid": "f624f584d13679bbf68c58956438a9304f3fff1c",
+    "class": "system_extension",
+    "rationale": "This service owns ETS-cached, write-through storage and distributed synchronization for operator trust profiles. Profile state is a normal-profile policy source and its Postgres/Persistence implementation cannot be required by the provider-free recovery host."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/supervisor.ex",
+    "blob_oid": "e38c3348ff3f53446797d0192f0cdb55c08bee07",
+    "class": "system_extension",
+    "rationale": "This supervisor assembles the full normal Trust profile stack, including a hard-coded Postgres BufferedStore plus optional events, anomaly, confirmation, and synchronization children. It must be separated from the small deterministic Trust mechanisms required in the host safe profile."
+  },
+  {
+    "path": "apps/arbor_trust/lib/arbor/trust/taint_conjunct.ex",
+    "blob_oid": "5e62b6bfc799e2a112b66f39d616a68bb89d88f2",
+    "class": "trusted_host",
+    "rationale": "This conjunct prevents static standing from yielding automatic high-risk effects when current inputs are untrusted or hostile. Because provider-supplied policy cannot waive taint-based egress, process, financial, or identity restrictions, the decision belongs to the fixed host."
+  },
+  {
+    "path": "apps/arbor_trust/lib/mix/tasks/arbor.trust.audit_profiles.ex",
+    "blob_oid": "642236132e19c83e7991e68c416f1b1aaa18ba38",
+    "class": "optional_extension",
+    "rationale": "This Mix task is an operator presentation for running the profile exit audit or migration locally or over RPC. It is development and migration tooling, not production authorization, boot, or recovery mechanism."
+  }
+]

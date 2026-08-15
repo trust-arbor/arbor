@@ -73,7 +73,8 @@ defmodule Arbor.MixProject do
         "deps.unlock --check-unused",
         "xref graph --label compile-connected --fail-above 88",
         "arbor.packaging.source_coupling --check",
-        "arbor.packaging.app_env_inventory --check"
+        "arbor.packaging.app_env_inventory --check",
+        "arbor.packaging.platform_inventory --check"
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": [
