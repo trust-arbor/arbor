@@ -1,0 +1,214 @@
+{
+  "schema": "arbor.packaging.safe_recovery_profile.intent.v1",
+  "version": 1,
+  "profile": "safe_recovery",
+  "evidence_status": "conformant",
+  "architecture_status": "blocked",
+  "source_inventory": {
+    "platform_inventory_schema": "arbor.packaging.platform_inventory.v1",
+    "selected_file_count": 303,
+    "selected_index_digest": "2232c36a5ed7c8f3e06e01fabb0fdb20e1579ee25dda2d9d8df34b5cc494afde",
+    "entries_digest": "ec219b075dfb941f213df9feb46f248f05aa1f61259a402cde4250165bad0156",
+    "review_digest": "f674935bc507568df3cb701f097becff7299287de13772b0d8fbd63e4aac2c7a"
+  },
+  "selected_applications": [
+    {
+      "name": "arbor_kernel",
+      "role": "stage_zero",
+      "rationale": "Passive L0 owner of contracts, types, and identifiers with zero in-umbrella dependencies. Selected as stage-zero payload because boot-manifest verification is a kernel responsibility and no Platform, Commands, or extension code may be pulled into this layer."
+    },
+    {
+      "name": "arbor_kernel_runtime",
+      "role": "runtime_mechanism",
+      "rationale": "L1 runtime mechanism that hosts active Common, Signals, and Monitor services. Selected because activation-transaction mechanics belong here; the full Signals, Monitor, and os_mon surface stays a forbidden facility until a later closure."
+    },
+    {
+      "name": "arbor_security",
+      "role": "trusted_host",
+      "rationale": "Trusted-host identity and capability reference monitor. Selected so authorization remains a first-party in-process gate; persistence boot-cycle, authenticated sync transport, and host-provider separation remain recorded blockers."
+    },
+    {
+      "name": "arbor_trust",
+      "role": "trusted_host",
+      "rationale": "Trusted-host system-ceiling policy integration for URI-prefix trust rules. Selected to keep ceiling enforcement first-party; it does not make the architecture ready while host-provider separation and mutable application-env authority remain unfinished."
+    }
+  ],
+  "mandatory_host_responsibilities": [
+    {
+      "id": "boot_manifest_verification",
+      "owner": "arbor_kernel",
+      "rationale": "Kernel owns the boot-manifest types and verification contracts that a safe boot must check before any later payload is admitted."
+    },
+    {
+      "id": "activation_transaction_mechanics",
+      "owner": "arbor_kernel_runtime",
+      "rationale": "Runtime owns the activation transaction mechanics that must commit or roll back a safe-mode start without consulting extension applications."
+    },
+    {
+      "id": "identity_and_capability_reference_monitor",
+      "owner": "arbor_security",
+      "rationale": "Security is the identity and capability reference monitor. Safe recovery still requires this gate even while persistence and sync-transport blockers remain open."
+    },
+    {
+      "id": "system_ceiling_policy_integration",
+      "owner": "arbor_trust",
+      "rationale": "Trust integrates system-ceiling policy so longest-prefix URI rules remain enforceable during safe recovery."
+    },
+    {
+      "id": "artifact_verification_and_revocation",
+      "owner": "platform_host",
+      "rationale": "Verifying artifact bytes and honoring revocation remains a required trusted-host duty. E0B2 will bind exact payload identity; extraction from the current Platform layout is unfinished."
+    },
+    {
+      "id": "isolation_and_effect_enforcement",
+      "owner": "platform_host",
+      "rationale": "Containment and pre-authorization effect enforcement remain required trusted-host duties even though effect-proxy extraction is an open blocker."
+    },
+    {
+      "id": "minimal_boot_and_artifact_state",
+      "owner": "platform_host",
+      "rationale": "Minimal boot and durable artifact-state handling remain required trusted-host duties. They are not selected application payload and their extraction is unfinished."
+    },
+    {
+      "id": "lifecycle_security_audit",
+      "owner": "platform_host",
+      "rationale": "Mandatory pre-effect security audit remains a required trusted-host duty even though the dedicated audit spool is an open blocker."
+    },
+    {
+      "id": "safe_mode_management",
+      "owner": "platform_host",
+      "rationale": "Safe-mode management remains a required trusted-host duty. No selected application currently exposes a closed management surface."
+    }
+  ],
+  "forbidden_facilities": [
+    {
+      "id": "llm_and_model_calls",
+      "rationale": "LLM adapters, model catalogs, and compute-node completions are cognition payload, not safe-mode recovery machinery."
+    },
+    {
+      "id": "oauth_and_network_pools",
+      "rationale": "OAuth clients and pooled network connections introduce remote authority and egress that safe recovery must not start."
+    },
+    {
+      "id": "postgres_sqlite_and_vector_providers",
+      "rationale": "Postgres, SQLite, and vector providers are replaceable Persistence and Historian backends, not the selected first-party safe-mode payload."
+    },
+    {
+      "id": "shell_execution_backends",
+      "rationale": "Shell execution backends can run host commands. Safe recovery must not start them as in-VM payload."
+    },
+    {
+      "id": "dashboard_voice_gateway_and_cognition",
+      "rationale": "Dashboard, Voice, Gateway, and cognition stacks are operator or agent surfaces above the selected four applications."
+    },
+    {
+      "id": "dynamic_compile_eval_and_reload",
+      "rationale": "Dynamic compile, eval, and code reload can introduce unverified code into the VM during recovery."
+    },
+    {
+      "id": "skill_plugin_scan_and_git_fetch",
+      "rationale": "Skill and plugin scans plus Git fetch pull unreviewed or remote content that is not selected safe-mode payload."
+    },
+    {
+      "id": "remote_provider_rpc_before_authorization",
+      "rationale": "Remote provider RPC before authorization can export effects or import untrusted state ahead of the reference monitor."
+    },
+    {
+      "id": "unverified_or_third_party_in_vm_code",
+      "rationale": "Unverified or third-party code must not be loaded into the safe-mode VM. E0B3 later proves executable closure."
+    },
+    {
+      "id": "full_signals_monitor_and_os_mon",
+      "rationale": "Full Signals, Monitor, and os_mon services are observability runtime beyond the selected kernel-runtime mechanism and are not safe-mode payload."
+    }
+  ],
+  "expected_external_dependencies": [
+    {
+      "id": "host_os_and_installer",
+      "kind": "stage_zero",
+      "rationale": "A trusted host OS and installer must place the stage-zero runtime; this intent does not claim a self-hosting installer."
+    },
+    {
+      "id": "protected_public_trust_roots",
+      "kind": "protected_configuration",
+      "rationale": "Protected public trust roots are host-supplied configuration that artifact and identity verification consume. They are not compiled application payload."
+    },
+    {
+      "id": "local_durable_filesystem",
+      "kind": "host_service",
+      "rationale": "A local durable filesystem is the host service for artifact state and audit material. No database provider is selected."
+    },
+    {
+      "id": "cryptographic_entropy_and_clock",
+      "kind": "host_service",
+      "rationale": "Cryptographic entropy and a trustworthy clock are host services required for signatures, expiry, and audit timestamps."
+    }
+  ],
+  "blockers": [
+    {
+      "id": "security_persistence_boot_cycle",
+      "owner": "p1c_authority_state_and_audit",
+      "rationale": "Security still boots through a Persistence-backed authority cycle. Safe recovery cannot yet start the reference monitor without that unfinished split."
+    },
+    {
+      "id": "activation_only_runtime_profile_missing",
+      "owner": "p1a_safe_profile_closure",
+      "rationale": "arbor_kernel_runtime has no activation-only profile that starts transaction mechanics without the full Signals, Monitor, and os_mon surface."
+    },
+    {
+      "id": "exact_artifact_payload_manifest_missing",
+      "owner": "e0b2_exact_artifact_payload",
+      "rationale": "This intent does not bind exact built payload bytes. E0B2 must record that artifact identity before a release can claim a closed payload."
+    },
+    {
+      "id": "fresh_vm_executable_closure_missing",
+      "owner": "e0b3_fresh_vm_executable_closure",
+      "rationale": "No fresh-VM measurement yet proves that only the selected payload is executable. E0B3 owns that closure."
+    },
+    {
+      "id": "activation_invocation_contracts_unratified",
+      "owner": "e0c_activation_and_invocation_contracts",
+      "rationale": "Activation and invocation contracts are not ratified. Safe boot cannot yet name a stable ABI for entering the profile."
+    },
+    {
+      "id": "authenticated_security_sync_transport_missing",
+      "owner": "p1b_reference_monitor",
+      "rationale": "Security still uses cluster-scoped signals as load-bearing state sync. An authenticated sync transport is missing."
+    },
+    {
+      "id": "fixed_host_provider_separation_missing",
+      "owner": "p1b_reference_monitor",
+      "rationale": "Host and replaceable-provider code are not yet separated inside Security and Trust, so the selected trusted-host role is still mixed with provider implementations."
+    },
+    {
+      "id": "mutable_application_env_authority",
+      "owner": "p1b_reference_monitor",
+      "rationale": "Mutable application environment remains an authority source. Safe recovery requires fixed, verified configuration instead of live env mutation."
+    },
+    {
+      "id": "public_ets_authority",
+      "owner": "e1a_protected_registry_and_lifecycle_transaction",
+      "rationale": "Public ETS tables still carry authority state. A protected registry and lifecycle transaction are required before this profile can be ready."
+    },
+    {
+      "id": "mandatory_pre_effect_audit_missing",
+      "owner": "p1c_authority_state_and_audit",
+      "rationale": "The mandatory synchronous pre-effect audit spool is not extracted. Audit remains a required host responsibility with no closed implementation."
+    },
+    {
+      "id": "extension_effect_proxy_gaps",
+      "owner": "p1d_effect_proxies",
+      "rationale": "Extension effect proxies are incomplete, so isolation and effect enforcement cannot yet be guaranteed from the selected applications alone."
+    },
+    {
+      "id": "safe_release_payload_not_separated",
+      "owner": "p1e_release_separation",
+      "rationale": "Release packaging does not yet separate a safe-mode payload from Persistence, Historian, Shell, Dashboard, and other excluded applications."
+    },
+    {
+      "id": "safe_management_surface_missing",
+      "owner": "p1a_safe_profile_closure",
+      "rationale": "No closed safe-mode management surface exists. Operators cannot yet manage this profile without the excluded Dashboard, Gateway, or ad hoc tools."
+    }
+  ]
+}
