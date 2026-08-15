@@ -482,8 +482,8 @@
   {
     "path": "apps/arbor_llm/lib/arbor/llm/plugs/response_limit.ex",
     "blob_oid": "aa018863f0312f442952b0671d97872befbe79d4",
-    "class": "trusted_host",
-    "rationale": "Closes all caller and delegated response-size aliases to one maximum receipt before transport dispatch. This limit must become an immutable host step so a provider or configurable pipeline cannot widen or omit it."
+    "class": "system_extension",
+    "rationale": "This configurable plug normalizes caller response-size aliases before transport dispatch as defense in depth. The fixed Boundary and ResponseBudget modules own non-bypassable narrowing and receipt enforcement, so an omittable pipeline plug is not itself trusted-host policy."
   },
   {
     "path": "apps/arbor_llm/lib/arbor/llm/plugs/staleness_warn.ex",
@@ -1148,8 +1148,8 @@
   {
     "path": "apps/arbor_security/lib/arbor/security/crypto.ex",
     "blob_oid": "2ac651a5972c919d822d60fbd36e36efbf2f3476",
-    "class": "k_primitive",
-    "rationale": "This stateless module exposes provider-independent Ed25519, X25519, HKDF, AES-GCM, hashing, and deterministic identity derivation operations. These generic cryptographic mechanisms are needed to verify boot and extension evidence before Platform policy or a provider can be trusted."
+    "class": "trusted_host",
+    "rationale": "This mixed stateless facade exposes signing and verification alongside X25519, HKDF, AES-GCM, sealing, hashing, and identity derivation. The current physical file is broader than a minimal pre-Platform verifier; a verification-only signature and hash subset must be extracted before any file can be classified as k_primitive."
   },
   {
     "path": "apps/arbor_security/lib/arbor/security/delivery_receipt_broker.ex",
@@ -1316,8 +1316,8 @@
   {
     "path": "apps/arbor_security/lib/arbor/security/signal_sync.ex",
     "blob_oid": "c801b5e42b1adcc651afa72cc87132d3ecd33fc6",
-    "class": "trusted_host",
-    "rationale": "This helper establishes and maintains the cluster subscriptions currently used for nonce, identity, and capability security-state coherence. Signals is migration debt, but the authenticated synchronization responsibility is load-bearing host behavior until an explicit transport replaces it."
+    "class": "system_extension",
+    "rationale": "This helper only establishes, monitors, retries, and releases subscriptions over the current Signals transport. Authenticated admission, freshness, replay rejection, ordering, and fail-closed coherence semantics must remain in trusted-host state owners while this replaceable delivery adapter stays outside the reference monitor."
   },
   {
     "path": "apps/arbor_security/lib/arbor/security/signing_authority_broker.ex",
@@ -1682,8 +1682,8 @@
   {
     "path": "apps/arbor_trust/lib/arbor/trust/authority.ex",
     "blob_oid": "fb35633ab6cfbc8053b5940d71de124389e04e66",
-    "class": "system_extension",
-    "rationale": "This CRC core primarily constructs, mutates, serializes, and evaluates operator trust profiles and model constraints. It currently mixes mandatory ceilings and taint into profile evaluation; those deterministic conjuncts must split to the host while profile state remains a normal-profile policy source."
+    "class": "trusted_host",
+    "rationale": "This CRC core currently computes the effective authorization mode by combining operator rules with mandatory security ceilings, model constraints, and the taint conjunct using most-restrictive resolution. Profile construction and persistence conversion should split, but the implemented authorization-time conjunction is trusted-host logic today."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
@@ -1718,8 +1718,8 @@
   {
     "path": "apps/arbor_trust/lib/arbor/trust/capability_sync.ex",
     "blob_oid": "bb13de44345f4996256276f60cb081346dc02172",
-    "class": "system_extension",
-    "rationale": "This listener translates profile creation, freeze, and unfreeze events into baseline capability grant and revocation effects. It is a normal-profile policy adapter; the target split must turn its strategy output into bounded recommendations and leave every authority mutation to the host."
+    "class": "trusted_host",
+    "rationale": "This listener currently translates profile creation, freeze, and unfreeze events into direct Security grant, list, and revoke effects. Those authority mutations make the present file part of the trusted host; the target split must leave event strategy outside and move all mutations behind a bounded host command."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
@@ -1760,8 +1760,8 @@
   {
     "path": "apps/arbor_trust/lib/arbor/trust/manager.ex",
     "blob_oid": "fb5b86f90ab70e9857794c887ee8828bffda0096",
-    "class": "system_extension",
-    "rationale": "This GenServer coordinates first-party trust profile creation, mutation, freeze lifecycle, event recording, persistence, and baseline capability synchronization. It is the normal-profile policy-state provider; direct grant effects must move behind the host reference monitor."
+    "class": "trusted_host",
+    "rationale": "This GenServer currently couples profile creation and freeze lifecycle to baseline capability grants and grant or revoke synchronization triggers. Because it initiates authority mutations, the current mixed file is trusted-host code; profile state, history, and lifecycle orchestration must split from an authenticated host mutation boundary."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/policy.ex",
@@ -1779,7 +1779,7 @@
     "path": "apps/arbor_trust/lib/arbor/trust/presets.ex",
     "blob_oid": "e9327c184e8e0862f02f9072cc659454e48c6af9",
     "class": "system_extension",
-    "rationale": "This file primarily defines first-party onboarding baselines and URI rules for cautious through full-trust profiles. Its delegated default-security-ceiling function is a mixed host concern that must split so replaceable presets cannot alter mandatory ceilings."
+    "rationale": "This file defines replaceable first-party onboarding baselines and URI rules for cautious through full-trust profiles. Its compatibility function only forwards default ceiling lookup to trusted-host CapabilityRiskProfiles; that forwarding dependency must be removed so authorization never relies on an extension-classified preset module."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
