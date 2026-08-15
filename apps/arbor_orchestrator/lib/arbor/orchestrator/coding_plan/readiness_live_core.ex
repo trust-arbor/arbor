@@ -75,6 +75,32 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
   def toolchain(_identity), do: {:error, :malformed}
 
   @doc false
+  @spec dependency_baseline(term()) ::
+          {:ok, :passed}
+          | {:error,
+             :mismatch
+             | :unavailable
+             | :mix_lock_unreadable
+             | :base_ref_unresolvable
+             | :malformed}
+  def dependency_baseline({:ok, %{"matched" => true} = result})
+      when map_size(result) == 1 do
+    {:ok, :passed}
+  end
+
+  def dependency_baseline({:error, :digest_mismatch}), do: {:error, :mismatch}
+
+  def dependency_baseline({:error, :baseline_unavailable}), do: {:error, :unavailable}
+
+  def dependency_baseline({:error, :mix_lock_unreadable_at_base_commit}),
+    do: {:error, :mix_lock_unreadable}
+
+  def dependency_baseline({:error, :base_ref_unresolvable}),
+    do: {:error, :base_ref_unresolvable}
+
+  def dependency_baseline(_other), do: {:error, :malformed}
+
+  @doc false
   @spec expiry(DateTime.t(), String.t() | nil) ::
           {:ok, DateTime.t()} | {:error, :malformed | :expired}
   def expiry(observed_at, nil) when is_struct(observed_at, DateTime) do

@@ -19,6 +19,16 @@ if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
   )
 end
 
+# Arbor.Actions.Git shells out through Arbor.Shell.execute_direct/3, which
+# requires ExecutionRegistry (start_children: false leaves the app childless
+# in test). Coding-plan dependency-baseline readiness observes real git blobs
+# in-process, so the registry must be present the same way arbor_actions'
+# test_helper.exs starts it.
+if Process.whereis(Arbor.Shell.ExecutionRegistry) == nil and
+     Process.whereis(Arbor.Shell.Supervisor) != nil do
+  Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
+end
+
 # Insert a wildcard capability for "agent_system".
 # This is the default principal used by CapabilityCheck middleware when no
 # agent_id is set in token assigns. Without this grant, mandatory middleware

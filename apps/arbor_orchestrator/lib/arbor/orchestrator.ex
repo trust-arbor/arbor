@@ -375,7 +375,9 @@ defmodule Arbor.Orchestrator do
   @doc """
   Check coding-plan readiness without creating a workspace. Static mode checks
   immutable prerequisites; live mode additionally observes the exact agent's
-  security authority, ACP provider/model, toolchain, and validation capacity.
+  security authority, the exact base commit's Linux dependency baseline, ACP
+  provider/model, toolchain, and validation capacity. Live baseline admission
+  is point-in-time; dispatch still rechecks after workspace acquisition.
 
   Static checks that pass immutable prerequisites return `degraded` with
   explicit unavailable diagnostics for live facts. Use `:observed_at` in tests

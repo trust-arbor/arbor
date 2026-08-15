@@ -175,6 +175,119 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmissionTest do
     end
   end
 
+  describe "Arbor.Actions.coding_dependency_baseline_admission/2" do
+    test "matching exact commit admits without acquiring a workspace or emitting signals",
+         %{repo_path: repo_path} do
+      contents = "%{\"facade\" => \"match\"}\n"
+      base_commit = commit_mix_lock(repo_path, contents)
+      FakeDigestSource.set_digest(mix_lock_digest(contents))
+
+      parent = self()
+
+      {:ok, started_id} =
+        Arbor.Signals.subscribe("action.started", fn signal ->
+          send(parent, {:action_signal, :started, signal})
+          :ok
+        end)
+
+      {:ok, completed_id} =
+        Arbor.Signals.subscribe("action.completed", fn signal ->
+          send(parent, {:action_signal, :completed, signal})
+          :ok
+        end)
+
+      {:ok, failed_id} =
+        Arbor.Signals.subscribe("action.failed", fn signal ->
+          send(parent, {:action_signal, :failed, signal})
+          :ok
+        end)
+
+      on_exit(fn ->
+        Arbor.Signals.unsubscribe(started_id)
+        Arbor.Signals.unsubscribe(completed_id)
+        Arbor.Signals.unsubscribe(failed_id)
+      end)
+
+      before_files = File.ls!(repo_path)
+      {before_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: repo_path)
+
+      assert {:ok, resolved} =
+               Arbor.Actions.Coding.Workspace.resolve_base_ref(repo_path, base_commit)
+
+      assert resolved == base_commit
+
+      assert {:ok, %{"matched" => true}} =
+               Arbor.Actions.coding_dependency_baseline_admission(repo_path, base_commit)
+
+      assert File.ls!(repo_path) == before_files
+      {after_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: repo_path)
+      assert after_worktrees == before_worktrees
+      refute_received {:action_signal, _, _}
+    end
+
+    test "symbolic base_ref uses the same workspace resolver as acquisition", %{
+      repo_path: repo_path
+    } do
+      contents = "%{\"branch\" => \"lock\"}\n"
+      base_commit = commit_mix_lock(repo_path, contents)
+      FakeDigestSource.set_digest(mix_lock_digest(contents))
+      {_, 0} = System.cmd("git", ["branch", "feature-base", base_commit], cd: repo_path)
+
+      assert {:ok, ^base_commit} =
+               Arbor.Actions.Coding.Workspace.resolve_base_ref(repo_path, "feature-base")
+
+      assert {:ok, %{"matched" => true}} =
+               Arbor.Actions.coding_dependency_baseline_admission(repo_path, "feature-base")
+    end
+
+    test "mismatched mix.lock is rejected without leaking digests or git output", %{
+      repo_path: repo_path
+    } do
+      contents = "%{\"a\" => \"1\"}\n"
+      base_commit = commit_mix_lock(repo_path, contents)
+      actual_digest = mix_lock_digest(contents)
+      expected_digest = mix_lock_digest("%{\"different\" => \"2\"}\n")
+      FakeDigestSource.set_digest(expected_digest)
+
+      result = Arbor.Actions.coding_dependency_baseline_admission(repo_path, base_commit)
+
+      assert {:error, :digest_mismatch} = result
+      refute inspect(result) =~ actual_digest
+      refute inspect(result) =~ expected_digest
+      refute inspect(result) =~ repo_path
+    end
+
+    test "unavailable baseline, unreadable mix.lock, and unresolvable refs fail closed", %{
+      repo_path: repo_path
+    } do
+      contents = "%{\"a\" => \"1\"}\n"
+      base_commit = commit_mix_lock(repo_path, contents)
+
+      FakeDigestSource.set_unavailable()
+
+      assert {:error, :baseline_unavailable} =
+               Arbor.Actions.coding_dependency_baseline_admission(repo_path, base_commit)
+
+      {initial_commit, 0} =
+        System.cmd("git", ["rev-list", "--max-parents=0", "HEAD"], cd: repo_path)
+
+      initial_commit = String.trim(initial_commit)
+
+      FakeDigestSource.set_digest(mix_lock_digest(contents))
+
+      assert {:error, :mix_lock_unreadable_at_base_commit} =
+               Arbor.Actions.coding_dependency_baseline_admission(repo_path, initial_commit)
+
+      result = Arbor.Actions.coding_dependency_baseline_admission(repo_path, "missing-ref")
+      assert {:error, :base_ref_unresolvable} = result
+      refute inspect(result) =~ "fatal"
+      refute inspect(result) =~ repo_path
+
+      assert {:error, :base_ref_unresolvable} =
+               Arbor.Actions.coding_dependency_baseline_admission(:not_a_path, "HEAD")
+    end
+  end
+
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

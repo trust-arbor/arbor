@@ -144,7 +144,7 @@ defmodule Arbor.Actions.Coding.Workspace do
 
         require_reused? = get_param(params, :require_reused) == true
 
-        with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
+        with {:ok, base_commit} <- resolve_base_ref(repo_root, base_ref),
              {:ok, path, ownership, reset?, branch_provenance} <-
                ensure_worktree(
                  repo_root,
@@ -1574,11 +1574,17 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
   end
 
-  defp rev_parse(repo_root, ref) do
+  @doc false
+  @spec resolve_base_ref(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def resolve_base_ref(repo_root, ref) when is_binary(repo_root) and is_binary(ref) do
     case git(repo_root, ["rev-parse", "--verify", ref]) do
       {:ok, output} -> {:ok, String.trim(output)}
       {:error, reason} -> {:error, "failed to resolve base_ref #{inspect(ref)}: #{reason}"}
     end
+  end
+
+  def resolve_base_ref(_repo_root, ref) do
+    {:error, "failed to resolve base_ref #{inspect(ref)}"}
   end
 
   defp worktree_dirty?(worktree_path) do

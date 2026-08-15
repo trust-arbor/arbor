@@ -29,10 +29,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     def coding_toolchain_identity, do: invoke(:coding_toolchain_identity, [])
     def validation_capacity_observer, do: invoke(:validation_capacity_observer, [])
 
+    def coding_dependency_baseline_admission(repo_path, base_ref),
+      do: invoke(:coding_dependency_baseline_admission, [repo_path, base_ref])
+
     defp invoke(key, args) do
       case Process.get({:readiness_observer, key}) do
         function when is_function(function, length(args)) -> apply(function, args)
         value -> value
+      end
+    end
+  end
+
+  defmodule DependencyBaselineDigestStub do
+    @moduledoc false
+
+    def linux_dependency_baseline_mix_lock_digest do
+      case Process.get(:dependency_baseline_digest) do
+        digest when is_binary(digest) -> {:ok, digest}
+        _other -> {:error, :linux_dependency_baseline_unavailable}
       end
     end
   end
@@ -97,9 +111,24 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     codes = Enum.map(report["diagnostics"], & &1["code"])
     assert "compilation_valid" in codes
     assert "security_authority_unavailable" in codes
+    assert "dependency_baseline_unavailable" in codes
     assert "acp_health_unavailable" in codes
     assert "toolchain_identity_unavailable" in codes
     assert "validation_capacity_unavailable" in codes
+
+    assert Enum.map(report["diagnostics"], & &1["gate_id"]) == [
+             "plan_schema",
+             "trusted_roots",
+             "compiler",
+             "provenance",
+             "security_authority",
+             "dependency_baseline",
+             "acp_health",
+             "toolchain_identity",
+             "validation_capacity"
+           ]
+
+    assert diagnostic(report, "dependency_baseline")["decision"] == "unavailable"
     assert File.ls!(ctx.repo) == before
   end
 
@@ -111,6 +140,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert report["status"] == "degraded"
     assert report["expires_at"] == "2026-07-22T12:00:30.000Z"
     assert Enum.count(report["diagnostics"], &(&1["decision"] == "blocked")) == 0
+    assert diagnostic(report, "dependency_baseline")["decision"] == "passed"
+    assert diagnostic(report, "dependency_baseline")["code"] == "dependency_baseline_matched"
     assert diagnostic(report, "acp_health")["decision"] == "degraded"
     assert diagnostic(report, "acp_health")["code"] == "acp_health_degraded"
     assert diagnostic(report, "validation_capacity")["decision"] == "unavailable"
@@ -125,6 +156,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     opts =
       live_opts(ctx,
         security_available?: fn -> false end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          send(test_pid, :baseline_called)
+        end,
         acp_provider_readiness: fn _provider, _model -> send(test_pid, :acp_called) end,
         coding_toolchain_identity: fn -> send(test_pid, :toolchain_called) end,
         validation_capacity_observer: fn -> send(test_pid, :capacity_called) end
@@ -133,6 +167,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
     assert report["status"] == "blocked"
     assert blocked_code(report) == "security_authority_unavailable"
+    refute_received :baseline_called
     refute_received :acp_called
     refute_received :toolchain_called
     refute_received :capacity_called
@@ -168,6 +203,129 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert report["status"] == "blocked"
     assert blocked_code(report) == "signing_key_unavailable"
     refute_received :acp_called
+  end
+
+  @tag :security_regression
+  test "security regression: mismatched mix.lock at the exact base commit blocks before ACP or workspace work",
+       ctx do
+    test_pid = self()
+    contents = "%{\"stale\" => \"lock\"}\n"
+    base_commit = commit_mix_lock!(ctx.repo, contents)
+    expected_digest = mix_lock_digest("%{\"baseline\" => \"pinned\"}\n")
+    actual_digest = mix_lock_digest(contents)
+
+    previous_digest_module =
+      Application.get_env(:arbor_actions, :dependency_baseline_digest_module)
+
+    Application.put_env(
+      :arbor_actions,
+      :dependency_baseline_digest_module,
+      DependencyBaselineDigestStub
+    )
+
+    Process.put(:dependency_baseline_digest, expected_digest)
+
+    on_exit(fn ->
+      restore_actions_env(:dependency_baseline_digest_module, previous_digest_module)
+    end)
+
+    before = File.ls!(ctx.repo)
+    {before_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: ctx.repo)
+
+    opts =
+      live_opts(ctx,
+        coding_dependency_baseline_admission: fn repo, ref ->
+          send(test_pid, {:baseline_called, repo, ref})
+          Arbor.Actions.coding_dependency_baseline_admission(repo, ref)
+        end,
+        acp_provider_readiness: fn _provider, _model -> send(test_pid, :acp_called) end,
+        coding_toolchain_identity: fn -> send(test_pid, :toolchain_called) end,
+        validation_capacity_observer: fn -> send(test_pid, :capacity_called) end
+      )
+
+    assert {:ok, report} =
+             Readiness.check(plan(ctx.repo, %{"base_ref" => base_commit}), opts)
+
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "dependency_baseline_mismatch"
+    assert_received {:baseline_called, _repo, ^base_commit}
+    refute_received :acp_called
+    refute_received :toolchain_called
+    refute_received :capacity_called
+    refute inspect(report) =~ actual_digest
+    refute inspect(report) =~ expected_digest
+    refute inspect(report) =~ ctx.repo
+    assert File.ls!(ctx.repo) == before
+    {after_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: ctx.repo)
+    assert after_worktrees == before_worktrees
+  end
+
+  test "live baseline observer raise, exit, throw, and malformed results fail closed", ctx do
+    test_pid = self()
+
+    for {label, observer} <- [
+          {:raise, fn _repo, _ref -> raise "baseline boom" end},
+          {:exit, fn _repo, _ref -> exit(:baseline_exit) end},
+          {:throw, fn _repo, _ref -> throw(:baseline_throw) end},
+          {:malformed, fn _repo, _ref -> {:ok, %{"matched" => true, "digest" => "secret"}} end}
+        ] do
+      opts =
+        live_opts(ctx,
+          coding_dependency_baseline_admission: observer,
+          acp_provider_readiness: fn _provider, _model -> send(test_pid, {:acp_called, label}) end
+        )
+
+      assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+      assert report["status"] == "blocked"
+      assert blocked_code(report) == "dependency_baseline_invalid"
+      refute inspect(report) =~ "secret"
+      refute_received {:acp_called, ^label}
+    end
+  end
+
+  test "live unavailable baseline, unreadable mix.lock, and unresolvable base_ref block", ctx do
+    test_pid = self()
+
+    for {reason, code} <- [
+          {:digest_mismatch, "dependency_baseline_mismatch"},
+          {:baseline_unavailable, "dependency_baseline_unavailable"},
+          {:mix_lock_unreadable_at_base_commit, "dependency_baseline_mix_lock_unreadable"},
+          {:base_ref_unresolvable, "dependency_baseline_base_ref_unresolvable"}
+        ] do
+      opts =
+        live_opts(ctx,
+          coding_dependency_baseline_admission: fn _repo, _ref -> {:error, reason} end,
+          acp_provider_readiness: fn _provider, _model ->
+            send(test_pid, {:acp_called, reason})
+          end
+        )
+
+      assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+      assert report["status"] == "blocked"
+      assert blocked_code(report) == code
+      refute_received {:acp_called, ^reason}
+    end
+  end
+
+  test "pure baseline classifier admits only the exact matched envelope" do
+    assert ReadinessLiveCore.dependency_baseline({:ok, %{"matched" => true}}) == {:ok, :passed}
+
+    assert ReadinessLiveCore.dependency_baseline({:error, :digest_mismatch}) ==
+             {:error, :mismatch}
+
+    assert ReadinessLiveCore.dependency_baseline({:error, :baseline_unavailable}) ==
+             {:error, :unavailable}
+
+    assert ReadinessLiveCore.dependency_baseline({:error, :mix_lock_unreadable_at_base_commit}) ==
+             {:error, :mix_lock_unreadable}
+
+    assert ReadinessLiveCore.dependency_baseline({:error, :base_ref_unresolvable}) ==
+             {:error, :base_ref_unresolvable}
+
+    assert ReadinessLiveCore.dependency_baseline({:ok, %{"matched" => true, "digest" => "x"}}) ==
+             {:error, :malformed}
+
+    assert ReadinessLiveCore.dependency_baseline(:ok) == {:error, :malformed}
   end
 
   test "live ACP model mismatch is primary and short-circuits later gates", ctx do
@@ -485,6 +643,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
       Keyword.get(overrides, :validation_capacity_observer, :unavailable)
     )
 
+    Process.put(
+      {:readiness_observer, :coding_dependency_baseline_admission},
+      Keyword.get(overrides, :coding_dependency_baseline_admission, fn _repo, _ref ->
+        {:ok, %{"matched" => true}}
+      end)
+    )
+
     readiness_opts(ctx)
     |> Keyword.merge(
       mode: :live,
@@ -496,7 +661,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
       :signing_key_status,
       :acp_provider_readiness,
       :coding_toolchain_identity,
-      :validation_capacity_observer
+      :validation_capacity_observer,
+      :coding_dependency_baseline_admission
     ])
   end
 
@@ -610,4 +776,21 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     {:ok, real_path} = Arbor.Common.SafePath.resolve_real(path)
     real_path
   end
+
+  defp commit_mix_lock!(repo, contents) do
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+    File.write!(Path.join(repo, "mix.lock"), contents)
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "mix.lock"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-m", "add mix.lock", "--quiet"])
+    {commit, 0} = System.cmd("git", ["-C", repo, "rev-parse", "HEAD"])
+    String.trim(commit)
+  end
+
+  defp mix_lock_digest(contents) do
+    :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+  end
+
+  defp restore_actions_env(key, nil), do: Application.delete_env(:arbor_actions, key)
+  defp restore_actions_env(key, value), do: Application.put_env(:arbor_actions, key, value)
 end

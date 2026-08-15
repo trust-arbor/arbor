@@ -57,7 +57,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
       when is_binary(repo_path) and is_binary(base_commit) do
     Actions.emit_started(__MODULE__, %{repo_path: repo_path})
 
-    case check_baseline(repo_path, base_commit) do
+    case admit(repo_path, base_commit) do
       {:ok, result} ->
         Actions.emit_completed(__MODULE__, result)
         {:ok, result}
@@ -79,6 +79,24 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
   end
 
   def run(_params, _context), do: {:error, "repo_path and base_commit are required"}
+
+  @doc false
+  @spec admit(String.t(), String.t()) ::
+          {:ok, %{required(String.t()) => true}}
+          | {:error, {:dependency_baseline_admission_failed, atom()}}
+  def admit(repo_path, base_commit)
+      when is_binary(repo_path) and is_binary(base_commit) do
+    check_baseline(repo_path, base_commit)
+  rescue
+    _exception ->
+      {:error, {:dependency_baseline_admission_failed, :mix_lock_unreadable_at_base_commit}}
+  catch
+    _kind, _reason ->
+      {:error, {:dependency_baseline_admission_failed, :mix_lock_unreadable_at_base_commit}}
+  end
+
+  def admit(_repo_path, _base_commit),
+    do: {:error, {:dependency_baseline_admission_failed, :mix_lock_unreadable_at_base_commit}}
 
   defp check_baseline(repo_path, base_commit) do
     with {:ok, blob} <- read_base_mix_lock(repo_path, base_commit),

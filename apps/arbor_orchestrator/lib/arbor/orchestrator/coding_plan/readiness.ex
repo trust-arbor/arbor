@@ -275,12 +275,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
     with {:ok, security_diagnostic} <- observe_security(opts, observed_at),
+         {:ok, baseline_diagnostic} <- observe_dependency_baseline(plan, observed_at),
          {:ok, acp_diagnostic, provider_expiry} <-
            observe_acp(plan, opts, observed_at, observed_datetime),
          {:ok, toolchain_diagnostic} <- observe_toolchain(opts, observed_at),
          {:ok, capacity_diagnostic} <- observe_capacity(opts, observed_at) do
-      {:ok, [security_diagnostic, acp_diagnostic, toolchain_diagnostic, capacity_diagnostic],
-       earlier_expiry(expires_at, provider_expiry)}
+      {:ok,
+       [
+         security_diagnostic,
+         baseline_diagnostic,
+         acp_diagnostic,
+         toolchain_diagnostic,
+         capacity_diagnostic
+       ], earlier_expiry(expires_at, provider_expiry)}
     else
       {:blocked, diagnostic} -> {:blocked, diagnostic, expires_at}
     end
@@ -333,6 +340,98 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
            "security_authority_available",
            observed_at,
            "The live security authority and agent signing key are available."
+         )}
+    end
+  end
+
+  defp observe_dependency_baseline(plan, observed_at) do
+    repo_root = plan.repo_root
+    base_ref = plan.base_ref
+
+    result =
+      safe_observer(
+        :coding_dependency_baseline_admission,
+        [repo_root, base_ref],
+        fn repo_value, ref_value ->
+          apply(
+            Config.coding_readiness_actions_module(),
+            :coding_dependency_baseline_admission,
+            [repo_value, ref_value]
+          )
+        end
+      )
+
+    case result do
+      {:ok, observed} ->
+        case ReadinessLiveCore.dependency_baseline(observed) do
+          {:ok, :passed} ->
+            {:ok,
+             passed(
+               "dependency_baseline",
+               "dependency_baseline_matched",
+               observed_at,
+               "The exact base commit matches the pinned Linux dependency baseline."
+             )}
+
+          {:error, :mismatch} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "dependency_baseline_mismatch",
+               observed_at,
+               "The exact base commit does not match the pinned Linux dependency baseline.",
+               "Rebuild the Linux dependency baseline for this commit before dispatch."
+             )}
+
+          {:error, :unavailable} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "dependency_baseline_unavailable",
+               observed_at,
+               "The pinned Linux dependency baseline is unavailable.",
+               "Restore the reviewed Linux dependency baseline before dispatch."
+             )}
+
+          {:error, :mix_lock_unreadable} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "dependency_baseline_mix_lock_unreadable",
+               observed_at,
+               "The exact base commit mix.lock could not be read.",
+               "Use a base ref whose commit contains a readable mix.lock."
+             )}
+
+          {:error, :base_ref_unresolvable} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "dependency_baseline_base_ref_unresolvable",
+               observed_at,
+               "The coding plan base ref could not be resolved to an exact commit.",
+               "Use a resolvable Git commit, tag, or branch as base_ref."
+             )}
+
+          {:error, :malformed} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "dependency_baseline_invalid",
+               observed_at,
+               "The dependency-baseline readiness observation is malformed.",
+               "Return the bounded matched-or-error admission result."
+             )}
+        end
+
+      _ ->
+        {:blocked,
+         blocked(
+           "dependency_baseline",
+           "dependency_baseline_invalid",
+           observed_at,
+           "The dependency-baseline readiness observation is unavailable.",
+           "Restore the dependency-baseline observer and retry live readiness."
          )}
     end
   end
@@ -826,6 +925,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         "security_authority_unavailable",
         observed_at,
         "Live security authority was not observed in static mode.",
+        "Run the live readiness check before dispatch."
+      ),
+      unavailable(
+        "dependency_baseline",
+        "dependency_baseline_unavailable",
+        observed_at,
+        "Linux dependency-baseline admission was not observed in static mode.",
         "Run the live readiness check before dispatch."
       ),
       unavailable(

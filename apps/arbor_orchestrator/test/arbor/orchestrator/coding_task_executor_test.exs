@@ -248,6 +248,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Process.get({:coding_executor_readiness, :validation_capacity}, :unavailable)
     end
 
+    def coding_dependency_baseline_admission(repo_path, base_ref) do
+      case Process.get({:coding_executor_readiness, :dependency_baseline}) do
+        nil -> {:ok, %{"matched" => true}}
+        observer when is_function(observer, 2) -> observer.(repo_path, base_ref)
+        value -> value
+      end
+    end
+
     defp toolchain_identity do
       base = %{
         "schema_version" => 1,
@@ -304,6 +312,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule InvalidCompilerReply do
     @moduledoc false
     def compile(_plan, _opts), do: {:ok, %{not: "a compilation"}}
+  end
+
+  defmodule DependencyBaselineDigestStub do
+    @moduledoc false
+
+    def linux_dependency_baseline_mix_lock_digest do
+      case Process.get(:dependency_baseline_digest) do
+        digest when is_binary(digest) -> {:ok, digest}
+        _other -> {:error, :linux_dependency_baseline_unavailable}
+      end
+    end
   end
 
   defmodule MismatchedManifestCompiler do
@@ -949,7 +968,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           :signing_key_status,
           :acp_provider_readiness,
           :toolchain_identity,
-          :validation_capacity
+          :validation_capacity,
+          :dependency_baseline
         ] do
       Process.delete({:coding_executor_readiness, key})
     end
@@ -1557,6 +1577,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defp configured_repo_path do
     Process.get(:coding_executor_repo_path)
   end
+
+  defp commit_mix_lock!(repo, contents) do
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+    File.write!(Path.join(repo, "mix.lock"), contents)
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "mix.lock"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-m", "add mix.lock", "--quiet"])
+    {commit, 0} = System.cmd("git", ["-C", repo, "rev-parse", "HEAD"])
+    String.trim(commit)
+  end
+
+  defp mix_lock_digest(contents) do
+    :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+  end
+
+  defp restore_actions_env(key, nil), do: Application.delete_env(:arbor_actions, key)
+  defp restore_actions_env(key, value), do: Application.put_env(:arbor_actions, key, value)
 
   defp configured_worktree_root do
     Process.get(:coding_executor_worktree_root)
@@ -3358,6 +3395,65 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       )
 
       assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    @tag :security_regression
+    test "security regression: mismatched mix.lock blocks dispatch readiness before workspace or ACP" do
+      repo = configured_repo_path()
+      contents = "%{\"stale\" => \"lock\"}\n"
+      base_commit = commit_mix_lock!(repo, contents)
+      expected_digest = mix_lock_digest("%{\"baseline\" => \"pinned\"}\n")
+      actual_digest = mix_lock_digest(contents)
+
+      previous_digest_module =
+        Application.get_env(:arbor_actions, :dependency_baseline_digest_module)
+
+      Application.put_env(
+        :arbor_actions,
+        :dependency_baseline_digest_module,
+        DependencyBaselineDigestStub
+      )
+
+      Process.put(:dependency_baseline_digest, expected_digest)
+
+      on_exit(fn ->
+        restore_actions_env(:dependency_baseline_digest_module, previous_digest_module)
+      end)
+
+      test_pid = self()
+
+      Process.put({:coding_executor_readiness, :dependency_baseline}, fn repo_path, base_ref ->
+        send(test_pid, {:baseline_called, repo_path, base_ref})
+        Arbor.Actions.coding_dependency_baseline_admission(repo_path, base_ref)
+      end)
+
+      Process.put({:coding_executor_readiness, :acp_provider_readiness}, fn _provider, _model ->
+        send(test_pid, :acp_called)
+        flunk("ACP must not be observed after a baseline mismatch")
+      end)
+
+      {before_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: repo)
+
+      result =
+        CodingTaskExecutor.run(
+          "agent_1",
+          valid_direct_task(%{"base_ref" => base_commit}),
+          valid_context()
+        )
+
+      assert_coding_admission_failed(
+        result,
+        "dependency_baseline",
+        "dependency_baseline_mismatch"
+      )
+
+      assert Process.get(:coding_executor_last_run) == nil
+      assert_received {:baseline_called, _repo_path, ^base_commit}
+      refute_received :acp_called
+      refute inspect(result) =~ actual_digest
+      refute inspect(result) =~ expected_digest
+      {after_worktrees, 0} = System.cmd("git", ["worktree", "list"], cd: repo)
+      assert after_worktrees == before_worktrees
     end
 
     test "missing runtime graph fails closed" do

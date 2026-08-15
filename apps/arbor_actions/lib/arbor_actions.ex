@@ -75,6 +75,7 @@ defmodule Arbor.Actions do
 
   alias Arbor.Actions.Coding.{DesignCheckpoint, Workspace, WorkspaceLeaseRegistry}
   alias Arbor.Actions.Coding.CodingResourceInventory
+  alias Arbor.Actions.Coding.DependencyBaselineAdmission
   alias Arbor.Actions.Coding.ToolchainIdentityCore
   alias Arbor.Actions.Config
   alias Arbor.Actions.Egress
@@ -702,6 +703,56 @@ defmodule Arbor.Actions do
       principal_id
     )
   end
+
+  @doc """
+  Point-in-time Linux dependency-baseline admission for a coding plan base_ref.
+
+  Resolves `base_ref` with the same workspace resolver used by acquisition,
+  then compares the exact commit's `mix.lock` through the same admission
+  implementation as `coding_dependency_baseline_check`. Does not acquire a
+  workspace and does not emit action lifecycle signals. Dispatch still reruns
+  the post-acquisition action as the authoritative defense-in-depth gate.
+  """
+  @spec coding_dependency_baseline_admission(String.t(), String.t()) ::
+          {:ok, %{required(String.t()) => true}}
+          | {:error,
+             :digest_mismatch
+             | :baseline_unavailable
+             | :mix_lock_unreadable_at_base_commit
+             | :base_ref_unresolvable}
+  def coding_dependency_baseline_admission(repo_path, base_ref)
+      when is_binary(repo_path) and is_binary(base_ref) do
+    try do
+      with {:ok, repo_root} <- Workspace.resolve_repo_root(repo_path),
+           {:ok, base_commit} <- Workspace.resolve_base_ref(repo_root, base_ref) do
+        case DependencyBaselineAdmission.admit(repo_root, base_commit) do
+          {:ok, %{"matched" => true} = result} when map_size(result) == 1 ->
+            {:ok, result}
+
+          {:error, {:dependency_baseline_admission_failed, reason}}
+          when reason in [
+                 :digest_mismatch,
+                 :baseline_unavailable,
+                 :mix_lock_unreadable_at_base_commit
+               ] ->
+            {:error, reason}
+
+          _other ->
+            {:error, :baseline_unavailable}
+        end
+      else
+        {:error, _reason} ->
+          {:error, :base_ref_unresolvable}
+      end
+    rescue
+      _exception -> {:error, :baseline_unavailable}
+    catch
+      _kind, _reason -> {:error, :baseline_unavailable}
+    end
+  end
+
+  def coding_dependency_baseline_admission(_repo_path, _base_ref),
+    do: {:error, :base_ref_unresolvable}
 
   @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
   @spec coding_toolchain_identity() ::
