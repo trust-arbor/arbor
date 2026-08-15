@@ -38,6 +38,21 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     assert policy["decision"]["choice"] == "split_passive_protocols"
     assert policy["scenarios"] == Core.scenarios()
 
+    assert policy["budgets"]["proposed_gated"]["supervisor_children"] == %{
+             "min" => 4,
+             "max" => 4
+           }
+
+    assert policy["budgets"]["proposed_gated"]["logger_filter_count"] == %{
+             "min" => 1,
+             "max" => 1
+           }
+
+    assert policy["budgets"]["proposed_gated"]["telemetry_handler_count"] == %{
+             "min" => 0,
+             "max" => 0
+           }
+
     shell =
       File.read!(Path.join(root, "apps/arbor_commands/lib/arbor/commands/startup_footprint.ex"))
 
@@ -147,7 +162,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
     policy = %{
       "schema" => "arbor.packaging.startup_footprint.policy.v1",
       "version" => 1,
-      "policy_version" => "k3b.v1",
+      "policy_version" => Core.policy_version(),
       "decision" => %{
         "status" => "candidate",
         "choice" => "measure_only",

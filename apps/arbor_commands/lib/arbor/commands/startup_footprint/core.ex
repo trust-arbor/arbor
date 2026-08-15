@@ -10,7 +10,7 @@ defmodule Arbor.Commands.StartupFootprint.Core do
   @policy_schema "arbor.packaging.startup_footprint.policy.v1"
   @evidence_schema "arbor.packaging.startup_footprint.evidence.v1"
   @report_schema "arbor.packaging.startup_footprint.report.v1"
-  @policy_version "k3b.v1"
+  @policy_version "k5.v1"
   @scenarios ["baseline", "proposed_gated", "proposed_eager"]
   @delta_metrics [
     "process_count",

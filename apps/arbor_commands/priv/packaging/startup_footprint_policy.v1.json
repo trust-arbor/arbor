@@ -1,11 +1,11 @@
 {
   "schema": "arbor.packaging.startup_footprint.policy.v1",
   "version": 1,
-  "policy_version": "k3b.v1",
+  "policy_version": "k5.v1",
   "decision": {
     "status": "accepted",
     "choice": "split_passive_protocols",
-    "rationale": "Five sequential manager-owned measurements on 2026-08-14 used fresh OTP :peer BEAMs for every scenario. Baseline measured 3 processes, 0 supervisor children, 0 ETS tables, 3827 ETS words, 0 positive BEAM-memory delta, and 6777-8576 us. Proposed-gated still measured 55 processes, 0 children, 12 tables, 45493 ETS words, 2914534-2948990 bytes, and 41733-48394 us while widening the runtime set from 3 to 18 applications. Proposed-eager measured 95 processes, 29 children, 35 tables, 91013 ETS words, 6567698-6704058 bytes, and 89394-98312 us, plus one Logger filter and one telemetry handler. Nested child gates remove active callbacks and supervised children but do not prevent the merged application dependency closure from materially widening a contracts-only consumer. K4 must therefore preserve passive protocol/schema ownership behind a passive application boundary and start active Common/Signals/Monitor services through a separate explicit runtime application. Count ceilings retain approximately 20-50 percent headroom, memory ceilings exceed the observed maxima by more than 2x, and boot ceilings exceed them by more than 6x; zero-callback and zero-child invariants remain exact.",
+    "rationale": "Five K3B measurements on 2026-08-14 selected split_passive_protocols. Five post-materialization K5 measurements on 2026-08-15 then confirmed that passive arbor_kernel remains at 3 processes, 0 supervisor children, 0 ETS tables, 3038 ETS words, 0 positive BEAM-memory delta, and 6040-6783 us. Starting explicit arbor_kernel_runtime with optional children gated off deterministically owns three empty subsystem supervisors plus the OAuth pool (4 children), installs the Common redaction filter, and leaves the Signals telemetry bridge detached: 63 processes, 15 tables, 70658 ETS words, 3711488-4575624 bytes, 50152-52479 us, one Logger filter, and zero telemetry handlers. This is not the contracts-only path because passive consumers never start the runtime application. Eager runtime remained at 95 processes, 29 children, 35 tables, 91749-92020 ETS words, 6520194-7763044 bytes, 84697-88802 us, one Logger filter, and one telemetry handler. Baseline callback/child invariants and gated/eager structural counts remain exact; bounded resource ceilings retain headroom for runtime noise. The passive/active split remains accepted and reversible.",
     "reversible": true
   },
   "scenarios": ["baseline", "proposed_gated", "proposed_eager"],
@@ -22,12 +22,12 @@
     },
     "proposed_gated": {
       "process_count_delta": {"min": 1, "max": 70},
-      "supervisor_children": {"min": 0, "max": 0},
+      "supervisor_children": {"min": 4, "max": 4},
       "ets_table_count_delta": {"min": 0, "max": 18},
       "ets_memory_words_delta": {"min": 0, "max": 75000},
       "beam_memory_bytes_delta": {"min": 0, "max": 8388608},
       "boot_time_us": {"min": 0, "max": 300000},
-      "logger_filter_count": {"min": 0, "max": 0},
+      "logger_filter_count": {"min": 1, "max": 1},
       "telemetry_handler_count": {"min": 0, "max": 0}
     },
     "proposed_eager": {

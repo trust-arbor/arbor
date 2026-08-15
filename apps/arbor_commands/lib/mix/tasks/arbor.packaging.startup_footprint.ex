@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Arbor.Packaging.StartupFootprint do
-  @shortdoc "K3B startup-footprint probe for Common/Signals/Monitor merge candidates"
+  @shortdoc "Checked startup-footprint probe for the split K package"
 
   @moduledoc """
-  Isolated startup-footprint probe for the reversible K3 merge decision.
+  Isolated startup-footprint probe for the accepted split K package.
 
   Measures baseline, proposed-gated, and proposed-eager scenarios in
   separate OS-level BEAM instances controlled by OTP `:peer` over
@@ -16,9 +16,9 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprint do
 
   This task is not installed in the root `quality` alias. It does not
   compile a nested Mix project, copy a dependency cache, or invoke
-  `Arbor.Shell`. Candidate policy remains `status=candidate` and
-  `choice=measure_only` until manager-owned measurements select the
-  final decision.
+  `Arbor.Shell`. The checked-in policy records the accepted
+  `split_passive_protocols` decision and the post-materialization K5
+  structural invariants.
   """
 
   use Mix.Task

@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     assert {:ok, report} = StartupFootprint.run(root: root, json: true)
 
     assert report["schema"] == "arbor.packaging.startup_footprint.report.v1"
-    assert report["policy_version"] == "k3b.v1"
+    assert report["policy_version"] == "k5.v1"
     assert report["decision"]["reversible"] == true
     assert report["decision"]["status"] == "accepted"
     assert report["decision"]["choice"] == "split_passive_protocols"
@@ -67,13 +67,12 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     assert Enum.all?(pids, &(&1 != parent_pid))
 
     gated = report["samples"]["proposed_gated"]
-    # Common.Application installs the Logger filter unconditionally, and the
-    # three nested Common/Signals/Monitor Application MFAs always start under
-    # Arbor.KernelRuntime.Supervisor, so neither is forced to zero anymore —
-    # only the *optional* children (and the telemetry bridge) are gated.
-    assert gated["logger_filter_count"] >= 1
+    # The gated runtime owns three empty subsystem supervisors plus the OAuth
+    # pool and installs Common's redaction filter. Optional children and the
+    # telemetry bridge remain disabled.
+    assert gated["logger_filter_count"] == 1
     assert gated["telemetry_handler_count"] == 0
-    assert gated["supervisor_children"] >= 1
+    assert gated["supervisor_children"] == 4
 
     baseline = report["samples"]["baseline"]
     eager = report["samples"]["proposed_eager"]

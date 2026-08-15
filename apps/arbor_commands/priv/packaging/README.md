@@ -167,6 +167,23 @@ Regression ceilings keep structural invariants tight while giving memory and
 boot-time measurements bounded CI headroom. Generated probe output is never
 committed.
 
+K5 repeated five sequential measurements against the materialized applications.
+The historical scenario names remain stable for report compatibility;
+`proposed_gated` now means the explicit runtime application with optional
+children disabled.
+
+| Scenario | Processes | Children | ETS tables | ETS words | BEAM bytes | Boot us | Logger / telemetry |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 3 | 0 | 0 | 3,038 | 0 | 6,040-6,783 | 0 / 0 |
+| proposed-gated | 63 | 4 | 15 | 70,658 | 3,711,488-4,575,624 | 50,152-52,479 | 1 / 0 |
+| proposed-eager | 95 | 29 | 35 | 91,749-92,020 | 6,520,194-7,763,044 | 84,697-88,802 | 1 / 1 |
+
+The gated runtime's four children are structural: three empty nested subsystem
+supervisors plus the OAuth HTTP pool. Common installs its redaction filter when
+the runtime starts, while the optional service children and Signals telemetry
+bridge remain disabled. These exact values do not weaken passive isolation:
+contracts-only consumers start `:arbor_kernel`, not the runtime application.
+
 ## Retired K migration gates
 
 The PK-K0 migration census and K4 materialization plan were one-time proof
