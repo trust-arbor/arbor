@@ -248,11 +248,21 @@ defmodule Arbor.Commands.PlatformInventory.Core do
 
   defp validate_file(file, object_format, seen) do
     path = file["path"]
-    oid = file["blob_oid"]
-    mode = file["mode"]
-    declared_size = file["byte_size"]
-    bytes = file["bytes"]
 
+    with :ok <- validate_file_path(path, seen),
+         :ok <- validate_file_oid(path, file["blob_oid"], object_format),
+         :ok <- validate_file_mode(file["mode"], path) do
+      validate_file_payload(
+        path,
+        file["byte_size"],
+        file["bytes"],
+        file["blob_oid"],
+        object_format
+      )
+    end
+  end
+
+  defp validate_file_path(path, seen) do
     cond do
       not is_binary(path) or not String.valid?(path) ->
         {:error, :invalid_path}
@@ -263,15 +273,34 @@ defmodule Arbor.Commands.PlatformInventory.Core do
       MapSet.member?(seen, path) ->
         {:error, {:duplicate_paths, path}}
 
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_file_oid(path, oid, object_format) do
+    cond do
       not is_binary(oid) or not valid_oid_shape?(oid) ->
         {:error, {:invalid_oid, path}}
 
       not oid_matches_format?(oid, object_format) ->
         {:error, {:oid_format_mismatch, path}}
 
-      mode not in @accepted_modes ->
-        {:error, {:invalid_mode, mode, path}}
+      true ->
+        :ok
+    end
+  end
 
+  defp validate_file_mode(mode, path) do
+    if mode in @accepted_modes do
+      :ok
+    else
+      {:error, {:invalid_mode, mode, path}}
+    end
+  end
+
+  defp validate_file_payload(path, declared_size, bytes, oid, object_format) do
+    cond do
       not is_integer(declared_size) or declared_size < 0 ->
         {:error, {:invalid_byte_size, path}}
 
@@ -389,16 +418,22 @@ defmodule Arbor.Commands.PlatformInventory.Core do
 
     stale =
       classifications
-      |> Enum.filter(&Map.has_key?(entries_by_path, &1["path"]))
-      |> Enum.filter(fn classification ->
-        entries_by_path[classification["path"]]["blob_oid"] != classification["blob_oid"]
-      end)
+      |> stale_classifications(entries_by_path)
       |> Enum.map(&stale_blob_failure(&1, entries_by_path))
 
     failures = Enum.sort_by(missing ++ extra ++ stale, &{&1["reason"], &1["detail"]})
     status = if failures == [], do: "match", else: "mismatch"
 
     {:ok, %{"status" => status, "failures" => failures, "failure_count" => length(failures)}}
+  end
+
+  defp stale_classifications(classifications, entries_by_path) do
+    Enum.filter(classifications, fn classification ->
+      path = classification["path"]
+
+      Map.has_key?(entries_by_path, path) and
+        entries_by_path[path]["blob_oid"] != classification["blob_oid"]
+    end)
   end
 
   defp stale_blob_failure(classification, entries_by_path) do
@@ -429,37 +464,40 @@ defmodule Arbor.Commands.PlatformInventory.Core do
   ## -- show -------------------------------------------------------------
 
   defp admit_show_options(opts) when is_list(opts) do
-    Enum.reduce_while(opts, {:ok, "report", "human", MapSet.new()}, fn option,
-                                                                       {:ok, mode, output, seen} ->
-      case option do
-        {key, value} when key in [:mode, :output] ->
-          if MapSet.member?(seen, key) do
-            {:halt, {:error, {:duplicate_option, key}}}
-          else
-            case valid_show_value(key, value) do
-              :ok ->
-                next = if key == :mode, do: {:ok, value, output}, else: {:ok, mode, value}
-                {:cont, put_show_seen(next, seen, key)}
-
-              {:error, _} = error ->
-                {:halt, error}
-            end
-          end
-
-        {key, _value} when is_atom(key) ->
-          {:halt, {:error, {:unknown_option, key}}}
-
-        _ ->
-          {:halt, {:error, :invalid_options}}
-      end
-    end)
-    |> case do
-      {:ok, mode, output, _seen} -> {:ok, mode, output}
-      {:error, _} = error -> error
-    end
+    Enum.reduce_while(opts, {:ok, "report", "human", MapSet.new()}, &admit_show_option/2)
+    |> finish_show_options()
   end
 
   defp admit_show_options(_), do: {:error, :invalid_options}
+
+  defp finish_show_options({:ok, mode, output, _seen}), do: {:ok, mode, output}
+  defp finish_show_options({:error, _} = error), do: error
+
+  defp admit_show_option({key, value}, {:ok, mode, output, seen}) when key in [:mode, :output] do
+    if MapSet.member?(seen, key) do
+      {:halt, {:error, {:duplicate_option, key}}}
+    else
+      admit_known_show_option(key, value, mode, output, seen)
+    end
+  end
+
+  defp admit_show_option({key, _value}, {:ok, _mode, _output, _seen}) when is_atom(key) do
+    {:halt, {:error, {:unknown_option, key}}}
+  end
+
+  defp admit_show_option(_option, {:ok, _mode, _output, _seen}) do
+    {:halt, {:error, :invalid_options}}
+  end
+
+  defp admit_known_show_option(key, value, mode, output, seen) do
+    case valid_show_value(key, value) do
+      :ok -> {:cont, put_show_seen(next_show_values(key, value, mode, output), seen, key)}
+      {:error, _} = error -> {:halt, error}
+    end
+  end
+
+  defp next_show_values(:mode, value, _mode, output), do: {:ok, value, output}
+  defp next_show_values(:output, value, mode, _output), do: {:ok, mode, value}
 
   defp put_show_seen({:ok, mode, output}, seen, key),
     do: {:ok, mode, output, MapSet.put(seen, key)}

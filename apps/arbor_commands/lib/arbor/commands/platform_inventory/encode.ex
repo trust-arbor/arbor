@@ -180,9 +180,9 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
   @doc "Strictly validate then domain-separate digest of a comparison result."
   @spec comparison_digest(map()) :: {:ok, String.t()} | validation_error()
   def comparison_digest(comparison) do
-    with {:ok, comparison} <- validate_comparison(comparison),
-         {:ok, digest} <- hash_comparison(comparison) do
-      {:ok, digest}
+    case validate_comparison(comparison) do
+      {:ok, comparison} -> hash_comparison(comparison)
+      other -> other
     end
   end
 
@@ -295,9 +295,8 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
            validate_classification_list(Map.fetch!(report, "classifications")),
          {:ok, comparison} <- validate_comparison(Map.fetch!(report, "comparison")),
          :ok <- validate_fields(Map.fetch!(report, "provenance"), provenance_field_specs()),
-         :ok <- validate_fields(Map.fetch!(report, "counts"), counts_field_specs()),
-         :ok <- validate_report_semantics(report, entries, classifications, comparison) do
-      :ok
+         :ok <- validate_fields(Map.fetch!(report, "counts"), counts_field_specs()) do
+      validate_report_semantics(report, entries, classifications, comparison)
     end
   end
 
@@ -633,21 +632,19 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
   end
 
   defp admit_manifest_triples(triples) do
-    cond do
-      length(triples) > @max_report_list_items ->
-        {:error, :unbounded}
-
-      true ->
-        Enum.reduce_while(triples, {:ok, []}, fn triple, {:ok, acc} ->
-          case admit_manifest_triple(triple) do
-            {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
-        |> case do
-          {:ok, acc} -> finish_manifest_triples(Enum.reverse(acc))
-          err -> err
+    if length(triples) > @max_report_list_items do
+      {:error, :unbounded}
+    else
+      Enum.reduce_while(triples, {:ok, []}, fn triple, {:ok, acc} ->
+        case admit_manifest_triple(triple) do
+          {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+          {:error, _} = err -> {:halt, err}
         end
+      end)
+      |> case do
+        {:ok, acc} -> finish_manifest_triples(Enum.reverse(acc))
+        err -> err
+      end
     end
   end
 
@@ -769,9 +766,8 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
          :ok <- validate_status_alignment(report, comparison, classifications),
          :ok <- validate_comparison_alignment(entries, classifications, comparison),
          :ok <- validate_counts(Map.fetch!(report, "counts"), entries, classifications),
-         :ok <- validate_oid_format_alignment(report, entries, classifications),
-         :ok <- validate_bound_digests(report, entries, classifications, comparison) do
-      :ok
+         :ok <- validate_oid_format_alignment(report, entries, classifications) do
+      validate_bound_digests(report, entries, classifications, comparison)
     end
   end
 
@@ -846,17 +842,22 @@ defmodule Arbor.Commands.PlatformInventory.Encode do
 
     stale =
       classifications
-      |> Enum.filter(&Map.has_key?(entries_by_path, Map.fetch!(&1, "path")))
-      |> Enum.filter(fn classification ->
-        path = Map.fetch!(classification, "path")
-        Map.fetch!(entries_by_path, path)["blob_oid"] != Map.fetch!(classification, "blob_oid")
-      end)
+      |> stale_classifications(entries_by_path)
       |> Enum.map(&stale_review_failure(&1, entries_by_path))
 
     failures = Enum.sort_by(missing ++ extra ++ stale, &failure_sort_key/1)
     status = if failures == [], do: "match", else: "mismatch"
 
     %{"status" => status, "failures" => failures, "failure_count" => length(failures)}
+  end
+
+  defp stale_classifications(classifications, entries_by_path) do
+    Enum.filter(classifications, fn classification ->
+      path = Map.fetch!(classification, "path")
+
+      Map.has_key?(entries_by_path, path) and
+        Map.fetch!(entries_by_path, path)["blob_oid"] != Map.fetch!(classification, "blob_oid")
+    end)
   end
 
   defp stale_review_failure(classification, entries_by_path) do

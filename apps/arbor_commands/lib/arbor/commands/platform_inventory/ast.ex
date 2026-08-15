@@ -144,67 +144,97 @@ defmodule Arbor.Commands.PlatformInventory.Ast do
   end
 
   defp walk(node, state, env, depth, count) do
-    count = count + 1
+    walk_form(node, state, env, depth, count + 1)
+  end
 
-    case node do
-      {:defmodule, _meta, [name_ast, body]} ->
-        walk_defmodule(name_ast, body, state, env, depth, count)
+  defp walk_form({:defmodule, _meta, [name_ast, body]}, state, env, depth, count) do
+    walk_defmodule(name_ast, body, state, env, depth, count)
+  end
 
-      {:alias, _meta, args} when is_list(args) ->
-        with {:ok, state, env} <- register_alias(args, state, env),
-             {:ok, {state, count, _child_env}} <-
-               walk_children(args, state, env, depth + 1, count) do
-          {:ok, {state, count, env}}
-        end
+  defp walk_form({:alias, _meta, args}, state, env, depth, count) when is_list(args) do
+    walk_alias(args, state, env, depth, count)
+  end
 
-      {:use, _meta, [target | _rest] = args} ->
-        with {:ok, state} <- record_use(state, target, env),
-             {:ok, {state, count, _child_env}} <-
-               walk_children(args, state, env, depth + 1, count) do
-          {:ok, {state, count, env}}
-        end
+  defp walk_form({:use, _meta, [target | _rest] = args}, state, env, depth, count) do
+    walk_recorded(record_use(state, target, env), args, env, depth, count)
+  end
 
-      {:__block__, _meta, expressions} when is_list(expressions) ->
-        walk_sequence(expressions, state, env, depth + 1, count)
+  defp walk_form({:__block__, _meta, expressions}, state, env, depth, count)
+       when is_list(expressions) do
+    walk_sequence(expressions, state, env, depth + 1, count)
+  end
 
-      {{:., _dot_meta, [receiver, fun]}, _call_meta, args}
-      when is_atom(fun) and is_list(args) ->
-        with {:ok, state} <- record_remote_call(state, receiver, fun, length(args), env),
-             {:ok, {state, count, _child_env}} <-
-               walk_children([receiver, args], state, env, depth + 1, count) do
-          {:ok, {state, count, env}}
-        end
+  defp walk_form({{:., _dot_meta, [receiver, fun]}, _call_meta, args}, state, env, depth, count)
+       when is_atom(fun) and is_list(args) do
+    walk_recorded(
+      record_remote_call(state, receiver, fun, length(args), env),
+      [receiver, args],
+      env,
+      depth,
+      count
+    )
+  end
 
-      {:@, _meta, [{:behaviour, _bmeta, [target]} | _rest] = args} ->
-        with {:ok, state} <- record_behaviour(state, target, env),
-             {:ok, {state, count, _child_env}} <-
-               walk_children(args, state, env, depth + 1, count) do
-          {:ok, {state, count, env}}
-        end
+  defp walk_form({:@, _meta, args}, state, env, depth, count) do
+    walk_attribute(args, state, env, depth, count)
+  end
 
-      {:@, _meta, [{callback, _cmeta, _} | _rest] = args}
-      when callback in [:callback, :macrocallback] ->
-        walk_children(args, %{state | registry: true}, env, depth + 1, count)
+  defp walk_form({fun, _meta, args}, state, env, depth, count)
+       when is_atom(fun) and is_list(args) do
+    walk_children(args, record_local_call(state, fun, length(args)), env, depth + 1, count)
+  end
 
-      {:@, _meta, [{:impl, _imeta, _} | _rest] = args} ->
-        walk_children(args, %{state | registry: true}, env, depth + 1, count)
+  defp walk_form({left, right}, state, env, depth, count) do
+    walk_children([left, right], state, env, depth + 1, count)
+  end
 
-      {:@, _meta, [{:on_load, _ometa, _} | _rest] = args} ->
-        walk_children(args, %{state | native: true}, env, depth + 1, count)
+  defp walk_form(list, state, env, depth, count) when is_list(list) do
+    walk_children(list, state, env, depth + 1, count)
+  end
 
-      {fun, _meta, args} when is_atom(fun) and is_list(args) ->
-        state = record_local_call(state, fun, length(args))
-        walk_children(args, state, env, depth + 1, count)
+  defp walk_form(_leaf, state, env, _depth, count) do
+    {:ok, {state, count, env}}
+  end
 
-      {left, right} ->
-        walk_children([left, right], state, env, depth + 1, count)
-
-      list when is_list(list) ->
-        walk_children(list, state, env, depth + 1, count)
-
-      _leaf ->
-        {:ok, {state, count, env}}
+  defp walk_alias(args, state, env, depth, count) do
+    case register_alias(args, state, env) do
+      {:ok, state, env} -> walk_recorded({:ok, state}, args, env, depth, count)
+      {:error, _} = error -> error
     end
+  end
+
+  defp walk_recorded({:error, _} = error, _children, _env, _depth, _count), do: error
+
+  defp walk_recorded({:ok, state}, children, env, depth, count) do
+    case walk_children(children, state, env, depth + 1, count) do
+      {:ok, {state, count, _child_env}} -> {:ok, {state, count, env}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp walk_attribute([{:behaviour, _bmeta, [target]} | _rest] = args, state, env, depth, count) do
+    walk_recorded(record_behaviour(state, target, env), args, env, depth, count)
+  end
+
+  defp walk_attribute([{callback, _cmeta, _} | _rest] = args, state, env, depth, count)
+       when callback in [:callback, :macrocallback] do
+    walk_children(args, %{state | registry: true}, env, depth + 1, count)
+  end
+
+  defp walk_attribute([{:impl, _imeta, _} | _rest] = args, state, env, depth, count) do
+    walk_children(args, %{state | registry: true}, env, depth + 1, count)
+  end
+
+  defp walk_attribute([{:on_load, _ometa, _} | _rest] = args, state, env, depth, count) do
+    walk_children(args, %{state | native: true}, env, depth + 1, count)
+  end
+
+  defp walk_attribute(args, state, env, depth, count) when is_list(args) do
+    walk_children(args, record_local_call(state, :@, length(args)), env, depth + 1, count)
+  end
+
+  defp walk_attribute(_args, state, env, _depth, count) do
+    {:ok, {state, count, env}}
   end
 
   defp walk_defmodule(name_ast, body, state, env, depth, count) do
@@ -417,34 +447,33 @@ defmodule Arbor.Commands.PlatformInventory.Ast do
       MapSet.member?(@network_modules, receiver) ->
         %{state | network: true}
 
-      receiver == "filelib" and fun == :wildcard ->
+      filesystem_scan_call?(receiver, fun) ->
         %{state | filesystem_scan: true}
 
-      receiver == "File" and fun in @fs_scan_funs ->
-        %{state | filesystem_scan: true}
-
-      receiver == "Path" and fun == :wildcard ->
-        %{state | filesystem_scan: true}
-
-      receiver == "Kernel" and fun == :apply ->
+      dynamic_code_call?(receiver, fun) ->
         %{state | dynamic_code: true}
 
-      receiver == "Code" and MapSet.member?(@code_eval_funs, fun) ->
-        %{state | dynamic_code: true}
-
-      receiver == "Module" and fun == :concat ->
-        %{state | dynamic_code: true}
-
-      receiver == "telemetry" and MapSet.member?(@telemetry_funs, fun) ->
-        %{state | telemetry: true}
-
-      receiver == "Logger" and MapSet.member?(@logger_backend_funs, fun) ->
+      telemetry_call?(receiver, fun) ->
         %{state | telemetry: true}
 
       true ->
         state
     end
   end
+
+  defp filesystem_scan_call?("filelib", :wildcard), do: true
+  defp filesystem_scan_call?("File", fun), do: fun in @fs_scan_funs
+  defp filesystem_scan_call?("Path", :wildcard), do: true
+  defp filesystem_scan_call?(_receiver, _fun), do: false
+
+  defp dynamic_code_call?("Kernel", :apply), do: true
+  defp dynamic_code_call?("Code", fun), do: MapSet.member?(@code_eval_funs, fun)
+  defp dynamic_code_call?("Module", :concat), do: true
+  defp dynamic_code_call?(_receiver, _fun), do: false
+
+  defp telemetry_call?("telemetry", fun), do: MapSet.member?(@telemetry_funs, fun)
+  defp telemetry_call?("Logger", fun), do: MapSet.member?(@logger_backend_funs, fun)
+  defp telemetry_call?(_receiver, _fun), do: false
 
   defp record_erlang_call(state, :register, 2), do: %{state | process: true}
   defp record_erlang_call(state, :unregister, 1), do: %{state | process: true}

@@ -544,21 +544,19 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   end
 
   defp admit_index_triples(triples) do
-    cond do
-      length(triples) > @max_files ->
-        {:error, :file_limit}
-
-      true ->
-        Enum.reduce_while(triples, {:ok, []}, fn triple, {:ok, acc} ->
-          case admit_index_triple(triple) do
-            {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
-        |> case do
-          {:ok, acc} -> finish_index_triples(Enum.reverse(acc))
-          err -> err
+    if length(triples) > @max_files do
+      {:error, :file_limit}
+    else
+      Enum.reduce_while(triples, {:ok, []}, fn triple, {:ok, acc} ->
+        case admit_index_triple(triple) do
+          {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+          {:error, _} = err -> {:halt, err}
         end
+      end)
+      |> case do
+        {:ok, acc} -> finish_index_triples(Enum.reverse(acc))
+        err -> err
+      end
     end
   end
 

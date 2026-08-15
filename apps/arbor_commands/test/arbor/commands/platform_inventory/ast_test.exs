@@ -400,9 +400,6 @@ defmodule Arbor.Commands.PlatformInventory.AstTest do
   end
 
   defp existing_atom?(value) do
-    String.to_existing_atom(value)
-    true
-  rescue
-    ArgumentError -> false
+    match?({:ok, _}, Arbor.Common.SafeAtom.to_existing(value))
   end
 end
