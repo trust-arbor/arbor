@@ -2,7 +2,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   @moduledoc """
   Pure K4A projector and comparer.
 
-  Generic `project/2` does not assert the production 640/610/30/4 inventory.
+  Generic `project/2` does not assert the production 640/607/33/4 inventory.
   `enforce_production_policy/1` is the separate production gate.
   """
 
@@ -46,6 +46,7 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
                                      "apps/arbor_common/lib/mix/tasks/arbor/hands/spawn.ex",
                                      "apps/arbor_common/test/arbor/common/agent_telemetry/source_guard_test.exs",
                                      "apps/arbor_common/test/arbor/common/k1c_source_guard_test.exs",
+                                     "apps/arbor_common/test/arbor/common/runtime_wiring_source_shape_test.exs",
                                      "apps/arbor_common/test/mix/tasks/arbor/readiness_test.exs",
                                      "apps/arbor_common/test/mix/tasks/arbor/start_daemon_launch_test.exs",
                                      "apps/arbor_contracts/README.md",
@@ -57,9 +58,11 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
                                      "apps/arbor_contracts/test/arbor/contracts/dependency_hierarchy_test.exs",
                                      "apps/arbor_contracts/test/mix_project_paths_test.exs",
                                      "apps/arbor_monitor/test/arbor/monitor/k1d_source_guard_test.exs",
+                                     "apps/arbor_monitor/test/arbor/monitor/runtime_wiring_source_shape_test.exs",
                                      "apps/arbor_signals/test/arbor/signals/cluster_integration_test.exs",
                                      "apps/arbor_signals/test/arbor/signals/k1e_source_guard_test.exs",
                                      "apps/arbor_signals/test/arbor/signals/k1f_source_guard_test.exs",
+                                     "apps/arbor_signals/test/arbor/signals/runtime_wiring_source_shape_test.exs",
                                      "apps/arbor_signals/test/arbor/signals/subsystem_cluster_test.exs",
                                      "apps/arbor_signals/test/support/signal_test_case.ex"
                                    ])
@@ -116,8 +119,8 @@ defmodule Arbor.Commands.KernelMaterialization.Core do
   def production_policy do
     %{
       "source_entries" => 640,
-      "exact_moves" => 610,
-      "transform_inputs" => 30,
+      "exact_moves" => 607,
+      "transform_inputs" => 33,
       "collision_destinations" => 4,
       "collision_destination_paths" => MapSet.to_list(@collision_destinations) |> Enum.sort(),
       "semantic_transform_source_paths" =>

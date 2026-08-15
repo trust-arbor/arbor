@@ -125,10 +125,10 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
   test "enforce_production_policy derives counts from rows, not declared counts" do
     policy = Core.production_policy()
     assert policy["source_entries"] == 640
-    assert policy["exact_moves"] == 610
-    assert policy["transform_inputs"] == 30
+    assert policy["exact_moves"] == 607
+    assert policy["transform_inputs"] == 33
     assert policy["collision_destinations"] == 4
-    assert length(policy["semantic_transform_source_paths"]) == 22
+    assert length(policy["semantic_transform_source_paths"]) == 25
 
     stub = production_stub_plan()
     assert {:error, :accepted_count_mismatch} = Core.enforce_production_policy(stub)
@@ -604,8 +604,8 @@ defmodule Arbor.Commands.KernelMaterialization.CoreTest do
     %{
       "counts" => %{
         "source_entries" => 640,
-        "exact_moves" => 610,
-        "transform_inputs" => 30,
+        "exact_moves" => 607,
+        "transform_inputs" => 33,
         "collision_destinations" => 4,
         "retained_targets" => 3
       },

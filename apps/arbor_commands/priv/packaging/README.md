@@ -224,5 +224,5 @@ plus every reviewed source file whose content names a retiring application or
 physical root; single-file semantic transforms have an empty collision group.
 SPIKE-2 is not authority; accepted main
 `207d47486485e554d4e725d9cc898b56a9f327eb` is the source truth.
-Production policy asserts 640 source entries, 610 exact moves, 30 transform
+Production policy asserts 640 source entries, 607 exact moves, 33 transform
 inputs, and four collision destinations.

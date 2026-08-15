@@ -22,8 +22,8 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMaterializationProductionPathTest do
 
     counts = report["counts"]
     assert counts["source_entries"] == 640
-    assert counts["exact_moves"] == 610
-    assert counts["transform_inputs"] == 30
+    assert counts["exact_moves"] == 607
+    assert counts["transform_inputs"] == 33
     assert counts["collision_destinations"] == 4
 
     assert {:ok, check} =
