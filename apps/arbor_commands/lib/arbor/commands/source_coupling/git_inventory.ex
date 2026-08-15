@@ -3,7 +3,9 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   Imperative Git inventory for source-coupling census.
 
   Enumerates stage-0 tracked paths and reads exact blob bytes via
-  argv-safe `git cat-file --batch` (OIDs on stdin).
+  argv-safe `git cat-file --batch` (OIDs on stdin). The E0A selected-source
+  API admits only production Elixir sources at
+  `apps/<selected_app>/lib/<one-or-more-segments>.ex`.
   """
 
   @oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
@@ -13,7 +15,12 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @max_blob_bytes 1_048_576
   @max_total_bytes 64 * 1024 * 1024
   @max_files 50_000
+  @max_path_bytes 4096
+  @max_selected_apps 256
+  @max_app_bytes 255
   @batch_size 64
+  @selected_index_domain "arbor.git_inventory.selected_index.v1\0"
+  @app_name_re ~r/\A[a-z][a-z0-9_]*\z/
 
   @type file_entry :: %{
           path: String.t(),
@@ -218,14 +225,36 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   def admit_literal_path(path), do: literal_repo_path(path)
 
   @doc """
-  Load selected-app blobs from the full index.
+  Load selected-app production Elixir source blobs from the full index.
 
-  Parses every stage record structurally. Mode/stage/OID policy applies
-  only to selected source/target paths. Unrelated symlinks/gitlinks are
-  ignored. `apps/arbor_integrations` is always dropped.
+  Selection is exactly `apps/<selected_app>/lib/<one-or-more-segments>.ex`.
+  Tracked app metadata, configuration, `priv`, tests, `.exs` files, unselected
+  apps, and `apps/arbor_integrations` are ignored before selected-entry
+  mode/stage/OID admission, just like every other unrelated path. A malformed
+  path that structurally targets the selected production scope remains in
+  scope and fails closed during admission.
+
+  The returned `files` are read from the stage-0 **index** (`git ls-files
+  --stage`), not from a tree object. `head_tree_oid` is `HEAD^{tree}`,
+  recorded as separately named provenance for audit/display only — it is
+  **not** proof that the returned blob bytes came from that tree. When the
+  working index has staged-but-uncommitted changes, the index and
+  `HEAD^{tree}` diverge for the affected paths.
+
+  `selected_index_digest` binds the exact sorted selected production-source
+  `{path, mode, blob_oid}` set. It is domain-separated index provenance and
+  must never be labeled as HEAD-tree content. Consumer-specific report
+  digests belong in the consumer encoder.
   """
   @spec load_selected_blobs(String.t(), [String.t()], keyword()) ::
-          {:ok, %{files: [file_entry()], object_format: String.t()}} | {:error, term()}
+          {:ok,
+           %{
+             files: [file_entry()],
+             object_format: String.t(),
+             head_tree_oid: String.t(),
+             selected_index_digest: String.t()
+           }}
+          | {:error, term()}
   def load_selected_blobs(root, selected_apps, opts \\ [])
 
   def load_selected_blobs(root, selected_apps, opts)
@@ -234,17 +263,49 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
     max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
     max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes)
 
-    with :ok <- admit_selected_apps(selected_apps),
+    with {:ok, selected_apps} <- admit_selected_apps(selected_apps),
+         {:ok, head_tree_oid} <- rev_parse_tree(root, run_git),
          {:ok, staged} <- ls_files_stage_all(root, run_git),
-         {:ok, admitted} <- admit_selected_stage_entries(staged, selected_apps),
+         {:ok, admitted} <- admit_selected_production_entries(staged, selected_apps),
          :ok <- check_file_count(admitted),
-         {:ok, object_format} <- infer_object_format(admitted),
-         {:ok, files} <- read_blobs(root, admitted, run_git, max_blob, max_total) do
-      {:ok, %{files: files, object_format: object_format}}
+         {:ok, object_format} <- infer_selected_object_format(admitted, head_tree_oid),
+         :ok <- match_head_tree_format(head_tree_oid, object_format),
+         {:ok, files} <- read_blobs(root, admitted, run_git, max_blob, max_total),
+         {:ok, selected_index_digest} <- selected_index_digest(index_triples(files)) do
+      {:ok,
+       %{
+         files: files,
+         object_format: object_format,
+         head_tree_oid: head_tree_oid,
+         selected_index_digest: selected_index_digest
+       }}
     end
   end
 
   def load_selected_blobs(_, _, _), do: {:error, :invalid_selected_apps}
+
+  @doc """
+  Domain-separated digest of the exact sorted selected production-source set.
+
+  Every triple path must have the exact production-source shape
+  `apps/<app>/lib/<one-or-more-segments>.ex`; `apps/arbor_integrations` is
+  excluded. This binds stage-0 index content only. It is not a `HEAD^{tree}`
+  digest and must not be labeled as tree content.
+  """
+  @spec selected_index_digest([{String.t(), String.t(), String.t()}]) ::
+          {:ok, String.t()} | {:error, term()}
+  def selected_index_digest(triples) when is_list(triples) do
+    with {:ok, admitted} <- admit_index_triples(triples) do
+      digest =
+        admitted
+        |> Enum.sort_by(&elem(&1, 0))
+        |> hash_framed_triples(@selected_index_domain)
+
+      {:ok, digest}
+    end
+  end
+
+  def selected_index_digest(_), do: {:error, :invalid_selected_index}
 
   @doc """
   Query explicit index blobs in argv-bounded chunks.
@@ -320,19 +381,40 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   def list_stage_prefixes(_, _, _), do: {:error, :invalid_paths}
 
   defp admit_selected_apps(apps) when is_list(apps) do
-    if Enum.all?(apps, &(is_binary(&1) and &1 != "" and not String.contains?(&1, "/"))) do
-      :ok
-    else
-      {:error, :invalid_selected_apps}
+    cond do
+      apps == [] ->
+        {:error, :invalid_selected_apps}
+
+      length(apps) > @max_selected_apps ->
+        {:error, :selected_app_limit}
+
+      length(apps) != length(Enum.uniq(apps)) ->
+        {:error, :duplicate_selected_apps}
+
+      not Enum.all?(apps, &valid_selected_app?/1) ->
+        {:error, :invalid_selected_apps}
+
+      true ->
+        {:ok, MapSet.new(apps)}
     end
   end
 
   defp admit_selected_apps(_), do: {:error, :invalid_selected_apps}
 
+  defp admit_selected_production_entries(entries, selected_apps) do
+    admit_selected_stage_entries(entries, selected_apps, &selected_production_source_path?/2)
+  end
+
   defp admit_selected_stage_entries(entries, selected_apps) do
+    admit_selected_stage_entries(entries, selected_apps, &selected_app_path?/2)
+  end
+
+  defp admit_selected_stage_entries(entries, selected_apps, selected_path?) do
+    selected_apps = MapSet.new(selected_apps)
+
     selected =
       Enum.filter(entries, fn entry ->
-        selected_app_path?(entry.path, selected_apps)
+        selected_path?.(entry.path, selected_apps)
       end)
 
     paths = Enum.map(selected, & &1.path)
@@ -361,7 +443,7 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
         false
 
       ["apps", app | _] ->
-        app in selected_apps
+        MapSet.member?(selected_apps, app)
 
       _ ->
         false
@@ -370,23 +452,173 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
 
   defp selected_app_path?(_, _), do: false
 
+  defp selected_production_source_path?(path, selected_apps) when is_binary(path) do
+    case :binary.split(path, "/", [:global]) do
+      ["apps", "arbor_integrations" | _] ->
+        false
+
+      ["apps", app | suffix] ->
+        MapSet.member?(selected_apps, app) and
+          (production_source_suffix?(suffix) or traversal_production_source_suffix?(suffix))
+
+      _ ->
+        false
+    end
+  end
+
+  defp selected_production_source_path?(_, _), do: false
+
+  defp production_source_path?(path) when is_binary(path) do
+    case :binary.split(path, "/", [:global]) do
+      ["apps", app, "lib" | source_segments] when source_segments != [] ->
+        app != "arbor_integrations" and valid_selected_app?(app) and
+          ex_source_name?(List.last(source_segments))
+
+      _ ->
+        false
+    end
+  end
+
+  defp production_source_path?(_), do: false
+
+  defp production_source_suffix?(["lib" | source_segments]) when source_segments != [],
+    do: ex_source_name?(List.last(source_segments))
+
+  defp production_source_suffix?(_), do: false
+
+  defp traversal_production_source_suffix?(segments) do
+    Enum.any?(segments, &(&1 in ["", ".", ".."])) and "lib" in segments and
+      ex_source_name?(List.last(segments))
+  end
+
+  defp ex_source_name?(name) when is_binary(name) and byte_size(name) >= 3,
+    do: binary_part(name, byte_size(name) - 3, 3) == ".ex"
+
+  defp ex_source_name?(_), do: false
+
+  defp valid_selected_app?(app) when is_binary(app) do
+    String.valid?(app) and byte_size(app) <= @max_app_bytes and Regex.match?(@app_name_re, app)
+  end
+
+  defp valid_selected_app?(_), do: false
+
   defp admit_selected_entry(%{mode: mode, blob_oid: oid, stage: stage, path: path} = entry) do
-    cond do
-      not Regex.match?(@oid_re, oid) ->
-        {:error, {:invalid_oid, oid}}
+    with :ok <- literal_repo_path(path),
+         :ok <- check_path_size(path) do
+      cond do
+        not Regex.match?(@oid_re, oid) ->
+          {:error, {:invalid_oid, oid}}
 
-      stage != 0 ->
-        {:error, {:unsupported_selected_stage, path, stage}}
+        stage != 0 ->
+          {:error, {:unsupported_selected_stage, path, stage}}
 
-      MapSet.member?(@accepted_modes, mode) ->
-        {:ok, entry}
+        MapSet.member?(@accepted_modes, mode) ->
+          {:ok, entry}
 
-      true ->
-        {:error, {:unsupported_selected_mode, mode, path}}
+        true ->
+          {:error, {:unsupported_selected_mode, mode, path}}
+      end
     end
   end
 
   defp admit_selected_entry(_), do: {:error, :malformed_stage_line}
+
+  defp check_path_size(path) when byte_size(path) > @max_path_bytes,
+    do: {:error, {:invalid_path, :unbounded}}
+
+  defp check_path_size(_), do: :ok
+
+  defp match_head_tree_format(head_tree_oid, "sha1")
+       when byte_size(head_tree_oid) == 40,
+       do: :ok
+
+  defp match_head_tree_format(head_tree_oid, "sha256")
+       when byte_size(head_tree_oid) == 64,
+       do: :ok
+
+  defp match_head_tree_format(_head_tree_oid, _object_format),
+    do: {:error, {:oid_format_mismatch, :head_tree}}
+
+  defp index_triples(files) do
+    Enum.map(files, &{&1.path, &1.mode, &1.blob_oid})
+  end
+
+  defp admit_index_triples(triples) do
+    cond do
+      length(triples) > @max_files ->
+        {:error, :file_limit}
+
+      true ->
+        Enum.reduce_while(triples, {:ok, []}, fn triple, {:ok, acc} ->
+          case admit_index_triple(triple) do
+            {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+        |> case do
+          {:ok, acc} -> finish_index_triples(Enum.reverse(acc))
+          err -> err
+        end
+    end
+  end
+
+  defp finish_index_triples(admitted) do
+    paths = Enum.map(admitted, &elem(&1, 0))
+    oid_lengths = admitted |> Enum.map(fn {_, _, oid} -> byte_size(oid) end) |> Enum.uniq()
+
+    cond do
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :duplicate_selected_paths}
+
+      oid_lengths not in [[], [40], [64]] ->
+        {:error, :mixed_object_format}
+
+      true ->
+        {:ok, admitted}
+    end
+  end
+
+  defp admit_index_triple({path, mode, oid})
+       when is_binary(path) and is_binary(mode) and is_binary(oid) do
+    with :ok <- literal_repo_path(path),
+         :ok <- check_path_size(path),
+         true <- production_source_path?(path) do
+      cond do
+        not MapSet.member?(@accepted_modes, mode) ->
+          {:error, :invalid_selected_index}
+
+        not Regex.match?(@oid_re, oid) ->
+          {:error, :invalid_selected_index}
+
+        true ->
+          {:ok, {path, mode, oid}}
+      end
+    else
+      false -> {:error, :invalid_selected_index}
+      {:error, _} -> {:error, :invalid_selected_index}
+    end
+  end
+
+  defp admit_index_triple(_), do: {:error, :invalid_selected_index}
+
+  defp hash_framed_triples(triples, domain) do
+    Enum.reduce(
+      triples,
+      :crypto.hash_init(:sha256) |> :crypto.hash_update(domain),
+      fn {path, mode, oid}, acc ->
+        :crypto.hash_update(acc, [
+          <<byte_size(path)::unsigned-big-32>>,
+          path,
+          <<byte_size(mode)::unsigned-big-32>>,
+          mode,
+          <<byte_size(oid)::unsigned-big-32>>,
+          oid
+        ])
+      end
+    )
+    |> :crypto.hash_final()
+    |> Base.encode16(case: :lower)
+  end
 
   defp infer_object_format([]), do: {:ok, "sha1"}
 
@@ -402,6 +634,14 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
       _ -> {:error, :mixed_object_format}
     end
   end
+
+  defp infer_selected_object_format([], head_tree_oid) when byte_size(head_tree_oid) == 40,
+    do: {:ok, "sha1"}
+
+  defp infer_selected_object_format([], head_tree_oid) when byte_size(head_tree_oid) == 64,
+    do: {:ok, "sha256"}
+
+  defp infer_selected_object_format(entries, _head_tree_oid), do: infer_object_format(entries)
 
   defp query_batched_chunks(root, paths, run_git, max_blob, max_total) do
     paths
