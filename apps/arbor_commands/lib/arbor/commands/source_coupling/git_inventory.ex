@@ -209,6 +209,280 @@ defmodule Arbor.Commands.SourceCoupling.GitInventory do
   @spec accepted_modes() :: MapSet.t(String.t())
   def accepted_modes, do: @accepted_modes
 
+  @doc "Reviewed argv/cat-file chunk ceiling for K4 destination queries."
+  @spec destination_query_batch() :: pos_integer()
+  def destination_query_batch, do: @batch_size
+
+  @doc "Admit a repo-relative literal path (no IO)."
+  @spec admit_literal_path(term()) :: :ok | {:error, term()}
+  def admit_literal_path(path), do: literal_repo_path(path)
+
+  @doc """
+  Load selected-app blobs from the full index.
+
+  Parses every stage record structurally. Mode/stage/OID policy applies
+  only to selected source/target paths. Unrelated symlinks/gitlinks are
+  ignored. `apps/arbor_integrations` is always dropped.
+  """
+  @spec load_selected_blobs(String.t(), [String.t()], keyword()) ::
+          {:ok, %{files: [file_entry()], object_format: String.t()}} | {:error, term()}
+  def load_selected_blobs(root, selected_apps, opts \\ [])
+
+  def load_selected_blobs(root, selected_apps, opts)
+      when is_binary(root) and is_list(selected_apps) and is_list(opts) do
+    run_git = Keyword.get(opts, :run_git, &default_run_git/3)
+    max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
+    max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes)
+
+    with :ok <- admit_selected_apps(selected_apps),
+         {:ok, staged} <- ls_files_stage_all(root, run_git),
+         {:ok, admitted} <- admit_selected_stage_entries(staged, selected_apps),
+         :ok <- check_file_count(admitted),
+         {:ok, object_format} <- infer_object_format(admitted),
+         {:ok, files} <- read_blobs(root, admitted, run_git, max_blob, max_total) do
+      {:ok, %{files: files, object_format: object_format}}
+    end
+  end
+
+  def load_selected_blobs(_, _, _), do: {:error, :invalid_selected_apps}
+
+  @doc """
+  Query explicit index blobs in argv-bounded chunks.
+
+  Each chunk is at most `destination_query_batch/0` paths. Results are
+  merged and sorted by path. Missing paths are returned in `:absent`.
+  """
+  @spec query_indexed_blobs_batched(String.t(), [String.t()], keyword()) ::
+          {:ok, %{present: [file_entry()], absent: [String.t()]}} | {:error, term()}
+  def query_indexed_blobs_batched(root, paths, opts \\ [])
+
+  def query_indexed_blobs_batched(root, paths, opts)
+      when is_binary(root) and is_list(paths) and is_list(opts) do
+    run_git = Keyword.get(opts, :run_git, &default_run_git/3)
+    max_blob = Keyword.get(opts, :max_blob_bytes, @max_blob_bytes)
+    max_total = Keyword.get(opts, :max_total_bytes, @max_total_bytes)
+
+    cond do
+      paths == [] ->
+        {:ok, %{present: [], absent: []}}
+
+      not Enum.all?(paths, &is_binary/1) ->
+        {:error, :invalid_paths}
+
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :duplicate_paths}
+
+      true ->
+        with :ok <- check_file_count(paths),
+             :ok <- admit_literal_paths(paths) do
+          query_batched_chunks(root, paths, run_git, max_blob, max_total)
+        end
+    end
+  end
+
+  def query_indexed_blobs_batched(_, _, _), do: {:error, :invalid_paths}
+
+  @doc """
+  List stage records under explicit prefixes without reading blobs.
+
+  Used to prove old source roots are absent. Prefix argv stays bounded.
+  """
+  @spec list_stage_prefixes(String.t(), [String.t()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def list_stage_prefixes(root, prefixes, opts \\ [])
+
+  def list_stage_prefixes(root, prefixes, opts)
+      when is_binary(root) and is_list(prefixes) and is_list(opts) do
+    run_git = Keyword.get(opts, :run_git, &default_run_git/3)
+
+    cond do
+      prefixes == [] ->
+        {:ok, []}
+
+      not Enum.all?(prefixes, &is_binary/1) ->
+        {:error, :invalid_paths}
+
+      length(prefixes) != length(Enum.uniq(prefixes)) ->
+        {:error, :duplicate_paths}
+
+      true ->
+        selected_apps = Enum.flat_map(prefixes, &prefix_app/1)
+
+        with :ok <- check_file_count(prefixes),
+             :ok <- admit_literal_paths(prefixes),
+             {:ok, staged} <- ls_files_stage_prefixes(root, prefixes, run_git),
+             {:ok, admitted} <- admit_selected_stage_entries(staged, selected_apps) do
+          {:ok, admitted}
+        end
+    end
+  end
+
+  def list_stage_prefixes(_, _, _), do: {:error, :invalid_paths}
+
+  defp admit_selected_apps(apps) when is_list(apps) do
+    if Enum.all?(apps, &(is_binary(&1) and &1 != "" and not String.contains?(&1, "/"))) do
+      :ok
+    else
+      {:error, :invalid_selected_apps}
+    end
+  end
+
+  defp admit_selected_apps(_), do: {:error, :invalid_selected_apps}
+
+  defp admit_selected_stage_entries(entries, selected_apps) do
+    selected =
+      Enum.filter(entries, fn entry ->
+        selected_app_path?(entry.path, selected_apps)
+      end)
+
+    paths = Enum.map(selected, & &1.path)
+
+    cond do
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, :index_conflict}
+
+      true ->
+        Enum.reduce_while(selected, {:ok, []}, fn entry, {:ok, acc} ->
+          case admit_selected_entry(entry) do
+            {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+        |> case do
+          {:ok, acc} -> {:ok, Enum.reverse(acc)}
+          err -> err
+        end
+    end
+  end
+
+  defp selected_app_path?(path, selected_apps) when is_binary(path) do
+    case Path.split(path) do
+      ["apps", "arbor_integrations" | _] ->
+        false
+
+      ["apps", app | _] ->
+        app in selected_apps
+
+      _ ->
+        false
+    end
+  end
+
+  defp selected_app_path?(_, _), do: false
+
+  defp admit_selected_entry(%{mode: mode, blob_oid: oid, stage: stage, path: path} = entry) do
+    cond do
+      not Regex.match?(@oid_re, oid) ->
+        {:error, {:invalid_oid, oid}}
+
+      stage != 0 ->
+        {:error, {:unsupported_selected_stage, path, stage}}
+
+      MapSet.member?(@accepted_modes, mode) ->
+        {:ok, entry}
+
+      true ->
+        {:error, {:unsupported_selected_mode, mode, path}}
+    end
+  end
+
+  defp admit_selected_entry(_), do: {:error, :malformed_stage_line}
+
+  defp infer_object_format([]), do: {:ok, "sha1"}
+
+  defp infer_object_format(entries) when is_list(entries) do
+    lengths =
+      entries
+      |> Enum.map(&byte_size(&1.blob_oid))
+      |> Enum.uniq()
+
+    case lengths do
+      [40] -> {:ok, "sha1"}
+      [64] -> {:ok, "sha256"}
+      _ -> {:error, :mixed_object_format}
+    end
+  end
+
+  defp query_batched_chunks(root, paths, run_git, max_blob, max_total) do
+    paths
+    |> Enum.chunk_every(@batch_size)
+    |> Enum.reduce_while({:ok, [], [], 0}, fn chunk, {:ok, present_acc, absent_acc, total} ->
+      case query_selected_chunk(root, chunk, run_git, max_blob, max_total - total) do
+        {:ok, %{present: present, absent: absent, bytes: used}} ->
+          {:cont, {:ok, present_acc ++ present, absent_acc ++ absent, total + used}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, present, absent, _total} ->
+        present = Enum.sort_by(present, & &1.path)
+
+        case infer_object_format(present) do
+          {:ok, _} -> {:ok, %{present: present, absent: absent}}
+          err -> err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp query_selected_chunk(root, chunk, run_git, max_blob, remaining_total) do
+    with {:ok, staged} <- ls_files_stage_path_fields(root, chunk, run_git),
+         {:ok, %{admitted: admitted, absent: absent}} <- query_explicit_paths(staged, chunk),
+         {:ok, selected} <- admit_selected_list(admitted),
+         {:ok, object_format} <- infer_object_format(selected),
+         :ok <- check_chunk_format(object_format),
+         {:ok, files} <- read_blobs(root, selected, run_git, max_blob, remaining_total) do
+      used = Enum.reduce(files, 0, &(&1.byte_size + &2))
+      {:ok, %{present: files, absent: absent, bytes: used}}
+    end
+  end
+
+  defp check_chunk_format("sha1"), do: :ok
+  defp check_chunk_format("sha256"), do: :ok
+  defp check_chunk_format(_), do: {:error, :mixed_object_format}
+
+  defp admit_selected_list(entries) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      case admit_selected_entry(entry) do
+        {:ok, admitted} -> {:cont, {:ok, [admitted | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  defp ls_files_stage_path_fields(root, paths, run_git) do
+    args = ["--literal-pathspecs", "ls-files", "-z", "--stage", "--"] ++ paths
+
+    case run_git.(root, args, "") do
+      {:ok, out} -> parse_stage_fields_output(out)
+      {:error, reason} -> {:error, {:git_ls_files, reason}}
+    end
+  end
+
+  defp ls_files_stage_prefixes(root, prefixes, run_git) do
+    args = ["ls-files", "-z", "--stage", "--"] ++ prefixes
+
+    case run_git.(root, args, "") do
+      {:ok, out} -> parse_stage_fields_output(out)
+      {:error, reason} -> {:error, {:git_ls_files, reason}}
+    end
+  end
+
+  defp prefix_app(prefix) when is_binary(prefix) do
+    case Path.split(prefix) do
+      ["apps", app | _] -> [app]
+      _ -> []
+    end
+  end
+
   defp rev_parse_tree(root, run_git) do
     case run_git.(root, ["rev-parse", "HEAD^{tree}"], "") do
       {:ok, out} ->

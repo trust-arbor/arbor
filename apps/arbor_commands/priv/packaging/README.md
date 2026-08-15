@@ -183,3 +183,43 @@ reviewed inputs and are never rewritten by check or write-report. The general
 Two consecutive `--check --json` runs must be byte-identical with
 `status: "ok"`. The report identity binds the scan-manifest digest and
 reviewed manifests; Git tree OID is non-normative provenance only.
+
+## K4A kernel-materialization plan
+
+Immutable Git-index-backed pre-move plan for the accepted passive
+`arbor_kernel` / active `arbor_kernel_runtime` split. Contracts map into
+`apps/arbor_kernel`; Common, Signals, and Monitor map into
+`apps/arbor_kernel_runtime`. The four source applications are not moved
+in this packet.
+
+The checked plan (`kernel_materialization_plan.v1.json`) is
+phase-independent: it records source paths, modes, object IDs,
+destinations, exact-move versus transform-input dispositions, target
+preconditions, and collision groups. It must not contain `phase`,
+`status`, or a planned tree OID. Phase and status belong only to the
+runtime report.
+
+`--phase` is required and never inferred from old-root absence. Root
+discovery uses `mix.exs` plus `apps/arbor_commands` and
+`apps/arbor_kernel`, not `apps/arbor_contracts`.
+
+Not installed in the root `quality` alias. The exact gate is:
+
+```bash
+./bin/mix arbor.packaging.kernel_materialization --check --phase planned
+```
+
+```bash
+./bin/mix arbor.packaging.kernel_materialization --phase planned --json
+./bin/mix arbor.packaging.kernel_materialization --check --phase materialized
+./bin/mix arbor.packaging.kernel_materialization --write-plan
+```
+
+Check mode never writes. It admits the indexed plan and transform
+evidence blobs, projects the current selected inventory, and
+byte-compares the encoded plan. `--write-plan` writes the plan and an
+empty transform-evidence file bound to that plan digest when evidence
+entries are empty. SPIKE-2 is not authority; accepted main
+`207d47486485e554d4e725d9cc898b56a9f327eb` is the source truth.
+Production policy asserts 640 source entries, 632 exact moves, eight
+transform inputs, and four collision destinations.
