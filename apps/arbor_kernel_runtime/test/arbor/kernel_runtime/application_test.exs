@@ -164,8 +164,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
 
     assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
     restore_signals_test_children()
-    start_unless_running(Arbor.Monitor.MetricsStore)
-    start_unless_running(Arbor.Monitor.Poller)
+    restore_monitor_test_children()
   end
 
   defp restore_signals_test_children do
@@ -184,10 +183,20 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     end)
   end
 
-  defp start_unless_running(module) do
-    unless Process.whereis(module) do
-      {:ok, _pid} = module.start_link([])
-    end
+  defp restore_monitor_test_children do
+    Enum.each([Arbor.Monitor.MetricsStore, Arbor.Monitor.Poller], fn module ->
+      case Supervisor.start_child(Arbor.Monitor.Supervisor, {module, []}) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          :ok = Supervisor.delete_child(Arbor.Monitor.Supervisor, module)
+          {:ok, _pid} = Supervisor.start_child(Arbor.Monitor.Supervisor, {module, []})
+      end
+    end)
   end
 
   defp remove_redaction_filter do
