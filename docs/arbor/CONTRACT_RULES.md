@@ -1,15 +1,15 @@
 # Arbor Contract Rules
 
-Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Include this in context when working on arbor_contracts or any library that defines or implements behaviours.
+Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Include this in context when working on the `Arbor.Contracts` namespace in `arbor_kernel` or any library that defines or implements behaviours.
 
 ---
 
 ## 1. What Goes in Contracts
 
-Contracts (`arbor_contracts`) admits only three categories:
+The `Arbor.Contracts` namespace in `arbor_kernel` admits only three categories:
 
 **Shared data types** — Structs referenced by two or more umbrella libraries
-other than `arbor_contracts`. Exactly one consuming library means the type
+other than `arbor_kernel`. Exactly one consuming library means the type
 belongs to that consumer, not here. The executable consumer census defined by
 [`AC-1.0`](../specs/arbor-contracts/AC-1.0.md) decides the question; run
 `./bin/mix arbor.contracts.census` rather than inferring consumers from
@@ -47,7 +47,7 @@ Library-owned contract modules use the AC-4 destination convention:
 `<AppRootNamespace>.Contracts.<Leaf>`, with a matching path under that app's
 `lib/` directory.
 
-**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `arbor_contracts` only when two or more other umbrella libraries consume it, or when it is a facade behaviour under `contracts/api/`.
+**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `Arbor.Contracts` in `arbor_kernel` only when two or more other umbrella libraries consume it, or when it is a facade behaviour under `contracts/api/`.
 
 ## 3. Contract Callback Naming
 
@@ -219,16 +219,21 @@ capability_provider().grant_capability(opts)
 ## 10. Dependencies
 
 ```
-arbor_contracts depends on: NOTHING (typed_struct + jason only)
-All libraries depend on: arbor_contracts (at minimum)
+arbor_kernel depends on: no in-repo application
+arbor_kernel_runtime depends on: arbor_kernel
+contracts-only consumers depend on: arbor_kernel
+active Common / Signals / Monitor consumers depend on: arbor_kernel_runtime
 ```
 
-Contracts must never depend on any Arbor library. If you find yourself wanting contracts to import from a library, the dependency direction is wrong.
+Each consumer declares exactly one direct K edge; runtime consumers receive the
+passive kernel transitively and must not declare both applications. Contract
+modules must never depend on another Arbor application. If a contract needs to
+import from a higher-level library, the dependency direction is wrong.
 
 ## 11. Organization
 
 ```
-arbor_contracts/lib/arbor/contracts/
+arbor_kernel/lib/arbor/contracts/
   agent/
   ai/
   api/            # Facade behaviours; the only AC-1 multi-consumer exemption

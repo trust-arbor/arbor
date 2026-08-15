@@ -15,7 +15,7 @@ On each user turn, when enabled, `Arbor.Orchestrator.Preprocessor.run/2` runs:
 
 | Stage | What it produces | Provider (default) |
 |---|---|---|
-| **sensitivity** | PII/secret scan → routing recommendation | `Arbor.Common.SensitivityClassifier` (declared arbor_common dep; default) |
+| **sensitivity** | PII/secret scan → routing recommendation | `Arbor.Common.SensitivityClassifier` (provided by the declared `arbor_kernel_runtime` package edge; default) |
 | **needs_tools** | boolean: does this need tools, or a pure conversational answer? (the effort-tier gate) | LM Studio, `gemma-4-e4b-it@q4_k_xl` |
 | **complexity** | SIMPLE / MULTI_STEP / NON_ACTIONABLE (actionable turns only) | Ollama, `granite4.1:3b` |
 | **intent** | goal / risk_level (actionable turns only) | `Arbor.Gateway.IntentExtractor` (runtime-resolved) |
@@ -92,7 +92,7 @@ config :arbor_orchestrator, :preprocessor,
     top_k: 5
   ],
 
-  # prompt_classifier is a declared lower-level arbor_common dependency (default).
+  # prompt_classifier is provided by the declared lower-level arbor_kernel_runtime dependency (default).
   # intent_extractor is a gateway module resolved at RUNTIME (no compile-time
   # cross-library dep). Both are overridable for testing or to swap implementations.
   prompt_classifier: Arbor.Common.SensitivityClassifier,
@@ -182,10 +182,11 @@ LLM rerank would tighten it.
 
 - `arbor_orchestrator` does not depend on `arbor_gateway` at compile time. The default
   sensitivity classifier,
-  `Arbor.Common.SensitivityClassifier`, is a declared lower-level `arbor_common`
-  dependency consumed directly (arbor_common sits below arbor_gateway in the
-  hierarchy) — `Arbor.Gateway.PromptClassifier` remains available as an explicit
-  override for source compatibility. The `intent_extractor` stage still resolves
+  `Arbor.Common.SensitivityClassifier`, is consumed through the declared
+  lower-level `arbor_kernel_runtime` package edge (the runtime package sits below
+  `arbor_gateway` in the hierarchy) — `Arbor.Gateway.PromptClassifier` remains
+  available as an explicit override for source compatibility. The
+  `intent_extractor` stage still resolves
   its gateway module at **runtime** (`Code.ensure_loaded?` + `function_exported?`),
   so there's no cross-library compile dependency for that stage. LLM calls use
   `Req` (external) directly to Ollama / LM Studio.

@@ -83,7 +83,7 @@ a particular deployment. The sections below identify those boundaries.
   not equivalent to an external signer or hardware boundary.
 
 Authoritative code: [`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex),
-[`SignedRequest`](../../apps/arbor_contracts/lib/arbor/contracts/security/signed_request.ex),
+[`SignedRequest`](../../apps/arbor_kernel/lib/arbor/contracts/security/signed_request.ex),
 [`SignedRequestAuth`](../../apps/arbor_gateway/lib/arbor/gateway/signed_request_auth.ex),
 [`Identity.Verifier`](../../apps/arbor_security/lib/arbor/security/identity/verifier.ex),
 and [`Reload-Stable Signing Authority`](../../.arbor/decisions/2026-07-11-reload-stable-signing-authority.md).
@@ -159,7 +159,7 @@ does not turn a process with unrestricted host privileges into a filesystem sand
 
 Authoritative code: [`FileGuard`](../../apps/arbor_security/lib/arbor/security/file_guard.ex),
 [`Arbor.Security`](../../apps/arbor_security/lib/arbor/security.ex), and
-[`SafePath`](../../apps/arbor_common/lib/arbor/common/safe_path.ex).
+[`SafePath`](../../apps/arbor_kernel_runtime/lib/arbor/common/safe_path.ex).
 
 ### RunAuthorization and immutable execution identity
 
@@ -343,8 +343,8 @@ until an explicit distributed synchronization mechanism replaces it.
 Authoritative code: [`CapabilityStore`](../../apps/arbor_security/lib/arbor/security/capability_store.ex),
 [`Identity.Registry`](../../apps/arbor_security/lib/arbor/security/identity/registry.ex),
 [`SignalSync`](../../apps/arbor_security/lib/arbor/security/signal_sync.ex),
-[`Arbor.Signals`](../../apps/arbor_signals/lib/arbor/signals.ex), and
-[`Signals.Bus`](../../apps/arbor_signals/lib/arbor/signals/bus.ex).
+[`Arbor.Signals`](../../apps/arbor_kernel_runtime/lib/arbor/signals.ex), and
+[`Signals.Bus`](../../apps/arbor_kernel_runtime/lib/arbor/signals/bus.ex).
 
 ## Partial, Planned, or Unsupported Controls
 

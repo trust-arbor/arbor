@@ -122,6 +122,6 @@ Not yet wired, real follow-up:
 - `apps/arbor_orchestrator/lib/arbor/orchestrator/mix/helpers.ex` — `load_identity/1`
 - `apps/arbor_orchestrator/lib/arbor/orchestrator/engine.ex` — `derive_checkpoint_hmac_secret/1`, `require_identity_on_resume/1`
 - `apps/arbor_orchestrator/lib/arbor/orchestrator/engine/checkpoint.ex` — `sign/3`, `verify/3` (HMAC-SHA256 with AAD bound to `run_id` + `current_node` + `graph_hash`)
-- `apps/arbor_contracts/lib/arbor/contracts/security/identity.ex` — `Identity.generate/1`
+- `apps/arbor_kernel/lib/arbor/contracts/security/identity.ex` — `Identity.generate/1`
 - `apps/arbor_security/lib/arbor/security/crypto.ex` — `derive_key/3` (HKDF, RFC 5869)
 - `apps/arbor_gateway/lib/arbor/gateway/signer/proxy_core.ex` — `parse_key_file/1`
