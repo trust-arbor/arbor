@@ -2,6 +2,7 @@ defmodule Arbor.Commands.PlatformInventory.AstTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Commands.PlatformInventory.Ast
+  alias Arbor.Common.SafeAtom
 
   @moduletag :fast
 
@@ -400,6 +401,6 @@ defmodule Arbor.Commands.PlatformInventory.AstTest do
   end
 
   defp existing_atom?(value) do
-    match?({:ok, _}, Arbor.Common.SafeAtom.to_existing(value))
+    match?({:ok, _}, SafeAtom.to_existing(value))
   end
 end
