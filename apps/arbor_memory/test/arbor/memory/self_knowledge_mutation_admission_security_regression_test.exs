@@ -35,6 +35,9 @@ defmodule Arbor.Memory.SelfKnowledgeMutationAdmissionSecurityRegressionTest do
   @fake_name :sk_sec_ma_fake
 
   setup do
+    restart_writer_supervisor!()
+    on_exit(&restart_writer_supervisor!/0)
+
     ensure_durable_store!()
     ensure_self_knowledge_ets!()
     ensure_provenance!()

@@ -57,6 +57,9 @@ defmodule Arbor.Memory.AsyncWriterReservationTest do
   end
 
   setup do
+    restart_writer_supervisor!()
+    on_exit(&restart_writer_supervisor!/0)
+
     hang_name = :async_writer_reservation_hang_backend
     {:ok, _} = Hang.start_link(agent_name: hang_name)
     Hang.arm_hang(hang_name)

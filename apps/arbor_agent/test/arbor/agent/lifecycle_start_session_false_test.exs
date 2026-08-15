@@ -24,10 +24,9 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
   @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
-  alias Arbor.Agent.Test.RuntimeAdmissionTopology
+  alias Arbor.Agent.Test.{RuntimeAdmissionTopology, TrustTopology}
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Security.SigningAuthorityBroker
-  alias Arbor.Trust.Store, as: TrustStore
 
   @profiles_store :arbor_agent_profiles
 
@@ -49,20 +48,9 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
       end
     end)
 
-    # Trust Store is required by Lifecycle.create for template trust presets.
-    start_supervised!(%{
-      id: :lifecycle_start_session_false_trust_sup,
-      start:
-        {Supervisor, :start_link,
-         [
-           [
-             {TrustStore, []},
-             {Arbor.Trust.Manager, [circuit_breaker: false, decay: false, event_store: false]}
-           ],
-           [strategy: :one_for_one]
-         ]},
-      type: :supervisor
-    })
+    # Lifecycle.create needs Trust Store. Keep the process under its application
+    # owner so this module composes with earlier umbrella test helpers.
+    TrustTopology.ensure_owned!()
 
     security_backend =
       Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)

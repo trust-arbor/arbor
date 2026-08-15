@@ -164,6 +164,8 @@ defmodule Arbor.Orchestrator.RegistrarTest do
       alias Arbor.Common.CapabilityResolver
 
       if Code.ensure_loaded?(Arbor.Actions) do
+        inject_action_capability_uri_provider()
+
         # Own the index lifecycle (not started in test env).
         case GenServer.whereis(CapabilityIndex) do
           nil -> :ok
@@ -192,5 +194,31 @@ defmodule Arbor.Orchestrator.RegistrarTest do
                  "#{inspect(uris)} (empty = the CapabilityIndex action re-sync regressed)"
       end
     end
+  end
+
+  defp inject_action_capability_uri_provider do
+    previous = Application.fetch_env(:arbor_kernel, :common)
+    current = if match?({:ok, _}, previous), do: elem(previous, 1), else: []
+
+    updated =
+      cond do
+        is_list(current) and Keyword.keyword?(current) ->
+          Keyword.put(current, :action_capability_uri_module, Arbor.Actions)
+
+        is_map(current) and not is_struct(current) ->
+          Map.put(current, :action_capability_uri_module, Arbor.Actions)
+
+        true ->
+          flunk("expected :arbor_kernel common config to be a keyword list or map")
+      end
+
+    Application.put_env(:arbor_kernel, :common, updated)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:arbor_kernel, :common, value)
+        :error -> Application.delete_env(:arbor_kernel, :common)
+      end
+    end)
   end
 end

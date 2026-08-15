@@ -44,16 +44,30 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
 
     def reset(frames) when is_list(frames) do
       ensure!()
-      :ets.insert(@table, {:frames, frames})
-      :ets.insert(@table, {:sent, []})
+      generation = make_ref()
+
+      case :ets.lookup(@table, :generation) do
+        [{:generation, previous}] ->
+          :ets.delete(@table, {:frames, previous})
+          :ets.delete(@table, {:sent, previous})
+
+        _ ->
+          :ok
+      end
+
+      :ets.insert(@table, {:generation, generation})
+      :ets.insert(@table, {{:frames, generation}, frames})
+      :ets.insert(@table, {{:sent, generation}, []})
       :ok
     end
 
     def sent do
       ensure!()
 
-      case :ets.lookup(@table, :sent) do
-        [{:sent, list}] -> list
+      with [{:generation, generation}] <- :ets.lookup(@table, :generation),
+           [{{:sent, ^generation}, list}] <- :ets.lookup(@table, {:sent, generation}) do
+        list
+      else
         _ -> []
       end
     end
@@ -61,29 +75,35 @@ defmodule Arbor.Voice.ManagedCodingDispatchSecurityRegressionTest do
     def connect(opts) do
       ensure!()
       _ = Keyword.fetch!(opts, :token)
-      {:ok, %{id: make_ref()}}
+
+      case :ets.lookup(@table, :generation) do
+        [{:generation, generation}] -> {:ok, %{id: make_ref(), generation: generation}}
+        _ -> {:error, :transport_not_reset}
+      end
     end
 
-    def send_frame(state, frame) do
+    def send_frame(%{generation: generation} = state, frame) do
       ensure!()
+      key = {:sent, generation}
 
-      case :ets.lookup(@table, :sent) do
-        [{:sent, list}] -> :ets.insert(@table, {:sent, list ++ [frame]})
-        _ -> :ets.insert(@table, {:sent, [frame]})
+      case :ets.lookup(@table, key) do
+        [{^key, list}] -> :ets.insert(@table, {key, list ++ [frame]})
+        _ -> :ets.insert(@table, {key, [frame]})
       end
 
       {:ok, state}
     end
 
-    def recv_frame(state, _timeout) do
+    def recv_frame(%{generation: generation} = state, _timeout) do
       ensure!()
+      key = {:frames, generation}
 
-      case :ets.lookup(@table, :frames) do
-        [{:frames, [frame | rest]}] ->
-          :ets.insert(@table, {:frames, rest})
+      case :ets.lookup(@table, key) do
+        [{^key, [frame | rest]}] ->
+          :ets.insert(@table, {key, rest})
           {:ok, state, frame}
 
-        [{:frames, []}] ->
+        [{^key, []}] ->
           {:error, :timeout}
 
         _ ->

@@ -35,7 +35,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   @moduletag :integration
 
   alias Arbor.Agent.{BranchSupervisor, Lifecycle}
-  alias Arbor.Agent.Test.RuntimeAdmissionTopology
+  alias Arbor.Agent.Test.{RuntimeAdmissionTopology, TrustTopology}
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
@@ -67,20 +67,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end)
 
-    trust_supervisor =
-      start_supervised!(%{
-        id: :trust_preset_apply_supervisor,
-        start:
-          {Supervisor, :start_link,
-           [
-             [
-               {TrustStore, []},
-               {Arbor.Trust.Manager, [circuit_breaker: false, decay: false, event_store: false]}
-             ],
-             [strategy: :one_for_one]
-           ]},
-        type: :supervisor
-      })
+    trust_supervisor = TrustTopology.ensure_owned!()
 
     {:ok, trust_supervisor: trust_supervisor}
   end

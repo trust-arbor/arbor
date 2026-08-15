@@ -161,10 +161,20 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
   test "runtime source keeps the optional loader branch data-only and out of test VMs" do
     runtime = Path.expand("../../../../../config/runtime.exs", __DIR__) |> File.read!()
 
-    assert runtime =~ "ARBOR_APPLE_CONTAINER_CONFIG_PATH"
-    assert runtime =~ "if config_env() != :test do"
-    refute runtime =~ "Arbor.Orchestrator"
-    refute runtime =~ "Arbor.Agent"
+    assert [_, loader_and_rest] =
+             String.split(
+               runtime,
+               "# Optional operator surface for the Apple Container runtime.",
+               parts: 2
+             )
+
+    assert [loader_branch, _] =
+             String.split(loader_and_rest, "# Development creates", parts: 2)
+
+    assert loader_branch =~ "ARBOR_APPLE_CONTAINER_CONFIG_PATH"
+    assert loader_branch =~ "if config_env() != :test do"
+    refute loader_branch =~ "Arbor.Orchestrator"
+    refute loader_branch =~ "Arbor.Agent"
   end
 
   test "rejects blank, relative, noncanonical, and missing locators", %{root: root} do
