@@ -18,6 +18,8 @@ defmodule Arbor.Commands.SourceCoupling.Bands do
 
   # Exact governing table from approved design §7 (full app names).
   @app_band %{
+    "arbor_kernel" => "K",
+    "arbor_kernel_runtime" => "K",
     "arbor_contracts" => "K",
     "arbor_common" => "K",
     "arbor_signals" => "K",

@@ -8,9 +8,7 @@ defmodule Arbor.Commands.AppEnvInventory do
 
   alias Arbor.Commands.AppEnvInventory.{Core, Encode}
   alias Arbor.Commands.SourceCoupling.GitInventory
-  alias Arbor.Common.SafePath
-
-  @root_marker ["apps", "arbor_kernel", "mix.exs"]
+  alias Arbor.Commands.PackagingRoot
 
   @production_opt_keys [:mode, :json, :root]
 
@@ -67,40 +65,7 @@ defmodule Arbor.Commands.AppEnvInventory do
     end
   end
 
-  defp resolve_root(nil), do: discover_root(File.cwd!())
-
-  defp resolve_root(path) when is_binary(path) do
-    case SafePath.validate(path) do
-      :ok ->
-        expanded = Path.expand(path)
-
-        if kernel_root?(expanded) do
-          {:ok, expanded}
-        else
-          {:error, :invalid_root_marker}
-        end
-
-      {:error, reason} ->
-        {:error, {:root_path, reason}}
-    end
-  end
-
-  defp discover_root(start) when is_binary(start), do: find_root(Path.expand(start))
-  defp discover_root(_), do: {:error, :invalid_root}
-
-  defp find_root(dir) do
-    cond do
-      kernel_root?(dir) -> {:ok, dir}
-      Path.dirname(dir) == dir -> {:error, :umbrella_root_not_found}
-      true -> find_root(Path.dirname(dir))
-    end
-  end
-
-  defp kernel_root?(dir) when is_binary(dir) do
-    File.regular?(Path.join([dir | @root_marker]))
-  end
-
-  defp kernel_root?(_), do: false
+  defp resolve_root(path), do: PackagingRoot.resolve(path)
 
   @doc false
   @spec encode_report(map()) :: {:ok, binary()} | {:error, term()}

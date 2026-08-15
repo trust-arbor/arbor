@@ -140,7 +140,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
         defmodule Arbor.Integrations.MixProject do
           use Mix.Project
           def project do
-            [app: :arbor_integrations, deps: [{:arbor_contracts, in_umbrella: true}]]
+            [app: :arbor_integrations, deps: [{:arbor_kernel, in_umbrella: true}]]
           end
         end
         """
@@ -197,7 +197,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
     assert occ,
            "expected private→tracked occurrence for #{tracked_module}, got: #{inspect(compat["occurrences"])}"
 
-    assert occ["to_app"] == "arbor_contracts"
+    assert occ["to_app"] == "arbor_kernel"
     assert occ["from_band"] == "private"
     assert occ["fate"] == "private_to_tracked"
 
@@ -231,14 +231,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingProductionPathTest do
   end
 
   defp umbrella_root do
-    find_root(__DIR__)
-  end
-
-  defp find_root(dir) do
-    cond do
-      File.exists?(Path.join([dir, "apps", "arbor_contracts", "mix.exs"])) -> dir
-      Path.dirname(dir) == dir -> raise "umbrella root not found"
-      true -> find_root(Path.dirname(dir))
-    end
+    {:ok, root} = Arbor.Commands.PackagingRoot.discover(__DIR__)
+    root
   end
 end

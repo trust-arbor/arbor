@@ -8,11 +8,11 @@ defmodule Arbor.Commands.StartupFootprint do
   MFA and returns the complete normalized measurement envelope.
   """
 
+  alias Arbor.Commands.PackagingRoot
   alias Arbor.Commands.StartupFootprint.Core
   alias Arbor.Commands.StartupFootprint.PeerRunner
   alias Arbor.Common.SafePath
 
-  @root_marker ["apps", "arbor_kernel", "mix.exs"]
   @default_policy_rel "apps/arbor_commands/priv/packaging/startup_footprint_policy.v1.json"
 
   @production_opt_keys [:mode, :json, :root, :policy]
@@ -158,34 +158,7 @@ defmodule Arbor.Commands.StartupFootprint do
     end
   end
 
-  defp resolve_root(nil), do: discover_root(File.cwd!())
-
-  defp resolve_root(path) when is_binary(path) do
-    case SafePath.validate(path) do
-      :ok ->
-        expanded = Path.expand(path)
-        if packaging_root?(expanded), do: {:ok, expanded}, else: {:error, :invalid_root_marker}
-
-      {:error, reason} ->
-        {:error, {:root_path, reason}}
-    end
-  end
-
-  defp discover_root(start) when is_binary(start), do: find_root(Path.expand(start))
-  defp discover_root(_), do: {:error, :invalid_root}
-
-  defp find_root(dir) do
-    cond do
-      packaging_root?(dir) -> {:ok, dir}
-      Path.dirname(dir) == dir -> {:error, :umbrella_root_not_found}
-      true -> find_root(Path.dirname(dir))
-    end
-  end
-
-  defp packaging_root?(dir) when is_binary(dir),
-    do: File.regular?(Path.join([dir | @root_marker]))
-
-  defp packaging_root?(_), do: false
+  defp resolve_root(path), do: PackagingRoot.resolve(path)
 
   defp resolve_policy_path(root, nil), do: SafePath.safe_join(root, @default_policy_rel)
 

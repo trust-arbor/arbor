@@ -406,6 +406,10 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMigrationTest do
     File.mkdir_p!(Path.join(root, "apps/arbor_contracts"))
     File.write!(Path.join(root, "apps/arbor_contracts/mix.exs"), "defmodule X, do: :ok\n")
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
+    File.mkdir_p!(Path.join(root, "apps/arbor_kernel"))
+    File.write!(Path.join(root, "mix.exs"), "defmodule Root, do: :ok\n")
+    File.write!(Path.join(root, "apps/arbor_commands/mix.exs"), "defmodule C, do: :ok\n")
+    File.write!(Path.join(root, "apps/arbor_kernel/mix.exs"), "defmodule K, do: :ok\n")
     root
   end
 

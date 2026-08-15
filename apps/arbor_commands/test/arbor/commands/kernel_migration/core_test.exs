@@ -624,11 +624,8 @@ defmodule Arbor.Commands.KernelMigration.CoreTest do
   end
 
   defp find_umbrella_root(dir) do
-    cond do
-      File.exists?(Path.join([dir, "apps", "arbor_contracts", "mix.exs"])) -> dir
-      Path.dirname(dir) == dir -> raise "umbrella root not found"
-      true -> find_umbrella_root(Path.dirname(dir))
-    end
+    {:ok, root} = Arbor.Commands.PackagingRoot.discover(dir)
+    root
   end
 
   test "formatter requires kernel destinations, exact file count, and rejects unexpected absent configs" do

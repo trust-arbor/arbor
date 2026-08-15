@@ -11,6 +11,7 @@ defmodule Arbor.Commands.SourceCoupling do
   claim canonical Git provenance from caller-supplied bytes.
   """
 
+  alias Arbor.Commands.PackagingRoot
   alias Arbor.Commands.SourceCoupling.{Core, Encode, GitInventory}
   alias Arbor.Common.SafePath
 
@@ -166,46 +167,9 @@ defmodule Arbor.Commands.SourceCoupling do
 
   @doc "Discover umbrella root from a starting directory."
   @spec discover_root(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def discover_root(start) when is_binary(start) do
-    start = Path.expand(start)
-    find_root(start)
-  end
+  def discover_root(start), do: PackagingRoot.discover(start)
 
-  def discover_root(_), do: {:error, :invalid_root}
-
-  defp find_root(dir) do
-    marker = Path.join([dir, "apps", "arbor_contracts", "mix.exs"])
-
-    cond do
-      File.regular?(marker) ->
-        {:ok, Path.expand(dir)}
-
-      Path.dirname(dir) == dir ->
-        {:error, :umbrella_root_not_found}
-
-      true ->
-        find_root(Path.dirname(dir))
-    end
-  end
-
-  defp resolve_root(nil), do: discover_root(File.cwd!())
-
-  defp resolve_root(path) when is_binary(path) do
-    case SafePath.validate(path) do
-      :ok ->
-        expanded = Path.expand(path)
-        marker = Path.join([expanded, "apps", "arbor_contracts", "mix.exs"])
-
-        if File.regular?(marker) do
-          {:ok, expanded}
-        else
-          {:error, :invalid_root_marker}
-        end
-
-      {:error, reason} ->
-        {:error, {:root_path, reason}}
-    end
-  end
+  defp resolve_root(path), do: PackagingRoot.resolve(path)
 
   defp resolve_baseline_path(root, nil) do
     SafePath.safe_join(root, @default_baseline_rel)

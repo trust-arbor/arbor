@@ -15,6 +15,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
       System.tmp_dir!()
       |> Path.join("sc-check-#{System.unique_integer([:positive])}")
 
+    write_packaging_root_markers!(root)
     File.mkdir_p!(Path.join(root, "apps/arbor_contracts/lib"))
     File.mkdir_p!(Path.join(root, "apps/arbor_common/lib"))
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
@@ -116,6 +117,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
       System.tmp_dir!()
       |> Path.join("sc-compat-#{System.unique_integer([:positive])}")
 
+    write_packaging_root_markers!(root)
     File.mkdir_p!(Path.join(root, "apps/arbor_contracts/lib"))
     File.write!(Path.join(root, "apps/arbor_contracts/mix.exs"), contracts_mix())
 
@@ -202,6 +204,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
       System.tmp_dir!()
       |> Path.join("sc-json-#{System.unique_integer([:positive])}")
 
+    write_packaging_root_markers!(root)
     File.mkdir_p!(Path.join(root, "apps/arbor_contracts/lib"))
     File.write!(Path.join(root, "apps/arbor_contracts/mix.exs"), contracts_mix())
 
@@ -278,6 +281,14 @@ defmodule Mix.Tasks.Arbor.Packaging.SourceCouplingTest do
       blob_oid: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower),
       bytes: bytes
     }
+  end
+
+  defp write_packaging_root_markers!(root) do
+    for relative <- ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"] do
+      path = Path.join(root, relative)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "defmodule PackagingRootMarker do\nend\n")
+    end
   end
 
   defp contracts_mix do

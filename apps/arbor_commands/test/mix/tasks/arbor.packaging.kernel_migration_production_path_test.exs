@@ -125,14 +125,7 @@ defmodule Mix.Tasks.Arbor.Packaging.KernelMigrationProductionPathTest do
   end
 
   defp umbrella_root do
-    find_root(__DIR__)
-  end
-
-  defp find_root(dir) do
-    cond do
-      File.exists?(Path.join([dir, "apps", "arbor_contracts", "mix.exs"])) -> dir
-      Path.dirname(dir) == dir -> raise "umbrella root not found"
-      true -> find_root(Path.dirname(dir))
-    end
+    {:ok, root} = Arbor.Commands.PackagingRoot.discover(__DIR__)
+    root
   end
 end

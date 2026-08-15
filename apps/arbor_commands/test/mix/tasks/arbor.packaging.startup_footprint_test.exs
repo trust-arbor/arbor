@@ -140,6 +140,8 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintTest do
 
     File.mkdir_p!(Path.join(root, "apps/arbor_kernel"))
     File.mkdir_p!(Path.join(root, "apps/arbor_commands/priv/packaging"))
+    File.write!(Path.join(root, "mix.exs"), "defmodule Root do\nend\n")
+    File.write!(Path.join(root, "apps/arbor_commands/mix.exs"), "defmodule C do\nend\n")
     File.write!(Path.join(root, "apps/arbor_kernel/mix.exs"), "defmodule K do\nend\n")
 
     policy = %{

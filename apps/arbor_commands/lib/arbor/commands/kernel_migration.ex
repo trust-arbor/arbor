@@ -8,6 +8,7 @@ defmodule Arbor.Commands.KernelMigration do
   """
 
   alias Arbor.Commands.KernelMigration.{Core, Encode, Evidence}
+  alias Arbor.Commands.PackagingRoot
   alias Arbor.Commands.SourceCoupling
   alias Arbor.Commands.SourceCoupling.GitInventory
   alias Arbor.Common.SafePath
@@ -181,24 +182,7 @@ defmodule Arbor.Commands.KernelMigration do
     end
   end
 
-  defp resolve_root(nil), do: SourceCoupling.discover_root(File.cwd!())
-
-  defp resolve_root(path) when is_binary(path) do
-    case SafePath.validate(path) do
-      :ok ->
-        expanded = Path.expand(path)
-        marker = Path.join([expanded, "apps", "arbor_contracts", "mix.exs"])
-
-        if File.regular?(marker) do
-          {:ok, expanded}
-        else
-          {:error, :invalid_root_marker}
-        end
-
-      {:error, reason} ->
-        {:error, {:root_path, reason}}
-    end
-  end
+  defp resolve_root(path), do: PackagingRoot.resolve(path)
 
   defp resolve_paths(root, opts) do
     with {:ok, report} <- resolve_within(root, Keyword.get(opts, :report), @default_report_rel),
