@@ -5,35 +5,43 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
 
   @moduletag :fast
 
-  @candidate_path Path.expand(
-                    "../../../../../priv/packaging/safe_recovery_profile.v1.json",
-                    __DIR__
-                  )
-
   describe "validate_profile/1" do
     test "accepts the projected committed candidate" do
       profile = projected_candidate()
       assert :ok = Encode.validate_profile(profile)
     end
 
-    test "accepts conformant blocked and conformant ready independently" do
+    test "accepts only the frozen conformant blocked intent" do
       blocked = projected_candidate()
       assert blocked["evidence_status"] == "conformant"
       assert blocked["architecture_status"] == "blocked"
       assert :ok = Encode.validate_profile(blocked)
-
-      ready = %{blocked | "architecture_status" => "ready", "blockers" => []}
-      assert :ok = Encode.validate_profile(ready)
     end
 
-    test "rejects ready-with-blockers and blocked-without-blockers" do
+    test "rejects ready architecture and blocked architecture without blockers" do
       profile = projected_candidate()
 
-      assert {:error, {:invalid_field, "architecture_status", :inconsistent_status}} =
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
                Encode.validate_profile(%{profile | "architecture_status" => "ready"})
 
       assert {:error, {:invalid_field, "architecture_status", :inconsistent_status}} =
                Encode.validate_profile(%{profile | "blockers" => []})
+    end
+
+    test "security regression: validate_profile/1 rejects relabeling the frozen candidate as ready even when blockers are removed" do
+      relabeled =
+        projected_candidate()
+        |> Map.put("architecture_status", "ready")
+        |> Map.put("blockers", [])
+
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
+               Encode.validate_profile(relabeled)
+
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
+               Encode.encode_profile(relabeled)
+
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
+               Encode.profile_digest(relabeled)
     end
 
     test "rejects unknown, missing, extra, and mixed fields" do
@@ -42,10 +50,10 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
       assert {:error, {:invalid_field, "schema", :invalid_schema}} =
                Encode.validate_profile(%{profile | "schema" => "arbor.packaging.other.v1"})
 
-      assert {:error, {:field_mismatch, %{missing: ["blockers"]}}} =
+      assert {:error, {:field_mismatch, %{missing: ["blockers"], extra_count: 0}}} =
                Encode.validate_profile(Map.delete(profile, "blockers"))
 
-      assert {:error, {:field_mismatch, %{extra: ["profile_digest"]}}} =
+      assert {:error, {:field_mismatch, %{missing: [], extra_count: 1}}} =
                Encode.validate_profile(Map.put(profile, "profile_digest", String.duplicate("a", 64)))
 
       mixed = profile |> Map.delete("version") |> Map.put(:version, 1)
@@ -53,6 +61,28 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
 
       atom_only = %{schema: profile["schema"]}
       assert {:error, :non_string_keys} = Encode.validate_profile(atom_only)
+    end
+
+    test "field-mismatch diagnostics stay bounded and do not echo unknown keys" do
+      profile = projected_candidate()
+      unknown = "hostile_unknown_field"
+
+      assert {:error, {:field_mismatch, diagnostic}} =
+               Encode.validate_profile(Map.put(profile, unknown, "payload"))
+
+      assert diagnostic == %{missing: [], extra_count: 1}
+      refute inspect(diagnostic) =~ unknown
+    end
+
+    test "rejects oversized unknown keys without echoing them" do
+      profile = projected_candidate()
+      oversized_key = String.duplicate("k", 257)
+
+      assert {:error, :unbounded} =
+               Encode.validate_profile(Map.put(profile, oversized_key, "payload"))
+
+      assert {:error, :invalid_map_keys} =
+               Encode.validate_profile(Map.put(profile, <<0xFF>>, "payload"))
     end
 
     test "rejects structs, duplicate ids, and malformed digest or count values" do
@@ -75,6 +105,15 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
                  | "source_inventory" => %{
                      inventory
                      | "selected_index_digest" => "not-a-digest"
+                   }
+               })
+
+      assert {:error, {:invalid_field, "selected_index_digest", :invalid_digest}} =
+               Encode.validate_profile(%{
+                 profile
+                 | "source_inventory" => %{
+                     inventory
+                     | "selected_index_digest" => String.duplicate("a", 10_000)
                    }
                })
 
@@ -206,12 +245,13 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
     end
 
     test "decoding the committed candidate, projecting, and encoding is deterministic" do
-      raw = File.read!(@candidate_path)
+      raw = File.read!(candidate_path())
       assert String.contains?(raw, "\n  ")
       refute String.contains?(raw, "profile_digest")
 
       assert {:ok, decoded} = Jason.decode(raw)
       assert {:ok, projected} = Core.project(decoded)
+      assert decoded == projected
       assert {:ok, bytes} = Encode.encode_profile(projected)
       assert {:ok, ^bytes} = Encode.encode_profile(projected)
 
@@ -237,8 +277,12 @@ defmodule Arbor.Commands.SafeRecoveryProfile.EncodeTest do
     end
   end
 
+  defp candidate_path do
+    Application.app_dir(:arbor_commands, "priv/packaging/safe_recovery_profile.v1.json")
+  end
+
   defp load_candidate do
-    @candidate_path
+    candidate_path()
     |> File.read!()
     |> Jason.decode!()
   end

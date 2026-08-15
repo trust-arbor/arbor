@@ -23,7 +23,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
   @digest_re ~r/\A[0-9a-f]{64}\z/
 
   @evidence_statuses MapSet.new(["conformant"])
-  @architecture_statuses MapSet.new(["blocked", "ready"])
+  @architecture_statuses MapSet.new(["blocked"])
 
   @application_pairs [
     {"arbor_kernel", "stage_zero"},
@@ -128,6 +128,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
 
   @max_map_keys 16
   @max_list_items 32
+  @max_key_bytes 256
   @max_short_bytes 256
   @max_rationale_bytes 4000
   @max_file_count 5_000
@@ -156,7 +157,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
          :ok <-
            validate_named_list(
              Map.fetch!(profile, "selected_applications"),
-             @application_key_order,
              application_entry_specs(),
              "name",
              @application_names,
@@ -167,7 +167,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
          :ok <-
            validate_named_list(
              Map.fetch!(profile, "mandatory_host_responsibilities"),
-             @responsibility_key_order,
              responsibility_entry_specs(),
              "id",
              @responsibility_ids,
@@ -178,7 +177,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
          :ok <-
            validate_id_list(
              Map.fetch!(profile, "forbidden_facilities"),
-             @facility_key_order,
              facility_entry_specs(),
              @facility_id_set,
              "forbidden_facilities"
@@ -186,7 +184,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
          :ok <-
            validate_named_list(
              Map.fetch!(profile, "expected_external_dependencies"),
-             @dependency_key_order,
              dependency_entry_specs(),
              "id",
              @dependency_ids,
@@ -209,8 +206,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
     with :ok <- validate_profile(profile) do
       {:ok, profile |> sort_profile() |> order_profile() |> Jason.encode!()}
     end
-  rescue
-    _ -> {:error, :encode_failed}
   end
 
   @doc """
@@ -303,19 +298,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
   defp dependency_pair(entry), do: {entry["id"], entry["kind"]}
   defp blocker_pair(entry), do: {entry["id"], entry["owner"]}
 
-  defp validate_blockers("ready", blockers) do
-    case take_proper_list(blockers, @max_list_items) do
-      {:ok, []} ->
-        :ok
-
-      {:ok, _nonempty} ->
-        {:error, {:invalid_field, "architecture_status", :inconsistent_status}}
-
-      {:error, reason} ->
-        {:error, {:invalid_field, "blockers", reason}}
-    end
-  end
-
   defp validate_blockers("blocked", blockers) do
     case take_proper_list(blockers, @max_list_items) do
       {:ok, []} ->
@@ -324,7 +306,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
       {:ok, items} ->
         validate_named_items(
           items,
-          @blocker_key_order,
           blocker_entry_specs(),
           "id",
           @blocker_ids,
@@ -342,20 +323,20 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
     {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}}
   end
 
-  defp validate_named_list(list, key_order, specs, id_key, id_set, pair_set, pair_fun, field) do
+  defp validate_named_list(list, specs, id_key, id_set, pair_set, pair_fun, field) do
     case take_proper_list(list, @max_list_items) do
       {:ok, items} ->
-        validate_named_items(items, key_order, specs, id_key, id_set, pair_set, pair_fun, field)
+        validate_named_items(items, specs, id_key, id_set, pair_set, pair_fun, field)
 
       {:error, reason} ->
         {:error, {:invalid_field, field, reason}}
     end
   end
 
-  defp validate_id_list(list, key_order, specs, id_set, field) do
+  defp validate_id_list(list, specs, id_set, field) do
     case take_proper_list(list, @max_list_items) do
       {:ok, items} ->
-        with :ok <- validate_entry_items(items, key_order, specs, "id", field) do
+        with :ok <- validate_entry_items(items, specs, "id", field) do
           ids = Enum.map(items, &Map.fetch!(&1, "id"))
 
           if MapSet.new(ids) == id_set do
@@ -370,8 +351,8 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
     end
   end
 
-  defp validate_named_items(items, key_order, specs, id_key, id_set, pair_set, pair_fun, field) do
-    with :ok <- validate_entry_items(items, key_order, specs, id_key, field) do
+  defp validate_named_items(items, specs, id_key, id_set, pair_set, pair_fun, field) do
+    with :ok <- validate_entry_items(items, specs, id_key, field) do
       ids = Enum.map(items, &Map.fetch!(&1, id_key))
       pairs = MapSet.new(Enum.map(items, pair_fun))
 
@@ -388,11 +369,10 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
     end
   end
 
-  defp validate_entry_items(items, key_order, specs, id_key, field) do
+  defp validate_entry_items(items, specs, id_key, field) do
     Enum.reduce_while(items, {:ok, MapSet.new()}, fn item, {:ok, seen} ->
       with :ok <- bounded_map(item),
-           :ok <- validate_fields(item, specs),
-           :ok <- exact_key_order_shape(item, key_order) do
+           :ok <- validate_fields(item, specs) do
         id = Map.fetch!(item, id_key)
 
         if MapSet.member?(seen, id) do
@@ -414,16 +394,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
     end
   end
 
-  defp exact_key_order_shape(map, key_order) do
-    keys = Map.keys(map)
-
-    if MapSet.new(keys) == MapSet.new(key_order) do
-      :ok
-    else
-      {:error, {:field_mismatch, %{missing: key_order -- keys, extra: keys -- key_order}}}
-    end
-  end
-
   defp validate_fields(map, specs) when is_map(map) and not is_struct(map) do
     keys = Map.keys(map)
     expected_keys = Enum.map(specs, &elem(&1, 0))
@@ -439,21 +409,50 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
           {:error, :non_string_keys}
         end
 
-      MapSet.new(keys) != MapSet.new(expected_keys) ->
-        {:error,
-         {:field_mismatch, %{missing: expected_keys -- keys, extra: keys -- expected_keys}}}
-
       true ->
-        Enum.reduce_while(specs, :ok, fn {key, validator}, :ok ->
-          case validator.(Map.fetch!(map, key)) do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, {:invalid_field, key, reason}}}
+        with :ok <- admit_map_keys(keys) do
+          if MapSet.new(keys) != MapSet.new(expected_keys) do
+            field_mismatch(keys, expected_keys)
+          else
+            Enum.reduce_while(specs, :ok, fn {key, validator}, :ok ->
+              case validator.(Map.fetch!(map, key)) do
+                :ok -> {:cont, :ok}
+                {:error, reason} -> {:halt, {:error, {:invalid_field, key, reason}}}
+              end
+            end)
           end
-        end)
+        end
     end
   end
 
   defp validate_fields(_, _), do: {:error, :invalid_map}
+
+  defp admit_map_keys(keys) do
+    Enum.reduce_while(keys, :ok, fn key, :ok ->
+      case admit_map_key(key) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp admit_map_key(key) when is_binary(key) do
+    cond do
+      byte_size(key) > @max_key_bytes -> {:error, :unbounded}
+      not String.valid?(key) -> {:error, :invalid_map_keys}
+      true -> :ok
+    end
+  end
+
+  defp admit_map_key(_), do: {:error, :invalid_map_keys}
+
+  defp field_mismatch(keys, expected_keys) do
+    expected_set = MapSet.new(expected_keys)
+    missing = Enum.reject(expected_keys, &(&1 in keys))
+    extra_count = Enum.count(keys, &(&1 not in expected_set))
+
+    {:error, {:field_mismatch, %{missing: missing, extra_count: extra_count}}}
+  end
 
   defp bounded_map(map) when is_map(map) and not is_struct(map) do
     if map_size(map) > @max_map_keys, do: {:error, :unbounded}, else: :ok
@@ -469,15 +468,17 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
   defp bounded_list_result({:ok, _items}), do: :ok
   defp bounded_list_result({:error, reason}), do: {:error, reason}
 
-  defp take_proper_list(list, max) when is_list(list) do
-    take_proper_list(list, max, 0, [])
+  defp take_proper_list([], _max), do: {:ok, []}
+
+  defp take_proper_list([head | tail], max) do
+    take_proper_list(tail, max, 1, [head])
   end
 
   defp take_proper_list(_, _), do: {:error, :not_a_list}
 
   defp take_proper_list([], _max, _count, acc), do: {:ok, Enum.reverse(acc)}
 
-  defp take_proper_list([head | tail], max, count, acc) when is_list(tail) do
+  defp take_proper_list([head | tail], max, count, acc) do
     if count >= max do
       {:error, :unbounded}
     else
@@ -523,6 +524,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
 
   defp valid_frozen_digest?(expected, value) when is_binary(value) do
     cond do
+      byte_size(value) != 64 -> {:error, :invalid_digest}
       not Regex.match?(@digest_re, value) -> {:error, :invalid_digest}
       value != expected -> {:error, :digest_mismatch}
       true -> :ok
@@ -543,9 +545,9 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Encode do
 
   defp valid_text(value, max_bytes) when is_binary(value) do
     cond do
+      byte_size(value) > max_bytes -> {:error, :unbounded}
       not String.valid?(value) -> {:error, :invalid_utf8}
       String.trim(value) == "" -> {:error, :blank}
-      byte_size(value) > max_bytes -> {:error, :unbounded}
       control_bearing?(value) -> {:error, :control_character}
       true -> :ok
     end

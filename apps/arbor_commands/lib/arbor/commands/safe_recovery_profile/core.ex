@@ -39,6 +39,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
 
   @max_map_keys 16
   @max_list_items 32
+  @max_key_bytes 256
 
   @doc "Closed intent schema identifier."
   @spec schema() :: String.t()
@@ -55,8 +56,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
          :ok <- Encode.validate_profile(normalized) do
       {:ok, sort_profile(normalized)}
     end
-  rescue
-    _ -> {:error, :invalid_candidate}
   end
 
   def project(_), do: {:error, :invalid_candidate}
@@ -119,14 +118,19 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
       Enum.any?(keys, &(is_nil(&1) or (not is_atom(&1) and not is_binary(&1)))) ->
         {:error, :invalid_map_keys}
 
-      Enum.all?(keys, &is_atom/1) ->
-        admit_key_style(map, keys, atom_keys, :atom)
-
-      Enum.all?(keys, &is_binary/1) ->
-        admit_key_style(map, keys, atom_keys, :string)
-
       true ->
-        {:error, :mixed_keys}
+        with :ok <- admit_map_keys(keys) do
+          cond do
+            Enum.all?(keys, &is_atom/1) ->
+              admit_key_style(map, keys, atom_keys, :atom)
+
+            Enum.all?(keys, &is_binary/1) ->
+              admit_key_style(map, keys, atom_keys, :string)
+
+            true ->
+              {:error, :mixed_keys}
+          end
+        end
     end
   end
 
@@ -153,11 +157,34 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
     end
   end
 
+  defp admit_map_keys(keys) do
+    Enum.reduce_while(keys, :ok, fn key, :ok ->
+      case admit_map_key(key) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp admit_map_key(key) when is_atom(key), do: :ok
+
+  defp admit_map_key(key) when is_binary(key) do
+    cond do
+      byte_size(key) > @max_key_bytes -> {:error, :unbounded}
+      not String.valid?(key) -> {:error, :invalid_map_keys}
+      true -> :ok
+    end
+  end
+
+  defp admit_map_key(_), do: {:error, :invalid_map_keys}
+
   defp field_mismatch(keys, atom_keys) do
     expected = Enum.map(atom_keys, &Atom.to_string/1)
-    actual = Enum.map(keys, &stringify_key/1)
+    expected_set = MapSet.new(expected)
+    missing = Enum.reject(expected, fn key -> Enum.any?(keys, &(stringify_key(&1) == key)) end)
+    extra_count = Enum.count(keys, &(stringify_key(&1) not in expected_set))
 
-    {:error, {:field_mismatch, %{missing: expected -- actual, extra: actual -- expected}}}
+    {:error, {:field_mismatch, %{missing: missing, extra_count: extra_count}}}
   end
 
   defp stringify_key(key) when is_atom(key), do: Atom.to_string(key)
@@ -182,15 +209,17 @@ defmodule Arbor.Commands.SafeRecoveryProfile.Core do
     end
   end
 
-  defp take_proper_list(list, max) when is_list(list) do
-    take_proper_list(list, max, 0, [])
+  defp take_proper_list([], _max), do: {:ok, []}
+
+  defp take_proper_list([head | tail], max) do
+    take_proper_list(tail, max, 1, [head])
   end
 
   defp take_proper_list(_, _), do: {:error, :not_a_list}
 
   defp take_proper_list([], _max, _count, acc), do: {:ok, Enum.reverse(acc)}
 
-  defp take_proper_list([head | tail], max, count, acc) when is_list(tail) do
+  defp take_proper_list([head | tail], max, count, acc) do
     if count >= max do
       {:error, :unbounded}
     else

@@ -5,11 +5,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
 
   @moduletag :fast
 
-  @candidate_path Path.expand(
-                    "../../../../../priv/packaging/safe_recovery_profile.v1.json",
-                    __DIR__
-                  )
-
   describe "project/1 committed candidate" do
     test "admits the frozen conformant blocked intent and sorts closed lists" do
       candidate = load_candidate()
@@ -68,6 +63,12 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
       assert length(profile["blockers"]) == 13
     end
 
+    test "decoded committed candidate already equals its projected profile" do
+      candidate = load_candidate()
+      assert {:ok, profile} = Core.project(candidate)
+      assert candidate == profile
+    end
+
     test "accepts a closed atom-keyed candidate and reordered lists as the same profile" do
       candidate = load_candidate()
       assert {:ok, expected} = Core.project(candidate)
@@ -88,7 +89,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
     end
   end
 
-  describe "project/1 status independence" do
+  describe "project/1 frozen v1 status" do
     test "keeps conformant evidence with blocked architecture" do
       candidate = load_candidate()
       assert {:ok, profile} = Core.project(candidate)
@@ -100,7 +101,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
     test "rejects ready architecture while blockers remain" do
       candidate = %{load_candidate() | "architecture_status" => "ready"}
 
-      assert {:error, {:invalid_field, "architecture_status", :inconsistent_status}} =
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
                Core.project(candidate)
     end
 
@@ -111,16 +112,14 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
                Core.project(candidate)
     end
 
-    test "admits ready architecture only with an empty blocker list" do
+    test "security regression: project/1 rejects relabeling the frozen candidate as ready even when blockers are removed" do
       candidate =
         load_candidate()
         |> Map.put("architecture_status", "ready")
         |> Map.put("blockers", [])
 
-      assert {:ok, profile} = Core.project(candidate)
-      assert profile["evidence_status"] == "conformant"
-      assert profile["architecture_status"] == "ready"
-      assert profile["blockers"] == []
+      assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
+               Core.project(candidate)
     end
   end
 
@@ -248,17 +247,18 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
       alias_collision = Map.put(candidate, :blockers, candidate["blockers"])
       assert {:error, :mixed_keys} = Core.project(alias_collision)
 
-      assert {:error, {:field_mismatch, %{missing: ["blockers"]}}} =
+      assert {:error, {:field_mismatch, %{missing: ["blockers"], extra_count: 0}}} =
                Core.project(Map.delete(candidate, "blockers"))
 
-      assert {:error, {:field_mismatch, %{extra: ["head_tree_oid"]}}} =
+      assert {:error, {:field_mismatch, %{missing: [], extra_count: 1}}} =
                Core.project(Map.put(candidate, "head_tree_oid", String.duplicate("a", 40)))
 
       inventory =
         Map.put(candidate["source_inventory"], "head_tree_oid", String.duplicate("a", 40))
 
       assert {:error,
-              {:invalid_field, "source_inventory", {:field_mismatch, %{extra: ["head_tree_oid"]}}}} =
+              {:invalid_field, "source_inventory",
+               {:field_mismatch, %{missing: [], extra_count: 1}}}} =
                Core.project(%{candidate | "source_inventory" => inventory})
 
       assert {:error, {:invalid_field, "architecture_status", :unknown_architecture_status}} =
@@ -266,6 +266,27 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
 
       assert {:error, {:invalid_field, "evidence_status", :unknown_evidence_status}} =
                Core.project(%{candidate | "evidence_status" => "ready"})
+    end
+
+    test "field-mismatch diagnostics stay bounded and do not echo unknown keys" do
+      candidate = load_candidate()
+      unknown = "hostile_unknown_field"
+
+      assert {:error, {:field_mismatch, diagnostic}} =
+               Core.project(Map.put(candidate, unknown, "payload"))
+
+      assert diagnostic == %{missing: [], extra_count: 1}
+      refute inspect(diagnostic) =~ unknown
+    end
+
+    test "rejects oversized unknown keys without echoing them" do
+      candidate = load_candidate()
+      oversized_key = String.duplicate("k", 257)
+
+      assert {:error, :unbounded} = Core.project(Map.put(candidate, oversized_key, "payload"))
+
+      assert {:error, :invalid_map_keys} =
+               Core.project(Map.put(candidate, <<0xFF>>, "payload"))
     end
 
     test "rejects malformed digests, counts, and text" do
@@ -367,8 +388,12 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
     end
   end
 
+  defp candidate_path do
+    Application.app_dir(:arbor_commands, "priv/packaging/safe_recovery_profile.v1.json")
+  end
+
   defp load_candidate do
-    @candidate_path
+    candidate_path()
     |> File.read!()
     |> Jason.decode!()
   end
