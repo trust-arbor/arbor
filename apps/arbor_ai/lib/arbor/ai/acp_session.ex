@@ -4322,16 +4322,16 @@ defmodule Arbor.AI.AcpSession do
 
   @response_budget [
     max_bytes: 64_000,
-    max_nodes: 2_048,
+    max_nodes: 4_096,
     max_depth: 8,
-    max_map_keys: 512,
-    max_list_items: 256,
+    max_map_keys: 2_048,
+    max_list_items: 1_024,
     max_string_bytes: 1024
   ]
 
   @max_option_scalar_bytes 256
   @max_config_options 20
-  @max_model_catalog_options 128
+  @max_model_catalog_options 512
 
   defp verify_model_response({:ok, inner}, model) when is_map(inner) do
     case Arbor.LLM.validate_decoded_term(inner, @response_budget) do
@@ -4418,10 +4418,10 @@ defmodule Arbor.AI.AcpSession do
     {:error, {:model_not_confirmed, :improper_list}}
   end
 
-  # Codex includes a bounded catalog under the model option. Keep that nested
-  # list within a smaller protocol-specific limit than the response budget so
-  # a large but otherwise well-shaped provider response cannot consume the
-  # entire generic tree allowance.
+  # Pi's measured model-selection response carries 443 catalog entries under
+  # the model option. Keep that nested list within a protocol-specific limit
+  # below the generic list-item budget so a well-shaped provider response
+  # cannot consume the entire tree allowance.
   defp validate_model_catalog(%{"options" => options}) when is_list(options) do
     if length(options) <= @max_model_catalog_options do
       :ok

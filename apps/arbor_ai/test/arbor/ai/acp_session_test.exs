@@ -2455,6 +2455,101 @@ defmodule Arbor.AI.AcpSessionTest do
        }}
     end
 
+    # Real ExMCP.ACP.Adapters.Pi config option IDs and representative shapes.
+    # Catalog values besides the requested model are size ballast, not a live
+    # Pi listing.
+    defp pi_catalog_response(model, catalog_size) do
+      catalog =
+        Enum.map(1..catalog_size, fn index ->
+          value = if index == 1, do: model, else: "pi-#{index}"
+
+          %{
+            "value" => value,
+            "name" => value,
+            "description" => nil
+          }
+        end)
+
+      thought_levels =
+        Enum.map(~w(off minimal low medium high xhigh), fn level ->
+          %{
+            "value" => level,
+            "name" => "Thinking: #{level}",
+            "description" => nil
+          }
+        end)
+
+      boolean_options = [
+        %{"value" => "true", "name" => "On"},
+        %{"value" => "false", "name" => "Off"}
+      ]
+
+      mode_options = [
+        %{"value" => "all", "name" => "All"},
+        %{"value" => "one-at-a-time", "name" => "One at a time"}
+      ]
+
+      {:ok,
+       %{
+         "configOptions" => [
+           %{
+             "id" => "model",
+             "name" => "Model",
+             "category" => "model",
+             "description" => "Select the model for this session",
+             "type" => "select",
+             "currentValue" => model,
+             "options" => catalog
+           },
+           %{
+             "id" => "thought_level",
+             "name" => "Thinking",
+             "category" => "thought_level",
+             "description" => "Set the reasoning effort for this session",
+             "type" => "select",
+             "currentValue" => "medium",
+             "options" => thought_levels
+           },
+           %{
+             "id" => "auto_compaction",
+             "name" => "Auto Compaction",
+             "category" => "other",
+             "description" => "Automatically compact context when nearly full",
+             "type" => "select",
+             "currentValue" => "true",
+             "options" => boolean_options
+           },
+           %{
+             "id" => "auto_retry",
+             "name" => "Auto Retry",
+             "category" => "other",
+             "description" => "Automatically retry on transient errors",
+             "type" => "select",
+             "currentValue" => "true",
+             "options" => boolean_options
+           },
+           %{
+             "id" => "steering_mode",
+             "name" => "Steering Mode",
+             "category" => "other",
+             "description" => "How steering messages are delivered",
+             "type" => "select",
+             "currentValue" => "all",
+             "options" => mode_options
+           },
+           %{
+             "id" => "follow_up_mode",
+             "name" => "Follow-up Mode",
+             "category" => "other",
+             "description" => "How follow-up messages are delivered",
+             "type" => "select",
+             "currentValue" => "all",
+             "options" => mode_options
+           }
+         ]
+       }}
+    end
+
     defp install_model_select_client(opts) do
       original_client = Application.get_env(:arbor_ai, :acp_client_module)
       Application.put_env(:arbor_ai, :acp_client_module, ModelSelectClient)
@@ -2547,9 +2642,29 @@ defmodule Arbor.AI.AcpSessionTest do
       assert %{status: :ready, model: ^model} = AcpSession.status(session)
     end
 
-    test "model catalog just beyond the bounded contract fails closed" do
-      model = "gpt-5.3-codex-spark"
-      response = codex_catalog_response(model, 129)
+    test "measured Pi model-selection response with 443 catalog entries confirms the exact model" do
+      model = "zai-coding-plan/glm-5.2"
+      response = pi_catalog_response(model, 443)
+      session = start_model_session(model, model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 2_000)
+      assert %{status: :ready, model: ^model} = AcpSession.status(session)
+    end
+
+    test "bounded contract accepts exactly 512 model catalog entries" do
+      model = "zai-coding-plan/glm-5.2"
+      response = pi_catalog_response(model, 512)
+      session = start_model_session(model, model_responses: [response])
+
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert {:ok, _info} = AcpSession.create_session(session, timeout: 2_000)
+      assert %{status: :ready, model: ^model} = AcpSession.status(session)
+    end
+
+    test "bounded contract fails closed at 513 model catalog entries" do
+      model = "zai-coding-plan/glm-5.2"
+      response = pi_catalog_response(model, 513)
       session = start_model_session(model, model_responses: [response])
 
       assert :ok = AcpSession.await_ready(session, timeout: 1_000)

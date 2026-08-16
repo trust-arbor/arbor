@@ -88,6 +88,13 @@ for child <- children do
   Supervisor.start_child(Arbor.AI.Supervisor, child)
 end
 
+# Isolated ACP session tests create private runtime homes through
+# Arbor.Shell.create_private_owned_tree/1. arbor_shell starts empty in test.
+case Supervisor.start_child(Arbor.Shell.Supervisor, Arbor.Shell.OwnedTreeRegistry) do
+  {:ok, _pid} -> :ok
+  {:error, {:already_started, _pid}} -> :ok
+end
+
 Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
 
 defmodule Arbor.AI.TestSupport.AutoTrustPolicy do
