@@ -298,6 +298,27 @@ defmodule Arbor.Commands.SafeRecoveryProfileTest do
              SafeRecoveryProfile.run(root: root)
   end
 
+  test "security regression: production rejects changed rationale content", %{root: root} do
+    candidate = load_candidate()
+    [application | applications] = candidate["selected_applications"]
+
+    changed =
+      Map.put(candidate, "selected_applications", [
+        %{application | "rationale" => application["rationale"] <> " Changed."}
+        | applications
+      ])
+
+    write_fixed_profile!(root, Jason.encode!(changed))
+
+    assert {:error, :profile_identity_mismatch} =
+             SafeRecoveryProfile.run(root: root, mode: "check")
+
+    assert {:ok, synthetic} =
+             SafeRecoveryProfile.run_for_test(root: root, profile: changed, mode: "check")
+
+    assert synthetic["profile"] == changed
+  end
+
   test "reordered candidate lists fail even when Core would sort them", %{root: root} do
     candidate = load_candidate()
     assert {:ok, projected} = Core.project(candidate)

@@ -20,6 +20,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   @default_profile_rel "apps/arbor_commands/priv/packaging/safe_recovery_profile.v1.json"
   @max_profile_bytes 256 * 1024
+  @expected_profile_digest "55fda49eb5389dcb7acd8d90ccd3e20961cf5176a563eb75c32f6848e227d2d5"
   @profile_io_timeout_ms 1_000
   @profile_opened_event [:arbor, :commands, :safe_recovery_profile, :opened]
 
@@ -63,17 +64,6 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
     end
   end
 
-  defp resolve_root(nil) do
-    with {:ok, root} <- PackagingRoot.resolve(nil),
-         :ok <- reject_root_symlink(root),
-         {:ok, real_root} <- SafePath.resolve_real(root) do
-      {:ok, real_root}
-    else
-      {:error, :not_found} -> {:error, :invalid_root_marker}
-      {:error, _} = error -> error
-    end
-  end
-
   defp resolve_root(path) do
     with {:ok, root} <- PackagingRoot.resolve(path),
          :ok <- reject_root_symlink(root),
@@ -96,7 +86,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   defp load_profile(root, opts, seen, true) do
     if MapSet.member?(seen, :profile) do
-      admit_profile(opts.profile)
+      admit_profile(opts.profile, :synthetic)
     else
       load_fixed_profile(root)
     end
@@ -108,7 +98,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
     with {:ok, path} <- resolve_profile_path(root),
          {:ok, bytes} <- read_profile_bytes(path, root),
          {:ok, decoded} <- decode_profile(bytes) do
-      admit_profile(decoded)
+      admit_profile(decoded, :production)
     end
   end
 
@@ -255,6 +245,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
   end
 
   defp emit_profile_opened(path) do
+    # Post-open, pre-verify TOCTOU seam used by the security-regression tests.
     :telemetry.execute(@profile_opened_event, %{count: 1}, %{path: path})
     :ok
   end
@@ -279,14 +270,19 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
     end
   end
 
-  defp admit_profile(decoded) do
+  defp admit_profile(decoded, kind) do
     with {:ok, projected} <- Core.project(decoded),
          :ok <- require_canonical_order(decoded, projected),
          :ok <- Encode.validate_profile(projected),
-         {:ok, digest} <- Encode.profile_digest(projected) do
+         {:ok, digest} <- Encode.profile_digest(projected),
+         :ok <- require_reviewed_identity(kind, digest) do
       {:ok, projected, digest}
     end
   end
+
+  defp require_reviewed_identity(:synthetic, _digest), do: :ok
+  defp require_reviewed_identity(:production, @expected_profile_digest), do: :ok
+  defp require_reviewed_identity(:production, _digest), do: {:error, :profile_identity_mismatch}
 
   defp require_canonical_order(decoded, projected) do
     normalized = stringify_map_keys(decoded)
