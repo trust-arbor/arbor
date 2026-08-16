@@ -10,7 +10,6 @@ defmodule Arbor.Shell.OwnedTree do
   @max_timeout_ms 10_000
   @min_listing_heap_words 512
   @max_listing_heap_words 8_000_000
-  @listing_depth_shift_cap 12
 
   @type identity :: %{
           path: String.t(),
@@ -80,7 +79,7 @@ defmodule Arbor.Shell.OwnedTree do
            inode: ^inode
          }} ->
           with :ok <- run_before_remove(opts),
-               {:ok, _budget} <- delete_dir_contents(path, 0, budget),
+               :ok <- run_cleanup_traversal(path, budget),
                :ok <- prove_absence(path) do
             :ok
           end
@@ -265,41 +264,163 @@ defmodule Arbor.Shell.OwnedTree do
     end
   end
 
-  defp delete_dir_contents(path, depth, budget) do
-    with :ok <- check_cleanup_deadline(budget) do
-      do_delete_dir_contents(path, depth, budget)
+  defp run_cleanup_traversal(path, budget) do
+    parent = self()
+    token = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn -> cleanup_traversal_worker(parent, token, path, budget) end)
+
+    await_cleanup_traversal(pid, monitor_ref, token, budget)
+  end
+
+  defp await_cleanup_traversal(pid, monitor_ref, token, budget) do
+    case remaining_cleanup_ms(budget) do
+      remaining when remaining > 0 ->
+        receive do
+          {^token, :ok} ->
+            Process.demonitor(monitor_ref, [:flush])
+            :ok
+
+          {^token, {:error, reason}} when is_atom(reason) ->
+            Process.demonitor(monitor_ref, [:flush])
+            {:error, reason}
+
+          {:DOWN, ^monitor_ref, :process, ^pid, :killed} ->
+            flush_cleanup_messages(token)
+            {:error, :cleanup_listing_memory_budget_exceeded}
+
+          {:DOWN, ^monitor_ref, :process, ^pid, :normal} ->
+            receive_cleanup_result_after_down(token)
+
+          {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+            flush_cleanup_messages(token)
+            {:error, :cleanup_listing_worker_failed}
+        after
+          remaining ->
+            stop_cleanup_worker(pid, monitor_ref, token)
+            {:error, :cleanup_time_budget_exceeded}
+        end
+
+      _expired ->
+        stop_cleanup_worker(pid, monitor_ref, token)
+        {:error, :cleanup_time_budget_exceeded}
     end
   end
 
-  defp do_delete_dir_contents(path, depth, budget) do
-    case start_directory_listing(path, depth, budget) do
-      {:ok, listing} ->
-        consume_directory_listing(listing, path, depth, budget)
-
-      {:error, :cleanup_directory_absent} ->
-        {:ok, budget}
-
-      {:error, reason} ->
-        {:error, reason}
+  defp receive_cleanup_result_after_down(token) do
+    receive do
+      {^token, :ok} -> :ok
+      {^token, {:error, reason}} when is_atom(reason) -> {:error, reason}
+      {^token, _invalid} -> {:error, :cleanup_listing_worker_failed}
+    after
+      0 -> {:error, :cleanup_listing_worker_failed}
     end
   end
 
-  defp delete_entry(path, depth, budget) do
-    with :ok <- check_cleanup_deadline(budget),
+  defp stop_cleanup_worker(pid, monitor_ref, token) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      100 -> Process.demonitor(monitor_ref, [:flush])
+    end
+
+    flush_cleanup_messages(token)
+    :ok
+  end
+
+  defp flush_cleanup_messages(token) do
+    receive do
+      {^token, _message} -> flush_cleanup_messages(token)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp cleanup_traversal_worker(parent, token, path, budget) do
+    parent_ref = Process.monitor(parent)
+
+    Process.flag(:max_heap_size, %{
+      size: budget.listing_heap_words,
+      kill: true,
+      error_logger: false,
+      include_shared_binaries: true
+    })
+
+    case delete_dir_contents(path, budget, parent, parent_ref) do
+      {:ok, _budget} -> send(parent, {token, :ok})
+      {:error, reason} -> send(parent, {token, {:error, reason}})
+      :owner_down -> :ok
+    end
+  rescue
+    _error -> send(parent, {token, {:error, :cleanup_failed}})
+  catch
+    _kind, _reason -> send(parent, {token, {:error, :cleanup_failed}})
+  end
+
+  defp delete_dir_contents(path, budget, parent, parent_ref) do
+    with :ok <- check_worker_state(parent, parent_ref, budget) do
+      case File.ls(path) do
+        {:ok, names} -> consume_directory_entries(names, path, budget, parent, parent_ref)
+        {:error, :enoent} -> {:ok, budget}
+        {:error, _reason} -> {:error, :cleanup_list_failed}
+      end
+    end
+  end
+
+  defp consume_directory_entries([], path, budget, parent, parent_ref) do
+    with :ok <- check_worker_state(parent, parent_ref, budget),
+         :ok <- rmdir(path) do
+      {:ok, budget}
+    end
+  end
+
+  defp consume_directory_entries([name | rest], path, budget, parent, parent_ref)
+       when is_binary(name) and name not in ["", ".", ".."] do
+    child_path = Path.join(path, name)
+
+    with :ok <- check_worker_state(parent, parent_ref, budget),
+         {:ok, next_budget} <- consume_cleanup_entry(budget, parent, parent_ref),
+         {:ok, next_budget} <- delete_entry(child_path, next_budget, parent, parent_ref) do
+      consume_directory_entries(rest, path, next_budget, parent, parent_ref)
+    end
+  end
+
+  defp consume_directory_entries(_invalid, _path, _budget, _parent, _parent_ref),
+    do: {:error, :cleanup_list_failed}
+
+  defp consume_cleanup_entry(
+         %{remaining_entries: remaining} = budget,
+         parent,
+         parent_ref
+       )
+       when remaining > 0 do
+    with :ok <- check_worker_state(parent, parent_ref, budget) do
+      {:ok, %{budget | remaining_entries: remaining - 1}}
+    end
+  end
+
+  defp consume_cleanup_entry(_budget, _parent, _parent_ref),
+    do: {:error, :cleanup_entry_budget_exceeded}
+
+  defp delete_entry(path, budget, parent, parent_ref) do
+    with :ok <- check_worker_state(parent, parent_ref, budget),
          :ok <- validate_cleanup_child_path(path) do
-      do_delete_entry(path, depth, budget)
+      do_delete_entry(path, budget, parent, parent_ref)
     end
   end
 
-  defp do_delete_entry(path, depth, budget) do
+  defp do_delete_entry(path, budget, parent, parent_ref) do
     case File.lstat(path, time: :posix) do
       {:ok, %File.Stat{type: :directory}} ->
-        delete_dir_contents(path, depth, budget)
+        delete_dir_contents(path, budget, parent, parent_ref)
 
       {:ok, %File.Stat{}} ->
-        case unlink_path(path) do
-          :ok -> {:ok, budget}
-          {:error, reason} -> {:error, reason}
+        with :ok <- check_worker_state(parent, parent_ref, budget),
+             :ok <- unlink_path(path) do
+          {:ok, budget}
         end
 
       {:error, :enoent} ->
@@ -310,184 +431,12 @@ defmodule Arbor.Shell.OwnedTree do
     end
   end
 
-  defp consume_cleanup_entry(%{remaining_entries: remaining} = budget) when remaining > 0 do
-    with :ok <- check_cleanup_deadline(budget) do
-      {:ok, %{budget | remaining_entries: remaining - 1}}
-    end
-  end
-
-  defp consume_cleanup_entry(_budget), do: {:error, :cleanup_entry_budget_exceeded}
-
-  defp consume_directory_listing(listing, path, depth, budget) do
-    case next_directory_entry(listing, budget) do
-      {:ok, :done} ->
-        with :ok <- check_cleanup_deadline(budget),
-             :ok <- rmdir(path) do
-          {:ok, budget}
-        end
-
-      {:ok, {:entry, name}} ->
-        child_path = Path.join(path, name)
-
-        with {:ok, next_budget} <- consume_cleanup_entry(budget),
-             {:ok, next_budget} <- delete_entry(child_path, depth + 1, next_budget) do
-          consume_directory_listing(listing, path, depth, next_budget)
-        else
-          {:error, reason} ->
-            stop_directory_listing(listing, budget)
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        stop_directory_listing(listing, budget)
-        {:error, reason}
-    end
-  end
-
-  defp start_directory_listing(path, depth, budget) do
-    parent = self()
-    token = make_ref()
-    heap_words = listing_heap_words(budget.listing_heap_words, depth)
-
-    {pid, monitor_ref} =
-      spawn_monitor(fn -> directory_listing_worker(parent, token, path, heap_words) end)
-
-    receive_listing_ready(pid, monitor_ref, token, budget)
-  end
-
-  defp receive_listing_ready(pid, monitor_ref, token, budget) do
-    case remaining_cleanup_ms(budget) do
-      remaining when remaining > 0 ->
-        receive do
-          {^token, :ready} ->
-            {:ok, %{pid: pid, monitor_ref: monitor_ref, token: token}}
-
-          {^token, {:error, :enoent}} ->
-            Process.demonitor(monitor_ref, [:flush])
-            {:error, :cleanup_directory_absent}
-
-          {^token, {:error, _reason}} ->
-            Process.demonitor(monitor_ref, [:flush])
-            {:error, :cleanup_list_failed}
-
-          {:DOWN, ^monitor_ref, :process, ^pid, :killed} ->
-            {:error, :cleanup_listing_memory_budget_exceeded}
-
-          {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
-            {:error, :cleanup_listing_worker_failed}
-        after
-          remaining ->
-            stop_directory_listing(
-              %{pid: pid, monitor_ref: monitor_ref, token: token},
-              budget
-            )
-
-            {:error, :cleanup_time_budget_exceeded}
-        end
-
-      _expired ->
-        stop_directory_listing(%{pid: pid, monitor_ref: monitor_ref, token: token}, budget)
-        {:error, :cleanup_time_budget_exceeded}
-    end
-  end
-
-  defp next_directory_entry(listing, budget) do
-    send(listing.pid, {listing.token, :next})
-
-    case remaining_cleanup_ms(budget) do
-      remaining when remaining > 0 ->
-        receive do
-          {token, {:entry, name}}
-          when token == listing.token and is_binary(name) and name not in ["", ".", ".."] ->
-            {:ok, {:entry, name}}
-
-          {token, :done} when token == listing.token ->
-            Process.demonitor(listing.monitor_ref, [:flush])
-            {:ok, :done}
-
-          {:DOWN, ref, :process, pid, :killed}
-          when ref == listing.monitor_ref and pid == listing.pid ->
-            {:error, :cleanup_listing_memory_budget_exceeded}
-
-          {:DOWN, ref, :process, pid, _reason}
-          when ref == listing.monitor_ref and pid == listing.pid ->
-            {:error, :cleanup_listing_worker_failed}
-        after
-          remaining -> {:error, :cleanup_time_budget_exceeded}
-        end
-
-      _expired ->
-        {:error, :cleanup_time_budget_exceeded}
-    end
-  end
-
-  defp directory_listing_worker(parent, token, path, heap_words) do
-    parent_ref = Process.monitor(parent)
-
-    Process.flag(:max_heap_size, %{
-      size: heap_words,
-      kill: true,
-      error_logger: false,
-      include_shared_binaries: true
-    })
-
-    case File.ls(path) do
-      {:ok, names} ->
-        send(parent, {token, :ready})
-        serve_directory_entries(parent, parent_ref, token, names)
-
-      {:error, reason} ->
-        send(parent, {token, {:error, reason}})
-    end
-  rescue
-    _error -> send(parent, {token, {:error, :listing_failed}})
-  catch
-    _kind, _reason -> send(parent, {token, {:error, :listing_failed}})
-  end
-
-  defp serve_directory_entries(parent, parent_ref, token, [name | rest]) do
+  defp check_worker_state(parent, parent_ref, budget) do
     receive do
-      {^token, :next} ->
-        send(parent, {token, {:entry, name}})
-        serve_directory_entries(parent, parent_ref, token, rest)
-
-      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
-        :ok
-    end
-  end
-
-  defp serve_directory_entries(parent, parent_ref, token, []) do
-    receive do
-      {^token, :next} -> send(parent, {token, :done})
-      {:DOWN, ^parent_ref, :process, ^parent, _reason} -> :ok
-    end
-  end
-
-  defp stop_directory_listing(%{pid: pid, monitor_ref: monitor_ref, token: token}, budget) do
-    if Process.alive?(pid), do: Process.exit(pid, :kill)
-    wait_ms = min(remaining_cleanup_ms(budget), 100)
-
-    receive do
-      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} -> :owner_down
     after
-      wait_ms -> Process.demonitor(monitor_ref, [:flush])
+      0 -> check_cleanup_deadline(budget)
     end
-
-    flush_directory_listing_messages(token)
-    :ok
-  end
-
-  defp flush_directory_listing_messages(token) do
-    receive do
-      {^token, _message} -> flush_directory_listing_messages(token)
-    after
-      0 -> :ok
-    end
-  end
-
-  defp listing_heap_words(total, depth) do
-    shift = min(depth, @listing_depth_shift_cap)
-    max(@min_listing_heap_words, div(total, :erlang.bsl(1, shift)))
   end
 
   defp validate_cleanup_child_path(path) when is_binary(path) do

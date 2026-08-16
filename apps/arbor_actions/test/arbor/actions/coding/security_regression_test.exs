@@ -786,8 +786,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
        %{
          tmp_dir: tmp_dir
        } do
-    # Prove the generic OwnedTree default still rejects this exact shape so the
-    # WorkspaceLeaseRegistry policy remains the load-bearing fix.
+    # The generic cleanup budget is global across the traversal, so directory
+    # depth no longer starves an otherwise admissible compiled-artifact listing.
     probe_root = Path.join(tmp_dir, "compiled-artifact-probe")
     assert {:ok, probe_identity} = Arbor.Shell.create_private_owned_tree(probe_root)
 
@@ -797,17 +797,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     File.mkdir_p!(probe_ebin)
     populate_compiled_artifact_ebin!(probe_ebin)
 
-    assert {:error, :cleanup_listing_memory_budget_exceeded} =
-             Arbor.Shell.remove_owned_tree(probe_identity)
-
-    assert File.dir?(probe_root)
-
-    assert :ok =
-             Arbor.Shell.remove_owned_tree(probe_identity,
-               listing_heap_words: 8_000_000,
-               timeout_ms: 10_000
-             )
-
+    assert :ok = Arbor.Shell.remove_owned_tree(probe_identity)
     refute File.exists?(probe_root)
 
     fixture = leased_project(tmp_dir, valid_module())
@@ -832,8 +822,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert File.dir?(lease_root)
 
     # Realistic Mix layout under the Actions-owned validation root. Release must
-    # succeed through the public WorkspaceLeaseRegistry lifecycle with the
-    # operation-specific listing/time bounds (fails on pre-fix defaults).
+    # succeed through the public WorkspaceLeaseRegistry lifecycle with its
+    # operation-specific listing/time bounds.
     ebin =
       Path.join(
         resource.root_path,

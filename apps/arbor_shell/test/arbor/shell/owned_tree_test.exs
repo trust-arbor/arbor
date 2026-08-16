@@ -121,6 +121,30 @@ defmodule Arbor.Shell.OwnedTreeTest do
     refute File.exists?(owned_path)
   end
 
+  test "security regression: cleanup memory is global across nested directory listings", %{
+    test_root: root
+  } do
+    owned_path = Path.join(root, "owned")
+    assert {:ok, identity} = Shell.create_private_owned_tree(owned_path)
+
+    deepest =
+      Enum.reduce(1..8, owned_path, fn index, parent ->
+        child = Path.join(parent, "directory-#{index}")
+        File.mkdir!(child)
+        child
+      end)
+
+    for index <- 1..400 do
+      name =
+        "#{String.pad_leading(Integer.to_string(index), 4, "0")}-#{String.duplicate("x", 160)}"
+
+      File.write!(Path.join(deepest, name), "remove")
+    end
+
+    assert :ok = Shell.remove_owned_tree(identity)
+    refute File.exists?(owned_path)
+  end
+
   test "directory enumeration is isolated by a hard listing-memory budget", %{
     test_root: root
   } do
