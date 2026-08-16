@@ -141,6 +141,19 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.EncodeTest do
     assert {:error, :unsupported_syntax} = Encode.canonical_json(1.5)
   end
 
+  test "security regression: canonical_json/1 returns bounded errors for invalid UTF-8" do
+    invalid = <<0xFF, 0xFF>>
+
+    assert {:error, :invalid_utf8} = Encode.canonical_json(invalid)
+    assert {:error, :invalid_utf8} = Encode.canonical_json(["ok", invalid])
+    assert {:error, :invalid_utf8} = Encode.canonical_json(%{"k" => invalid})
+    assert {:error, :invalid_utf8} = Encode.canonical_json(%{invalid => 1})
+
+    escaped = "a\nb\t\r\"\\"
+    assert {:ok, Jason.encode!(escaped)} = Encode.canonical_json(escaped)
+    assert {:ok, ~s({"a":1,"b":2})} = Encode.canonical_json(%{"b" => 2, "a" => 1})
+  end
+
   test "digest avalanche across domains", %{manifest: manifest} do
     {:ok, payload} = Encode.payload_tree_digest(manifest["entries"])
     {:ok, apps} = Encode.applications_digest(manifest["applications"])

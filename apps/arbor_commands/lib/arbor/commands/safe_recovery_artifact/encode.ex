@@ -906,13 +906,20 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
       not Enum.all?(keys, &is_binary/1) ->
         {:error, :non_string_keys}
 
+      not Enum.all?(keys, &String.valid?/1) ->
+        {:error, :invalid_utf8}
+
       true ->
         order_map_pairs(Enum.sort(keys), map, [])
     end
   end
 
   defp order_value(list) when is_list(list), do: order_list(list, [])
-  defp order_value(value) when is_binary(value), do: {:ok, value}
+
+  defp order_value(value) when is_binary(value) do
+    if String.valid?(value), do: {:ok, value}, else: {:error, :invalid_utf8}
+  end
+
   defp order_value(value) when is_integer(value), do: {:ok, value}
   defp order_value(value) when is_boolean(value), do: {:ok, value}
   defp order_value(nil), do: {:ok, nil}
@@ -943,12 +950,18 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
   defp order_list(_, _), do: {:error, :improper_list}
 
   defp encode_capped(ordered) do
-    bytes = Jason.encode!(ordered)
+    case Jason.encode(ordered) do
+      {:ok, bytes} when byte_size(bytes) > @max_canonical_bytes ->
+        {:error, :unbounded}
 
-    if byte_size(bytes) > @max_canonical_bytes do
-      {:error, :unbounded}
-    else
-      {:ok, bytes}
+      {:ok, bytes} ->
+        {:ok, bytes}
+
+      {:error, %Jason.EncodeError{}} ->
+        {:error, :invalid_utf8}
+
+      {:error, _} ->
+        {:error, :invalid_map}
     end
   end
 end

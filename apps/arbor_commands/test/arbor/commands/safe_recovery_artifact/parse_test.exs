@@ -74,6 +74,41 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
                Parse.app_spec(<<0xFF, 0xFF, "{application,foo,[{vsn,\"1\"}]}."::binary>>)
     end
 
+    test "security regression: rejects octal-decoded controls and keeps symbolic escapes" do
+      assert {:ok, newline} = Parse.app_spec("{application,foo,[{vsn,\"a\\nb\"}]}.")
+      assert newline.version == "a\nb"
+
+      assert {:ok, tab} = Parse.app_spec("{application,foo,[{vsn,\"a\\tb\"}]}.")
+      assert tab.version == "a\tb"
+
+      assert {:ok, cr} = Parse.app_spec("{application,foo,[{vsn,\"a\\rb\"}]}.")
+      assert cr.version == "a\rb"
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\000\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\001\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\011\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\012\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\015\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\177\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\200\"}]}.")
+
+      assert {:error, :unsupported_syntax} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\400\"}]}.")
+    end
+
     test "rejects maps, improper lists, and missing terminator" do
       assert {:error, :unsupported_syntax} = Parse.app_spec(~S({application,foo,#{a=>1}}.))
       assert {:error, :improper_list} = Parse.app_spec("{application,foo,[{vsn,\"1\"}|x]}.")
@@ -84,6 +119,17 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
       items = Enum.map_join(1..2_048, ",", &Integer.to_string/1)
       assert {:ok, list} = Parse.term("[" <> items <> "].")
       assert length(list) == 2_048
+    end
+
+    test "security regression: integer binary items hit the 16_384-item ceiling" do
+      # 16,384 integer items stay under the 32,768-node ceiling (1 binary
+      # node + 16,384 integer nodes). Rejection must come from the item bound.
+      accepted = integer_binary_term(16_384)
+      assert {:ok, bytes} = Parse.term(accepted)
+      assert byte_size(bytes) == 16_384
+
+      rejected = integer_binary_term(16_385)
+      assert {:error, :unbounded} = Parse.term(rejected)
     end
 
     test "rejects oversized and overly nested terms" do
@@ -133,5 +179,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
       after_count = :erlang.system_info(:atom_count)
       assert after_count == before
     end
+  end
+
+  defp integer_binary_term(count) do
+    "<<" <> Enum.map_join(1..count, ",", fn _index -> "1" end) <> ">>."
   end
 end

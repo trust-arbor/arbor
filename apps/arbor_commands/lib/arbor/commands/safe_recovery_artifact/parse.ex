@@ -254,7 +254,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
   defp parse_integer_allow(bytes, state), do: parse_integer(bytes, state, false)
 
   defp admit_binary_byte(int, rest, state, count, acc) when int >= 0 and int <= 255 do
-    continue_binary(rest, state, count, [{:byte, int} | acc])
+    continue_binary(rest, state, count + 1, [{:byte, int} | acc])
   end
 
   defp admit_binary_byte(_int, _rest, _state, _count, _acc), do: {:error, :malformed_term}
@@ -348,14 +348,20 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
        when a >= ?0 and a <= ?7 and b >= ?0 and b <= ?7 and c >= ?0 and c <= ?7 do
     value = (a - ?0) * 64 + (b - ?0) * 8 + (c - ?0)
 
-    if value <= 255 do
-      {:ok, value, rest}
-    else
-      {:error, :unsupported_syntax}
+    cond do
+      value > 255 -> {:error, :unsupported_syntax}
+      octal_control?(value) -> {:error, :control_character}
+      true -> {:ok, value, rest}
     end
   end
 
   defp take_escape(_rest), do: {:error, :unsupported_syntax}
+
+  # Symbolic \n, \t, and \r stay allowed above. Octal must not reintroduce
+  # NUL, C0, C1, or DEL after decoding.
+  defp octal_control?(c) when c <= 0x1F or c == 0x7F, do: true
+  defp octal_control?(c) when c >= 0x80 and c <= 0x9F, do: true
+  defp octal_control?(_), do: false
 
   defp parse_unquoted_atom(bytes, state) do
     {atom, rest} = take_atom_chars(bytes, [])

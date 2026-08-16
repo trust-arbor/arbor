@@ -67,6 +67,25 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ClassifyTest do
     assert {:error, :malformed_signature} = kind("bin/fat", oob, 40, false, nil)
   end
 
+  test "security regression: fat64 rejects unsigned-64 offset+size overflow" do
+    # Declared file size is larger than offset+size so ordinary out-of-file
+    # rejection cannot be the reason this fails.
+    header = <<0xCAFEBABF::unsigned-big-32, 1::unsigned-big-32>>
+    offset = 0xFFFF_FFFF_FFFF_FFF0
+    size = 0x20
+    align = 4
+
+    arch =
+      <<0x0100000C::unsigned-big-32, 0::unsigned-big-32, offset::unsigned-big-64,
+        size::unsigned-big-64, align::unsigned-big-32, 0::unsigned-big-32>>
+
+    prefix = header <> arch
+    file_size = offset + size + 4096
+    assert file_size > offset + size
+    assert offset + size > 0xFFFF_FFFF_FFFF_FFFF
+    assert {:error, :malformed_signature} = kind("bin/fat", prefix, file_size, false, nil)
+  end
+
   test "does not count ARM64 in a malformed fat slice" do
     # nfat=1, ARM64 cputype, but size 0.
     header = <<0xCAFEBABE::unsigned-big-32, 1::unsigned-big-32>>
