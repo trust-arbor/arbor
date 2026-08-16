@@ -19,6 +19,7 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
   }
 
   @writable_names ~w(home tmp build deps hex mix cache release)
+  @project_root_segments ["apps", "arbor_trust"]
   @env_keys ~w(
     MIX_ENV HEX_OFFLINE MIX_OS_CONCURRENCY_LOCK ARBOR_MIX_CONTAINED
     ARBOR_ERLANG_ROOT ARBOR_ELIXIR_ROOT HOME TMPDIR TMP HEX_HOME MIX_HOME
@@ -66,6 +67,9 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
 
   @spec phase_index(atom()) :: non_neg_integer()
   def phase_index(phase), do: Map.fetch!(@phase_order, phase)
+
+  @spec project_root_segments() :: [String.t()]
+  def project_root_segments, do: @project_root_segments
 
   @spec source_root(String.t()) :: String.t()
   def source_root(identity_path) when is_binary(identity_path),

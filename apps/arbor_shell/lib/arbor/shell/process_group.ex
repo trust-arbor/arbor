@@ -324,6 +324,7 @@ defmodule Arbor.Shell.ProcessGroup do
       file_id(elixir) ++
       file_id(mix) ++
       dir_id(source) ++
+      dir_id(launch.project) ++
       dir_id(erlang_root) ++
       dir_id(elixir_root) ++
       dir_id(archives) ++

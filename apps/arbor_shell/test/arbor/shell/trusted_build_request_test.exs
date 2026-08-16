@@ -84,6 +84,28 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
                  "identity" => Map.put(identity, "path", "/tmp/../evil")
                }
              })
+
+    Enum.each(["project_root", "cwd", "child", "mix_cwd", "project"], fn key ->
+      assert {:error, :invalid_trusted_build_request} =
+               Request.admit(%{
+                 "schema" => "arbor.shell.trusted_build.request.v1",
+                 "source" => %{
+                   "schema" => "arbor.shell.trusted_build.source.v1",
+                   "identity" => identity
+                 },
+                 key => "/evil"
+               })
+
+      assert {:error, :invalid_trusted_build_request} =
+               Request.admit(%{
+                 "schema" => "arbor.shell.trusted_build.request.v1",
+                 "source" => %{
+                   "schema" => "arbor.shell.trusted_build.source.v1",
+                   "identity" => identity,
+                   key => "/evil"
+                 }
+               })
+    end)
   end
 
   test "rejects invented identities that were never registered" do
@@ -110,15 +132,11 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
       }
     }
 
-    assert {:error, reason} = Shell.acquire_trusted_build_lease(request)
-
-    case :os.type() do
-      {:unix, :darwin} -> assert reason == :owned_tree_not_registered
-      _other -> assert reason == :trusted_build_unavailable
-    end
+    assert {:error, :owned_tree_not_registered} = Shell.acquire_trusted_build_lease(request)
   end
 
   test "plan admits only the three phases in order" do
+    assert Plan.project_root_segments() == ["apps", "arbor_trust"]
     assert {:ok, :deps_get} = Plan.admit_phase("deps_get")
     assert {:ok, :compile} = Plan.admit_phase("compile")
     assert {:ok, :release} = Plan.admit_phase("release")

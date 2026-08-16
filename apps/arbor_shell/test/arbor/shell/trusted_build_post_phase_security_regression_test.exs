@@ -287,14 +287,10 @@ defmodule Arbor.Shell.TrustedBuildPostPhaseSecurityRegressionTest do
     parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join(source, "lib"))
-    File.mkdir_p!(Path.join(source, "bin"))
-    File.write!(Path.join(source, "mix.exs"), mix_project())
 
-    File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), source_module(kind))
+    _project =
+      Helpers.plant_production_child_project!(source, mix_project(), source_module(kind))
 
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     plant_overlay!(identity.path)
 
     request = %{

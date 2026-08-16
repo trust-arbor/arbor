@@ -35,6 +35,7 @@ defmodule Arbor.Shell.TrustedBuild do
 
   def acquire(request, fault) when fault in @faults do
     with {:ok, admitted} <- Request.admit(request),
+         :ok <- preflight_fixed_project_root(admitted.identity),
          :ok <- require_darwin(),
          {:ok, source_owned} <- bind_source(admitted.identity),
          {:ok, binding, authority_pid, authority_gen} <-
@@ -105,6 +106,29 @@ defmodule Arbor.Shell.TrustedBuild do
     case :os.type() do
       {:unix, :darwin} -> :ok
       _other -> {:error, :trusted_build_unavailable}
+    end
+  end
+
+  defp preflight_fixed_project_root(identity) do
+    case OwnedTreeRegistry.fetch(identity) do
+      {:ok, :unbound, _gen} ->
+        with :ok <- Identity.verify_owned_identity(identity),
+             {:ok, _project} <-
+               Identity.pin_descendant_directory(
+                 identity,
+                 ["source" | Plan.project_root_segments()]
+               ) do
+          :ok
+        end
+
+      {:ok, _purpose, _gen} ->
+        {:error, :owned_tree_purpose_mismatch}
+
+      {:error, :owned_tree_not_registered} ->
+        {:error, :owned_tree_not_registered}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -266,6 +290,8 @@ defmodule Arbor.Shell.TrustedBuild do
          :ok <- seed_hex_cache(children.hex.path, binding, fault),
          :ok <- reject_source_overlap(source_root, children, archives),
          {:ok, source} <- Identity.pin_directory(source_root),
+         {:ok, project} <-
+           Identity.pin_descendant_directory(source, Plan.project_root_segments()),
          {:ok, wrapper} <- Identity.pin_regular_file(wrapper_path),
          {:ok, overlay, source_tree_digest} <- pin_source_overlay(source_identity) do
       roots = Map.merge(children, %{parent: parent, archives: archives})
@@ -273,6 +299,7 @@ defmodule Arbor.Shell.TrustedBuild do
       identities = %{
         source: source,
         source_owned: source_identity,
+        project: project,
         wrapper: wrapper,
         overlay: overlay,
         source_tree_digest: source_tree_digest,

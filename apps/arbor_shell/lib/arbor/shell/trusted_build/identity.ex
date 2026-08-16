@@ -221,6 +221,29 @@ defmodule Arbor.Shell.TrustedBuild.Identity do
     :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower)
   end
 
+  @doc """
+  Pin a descendant directory by no-follow lstat of each trusted segment.
+  """
+  @spec pin_descendant_directory(map(), [String.t()]) :: {:ok, dir_identity()} | {:error, atom()}
+  def pin_descendant_directory(root, segments)
+      when is_map(root) and is_list(segments) and segments != [] do
+    with {:ok, root_path} <- ancestry_root_path(root),
+         :ok <- verify_ancestry_root(root),
+         :ok <- walk_ancestry_segments(root_path, segments, :directory),
+         path = Path.join([root_path | segments]),
+         {:ok, leaf} <- pin_directory(path),
+         true <- leaf.path == path,
+         :ok <- verify_ancestry(root, leaf, segments) do
+      {:ok, leaf}
+    else
+      false -> {:error, :trusted_build_wrapper_identity_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def pin_descendant_directory(_root, _segments),
+    do: {:error, :trusted_build_wrapper_identity_mismatch}
+
   @spec child_of?(String.t(), String.t()) :: boolean()
   def child_of?(parent, child) when is_binary(parent) and is_binary(child) do
     parent_segs = Path.split(parent)

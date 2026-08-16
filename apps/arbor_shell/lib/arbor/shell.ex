@@ -860,10 +860,11 @@ defmodule Arbor.Shell do
   @doc """
   Run one fixed Mix phase on a live trusted-build lease.
 
-  Accepts only `\"deps_get\"`, `\"compile\"`, or `\"release\"` in that order,
-  once. Compile is admitted only after native staging and deps inventory.
-  After a failed or cancelled phase only `release_trusted_build_lease/1`
-  is admitted.
+  Mix cwd is the fixed child `source/apps/arbor_trust` under the reconstructed
+  source root. Accepts only `\"deps_get\"`, `\"compile\"`, or `\"release\"` in
+  that order, once. Compile is admitted only after native staging and deps
+  inventory. After a failed or cancelled phase only
+  `release_trusted_build_lease/1` is admitted.
   """
   @spec execute_trusted_build(term(), term()) :: {:ok, map()} | {:error, term()}
   def execute_trusted_build(lease, phase) do

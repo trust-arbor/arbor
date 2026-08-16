@@ -93,6 +93,18 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
 
   def stop_retained_worker(_pid), do: :ok
 
+  def plant_production_child_project!(source_path, mix_exs, lib_source)
+      when is_binary(source_path) and is_binary(mix_exs) and is_binary(lib_source) do
+    project = Path.join([source_path, "apps", "arbor_trust"])
+    File.mkdir_p!(Path.join(project, "lib"))
+    File.mkdir_p!(Path.join(source_path, "bin"))
+    File.write!(Path.join(project, "mix.exs"), mix_exs)
+    File.write!(Path.join(project, "lib/trusted_build_fixture.ex"), lib_source)
+    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source_path, "bin/mix"))
+    File.chmod!(Path.join(source_path, "bin/mix"), 0o755)
+    project
+  end
+
   def plant_fixed_overlay!(owned_path) when is_binary(owned_path) do
     desc = Arbor.Shell.trusted_build_native_overlay_descriptor()
     dest = Path.join(owned_path, desc["staging_rel"])

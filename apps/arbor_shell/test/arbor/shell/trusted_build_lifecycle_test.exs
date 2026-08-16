@@ -330,12 +330,10 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join([source, "bin"]))
-    File.mkdir_p!(Path.join([source, "lib"]))
-    File.write!(Path.join(source, "mix.exs"), mix_project(kind))
-    File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), source_module(kind))
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
+
+    _project =
+      Helpers.plant_production_child_project!(source, mix_project(kind), source_module(kind))
+
     :ok = Helpers.plant_fixed_overlay!(identity.path)
     {nil, identity, handle}
   end

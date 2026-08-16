@@ -6,6 +6,7 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
   alias Arbor.Shell.TrustedBuild.Inventory
   alias Arbor.Shell.TrustedBuild.NativeFs
   alias Arbor.Shell.TrustedBuild.NativeOverlay
+  alias Arbor.Shell.TrustedBuild.Plan
 
   @max_selector_bytes 4_096
   @max_term_body 256 * 1024
@@ -14,14 +15,15 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
   def verify_pinned_source_tree(%{
         source: source,
         source_owned: source_owned,
+        project: project,
         wrapper: wrapper,
         overlay: overlay,
         source_tree_digest: digest
       })
       when is_binary(digest) do
-    with :ok <- verify_source_pins(source_owned, source, wrapper, overlay),
+    with :ok <- verify_source_pins(source_owned, source, project, wrapper, overlay),
          {:ok, ^digest} <- Identity.tree_digest(source_owned.path),
-         :ok <- verify_source_pins(source_owned, source, wrapper, overlay) do
+         :ok <- verify_source_pins(source_owned, source, project, wrapper, overlay) do
       :ok
     else
       false -> {:error, :identity_mismatch}
@@ -148,13 +150,15 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
 
   def scan_release_document(_state), do: {:error, :identity_mismatch}
 
-  defp verify_source_pins(source_owned, source, wrapper, overlay) do
+  defp verify_source_pins(source_owned, source, project, wrapper, overlay) do
     with :ok <- Identity.verify_owned_identity(source_owned),
          :ok <- Identity.verify_directory(source),
+         :ok <- Identity.verify_directory(project),
          :ok <- Identity.verify_file(wrapper),
          :ok <- Identity.verify_file(overlay),
          true <- NativeOverlay.matches_pin?(overlay),
          :ok <- Identity.verify_ancestry(source_owned, source, ["source"]),
+         :ok <- Identity.verify_ancestry(source, project, Plan.project_root_segments()),
          :ok <- Identity.verify_ancestry(source, wrapper, ["bin", "mix"]),
          :ok <-
            Identity.verify_ancestry(source_owned, overlay, NativeOverlay.staging_segments()) do

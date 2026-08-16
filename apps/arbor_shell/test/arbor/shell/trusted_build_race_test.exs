@@ -169,24 +169,20 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join([source, "bin"]))
-    File.mkdir_p!(Path.join([source, "lib"]))
 
-    File.write!(Path.join(source, "mix.exs"), """
-    defmodule TrustedBuildFixture.MixProject do
-      use Mix.Project
-      def project, do: [app: :trusted_build_fixture, version: "0.1.0"]
-      def application, do: []
-    end
-    """)
+    _project =
+      Helpers.plant_production_child_project!(
+        source,
+        """
+        defmodule TrustedBuildFixture.MixProject do
+          use Mix.Project
+          def project, do: [app: :trusted_build_fixture, version: "0.1.0"]
+          def application, do: []
+        end
+        """,
+        "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
+      )
 
-    File.write!(
-      Path.join(source, "lib/trusted_build_fixture.ex"),
-      "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
-    )
-
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     request = %{

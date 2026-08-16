@@ -142,6 +142,13 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
            Identity.verify_ancestry(descriptor.elixir_root, descriptor.elixir_mix, ["bin", "mix"]),
          :ok <-
            Identity.verify_ancestry(descriptor.source_owned, descriptor.source, ["source"]),
+         :ok <- Identity.verify_directory(descriptor.project),
+         :ok <-
+           Identity.verify_ancestry(
+             descriptor.source,
+             descriptor.project,
+             Plan.project_root_segments()
+           ),
          :ok <-
            Identity.verify_ancestry(
              descriptor.source_owned,
@@ -152,6 +159,7 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
            PostPhase.verify_pinned_source_tree(%{
              source: descriptor.source,
              source_owned: descriptor.source_owned,
+             project: descriptor.project,
              wrapper: descriptor.wrapper,
              overlay: descriptor.overlay,
              source_tree_digest: descriptor.source_tree_digest

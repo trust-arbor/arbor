@@ -88,18 +88,18 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join(source, "lib"))
-    File.mkdir_p!(Path.join(source, "bin"))
-    File.write!(Path.join(source, "mix.exs"), mix_project())
 
-    File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), """
-    defmodule TrustedBuildFixture do
-      def hello, do: :ok
-    end
-    """)
+    _project =
+      Helpers.plant_production_child_project!(
+        source,
+        mix_project(),
+        """
+        defmodule TrustedBuildFixture do
+          def hello, do: :ok
+        end
+        """
+      )
 
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     request = %{

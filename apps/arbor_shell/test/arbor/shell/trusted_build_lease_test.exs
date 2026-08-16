@@ -462,17 +462,14 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join(source, "bin"))
-    File.mkdir_p!(Path.join(source, "lib"))
-    File.write!(Path.join(source, "mix.exs"), mix_project())
 
-    File.write!(
-      Path.join(source, "lib/trusted_build_fixture.ex"),
-      "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
-    )
+    _project =
+      Helpers.plant_production_child_project!(
+        source,
+        mix_project(),
+        "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
+      )
 
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     :ok = Helpers.plant_fixed_overlay!(identity.path)
     {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), fault)
     {lease, identity, handle}

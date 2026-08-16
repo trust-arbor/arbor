@@ -40,7 +40,8 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
       assert result.exit_code == 0
       refute File.exists?(Path.join(source, "SHOULD_NOT_WRITE"))
-      assert File.exists?(Path.join(source, "lib/trusted_build_fixture.ex"))
+      refute File.exists?(Path.join(source, "apps/arbor_trust/SHOULD_NOT_WRITE"))
+      assert File.exists?(Path.join(source, "apps/arbor_trust/lib/trusted_build_fixture.ex"))
 
       state = :sys.get_state(lease.worker)
       env_file = Path.join(state.roots.build.path, "env_keys.txt")
@@ -111,6 +112,59 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
     end
   end
 
+  test "deps_get evaluates only the fixed child project and never the unselected root mix.exs" do
+    if @darwin? do
+      parent = Helpers.unique_source_root()
+      {:ok, identity} = Shell.create_private_owned_tree(parent)
+      source = Path.join(parent, "source")
+
+      _project =
+        Helpers.plant_production_child_project!(
+          source,
+          """
+          defmodule TrustedBuildFixture.MixProject do
+            use Mix.Project
+            def project, do: [app: :trusted_build_fixture, version: "0.1.0"]
+            def application, do: []
+          end
+          """,
+          "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
+        )
+
+      File.write!(Path.join(source, "mix.exs"), """
+      defmodule PoisonRoot.MixProject do
+        use Mix.Project
+
+        def project do
+          build = System.get_env("MIX_BUILD_PATH")
+
+          if is_binary(build) do
+            File.mkdir_p!(build)
+            File.write!(Path.join(build, "ROOT_MIX_EVALUATED"), "yes")
+          end
+
+          raise "unselected root mix.exs evaluated"
+        end
+      end
+      """)
+
+      :ok = Helpers.plant_fixed_overlay!(identity.path)
+      handle = Helpers.handle_for_owned!(identity)
+      {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), :omit_hex_seed)
+
+      try do
+        assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
+        assert deps.exit_code == 0
+        state = :sys.get_state(lease.worker)
+        refute File.exists?(Path.join(state.roots.build.path, "ROOT_MIX_EVALUATED"))
+      after
+        _ = Shell.release_trusted_build_lease(lease)
+        _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
+      end
+    end
+  end
+
   test "exact trusted-build argv is observed", context do
     if @darwin? do
       lease = context.lease
@@ -137,55 +191,54 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
     parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join(source, "lib"))
-    File.mkdir_p!(Path.join(source, "bin"))
 
-    File.write!(Path.join(source, "mix.exs"), """
-    defmodule TrustedBuildFixture.MixProject do
-      use Mix.Project
+    _project =
+      Helpers.plant_production_child_project!(
+        source,
+        """
+        defmodule TrustedBuildFixture.MixProject do
+          use Mix.Project
 
-      def project do
-        build = System.get_env("MIX_BUILD_PATH")
-        if is_binary(build) do
-          File.mkdir_p!(build)
-          File.write!(
-            Path.join(build, "env_keys.txt"),
-            System.get_env() |> Map.keys() |> Enum.sort() |> Enum.join("\\n")
-          )
-          File.write!(
-            Path.join(build, "mix_os_concurrency_lock.txt"),
-            System.get_env("MIX_OS_CONCURRENCY_LOCK") || ""
-          )
-          File.write!(Path.join(build, "PRIVATE_WRITE"), "ok")
+          def project do
+            build = System.get_env("MIX_BUILD_PATH")
+            if is_binary(build) do
+              File.mkdir_p!(build)
+              File.write!(
+                Path.join(build, "env_keys.txt"),
+                System.get_env() |> Map.keys() |> Enum.sort() |> Enum.join("\\n")
+              )
+              File.write!(
+                Path.join(build, "mix_os_concurrency_lock.txt"),
+                System.get_env("MIX_OS_CONCURRENCY_LOCK") || ""
+              )
+              File.write!(Path.join(build, "PRIVATE_WRITE"), "ok")
+            end
+            _ = File.write(Path.join(File.cwd!(), "SHOULD_NOT_WRITE"), "x")
+            net =
+              inspect({
+                :gen_tcp.connect({1, 1, 1, 1}, 80, [], 200),
+                :gen_tcp.connect({127, 0, 0, 1}, 80, [], 200),
+                :gen_tcp.connect({0, 0, 0, 0, 0, 0, 0, 1}, 80, [:inet6], 200)
+              })
+            if is_binary(build), do: File.write!(Path.join(build, "net.txt"), net)
+            [
+              app: :trusted_build_fixture,
+              version: "0.1.0",
+              elixir: "~> 1.17",
+              releases: [trusted_build_fixture: [include_executables_for: [:unix]]]
+            ]
+          end
+
+          def application, do: []
         end
-        _ = File.write(Path.join(File.cwd!(), "SHOULD_NOT_WRITE"), "x")
-        net =
-          inspect({
-            :gen_tcp.connect({1, 1, 1, 1}, 80, [], 200),
-            :gen_tcp.connect({127, 0, 0, 1}, 80, [], 200),
-            :gen_tcp.connect({0, 0, 0, 0, 0, 0, 0, 1}, 80, [:inet6], 200)
-          })
-        if is_binary(build), do: File.write!(Path.join(build, "net.txt"), net)
-        [
-          app: :trusted_build_fixture,
-          version: "0.1.0",
-          elixir: "~> 1.17",
-          releases: [trusted_build_fixture: [include_executables_for: [:unix]]]
-        ]
-      end
+        """,
+        """
+        defmodule TrustedBuildFixture do
+          def hello, do: :ok
+        end
+        """
+      )
 
-      def application, do: []
-    end
-    """)
-
-    File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), """
-    defmodule TrustedBuildFixture do
-      def hello, do: :ok
-    end
-    """)
-
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     handle = Helpers.handle_for_owned!(identity)

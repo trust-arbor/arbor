@@ -1,9 +1,12 @@
+Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+
 defmodule Arbor.Shell.TrustedBuildUnavailableTest do
   use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   test "non-Darwin acquire does not execute the wrapper" do
     if match?({:unix, :darwin}, :os.type()) do
@@ -23,8 +26,38 @@ defmodule Arbor.Shell.TrustedBuildUnavailableTest do
         }
       }
 
-      assert {:error, :trusted_build_unavailable} = Shell.acquire_trusted_build_lease(request)
+      assert {:error, :owned_tree_not_registered} = Shell.acquire_trusted_build_lease(request)
       refute launcher_running?()
+
+      parent = Helpers.unique_source_root()
+      {:ok, identity} = Shell.create_private_owned_tree(parent)
+      handle = Helpers.handle_for_owned!(identity)
+      source = Path.join(parent, "source")
+
+      _project =
+        Helpers.plant_production_child_project!(
+          source,
+          """
+          defmodule TrustedBuildFixture.MixProject do
+            use Mix.Project
+            def project, do: [app: :trusted_build_fixture, version: "0.1.0"]
+            def application, do: []
+          end
+          """,
+          "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
+        )
+
+      :ok = Helpers.plant_fixed_overlay!(identity.path)
+
+      try do
+        assert {:error, :trusted_build_unavailable} =
+                 Shell.acquire_trusted_build_lease(request_for(identity))
+
+        refute launcher_running?()
+      after
+        _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
+      end
     end
   end
 
@@ -49,6 +82,22 @@ defmodule Arbor.Shell.TrustedBuildUnavailableTest do
       assert message =~ "unavailable"
       Port.close(port)
     end
+  end
+
+  defp request_for(identity) do
+    %{
+      "schema" => "arbor.shell.trusted_build.request.v1",
+      "source" => %{
+        "schema" => "arbor.shell.trusted_build.source.v1",
+        "identity" => %{
+          "path" => identity.path,
+          "type" => "directory",
+          "device" => identity.device,
+          "minor_device" => identity.minor_device,
+          "inode" => identity.inode
+        }
+      }
+    }
   end
 
   defp launcher_running? do

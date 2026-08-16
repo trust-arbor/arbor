@@ -1609,6 +1609,42 @@ static int verify_file_ancestry(const char *root_path, const char *const *segmen
   return result;
 }
 
+static int verify_dir_ancestry(const char *root_path, const char *const *segments, size_t count,
+                               const char *expected_path, const struct stat *expected) {
+  char joined[TB_MAX_REL];
+  size_t used = 0;
+  int written = snprintf(joined, sizeof(joined), "%s", root_path);
+  if (written <= 0 || (size_t)written >= sizeof(joined)) return -1;
+  used = (size_t)written;
+  for (size_t i = 0; i < count; i++) {
+    written = snprintf(joined + used, sizeof(joined) - used, "/%s", segments[i]);
+    if (written <= 0 || (size_t)written >= sizeof(joined) - used) return -1;
+    used += (size_t)written;
+  }
+  if (strcmp(joined, expected_path) != 0) return -2;
+
+  int root_fd = open(root_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (root_fd < 0) return -3;
+  int leaf_fd = -1;
+  int walk = walk_openat_segments(root_fd, segments, count, 0, &leaf_fd);
+  close(root_fd);
+  if (walk != 0) return -4;
+  struct stat actual;
+  if (fstat(leaf_fd, &actual) != 0 || !S_ISDIR(actual.st_mode)) {
+    close(leaf_fd);
+    return -5;
+  }
+  close(leaf_fd);
+  if (actual.st_dev != expected->st_dev) return -6;
+  if ((((uint64_t)actual.st_ino) & 0xffffffffULL) !=
+      (((uint64_t)expected->st_ino) & 0xffffffffULL)) {
+    return -7;
+  }
+  if (actual.st_mode != expected->st_mode) return -8;
+  if (actual.st_uid != expected->st_uid) return -9;
+  return 0;
+}
+
 static int digest_add(digest_rows *rows, char *data, size_t len) {
   if (rows->count >= TB_MAX_DIGEST_ROWS) {
     free(data);
@@ -2377,8 +2413,8 @@ static int run_trusted_build(int argc, char **argv) {
   send_error("trusted build launcher unavailable");
   return 126;
 #else
-  /* timeout max_output + 4 file-ids(11) + 4 dir-ids(5) + digest + 8 wdirs(3) + -- + argv0 */
-  if (argc < 95 || strcmp(argv[93], "--") != 0) {
+  /* timeout max_output + 4 file-ids(11) + 5 dir-ids(5) + digest + 8 wdirs(3) + -- + argv0 */
+  if (argc < 100 || strcmp(argv[98], "--") != 0) {
     send_error("invalid trusted-build arguments");
     return 2;
   }
@@ -2395,19 +2431,20 @@ static int run_trusted_build(int argc, char **argv) {
   const char *elixir_path = argv[36];
   const char *elixir_mix_path = argv[47];
   const char *source_path = argv[52];
-  const char *erlang_root = argv[57];
-  const char *elixir_root = argv[62];
-  const char *archives_path = argv[67];
-  const char *archives_digest = argv[68];
-  const char *home_path = argv[71];
-  const char *tmp_path = argv[74];
-  const char *build_path = argv[77];
-  const char *deps_path = argv[80];
-  const char *hex_path = argv[83];
-  const char *mix_path = argv[86];
-  const char *cache_path = argv[89];
-  const char *release_path = argv[92];
-  const char *argv0 = argv[94];
+  const char *project_path = argv[57];
+  const char *erlang_root = argv[62];
+  const char *elixir_root = argv[67];
+  const char *archives_path = argv[72];
+  const char *archives_digest = argv[73];
+  const char *home_path = argv[76];
+  const char *tmp_path = argv[79];
+  const char *build_path = argv[82];
+  const char *deps_path = argv[85];
+  const char *hex_path = argv[88];
+  const char *mix_path = argv[91];
+  const char *cache_path = argv[94];
+  const char *release_path = argv[97];
+  const char *argv0 = argv[99];
 
   if (strlen(archives_digest) != 64 || strcmp(argv0, wrap_path) != 0) {
     send_error("invalid trusted-build executable binding");
@@ -2427,21 +2464,22 @@ static int run_trusted_build(int argc, char **argv) {
   }
 
   if (verify_dir_identity(argv[48], argv[49], argv[50], argv[51], source_path, 0) != 0 ||
-      verify_dir_identity(argv[53], argv[54], argv[55], argv[56], erlang_root, 0) != 0 ||
-      verify_dir_identity(argv[58], argv[59], argv[60], argv[61], elixir_root, 0) != 0 ||
-      verify_dir_identity(argv[63], argv[64], argv[65], argv[66], archives_path, 0) != 0) {
+      verify_dir_identity(argv[53], argv[54], argv[55], argv[56], project_path, 0) != 0 ||
+      verify_dir_identity(argv[58], argv[59], argv[60], argv[61], erlang_root, 0) != 0 ||
+      verify_dir_identity(argv[63], argv[64], argv[65], argv[66], elixir_root, 0) != 0 ||
+      verify_dir_identity(argv[68], argv[69], argv[70], argv[71], archives_path, 0) != 0) {
     send_error("trusted-build directory identity changed");
     return 126;
   }
 
-  if (verify_wdir_identity(argv[69], argv[70], home_path) != 0 ||
-      verify_wdir_identity(argv[72], argv[73], tmp_path) != 0 ||
-      verify_wdir_identity(argv[75], argv[76], build_path) != 0 ||
-      verify_wdir_identity(argv[78], argv[79], deps_path) != 0 ||
-      verify_wdir_identity(argv[81], argv[82], hex_path) != 0 ||
-      verify_wdir_identity(argv[84], argv[85], mix_path) != 0 ||
-      verify_wdir_identity(argv[87], argv[88], cache_path) != 0 ||
-      verify_wdir_identity(argv[90], argv[91], release_path) != 0) {
+  if (verify_wdir_identity(argv[74], argv[75], home_path) != 0 ||
+      verify_wdir_identity(argv[77], argv[78], tmp_path) != 0 ||
+      verify_wdir_identity(argv[80], argv[81], build_path) != 0 ||
+      verify_wdir_identity(argv[83], argv[84], deps_path) != 0 ||
+      verify_wdir_identity(argv[86], argv[87], hex_path) != 0 ||
+      verify_wdir_identity(argv[89], argv[90], mix_path) != 0 ||
+      verify_wdir_identity(argv[92], argv[93], cache_path) != 0 ||
+      verify_wdir_identity(argv[95], argv[96], release_path) != 0) {
     send_error("trusted-build writable identity changed");
     return 126;
   }
@@ -2507,6 +2545,24 @@ static int run_trusted_build(int argc, char **argv) {
   }
 #undef LOAD_FILE_STAT
 
+  struct stat project_st;
+  uint64_t project_dev, project_ino, project_mode, project_uid;
+  if (parse_u64(argv[53], &project_dev) != 0 || parse_u64(argv[54], &project_ino) != 0 ||
+      parse_u64(argv[55], &project_mode) != 0 || parse_u64(argv[56], &project_uid) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+  memset(&project_st, 0, sizeof(project_st));
+  project_st.st_dev = (dev_t)project_dev;
+  project_st.st_ino = (ino_t)project_ino;
+  project_st.st_mode = (mode_t)project_mode;
+  project_st.st_uid = (uid_t)project_uid;
+  const char *project_segs[] = {"apps", "arbor_trust"};
+  if (verify_dir_ancestry(source_path, project_segs, 2, project_path, &project_st) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+
   char computed_digest[65];
   if (digest_tree(archives_path, computed_digest) != 0 ||
       strcmp(computed_digest, archives_digest) != 0) {
@@ -2528,7 +2584,7 @@ static int run_trusted_build(int argc, char **argv) {
     return 126;
   }
 
-  if (trusted_build_mix_argv(argc - 95, &argv[95]) != 0) {
+  if (trusted_build_mix_argv(argc - 100, &argv[100]) != 0) {
     send_error("unreviewed trusted-build command");
     return 2;
   }
@@ -2559,13 +2615,13 @@ static int run_trusted_build(int argc, char **argv) {
   exec_argv[9] = argv[9];
   exec_argv[10] = argv[13];
   exec_argv[11] = (char *)wrap_path;
-  exec_argv[12] = argv[48];
-  exec_argv[13] = argv[49];
-  exec_argv[14] = (char *)source_path;
+  exec_argv[12] = argv[53];
+  exec_argv[13] = argv[54];
+  exec_argv[14] = (char *)project_path;
   exec_argv[15] = (char *)"--";
   exec_argv[16] = (char *)wrap_path;
   int exec_argc = 17;
-  for (int i = 95; i < argc && exec_argc < 31; i++) {
+  for (int i = 100; i < argc && exec_argc < 31; i++) {
     exec_argv[exec_argc++] = argv[i];
   }
   exec_argv[exec_argc] = NULL;

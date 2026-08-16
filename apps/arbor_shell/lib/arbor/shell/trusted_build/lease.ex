@@ -794,6 +794,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       elixir_mix: binding.elixir_mix,
       source: identities.source,
       source_owned: identities.source_owned,
+      project: identities.project,
       overlay: identities.overlay,
       source_tree_digest: identities.source_tree_digest,
       native_staged: state.native_staged,

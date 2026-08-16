@@ -30,12 +30,13 @@ defmodule Arbor.Shell.TrustedBuildPostPhaseTest do
       {:ok, identity} = Shell.create_private_owned_tree(parent)
       handle = Helpers.handle_for_owned!(identity)
       source = Path.join(parent, "source")
-      File.mkdir_p!(Path.join([source, "bin"]))
-      File.mkdir_p!(Path.join([source, "lib"]))
-      File.write!(Path.join(source, "mix.exs"), "defmodule T, do: use Mix.Project\n")
-      File.write!(Path.join(source, "lib/t.ex"), "defmodule T, do: :ok\n")
-      File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-      File.chmod!(Path.join(source, "bin/mix"), 0o755)
+
+      _project =
+        Helpers.plant_production_child_project!(
+          source,
+          "defmodule T, do: use Mix.Project\n",
+          "defmodule T, do: :ok\n"
+        )
 
       try do
         assert {:error, :trusted_build_native_overlay_unpinned} =
@@ -429,35 +430,31 @@ defmodule Arbor.Shell.TrustedBuildPostPhaseTest do
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
-    File.mkdir_p!(Path.join([source, "bin"]))
-    File.mkdir_p!(Path.join([source, "lib"]))
 
-    File.write!(Path.join(source, "mix.exs"), """
-    defmodule TrustedBuildFixture.MixProject do
-      use Mix.Project
-      def project do
-        [
-          app: :trusted_build_fixture,
-          version: "0.1.0",
-          elixir: "~> 1.17",
-          releases: [trusted_build_fixture: [include_executables_for: [:unix]]]
-        ]
-      end
-      def application, do: []
-    end
-    """)
+    _project =
+      Helpers.plant_production_child_project!(
+        source,
+        """
+        defmodule TrustedBuildFixture.MixProject do
+          use Mix.Project
+          def project do
+            [
+              app: :trusted_build_fixture,
+              version: "0.1.0",
+              elixir: "~> 1.17",
+              releases: [trusted_build_fixture: [include_executables_for: [:unix]]]
+            ]
+          end
+          def application, do: []
+        end
+        """,
+        """
+        defmodule TrustedBuildFixture do
+          def hello, do: :ok
+        end
+        """
+      )
 
-    File.write!(
-      Path.join(source, "lib/trusted_build_fixture.ex"),
-      """
-      defmodule TrustedBuildFixture do
-        def hello, do: :ok
-      end
-      """
-    )
-
-    File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
-    File.chmod!(Path.join(source, "bin/mix"), 0o755)
     :ok = Helpers.plant_fixed_overlay!(identity.path)
     {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), fault)
     {lease, identity, handle}
