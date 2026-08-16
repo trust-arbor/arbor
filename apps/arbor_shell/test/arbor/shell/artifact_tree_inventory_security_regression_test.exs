@@ -76,6 +76,7 @@ defmodule Arbor.Shell.ArtifactTreeInventorySecurityRegressionTest do
              "regular_files",
              "schema"
            ]
+
     assert inventory["schema"] == "arbor.shell.regular_tree_inventory.v1"
 
     assert inventory["directories"] == [%{"path" => "bin", "mode" => dir_mode}]
