@@ -48,17 +48,22 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       Enum.each(Plan.env_keys(), fn key -> assert key in keys end)
       refute "USER" in keys
       refute "SHELL" in keys
+      lock_file = Path.join(state.roots.build.path, "mix_os_concurrency_lock.txt")
+      assert File.exists?(lock_file)
+      assert String.trim(File.read!(lock_file)) == "0"
       assert File.exists?(Path.join(state.roots.build.path, "PRIVATE_WRITE"))
       net_file = Path.join(state.roots.build.path, "net.txt")
       assert File.exists?(net_file)
       net = File.read!(net_file)
       refute net =~ "{:ok,"
+
       assert net =~ ":timeout" or net =~ ":ehostunreach" or net =~ ":enetunreach" or
                net =~ ":econnrefused" or net =~ "error"
     end
   end
 
-  test "phase order is enforced and a second deps_get is rejected", context do
+  test "out-of-order rejection leaves the lease usable and a repeated phase is rejected",
+       context do
     if @darwin? do
       lease = context.lease
 
@@ -94,7 +99,9 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       assert inventory["kind"] == "release"
       assert is_list(inventory["directories"])
       assert is_list(inventory["regular_files"])
+      assert inventory["regular_files"] != []
       refute Enum.any?(inventory["directories"], &String.starts_with?(&1["path"] || "", "/"))
+      refute Enum.any?(inventory["regular_files"], &String.starts_with?(&1["path"] || "", "/"))
     end
   end
 
@@ -135,11 +142,23 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
         build = System.get_env("MIX_BUILD_PATH")
         if is_binary(build) do
           File.mkdir_p!(build)
-          File.write!(Path.join(build, "env_keys.txt"), System.get_env() |> Map.keys() |> Enum.sort() |> Enum.join("\\n"))
+          File.write!(
+            Path.join(build, "env_keys.txt"),
+            System.get_env() |> Map.keys() |> Enum.sort() |> Enum.join("\\n")
+          )
+          File.write!(
+            Path.join(build, "mix_os_concurrency_lock.txt"),
+            System.get_env("MIX_OS_CONCURRENCY_LOCK") || ""
+          )
           File.write!(Path.join(build, "PRIVATE_WRITE"), "ok")
         end
         _ = File.write(Path.join(File.cwd!(), "SHOULD_NOT_WRITE"), "x")
-        net = inspect(:gen_tcp.connect({1, 1, 1, 1}, 80, [], 200))
+        net =
+          inspect({
+            :gen_tcp.connect({1, 1, 1, 1}, 80, [], 200),
+            :gen_tcp.connect({127, 0, 0, 1}, 80, [], 200),
+            :gen_tcp.connect({0, 0, 0, 0, 0, 0, 0, 1}, 80, [:inet6], 200)
+          })
         if is_binary(build), do: File.write!(Path.join(build, "net.txt"), net)
         [
           app: :trusted_build_fixture,

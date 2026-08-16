@@ -7,7 +7,6 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   @moduletag :security_regression
 
   alias Arbor.Shell
-  alias Arbor.Shell.TrustedBuild
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   test "security regression: the test-only lease facade is not exposed on Arbor.Shell" do
@@ -70,6 +69,20 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     end
   end
 
+  test "security regression: trusted-build environ snprintf is fail-closed on truncation" do
+    if match?({:unix, :darwin}, :os.type()) do
+      {handle, harness} = compile_replace_environ_harness!()
+
+      try do
+        {output, status} = System.cmd(harness, [], stderr_to_stdout: true)
+        assert output == ""
+        assert status == 126
+      after
+        assert :ok = Helpers.rm_fixture!(handle)
+      end
+    end
+  end
+
   defp start_fixture_lease! do
     tmp = System.tmp_dir!()
     parent = Path.join(tmp, "arbor-tb-src-#{System.unique_integer([:positive])}")
@@ -103,7 +116,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     }
 
     handle = Helpers.handle_for_owned!(identity)
-    {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
+    {:ok, lease, _view} = Shell.acquire_trusted_build_lease(request)
     {lease, identity, handle}
   end
 
@@ -124,7 +137,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   end
 
   defp os_processes do
-    {output, 0} = System.cmd("ps", ["-ax", "-o", "pid=,command="])
+    {output, 0} = System.cmd("ps", ["-axww", "-o", "pid=,command="])
 
     output
     |> String.split("\n", trim: true)
@@ -134,6 +147,73 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
         _other -> %{pid: "", command: line}
       end
     end)
+  end
+
+  defp compile_replace_environ_harness! do
+    root = Path.join(System.tmp_dir!(), "arbor-tb-env-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    handle = Helpers.capture_handle!(root)
+    out = Path.join(root, "replace_environ_harness")
+    c_src = Path.expand("../../../c_src", __DIR__)
+    harness = Path.join(root, "replace_environ_harness.c")
+    File.write!(harness, replace_environ_harness_source())
+    archive = Path.join(c_src, "arbor_shell_archive_stat.c")
+
+    {output, status} =
+      System.cmd(
+        "cc",
+        [
+          "-std=c11",
+          "-O2",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-D_POSIX_C_SOURCE=200809L",
+          "-I",
+          c_src,
+          harness,
+          archive,
+          "-o",
+          out
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    {handle, out}
+  end
+
+  defp replace_environ_harness_source do
+    """
+    #define main arbor_shell_launcher_original_main
+    #include "arbor_shell_launcher.c"
+    #undef main
+
+    int main(void) {
+      char erlang_root[5000];
+      trusted_build_paths paths;
+
+      memset(erlang_root, 'a', 4999U);
+      erlang_root[0] = '/';
+      erlang_root[4999] = '\\0';
+
+      memset(&paths, 0, sizeof(paths));
+      paths.home = "/h";
+      paths.tmp = "/t";
+      paths.build = "/b";
+      paths.deps = "/d";
+      paths.hex = "/x";
+      paths.mix = "/m";
+      paths.cache = "/c";
+      paths.release = "/r";
+      paths.source = "/s";
+      paths.erlang_root = erlang_root;
+      paths.elixir_root = "/e";
+      paths.archives = "/a";
+      trusted_build_replace_environ(&paths);
+      return 0;
+    }
+    """
   end
 
   defp eventually?(fun, timeout \\ 10_000) do

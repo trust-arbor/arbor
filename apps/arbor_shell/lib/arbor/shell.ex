@@ -859,7 +859,7 @@ defmodule Arbor.Shell do
   end
 
   @doc """
-  Closed relative inventory of `$MIX_BUILD_PATH/prod/rel` for a completed lease.
+  Closed relative inventory of `$MIX_BUILD_PATH/rel` for a completed lease.
   """
   @spec inventory_trusted_build(term()) :: {:ok, map()} | {:error, term()}
   def inventory_trusted_build(lease) do

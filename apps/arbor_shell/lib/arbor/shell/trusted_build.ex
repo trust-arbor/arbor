@@ -1,6 +1,7 @@
 defmodule Arbor.Shell.TrustedBuild do
   @moduledoc false
 
+  alias Arbor.Common.SafePath
   alias Arbor.Shell.OwnedTree
   alias Arbor.Shell.OwnedTreeRegistry
   alias Arbor.Shell.TrustedBuild.HexSeed
@@ -189,23 +190,39 @@ defmodule Arbor.Shell.TrustedBuild do
   end
 
   defp create_workspace(source_identity, binding, fault) do
-    tmp = System.tmp_dir!()
-    token = :crypto.strong_rand_bytes(@token_bytes) |> Base.encode16(case: :lower)
-    path = Path.join(tmp, "arbor-tb-" <> token)
+    with {:ok, tmp} <- host_tmp_root() do
+      token = :crypto.strong_rand_bytes(@token_bytes) |> Base.encode16(case: :lower)
+      path = Path.join(tmp, "arbor-tb-" <> token)
 
-    case Arbor.Shell.create_private_owned_tree(path) do
-      {:ok, parent} ->
-        case OwnedTreeRegistry.cas(parent, :unbound, :trusted_build_workspace) do
-          :ok ->
-            complete_workspace(parent, source_identity, binding, fault)
+      case Arbor.Shell.create_private_owned_tree(path) do
+        {:ok, parent} ->
+          case OwnedTreeRegistry.cas(parent, :unbound, :trusted_build_workspace) do
+            :ok ->
+              complete_workspace(parent, source_identity, binding, fault)
 
-          {:error, reason} ->
-            _ = cleanup_workspace(parent)
-            {:error, reason}
+            {:error, reason} ->
+              _ = cleanup_workspace(parent)
+              {:error, reason}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # Darwin sandbox-exec subpath params must be the kernel-resolved
+  # temporary root, not the /var lookup spelling.
+  defp host_tmp_root do
+    case SafePath.resolve_real(System.tmp_dir!()) do
+      {:ok, real} ->
+        case File.lstat(real, time: :posix) do
+          {:ok, %File.Stat{type: :directory}} -> {:ok, real}
+          _other -> {:error, :tmp_unavailable}
         end
 
-      {:error, reason} ->
-        {:error, reason}
+      _other ->
+        {:error, :tmp_unavailable}
     end
   end
 

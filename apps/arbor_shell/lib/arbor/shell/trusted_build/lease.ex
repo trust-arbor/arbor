@@ -535,55 +535,62 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   end
 
   defp start_phase(state, phase) do
-    with :ok <- Plan.admit_order(phase, state.completed),
-         {:ok, binding, authority_pid, generation} <-
-           TrustedBuildToolchainAuthority.checkout_generation(
-             state.authority_pid,
-             state.authority_gen
-           ),
-         {:ok, registry_pid, registry_gen} <- OwnedTreeRegistry.checkout(),
-         true <- authority_pid == state.authority_pid and generation == state.authority_gen,
-         true <- registry_pid == state.registry_pid and registry_gen == state.registry_gen do
-      cancel_id = make_ref()
-      launch_ticket = make_ref()
+    case Plan.admit_order(phase, state.completed) do
+      # Plan.admit_order policy rejection is recoverable; later identity,
+      # registry, generation, and launch integrity failures still lock.
+      {:error, :trusted_build_phase_rejected} ->
+        {:error, :trusted_build_phase_rejected, state}
 
-      session = %{
-        lease_pid: self(),
-        owner_pid: state.owner,
-        authority_pid: authority_pid,
-        authority_gen: generation,
-        registry_pid: registry_pid,
-        registry_gen: registry_gen,
-        cancel_id: cancel_id,
-        launch_ticket: launch_ticket,
-        phase: phase
-      }
+      :ok ->
+        with {:ok, binding, authority_pid, generation} <-
+               TrustedBuildToolchainAuthority.checkout_generation(
+                 state.authority_pid,
+                 state.authority_gen
+               ),
+             {:ok, registry_pid, registry_gen} <- OwnedTreeRegistry.checkout(),
+             true <- authority_pid == state.authority_pid and generation == state.authority_gen,
+             true <- registry_pid == state.registry_pid and registry_gen == state.registry_gen do
+          cancel_id = make_ref()
+          launch_ticket = make_ref()
 
-      next = %{
-        state
-        | in_flight: phase,
-          cancel_id: cancel_id,
-          launch_ticket: launch_ticket,
-          launch_permit: nil,
-          launch_descriptor: nil,
-          launch_released: false,
-          fallback_used: false,
-          fallback_pending: false,
-          fallback_pid: nil,
-          fallback_ref: nil,
-          fallback_permit: nil,
-          fallback_claimed: false,
-          fallback_descriptor: nil,
-          binding: binding
-      }
+          session = %{
+            lease_pid: self(),
+            owner_pid: state.owner,
+            authority_pid: authority_pid,
+            authority_gen: generation,
+            registry_pid: registry_pid,
+            registry_gen: registry_gen,
+            cancel_id: cancel_id,
+            launch_ticket: launch_ticket,
+            phase: phase
+          }
 
-      {:ok, session, next}
-    else
-      false ->
-        {:error, :trusted_build_toolchain_generation_mismatch, %{state | locked: true}}
+          next = %{
+            state
+            | in_flight: phase,
+              cancel_id: cancel_id,
+              launch_ticket: launch_ticket,
+              launch_permit: nil,
+              launch_descriptor: nil,
+              launch_released: false,
+              fallback_used: false,
+              fallback_pending: false,
+              fallback_pid: nil,
+              fallback_ref: nil,
+              fallback_permit: nil,
+              fallback_claimed: false,
+              fallback_descriptor: nil,
+              binding: binding
+          }
 
-      {:error, reason} ->
-        {:error, reason, %{state | locked: true}}
+          {:ok, session, next}
+        else
+          false ->
+            {:error, :trusted_build_toolchain_generation_mismatch, %{state | locked: true}}
+
+          {:error, reason} ->
+            {:error, reason, %{state | locked: true}}
+        end
     end
   end
 
@@ -699,8 +706,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     ref = Process.monitor(pid)
     permit = make_ref()
     descriptor = build_fallback_descriptor(state)
+
     timer =
       Process.send_after(self(), {:trusted_build_fallback_timeout, permit}, @fallback_timeout_ms)
+
     send(pid, {:trusted_build_fallback_go, permit})
 
     %{
@@ -899,8 +908,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       {state, :ok}
     else
       {state,
-       {:error,
-        {:cleanup_retained, state.cleanup_reason || :incomplete, cleanup_evidence(state)}}}
+       {:error, {:cleanup_retained, state.cleanup_reason || :incomplete, cleanup_evidence(state)}}}
     end
   end
 

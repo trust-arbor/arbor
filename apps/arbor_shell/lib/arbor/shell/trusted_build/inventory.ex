@@ -7,7 +7,7 @@ defmodule Arbor.Shell.TrustedBuild.Inventory do
 
   @spec release_document(String.t()) :: {:ok, map()} | {:error, term()}
   def release_document(build_path) when is_binary(build_path) do
-    rel_root = Path.join([build_path, "prod", "rel"])
+    rel_root = Path.join(build_path, "rel")
 
     case File.lstat(rel_root) do
       {:ok, %File.Stat{type: :directory}} ->

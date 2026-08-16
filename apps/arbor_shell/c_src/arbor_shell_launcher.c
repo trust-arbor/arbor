@@ -69,7 +69,9 @@ extern char **environ;
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
 /* Residual risk: file-read*, mach-lookup, process-info*, sysctl-read, signal,
  * and posix shm/sem are intentionally broad so Mix/ERTS can start. Writes are
- * only the eight -D private roots; SOURCE writes and network* are denied. */
+ * only the eight -D private roots. SOURCE writes stay denied. Only localhost
+ * bind+inbound are added for Mix 1.19; outbound including loopback outbound
+ * stays denied by network*. */
 #define DARWIN_TRUSTED_BUILD_PROFILE \
   "(version 1)\n" \
   "(deny default)\n" \
@@ -93,6 +95,8 @@ extern char **environ;
   "(allow file-write* (subpath (param \"CACHE\")))\n" \
   "(allow file-write* (subpath (param \"RELEASE\")))\n" \
   "(deny file-write* (subpath (param \"SOURCE\")))\n" \
+  "(allow network-bind (local ip \"localhost:*\"))\n" \
+  "(allow network-inbound (local ip \"localhost:*\"))\n" \
   "(deny network*)"
 #endif
 
@@ -524,16 +528,22 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   char path_value[8192];
   char crash[4096];
 
-  if (snprintf(erlang_bin, sizeof(erlang_bin), "%s/bin", paths->erlang_root) <= 0) _exit(126);
-  if (snprintf(elixir_bin, sizeof(elixir_bin), "%s/bin", paths->elixir_root) <= 0) _exit(126);
+  int erlang_n = snprintf(erlang_bin, sizeof(erlang_bin), "%s/bin", paths->erlang_root);
+  if (erlang_n <= 0 || (size_t)erlang_n >= sizeof(erlang_bin)) _exit(126);
+  int elixir_n = snprintf(elixir_bin, sizeof(elixir_bin), "%s/bin", paths->elixir_root);
+  if (elixir_n <= 0 || (size_t)elixir_n >= sizeof(elixir_bin)) _exit(126);
   /* Suffix locked to Plan.closed_env/2 Darwin policy. Not taken from environ. */
-  if (snprintf(path_value, sizeof(path_value), "%s:%s:/usr/bin:/bin", erlang_bin, elixir_bin) <= 0)
-    _exit(126);
-  if (snprintf(crash, sizeof(crash), "%s/erl_crash.dump", paths->tmp) <= 0) _exit(126);
+  int path_n =
+      snprintf(path_value, sizeof(path_value), "%s:%s:/usr/bin:/bin", erlang_bin, elixir_bin);
+  if (path_n <= 0 || (size_t)path_n >= sizeof(path_value)) _exit(126);
+  int crash_n = snprintf(crash, sizeof(crash), "%s/erl_crash.dump", paths->tmp);
+  if (crash_n <= 0 || (size_t)crash_n >= sizeof(crash)) _exit(126);
 
   trusted_build_clear_environ();
   if (setenv("MIX_ENV", "prod", 1) != 0) _exit(126);
   if (setenv("HEX_OFFLINE", "1", 1) != 0) _exit(126);
+  /* Lease-private build/deps roots make Mix 1.19's outbound coordination lock unnecessary. */
+  if (setenv("MIX_OS_CONCURRENCY_LOCK", "0", 1) != 0) _exit(126);
   if (setenv("ARBOR_MIX_CONTAINED", "1", 1) != 0) _exit(126);
   if (setenv("ARBOR_ERLANG_ROOT", paths->erlang_root, 1) != 0) _exit(126);
   if (setenv("ARBOR_ELIXIR_ROOT", paths->elixir_root, 1) != 0) _exit(126);

@@ -20,9 +20,10 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
 
   @writable_names ~w(home tmp build deps hex mix cache release)
   @env_keys ~w(
-    MIX_ENV HEX_OFFLINE ARBOR_MIX_CONTAINED ARBOR_ERLANG_ROOT ARBOR_ELIXIR_ROOT
-    HOME TMPDIR TMP HEX_HOME MIX_HOME MIX_ARCHIVES MIX_DEPS_PATH MIX_BUILD_PATH
-    ELIXIR_MAKE_CACHE_DIR ERL_CRASH_DUMP PATH LANG LC_ALL
+    MIX_ENV HEX_OFFLINE MIX_OS_CONCURRENCY_LOCK ARBOR_MIX_CONTAINED
+    ARBOR_ERLANG_ROOT ARBOR_ELIXIR_ROOT HOME TMPDIR TMP HEX_HOME MIX_HOME
+    MIX_ARCHIVES MIX_DEPS_PATH MIX_BUILD_PATH ELIXIR_MAKE_CACHE_DIR
+    ERL_CRASH_DUMP PATH LANG LC_ALL
   )
   # Locked to trusted_build_replace_environ() Darwin PATH suffix.
   @darwin_utility_path "/usr/bin:/bin"
@@ -83,6 +84,8 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
     %{
       "MIX_ENV" => "prod",
       "HEX_OFFLINE" => "1",
+      # Lease-private build/deps roots make Mix 1.19's outbound coordination lock unnecessary.
+      "MIX_OS_CONCURRENCY_LOCK" => "0",
       "ARBOR_MIX_CONTAINED" => "1",
       "ARBOR_ERLANG_ROOT" => erlang,
       "ARBOR_ELIXIR_ROOT" => elixir,

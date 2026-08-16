@@ -4,6 +4,7 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuild.Identity
   alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.TrustedBuild.Request
 
@@ -86,11 +87,26 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
   end
 
   test "rejects invented identities that were never registered" do
+    path =
+      Path.join(System.tmp_dir!(), "arbor-e0b2c-unreg-#{System.unique_integer([:positive])}")
+
+    File.mkdir!(path)
+    File.chmod!(path, 0o700)
+    on_exit(fn -> File.rm_rf(path) end)
+
+    assert {:ok, pinned} = Identity.pin_directory(path)
+
     request = %{
       "schema" => "arbor.shell.trusted_build.request.v1",
       "source" => %{
         "schema" => "arbor.shell.trusted_build.source.v1",
-        "identity" => valid_identity()
+        "identity" => %{
+          "path" => pinned.path,
+          "type" => "directory",
+          "device" => pinned.device,
+          "minor_device" => pinned.minor_device,
+          "inode" => pinned.inode
+        }
       }
     }
 
@@ -132,7 +148,7 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
 
   test "closed env PATH is the fixed Darwin utility suffix and ignores caller input" do
     roots = %{
-      home: %{path: "/tmp/h", "PATH" => "/evil/bin"},
+      home: %{:path => "/tmp/h", "PATH" => "/evil/bin"},
       tmp: %{path: "/tmp/t"},
       hex: %{path: "/tmp/x"},
       mix: %{path: "/tmp/m"},
@@ -143,7 +159,7 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
     }
 
     binding = %{
-      erlang_root: %{path: "/pinned/erlang", "PATH" => "/evil/bin"},
+      erlang_root: %{:path => "/pinned/erlang", "PATH" => "/evil/bin"},
       elixir_root: %{path: "/pinned/elixir"}
     }
 
@@ -157,9 +173,43 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
       end
 
     assert env["PATH"] == expected_path
+    assert env["MIX_OS_CONCURRENCY_LOCK"] == "0"
     assert Enum.sort(Map.keys(env)) == Enum.sort(Plan.env_keys())
     refute env["PATH"] == System.get_env("PATH")
     refute String.contains?(env["PATH"], "/evil/bin")
+    refute Map.has_key?(env, "USER")
+    refute Map.has_key?(env, "SHELL")
+  end
+
+  test "closed env MIX_OS_CONCURRENCY_LOCK is exactly 0 and caller keys cannot override" do
+    roots = %{
+      home: %{
+        :path => "/tmp/h",
+        "PATH" => "/evil/bin",
+        "MIX_OS_CONCURRENCY_LOCK" => "1"
+      },
+      tmp: %{path: "/tmp/t"},
+      hex: %{path: "/tmp/x"},
+      mix: %{path: "/tmp/m"},
+      archives: %{path: "/tmp/a"},
+      deps: %{path: "/tmp/d"},
+      build: %{path: "/tmp/b"},
+      cache: %{path: "/tmp/c"}
+    }
+
+    binding = %{
+      erlang_root: %{
+        :path => "/pinned/erlang",
+        "PATH" => "/evil/bin",
+        "MIX_OS_CONCURRENCY_LOCK" => "1"
+      },
+      elixir_root: %{path: "/pinned/elixir"}
+    }
+
+    env = Plan.closed_env(roots, binding)
+    assert env["MIX_OS_CONCURRENCY_LOCK"] == "0"
+    refute env["MIX_OS_CONCURRENCY_LOCK"] == "1"
+    assert Enum.sort(Map.keys(env)) == Enum.sort(Plan.env_keys())
   end
 
   defp valid_identity do
