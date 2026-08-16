@@ -4,6 +4,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineFilesystem do
   alias Arbor.Common.SafePath
 
   @chunk_size 65_536
+  # RegularTreeInventory prefix_hex is min(size, @prefix_bytes) leading bytes.
+  # Do not shrink this for ELF-only needs; Linux only reads the first 20.
+  @prefix_bytes 256
 
   @doc false
   @spec read_regular_file(String.t(), pos_integer()) ::
@@ -253,10 +256,10 @@ defmodule Arbor.Shell.LinuxDependencyBaselineFilesystem do
     end
   end
 
-  defp prefix(prefix, _chunk) when byte_size(prefix) >= 256, do: prefix
+  defp prefix(prefix, _chunk) when byte_size(prefix) >= @prefix_bytes, do: prefix
 
   defp prefix(prefix, chunk) do
-    wanted = min(256 - byte_size(prefix), byte_size(chunk))
+    wanted = min(@prefix_bytes - byte_size(prefix), byte_size(chunk))
     prefix <> binary_part(chunk, 0, wanted)
   end
 

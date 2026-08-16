@@ -53,6 +53,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
     end
   end
 
+  # Collapse walker control errors to the pre-refactor public atom so Linux
+  # callers still see :source_list_failed, not :scan_timeout / listing failures.
   defp scan_source(source_root) do
     case RegularTreeInventory.scan_resolved(source_root) do
       {:ok, facts} ->

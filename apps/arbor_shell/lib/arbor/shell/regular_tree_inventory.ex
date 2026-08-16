@@ -299,7 +299,7 @@ defmodule Arbor.Shell.RegularTreeInventory do
         admit_listed_name(listing, remaining, acc, count, state, name)
 
       {token, :done} when token == listing.token ->
-        release_listing(listing)
+        stop_listing(listing)
         {:ok, Enum.sort(acc)}
 
       {:DOWN, ref, :process, pid, reason}
@@ -437,7 +437,7 @@ defmodule Arbor.Shell.RegularTreeInventory do
 
   defp hash_and_record(abs_path, rel_path, before, inode, state) do
     with :ok <- check_deadline(state.deadline_ms),
-         {:ok, hashed} <- hash_regular(abs_path, before.size),
+         {:ok, hashed} <- hash_regular(abs_path, before.size, state.deadline_ms),
          :ok <- check_deadline(state.deadline_ms),
          :ok <- unchanged(abs_path, before, :regular),
          :ok <- check_deadline(state.deadline_ms) do
@@ -445,19 +445,77 @@ defmodule Arbor.Shell.RegularTreeInventory do
     end
   end
 
-  defp hash_regular(path, expected_size) do
-    case Filesystem.hash_regular_file(path, @max_total_bytes) do
-      {:ok, %{sha256: digest, prefix: prefix, size: ^expected_size}}
-      when is_binary(digest) and is_binary(prefix) ->
-        {:ok, %{sha256: digest, prefix: prefix}}
-
-      {:ok, _other} ->
-        {:error, :source_changed}
-
-      {:error, reason} ->
-        {:error, reason}
+  defp hash_regular(path, expected_size, deadline_ms) do
+    case remaining_ms(deadline_ms) do
+      left when left > 0 -> hash_regular_bounded(path, expected_size, left)
+      _expired -> {:error, :scan_timeout}
     end
   end
+
+  defp hash_regular_bounded(path, expected_size, left) do
+    parent = self()
+    token = make_ref()
+    hook = Process.get({Filesystem, :before_open_hook})
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn -> hash_worker(parent, token, path, hook) end)
+
+    await_hash_result(pid, monitor_ref, token, expected_size, left)
+  end
+
+  defp hash_worker(parent, token, path, hook) do
+    if is_function(hook, 1) do
+      Process.put({Filesystem, :before_open_hook}, hook)
+    end
+
+    send(parent, {token, Filesystem.hash_regular_file(path, @max_total_bytes)})
+  end
+
+  defp await_hash_result(pid, monitor_ref, token, expected_size, left) do
+    receive do
+      {^token, result} ->
+        reap_hash_worker(pid, monitor_ref, token)
+        decode_hash_result(result, expected_size)
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        flush_listing(token)
+        {:error, :source_read_failed}
+    after
+      left ->
+        stop_hash_worker(pid, monitor_ref, token)
+        {:error, :scan_timeout}
+    end
+  end
+
+  defp stop_hash_worker(pid, monitor_ref, token) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+    reap_hash_worker(pid, monitor_ref, token)
+  end
+
+  defp reap_hash_worker(pid, monitor_ref, token) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      @cleanup_wait_ms ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        Process.demonitor(monitor_ref, [:flush])
+    end
+
+    flush_listing(token)
+    :ok
+  end
+
+  defp decode_hash_result(
+         {:ok, %{sha256: digest, prefix: prefix, size: expected_size}},
+         expected_size
+       )
+       when is_binary(digest) and is_binary(prefix) do
+    {:ok, %{sha256: digest, prefix: prefix}}
+  end
+
+  defp decode_hash_result({:ok, _other}, _expected_size), do: {:error, :source_changed}
+  defp decode_hash_result({:error, reason}, _expected_size), do: {:error, reason}
+  defp decode_hash_result(_other, _expected_size), do: {:error, :source_read_failed}
 
   defp record_regular(rel_path, before, hashed, inode, state) do
     entry = %{
