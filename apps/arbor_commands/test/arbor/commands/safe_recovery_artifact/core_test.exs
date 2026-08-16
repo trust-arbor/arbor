@@ -14,6 +14,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
 
       assert manifest["schema"] == "arbor.packaging.safe_recovery_artifact.payload.v1"
       assert manifest["version"] == 1
+
       assert Map.keys(manifest) |> Enum.sort() ==
                [
                  "applications",
@@ -103,6 +104,40 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
   end
 
   describe "project/1 closed candidate" do
+    test "rejects locked profile, toolchain, release, and git mismatches" do
+      candidate = Fixture.candidate()
+
+      bad_profile = %{candidate["profile"] | "digest" => String.duplicate("0", 64)}
+
+      assert {:error, {:invalid_field, "digest", :digest_mismatch}} =
+               Core.project(%{candidate | "profile" => bad_profile})
+
+      bad_toolchain = %{candidate["toolchain"] | "target" => "x86_64-apple-darwin"}
+
+      assert {:error, {:invalid_field, "toolchain", :profile_mismatch}} =
+               Core.project(%{candidate | "toolchain" => bad_toolchain})
+
+      bad_release = %{candidate["release"] | "name" => "other"}
+
+      assert {:error, {:invalid_field, "release", :release_mismatch}} =
+               Core.project(%{candidate | "release" => bad_release})
+
+      bad_git = %{candidate["source"] | "object_format" => "md5"}
+
+      assert {:error, {:invalid_field, "object_format", :invalid_object_format}} =
+               Core.project(%{candidate | "source" => bad_git})
+
+      inventory = %{
+        candidate["source"]["platform_inventory"]
+        | "review_digest" => String.duplicate("1", 64)
+      }
+
+      bad_e0a = %{candidate["source"] | "platform_inventory" => inventory}
+
+      assert {:error, {:invalid_field, "platform_inventory", :digest_mismatch}} =
+               Core.project(%{candidate | "source" => bad_e0a})
+    end
+
     test "rejects atom keys, mixed keys, structs, and extra fields" do
       candidate = Fixture.candidate()
 
@@ -131,9 +166,16 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
       assert {:error, :extra_content} = Core.project(Fixture.candidate(snapshot: extra))
 
       [first | rest] = snapshot["term_contents"]
-      tampered = [%{first | "bytes" => first["bytes"] <> " "} | rest]
+      bytes = first["bytes"]
+      last = binary_part(bytes, byte_size(bytes) - 1, 1)
+      flip = if last == ".", do: "!", else: "."
+      tampered_bytes = binary_part(bytes, 0, byte_size(bytes) - 1) <> flip
+      tampered = [%{first | "bytes" => tampered_bytes} | rest]
+
       assert {:error, :content_digest_mismatch} =
-               Core.project(Fixture.candidate(snapshot: %{snapshot | "term_contents" => tampered}))
+               Core.project(
+                 Fixture.candidate(snapshot: %{snapshot | "term_contents" => tampered})
+               )
     end
 
     test "rejects missing selected app, extra spec, and missing required dep" do
@@ -214,7 +256,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
     test "rejects a required dependency missing from the release" do
       snapshot = Fixture.golden_snapshot()
       body = Fixture.app_body("arbor_trust") |> String.replace("[kernel]", "[kernel,stdlib]")
-      snapshot = Fixture.replace_file(snapshot, "lib/arbor_trust-0.1.0/ebin/arbor_trust.app", body, 0o644)
+
+      snapshot =
+        Fixture.replace_file(snapshot, "lib/arbor_trust-0.1.0/ebin/arbor_trust.app", body, 0o644)
+
       assert {:error, :missing_dependency} = Core.project(Fixture.candidate(snapshot: snapshot))
     end
   end
@@ -236,13 +281,22 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
       snapshot = Fixture.golden_snapshot()
       inventory = snapshot["inventory"]
       current = inventory["counts"]["entries"]
-      extras = Enum.map(1..(50_001 - current), fn i -> Fixture.regular_file("z#{i}", "x", 0o644) end)
+
+      extras =
+        Enum.map(1..(50_001 - current), fn i -> Fixture.regular_file("z#{i}", "x", 0o644) end)
+
       files = inventory["regular_files"] ++ extras
       huge = %{snapshot | "inventory" => Fixture.inventory(inventory["directories"], files)}
       assert {:error, :unbounded} = Core.project(Fixture.candidate(snapshot: huge))
 
       [file | rest] = snapshot["inventory"]["regular_files"]
-      oversized = %{file | "size" => 512 * 1024 * 1024 + 1, "prefix_hex" => String.duplicate("aa", 256)}
+
+      oversized = %{
+        file
+        | "size" => 512 * 1024 * 1024 + 1,
+          "prefix_hex" => String.duplicate("aa", 256)
+      }
+
       counts = %{snapshot["inventory"]["counts"] | "total_regular_bytes" => oversized["size"]}
 
       inv = %{

@@ -74,8 +74,25 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
 
   defp new_state, do: %{nodes: 0, depth: 0}
 
-  defp admit_body(bytes) when byte_size(bytes) > @max_body, do: {:error, :unbounded}
-  defp admit_body(_bytes), do: :ok
+  defp admit_body(bytes) do
+    cond do
+      byte_size(bytes) > @max_body -> {:error, :unbounded}
+      not String.valid?(bytes) -> {:error, :invalid_utf8}
+      illegal_control?(bytes) -> {:error, :control_character}
+      true -> :ok
+    end
+  end
+
+  defp illegal_control?(bytes) do
+    bytes
+    |> String.to_charlist()
+    |> Enum.any?(&forbidden_control?/1)
+  end
+
+  defp forbidden_control?(c) when c in [?\s, ?\t, ?\n, ?\r, ?\f], do: false
+  defp forbidden_control?(c) when c <= 0x1F or c == 0x7F, do: true
+  defp forbidden_control?(c) when c >= 0x80 and c <= 0x9F, do: true
+  defp forbidden_control?(_), do: false
 
   defp parse_and_finish(bytes) do
     case parse_value(skip(bytes), new_state()) do
@@ -115,6 +132,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
   defp do_parse_value(<<?", rest::binary>>, state), do: parse_quoted(rest, state, :string)
   defp do_parse_value(<<?', rest::binary>>, state), do: parse_quoted(rest, state, :atom)
   defp do_parse_value(<<?-, rest::binary>>, state), do: parse_integer(rest, state, true)
+
   defp do_parse_value(<<c, _::binary>> = bytes, state) when c >= ?0 and c <= ?9 do
     parse_integer(bytes, state, false)
   end
@@ -141,115 +159,115 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
 
   defp parse_tuple(bytes, state) do
     with {:ok, state} <- enter(state),
-         {:ok, items, rest, state} <- parse_comma_seq(skip(bytes), state, :tuple, []) do
+         {:ok, items, rest, state} <- parse_comma_seq(skip(bytes), state, :tuple, 0, []) do
       {:ok, {:tuple, items}, rest, leave(state)}
     end
   end
 
   defp parse_list(bytes, state) do
     with {:ok, state} <- enter(state),
-         {:ok, items, rest, state} <- parse_comma_seq(skip(bytes), state, :list, []) do
+         {:ok, items, rest, state} <- parse_comma_seq(skip(bytes), state, :list, 0, []) do
       {:ok, items, rest, leave(state)}
     end
   end
 
-  defp parse_comma_seq(<<?}, rest::binary>>, state, :tuple, acc) do
-    finish_seq(rest, state, :tuple, acc)
+  defp parse_comma_seq(<<?}, rest::binary>>, state, :tuple, _count, acc) do
+    {:ok, Enum.reverse(acc), rest, state}
   end
 
-  defp parse_comma_seq(<<?], rest::binary>>, state, :list, acc) do
-    finish_seq(rest, state, :list, acc)
+  defp parse_comma_seq(<<?], rest::binary>>, state, :list, _count, acc) do
+    {:ok, Enum.reverse(acc), rest, state}
   end
 
-  defp parse_comma_seq(<<?|, _::binary>>, _state, :list, _acc), do: {:error, :improper_list}
+  defp parse_comma_seq(<<?|, _::binary>>, _state, :list, _count, _acc),
+    do: {:error, :improper_list}
 
-  defp parse_comma_seq(bytes, state, kind, acc) do
+  defp parse_comma_seq(bytes, state, kind, count, acc) do
     max = if kind == :tuple, do: @max_tuple, else: @max_list
 
-    cond do
-      length(acc) >= max ->
-        {:error, :unbounded}
-
-      true ->
-        parse_seq_item(bytes, state, kind, acc)
+    if count >= max do
+      {:error, :unbounded}
+    else
+      parse_seq_item(bytes, state, kind, count, acc)
     end
   end
 
-  defp finish_seq(rest, state, :tuple, acc) when length(acc) > @max_tuple do
-    _ = {rest, state}
-    {:error, :unbounded}
-  end
-
-  defp finish_seq(rest, state, _kind, acc), do: {:ok, Enum.reverse(acc), rest, state}
-
-  defp parse_seq_item(bytes, state, kind, acc) do
+  defp parse_seq_item(bytes, state, kind, count, acc) do
     case parse_value(skip(bytes), state) do
-      {:ok, value, rest, state} -> continue_seq(skip(rest), state, kind, [value | acc])
-      error -> error
+      {:ok, value, rest, state} ->
+        continue_seq(skip(rest), state, kind, count + 1, [value | acc])
+
+      error ->
+        error
     end
   end
 
-  defp continue_seq(<<?,, rest::binary>>, state, kind, acc) do
-    parse_comma_seq(skip(rest), state, kind, acc)
+  defp continue_seq(<<?,, rest::binary>>, state, kind, count, acc) do
+    parse_comma_seq(skip(rest), state, kind, count, acc)
   end
 
-  defp continue_seq(<<?}, rest::binary>>, state, :tuple, acc) do
-    finish_seq(rest, state, :tuple, acc)
+  defp continue_seq(<<?}, rest::binary>>, state, :tuple, _count, acc) do
+    {:ok, Enum.reverse(acc), rest, state}
   end
 
-  defp continue_seq(<<?], rest::binary>>, state, :list, acc) do
-    finish_seq(rest, state, :list, acc)
+  defp continue_seq(<<?], rest::binary>>, state, :list, _count, acc) do
+    {:ok, Enum.reverse(acc), rest, state}
   end
 
-  defp continue_seq(<<?|, _::binary>>, _state, :list, _acc), do: {:error, :improper_list}
-  defp continue_seq(_bytes, _state, _kind, _acc), do: {:error, :malformed_term}
+  defp continue_seq(<<?|, _::binary>>, _state, :list, _count, _acc), do: {:error, :improper_list}
+  defp continue_seq(_bytes, _state, _kind, _count, _acc), do: {:error, :malformed_term}
 
   defp parse_binary(bytes, state) do
     case enter(state) do
-      {:ok, state} -> read_binary_body(skip(bytes), state, [])
+      {:ok, state} -> read_binary_body(skip(bytes), state, 0, [])
       error -> error
     end
   end
 
-  defp read_binary_body(<<">>", rest::binary>>, state, acc) do
+  defp read_binary_body(<<">>", rest::binary>>, state, _count, acc) do
     finalize_binary(Enum.reverse(acc), rest, leave(state))
   end
 
-  defp read_binary_body(<<?", rest::binary>>, state, acc) do
-    case read_quoted(rest, :string) do
-      {:ok, string, rest} -> continue_binary(skip(rest), state, [{:str, string} | acc])
-      error -> error
+  defp read_binary_body(bytes, state, count, acc) when count >= @max_list do
+    _ = {bytes, state, acc}
+    {:error, :unbounded}
+  end
+
+  defp read_binary_body(<<?", rest::binary>>, state, count, acc) do
+    with {:ok, state} <- bump_node(state),
+         {:ok, string, rest} <- read_quoted(rest, :string) do
+      continue_binary(skip(rest), state, count + 1, [{:str, string} | acc])
     end
   end
 
-  defp read_binary_body(<<c, _::binary>> = bytes, state, acc)
+  defp read_binary_body(<<c, _::binary>> = bytes, state, count, acc)
        when (c >= ?0 and c <= ?9) or c == ?- do
-    case parse_integer_allow(bytes, state) do
-      {:ok, int, rest, state} -> admit_binary_byte(int, skip(rest), state, acc)
-      error -> error
+    with {:ok, state} <- bump_node(state),
+         {:ok, int, rest, state} <- parse_integer_allow(bytes, state) do
+      admit_binary_byte(int, skip(rest), state, count, acc)
     end
   end
 
-  defp read_binary_body(_bytes, _state, _acc), do: {:error, :unsupported_syntax}
+  defp read_binary_body(_bytes, _state, _count, _acc), do: {:error, :unsupported_syntax}
 
   defp parse_integer_allow(<<?-, rest::binary>>, state), do: parse_integer(rest, state, true)
   defp parse_integer_allow(bytes, state), do: parse_integer(bytes, state, false)
 
-  defp admit_binary_byte(int, rest, state, acc) when int >= 0 and int <= 255 do
-    continue_binary(rest, state, [{:byte, int} | acc])
+  defp admit_binary_byte(int, rest, state, count, acc) when int >= 0 and int <= 255 do
+    continue_binary(rest, state, count, [{:byte, int} | acc])
   end
 
-  defp admit_binary_byte(_int, _rest, _state, _acc), do: {:error, :malformed_term}
+  defp admit_binary_byte(_int, _rest, _state, _count, _acc), do: {:error, :malformed_term}
 
-  defp continue_binary(<<">>", rest::binary>>, state, acc) do
+  defp continue_binary(<<">>", rest::binary>>, state, _count, acc) do
     finalize_binary(Enum.reverse(acc), rest, leave(state))
   end
 
-  defp continue_binary(<<?,, rest::binary>>, state, acc) do
-    read_binary_body(skip(rest), state, acc)
+  defp continue_binary(<<?,, rest::binary>>, state, count, acc) do
+    read_binary_body(skip(rest), state, count, acc)
   end
 
-  defp continue_binary(_bytes, _state, _acc), do: {:error, :malformed_term}
+  defp continue_binary(_bytes, _state, _count, _acc), do: {:error, :malformed_term}
 
   defp finalize_binary(parts, rest, state) do
     case binary_parts_to_iodata(parts, :empty, []) do
@@ -328,7 +346,13 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
 
   defp take_escape(<<a, b, c, rest::binary>>)
        when a >= ?0 and a <= ?7 and b >= ?0 and b <= ?7 and c >= ?0 and c <= ?7 do
-    {:ok, (a - ?0) * 64 + (b - ?0) * 8 + (c - ?0), rest}
+    value = (a - ?0) * 64 + (b - ?0) * 8 + (c - ?0)
+
+    if value <= 255 do
+      {:ok, value, rest}
+    else
+      {:error, :unsupported_syntax}
+    end
   end
 
   defp take_escape(_rest), do: {:error, :unsupported_syntax}

@@ -198,66 +198,87 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
 
   @type validation_error :: {:error, term()}
 
+  @doc "Closed payload schema identifier."
   @spec schema() :: String.t()
   def schema, do: @schema
 
+  @doc "Closed payload version."
   @spec version() :: pos_integer()
   def version, do: @version
 
+  @doc "Reviewed OTP/Elixir runtime names, including the forbidden subset."
   @spec runtime_application_names() :: MapSet.t(String.t())
   def runtime_application_names, do: @runtime_applications
 
+  @doc "Forbidden-runtime subset; still class runtime and always a finding."
   @spec forbidden_runtime_application_names() :: MapSet.t(String.t())
   def forbidden_runtime_application_names, do: @forbidden_runtime
 
+  @doc "The four E0B1 selected first-party application names."
   @spec selected_first_party_names() :: MapSet.t(String.t())
   def selected_first_party_names, do: @selected_first_party
 
+  @doc "Domain tag for build_inputs_digest, including trailing NUL."
   @spec build_inputs_domain() :: binary()
   def build_inputs_domain, do: @build_inputs_domain
 
+  @doc "Domain tag for applications_digest, including trailing NUL."
   @spec applications_domain() :: binary()
   def applications_domain, do: @applications_domain
 
+  @doc "Domain tag for payload_tree_digest, including trailing NUL."
   @spec payload_tree_domain() :: binary()
   def payload_tree_domain, do: @payload_tree_domain
 
+  @doc "Domain tag for the external manifest_digest, including trailing NUL."
   @spec manifest_domain() :: binary()
   def manifest_domain, do: @manifest_domain
 
+  @doc false
   @spec profile_digest_value() :: String.t()
   def profile_digest_value, do: @profile_digest
 
+  @doc false
   @spec selected_file_count() :: pos_integer()
   def selected_file_count, do: @selected_file_count
 
+  @doc false
   @spec e0a_index_digest() :: String.t()
   def e0a_index_digest, do: @selected_index_digest
 
+  @doc false
   @spec e0a_entries_digest() :: String.t()
   def e0a_entries_digest, do: @entries_digest
 
+  @doc false
   @spec e0a_review_digest() :: String.t()
   def e0a_review_digest, do: @review_digest
 
+  @doc false
   @spec platform_inventory_schema() :: String.t()
   def platform_inventory_schema, do: @platform_inventory_schema
 
+  @doc false
   @spec profile_schema() :: String.t()
   def profile_schema, do: @profile_schema
 
+  @doc false
   @spec profile_name() :: String.t()
   def profile_name, do: @profile_name
 
+  @doc false
   @spec release_name() :: String.t()
   def release_name, do: @release_name
 
+  @doc false
   @spec release_version() :: String.t()
   def release_version, do: @release_version
 
+  @doc false
   @spec logical_root() :: String.t()
   def logical_root, do: @logical_root
 
+  @doc false
   @spec toolchain_constants() :: map()
   def toolchain_constants do
     %{
@@ -419,34 +440,43 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
     repro = Map.fetch!(manifest, "reproducibility")
 
     with :ok <- require_classes(apps),
+         :ok <- Derive.applications_consistent?(apps, entries),
          :ok <- require_findings(apps, entries, findings),
          {:ok, facts} <- Derive.release_facts(apps, entries),
          :ok <- require_release_facts(release, facts),
          {:ok, inputs_digest} <- build_inputs_digest(Map.fetch!(source, "build_inputs")),
          :ok <- require_equal(source["build_inputs_digest"], inputs_digest) do
-      Derive.reproducibility_consistent?(repro, facts["payload_tree_digest"])
+      Derive.reproducibility_consistent?(repro, facts)
     end
   end
 
   defp require_classes(apps) do
     Enum.reduce_while(apps, :ok, fn app, :ok ->
-      expected = Derive.application_class(app["name"])
+      observed = app["class"]
 
-      if app["class"] == expected do
-        {:cont, :ok}
-      else
-        {:halt, {:error, {:invalid_field, "class", :derived_mismatch}}}
+      case Derive.application_class(app["name"]) do
+        {:error, reason} ->
+          {:halt, {:error, {:invalid_field, "class", reason}}}
+
+        expected when observed == expected ->
+          {:cont, :ok}
+
+        _other ->
+          {:halt, {:error, {:invalid_field, "class", :derived_mismatch}}}
       end
     end)
   end
 
   defp require_findings(apps, entries, findings) do
-    expected = Derive.findings(apps, entries)
+    case Derive.findings(apps, entries) do
+      {:error, reason} ->
+        {:error, {:invalid_field, "findings", reason}}
 
-    if findings == expected do
-      :ok
-    else
-      {:error, {:invalid_field, "findings", :derived_mismatch}}
+      expected when findings == expected ->
+        :ok
+
+      _other ->
+        {:error, {:invalid_field, "findings", :derived_mismatch}}
     end
   end
 
@@ -473,7 +503,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
   end
 
   defp require_equal(value, value), do: :ok
-  defp require_equal(_, _), do: {:error, {:invalid_field, "build_inputs_digest", :derived_mismatch}}
+
+  defp require_equal(_, _),
+    do: {:error, {:invalid_field, "build_inputs_digest", :derived_mismatch}}
 
   defp validate_profile(profile) do
     with :ok <- validate_closed_map(profile, @profile_keys),
@@ -500,10 +532,17 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
     tree = Map.fetch!(source, "tree")
 
     case format do
-      "sha1" -> admit_oids(commit, tree, @oid_sha1_re)
-      "sha256" -> admit_oids(commit, tree, @oid_sha256_re)
-      value when is_binary(value) -> {:error, {:invalid_field, "object_format", :invalid_object_format}}
-      _ -> {:error, {:invalid_field, "object_format", :not_a_string}}
+      "sha1" ->
+        admit_oids(commit, tree, @oid_sha1_re)
+
+      "sha256" ->
+        admit_oids(commit, tree, @oid_sha256_re)
+
+      value when is_binary(value) ->
+        {:error, {:invalid_field, "object_format", :invalid_object_format}}
+
+      _ ->
+        {:error, {:invalid_field, "object_format", :not_a_string}}
     end
   end
 
@@ -536,7 +575,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
          :ok <-
            exact_int(inventory, "selected_file_count", @selected_file_count, :count_mismatch),
          :ok <-
-           exact_string(inventory, "selected_index_digest", @selected_index_digest, :digest_mismatch),
+           exact_string(
+             inventory,
+             "selected_index_digest",
+             @selected_index_digest,
+             :digest_mismatch
+           ),
          :ok <- exact_string(inventory, "entries_digest", @entries_digest, :digest_mismatch) do
       exact_string(inventory, "review_digest", @review_digest, :digest_mismatch)
     end
@@ -565,7 +609,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
          :ok <- exact_string(toolchain, "erts", constants["erts"], :profile_mismatch),
          :ok <- exact_string(toolchain, "elixir", constants["elixir"], :profile_mismatch),
          :ok <- exact_string(toolchain, "mix", constants["mix"], :profile_mismatch),
-         :ok <- exact_string(toolchain, "environment", constants["environment"], :profile_mismatch),
+         :ok <-
+           exact_string(toolchain, "environment", constants["environment"], :profile_mismatch),
          :ok <- valid_digest?(Map.fetch!(toolchain, "tool_versions_sha256")) do
       valid_digest?(Map.fetch!(toolchain, "mix_lock_sha256"))
     end
@@ -778,7 +823,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
   end
 
   defp classify_key_types(keys) do
-    if Enum.any?(keys, &is_atom/1), do: {:error, :non_string_keys}, else: {:error, :invalid_map_keys}
+    if Enum.any?(keys, &is_atom/1),
+      do: {:error, :non_string_keys},
+      else: {:error, :invalid_map_keys}
   end
 
   defp admit_string_keys(_map, keys, expected) do

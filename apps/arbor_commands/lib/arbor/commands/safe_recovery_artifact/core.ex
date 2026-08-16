@@ -205,7 +205,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
         toolchain["mix"] == constants["mix"] and
         toolchain["environment"] == constants["environment"]
 
-    if match?, do: {:ok, toolchain}, else: {:error, {:invalid_field, "toolchain", :profile_mismatch}}
+    if match?,
+      do: {:ok, toolchain},
+      else: {:error, {:invalid_field, "toolchain", :profile_mismatch}}
   end
 
   defp admit_release_id(release) do
@@ -321,7 +323,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
   defp mode_ok(_), do: {:error, :not_an_integer}
 
   defp bool_ok(value) when is_boolean(value), do: :ok
-  defp bool_ok(_), do: {:error, :not_a_string}
+  defp bool_ok(_), do: {:error, :not_a_boolean}
 
   defp size_ok(size) when is_integer(size) and size >= 0 and size <= @max_total_bytes, do: :ok
   defp size_ok(size) when is_integer(size) and size < 0, do: {:error, :negative}
@@ -347,7 +349,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
     if executable == expected do
       :ok
     else
-      {:error, :count_mismatch}
+      {:error, :executable_mode_mismatch}
     end
   end
 
@@ -421,7 +423,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
 
   defp term_paths(files) do
     files
-    |> Enum.filter(&(String.ends_with?(&1["path"], ".app") or String.ends_with?(&1["path"], ".rel")))
+    |> Enum.filter(
+      &(String.ends_with?(&1["path"], ".app") or String.ends_with?(&1["path"], ".rel"))
+    )
     |> Enum.map(& &1["path"])
     |> Enum.sort()
   end
@@ -719,30 +723,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
     end
   end
 
-  defp owner_for(path, identities) do
-    matches =
-      path
-      |> String.split("/")
-      |> adjacent_lib_identities(identities)
-
-    case Enum.uniq(matches) do
-      [] -> {:ok, nil}
-      [{name, _vsn}] -> {:ok, name}
-      _many -> {:error, :ownership_ambiguity}
-    end
-  end
-
-  defp adjacent_lib_identities(segments, identities) do
-    segments
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.flat_map(&match_lib_pair(&1, identities))
-  end
-
-  defp match_lib_pair(["lib", ident], identities) do
-    Enum.filter(identities, fn {name, vsn} -> ident == name <> "-" <> vsn end)
-  end
-
-  defp match_lib_pair(_, _), do: []
+  defp owner_for(path, identities), do: Derive.owner_application(path, identities)
 
   defp decode_prefix(""), do: {:ok, <<>>}
 
@@ -754,16 +735,19 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
   end
 
   defp assemble(profile, source, toolchain, release_id, first, second) do
-    {apps, entries} = first_payload(first)
-
-    {second_apps, second_entries} = projected_payload(second)
+    # Only the first snapshot is published on the manifest.
+    {apps, entries} = published_snapshot(first)
+    # The second snapshot is compared for reproducibility only.
+    {second_apps, second_entries} = compared_snapshot(second)
 
     with {:ok, inputs_digest} <- Encode.build_inputs_digest(source["build_inputs"]),
          {:ok, facts} <- Derive.release_facts(apps, entries),
          {:ok, first_digest} <- Encode.payload_tree_digest(entries),
          {:ok, second_digest} <- Encode.payload_tree_digest(second_entries) do
       findings = Derive.findings(apps, entries)
-      repro = reproducibility(apps, entries, second_apps, second_entries, first_digest, second_digest)
+
+      repro =
+        reproducibility(apps, entries, second_apps, second_entries, first_digest, second_digest)
 
       manifest = %{
         "schema" => Encode.schema(),
@@ -782,8 +766,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
     end
   end
 
-  defp first_payload(%{applications: apps, entries: entries}), do: {apps, entries}
-  defp projected_payload(projected), do: first_payload(projected)
+  defp published_snapshot(%{applications: apps, entries: entries}), do: {apps, entries}
+  defp compared_snapshot(projected), do: published_snapshot(projected)
 
   defp reproducibility(apps1, entries1, apps2, entries2, digest1, digest2) do
     same_apps = apps1 == apps2
@@ -816,5 +800,4 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
       error -> error
     end
   end
-
 end
