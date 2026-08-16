@@ -20,19 +20,13 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   @default_profile_rel "apps/arbor_commands/priv/packaging/safe_recovery_profile.v1.json"
   @max_profile_bytes 256 * 1024
+  @profile_io_timeout_ms 1_000
+  @profile_opened_event [:arbor, :commands, :safe_recovery_profile, :opened]
 
   @production_opt_keys MapSet.new([:mode, :json, :root])
   @test_opt_keys MapSet.union(@production_opt_keys, MapSet.new([:profile]))
 
   @default_opts %{mode: "report", json: false, root: nil, profile: nil}
-
-  @ordered_lists [
-    {"selected_applications", "name"},
-    {"mandatory_host_responsibilities", "id"},
-    {"forbidden_facilities", "id"},
-    {"expected_external_dependencies", "id"},
-    {"blockers", "id"}
-  ]
 
   @doc """
   Admit the fixed reviewed safe-recovery candidate from a trusted root.
@@ -71,6 +65,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   defp resolve_root(nil) do
     with {:ok, root} <- PackagingRoot.resolve(nil),
+         :ok <- reject_root_symlink(root),
          {:ok, real_root} <- SafePath.resolve_real(root) do
       {:ok, real_root}
     else
@@ -111,9 +106,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   defp load_fixed_profile(root) do
     with {:ok, path} <- resolve_profile_path(root),
-         {:ok, stat} <- stat_profile(path),
-         :ok <- require_regular(stat),
-         {:ok, bytes} <- read_profile_bytes(path),
+         {:ok, bytes} <- read_profile_bytes(path, root),
          {:ok, decoded} <- decode_profile(bytes) do
       admit_profile(decoded)
     end
@@ -146,32 +139,131 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
   defp require_unredirected(path, path), do: :ok
   defp require_unredirected(_lexical, _real), do: {:error, :profile_symlink_redirection}
 
-  defp stat_profile(path) do
-    case File.stat(path) do
-      {:ok, stat} -> {:ok, stat}
-      {:error, :enoent} -> {:error, :profile_missing}
-      {:error, reason} -> {:error, {:profile_stat, reason}}
+  defp read_profile_bytes(path, root) do
+    caller = self()
+    request_ref = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        send(caller, {request_ref, read_open_profile(path, root)})
+      end)
+
+    await_profile_reader(pid, monitor_ref, request_ref)
+  end
+
+  defp await_profile_reader(pid, monitor_ref, request_ref) do
+    receive do
+      {^request_ref, result} ->
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        {:error, :profile_read_failed}
+    after
+      @profile_io_timeout_ms ->
+        Process.exit(pid, :kill)
+        await_reader_shutdown(pid, monitor_ref, request_ref)
+        {:error, :profile_read_timeout}
     end
   end
 
-  defp require_regular(%File.Stat{type: :regular}), do: :ok
-  defp require_regular(%File.Stat{}), do: {:error, :profile_not_regular}
+  defp await_reader_shutdown(pid, monitor_ref, request_ref) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      @profile_io_timeout_ms -> Process.demonitor(monitor_ref, [:flush])
+    end
 
-  defp read_profile_bytes(path) do
+    receive do
+      {^request_ref, _late_result} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp read_open_profile(path, root) do
     case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
-          case :file.read(io, @max_profile_bytes + 1) do
-            {:ok, bytes} -> admit_read_bytes(bytes)
-            :eof -> {:ok, ""}
-            {:error, reason} -> {:error, {:profile_read, reason}}
+          with {:ok, opened_identity} <- descriptor_regular_identity(io),
+               :ok <- emit_profile_opened(path),
+               :ok <- verify_open_profile(path, root, opened_identity),
+               {:ok, bytes} <- read_descriptor(io),
+               {:ok, final_identity} <- descriptor_regular_identity(io),
+               true <- final_identity == opened_identity,
+               :ok <- verify_open_profile(path, root, final_identity) do
+            {:ok, bytes}
+          else
+            false -> {:error, :profile_changed_during_read}
+            {:error, _} = error -> error
           end
         after
           :file.close(io)
         end
 
+      {:error, :enoent} ->
+        {:error, :profile_missing}
+
+      {:error, :eisdir} ->
+        {:error, :profile_not_regular}
+
       {:error, reason} ->
         {:error, {:profile_read, reason}}
+    end
+  end
+
+  defp descriptor_regular_identity(io) do
+    case :file.read_file_info(io, time: :posix) do
+      {:ok, info} -> info |> File.Stat.from_record() |> regular_identity()
+      {:error, reason} -> {:error, {:profile_read, reason}}
+    end
+  end
+
+  defp path_regular_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, stat} -> regular_identity(stat)
+      {:error, :enoent} -> {:error, :profile_missing}
+      {:error, reason} -> {:error, {:profile_stat, reason}}
+    end
+  end
+
+  defp regular_identity(%File.Stat{type: :regular} = stat) do
+    {:ok,
+     %{
+       type: stat.type,
+       inode: stat.inode,
+       major_device: stat.major_device,
+       minor_device: stat.minor_device,
+       size: stat.size,
+       mtime: stat.mtime,
+       ctime: stat.ctime
+     }}
+  end
+
+  defp regular_identity(%File.Stat{}), do: {:error, :profile_not_regular}
+
+  defp verify_open_profile(path, root, expected_identity) do
+    with {:ok, real} <- resolve_profile_real(path),
+         :ok <- require_within(real, root),
+         :ok <- require_unredirected(path, real),
+         {:ok, current_identity} <- path_regular_identity(path),
+         true <- current_identity == expected_identity do
+      :ok
+    else
+      _other -> {:error, :profile_changed_during_read}
+    end
+  end
+
+  defp emit_profile_opened(path) do
+    :telemetry.execute(@profile_opened_event, %{count: 1}, %{path: path})
+    :ok
+  end
+
+  defp read_descriptor(io) do
+    case :file.read(io, @max_profile_bytes + 1) do
+      {:ok, bytes} -> admit_read_bytes(bytes)
+      :eof -> {:ok, ""}
+      {:error, reason} -> {:error, {:profile_read, reason}}
     end
   end
 
@@ -197,45 +289,27 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
   end
 
   defp require_canonical_order(decoded, projected) do
-    Enum.reduce_while(@ordered_lists, :ok, fn {field, id_key}, :ok ->
-      decoded_ids = identifier_sequence(fetch_list(decoded, field), id_key)
-      projected_ids = Enum.map(Map.fetch!(projected, field), & &1[id_key])
+    normalized = stringify_map_keys(decoded)
 
-      if decoded_ids == projected_ids do
-        {:cont, :ok}
-      else
-        {:halt, {:error, {:candidate_not_canonical, field}}}
-      end
-    end)
-  end
-
-  defp fetch_list(map, field) do
-    case Map.fetch(map, field) do
-      {:ok, list} -> list
-      :error -> Map.get(map, list_field_atom(field))
+    projected
+    |> Enum.filter(fn {_field, value} -> is_list(value) end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.find(fn {field, canonical} -> Map.get(normalized, field) != canonical end)
+    |> case do
+      nil -> :ok
+      {field, _canonical} -> {:error, {:candidate_not_canonical, field}}
     end
   end
 
-  defp list_field_atom("selected_applications"), do: :selected_applications
-  defp list_field_atom("mandatory_host_responsibilities"), do: :mandatory_host_responsibilities
-  defp list_field_atom("forbidden_facilities"), do: :forbidden_facilities
-  defp list_field_atom("expected_external_dependencies"), do: :expected_external_dependencies
-  defp list_field_atom("blockers"), do: :blockers
-
-  defp identifier_sequence(list, id_key) when is_list(list) do
-    Enum.map(list, fn
-      item when is_map(item) ->
-        Map.get(item, id_key) || Map.get(item, identifier_atom(id_key))
-
-      _ ->
-        :invalid
-    end)
+  defp stringify_map_keys(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {stringify_key(key), stringify_map_keys(value)} end)
   end
 
-  defp identifier_sequence(_, _), do: :invalid
+  defp stringify_map_keys(list) when is_list(list), do: Enum.map(list, &stringify_map_keys/1)
+  defp stringify_map_keys(value), do: value
 
-  defp identifier_atom("name"), do: :name
-  defp identifier_atom("id"), do: :id
+  defp stringify_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp stringify_key(key), do: key
 
   defp build_result(opts, profile, digest) do
     output = if opts.json, do: "json", else: "human"

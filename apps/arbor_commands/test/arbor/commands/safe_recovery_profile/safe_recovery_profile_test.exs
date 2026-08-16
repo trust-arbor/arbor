@@ -6,6 +6,7 @@ defmodule Arbor.Commands.SafeRecoveryProfileTest do
   alias Arbor.Common.SafePath
 
   @moduletag :fast
+  @profile_opened_event [:arbor, :commands, :safe_recovery_profile, :opened]
 
   setup do
     root = temp_umbrella_root!()
@@ -156,6 +157,66 @@ defmodule Arbor.Commands.SafeRecoveryProfileTest do
     :ok = File.ln_s(outside, path)
 
     assert {:error, :profile_path_escape} = SafeRecoveryProfile.run(root: root)
+  end
+
+  test "security regression: pathname replacement after open cannot redirect profile bytes", %{
+    root: root
+  } do
+    path = write_fixed_profile!(root, committed_bytes())
+    original = path <> ".opened"
+    outside = Path.join(Path.dirname(root), "outside-opened-profile.json")
+    File.write!(outside, committed_bytes())
+    test_pid = self()
+    handler_id = {__MODULE__, test_pid}
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+      File.rm_rf(outside)
+      File.rm_rf(original)
+    end)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @profile_opened_event,
+        fn _event, _measurements, %{path: opened_path}, _config ->
+          File.rename!(opened_path, original)
+          File.ln_s!(outside, opened_path)
+          send(test_pid, :profile_path_replaced)
+        end,
+        nil
+      )
+
+    assert {:error, :profile_changed_during_read} = SafeRecoveryProfile.run(root: root)
+    assert_receive :profile_path_replaced
+    :telemetry.detach(handler_id)
+
+    File.rm!(path)
+    File.rename!(original, path)
+  end
+
+  test "security regression: a stalled descriptor read is bounded", %{root: root} do
+    write_fixed_profile!(root, committed_bytes())
+    test_pid = self()
+    handler_id = {__MODULE__, test_pid}
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        @profile_opened_event,
+        fn _event, _measurements, _metadata, _config ->
+          send(test_pid, :profile_reader_stalled)
+          Process.sleep(5_000)
+        end,
+        nil
+      )
+
+    started_at = System.monotonic_time(:millisecond)
+    assert {:error, :profile_read_timeout} = SafeRecoveryProfile.run(root: root)
+    assert_receive :profile_reader_stalled
+    assert System.monotonic_time(:millisecond) - started_at < 2_500
   end
 
   test "directory and non-regular candidates are rejected", %{root: root} do

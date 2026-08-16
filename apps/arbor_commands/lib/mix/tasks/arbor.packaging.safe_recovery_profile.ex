@@ -150,11 +150,17 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryProfile do
   defp raw_option_occurrences(["--check" | rest], acc),
     do: raw_option_occurrences(rest, [{:check, true} | acc])
 
+  defp raw_option_occurrences(["--check=" <> value | rest], acc),
+    do: raw_boolean_occurrence(:check, value, rest, acc)
+
   defp raw_option_occurrences(["--no-check" | rest], acc),
     do: raw_option_occurrences(rest, [{:check, false} | acc])
 
   defp raw_option_occurrences(["--json" | rest], acc),
     do: raw_option_occurrences(rest, [{:json, true} | acc])
+
+  defp raw_option_occurrences(["--json=" <> value | rest], acc),
+    do: raw_boolean_occurrence(:json, value, rest, acc)
 
   defp raw_option_occurrences(["--no-json" | rest], acc),
     do: raw_option_occurrences(rest, [{:json, false} | acc])
@@ -166,6 +172,15 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryProfile do
     do: raw_option_occurrences(rest, [{:root, value} | acc])
 
   defp raw_option_occurrences([_other | rest], acc), do: raw_option_occurrences(rest, acc)
+
+  defp raw_boolean_occurrence(key, "true", rest, acc),
+    do: raw_option_occurrences(rest, [{key, true} | acc])
+
+  defp raw_boolean_occurrence(key, "false", rest, acc),
+    do: raw_option_occurrences(rest, [{key, false} | acc])
+
+  defp raw_boolean_occurrence(_key, _value, rest, acc),
+    do: raw_option_occurrences(rest, acc)
 
   defp reject_repeated_or_conflicting(occurrences) do
     occurrences

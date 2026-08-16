@@ -17,7 +17,11 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryProfileTest do
     {:ok, root: root}
   end
 
-  test "parser rejects unknown, positional, repeated, conflicting, and negative input" do
+  test "parser rejects unknown, positional, repeated, conflicting, and negative input", %{
+    root: root
+  } do
+    write_fixed_profile!(root, committed_bytes())
+
     assert {:error, {:arguments, :unknown_or_invalid_option}} = Task.execute(["--write"])
     assert {:error, {:arguments, :unknown_or_invalid_option}} = Task.execute(["--review", "x"])
     assert {:error, {:arguments, :unexpected_positional}} = Task.execute(["extra"])
@@ -31,6 +35,18 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryProfileTest do
     assert {:error, {:arguments, {:conflicting_option, :check}}} =
              Task.execute(["--check", "--no-check"])
 
+    assert {:error, {:arguments, {:repeated_option, :check}}} =
+             Task.execute(["--check=true", "--check=true"])
+
+    assert {:error, {:arguments, {:conflicting_option, :check}}} =
+             Task.execute(["--check=true", "--check=false"])
+
+    assert {:error, {:arguments, {:repeated_option, :json}}} =
+             Task.execute(["--json", "--json=true"])
+
+    assert {:error, {:arguments, {:conflicting_option, :json}}} =
+             Task.execute(["--json=true", "--json=false"])
+
     assert {:error, {:arguments, {:conflicting_option, :root}}} =
              Task.execute(["--root", "a", "--root", "b"])
 
@@ -39,6 +55,18 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryProfileTest do
 
     assert {:error, {:arguments, {:invalid_boolean_switch, :check}}} =
              Task.execute(["--no-check"])
+
+    assert {:error, {:arguments, {:invalid_boolean_switch, :check}}} =
+             Task.execute(["--check=false"])
+
+    assert {:error, {:arguments, {:invalid_boolean_switch, :json}}} =
+             Task.execute(["--json=false"])
+
+    assert {:ok, %{"mode" => "check"}} =
+             Task.execute(["--root", root, "--check=true"])
+
+    assert {:ok, %{"output" => "json"}} =
+             Task.execute(["--root", root, "--json=true"])
 
     assert {:error, {:arguments, :invalid_argv}} = Task.execute([:check])
   end
