@@ -346,6 +346,7 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterCase do
   setup_all do
     for child <- [
           {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")},
+          Arbor.Shell.OwnedTreeRegistry,
           {Arbor.Shell.ExecutionRegistry, []},
           {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
         ] do

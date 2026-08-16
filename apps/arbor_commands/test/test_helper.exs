@@ -2,6 +2,7 @@
 # provenance tests exercise its bounded direct-argv facade.
 for child <- [
       {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")},
+      Arbor.Shell.OwnedTreeRegistry,
       {Arbor.Shell.ExecutionRegistry, []},
       {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
     ] do

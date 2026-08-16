@@ -603,10 +603,13 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
       assert modules == [
                Arbor.Shell.ExecutablePolicy,
+               Arbor.Shell.OwnedTreeRegistry,
+               Arbor.Shell.TrustedBuildToolchainAuthority,
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+               Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor,
                Arbor.Shell.AppleContainerUnitJournal,
@@ -615,10 +618,10 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Arbor.Shell.AppleContainerUnitDrainCoordinator
              ]
 
-      authority_child = Enum.at(children, 1)
-      linux_child = Enum.at(children, 2)
-      image_child = Enum.at(children, 3)
-      materializer_sup = Enum.at(children, 4)
+      authority_child = Enum.at(children, 3)
+      linux_child = Enum.at(children, 4)
+      image_child = Enum.at(children, 5)
+      materializer_sup = Enum.at(children, 6)
 
       assert authority_child ==
                {Arbor.Shell.AppleContainerControlPlaneAuthority, [boot_epoch: boot_epoch]}

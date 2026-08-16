@@ -66,6 +66,7 @@ defmodule Arbor.Shell do
     Executor,
     LinuxDependencyBaselineBuilder,
     LinuxDependencyBaselineFilesystem,
+    OwnedTreeRegistry,
     PortSession,
     RegularTreeInventory,
     Sandbox,
@@ -760,22 +761,104 @@ defmodule Arbor.Shell do
   @spec create_private_owned_tree(String.t()) ::
           {:ok, map()} | {:error, term()}
   def create_private_owned_tree(path) do
-    Arbor.Shell.OwnedTree.create_private(path)
+    case Arbor.Shell.OwnedTree.create_private(path) do
+      {:ok, identity} ->
+        case OwnedTreeRegistry.put(identity, :unbound) do
+          :ok ->
+            {:ok, identity}
+
+          {:error, reason} ->
+            case Arbor.Shell.OwnedTree.remove(identity) do
+              :ok ->
+                {:error, reason}
+
+              {:error, cleanup} ->
+                {:error,
+                 {:owned_tree_cleanup_retained, {reason, cleanup},
+                  %{path: identity.path, identity: identity}}}
+            end
+        end
+
+      other ->
+        other
+    end
   end
 
   @doc false
   @spec remove_owned_tree(map()) :: :ok | {:error, term()}
   def remove_owned_tree(identity) do
-    Arbor.Shell.OwnedTree.remove(identity)
+    remove_owned_tree(identity, [])
   end
 
   @doc false
   @spec remove_owned_tree(map(), keyword()) :: :ok | {:error, term()}
   def remove_owned_tree(identity, opts) when is_list(opts) do
-    Arbor.Shell.OwnedTree.remove(identity, opts)
+    case Arbor.Shell.OwnedTree.remove(identity, opts) do
+      :ok ->
+        case OwnedTreeRegistry.delete(identity) do
+          :ok -> :ok
+          {:error, :owned_tree_not_registered} -> :ok
+          {:error, :owned_tree_registry_unavailable} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      error ->
+        error
+    end
   end
 
   def remove_owned_tree(_identity, _opts), do: {:error, :invalid_owned_tree_cleanup}
+
+  @doc """
+  Acquire a Shell-owned Darwin trusted-build lease.
+
+  **Trusted system API only.** Accepts one closed JSON-clean request with a
+  purpose-unbound Shell-created owned-tree identity. Callers cannot supply
+  executable, argv, environment, sandbox, destination, timeout, or backend.
+  """
+  @spec acquire_trusted_build_lease(term()) :: {:ok, term(), map()} | {:error, term()}
+  def acquire_trusted_build_lease(request) do
+    Arbor.Shell.TrustedBuild.acquire(request)
+  end
+
+  @doc """
+  Run one fixed Mix phase on a live trusted-build lease.
+
+  Accepts only `\"deps_get\"`, `\"compile\"`, or `\"release\"` in that order,
+  once. After a failed or cancelled phase only `release_trusted_build_lease/1`
+  is admitted.
+  """
+  @spec execute_trusted_build(term(), term()) :: {:ok, map()} | {:error, term()}
+  def execute_trusted_build(lease, phase) do
+    Arbor.Shell.TrustedBuild.execute(lease, phase)
+  end
+
+  @doc """
+  Closed relative inventory of `$MIX_BUILD_PATH/prod/rel` for a completed lease.
+  """
+  @spec inventory_trusted_build(term()) :: {:ok, map()} | {:error, term()}
+  def inventory_trusted_build(lease) do
+    Arbor.Shell.TrustedBuild.inventory(lease)
+  end
+
+  @doc """
+  Release a trusted-build lease after proven workspace absence.
+  """
+  @spec release_trusted_build_lease(term()) :: :ok | {:error, term()}
+  def release_trusted_build_lease(lease) do
+    Arbor.Shell.TrustedBuild.release(lease)
+  end
+
+  @doc false
+  @spec acquire_trusted_build_lease_for_test(term(), atom()) ::
+          {:ok, term(), map()} | {:error, term()}
+  def acquire_trusted_build_lease_for_test(request, fault)
+      when fault in [:force_cleanup_failure, :force_identity_capture_failure, :omit_hex_seed] do
+    Arbor.Shell.TrustedBuild.acquire(request, fault)
+  end
+
+  def acquire_trusted_build_lease_for_test(_request, _fault),
+    do: {:error, :invalid_trusted_build_request}
 
   @doc """
   Verified startup-pinned Linux dependency-baseline mix.lock digest.

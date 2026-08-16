@@ -934,10 +934,13 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
       assert modules == [
                Arbor.Shell.ExecutablePolicy,
+               Arbor.Shell.OwnedTreeRegistry,
+               Arbor.Shell.TrustedBuildToolchainAuthority,
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+               Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor,
                Arbor.Shell.AppleContainerUnitJournal,
@@ -946,16 +949,16 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
                Arbor.Shell.AppleContainerUnitDrainCoordinator
              ]
 
-      assert Enum.at(children, 1) ==
+      assert Enum.at(children, 3) ==
                {Arbor.Shell.AppleContainerControlPlaneAuthority, [boot_epoch: boot_epoch]}
 
-      assert Enum.at(children, 2) ==
+      assert Enum.at(children, 4) ==
                {Arbor.Shell.LinuxDependencyBaselineAuthority, [boot_epoch: boot_epoch]}
 
-      assert Enum.at(children, 3) ==
+      assert Enum.at(children, 5) ==
                {Arbor.Shell.AppleContainerImagePolicyAuthority, [boot_epoch: boot_epoch]}
 
-      materializer_sup = Enum.at(children, 4)
+      materializer_sup = Enum.at(children, 6)
 
       assert match?(
                %{id: Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor},

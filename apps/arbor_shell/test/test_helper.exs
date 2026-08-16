@@ -5,6 +5,13 @@ Supervisor.start_child(
   {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}
 )
 
+Supervisor.start_child(Arbor.Shell.Supervisor, Arbor.Shell.OwnedTreeRegistry)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  {Arbor.Shell.TrustedBuildToolchainAuthority, []}
+)
+
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {Arbor.Shell.AppleContainerControlPlaneAuthority, []}
@@ -23,6 +30,11 @@ Supervisor.start_child(
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec()
+)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  Arbor.Shell.TrustedBuild.Lease.supervisor_child_spec()
 )
 
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})

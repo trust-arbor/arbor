@@ -594,10 +594,13 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
 
       assert modules == [
                Arbor.Shell.ExecutablePolicy,
+               Arbor.Shell.OwnedTreeRegistry,
+               Arbor.Shell.TrustedBuildToolchainAuthority,
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+               Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
                DynamicSupervisor,
                Arbor.Shell.AppleContainerUnitJournal,
@@ -606,7 +609,7 @@ defmodule Arbor.Shell.AppleContainerImagePolicyAuthorityTest do
                Arbor.Shell.AppleContainerUnitDrainCoordinator
              ]
 
-      assert Enum.at(children, 3) ==
+      assert Enum.at(children, 5) ==
                {Arbor.Shell.AppleContainerImagePolicyAuthority, [boot_epoch: boot_epoch]}
 
       assert Arbor.Shell.Application.supervisor_options() ==

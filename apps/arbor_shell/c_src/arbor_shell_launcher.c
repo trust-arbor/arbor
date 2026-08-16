@@ -57,6 +57,7 @@ extern char **environ;
 
 #define EXECUTION_NO_FORK 0
 #define EXECUTION_APPLE_CONTAINER_PROBE 1
+#define EXECUTION_TRUSTED_BUILD 2
 
 #define APPLE_CONTAINER_CLI "/usr/local/bin/container"
 #define APPLE_CONTAINER_ALIAS_PREFIX "127.0.0.1:0/arbor/"
@@ -64,6 +65,30 @@ extern char **environ;
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
+#define DARWIN_TRUSTED_BUILD_PROFILE \
+  "(version 1)\n" \
+  "(deny default)\n" \
+  "(allow process-fork)\n" \
+  "(allow process-exec)\n" \
+  "(allow process-info*)\n" \
+  "(allow signal)\n" \
+  "(allow sysctl-read)\n" \
+  "(allow file-read*)\n" \
+  "(allow file-ioctl (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n" \
+  "(allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n" \
+  "(allow ipc-posix-shm)\n" \
+  "(allow ipc-posix-sem)\n" \
+  "(allow mach-lookup)\n" \
+  "(allow file-write* (subpath (param \"HOME\")))\n" \
+  "(allow file-write* (subpath (param \"TMP\")))\n" \
+  "(allow file-write* (subpath (param \"BUILD\")))\n" \
+  "(allow file-write* (subpath (param \"DEPS\")))\n" \
+  "(allow file-write* (subpath (param \"HEX\")))\n" \
+  "(allow file-write* (subpath (param \"MIX\")))\n" \
+  "(allow file-write* (subpath (param \"CACHE\")))\n" \
+  "(allow file-write* (subpath (param \"RELEASE\")))\n" \
+  "(deny file-write* (subpath (param \"SOURCE\")))\n" \
+  "(deny network*)"
 #endif
 
 #ifdef __linux__
@@ -422,6 +447,23 @@ static int reviewed_apple_container_probe(const char *path, int target_argc,
 }
 
 #ifdef __APPLE__
+typedef struct {
+  const char *home;
+  const char *tmp;
+  const char *build;
+  const char *deps;
+  const char *hex;
+  const char *mix;
+  const char *cache;
+  const char *release;
+  const char *source;
+  const char *erlang_root;
+  const char *elixir_root;
+  const char *archives;
+} trusted_build_paths;
+
+static trusted_build_paths g_trusted_build_paths;
+
 static int trusted_system_executable(const char *path) {
   struct stat path_stat;
   struct stat fd_stat;
@@ -443,6 +485,103 @@ static int trusted_system_executable(const char *path) {
   }
 
   return 0;
+}
+
+static int format_assign(char *buffer, size_t size, const char *key, const char *value) {
+  int written = snprintf(buffer, size, "%s=%s", key, value);
+  return written > 0 && (size_t)written < size ? 0 : -1;
+}
+
+static void trusted_build_replace_environ(const trusted_build_paths *paths) {
+  char erlang_bin[4096];
+  char elixir_bin[4096];
+  char path_value[8192];
+  char crash[4096];
+
+  if (snprintf(erlang_bin, sizeof(erlang_bin), "%s/bin", paths->erlang_root) <= 0) _exit(126);
+  if (snprintf(elixir_bin, sizeof(elixir_bin), "%s/bin", paths->elixir_root) <= 0) _exit(126);
+  if (snprintf(path_value, sizeof(path_value), "%s:%s", erlang_bin, elixir_bin) <= 0) _exit(126);
+  if (snprintf(crash, sizeof(crash), "%s/erl_crash.dump", paths->tmp) <= 0) _exit(126);
+
+  if (clearenv() != 0) _exit(126);
+  if (setenv("MIX_ENV", "prod", 1) != 0) _exit(126);
+  if (setenv("HEX_OFFLINE", "1", 1) != 0) _exit(126);
+  if (setenv("ARBOR_MIX_CONTAINED", "1", 1) != 0) _exit(126);
+  if (setenv("ARBOR_ERLANG_ROOT", paths->erlang_root, 1) != 0) _exit(126);
+  if (setenv("ARBOR_ELIXIR_ROOT", paths->elixir_root, 1) != 0) _exit(126);
+  if (setenv("HOME", paths->home, 1) != 0) _exit(126);
+  if (setenv("TMPDIR", paths->tmp, 1) != 0) _exit(126);
+  if (setenv("TMP", paths->tmp, 1) != 0) _exit(126);
+  if (setenv("HEX_HOME", paths->hex, 1) != 0) _exit(126);
+  if (setenv("MIX_HOME", paths->mix, 1) != 0) _exit(126);
+  if (setenv("MIX_ARCHIVES", paths->archives, 1) != 0) _exit(126);
+  if (setenv("MIX_DEPS_PATH", paths->deps, 1) != 0) _exit(126);
+  if (setenv("MIX_BUILD_PATH", paths->build, 1) != 0) _exit(126);
+  if (setenv("ELIXIR_MAKE_CACHE_DIR", paths->cache, 1) != 0) _exit(126);
+  if (setenv("ERL_CRASH_DUMP", crash, 1) != 0) _exit(126);
+  if (setenv("PATH", path_value, 1) != 0) _exit(126);
+  if (setenv("LANG", "C", 1) != 0) _exit(126);
+  if (setenv("LC_ALL", "C", 1) != 0) _exit(126);
+}
+
+static void darwin_exec_trusted_build(const char *path, char **target_argv) {
+  if (trusted_system_executable(DARWIN_SANDBOX_EXEC) != 0) _exit(126);
+  trusted_build_replace_environ(&g_trusted_build_paths);
+
+  size_t target_count = 0;
+  while (target_argv[target_count] != NULL) target_count++;
+
+  /* sandbox-exec -p PROFILE -D KEY=val (x9) -- wrap args */
+  char **sandbox_argv = calloc(target_count + 24U, sizeof(char *));
+  if (sandbox_argv == NULL) _exit(126);
+
+  char home[4096], tmp[4096], build[4096], deps[4096], hex[4096], mix[4096];
+  char cache[4096], release[4096], source[4096];
+  if (format_assign(home, sizeof(home), "HOME", g_trusted_build_paths.home) != 0 ||
+      format_assign(tmp, sizeof(tmp), "TMP", g_trusted_build_paths.tmp) != 0 ||
+      format_assign(build, sizeof(build), "BUILD", g_trusted_build_paths.build) != 0 ||
+      format_assign(deps, sizeof(deps), "DEPS", g_trusted_build_paths.deps) != 0 ||
+      format_assign(hex, sizeof(hex), "HEX", g_trusted_build_paths.hex) != 0 ||
+      format_assign(mix, sizeof(mix), "MIX", g_trusted_build_paths.mix) != 0 ||
+      format_assign(cache, sizeof(cache), "CACHE", g_trusted_build_paths.cache) != 0 ||
+      format_assign(release, sizeof(release), "RELEASE", g_trusted_build_paths.release) != 0 ||
+      format_assign(source, sizeof(source), "SOURCE", g_trusted_build_paths.source) != 0) {
+    free(sandbox_argv);
+    _exit(126);
+  }
+
+  size_t i = 0;
+  sandbox_argv[i++] = (char *)DARWIN_SANDBOX_EXEC;
+  sandbox_argv[i++] = "-p";
+  sandbox_argv[i++] = (char *)DARWIN_TRUSTED_BUILD_PROFILE;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = home;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = tmp;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = build;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = deps;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = hex;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = mix;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = cache;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = release;
+  sandbox_argv[i++] = "-D";
+  sandbox_argv[i++] = source;
+  sandbox_argv[i++] = "--";
+  sandbox_argv[i++] = (char *)path;
+  for (size_t j = 1; j < target_count; j++) {
+    sandbox_argv[i++] = target_argv[j];
+  }
+  sandbox_argv[i] = NULL;
+
+  execve(DARWIN_SANDBOX_EXEC, sandbox_argv, environ);
+  free(sandbox_argv);
+  _exit(127);
 }
 
 static void darwin_exec_no_fork(const char *path, char **target_argv) {
@@ -926,6 +1065,8 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   close(target_fd);
   if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE) {
     execve(path, target_argv, environ);
+  } else if (execution_mode == EXECUTION_TRUSTED_BUILD) {
+    darwin_exec_trusted_build(path, target_argv);
   } else {
     darwin_exec_no_fork(path, target_argv);
   }
@@ -1358,6 +1499,258 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   return 0;
 }
 
+static int path_join_equals(const char *root, const char *suffix, const char *actual) {
+  char expected[4096];
+  if (snprintf(expected, sizeof(expected), "%s/%s", root, suffix) <= 0) return 0;
+  return strcmp(expected, actual) == 0;
+}
+
+static int segment_overlap(const char *left, const char *right) {
+  size_t left_len = strlen(left);
+  size_t right_len = strlen(right);
+  if (strcmp(left, right) == 0) return 1;
+  if (left_len < right_len) {
+    return strncmp(left, right, left_len) == 0 && right[left_len] == '/';
+  }
+  return strncmp(right, left, right_len) == 0 && left[right_len] == '/';
+}
+
+static int verify_file_identity(const char *dev_s, const char *ino_s, const char *size_s,
+                                const char *mtime_s, const char *ctime_s, const char *mode_s,
+                                const char *sha256, const char *path) {
+  uint64_t dev, ino, size, mtime, ctime, mode;
+  if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 ||
+      parse_u64(size_s, &size) != 0 || parse_u64(mtime_s, &mtime) != 0 ||
+      parse_u64(ctime_s, &ctime) != 0 || parse_u64(mode_s, &mode) != 0 ||
+      sha256 == NULL || strlen(sha256) != 64 || path == NULL || path[0] != '/') {
+    return -1;
+  }
+
+  struct stat expected;
+  memset(&expected, 0, sizeof(expected));
+  expected.st_dev = (dev_t)dev;
+  expected.st_ino = (ino_t)ino;
+  expected.st_size = (off_t)size;
+  expected.st_mtime = (time_t)mtime;
+  expected.st_ctime = (time_t)ctime;
+  expected.st_mode = (mode_t)mode;
+
+  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return -2;
+  int result = verify_identity(fd, &expected, sha256);
+  close(fd);
+  return result;
+}
+
+static int verify_dir_identity(const char *dev_s, const char *ino_s, const char *mode_s,
+                               const char *path, int writable) {
+  uint64_t dev, ino, mode;
+  if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 ||
+      parse_u64(mode_s, &mode) != 0 || path == NULL || path[0] != '/') {
+    return -1;
+  }
+
+  int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return -2;
+  struct stat actual;
+  if (fstat(fd, &actual) != 0 || !S_ISDIR(actual.st_mode)) {
+    close(fd);
+    return -3;
+  }
+  close(fd);
+
+  if (actual.st_dev != (dev_t)dev) return -4;
+  if ((((uint64_t)actual.st_ino) & 0xffffffffULL) != (ino & 0xffffffffULL)) return -5;
+  if ((uint64_t)actual.st_mode != mode) return -6;
+  if (writable) {
+    if ((actual.st_mode & 0777) != 0700) return -7;
+    if (actual.st_uid != geteuid()) return -8;
+  } else if ((actual.st_mode & 0022) != 0) {
+    return -9;
+  }
+  return 0;
+}
+
+static int verify_wdir_identity(const char *dev_s, const char *ino_s, const char *path) {
+  uint64_t dev, ino;
+  if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 || path == NULL ||
+      path[0] != '/') {
+    return -1;
+  }
+
+  int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return -2;
+  struct stat actual;
+  if (fstat(fd, &actual) != 0 || !S_ISDIR(actual.st_mode)) {
+    close(fd);
+    return -3;
+  }
+  close(fd);
+  if (actual.st_dev != (dev_t)dev) return -4;
+  if ((((uint64_t)actual.st_ino) & 0xffffffffULL) != (ino & 0xffffffffULL)) return -5;
+  if ((actual.st_mode & 0777) != 0700) return -6;
+  if (actual.st_uid != geteuid()) return -7;
+  return 0;
+}
+
+static int trusted_build_mix_argv(int argc, char **argv) {
+  if (argc == 3 && strcmp(argv[0], "deps.get") == 0 && strcmp(argv[1], "--only") == 0 &&
+      strcmp(argv[2], "prod") == 0) {
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[0], "compile") == 0 &&
+      strcmp(argv[1], "--warnings-as-errors") == 0) {
+    return 0;
+  }
+  if (argc == 2 && strcmp(argv[0], "release") == 0 && strcmp(argv[1], "--overwrite") == 0) {
+    return 0;
+  }
+  return -1;
+}
+
+static int run_trusted_build(int argc, char **argv) {
+#ifndef __APPLE__
+  (void)argc;
+  (void)argv;
+  send_error("trusted build launcher unavailable");
+  return 126;
+#else
+  /* See design: timeout max_output + 4 file-ids + 4 dir-ids + digest + 8 wdirs + -- + argv0 */
+  if (argc < 79 || strcmp(argv[77], "--") != 0) {
+    send_error("invalid trusted-build arguments");
+    return 2;
+  }
+
+  uint64_t timeout_ms, max_output;
+  if (parse_u64(argv[2], &timeout_ms) != 0 || parse_u64(argv[3], &max_output) != 0 ||
+      timeout_ms == 0 || max_output == 0) {
+    send_error("invalid trusted-build bounds");
+    return 2;
+  }
+
+  const char *wrap_path = argv[11];
+  const char *erl_path = argv[19];
+  const char *elixir_path = argv[27];
+  const char *elixir_mix_path = argv[35];
+  const char *source_path = argv[39];
+  const char *erlang_root = argv[43];
+  const char *elixir_root = argv[47];
+  const char *archives_path = argv[51];
+  const char *archives_digest = argv[52];
+  const char *home_path = argv[55];
+  const char *tmp_path = argv[58];
+  const char *build_path = argv[61];
+  const char *deps_path = argv[64];
+  const char *hex_path = argv[67];
+  const char *mix_path = argv[70];
+  const char *cache_path = argv[73];
+  const char *release_path = argv[76];
+  const char *argv0 = argv[78];
+
+  if (strlen(archives_digest) != 64 || strcmp(argv0, wrap_path) != 0) {
+    send_error("invalid trusted-build executable binding");
+    return 2;
+  }
+
+  if (verify_file_identity(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9], argv[10],
+                           wrap_path) != 0 ||
+      verify_file_identity(argv[12], argv[13], argv[14], argv[15], argv[16], argv[17], argv[18],
+                           erl_path) != 0 ||
+      verify_file_identity(argv[20], argv[21], argv[22], argv[23], argv[24], argv[25], argv[26],
+                           elixir_path) != 0 ||
+      verify_file_identity(argv[28], argv[29], argv[30], argv[31], argv[32], argv[33], argv[34],
+                           elixir_mix_path) != 0) {
+    send_error("trusted-build file identity changed");
+    return 126;
+  }
+
+  if (verify_dir_identity(argv[36], argv[37], argv[38], source_path, 0) != 0 ||
+      verify_dir_identity(argv[40], argv[41], argv[42], erlang_root, 0) != 0 ||
+      verify_dir_identity(argv[44], argv[45], argv[46], elixir_root, 0) != 0 ||
+      verify_dir_identity(argv[48], argv[49], argv[50], archives_path, 0) != 0) {
+    send_error("trusted-build directory identity changed");
+    return 126;
+  }
+
+  if (verify_wdir_identity(argv[53], argv[54], home_path) != 0 ||
+      verify_wdir_identity(argv[56], argv[57], tmp_path) != 0 ||
+      verify_wdir_identity(argv[59], argv[60], build_path) != 0 ||
+      verify_wdir_identity(argv[62], argv[63], deps_path) != 0 ||
+      verify_wdir_identity(argv[65], argv[66], hex_path) != 0 ||
+      verify_wdir_identity(argv[68], argv[69], mix_path) != 0 ||
+      verify_wdir_identity(argv[71], argv[72], cache_path) != 0 ||
+      verify_wdir_identity(argv[74], argv[75], release_path) != 0) {
+    send_error("trusted-build writable identity changed");
+    return 126;
+  }
+
+  if (!path_join_equals(source_path, "bin/mix", wrap_path) ||
+      !path_join_equals(erlang_root, "bin/erl", erl_path) ||
+      !path_join_equals(elixir_root, "bin/elixir", elixir_path) ||
+      !path_join_equals(elixir_root, "bin/mix", elixir_mix_path)) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+
+  const char *writables[] = {home_path, tmp_path,   build_path, deps_path,
+                             hex_path,  mix_path,   cache_path, release_path};
+  for (size_t i = 0; i < sizeof(writables) / sizeof(writables[0]); i++) {
+    if (segment_overlap(source_path, writables[i]) ||
+        segment_overlap(archives_path, writables[i])) {
+      send_error("trusted-build path overlap");
+      return 126;
+    }
+  }
+  if (segment_overlap(source_path, archives_path)) {
+    send_error("trusted-build path overlap");
+    return 126;
+  }
+
+  if (trusted_build_mix_argv(argc - 79, &argv[79]) != 0) {
+    send_error("unreviewed trusted-build command");
+    return 2;
+  }
+
+  g_trusted_build_paths.home = home_path;
+  g_trusted_build_paths.tmp = tmp_path;
+  g_trusted_build_paths.build = build_path;
+  g_trusted_build_paths.deps = deps_path;
+  g_trusted_build_paths.hex = hex_path;
+  g_trusted_build_paths.mix = mix_path;
+  g_trusted_build_paths.cache = cache_path;
+  g_trusted_build_paths.release = release_path;
+  g_trusted_build_paths.source = source_path;
+  g_trusted_build_paths.erlang_root = erlang_root;
+  g_trusted_build_paths.elixir_root = elixir_root;
+  g_trusted_build_paths.archives = archives_path;
+
+  char *exec_argv[32];
+  exec_argv[0] = argv[0];
+  exec_argv[1] = argv[1];
+  exec_argv[2] = argv[2];
+  exec_argv[3] = argv[3];
+  exec_argv[4] = argv[4];
+  exec_argv[5] = argv[5];
+  exec_argv[6] = argv[6];
+  exec_argv[7] = argv[7];
+  exec_argv[8] = argv[8];
+  exec_argv[9] = argv[9];
+  exec_argv[10] = argv[10];
+  exec_argv[11] = wrap_path;
+  exec_argv[12] = argv[36];
+  exec_argv[13] = argv[37];
+  exec_argv[14] = source_path;
+  exec_argv[15] = (char *)"--";
+  exec_argv[16] = (char *)wrap_path;
+  int exec_argc = 17;
+  for (int i = 79; i < argc && exec_argc < 31; i++) {
+    exec_argv[exec_argc++] = argv[i];
+  }
+  exec_argv[exec_argc] = NULL;
+  return run_exec(exec_argc, exec_argv, EXECUTION_TRUSTED_BUILD);
+#endif
+}
+
 static int run_kill(int argc, char **argv) {
   if (argc != 4) return 2;
   uint64_t pgid_value, grace_value;
@@ -1407,6 +1800,9 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && strcmp(argv[1], "apple-container-probe") == 0) {
     return run_exec(argc, argv, EXECUTION_APPLE_CONTAINER_PROBE);
+  }
+  if (argc >= 2 && strcmp(argv[1], "trusted-build") == 0) {
+    return run_trusted_build(argc, argv);
   }
   if (argc >= 2 && strcmp(argv[1], "kill") == 0) return run_kill(argc, argv);
   return 2;

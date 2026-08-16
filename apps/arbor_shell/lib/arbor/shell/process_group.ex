@@ -33,6 +33,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
   @generic_launcher_command "exec"
   @apple_container_probe_launcher_command "apple-container-probe"
+  @trusted_build_launcher_command "trusted-build"
 
   defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes, stdin_open: true]
 
@@ -112,6 +113,226 @@ defmodule Arbor.Shell.ProcessGroup do
       timeout,
       max_output_bytes
     )
+  end
+
+  @doc false
+  @spec run_trusted_build_executable(
+          map(),
+          [String.t()],
+          integer(),
+          pos_integer(),
+          pos_integer(),
+          pid()
+        ) ::
+          {:ok, map()} | {:error, term()}
+  def run_trusted_build_executable(
+        launch,
+        args,
+        start_time,
+        timeout,
+        max_output_bytes,
+        lease_pid
+      )
+      when is_map(launch) and is_list(args) and is_pid(lease_pid) do
+    run_trusted_build_owned(
+      launch,
+      args,
+      start_time,
+      timeout,
+      max_output_bytes,
+      lease_pid
+    )
+  end
+
+  def run_trusted_build_executable(_launch, _args, _start_time, _timeout, _max_output, _lease),
+    do: {:error, :invalid_trusted_build_launch}
+
+  defp run_trusted_build_owned(
+         launch,
+         args,
+         start_time,
+         timeout,
+         max_output_bytes,
+         lease_pid
+       ) do
+    caller = self()
+    reply_ref = make_ref()
+    cancel_id = Map.get(launch, :cancel_id)
+
+    owner =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        lease_mon = Process.monitor(lease_pid)
+
+        result =
+          try do
+            run_trusted_build_one_shot(
+              launch,
+              args,
+              start_time,
+              timeout,
+              max_output_bytes,
+              lease_mon,
+              lease_pid,
+              cancel_id
+            )
+          catch
+            kind, reason -> {:error, {:port_owner_exception, {kind, reason}}}
+          end
+
+        send(caller, {:"$arbor_shell_port_owner_reply", reply_ref, result})
+      end)
+
+    owner_mon = Process.monitor(owner)
+    await_owned_one_shot_result(owner, owner_mon, reply_ref, cancel_id)
+  end
+
+  defp run_trusted_build_one_shot(
+         launch,
+         args,
+         start_time,
+         timeout,
+         max_output_bytes,
+         lease_mon,
+         lease_pid,
+         cancel_id
+       ) do
+    case ensure_caller_alive(lease_mon, lease_pid) do
+      {:error, :caller_dead} ->
+        {:error, :trusted_build_lease_lost}
+
+      :ok ->
+        case open_trusted_build(launch, args, start_time, timeout, max_output_bytes) do
+          {:error, reason} ->
+            {:error, reason}
+
+          {:ok, handle} ->
+            with :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
+                 :ok <- start(handle, nil, caller_mon: lease_mon, cancel_id: cancel_id),
+                 :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
+                 {:ok, handle} <-
+                   close_stdin(handle, caller_mon: lease_mon, cancel_id: cancel_id) do
+              collect(handle, cancel_id, [], 0, lease_mon, lease_pid)
+            else
+              {:error, :caller_dead} ->
+                {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
+
+              {:error, :timeout} ->
+                {:ok, %{reason: :timeout, exit_code: 137, output: ""}}
+
+              {:error, :cancelled} ->
+                {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+        end
+    end
+  end
+
+  defp open_trusted_build(launch, args, start_time, timeout, max_output_bytes) do
+    deadline = start_time + timeout
+
+    with :ok <- validate_args(args),
+         {:ok, launcher} <- launcher_path(),
+         remaining when remaining > 0 <- remaining_ms(deadline),
+         {:ok, port} <-
+           open_trusted_build_port(launcher, launch, args, remaining, max_output_bytes),
+         {:ok, group_id} <- await_ready(port, deadline) do
+      {:ok,
+       %__MODULE__{
+         port: port,
+         group_id: group_id,
+         deadline: deadline,
+         start_time: start_time,
+         max_output_bytes: max_output_bytes,
+         stdin_open: true
+       }}
+    else
+      remaining when is_integer(remaining) and remaining <= 0 -> {:error, :timeout_during_setup}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp open_trusted_build_port(launcher, launch, args, timeout, max_output_bytes) do
+    launcher_args = trusted_build_argv(launch, args, timeout, max_output_bytes)
+
+    port_opts = [
+      :binary,
+      :exit_status,
+      :use_stdio,
+      {:packet, 4},
+      args: Enum.map(launcher_args, &to_charlist/1),
+      env: build_env(launch.env, launch.env["PATH"], true)
+    ]
+
+    try do
+      {:ok, Port.open({:spawn_executable, to_charlist(launcher)}, port_opts)}
+    catch
+      :error, reason -> {:error, {:port_open_failed, reason}}
+    end
+  end
+
+  defp trusted_build_argv(launch, args, timeout, max_output_bytes) do
+    w = launch.wrapper
+    erl = launch.erl
+    elixir = launch.elixir
+    mix = launch.elixir_mix
+    source = launch.source
+    erlang_root = launch.erlang_root
+    elixir_root = launch.elixir_root
+    archives = launch.archives
+    roots = launch.roots
+
+    [
+      @trusted_build_launcher_command,
+      Integer.to_string(timeout),
+      Integer.to_string(max_output_bytes)
+    ] ++
+      file_id(w) ++
+      file_id(erl) ++
+      file_id(elixir) ++
+      file_id(mix) ++
+      dir_id(source) ++
+      dir_id(erlang_root) ++
+      dir_id(elixir_root) ++
+      dir_id(archives) ++
+      [launch.archives_digest] ++
+      wdir_id(roots.home) ++
+      wdir_id(roots.tmp) ++
+      wdir_id(roots.build) ++
+      wdir_id(roots.deps) ++
+      wdir_id(roots.hex) ++
+      wdir_id(roots.mix) ++
+      wdir_id(roots.cache) ++
+      wdir_id(roots.release) ++
+      ["--", w.path | args]
+  end
+
+  defp file_id(id) do
+    [
+      Integer.to_string(id.device),
+      Integer.to_string(id.inode),
+      Integer.to_string(id.size),
+      Integer.to_string(id.mtime),
+      Integer.to_string(id.ctime),
+      Integer.to_string(id.mode),
+      id.sha256,
+      id.path
+    ]
+  end
+
+  defp dir_id(id) do
+    [
+      Integer.to_string(id.device),
+      Integer.to_string(id.inode),
+      Integer.to_string(id.mode),
+      id.path
+    ]
+  end
+
+  defp wdir_id(id) do
+    [Integer.to_string(id.device), Integer.to_string(id.inode), id.path]
   end
 
   defp run_executable_with_launcher(

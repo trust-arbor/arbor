@@ -238,6 +238,29 @@ defmodule Arbor.Shell.Config do
   @spec validate_unit_journal_path(term()) :: {:ok, String.t()} | {:error, atom()}
   def validate_unit_journal_path(path), do: validate_locator_path(path)
 
+  @doc """
+  Optional startup locator for the reviewed Hex package cache.
+
+  Read once at authority init. Absent config is a stable miss so acquire can
+  seed an empty cache. Never falls back to HOME or a per-call lookup.
+  """
+  @spec trusted_build_hex_cache() ::
+          {:ok, String.t()}
+          | {:error, :trusted_build_hex_cache_absent | {:invalid_trusted_build_hex_cache, atom()}}
+  def trusted_build_hex_cache do
+    case Application.get_env(@app, :trusted_build_hex_cache) do
+      nil ->
+        {:error, :trusted_build_hex_cache_absent}
+
+      path ->
+        case validate_locator_path(path) do
+          {:ok, ^path} = ok -> ok
+          {:ok, normalized} when is_binary(normalized) -> {:ok, normalized}
+          {:error, reason} -> {:error, {:invalid_trusted_build_hex_cache, reason}}
+        end
+    end
+  end
+
   defp normalize_apple_container(config) when is_list(config) do
     if Keyword.keyword?(config) do
       config
