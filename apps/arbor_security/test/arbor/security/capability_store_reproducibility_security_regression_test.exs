@@ -6,7 +6,6 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
 
   use ExUnit.Case, async: false
 
-  @moduletag :fast
   @moduletag security: :regression
 
   alias Arbor.Contracts.Security.Capability
@@ -19,11 +18,22 @@ defmodule Arbor.Security.CapabilityStoreReproducibilitySecurityRegressionTest do
   @cert_epoch_domain "arbor.security.capability_store.cert_epoch.v1"
   @cert_field :__c3a_cert__
 
-  @tag :tmp_dir
+  @tag :slow
   test "security regression: equal CapabilityStore source is reproducible and " <>
-         "a source change invalidates a preserved certificate",
-       %{tmp_dir: tmp_dir} do
-    on_exit(fn -> unload_fixture(@fixture_module) end)
+         "a source change invalidates a preserved certificate" do
+    # Owner-created unique dir under System.tmp_dir! - never apps/*/tmp.
+    tmp_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "e0b2p-capability-store-repro-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(tmp_dir)
+
+    on_exit(fn ->
+      unload_fixture(@fixture_module)
+      File.rm_rf!(tmp_dir)
+    end)
 
     path = Path.join(tmp_dir, "capability_store_repro_fixture.ex")
     production_source = File.read!(@store_source_path)
