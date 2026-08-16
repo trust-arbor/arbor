@@ -79,9 +79,8 @@ defmodule Arbor.Shell.OwnedTree do
            inode: ^inode
          }} ->
           with :ok <- run_before_remove(opts),
-               :ok <- run_cleanup_traversal(path, budget),
-               :ok <- prove_absence(path) do
-            :ok
+               :ok <- run_cleanup_traversal(path, budget) do
+            prove_absence(path)
           end
 
         {:ok, %File.Stat{}} ->
