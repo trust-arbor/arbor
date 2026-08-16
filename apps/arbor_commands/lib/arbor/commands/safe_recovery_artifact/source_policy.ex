@@ -8,6 +8,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_persistence/",
     "apps/arbor_trust/"
   ]
+  @app_names ~w(arbor_kernel arbor_kernel_runtime arbor_security arbor_persistence arbor_trust)
+  @ignored_generated_dirs ~w(.elixir_ls cover)
 
   @required_files [
     "apps/arbor_kernel/mix.exs",
@@ -58,6 +60,24 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
   end
 
   def selected_path?(_path), do: false
+
+  @doc false
+  @spec ignored_generated_extra?(String.t()) :: boolean()
+  def ignored_generated_extra?(path) when is_binary(path) do
+    case String.split(path, "/", trim: false) do
+      ["apps", app, generated | _rest]
+      when app in @app_names and generated in @ignored_generated_dirs ->
+        true
+
+      ["apps", app, "erl_crash.dump"] when app in @app_names ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  def ignored_generated_extra?(_path), do: false
 
   @spec select(term()) :: {:ok, [String.t()]} | {:error, term()}
   def select(triples) when is_list(triples) do

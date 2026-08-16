@@ -581,10 +581,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStaging do
         |> :binary.split(<<0>>, [:global])
         |> Enum.reject(&(&1 == ""))
         |> Enum.reduce_while(:ok, fn path, :ok ->
-          if SourcePolicy.selected_path?(path) do
-            {:halt, {:error, :selected_untracked}}
-          else
-            {:cont, :ok}
+          cond do
+            SourcePolicy.ignored_generated_extra?(path) -> {:cont, :ok}
+            SourcePolicy.selected_path?(path) -> {:halt, {:error, :selected_untracked}}
+            true -> {:cont, :ok}
           end
         end)
 

@@ -378,6 +378,37 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
 
   @tag :slow
   @tag :integration
+  test "ignored generated tooling state beneath selected roots remains admissible", %{root: root} do
+    File.mkdir_p!(Path.join(root, ".git/info"))
+    File.write!(Path.join(root, ".git/info/exclude"), ".elixir_ls/\ncover/\nerl_crash.dump\n")
+
+    generated = [
+      "apps/arbor_persistence/.elixir_ls/build/cache",
+      "apps/arbor_security/cover/report.html",
+      "apps/arbor_trust/erl_crash.dump"
+    ]
+
+    Enum.each(generated, fn relative ->
+      path = Path.join(root, relative)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "generated\n")
+    end)
+
+    overlay = "overlay-bytes"
+    digest = sha256_hex(overlay)
+    assert {:ok, lease} = stage!(root, overlay, digest)
+    on_exit(fn -> SafeRecoveryArtifact.release_source_for_test(lease) end)
+
+    paths = Enum.map(lease["build_inputs"], & &1["path"])
+    assert Enum.all?(generated, &SourcePolicy.ignored_generated_extra?/1)
+    assert Enum.all?(generated, &(&1 not in paths))
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/.elixir_ls_evil/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/coverup/x.ex")
+    refute SourcePolicy.ignored_generated_extra?("apps/arbor_kernel/erl_crash.dump/x.ex")
+  end
+
+  @tag :slow
+  @tag :integration
   test "ignored selected-root extras fail closed", %{root: root} do
     File.mkdir_p!(Path.join(root, ".git/info"))
     File.write!(Path.join(root, ".git/info/exclude"), "ignored-secret\n")
