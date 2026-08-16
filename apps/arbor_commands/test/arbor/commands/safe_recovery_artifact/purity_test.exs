@@ -30,10 +30,22 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.PurityTest do
     ~r/Code\.compile/
   ]
 
+  # Explicit allowlist rather than a directory-wide wildcard+count: the
+  # directory also holds deliberately impure modules (source staging, the
+  # trusted-build compose shell, the fact-mode test interpreter) that must
+  # perform IO/process/crypto work, so scanning every *.ex file here would
+  # either false-positive on them or require silently excluding them. Listing
+  # the pure modules by name keeps drift visible -- adding a new pure module
+  # means adding it here, not just dropping a file in the directory.
+  @pure_modules ~w(classify.ex cleanup_plan.ex cleanup_receipt.ex compose_core.ex core.ex derive.ex encode.ex parse.ex trusted_inventory.ex)
+
   test "production modules contain no impurity or atom-interning" do
     root = Path.expand("../../../../lib/arbor/commands/safe_recovery_artifact", __DIR__)
-    paths = Path.wildcard(Path.join(root, "*.ex"))
-    assert length(paths) == 5
+    paths = Enum.map(@pure_modules, &Path.join(root, &1))
+
+    Enum.each(paths, fn path ->
+      assert File.exists?(path), "expected pure module #{path} to exist"
+    end)
 
     Enum.each(paths, fn path ->
       src = File.read!(path)
