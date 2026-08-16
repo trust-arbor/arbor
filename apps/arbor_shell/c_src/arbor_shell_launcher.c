@@ -1533,6 +1533,7 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   return 0;
 }
 
+#ifdef __APPLE__
 #define TB_MAX_REL 4096
 #define TB_MAX_DIGEST_ROWS 65536
 
@@ -1885,6 +1886,7 @@ static int trusted_build_mix_argv(int argc, char **argv) {
   }
   return -1;
 }
+#endif
 
 static int run_trusted_build(int argc, char **argv) {
 #ifndef __APPLE__
