@@ -414,14 +414,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
   defp take_digits(rest, acc), do: {:erlang.list_to_binary(Enum.reverse(acc)), rest}
 
   defp build_integer(digits, rest, state, negative) do
-    cond do
-      byte_size(digits) > @max_int_digits ->
-        {:error, :unbounded}
-
-      true ->
-        value = digits_to_int(digits, 0)
-        signed = if negative, do: -value, else: value
-        admit_integer(signed, rest, state)
+    if byte_size(digits) > @max_int_digits do
+      {:error, :unbounded}
+    else
+      value = digits_to_int(digits, 0)
+      signed = if negative, do: -value, else: value
+      admit_integer(signed, rest, state)
     end
   end
 

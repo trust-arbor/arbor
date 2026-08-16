@@ -957,9 +957,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
       {:ok, bytes} ->
         {:ok, bytes}
 
-      {:error, %Jason.EncodeError{}} ->
-        {:error, :invalid_utf8}
-
       {:error, _} ->
         {:error, :invalid_map}
     end

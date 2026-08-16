@@ -40,7 +40,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
 
     test "rejects duplicate properties" do
       assert {:error, :duplicate_property} =
-               Parse.app_spec("{application,foo,[{vsn,\"1\"},{vsn,\"2\"}]}.")
+               Parse.app_spec(~s({application,foo,[{vsn,"1"},{vsn,"2"}]}.))
     end
 
     test "rejects malformed dependency lists" do
@@ -122,8 +122,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
     end
 
     test "security regression: integer binary items hit the 16_384-item ceiling" do
-      # 16,384 integer items stay under the 32,768-node ceiling (1 binary
-      # node + 16,384 integer nodes). Rejection must come from the item bound.
+      # The binary-specific item ceiling is independent of the global parsed-value
+      # ceiling because the entire binary literal is one parsed value.
       accepted = integer_binary_term(16_384)
       assert {:ok, bytes} = Parse.term(accepted)
       assert byte_size(bytes) == 16_384
@@ -166,18 +166,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
 
   describe "atom safety" do
     @tag :slow
-    test "many unique unknown atom spellings do not increase atom_count" do
-      before = :erlang.system_info(:atom_count)
-
+    test "many unique unknown atom spellings are not interned" do
       Enum.each(1..2_000, fn index ->
         name = "u" <> String.pad_leading(Integer.to_string(index), 6, "0") <> "z"
         bytes = "{application,#{name},[{vsn,\"1\"}]}."
         assert {:ok, spec} = Parse.app_spec(bytes)
         assert spec.name == name
+        assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
       end)
-
-      after_count = :erlang.system_info(:atom_count)
-      assert after_count == before
     end
   end
 

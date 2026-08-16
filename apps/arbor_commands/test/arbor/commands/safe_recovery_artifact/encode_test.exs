@@ -150,7 +150,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.EncodeTest do
     assert {:error, :invalid_utf8} = Encode.canonical_json(%{invalid => 1})
 
     escaped = "a\nb\t\r\"\\"
-    assert {:ok, Jason.encode!(escaped)} = Encode.canonical_json(escaped)
+    expected = Jason.encode!(escaped)
+    assert {:ok, ^expected} = Encode.canonical_json(escaped)
     assert {:ok, ~s({"a":1,"b":2})} = Encode.canonical_json(%{"b" => 2, "a" => 1})
   end
 
