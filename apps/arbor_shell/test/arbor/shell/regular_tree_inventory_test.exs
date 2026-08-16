@@ -311,14 +311,36 @@ defmodule Arbor.Shell.RegularTreeInventoryTest do
 
     assert :ok =
              Filesystem.__test_set_before_open_hook__(fn _path ->
-               Process.sleep(80)
+               Process.sleep(400)
              end)
+
+    started = System.monotonic_time(:millisecond)
 
     assert {:error, :scan_timeout} =
              RegularTreeInventory.__test_inventory__(root, %{
                timeout_ms: 20,
                listing_heap_words: 4_000_000
              })
+
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed < 250
+  end
+
+  test "listing workers exit after a successful scan", %{root: root} do
+    File.mkdir!(Path.join(root, "nested"))
+    File.write!(Path.join(root, "nested/ok"), "ok")
+    test_pid = self()
+
+    assert :ok =
+             RegularTreeInventory.__test_set_listing_hook__(fn _path ->
+               send(test_pid, {:listing_worker, self()})
+               :cont
+             end)
+
+    assert {:ok, _inventory} = RegularTreeInventory.inventory(root)
+    workers = receive_listing_workers([])
+    assert workers != []
+    Enum.each(workers, fn worker -> refute Process.alive?(worker) end)
   end
 
   @tag :slow
@@ -431,6 +453,15 @@ defmodule Arbor.Shell.RegularTreeInventoryTest do
 
   defp sha256(content) do
     :sha256 |> :crypto.hash(content) |> Base.encode16(case: :lower)
+  end
+
+  defp receive_listing_workers(acc) do
+    receive do
+      {:listing_worker, worker} when is_pid(worker) ->
+        receive_listing_workers([worker | acc])
+    after
+      20 -> Enum.reverse(acc)
+    end
   end
 
   defp assert_reaped_listing_worker do
