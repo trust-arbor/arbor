@@ -8,6 +8,8 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
   alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.TrustedBuildToolchainAuthority
 
+  @go_timeout_ms 5_000
+
   @spec run(map()) :: {:ok, map()} | {:error, term()}
   def run(session) when is_map(session) do
     caller = self()
@@ -17,13 +19,22 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
       spawn(fn ->
         result =
           try do
-            run_monitored(session)
+            await_go_and_run(session)
           catch
             kind, reason -> {:error, {:trusted_build_phase_exception, {kind, reason}}}
           end
 
-        _ = Lease.commit_phase_result(session.lease_pid, result)
-        send(caller, {:"$arbor_trusted_build_phase", reply_ref, result})
+        owner_result =
+          try do
+            case Lease.commit_phase_result(session.lease_pid, result) do
+              :ok -> result
+              {:error, reason} -> {:error, reason}
+            end
+          catch
+            _kind, _reason -> {:error, :invalid_lease}
+          end
+
+        send(caller, {:"$arbor_trusted_build_phase", reply_ref, owner_result})
       end)
 
     case Lease.attach_phase(session.lease, phase_pid) do
@@ -38,6 +49,16 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
   end
 
   def run(_session), do: {:error, :invalid_trusted_build_session}
+
+  defp await_go_and_run(session) do
+    receive do
+      {:trusted_build_phase_go, ticket} when ticket == session.launch_ticket ->
+        run_monitored(session)
+    after
+      @go_timeout_ms ->
+        {:error, :trusted_build_launch_unauthorized}
+    end
+  end
 
   defp await_phase(phase_pid, reply_ref, cancel_id) do
     mon = Process.monitor(phase_pid)

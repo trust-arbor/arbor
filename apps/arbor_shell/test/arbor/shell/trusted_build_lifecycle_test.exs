@@ -1,3 +1,5 @@
+Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+
 defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   use ExUnit.Case, async: false
 
@@ -6,49 +8,46 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   alias Arbor.Shell
   alias Arbor.Shell.TrustedBuild
   alias Arbor.Shell.TrustedBuild.Lease
+  alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
   test "release proves workspace absence and cleanup fault is retained" do
-    {_lease, identity} = start_source!()
+    {_lease, identity, handle} = start_source!()
 
     assert {:ok, fail_lease, _view} =
-             TrustedBuild.acquire(
-               request_for(identity),
-               :force_cleanup_failure
-             )
+             TrustedBuild.acquire(request_for(identity), :force_cleanup_failure)
 
     assert {:error, {:cleanup_retained, :forced_cleanup_failure, evidence}} =
              Shell.release_trusted_build_lease(fail_lease)
 
     assert is_binary(evidence.path)
     assert is_integer(evidence.device)
+    Helpers.stop_retained_worker(fail_lease.worker)
 
-    {_lease2, identity2} = start_source!()
-
-    {:ok, ok_lease, _view} =
-      TrustedBuild.acquire(request_for(identity2), :omit_hex_seed)
-
+    {_lease2, identity2, handle2} = start_source!()
+    {:ok, ok_lease, _view} = TrustedBuild.acquire(request_for(identity2), :omit_hex_seed)
     assert :ok = Shell.release_trusted_build_lease(ok_lease)
+    assert {:error, :invalid_lease} = Shell.release_trusted_build_lease(ok_lease)
     _ = Shell.remove_owned_tree(identity)
     _ = Shell.remove_owned_tree(identity2)
+    assert :ok = Helpers.rm_fixture!(handle)
+    assert :ok = Helpers.rm_fixture!(handle2)
   end
 
   test "identity capture failure is not build success" do
-    {_lease, identity} = start_source!()
+    {_lease, identity, handle} = start_source!()
 
     assert {:error, :root_identity_capture_failed} =
-             TrustedBuild.acquire(
-               request_for(identity),
-               :force_identity_capture_failure
-             )
+             TrustedBuild.acquire(request_for(identity), :force_identity_capture_failure)
 
     _ = Shell.remove_owned_tree(identity)
+    assert :ok = Helpers.rm_fixture!(handle)
   end
 
   test "rebound source cannot be acquired twice" do
     if @darwin? do
-      {_unused, identity} = start_source!()
+      {_unused, identity, handle} = start_source!()
       request = request_for(identity)
       {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
 
@@ -57,31 +56,35 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
       _ = Shell.release_trusted_build_lease(lease)
       _ = Shell.remove_owned_tree(identity)
+      assert :ok = Helpers.rm_fixture!(handle)
     end
   end
 
   test "successful compile exhausts before reply" do
     if @darwin? do
-      {lease, identity} = acquire_source!()
+      {lease, identity, handle} = acquire_source!()
 
       try do
         assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
         assert deps.exit_code == 0
+        assert deps.timed_out == false
         assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
         assert result.exit_code == 0
+        assert result.timed_out == false
         refute trusted_build_running?()
         {:ok, view} = Lease.view(lease)
         assert view["completed_phases"] == ["deps_get", "compile"]
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
 
   test "nonzero mix result locks the lease" do
     if @darwin? do
-      {lease, identity} = acquire_source!(:broken)
+      {lease, identity, handle} = acquire_source!(:broken)
 
       try do
         assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
@@ -92,41 +95,47 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
 
   test "timeout and overflow lock and exhaust" do
     if @darwin? do
-      {timeout_lease, timeout_id} = acquire_source!(:ok, :force_phase_timeout)
+      {timeout_lease, timeout_id, timeout_handle} = acquire_source!(:ok, :force_phase_timeout)
 
       try do
         assert {:ok, result} = Shell.execute_trusted_build(timeout_lease, "compile")
-        assert result.timed_out or result.killed
+        assert result.timed_out == true or result.killed == true
         refute trusted_build_running?()
         {:ok, view} = Lease.view(timeout_lease)
         assert view["locked"] == true
       after
         _ = Shell.release_trusted_build_lease(timeout_lease)
         _ = Shell.remove_owned_tree(timeout_id)
+        assert :ok = Helpers.rm_fixture!(timeout_handle)
       end
 
-      {overflow_lease, overflow_id} = acquire_source!(:ok, :force_output_overflow)
+      {overflow_lease, overflow_id, overflow_handle} =
+        acquire_source!(:ok, :force_output_overflow)
 
       try do
         assert {:ok, result} = Shell.execute_trusted_build(overflow_lease, "compile")
-        assert result.output_limit_exceeded or result.killed or result.exit_code != 0
+        assert result.output_limit_exceeded == true or result.killed == true or
+                 result.exit_code != 0
+
         refute trusted_build_running?()
       after
         _ = Shell.release_trusted_build_lease(overflow_lease)
         _ = Shell.remove_owned_tree(overflow_id)
+        assert :ok = Helpers.rm_fixture!(overflow_handle)
       end
     end
   end
 
   test "explicit cancellation reaches the port owner" do
     if @darwin? do
-      {lease, identity} = acquire_source!()
+      {lease, identity, handle} = acquire_source!()
 
       try do
         helper =
@@ -139,25 +148,27 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
             state = :sys.get_state(lease.worker)
 
             if is_reference(state.cancel_id) do
-              send(self_owner(lease), {:cancel_shell_execution, state.cancel_id})
+              send(state.port_owner_pid, {:cancel_shell_execution, state.cancel_id})
             end
           end)
 
         _ = helper
         result = Shell.execute_trusted_build(lease, "compile")
         assert match?({:ok, %{killed: true}}, result) or match?({:ok, %{cancelled: true}}, result) or
-                 match?({:ok, %{exit_code: 137}}, result) or match?({:error, _}, result)
+                 match?({:ok, %{exit_code: 137}}, result)
+
         refute trusted_build_running?()
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
 
   test "phase crash locks without reporting success" do
     if @darwin? do
-      {lease, identity} = acquire_source!(:ok, :crash_phase)
+      {lease, identity, handle} = acquire_source!(:ok, :crash_phase)
 
       try do
         assert {:error, _reason} = Shell.execute_trusted_build(lease, "compile")
@@ -167,13 +178,14 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
 
   test "setup failure locks and does not leave a launcher" do
     if @darwin? do
-      {lease, identity, source} = acquire_source_path!()
+      {lease, identity, source, handle} = acquire_source_path!()
 
       try do
         File.write!(Path.join(source, "bin/mix"), "#!/bin/sh\necho forged\n")
@@ -185,6 +197,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
@@ -195,23 +208,53 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
       owner =
         spawn(fn ->
-          {lease, identity} = acquire_source!()
-          send(parent, {:ready, lease.worker, identity})
+          {lease, identity, handle} = acquire_source!()
+          workspace = :sys.get_state(lease.worker).roots.parent.path
+          send(parent, {:ready, lease.worker, identity, handle, workspace})
           _ = Shell.execute_trusted_build(lease, "compile")
         end)
 
-      assert_receive {:ready, worker, identity}, 5_000
+      assert_receive {:ready, worker, identity, handle, workspace}, 5_000
       wait_until(fn -> Process.alive?(worker) end)
       Process.exit(owner, :kill)
-      wait_until(fn -> not Process.alive?(worker) or not Process.alive?(owner) end)
+      wait_until(fn -> not Process.alive?(owner) end)
       refute trusted_build_running?()
+
+      wait_until(fn ->
+        cond do
+          not Process.alive?(worker) ->
+            not File.exists?(workspace)
+
+          true ->
+            state = :sys.get_state(worker)
+            state.cleanup_dormant == true or state.released == true or
+              (state.workspace_cleaned == true and state.source_unbound == true)
+        end
+      end)
+
+      if Process.alive?(worker) do
+        state = :sys.get_state(worker)
+
+        if state.workspace_cleaned do
+          refute File.exists?(workspace)
+        else
+          assert state.cleanup_dormant == true
+          assert File.exists?(workspace)
+        end
+
+        Helpers.stop_retained_worker(worker)
+      else
+        refute File.exists?(workspace)
+      end
+
       _ = Shell.remove_owned_tree(identity)
+      assert :ok = Helpers.rm_fixture!(handle)
     end
   end
 
   test "descendants and double-fork are exhausted before reply" do
     if @darwin? do
-      {lease, identity} = acquire_source!(:fork)
+      {lease, identity, handle} = acquire_source!(:fork)
 
       try do
         result = Shell.execute_trusted_build(lease, "compile")
@@ -221,6 +264,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
@@ -228,6 +272,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   defp start_source!(kind \\ :ok) do
     parent = Path.join(System.tmp_dir!(), "arbor-tb-src-#{System.unique_integer([:positive])}")
     {:ok, identity} = Shell.create_private_owned_tree(parent)
+    handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
     File.mkdir_p!(Path.join([source, "bin"]))
     File.mkdir_p!(Path.join([source, "lib"]))
@@ -235,19 +280,19 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), source_module(kind))
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
-    {nil, identity}
+    {nil, identity, handle}
   end
 
   defp acquire_source!(kind \\ :ok, fault \\ :omit_hex_seed) do
-    {_unused, identity} = start_source!(kind)
+    {_unused, identity, handle} = start_source!(kind)
     {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), fault)
-    {lease, identity}
+    {lease, identity, handle}
   end
 
   defp acquire_source_path! do
-    {_unused, identity} = start_source!()
+    {_unused, identity, handle} = start_source!()
     {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), :omit_hex_seed)
-    {lease, identity, Path.join(identity.path, "source")}
+    {lease, identity, Path.join(identity.path, "source"), handle}
   end
 
   defp mix_project(:broken) do
@@ -337,6 +382,4 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       end
     end
   end
-
-  defp self_owner(%Lease.Handle{owner: owner}), do: owner
 end

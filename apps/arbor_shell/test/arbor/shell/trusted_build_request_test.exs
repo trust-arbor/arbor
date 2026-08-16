@@ -75,7 +75,11 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
     }
 
     assert {:error, reason} = Shell.acquire_trusted_build_lease(request)
-    assert reason in [:owned_tree_not_registered, :trusted_build_unavailable]
+
+    case :os.type() do
+      {:unix, :darwin} -> assert reason == :owned_tree_not_registered
+      _other -> assert reason == :trusted_build_unavailable
+    end
   end
 
   test "plan admits only the three phases in order" do

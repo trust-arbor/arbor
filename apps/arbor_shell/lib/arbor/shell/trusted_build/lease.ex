@@ -16,11 +16,15 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   alias Arbor.Shell.Executor
   alias Arbor.Shell.OwnedTree
   alias Arbor.Shell.OwnedTreeRegistry
+  alias Arbor.Shell.TrustedBuild.FallbackOwner
   alias Arbor.Shell.TrustedBuild.Inventory
   alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.TrustedBuildToolchainAuthority
 
   @fallback_kill_grace_ms 2_000
+  @fallback_timeout_ms 3_000
+  @cleanup_retry_ms 1_000
+  @max_cleanup_attempts 8
 
   @supervisor Arbor.Shell.TrustedBuild.LeaseSupervisor
   @reserved_ops [
@@ -67,8 +71,6 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     %Handle{token: token, worker: worker, owner: owner}
   end
 
-  # -- Owner-scoped API (Handle + token authorized) ---------------------------
-
   @spec view(Handle.t()) :: {:ok, map()} | {:error, term()}
   def view(%Handle{} = lease), do: call(lease, :view)
 
@@ -105,9 +107,6 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     :ok
   end
 
-  # -- Phase-scoped API (process-identity authorized: caller must be the -----
-  # -- registered phase_pid; no Handle token available at this layer) --------
-
   @spec checkout_launch(pid(), reference()) :: {:ok, map()} | {:error, term()}
   def checkout_launch(lease_pid, launch_ticket)
       when is_pid(lease_pid) and is_reference(launch_ticket) do
@@ -130,8 +129,13 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     phase_call(lease_pid, {:commit_phase_result, result})
   end
 
-  # -- Port-owner-scoped API (process-identity authorized: caller must be ----
-  # -- the registered port_owner_pid) -----------------------------------------
+  @spec checkout_fallback(pid(), reference()) :: {:ok, map()} | {:error, term()}
+  def checkout_fallback(lease_pid, permit)
+      when is_pid(lease_pid) and is_reference(permit) do
+    port_owner_call(lease_pid, {:checkout_fallback, permit})
+  end
+
+  def checkout_fallback(_lease_pid, _permit), do: {:error, :trusted_build_launch_unauthorized}
 
   @spec record_group_id(pid(), pos_integer()) :: :ok | {:error, term()}
   def record_group_id(lease_pid, group_id)
@@ -159,6 +163,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
        token: Map.fetch!(attrs, :token),
        owner: owner,
        owner_ref: owner_ref,
+       owner_dead: false,
        registry_pid: registry_pid,
        registry_gen: registry_gen,
        registry_ref: registry_ref,
@@ -179,12 +184,27 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
        launch_ticket: nil,
        launch_permit: nil,
        launch_descriptor: nil,
+       launch_released: false,
        fallback_used: false,
+       fallback_pending: false,
+       fallback_pid: nil,
+       fallback_ref: nil,
+       fallback_permit: nil,
+       fallback_claimed: false,
+       fallback_descriptor: nil,
+       fallback_timer: nil,
        port_owner_pid: nil,
        port_owner_ref: nil,
        port_owner_group_id: nil,
        port_owner_registered: false,
        port_owner_exhausted: false,
+       release_from: nil,
+       workspace_cleaned: false,
+       source_unbound: false,
+       cleanup_attempts: 0,
+       cleanup_dormant: false,
+       cleanup_timer: nil,
+       cleanup_reason: nil,
        released: false
      }}
   end
@@ -202,6 +222,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     cond do
       caller != state.phase_pid or not is_pid(state.phase_pid) ->
         {:reply, {:error, :foreign_caller}, state}
+
+      state.launch_released != true ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
 
       state.launch_ticket != launch_ticket ->
         {:reply, {:error, :trusted_build_launch_unauthorized}, state}
@@ -233,6 +256,25 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
       true ->
         {:reply, {:ok, state.launch_descriptor}, %{state | launch_permit: :consumed}}
+    end
+  end
+
+  def handle_call({:checkout_fallback, permit}, {caller, _}, state) do
+    cond do
+      caller != state.fallback_pid or not is_pid(state.fallback_pid) ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      state.fallback_claimed == true ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      state.fallback_permit != permit or not is_reference(permit) ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      not is_map(state.fallback_descriptor) ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      true ->
+        {:reply, {:ok, state.fallback_descriptor}, %{state | fallback_claimed: true}}
     end
   end
 
@@ -284,6 +326,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       state.in_flight == nil ->
         {:reply, {:error, :trusted_build_phase_not_started}, state}
 
+      success_result?(result) and state.port_owner_exhausted != true ->
+        {:reply, {:error, :trusted_build_exhaustion_unproven}, lock_without_reset(state, result)}
+
       true ->
         {:reply, :ok, complete_phase(state, result)}
     end
@@ -292,8 +337,6 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   def handle_call(_request, _from, state) do
     {:reply, {:error, :invalid_trusted_build_lease_op}, state}
   end
-
-  # -- Owner-scoped dispatch (token already verified by handle_call above) ---
 
   defp dispatch_owner_request(:view, {caller, _}, state) do
     if caller == state.owner do
@@ -336,7 +379,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
       true ->
         ref = Process.monitor(phase_pid)
-        {:reply, :ok, %{state | phase_pid: phase_pid, phase_ref: ref}}
+        send(phase_pid, {:trusted_build_phase_go, state.launch_ticket})
+
+        next = %{state | phase_pid: phase_pid, phase_ref: ref, launch_released: true}
+        {:reply, :ok, next}
     end
   end
 
@@ -384,6 +430,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
              launch_ticket: nil,
              launch_permit: nil,
              launch_descriptor: nil,
+             launch_released: false,
              locked: true
          }}
     end
@@ -393,11 +440,22 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     {:reply, :ok, signal_cancel(state)}
   end
 
-  defp dispatch_owner_request(:release, {caller, _}, state) do
-    if caller == state.owner do
-      finalize_release(state)
-    else
-      {:reply, {:error, :foreign_release}, state}
+  defp dispatch_owner_request(:release, {caller, _} = from, state) do
+    cond do
+      caller != state.owner ->
+        {:reply, {:error, :foreign_release}, state}
+
+      is_tuple(state.release_from) ->
+        {:reply, {:error, :trusted_build_release_in_flight}, state}
+
+      true ->
+        state = signal_cancel(state)
+
+        if children_pending?(state) do
+          {:noreply, %{state | release_from: from}}
+        else
+          finish_release_call(state)
+        end
     end
   end
 
@@ -409,23 +467,54 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     cond do
       ref == state.owner_ref and pid == state.owner ->
-        state = signal_cancel(state)
-        state = await_phase_exit(state)
-        _ = cleanup_workspace(state)
-        {:stop, :normal, %{state | released: true, locked: true}}
+        state = signal_cancel(%{state | owner_dead: true})
+        maybe_settle(state)
 
       ref == state.phase_ref and pid == state.phase_pid ->
-        {:noreply, lock_after_phase_loss(state)}
+        maybe_settle(lock_after_phase_loss(state))
 
       ref == state.port_owner_ref and pid == state.port_owner_pid ->
-        {:noreply, handle_port_owner_loss(state)}
+        maybe_settle(handle_port_owner_loss(state))
+
+      ref == state.fallback_ref and pid == state.fallback_pid ->
+        maybe_settle(handle_fallback_down(state))
 
       ref == state.authority_ref or ref == state.registry_ref ->
-        state = signal_cancel(%{state | locked: true})
-        {:noreply, state}
+        {:noreply, signal_cancel(%{state | locked: true})}
 
       true ->
         {:noreply, state}
+    end
+  end
+
+  def handle_info({:trusted_build_fallback_done, pid, permit, result}, state) do
+    if pid == state.fallback_pid and matching_fallback_permit?(state, permit) do
+      maybe_settle(complete_fallback(state, result))
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:trusted_build_fallback_timeout, permit}, state) do
+    if matching_fallback_permit?(state, permit) and state.fallback_pending do
+      maybe_settle(fail_fallback(state))
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(:trusted_build_cleanup_retry, state) do
+    state = %{state | cleanup_timer: nil}
+
+    cond do
+      state.cleanup_dormant ->
+        {:noreply, state}
+
+      children_pending?(state) ->
+        {:noreply, state}
+
+      true ->
+        maybe_settle(state)
     end
   end
 
@@ -433,10 +522,13 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
   @impl true
   def terminate(_reason, state) do
-    if not state.released do
-      state = signal_cancel(state)
-      state = await_phase_exit(state)
-      _ = cleanup_workspace(state)
+    state = cancel_all_timers(state)
+
+    if not state.released and not children_pending?(state) do
+      _ = signal_cancel(state)
+      _ = advance_cleanup(state)
+    else
+      _ = signal_cancel(state)
     end
 
     :ok
@@ -474,7 +566,14 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
           launch_ticket: launch_ticket,
           launch_permit: nil,
           launch_descriptor: nil,
+          launch_released: false,
           fallback_used: false,
+          fallback_pending: false,
+          fallback_pid: nil,
+          fallback_ref: nil,
+          fallback_permit: nil,
+          fallback_claimed: false,
+          fallback_descriptor: nil,
           binding: binding
       }
 
@@ -488,9 +587,6 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     end
   end
 
-  # Built entirely from Lease's own trusted state; the caller (phase_pid) never
-  # supplies any of these fields. Timeout/argv/env are derived purely from the
-  # already-admitted `state.in_flight` phase atom via Plan, never from the caller.
   defp build_launch_descriptor(state) do
     identities = state.identities
     roots = state.roots
@@ -524,36 +620,36 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   defp phase_max_output_bytes(%{fault: :force_output_overflow}), do: 32
   defp phase_max_output_bytes(_state), do: Executor.default_max_output_bytes()
 
+  defp success_result?({:ok, %{exit_code: 0, timed_out: false, killed: false}}), do: true
+  defp success_result?(_result), do: false
+
   defp complete_phase(state, result) do
-    state = demonitor_phase(state)
-    state = demonitor_port_owner(state)
+    if success_result?(result) do
+      state = demonitor_phase(state)
+      state = reset_port_owner(demonitor_port_owner_ref(state))
+      completed = state.completed ++ [state.in_flight]
 
-    case result do
-      {:ok, %{exit_code: 0, timed_out: false, killed: false}} ->
-        completed = state.completed ++ [state.in_flight]
-
-        %{
-          state
-          | completed: completed,
-            in_flight: nil,
-            cancel_id: nil,
-            launch_ticket: nil,
-            launch_permit: nil,
-            launch_descriptor: nil,
-            done: completed == [:deps_get, :compile, :release]
-        }
-
-      _other ->
-        %{
-          state
-          | in_flight: nil,
-            cancel_id: nil,
-            launch_ticket: nil,
-            launch_permit: nil,
-            launch_descriptor: nil,
-            locked: true
-        }
+      clear_launch(%{
+        state
+        | completed: completed,
+          in_flight: nil,
+          cancel_id: nil,
+          done: completed == [:deps_get, :compile, :release]
+      })
+    else
+      lock_without_reset(state, result)
     end
+  end
+
+  defp lock_without_reset(state, _result) do
+    state = demonitor_phase(state)
+
+    clear_launch(%{
+      state
+      | in_flight: nil,
+        cancel_id: nil,
+        locked: true
+    })
   end
 
   defp lock_after_phase_loss(%{in_flight: nil} = state) do
@@ -561,24 +657,18 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   end
 
   defp lock_after_phase_loss(state) do
-    %{
+    state = signal_cancel(state)
+
+    clear_launch(%{
       state
       | locked: true,
         in_flight: nil,
         phase_pid: nil,
         phase_ref: nil,
-        cancel_id: nil,
-        launch_ticket: nil,
-        launch_permit: nil,
-        launch_descriptor: nil
-    }
+        cancel_id: nil
+    })
   end
 
-  # An unacked owner death: either the process genuinely crashed mid-flight
-  # (record_exhaustion never landed) or exhaustion already landed and this DOWN
-  # is just the ordinary follow-on exit. If a group_id was ever recorded, make
-  # one honest, idempotent last-resort native re-containment attempt before
-  # accepting exhaustion; otherwise no native process could ever have existed.
   defp handle_port_owner_loss(%{port_owner_exhausted: true} = state) do
     %{state | port_owner_pid: nil, port_owner_ref: nil}
   end
@@ -591,12 +681,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
          } = state
        )
        when is_integer(group_id) and group_id > 0 do
-    next = %{state | fallback_used: true, port_owner_pid: nil, port_owner_ref: nil}
-
-    case fallback_kill_once(group_id) do
-      :ok -> %{next | port_owner_exhausted: true}
-      {:error, _reason} -> %{next | locked: true}
-    end
+    spawn_fallback(%{state | port_owner_pid: nil, port_owner_ref: nil})
   end
 
   defp handle_port_owner_loss(%{port_owner_registered: true} = state) do
@@ -607,54 +692,104 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     %{state | port_owner_pid: nil, port_owner_ref: nil}
   end
 
-  defp fallback_kill_once(group_id) when is_integer(group_id) and group_id > 0 do
+  defp spawn_fallback(state) do
+    lease_pid = self()
+    state = %{state | fallback_used: true}
+    pid = spawn(fn -> FallbackOwner.run(lease_pid) end)
+    ref = Process.monitor(pid)
+    permit = make_ref()
+    descriptor = build_fallback_descriptor(state)
+    timer =
+      Process.send_after(self(), {:trusted_build_fallback_timeout, permit}, @fallback_timeout_ms)
+    send(pid, {:trusted_build_fallback_go, permit})
+
+    %{
+      state
+      | fallback_pending: true,
+        fallback_pid: pid,
+        fallback_ref: ref,
+        fallback_permit: permit,
+        fallback_claimed: false,
+        fallback_descriptor: descriptor,
+        fallback_timer: timer
+    }
+  end
+
+  defp build_fallback_descriptor(state) do
+    %{
+      launcher: pinned_launcher_path(),
+      group_id: state.port_owner_group_id,
+      grace_ms: @fallback_kill_grace_ms,
+      fault: state.fault
+    }
+  end
+
+  defp pinned_launcher_path do
     case :code.priv_dir(:arbor_shell) do
       path when is_list(path) ->
-        launcher = Path.join(List.to_string(path), "arbor_shell_launcher")
-
-        if File.regular?(launcher) do
-          await_fallback_kill_port(launcher, group_id)
-        else
-          {:error, :launcher_unavailable}
-        end
+        Path.join(List.to_string(path), "arbor_shell_launcher")
 
       _other ->
-        {:error, :launcher_unavailable}
+        ""
     end
   end
 
-  defp await_fallback_kill_port(launcher, group_id) do
-    port =
-      Port.open({:spawn_executable, to_charlist(launcher)}, [
-        :binary,
-        :exit_status,
-        args: [
-          ~c"kill",
-          Integer.to_charlist(group_id),
-          Integer.to_charlist(@fallback_kill_grace_ms)
-        ]
-      ])
-
-    receive do
-      {^port, {:exit_status, 0}} ->
-        :ok
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:kill_helper_failed, status}}
-    after
-      @fallback_kill_grace_ms + 500 ->
-        close_fallback_port(port)
-        {:error, :kill_helper_timeout}
-    end
-  catch
-    :error, reason -> {:error, {:kill_helper_failed, reason}}
+  defp matching_fallback_permit?(state, permit) do
+    is_reference(permit) and permit == state.fallback_permit
   end
 
-  defp close_fallback_port(port) do
-    Port.close(port)
-  catch
-    :error, _ -> :ok
+  defp complete_fallback(state, :ok) do
+    state = cancel_fallback_timer(state)
+
+    %{
+      state
+      | port_owner_exhausted: true,
+        fallback_pending: false,
+        fallback_pid: nil,
+        fallback_ref: demonitor_ref(state.fallback_ref),
+        fallback_permit: nil,
+        fallback_claimed: true,
+        fallback_descriptor: nil
+    }
   end
+
+  defp complete_fallback(state, _result), do: fail_fallback(state)
+
+  defp handle_fallback_down(%{fallback_pending: true} = state), do: fail_fallback(state)
+
+  defp handle_fallback_down(state) do
+    %{state | fallback_pid: nil, fallback_ref: nil}
+  end
+
+  defp fail_fallback(state) do
+    state = cancel_fallback_timer(state)
+    _ = demonitor_ref(state.fallback_ref)
+
+    %{
+      state
+      | locked: true,
+        fallback_pending: false,
+        fallback_pid: nil,
+        fallback_ref: nil,
+        fallback_permit: nil,
+        fallback_claimed: true,
+        fallback_descriptor: nil
+    }
+  end
+
+  defp cancel_fallback_timer(%{fallback_timer: timer} = state) when is_reference(timer) do
+    flush_timer(timer, {:trusted_build_fallback_timeout, :any})
+    %{state | fallback_timer: nil}
+  end
+
+  defp cancel_fallback_timer(state), do: state
+
+  defp demonitor_ref(ref) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    nil
+  end
+
+  defp demonitor_ref(_ref), do: nil
 
   defp signal_cancel(%{cancel_id: cancel_id} = state) do
     if is_reference(cancel_id) do
@@ -672,39 +807,257 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     state
   end
 
-  # Unbounded retry: waits for the phase process and (if one was ever
-  # registered) the actual port-owner process to be positively confirmed gone
-  # before returning, re-delivering cancel on each tick instead of ever forcing
-  # a kill or giving up. A raw $gen_call arriving in this window (a phase/owner
-  # process that has not yet observed cancellation trying to reach this same
-  # lease) is rejected immediately rather than left to block its sender
-  # indefinitely -- the sender is expected to fail closed and still exit,
-  # which is exactly what unblocks this loop.
-  defp await_phase_exit(state) do
-    if phase_still_pending?(state) or port_owner_still_pending?(state) do
-      receive do
-        {:DOWN, ref, :process, pid, _reason}
-        when ref == state.phase_ref and pid == state.phase_pid ->
-          await_phase_exit(demonitor_phase(state))
+  defp children_pending?(state) do
+    is_pid(state.phase_pid) or is_pid(state.port_owner_pid) or state.fallback_pending == true
+  end
 
-        {:DOWN, ref, :process, pid, _reason}
-        when ref == state.port_owner_ref and pid == state.port_owner_pid ->
-          await_phase_exit(handle_port_owner_loss(state))
+  defp maybe_settle(state) do
+    cond do
+      children_pending?(state) ->
+        {:noreply, state}
 
-        {:"$gen_call", from, _request} ->
-          GenServer.reply(from, {:error, :trusted_build_lease_terminating})
-          await_phase_exit(state)
-      after
-        5_000 ->
-          await_phase_exit(signal_cancel(state))
-      end
-    else
-      state
+      is_tuple(state.release_from) ->
+        settle_release(state)
+
+      state.owner_dead ->
+        settle_owner_death(state)
+
+      true ->
+        {:noreply, maybe_schedule_retry(state)}
     end
   end
 
-  defp phase_still_pending?(%{phase_pid: pid}), do: is_pid(pid)
-  defp port_owner_still_pending?(%{port_owner_pid: pid}), do: is_pid(pid)
+  defp finish_release_call(state) do
+    {state, result} = advance_cleanup(state)
+
+    case result do
+      :ok ->
+        {:stop, :normal, :ok, mark_released(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, maybe_schedule_retry(%{state | locked: true, released: false})}
+    end
+  end
+
+  defp settle_release(state) do
+    from = state.release_from
+    {state, result} = advance_cleanup(%{state | release_from: nil})
+
+    case result do
+      :ok ->
+        GenServer.reply(from, :ok)
+        {:stop, :normal, mark_released(state)}
+
+      {:error, reason} ->
+        GenServer.reply(from, {:error, reason})
+        {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+    end
+  end
+
+  defp settle_owner_death(state) do
+    {state, result} = advance_cleanup(state)
+
+    case result do
+      :ok ->
+        {:stop, :normal, mark_released(state)}
+
+      {:error, _reason} ->
+        {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+    end
+  end
+
+  defp maybe_schedule_retry(state) do
+    cond do
+      state.workspace_cleaned and state.source_unbound ->
+        state
+
+      state.cleanup_dormant ->
+        state
+
+      is_reference(state.cleanup_timer) ->
+        state
+
+      true ->
+        attempts = state.cleanup_attempts + 1
+
+        if attempts >= @max_cleanup_attempts do
+          %{state | cleanup_attempts: attempts, cleanup_dormant: true, locked: true}
+        else
+          timer = Process.send_after(self(), :trusted_build_cleanup_retry, @cleanup_retry_ms)
+          %{state | cleanup_attempts: attempts, cleanup_timer: timer, locked: true}
+        end
+    end
+  end
+
+  defp advance_cleanup(state) do
+    state =
+      state
+      |> maybe_clean_workspace()
+      |> maybe_unbind_source()
+
+    if state.workspace_cleaned and state.source_unbound do
+      {state, :ok}
+    else
+      {state,
+       {:error,
+        {:cleanup_retained, state.cleanup_reason || :incomplete, cleanup_evidence(state)}}}
+    end
+  end
+
+  defp maybe_clean_workspace(%{workspace_cleaned: true} = state), do: state
+
+  defp maybe_clean_workspace(%{fault: :force_cleanup_failure} = state) do
+    %{state | cleanup_reason: :forced_cleanup_failure, locked: true}
+  end
+
+  defp maybe_clean_workspace(
+         %{port_owner_registered: true, port_owner_exhausted: exhausted} = state
+       )
+       when exhausted != true do
+    %{state | cleanup_reason: :exhaustion_unproven, locked: true}
+  end
+
+  defp maybe_clean_workspace(state) do
+    parent = state.roots.parent
+    identity = Map.take(parent, [:path, :type, :device, :minor_device, :inode])
+
+    case OwnedTree.remove(identity) do
+      :ok ->
+        _ = OwnedTreeRegistry.delete(identity)
+        %{state | workspace_cleaned: true, cleanup_reason: nil}
+
+      {:error, reason} ->
+        %{state | cleanup_reason: reason, locked: true}
+    end
+  end
+
+  defp maybe_unbind_source(%{source_unbound: true} = state), do: state
+  defp maybe_unbind_source(%{workspace_cleaned: false} = state), do: state
+
+  defp maybe_unbind_source(state) do
+    source = state.identities.source_owned
+
+    case OwnedTreeRegistry.fetch(source) do
+      {:ok, :unbound, gen} when gen == state.registry_gen ->
+        %{state | source_unbound: true, cleanup_reason: nil}
+
+      {:ok, :trusted_build_source, gen} when gen == state.registry_gen ->
+        cas_unbind_source(state, source)
+
+      {:ok, _purpose, _gen} ->
+        %{state | cleanup_reason: :owned_tree_purpose_mismatch, locked: true}
+
+      {:error, :owned_tree_not_registered} ->
+        prove_source_absent(state, source)
+
+      {:error, reason} ->
+        %{state | cleanup_reason: reason, locked: true}
+    end
+  end
+
+  defp cas_unbind_source(state, source) do
+    case OwnedTreeRegistry.cas(source, :trusted_build_source, :unbound) do
+      :ok ->
+        %{state | source_unbound: true, cleanup_reason: nil}
+
+      {:error, :owned_tree_purpose_mismatch} ->
+        case OwnedTreeRegistry.fetch(source) do
+          {:ok, :unbound, gen} when gen == state.registry_gen ->
+            %{state | source_unbound: true, cleanup_reason: nil}
+
+          {:error, reason} ->
+            %{state | cleanup_reason: reason, locked: true}
+
+          _other ->
+            %{state | cleanup_reason: :owned_tree_purpose_mismatch, locked: true}
+        end
+
+      {:error, reason} ->
+        %{state | cleanup_reason: reason, locked: true}
+    end
+  end
+
+  defp prove_source_absent(state, source) do
+    case File.lstat(source.path, time: :posix) do
+      {:error, :enoent} ->
+        %{state | source_unbound: true, cleanup_reason: nil}
+
+      {:ok, %File.Stat{type: :directory}} ->
+        %{state | cleanup_reason: :owned_tree_not_registered, locked: true}
+
+      {:ok, %File.Stat{}} ->
+        %{state | cleanup_reason: :owned_tree_not_registered, locked: true}
+
+      {:error, reason} ->
+        %{state | cleanup_reason: reason, locked: true}
+    end
+  end
+
+  defp mark_released(state) do
+    cancel_all_timers(%{state | released: true})
+  end
+
+  defp cancel_all_timers(state) do
+    state
+    |> cancel_fallback_timer()
+    |> cancel_cleanup_timer()
+  end
+
+  defp cancel_cleanup_timer(%{cleanup_timer: timer} = state) when is_reference(timer) do
+    flush_timer(timer, :trusted_build_cleanup_retry)
+    %{state | cleanup_timer: nil}
+  end
+
+  defp cancel_cleanup_timer(state), do: state
+
+  defp flush_timer(timer, :trusted_build_cleanup_retry) do
+    case Process.cancel_timer(timer) do
+      false ->
+        receive do
+          :trusted_build_cleanup_retry -> :ok
+        after
+          0 -> :ok
+        end
+
+      _ms ->
+        :ok
+    end
+  end
+
+  defp flush_timer(timer, {:trusted_build_fallback_timeout, _}) do
+    case Process.cancel_timer(timer) do
+      false ->
+        receive do
+          {:trusted_build_fallback_timeout, _permit} -> :ok
+        after
+          0 -> :ok
+        end
+
+      _ms ->
+        :ok
+    end
+  end
+
+  defp cleanup_evidence(state) do
+    parent = state.roots.parent
+
+    %{
+      path: parent.path,
+      device: parent.device,
+      minor_device: parent.minor_device,
+      inode: parent.inode
+    }
+  end
+
+  defp clear_launch(state) do
+    %{
+      state
+      | launch_ticket: nil,
+        launch_permit: nil,
+        launch_descriptor: nil,
+        launch_released: false
+    }
+  end
 
   defp demonitor_phase(%{phase_ref: ref} = state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
@@ -713,12 +1066,12 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
   defp demonitor_phase(state), do: %{state | phase_pid: nil, phase_ref: nil}
 
-  defp demonitor_port_owner(%{port_owner_ref: ref} = state) when is_reference(ref) do
+  defp demonitor_port_owner_ref(%{port_owner_ref: ref} = state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
-    reset_port_owner(state)
+    %{state | port_owner_ref: nil, port_owner_pid: nil}
   end
 
-  defp demonitor_port_owner(state), do: reset_port_owner(state)
+  defp demonitor_port_owner_ref(state), do: %{state | port_owner_pid: nil, port_owner_ref: nil}
 
   defp reset_port_owner(state) do
     %{
@@ -728,77 +1081,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         port_owner_group_id: nil,
         port_owner_registered: false,
         port_owner_exhausted: false,
-        fallback_used: false
+        fallback_used: false,
+        fallback_pending: false,
+        fallback_claimed: false
     }
-  end
-
-  defp finalize_release(state) do
-    state = signal_cancel(state)
-    state = await_phase_exit(state)
-
-    case cleanup_workspace(state) do
-      :ok ->
-        {:stop, :normal, :ok, %{state | released: true}}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, %{state | released: false, locked: true}}
-    end
-  end
-
-  # A port owner was registered for the current cycle but exhaustion was never
-  # proven (no ack, and the fallback re-containment attempt -- if one ran --
-  # failed too): retain the workspace identity, never touch the filesystem,
-  # and never report success.
-  defp cleanup_workspace(%{port_owner_registered: true, port_owner_exhausted: exhausted} = state)
-       when exhausted != true do
-    parent = state.roots.parent
-
-    {:error,
-     {:cleanup_retained, :exhaustion_unproven,
-      %{
-        path: parent.path,
-        device: parent.device,
-        minor_device: parent.minor_device,
-        inode: parent.inode
-      }}}
-  end
-
-  defp cleanup_workspace(%{fault: :force_cleanup_failure} = state) do
-    parent = state.roots.parent
-
-    {:error,
-     {:cleanup_retained, :forced_cleanup_failure,
-      %{
-        path: parent.path,
-        device: parent.device,
-        minor_device: parent.minor_device,
-        inode: parent.inode
-      }}}
-  end
-
-  defp cleanup_workspace(state) do
-    parent = state.roots.parent
-    identity = Map.take(parent, [:path, :type, :device, :minor_device, :inode])
-
-    case OwnedTree.remove(identity) do
-      :ok ->
-        case OwnedTreeRegistry.delete(identity) do
-          :ok -> :ok
-          {:error, :owned_tree_not_registered} -> :ok
-          {:error, :owned_tree_registry_unavailable} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error,
-         {:cleanup_retained, reason,
-          %{
-            path: identity.path,
-            device: identity.device,
-            minor_device: identity.minor_device,
-            inode: identity.inode
-          }}}
-    end
   end
 
   defp render_view(state) do

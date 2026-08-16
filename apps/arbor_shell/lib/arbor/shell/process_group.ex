@@ -213,11 +213,8 @@ defmodule Arbor.Shell.ProcessGroup do
     cancel_id = launch.cancel_id
 
     case open_trusted_build(launch, start_time, timeout, max_output_bytes) do
-      {:error, :timeout_during_setup} = error ->
-        error
-
       {:error, reason} ->
-        _ = maybe_record_setup_exhaustion(lease_pid, reason)
+        _ = Lease.record_exhaustion(lease_pid, setup_exhaustion_reason(reason))
         {:error, reason}
 
       {:ok, handle} ->
@@ -248,12 +245,9 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  defp maybe_record_setup_exhaustion(_lease_pid, :timeout_during_setup), do: :ok
-  defp maybe_record_setup_exhaustion(_lease_pid, :cancelled_during_setup), do: :ok
-
-  defp maybe_record_setup_exhaustion(lease_pid, _reason) do
-    Lease.record_exhaustion(lease_pid, :setup_failed)
-  end
+  defp setup_exhaustion_reason(:timeout_during_setup), do: :not_started
+  defp setup_exhaustion_reason(:cancelled_during_setup), do: :not_started
+  defp setup_exhaustion_reason(_reason), do: :setup_failed
 
   defp record_trusted_build_exhaustion(lease_pid, {:ok, %{reason: reason}}) do
     Lease.record_exhaustion(lease_pid, reason)

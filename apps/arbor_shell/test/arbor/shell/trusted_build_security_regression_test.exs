@@ -1,3 +1,5 @@
+Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+
 defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   use ExUnit.Case, async: false
 
@@ -6,6 +8,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
 
   alias Arbor.Shell
   alias Arbor.Shell.TrustedBuild
+  alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   test "security regression: the test-only lease facade is not exposed on Arbor.Shell" do
     refute function_exported?(Shell, :acquire_trusted_build_lease_for_test, 2)
@@ -37,7 +40,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
            )
 
     if match?({:unix, :darwin}, :os.type()) do
-      {lease, source_identity} = start_fixture_lease!()
+      {lease, source_identity, handle} = start_fixture_lease!()
 
       try do
         watcher =
@@ -62,6 +65,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(source_identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end
     end
   end
@@ -98,8 +102,9 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
       }
     }
 
+    handle = Helpers.handle_for_owned!(identity)
     {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
-    {lease, identity}
+    {lease, identity, handle}
   end
 
   defp mix_project do

@@ -1,3 +1,5 @@
+Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+
 defmodule Arbor.Shell.TrustedBuildDarwinTest do
   use ExUnit.Case, async: false
 
@@ -7,16 +9,18 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
   alias Arbor.Shell.TrustedBuild
   alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Shell.TrustedBuild.Plan
+  alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
   setup do
     if @darwin? do
-      {lease, identity, source} = start_fixture!()
+      {lease, identity, source, handle} = start_fixture!()
 
       on_exit(fn ->
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
       end)
 
       {:ok, lease: lease, identity: identity, source: source}
@@ -45,6 +49,12 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       refute "USER" in keys
       refute "SHELL" in keys
       assert File.exists?(Path.join(state.roots.build.path, "PRIVATE_WRITE"))
+      net_file = Path.join(state.roots.build.path, "net.txt")
+      assert File.exists?(net_file)
+      net = File.read!(net_file)
+      refute net =~ "{:ok,"
+      assert net =~ ":timeout" or net =~ ":ehostunreach" or net =~ ":enetunreach" or
+               net =~ ":econnrefused" or net =~ "error"
     end
   end
 
@@ -105,7 +115,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       assert {:ok, _deps} = Shell.execute_trusted_build(lease, "deps_get")
       assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
       assert compile.exit_code == 0
-      assert Task.await(task, 1_000) in [true, false]
+      assert Task.await(task, 15_000) == true
     end
   end
 
@@ -129,7 +139,8 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
           File.write!(Path.join(build, "PRIVATE_WRITE"), "ok")
         end
         _ = File.write(Path.join(File.cwd!(), "SHOULD_NOT_WRITE"), "x")
-        _ = :gen_tcp.connect({1, 1, 1, 1}, 80, [], 200)
+        net = inspect(:gen_tcp.connect({1, 1, 1, 1}, 80, [], 200))
+        if is_binary(build), do: File.write!(Path.join(build, "net.txt"), net)
         [
           app: :trusted_build_fixture,
           version: "0.1.0",
@@ -151,11 +162,12 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
 
+    handle = Helpers.handle_for_owned!(identity)
     request = request_for(identity)
     {:ok, lease, view} = TrustedBuild.acquire(request, :omit_hex_seed)
     assert view["schema"] == "arbor.shell.trusted_build.lease.v1"
     refute Map.has_key?(view, "path")
-    {lease, identity, source}
+    {lease, identity, source, handle}
   end
 
   defp request_for(identity) do

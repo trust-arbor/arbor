@@ -289,6 +289,15 @@ The direct launcher is not a substitute for descendant containment. A process gr
 be escaped by `setsid`, so spawn-capable cleanup requires an OS-owned unit or an
 equivalent proof of whole-unit exhaustion.
 
+Darwin trusted-build has one reviewed residual: the host has no `fexecve`, so the
+launcher verifies the already-opened Mix wrapper descriptor, re-opens that same
+wrapper path with `O_NOFOLLOW`, verifies the new descriptor against the same
+pinned identity, and only then `execve`s the wrapper under `sandbox-exec`. That
+reopen does not apply to Hex archive entries or writable workspace roots; those
+are hashed and checked through the `openat`/`O_NOFOLLOW` descriptor whose uid,
+mode, type, and nlink were just validated. The residual does not skip the closed
+environment, sandbox profile, or process-group exhaustion.
+
 Authoritative code: [`Arbor.Shell`](../../apps/arbor_shell/lib/arbor/shell.ex),
 [`Executor`](../../apps/arbor_shell/lib/arbor/shell/executor.ex), and
 [`spawn-capable shell containment decision`](../../.arbor/decisions/2026-07-13-spawn-capable-shell-containment.md).

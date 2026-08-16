@@ -18,7 +18,8 @@ defmodule Arbor.Shell.TrustedBuild do
     :omit_hex_seed,
     :force_phase_timeout,
     :force_output_overflow,
-    :crash_phase
+    :crash_phase,
+    :force_kill_helper_failure
   ]
   @token_bytes 32
 
@@ -92,8 +93,20 @@ defmodule Arbor.Shell.TrustedBuild do
   end
 
   defp unbind_source(identity) do
-    _ = OwnedTreeRegistry.cas(identity, :trusted_build_source, :unbound)
-    :ok
+    case OwnedTreeRegistry.cas(identity, :trusted_build_source, :unbound) do
+      :ok ->
+        :ok
+
+      {:error, :owned_tree_purpose_mismatch} ->
+        case OwnedTreeRegistry.fetch(identity) do
+          {:ok, :unbound, _gen} -> :ok
+          {:error, reason} -> {:error, reason}
+          _other -> {:error, :owned_tree_purpose_mismatch}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp materialize(source_identity, source_owned, binding, authority, registry, fault) do
@@ -111,8 +124,7 @@ defmodule Arbor.Shell.TrustedBuild do
         )
 
       {:error, reason} ->
-        unbind_source(source_identity)
-        {:error, reason}
+        propagate_unbind(unbind_source(source_identity), reason)
     end
   end
 
@@ -147,14 +159,22 @@ defmodule Arbor.Shell.TrustedBuild do
 
       {:error, reason} ->
         _ = cleanup_workspace(roots.parent)
-        unbind_source(source_identity)
-        {:error, reason}
+        propagate_unbind(unbind_source(source_identity), reason)
     end
   catch
     kind, reason ->
       _ = cleanup_workspace(roots.parent)
-      unbind_source(source_owned)
-      {:error, {:trusted_build_acquire_failed, {kind, reason}}}
+
+      propagate_unbind(
+        unbind_source(source_owned),
+        {:trusted_build_acquire_failed, {kind, reason}}
+      )
+  end
+
+  defp propagate_unbind(:ok, reason), do: {:error, reason}
+
+  defp propagate_unbind({:error, unbind_reason}, reason) do
+    {:error, {:trusted_build_source_unbind_failed, unbind_reason, reason}}
   end
 
   defp create_workspace(source_identity, binding, fault) do

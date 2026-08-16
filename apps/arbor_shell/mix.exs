@@ -58,12 +58,17 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
   @impl true
   def run(_args) do
     if Mix.Project.config()[:app] == :arbor_shell do
-      source = Path.join(__DIR__, "c_src/arbor_shell_launcher.c")
+      sources = [
+        Path.join(__DIR__, "c_src/arbor_shell_launcher.c"),
+        Path.join(__DIR__, "c_src/arbor_shell_archive_stat.c"),
+        Path.join(__DIR__, "c_src/arbor_shell_archive_stat.h")
+      ]
+
       target = Path.join([Mix.Project.app_path(), "priv", "arbor_shell_launcher"])
 
-      if Mix.Utils.stale?([source], [target]) do
+      if Mix.Utils.stale?(sources, [target]) do
         File.mkdir_p!(Path.dirname(target))
-        compile!(source, target)
+        compile!(sources, target)
         {:ok, []}
       else
         :noop
@@ -82,20 +87,20 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
     :ok
   end
 
-  defp compile!(source, target) do
+  defp compile!(sources, target) do
     compiler = System.find_executable("cc") || Mix.raise("C compiler not found")
 
-    args = [
-      "-std=c11",
-      "-O2",
-      "-Wall",
-      "-Wextra",
-      "-Werror",
-      "-D_POSIX_C_SOURCE=200809L",
-      source,
-      "-o",
-      target
-    ]
+    args =
+      [
+        "-std=c11",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-D_POSIX_C_SOURCE=200809L",
+        "-I",
+        Path.join(__DIR__, "c_src")
+      ] ++ Enum.filter(sources, &String.ends_with?(&1, ".c")) ++ ["-o", target]
 
     case System.cmd(compiler, args, stderr_to_stdout: true) do
       {output, 0} ->

@@ -33,6 +33,8 @@
 #include <sys/syscall.h>
 #endif
 
+#include "arbor_shell_archive_stat.h"
+
 extern char **environ;
 
 #define TAG_READY 1
@@ -549,6 +551,9 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
 }
 
 static void darwin_exec_trusted_build(const char *path, char **target_argv) {
+  /* path is the identity-pinned Mix wrapper only. sandbox-exec, closed env,
+   * and process-group exhaustion still apply. Archive/writable roots are not
+   * reopened here. */
   if (trusted_system_executable(DARWIN_SANDBOX_EXEC) != 0) _exit(126);
   trusted_build_replace_environ(&g_trusted_build_paths);
 
@@ -1080,6 +1085,11 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   if (flags >= 0) (void)fcntl(target_fd, F_SETFD, flags & ~FD_CLOEXEC);
   fexecve(target_fd, target_argv, environ);
 #elif defined(__APPLE__)
+  /* Darwin trusted-build / probe residual: no fexecve(2). Re-open the already
+   * pinned Mix wrapper path with O_NOFOLLOW, verify that fd against the same
+   * expected identity as target_fd, then execve(path). This does not apply to
+   * Hex archive entries or writable workspace roots; those stay descriptor-
+   * relative. Both fds must match the pinned digest before exec. */
   int check_fd = open(path, O_RDONLY | O_NOFOLLOW);
   if (check_fd < 0 || verify_identity(target_fd, expected, sha256) != 0 ||
       verify_identity(check_fd, expected, sha256) != 0) {
@@ -1676,6 +1686,11 @@ static int walk_digest_entry(int dirfd, const char *rel, const char *name, diges
     return -1;
   }
 
+  if (trusted_build_archive_entry_allowed(&st) != 0) {
+    close(child);
+    return -1;
+  }
+
   int result = -1;
   if (S_ISDIR(st.st_mode)) {
     if (digest_push_dir(rows, child_rel, st.st_mode) == 0) {
@@ -1683,7 +1698,7 @@ static int walk_digest_entry(int dirfd, const char *rel, const char *name, diges
     }
   } else if (S_ISREG(st.st_mode)) {
     char sha[65];
-    if (st.st_nlink == 1 && digest_fd(child, sha) == 0) {
+    if (digest_fd(child, sha) == 0) {
       result = digest_push_file(rows, child_rel, st.st_mode, sha, st.st_size);
     }
   }

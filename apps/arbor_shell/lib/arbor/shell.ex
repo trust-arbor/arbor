@@ -793,12 +793,29 @@ defmodule Arbor.Shell do
   @doc false
   @spec remove_owned_tree(map(), keyword()) :: :ok | {:error, term()}
   def remove_owned_tree(identity, opts) when is_list(opts) do
+    case OwnedTreeRegistry.fetch(identity) do
+      {:ok, purpose, _gen} when purpose in [:trusted_build_source, :trusted_build_workspace] ->
+        {:error, :owned_tree_purpose_mismatch}
+
+      {:ok, :unbound, _gen} ->
+        remove_unbound_owned_tree(identity, opts)
+
+      {:error, :owned_tree_not_registered} ->
+        absent_unregistered_owned_tree(identity)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def remove_owned_tree(_identity, _opts), do: {:error, :invalid_owned_tree_cleanup}
+
+  defp remove_unbound_owned_tree(identity, opts) do
     case Arbor.Shell.OwnedTree.remove(identity, opts) do
       :ok ->
         case OwnedTreeRegistry.delete(identity) do
           :ok -> :ok
           {:error, :owned_tree_not_registered} -> :ok
-          {:error, :owned_tree_registry_unavailable} -> :ok
           {:error, reason} -> {:error, reason}
         end
 
@@ -807,7 +824,15 @@ defmodule Arbor.Shell do
     end
   end
 
-  def remove_owned_tree(_identity, _opts), do: {:error, :invalid_owned_tree_cleanup}
+  defp absent_unregistered_owned_tree(%{path: path}) when is_binary(path) do
+    case File.lstat(path, time: :posix) do
+      {:error, :enoent} -> :ok
+      {:ok, %File.Stat{}} -> {:error, :owned_tree_not_registered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp absent_unregistered_owned_tree(_identity), do: {:error, :invalid_owned_tree_cleanup}
 
   @doc """
   Acquire a Shell-owned Darwin trusted-build lease.
