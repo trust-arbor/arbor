@@ -56,6 +56,26 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
              })
 
     assert {:error, :invalid_trusted_build_request} =
+             Request.admit(%{
+               "schema" => "arbor.shell.trusted_build.request.v1",
+               "source" => %{
+                 "schema" => "arbor.shell.trusted_build.source.v1",
+                 "identity" => identity
+               },
+               "env" => %{"PATH" => "/evil/bin"}
+             })
+
+    assert {:error, :invalid_trusted_build_request} =
+             Request.admit(%{
+               "schema" => "arbor.shell.trusted_build.request.v1",
+               "source" => %{
+                 "schema" => "arbor.shell.trusted_build.source.v1",
+                 "identity" => identity
+               },
+               "PATH" => "/evil/bin"
+             })
+
+    assert {:error, :invalid_trusted_build_request} =
              Shell.acquire_trusted_build_lease(%{
                "schema" => "arbor.shell.trusted_build.request.v1",
                "source" => %{
@@ -108,6 +128,38 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
     assert function_exported?(Shell, :execute_trusted_build, 2)
     assert function_exported?(Shell, :inventory_trusted_build, 1)
     assert function_exported?(Shell, :release_trusted_build_lease, 1)
+  end
+
+  test "closed env PATH is the fixed Darwin utility suffix and ignores caller input" do
+    roots = %{
+      home: %{path: "/tmp/h", "PATH" => "/evil/bin"},
+      tmp: %{path: "/tmp/t"},
+      hex: %{path: "/tmp/x"},
+      mix: %{path: "/tmp/m"},
+      archives: %{path: "/tmp/a"},
+      deps: %{path: "/tmp/d"},
+      build: %{path: "/tmp/b"},
+      cache: %{path: "/tmp/c"}
+    }
+
+    binding = %{
+      erlang_root: %{path: "/pinned/erlang", "PATH" => "/evil/bin"},
+      elixir_root: %{path: "/pinned/elixir"}
+    }
+
+    env = Plan.closed_env(roots, binding)
+    toolchain = "/pinned/erlang/bin:/pinned/elixir/bin"
+
+    expected_path =
+      case :os.type() do
+        {:unix, :darwin} -> toolchain <> ":/usr/bin:/bin"
+        _other -> toolchain
+      end
+
+    assert env["PATH"] == expected_path
+    assert Enum.sort(Map.keys(env)) == Enum.sort(Plan.env_keys())
+    refute env["PATH"] == System.get_env("PATH")
+    refute String.contains?(env["PATH"], "/evil/bin")
   end
 
   defp valid_identity do

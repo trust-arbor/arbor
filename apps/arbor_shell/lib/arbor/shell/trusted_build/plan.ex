@@ -24,6 +24,8 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
     HOME TMPDIR TMP HEX_HOME MIX_HOME MIX_ARCHIVES MIX_DEPS_PATH MIX_BUILD_PATH
     ELIXIR_MAKE_CACHE_DIR ERL_CRASH_DUMP PATH LANG LC_ALL
   )
+  # Locked to trusted_build_replace_environ() Darwin PATH suffix.
+  @darwin_utility_path "/usr/bin:/bin"
 
   @spec admit_phase(term()) :: {:ok, atom()} | {:error, :trusted_build_phase_rejected}
   def admit_phase(phase) do
@@ -94,9 +96,18 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
       "MIX_BUILD_PATH" => roots.build.path,
       "ELIXIR_MAKE_CACHE_DIR" => roots.cache.path,
       "ERL_CRASH_DUMP" => Path.join(tmp, "erl_crash.dump"),
-      "PATH" => Path.join(erlang, "bin") <> ":" <> Path.join(elixir, "bin"),
+      "PATH" => closed_path(erlang, elixir),
       "LANG" => "C",
       "LC_ALL" => "C"
     }
+  end
+
+  defp closed_path(erlang, elixir) do
+    toolchain = Path.join(erlang, "bin") <> ":" <> Path.join(elixir, "bin")
+
+    case :os.type() do
+      {:unix, :darwin} -> toolchain <> ":" <> @darwin_utility_path
+      _other -> toolchain
+    end
   end
 end

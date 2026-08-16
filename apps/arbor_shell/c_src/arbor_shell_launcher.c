@@ -526,7 +526,9 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
 
   if (snprintf(erlang_bin, sizeof(erlang_bin), "%s/bin", paths->erlang_root) <= 0) _exit(126);
   if (snprintf(elixir_bin, sizeof(elixir_bin), "%s/bin", paths->elixir_root) <= 0) _exit(126);
-  if (snprintf(path_value, sizeof(path_value), "%s:%s", erlang_bin, elixir_bin) <= 0) _exit(126);
+  /* Suffix locked to Plan.closed_env/2 Darwin policy. Not taken from environ. */
+  if (snprintf(path_value, sizeof(path_value), "%s:%s:/usr/bin:/bin", erlang_bin, elixir_bin) <= 0)
+    _exit(126);
   if (snprintf(crash, sizeof(crash), "%s/erl_crash.dump", paths->tmp) <= 0) _exit(126);
 
   trusted_build_clear_environ();
