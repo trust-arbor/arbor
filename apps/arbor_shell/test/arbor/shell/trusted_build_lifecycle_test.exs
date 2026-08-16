@@ -6,6 +6,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.OwnedTreeRegistry
   alias Arbor.Shell.TrustedBuild
   alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
@@ -23,7 +24,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
     assert is_binary(evidence.path)
     assert is_integer(evidence.device)
-    Helpers.stop_retained_worker(fail_lease.worker)
+    assert :ok = Helpers.stop_retained_worker(fail_lease.worker)
 
     {_lease2, identity2, handle2} = start_source!()
     {:ok, ok_lease, _view} = TrustedBuild.acquire(request_for(identity2), :omit_hex_seed)
@@ -43,6 +44,30 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
     _ = Shell.remove_owned_tree(identity)
     assert :ok = Helpers.rm_fixture!(handle)
+  end
+
+  test "acquire-path source-unbind failure is propagated" do
+    if @darwin? do
+      {_lease, identity, handle} = start_source!()
+
+      try do
+        result = TrustedBuild.acquire(request_for(identity), :force_source_unbind_failure)
+
+        assert {:error,
+                {:trusted_build_source_unbind_failed, :owned_tree_purpose_mismatch,
+                 :forced_source_unbind_failure}} = result
+
+        refute match?({:error, :forced_source_unbind_failure}, result)
+
+        assert {:ok, :trusted_build_workspace, _} = OwnedTreeRegistry.fetch(identity)
+        assert :ok = OwnedTreeRegistry.cas(identity, :trusted_build_workspace, :unbound)
+        assert :ok = Shell.remove_owned_tree(identity)
+      after
+        _ = OwnedTreeRegistry.cas(identity, :trusted_build_workspace, :unbound)
+        _ = Shell.remove_owned_tree(identity)
+        assert :ok = Helpers.rm_fixture!(handle)
+      end
+    end
   end
 
   test "rebound source cannot be acquired twice" do
@@ -216,35 +241,47 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
       assert_receive {:ready, worker, identity, handle, workspace}, 5_000
       wait_until(fn -> Process.alive?(worker) end)
+      state = :sys.get_state(worker)
+      workspace_path = state.roots.parent.path
+      assert workspace_path == workspace
+      registry_gen = state.registry_gen
+      worker_mon = Process.monitor(worker)
       Process.exit(owner, :kill)
       wait_until(fn -> not Process.alive?(owner) end)
       refute trusted_build_running?()
 
-      wait_until(fn ->
-        cond do
-          not Process.alive?(worker) ->
-            not File.exists?(workspace)
+      assert wait_until(
+               fn ->
+                 cond do
+                   not Process.alive?(worker) ->
+                     true
 
-          true ->
-            state = :sys.get_state(worker)
-            state.cleanup_dormant == true or state.released == true or
-              (state.workspace_cleaned == true and state.source_unbound == true)
-        end
-      end)
+                   true ->
+                     case safe_worker_state(worker) do
+                       {:ok, st} ->
+                         not (st.workspace_cleaned == true and st.source_unbound == true) and
+                           (st.cleanup_dormant == true or st.cleanup_reason != nil or
+                              is_reference(st.cleanup_timer)) and File.exists?(workspace_path)
 
-      if Process.alive?(worker) do
-        state = :sys.get_state(worker)
+                       :down ->
+                         true
+                     end
+                 end
+               end,
+               10_000
+             )
 
-        if state.workspace_cleaned do
-          refute File.exists?(workspace)
-        else
-          assert state.cleanup_dormant == true
-          assert File.exists?(workspace)
-        end
+      case Process.alive?(worker) && safe_worker_state(worker) do
+        {:ok, st} ->
+          refute st.workspace_cleaned == true and st.source_unbound == true
+          assert st.cleanup_dormant == true or st.cleanup_reason != nil
+          assert File.exists?(workspace_path)
+          assert :ok = Helpers.stop_retained_worker(worker)
 
-        Helpers.stop_retained_worker(worker)
-      else
-        refute File.exists?(workspace)
+        _other ->
+          assert_receive {:DOWN, ^worker_mon, :process, ^worker, _reason}, 1_000
+          assert {:error, :enoent} = File.lstat(workspace_path)
+          assert {:ok, :unbound, ^registry_gen} = OwnedTreeRegistry.fetch(identity)
       end
 
       _ = Shell.remove_owned_tree(identity)
@@ -363,6 +400,12 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         _other -> %{pid: "", command: line}
       end
     end)
+  end
+
+  defp safe_worker_state(worker) do
+    {:ok, :sys.get_state(worker)}
+  catch
+    :exit, _ -> :down
   end
 
   defp wait_until(fun, timeout \\ 5_000) do

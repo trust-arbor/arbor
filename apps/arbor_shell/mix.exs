@@ -55,20 +55,27 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
   use Mix.Task.Compiler
   @recursive true
 
+  def translation_units do
+    [
+      Path.join(__DIR__, "c_src/arbor_shell_launcher.c"),
+      Path.join(__DIR__, "c_src/arbor_shell_archive_stat.c")
+    ]
+  end
+
+  def header_dependencies do
+    [Path.join(__DIR__, "c_src/arbor_shell_archive_stat.h")]
+  end
+
+  def dependency_inputs, do: translation_units() ++ header_dependencies()
+
   @impl true
   def run(_args) do
     if Mix.Project.config()[:app] == :arbor_shell do
-      sources = [
-        Path.join(__DIR__, "c_src/arbor_shell_launcher.c"),
-        Path.join(__DIR__, "c_src/arbor_shell_archive_stat.c"),
-        Path.join(__DIR__, "c_src/arbor_shell_archive_stat.h")
-      ]
-
       target = Path.join([Mix.Project.app_path(), "priv", "arbor_shell_launcher"])
 
-      if Mix.Utils.stale?(sources, [target]) do
+      if Mix.Utils.stale?(dependency_inputs(), [target]) do
         File.mkdir_p!(Path.dirname(target))
-        compile!(sources, target)
+        compile!(translation_units(), target)
         {:ok, []}
       else
         :noop
@@ -87,7 +94,11 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
     :ok
   end
 
-  defp compile!(sources, target) do
+  defp compile!(translation_units, target) do
+    if Enum.any?(translation_units, &(not String.ends_with?(&1, ".c"))) do
+      Mix.raise("trusted-build launcher compile accepts only C translation units")
+    end
+
     compiler = System.find_executable("cc") || Mix.raise("C compiler not found")
 
     args =
@@ -100,7 +111,7 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
         "-D_POSIX_C_SOURCE=200809L",
         "-I",
         Path.join(__DIR__, "c_src")
-      ] ++ Enum.filter(sources, &String.ends_with?(&1, ".c")) ++ ["-o", target]
+      ] ++ translation_units ++ ["-o", target]
 
     case System.cmd(compiler, args, stderr_to_stdout: true) do
       {output, 0} ->

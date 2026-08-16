@@ -230,18 +230,48 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
       {lease, identity, handle} = acquire_fixture!()
 
       try do
-        occupied = {self(), make_ref()}
-        :sys.replace_state(lease.worker, fn state -> %{state | release_from: occupied} end)
+        assert self() == lease.owner
+        {:ok, _session} = Lease.begin_phase(lease, :deps_get, self())
+
+        phase =
+          spawn(fn ->
+            receive do
+              {:trusted_build_phase_go, _} -> :ok
+            end
+
+            receive do
+              :stop -> :ok
+            end
+          end)
+
+        assert :ok = Lease.attach_phase(lease, phase)
+
+        req_id = GenServer.send_request(lease.worker, {:owner_request, lease.token, :release})
+
+        assert wait_until(fn ->
+                 match?(
+                   {pid, _tag} when pid == self(),
+                   :sys.get_state(lease.worker).release_from
+                 )
+               end)
+
+        assert :timeout = GenServer.wait_response(req_id, 0)
 
         assert {:error, :trusted_build_release_in_flight} =
                  Shell.release_trusted_build_lease(lease)
 
+        assert :timeout = GenServer.wait_response(req_id, 0)
         state = :sys.get_state(lease.worker)
-        assert state.release_from == occupied
+        assert match?({pid, _tag} when pid == self(), state.release_from)
+
+        send(phase, :stop)
+        assert {:reply, reply} = GenServer.wait_response(req_id, 5_000)
+        assert reply == :ok or match?({:error, {:cleanup_retained, _, _}}, reply)
       after
-        :sys.replace_state(lease.worker, fn state -> %{state | release_from: nil} end)
-        _ = Shell.release_trusted_build_lease(lease)
-        Helpers.stop_retained_worker(lease.worker)
+        if Process.alive?(lease.worker) do
+          assert :ok = Helpers.stop_retained_worker(lease.worker)
+        end
+
         _ = Shell.remove_owned_tree(identity)
         assert :ok = Helpers.rm_fixture!(handle)
       end
@@ -285,7 +315,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
         assert view["locked"] == true
       after
         _ = Shell.release_trusted_build_lease(lease)
-        Helpers.stop_retained_worker(lease.worker)
+        assert :ok = Helpers.stop_retained_worker(lease.worker)
         assert :ok = Helpers.rm_fixture!(handle)
       end
     end
@@ -351,7 +381,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
         assert st2.fallback_used == true
       after
         _ = Shell.release_trusted_build_lease(lease)
-        Helpers.stop_retained_worker(lease.worker)
+        assert :ok = Helpers.stop_retained_worker(lease.worker)
         _ = Shell.remove_owned_tree(identity)
         assert :ok = Helpers.rm_fixture!(handle)
       end
@@ -393,7 +423,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
         assert {:error, {:cleanup_retained, :exhaustion_unproven, _evidence}} =
                  Shell.release_trusted_build_lease(lease)
       after
-        Helpers.stop_retained_worker(lease.worker)
+        assert :ok = Helpers.stop_retained_worker(lease.worker)
         assert :ok = Helpers.rm_fixture!(handle)
       end
     end

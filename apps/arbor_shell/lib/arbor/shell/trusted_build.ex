@@ -19,7 +19,8 @@ defmodule Arbor.Shell.TrustedBuild do
     :force_phase_timeout,
     :force_output_overflow,
     :crash_phase,
-    :force_kill_helper_failure
+    :force_kill_helper_failure,
+    :force_source_unbind_failure
   ]
   @token_bytes 32
 
@@ -175,6 +176,16 @@ defmodule Arbor.Shell.TrustedBuild do
 
   defp propagate_unbind({:error, unbind_reason}, reason) do
     {:error, {:trusted_build_source_unbind_failed, unbind_reason, reason}}
+  end
+
+  defp create_workspace(source_identity, _binding, :force_source_unbind_failure) do
+    case OwnedTreeRegistry.cas(source_identity, :trusted_build_source, :trusted_build_workspace) do
+      :ok ->
+        {:error, :forced_source_unbind_failure}
+
+      {:error, reason} ->
+        {:error, {:forced_source_unbind_setup_failed, reason}}
+    end
   end
 
   defp create_workspace(source_identity, binding, fault) do

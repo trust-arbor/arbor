@@ -49,14 +49,37 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
   def stop_retained_worker(pid) when is_pid(pid) do
     if Process.alive?(pid) do
       ref = Process.monitor(pid)
-      Process.exit(pid, :shutdown)
+
+      case DynamicSupervisor.terminate_child(
+             Arbor.Shell.TrustedBuild.LeaseSupervisor,
+             pid
+           ) do
+        :ok ->
+          :ok
+
+        {:error, :not_found} ->
+          if Process.alive?(pid) do
+            try do
+              GenServer.stop(pid, :shutdown, 5_000)
+            catch
+              :exit, {:noproc, _} -> :already_down
+              :exit, {:normal, _} -> :ok
+              :exit, {:shutdown, _} -> :ok
+              :exit, _reason -> :stop_exit
+            end
+          else
+            :already_down
+          end
+
+        {:error, _reason} ->
+          :supervisor_stop_failed
+      end
 
       receive do
         {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
       after
         5_000 ->
-          Process.exit(pid, :kill)
-          :ok
+          {:error, :retained_worker_stop_timeout}
       end
     else
       :ok

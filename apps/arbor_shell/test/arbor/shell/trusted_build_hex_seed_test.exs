@@ -11,10 +11,11 @@ defmodule Arbor.Shell.TrustedBuildHexSeedTest do
 
   test "copies a nonempty tree through temp modes then finalizes readonly and writable" do
     {source_handle, digest} = write_hex_tree!()
+    {dest_handle, dest_root} = dest_container!()
 
     try do
-      readonly = dest!("ro")
-      writable = dest!("rw")
+      readonly = Path.join(dest_root, "ro")
+      writable = Path.join(dest_root, "rw")
 
       assert {:ok, ro_digest} = HexSeed.seed_tree(source_handle.root, readonly, digest, :readonly)
       assert {:ok, rw_digest} = HexSeed.seed_tree(source_handle.root, writable, digest, :writable)
@@ -23,8 +24,6 @@ defmodule Arbor.Shell.TrustedBuildHexSeedTest do
       {:ok, source_content} = Identity.content_digest(source_handle.root)
       assert {:ok, ^source_content} = Identity.content_digest(readonly)
       assert {:ok, ^source_content} = Identity.content_digest(writable)
-      ro_handle = Helpers.capture_handle!(readonly)
-      rw_handle = Helpers.capture_handle!(writable)
       assert ro_digest != digest
       assert rw_digest != digest
       assert ro_digest != rw_digest
@@ -35,23 +34,27 @@ defmodule Arbor.Shell.TrustedBuildHexSeedTest do
       assert_mode(writable, 0o700)
       assert_mode(Path.join(writable, "hex-2.0.0"), 0o700)
       assert_mode(Path.join(writable, "hex-2.0.0/hex"), 0o600)
-
-      assert :ok = Helpers.rm_fixture!(ro_handle)
-      assert :ok = Helpers.rm_fixture!(rw_handle)
     after
+      assert :ok = Helpers.rm_fixture!(dest_handle)
       assert :ok = Helpers.rm_fixture!(source_handle)
     end
   end
 
   test "rejects source digest drift before copy" do
     {source_handle, digest} = write_hex_tree!()
+    {dest_handle, dest_root} = dest_container!()
 
     try do
       File.write!(Path.join(source_handle.root, "hex-2.0.0/forged"), "x")
-      dest = dest!("drift")
+      dest = Path.join(dest_root, "drift")
       assert {:error, :hex_seed_digest_mismatch} =
                HexSeed.seed_tree(source_handle.root, dest, digest, :readonly)
+
+      assert :ok = Helpers.authorize_fixture_cleanup(dest_handle.root, dest_handle)
+      assert File.dir?(dest_root)
     after
+      assert :ok = Helpers.rm_fixture!(dest_handle)
+      refute File.exists?(dest_root)
       assert :ok = Helpers.rm_fixture!(source_handle)
     end
   end
@@ -79,16 +82,16 @@ defmodule Arbor.Shell.TrustedBuildHexSeedTest do
 
   test "rejects destination mode drift after finalize" do
     {source_handle, digest} = write_hex_tree!()
+    {dest_handle, dest_root} = dest_container!()
 
     try do
-      dest = dest!("finalize")
+      dest = Path.join(dest_root, "finalize")
       assert {:ok, seeded} = HexSeed.seed_tree(source_handle.root, dest, digest, :readonly)
       File.chmod!(Path.join(dest, "hex-2.0.0/hex"), 0o644)
       assert {:ok, drifted} = Identity.tree_digest(dest)
       assert drifted != seeded
-      dest_handle = Helpers.capture_handle!(dest)
-      assert :ok = Helpers.rm_fixture!(dest_handle)
     after
+      assert :ok = Helpers.rm_fixture!(dest_handle)
       assert :ok = Helpers.rm_fixture!(source_handle)
     end
   end
@@ -108,8 +111,10 @@ defmodule Arbor.Shell.TrustedBuildHexSeedTest do
     {handle, digest}
   end
 
-  defp dest!(label) do
-    Path.join(System.tmp_dir!(), "arbor-hex-#{label}-#{System.unique_integer([:positive])}")
+  defp dest_container! do
+    root = Path.join(System.tmp_dir!(), "arbor-hex-dest-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    {Helpers.capture_handle!(root), root}
   end
 
   defp assert_mode(path, expected) do

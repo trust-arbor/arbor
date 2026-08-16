@@ -7,6 +7,45 @@ defmodule Arbor.Shell.TrustedBuildArchiveStatTest do
 
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
+  test "launcher compiler tracks the archive stat header without compiling it" do
+    units = Enum.map(Mix.Tasks.Compile.ArborShellLauncher.translation_units(), &Path.expand/1)
+    headers = Enum.map(Mix.Tasks.Compile.ArborShellLauncher.header_dependencies(), &Path.expand/1)
+    deps = Enum.map(Mix.Tasks.Compile.ArborShellLauncher.dependency_inputs(), &Path.expand/1)
+    header = Path.expand("../../../c_src/arbor_shell_archive_stat.h", __DIR__)
+
+    assert Enum.all?(units, &String.ends_with?(&1, ".c"))
+    refute Enum.any?(units, &String.ends_with?(&1, ".h"))
+    assert header in headers
+    assert header in deps
+    refute header in units
+
+    {handle, root} = dest_container!()
+
+    try do
+      copied_units =
+        Enum.map(units, fn unit ->
+          dest = Path.join(root, Path.basename(unit))
+          File.cp!(unit, dest)
+          dest
+        end)
+
+      copied_header = Path.join(root, Path.basename(header))
+      File.cp!(header, copied_header)
+      target = Path.join(root, "dummy_target")
+      File.write!(target, "old")
+
+      now = System.os_time(:second)
+      Enum.each(copied_units, &File.touch!(&1, now - 180))
+      File.touch!(target, now - 60)
+      File.touch!(copied_header, now)
+
+      assert Mix.Utils.stale?(copied_units ++ [copied_header], [target])
+      refute Mix.Utils.stale?(copied_units, [target])
+    after
+      assert :ok = Helpers.rm_fixture!(handle)
+    end
+  end
+
   test "synthetic archive stat predicate rejects uid, writable, symlink, and hardlink" do
     {handle, harness} = compile_harness!()
 
@@ -22,6 +61,12 @@ defmodule Arbor.Shell.TrustedBuildArchiveStatTest do
     after
       assert :ok = Helpers.rm_fixture!(handle)
     end
+  end
+
+  defp dest_container! do
+    root = Path.join(System.tmp_dir!(), "arbor-tb-stale-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    {Helpers.capture_handle!(root), root}
   end
 
   defp compile_harness! do
