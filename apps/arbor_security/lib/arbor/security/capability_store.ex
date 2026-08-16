@@ -52,12 +52,18 @@ defmodule Arbor.Security.CapabilityStore do
   # epoch field produced ONLY by init, a successful deep validation, or a
   # successful legacy migration. Ordinary callbacks on a certified state skip
   # deep validation entirely (O(1) readiness); a missing or stale certificate
-  # (e.g. after a development reload that bumped @cert_epoch) deep-validates
-  # exactly once. code_change/3 always deep-validates regardless of the
-  # certificate. Never serialized; not defended against :sys.replace_state
-  # that preserves/forges a trusted certificate.
+  # (e.g. after a development reload whose source bytes changed produced a
+  # new @cert_epoch) deep-validates exactly once. code_change/3 always
+  # deep-validates regardless of the certificate. Never serialized; not
+  # defended against :sys.replace_state that preserves/forges a trusted
+  # certificate.
   @cert_field :__c3a_cert__
-  @cert_epoch System.unique_integer([:positive])
+  # Domain-separated SHA-256 of this file's exact source bytes. The path is a
+  # compile-time locator only and is not hashed. Identical source compiles to
+  # the same epoch; any source-byte change changes the epoch so a preserved
+  # live certificate becomes stale.
+  @cert_epoch_domain "arbor.security.capability_store.cert_epoch.v1"
+  @cert_epoch :crypto.hash(:sha256, [@cert_epoch_domain, <<0>>, File.read!(__ENV__.file)])
   @signal_events [
     :capability_granted,
     :capability_revoked,
@@ -2146,11 +2152,11 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   # A current-version state is certified iff it carries the current compile
-  # epoch under the private certificate field. A development reload recompiles
-  # this module, bumping @cert_epoch, so the preserved live state's certificate
-  # becomes stale and the first callback deep-validates exactly once. Trusted
-  # while resident; never serialized; not defended against :sys.replace_state
-  # that preserves/forges a trusted certificate.
+  # epoch under the private certificate field. A development reload whose
+  # source bytes changed produces a new @cert_epoch, so the preserved live
+  # state's certificate becomes stale and the first callback deep-validates
+  # exactly once. Trusted while resident; never serialized; not defended
+  # against :sys.replace_state that preserves/forges a trusted certificate.
   defp certified?(state), do: Map.get(state, @cert_field) == @cert_epoch
 
   defp certify(state), do: Map.put(state, @cert_field, @cert_epoch)
