@@ -18,6 +18,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
   @fat_header 8
   @fat32_arch 20
   @fat64_arch 32
+  @u64_max 0xFFFF_FFFF_FFFF_FFFF
 
   @attr_keys [:executable, :identities, :owner, :path, :prefix, :size, :term_role]
 
@@ -326,6 +327,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
 
     cond do
       offset < table_size -> {:error, :malformed_signature}
+      # Elixir integers do not wrap; reject unsigned-64 overflow first.
+      sum > @u64_max -> {:error, :malformed_signature}
       sum < offset -> {:error, :malformed_signature}
       sum > file_size -> {:error, :malformed_signature}
       true -> :ok
