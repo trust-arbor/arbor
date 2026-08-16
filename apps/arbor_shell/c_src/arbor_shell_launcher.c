@@ -65,6 +65,9 @@ extern char **environ;
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
+/* Residual risk: file-read*, mach-lookup, process-info*, sysctl-read, signal,
+ * and posix shm/sem are intentionally broad so Mix/ERTS can start. Writes are
+ * only the eight -D private roots; SOURCE writes and network* are denied. */
 #define DARWIN_TRUSTED_BUILD_PROFILE \
   "(version 1)\n" \
   "(deny default)\n" \
@@ -1520,10 +1523,232 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   return 0;
 }
 
-static int path_join_equals(const char *root, const char *suffix, const char *actual) {
-  char expected[4096];
-  if (snprintf(expected, sizeof(expected), "%s/%s", root, suffix) <= 0) return 0;
-  return strcmp(expected, actual) == 0;
+#define TB_MAX_REL 4096
+#define TB_MAX_DIGEST_ROWS 65536
+
+typedef struct {
+  char *data;
+  size_t len;
+} digest_row;
+
+typedef struct {
+  digest_row *rows;
+  size_t count;
+  size_t cap;
+} digest_rows;
+
+static int walk_openat_segments(int root_fd, const char *const *segments, size_t count,
+                                int last_is_file, int *out_fd) {
+  int current = root_fd;
+  int owned = 0;
+
+  for (size_t i = 0; i < count; i++) {
+    int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
+    if (!(last_is_file && i + 1U == count)) flags |= O_DIRECTORY;
+    int next = openat(current, segments[i], flags);
+    if (owned) close(current);
+    if (next < 0) return -1;
+    current = next;
+    owned = 1;
+  }
+
+  *out_fd = current;
+  return 0;
+}
+
+static int verify_file_ancestry(const char *root_path, const char *const *segments, size_t count,
+                                const char *expected_path, const struct stat *expected,
+                                const char *sha256) {
+  char joined[TB_MAX_REL];
+  size_t used = 0;
+  int written = snprintf(joined, sizeof(joined), "%s", root_path);
+  if (written <= 0 || (size_t)written >= sizeof(joined)) return -1;
+  used = (size_t)written;
+  for (size_t i = 0; i < count; i++) {
+    written = snprintf(joined + used, sizeof(joined) - used, "/%s", segments[i]);
+    if (written <= 0 || (size_t)written >= sizeof(joined) - used) return -1;
+    used += (size_t)written;
+  }
+  if (strcmp(joined, expected_path) != 0) return -2;
+
+  int root_fd = open(root_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (root_fd < 0) return -3;
+  int leaf_fd = -1;
+  int walk = walk_openat_segments(root_fd, segments, count, 1, &leaf_fd);
+  close(root_fd);
+  if (walk != 0) return -4;
+  int result = verify_identity(leaf_fd, expected, sha256);
+  close(leaf_fd);
+  return result;
+}
+
+static int digest_add(digest_rows *rows, char *data, size_t len) {
+  if (rows->count >= TB_MAX_DIGEST_ROWS) {
+    free(data);
+    return -1;
+  }
+  if (rows->count == rows->cap) {
+    size_t ncap = rows->cap == 0 ? 64 : rows->cap * 2;
+    digest_row *next = realloc(rows->rows, ncap * sizeof(digest_row));
+    if (next == NULL) {
+      free(data);
+      return -1;
+    }
+    rows->rows = next;
+    rows->cap = ncap;
+  }
+  rows->rows[rows->count].data = data;
+  rows->rows[rows->count].len = len;
+  rows->count++;
+  return 0;
+}
+
+static int digest_row_cmp(const void *left, const void *right) {
+  const digest_row *a = left;
+  const digest_row *b = right;
+  size_t n = a->len < b->len ? a->len : b->len;
+  int cmp = memcmp(a->data, b->data, n);
+  if (cmp != 0) return cmp;
+  if (a->len < b->len) return -1;
+  if (a->len > b->len) return 1;
+  return 0;
+}
+
+static int digest_push_dir(digest_rows *rows, const char *rel, mode_t mode) {
+  char mode_s[32];
+  int mode_len = snprintf(mode_s, sizeof(mode_s), "%u", (unsigned)(mode & 07777));
+  if (mode_len <= 0) return -1;
+  size_t rel_len = strlen(rel);
+  size_t len = 1 + 1 + rel_len + 1 + (size_t)mode_len;
+  char *row = malloc(len);
+  if (row == NULL) return -1;
+  row[0] = 'd';
+  row[1] = '\0';
+  memcpy(row + 2, rel, rel_len);
+  row[2 + rel_len] = '\0';
+  memcpy(row + 3 + rel_len, mode_s, (size_t)mode_len);
+  return digest_add(rows, row, len);
+}
+
+static int digest_push_file(digest_rows *rows, const char *rel, mode_t mode, const char *sha,
+                            off_t size) {
+  char mode_s[32];
+  char size_s[32];
+  int mode_len = snprintf(mode_s, sizeof(mode_s), "%u", (unsigned)(mode & 07777));
+  int size_len = snprintf(size_s, sizeof(size_s), "%llu", (unsigned long long)size);
+  if (mode_len <= 0 || size_len <= 0 || sha == NULL || strlen(sha) != 64) return -1;
+  size_t rel_len = strlen(rel);
+  size_t len = 1 + 1 + rel_len + 1 + (size_t)mode_len + 1 + 64 + 1 + (size_t)size_len;
+  char *row = malloc(len);
+  if (row == NULL) return -1;
+  size_t off = 0;
+  row[off++] = 'f';
+  row[off++] = '\0';
+  memcpy(row + off, rel, rel_len);
+  off += rel_len;
+  row[off++] = '\0';
+  memcpy(row + off, mode_s, (size_t)mode_len);
+  off += (size_t)mode_len;
+  row[off++] = '\0';
+  memcpy(row + off, sha, 64);
+  off += 64;
+  row[off++] = '\0';
+  memcpy(row + off, size_s, (size_t)size_len);
+  return digest_add(rows, row, len);
+}
+
+static int join_rel(char *out, size_t out_size, const char *prefix, const char *name) {
+  if (prefix[0] == '\0') return snprintf(out, out_size, "%s", name);
+  return snprintf(out, out_size, "%s/%s", prefix, name);
+}
+
+static int walk_digest_dir(int dirfd, const char *rel, digest_rows *rows);
+
+static int walk_digest_entry(int dirfd, const char *rel, const char *name, digest_rows *rows) {
+  char child_rel[TB_MAX_REL];
+  if (join_rel(child_rel, sizeof(child_rel), rel, name) <= 0) return -1;
+
+  int child = openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (child < 0) return -1;
+  struct stat st;
+  if (fstat(child, &st) != 0) {
+    close(child);
+    return -1;
+  }
+
+  int result = -1;
+  if (S_ISDIR(st.st_mode)) {
+    if (digest_push_dir(rows, child_rel, st.st_mode) == 0) {
+      result = walk_digest_dir(child, child_rel, rows);
+    }
+  } else if (S_ISREG(st.st_mode)) {
+    char sha[65];
+    if (st.st_nlink == 1 && digest_fd(child, sha) == 0) {
+      result = digest_push_file(rows, child_rel, st.st_mode, sha, st.st_size);
+    }
+  }
+
+  close(child);
+  return result;
+}
+
+static int walk_digest_dir(int dirfd, const char *rel, digest_rows *rows) {
+  int dupfd = dup(dirfd);
+  if (dupfd < 0) return -1;
+  DIR *dir = fdopendir(dupfd);
+  if (dir == NULL) {
+    close(dupfd);
+    return -1;
+  }
+
+  int result = 0;
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+    if (walk_digest_entry(dirfd, rel, ent->d_name, rows) != 0) {
+      result = -1;
+      break;
+    }
+  }
+  closedir(dir);
+  return result;
+}
+
+static void free_digest_rows(digest_rows *rows) {
+  for (size_t i = 0; i < rows->count; i++) free(rows->rows[i].data);
+  free(rows->rows);
+  rows->rows = NULL;
+  rows->count = 0;
+  rows->cap = 0;
+}
+
+static int digest_tree(const char *path, char hex[65]) {
+  digest_rows rows = {NULL, 0, 0};
+  int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return -1;
+  int walked = walk_digest_dir(fd, "", &rows);
+  close(fd);
+  if (walked != 0) {
+    free_digest_rows(&rows);
+    return -1;
+  }
+
+  if (rows.count > 1) qsort(rows.rows, rows.count, sizeof(digest_row), digest_row_cmp);
+
+  sha256_ctx ctx;
+  sha256_init(&ctx);
+  for (size_t i = 0; i < rows.count; i++) {
+    if (i > 0) sha256_update(&ctx, (const uint8_t *)"\n", 1);
+    sha256_update(&ctx, (const uint8_t *)rows.rows[i].data, rows.rows[i].len);
+  }
+  uint8_t digest[32];
+  sha256_final(&ctx, digest);
+  for (size_t i = 0; i < 32; i++) {
+    (void)snprintf(hex + (i * 2), 3, "%02x", digest[i]);
+  }
+  hex[64] = '\0';
+  free_digest_rows(&rows);
+  return 0;
 }
 
 static int segment_overlap(const char *left, const char *right) {
@@ -1538,12 +1763,15 @@ static int segment_overlap(const char *left, const char *right) {
 
 static int verify_file_identity(const char *dev_s, const char *ino_s, const char *size_s,
                                 const char *mtime_s, const char *ctime_s, const char *mode_s,
+                                const char *uid_s, const char *gid_s, const char *nlink_s,
                                 const char *sha256, const char *path) {
-  uint64_t dev, ino, size, mtime, ctime, mode;
+  uint64_t dev, ino, size, mtime, ctime, mode, uid, gid, nlink;
   if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 ||
       parse_u64(size_s, &size) != 0 || parse_u64(mtime_s, &mtime) != 0 ||
       parse_u64(ctime_s, &ctime) != 0 || parse_u64(mode_s, &mode) != 0 ||
-      sha256 == NULL || strlen(sha256) != 64 || path == NULL || path[0] != '/') {
+      parse_u64(uid_s, &uid) != 0 || parse_u64(gid_s, &gid) != 0 ||
+      parse_u64(nlink_s, &nlink) != 0 || nlink != 1 || sha256 == NULL ||
+      strlen(sha256) != 64 || path == NULL || path[0] != '/') {
     return -1;
   }
 
@@ -1555,19 +1783,32 @@ static int verify_file_identity(const char *dev_s, const char *ino_s, const char
   expected.st_mtime = (time_t)mtime;
   expected.st_ctime = (time_t)ctime;
   expected.st_mode = (mode_t)mode;
+  expected.st_uid = (uid_t)uid;
+  expected.st_gid = (gid_t)gid;
+  expected.st_nlink = (nlink_t)nlink;
 
   int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (fd < 0) return -2;
+  struct stat actual;
+  if (fstat(fd, &actual) != 0) {
+    close(fd);
+    return -3;
+  }
+  if (actual.st_nlink != 1 || actual.st_uid != (uid_t)uid || actual.st_gid != (gid_t)gid) {
+    close(fd);
+    return -4;
+  }
   int result = verify_identity(fd, &expected, sha256);
   close(fd);
   return result;
 }
 
 static int verify_dir_identity(const char *dev_s, const char *ino_s, const char *mode_s,
-                               const char *path, int writable) {
-  uint64_t dev, ino, mode;
+                               const char *uid_s, const char *path, int writable) {
+  uint64_t dev, ino, mode, uid;
   if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 ||
-      parse_u64(mode_s, &mode) != 0 || path == NULL || path[0] != '/') {
+      parse_u64(mode_s, &mode) != 0 || parse_u64(uid_s, &uid) != 0 || path == NULL ||
+      path[0] != '/') {
     return -1;
   }
 
@@ -1583,6 +1824,7 @@ static int verify_dir_identity(const char *dev_s, const char *ino_s, const char 
   if (actual.st_dev != (dev_t)dev) return -4;
   if ((((uint64_t)actual.st_ino) & 0xffffffffULL) != (ino & 0xffffffffULL)) return -5;
   if ((uint64_t)actual.st_mode != mode) return -6;
+  if (actual.st_uid != (uid_t)uid) return -10;
   if (writable) {
     if ((actual.st_mode & 0777) != 0700) return -7;
     if (actual.st_uid != geteuid()) return -8;
@@ -1636,8 +1878,8 @@ static int run_trusted_build(int argc, char **argv) {
   send_error("trusted build launcher unavailable");
   return 126;
 #else
-  /* See design: timeout max_output + 4 file-ids + 4 dir-ids + digest + 8 wdirs + -- + argv0 */
-  if (argc < 79 || strcmp(argv[77], "--") != 0) {
+  /* timeout max_output + 4 file-ids(11) + 4 dir-ids(5) + digest + 8 wdirs(3) + -- + argv0 */
+  if (argc < 95 || strcmp(argv[93], "--") != 0) {
     send_error("invalid trusted-build arguments");
     return 2;
   }
@@ -1649,24 +1891,24 @@ static int run_trusted_build(int argc, char **argv) {
     return 2;
   }
 
-  const char *wrap_path = argv[11];
-  const char *erl_path = argv[19];
-  const char *elixir_path = argv[27];
-  const char *elixir_mix_path = argv[35];
-  const char *source_path = argv[39];
-  const char *erlang_root = argv[43];
-  const char *elixir_root = argv[47];
-  const char *archives_path = argv[51];
-  const char *archives_digest = argv[52];
-  const char *home_path = argv[55];
-  const char *tmp_path = argv[58];
-  const char *build_path = argv[61];
-  const char *deps_path = argv[64];
-  const char *hex_path = argv[67];
-  const char *mix_path = argv[70];
-  const char *cache_path = argv[73];
-  const char *release_path = argv[76];
-  const char *argv0 = argv[78];
+  const char *wrap_path = argv[14];
+  const char *erl_path = argv[25];
+  const char *elixir_path = argv[36];
+  const char *elixir_mix_path = argv[47];
+  const char *source_path = argv[52];
+  const char *erlang_root = argv[57];
+  const char *elixir_root = argv[62];
+  const char *archives_path = argv[67];
+  const char *archives_digest = argv[68];
+  const char *home_path = argv[71];
+  const char *tmp_path = argv[74];
+  const char *build_path = argv[77];
+  const char *deps_path = argv[80];
+  const char *hex_path = argv[83];
+  const char *mix_path = argv[86];
+  const char *cache_path = argv[89];
+  const char *release_path = argv[92];
+  const char *argv0 = argv[94];
 
   if (strlen(archives_digest) != 64 || strcmp(argv0, wrap_path) != 0) {
     send_error("invalid trusted-build executable binding");
@@ -1674,42 +1916,102 @@ static int run_trusted_build(int argc, char **argv) {
   }
 
   if (verify_file_identity(argv[4], argv[5], argv[6], argv[7], argv[8], argv[9], argv[10],
-                           wrap_path) != 0 ||
-      verify_file_identity(argv[12], argv[13], argv[14], argv[15], argv[16], argv[17], argv[18],
-                           erl_path) != 0 ||
-      verify_file_identity(argv[20], argv[21], argv[22], argv[23], argv[24], argv[25], argv[26],
-                           elixir_path) != 0 ||
-      verify_file_identity(argv[28], argv[29], argv[30], argv[31], argv[32], argv[33], argv[34],
-                           elixir_mix_path) != 0) {
+                           argv[11], argv[12], argv[13], wrap_path) != 0 ||
+      verify_file_identity(argv[15], argv[16], argv[17], argv[18], argv[19], argv[20], argv[21],
+                           argv[22], argv[23], argv[24], erl_path) != 0 ||
+      verify_file_identity(argv[26], argv[27], argv[28], argv[29], argv[30], argv[31], argv[32],
+                           argv[33], argv[34], argv[35], elixir_path) != 0 ||
+      verify_file_identity(argv[37], argv[38], argv[39], argv[40], argv[41], argv[42], argv[43],
+                           argv[44], argv[45], argv[46], elixir_mix_path) != 0) {
     send_error("trusted-build file identity changed");
     return 126;
   }
 
-  if (verify_dir_identity(argv[36], argv[37], argv[38], source_path, 0) != 0 ||
-      verify_dir_identity(argv[40], argv[41], argv[42], erlang_root, 0) != 0 ||
-      verify_dir_identity(argv[44], argv[45], argv[46], elixir_root, 0) != 0 ||
-      verify_dir_identity(argv[48], argv[49], argv[50], archives_path, 0) != 0) {
+  if (verify_dir_identity(argv[48], argv[49], argv[50], argv[51], source_path, 0) != 0 ||
+      verify_dir_identity(argv[53], argv[54], argv[55], argv[56], erlang_root, 0) != 0 ||
+      verify_dir_identity(argv[58], argv[59], argv[60], argv[61], elixir_root, 0) != 0 ||
+      verify_dir_identity(argv[63], argv[64], argv[65], argv[66], archives_path, 0) != 0) {
     send_error("trusted-build directory identity changed");
     return 126;
   }
 
-  if (verify_wdir_identity(argv[53], argv[54], home_path) != 0 ||
-      verify_wdir_identity(argv[56], argv[57], tmp_path) != 0 ||
-      verify_wdir_identity(argv[59], argv[60], build_path) != 0 ||
-      verify_wdir_identity(argv[62], argv[63], deps_path) != 0 ||
-      verify_wdir_identity(argv[65], argv[66], hex_path) != 0 ||
-      verify_wdir_identity(argv[68], argv[69], mix_path) != 0 ||
-      verify_wdir_identity(argv[71], argv[72], cache_path) != 0 ||
-      verify_wdir_identity(argv[74], argv[75], release_path) != 0) {
+  if (verify_wdir_identity(argv[69], argv[70], home_path) != 0 ||
+      verify_wdir_identity(argv[72], argv[73], tmp_path) != 0 ||
+      verify_wdir_identity(argv[75], argv[76], build_path) != 0 ||
+      verify_wdir_identity(argv[78], argv[79], deps_path) != 0 ||
+      verify_wdir_identity(argv[81], argv[82], hex_path) != 0 ||
+      verify_wdir_identity(argv[84], argv[85], mix_path) != 0 ||
+      verify_wdir_identity(argv[87], argv[88], cache_path) != 0 ||
+      verify_wdir_identity(argv[90], argv[91], release_path) != 0) {
     send_error("trusted-build writable identity changed");
     return 126;
   }
 
-  if (!path_join_equals(source_path, "bin/mix", wrap_path) ||
-      !path_join_equals(erlang_root, "bin/erl", erl_path) ||
-      !path_join_equals(elixir_root, "bin/elixir", elixir_path) ||
-      !path_join_equals(elixir_root, "bin/mix", elixir_mix_path)) {
+  struct stat wrap_st;
+  memset(&wrap_st, 0, sizeof(wrap_st));
+  uint64_t wrap_dev, wrap_ino, wrap_size, wrap_mtime, wrap_ctime, wrap_mode;
+  if (parse_u64(argv[4], &wrap_dev) != 0 || parse_u64(argv[5], &wrap_ino) != 0 ||
+      parse_u64(argv[6], &wrap_size) != 0 || parse_u64(argv[7], &wrap_mtime) != 0 ||
+      parse_u64(argv[8], &wrap_ctime) != 0 || parse_u64(argv[9], &wrap_mode) != 0) {
     send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+  wrap_st.st_dev = (dev_t)wrap_dev;
+  wrap_st.st_ino = (ino_t)wrap_ino;
+  wrap_st.st_size = (off_t)wrap_size;
+  wrap_st.st_mtime = (time_t)wrap_mtime;
+  wrap_st.st_ctime = (time_t)wrap_ctime;
+  wrap_st.st_mode = (mode_t)wrap_mode;
+
+  const char *mix_segs[] = {"bin", "mix"};
+  const char *erl_segs[] = {"bin", "erl"};
+  const char *elixir_segs[] = {"bin", "elixir"};
+  if (verify_file_ancestry(source_path, mix_segs, 2, wrap_path, &wrap_st, argv[13]) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+
+  struct stat tool_st;
+  memset(&tool_st, 0, sizeof(tool_st));
+#define LOAD_FILE_STAT(offset, st)                                              \
+  do {                                                                          \
+    uint64_t d, i, sz, mt, ct, md;                                              \
+    if (parse_u64(argv[(offset)], &d) != 0 || parse_u64(argv[(offset) + 1], &i) != 0 || \
+        parse_u64(argv[(offset) + 2], &sz) != 0 || parse_u64(argv[(offset) + 3], &mt) != 0 || \
+        parse_u64(argv[(offset) + 4], &ct) != 0 || parse_u64(argv[(offset) + 5], &md) != 0) { \
+      send_error("trusted-build ancestry mismatch");                            \
+      return 126;                                                               \
+    }                                                                           \
+    memset(&(st), 0, sizeof(st));                                               \
+    (st).st_dev = (dev_t)d;                                                     \
+    (st).st_ino = (ino_t)i;                                                     \
+    (st).st_size = (off_t)sz;                                                   \
+    (st).st_mtime = (time_t)mt;                                                 \
+    (st).st_ctime = (time_t)ct;                                                 \
+    (st).st_mode = (mode_t)md;                                                  \
+  } while (0)
+
+  LOAD_FILE_STAT(15, tool_st);
+  if (verify_file_ancestry(erlang_root, erl_segs, 2, erl_path, &tool_st, argv[24]) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+  LOAD_FILE_STAT(26, tool_st);
+  if (verify_file_ancestry(elixir_root, elixir_segs, 2, elixir_path, &tool_st, argv[35]) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+  LOAD_FILE_STAT(37, tool_st);
+  if (verify_file_ancestry(elixir_root, mix_segs, 2, elixir_mix_path, &tool_st, argv[46]) != 0) {
+    send_error("trusted-build ancestry mismatch");
+    return 126;
+  }
+#undef LOAD_FILE_STAT
+
+  char computed_digest[65];
+  if (digest_tree(archives_path, computed_digest) != 0 ||
+      strcmp(computed_digest, archives_digest) != 0) {
+    send_error("trusted-build archive digest mismatch");
     return 126;
   }
 
@@ -1727,7 +2029,7 @@ static int run_trusted_build(int argc, char **argv) {
     return 126;
   }
 
-  if (trusted_build_mix_argv(argc - 79, &argv[79]) != 0) {
+  if (trusted_build_mix_argv(argc - 95, &argv[95]) != 0) {
     send_error("unreviewed trusted-build command");
     return 2;
   }
@@ -1756,15 +2058,15 @@ static int run_trusted_build(int argc, char **argv) {
   exec_argv[7] = argv[7];
   exec_argv[8] = argv[8];
   exec_argv[9] = argv[9];
-  exec_argv[10] = argv[10];
+  exec_argv[10] = argv[13];
   exec_argv[11] = (char *)wrap_path;
-  exec_argv[12] = argv[36];
-  exec_argv[13] = argv[37];
+  exec_argv[12] = argv[48];
+  exec_argv[13] = argv[49];
   exec_argv[14] = (char *)source_path;
   exec_argv[15] = (char *)"--";
   exec_argv[16] = (char *)wrap_path;
   int exec_argc = 17;
-  for (int i = 79; i < argc && exec_argc < 31; i++) {
+  for (int i = 95; i < argc && exec_argc < 31; i++) {
     exec_argv[exec_argc++] = argv[i];
   }
   exec_argv[exec_argc] = NULL;

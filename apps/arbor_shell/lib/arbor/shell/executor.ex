@@ -10,7 +10,6 @@ defmodule Arbor.Shell.Executor do
   """
 
   alias Arbor.Shell.ExecutablePolicy.Executable
-  alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.{ProcessGroup, Sandbox}
 
   @default_timeout 30_000
@@ -85,36 +84,12 @@ defmodule Arbor.Shell.Executor do
   end
 
   @doc false
-  @spec run_trusted_build(map()) :: {:ok, result()} | {:error, term()}
-  def run_trusted_build(session) when is_map(session) do
-    timeout = Plan.timeout_ms(session.phase)
-    max_output_bytes = default_max_output_bytes()
+  @spec run_trusted_build(pid(), reference()) :: {:ok, result()} | {:error, term()}
+  def run_trusted_build(lease_pid, launch_permit)
+      when is_pid(lease_pid) and is_reference(launch_permit) do
     start_time = System.monotonic_time(:millisecond)
-    env = Plan.closed_env(session.roots, session.binding)
 
-    launch = %{
-      wrapper: session.identities.wrapper,
-      erl: session.binding.erl,
-      elixir: session.binding.elixir,
-      elixir_mix: session.binding.elixir_mix,
-      source: session.identities.source,
-      erlang_root: session.binding.erlang_root,
-      elixir_root: session.binding.elixir_root,
-      archives: session.identities.archives,
-      archives_digest: session.identities.archives_digest,
-      roots: Map.put(session.roots, :archives, session.identities.archives),
-      env: env,
-      cancel_id: session.cancel_id
-    }
-
-    case ProcessGroup.run_trusted_build_executable(
-           launch,
-           session.argv,
-           start_time,
-           timeout,
-           max_output_bytes,
-           session.lease_pid
-         ) do
+    case ProcessGroup.run_trusted_build_executable(lease_pid, launch_permit) do
       {:ok, terminal} ->
         result_from_terminal(terminal, start_time)
 
@@ -132,7 +107,8 @@ defmodule Arbor.Shell.Executor do
     end
   end
 
-  def run_trusted_build(_session), do: {:error, :invalid_trusted_build_session}
+  def run_trusted_build(_lease_pid, _launch_permit),
+    do: {:error, :trusted_build_launch_unauthorized}
 
   defp run_bound_with(process_group_runner, executable, args, opts) do
     timeout = normalize_timeout(Keyword.get(opts, :timeout, @default_timeout))

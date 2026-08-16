@@ -48,8 +48,13 @@ defmodule Arbor.Shell.TrustedBuildProcessGroupTest do
   end
 
   test "run_trusted_build_executable is the only ProcessGroup entry that names trusted-build" do
-    assert function_exported?(ProcessGroup, :run_trusted_build_executable, 6)
+    assert function_exported?(ProcessGroup, :run_trusted_build_executable, 2)
+    refute function_exported?(ProcessGroup, :run_trusted_build_executable, 6)
+    refute function_exported?(ProcessGroup, :kill_group, 1)
     refute function_exported?(ProcessGroup, :run_executable_with_launcher, 7)
+
+    assert {:error, :trusted_build_launch_unauthorized} =
+             ProcessGroup.run_trusted_build_executable(self(), make_ref())
 
     {:ok, result} =
       Shell.execute_direct("python3", ["-c", "import os; os.fork(); print('forked')"],

@@ -98,6 +98,12 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
 
     assert {:error, :trusted_build_phase_rejected} =
              Shell.execute_trusted_build(:not_a_lease, "deps.get")
+
+    refute function_exported?(Shell, :acquire_trusted_build_lease_for_test, 2)
+    assert function_exported?(Shell, :acquire_trusted_build_lease, 1)
+    assert function_exported?(Shell, :execute_trusted_build, 2)
+    assert function_exported?(Shell, :inventory_trusted_build, 1)
+    assert function_exported?(Shell, :release_trusted_build_lease, 1)
   end
 
   defp valid_identity do

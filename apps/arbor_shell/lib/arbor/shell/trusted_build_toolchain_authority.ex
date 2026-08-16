@@ -8,7 +8,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
   alias Arbor.Shell.TrustedBuild.Identity
 
   @epoch_namespace __MODULE__
-  @allowed_start_keys MapSet.new([:name, :boot_epoch, :hex_cache])
+  @allowed_start_keys MapSet.new([:name, :boot_epoch, :hex_cache, :hex_archive])
 
   @type binding :: %{
           erlang_root: map(),
@@ -72,6 +72,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
         generation = make_ref()
         boot_epoch = Map.fetch!(start_opts, :boot_epoch)
         hex_cache = Map.get(start_opts, :hex_cache, :config)
+        hex_archive = Map.get(start_opts, :hex_archive, :config)
 
         {:ok,
          bootstrap(%{
@@ -80,7 +81,8 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
            boot_epoch: boot_epoch,
            generation: generation,
            binding: nil,
-           hex_cache: hex_cache
+           hex_cache: hex_cache,
+           hex_archive: hex_archive
          })}
 
       {:error, reason} ->
@@ -91,7 +93,8 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
            boot_epoch: nil,
            generation: make_ref(),
            binding: nil,
-           hex_cache: :config
+           hex_cache: :config,
+           hex_archive: :config
          }}
     end
   end
@@ -133,7 +136,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
   end
 
   defp bootstrap(state) do
-    case pin_binding(state.hex_cache) do
+    case pin_binding(state.hex_cache, state.hex_archive) do
       {:ok, binding} ->
         persist_epoch(%{state | status: :pinned, binding: binding, reason: nil})
 
@@ -156,7 +159,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
 
   defp persist_epoch(state), do: state
 
-  defp pin_binding(hex_cache_opt) do
+  defp pin_binding(hex_cache_opt, hex_archive_opt) do
     with {:ok, erlang_root_path} <- erlang_root(),
          {:ok, elixir_root_path} <- elixir_root(),
          {:ok, erlang_root} <- Identity.pin_directory(erlang_root_path),
@@ -164,7 +167,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
          {:ok, erl} <- Identity.pin_regular_file(Path.join(erlang_root_path, "bin/erl")),
          {:ok, elixir} <- Identity.pin_regular_file(Path.join(elixir_root_path, "bin/elixir")),
          {:ok, elixir_mix} <- Identity.pin_regular_file(Path.join(elixir_root_path, "bin/mix")),
-         {:ok, hex_archive} <- pin_hex_archive(elixir_root_path),
+         {:ok, hex_archive} <- pin_hex_archive(hex_archive_opt, elixir_root_path),
          {:ok, hex_cache} <- pin_hex_cache(hex_cache_opt) do
       {:ok,
        %{
@@ -189,7 +192,13 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
     {:ok, root}
   end
 
-  defp pin_hex_archive(elixir_root) do
+  defp pin_hex_archive(:empty, _elixir_root), do: {:ok, :empty}
+
+  defp pin_hex_archive(:config, elixir_root), do: pin_hex_archive_from_root(elixir_root)
+
+  defp pin_hex_archive(_other, _elixir_root), do: {:error, :trusted_build_hex_archive_unavailable}
+
+  defp pin_hex_archive_from_root(elixir_root) do
     archives = Path.join(elixir_root, ".mix/archives")
 
     case File.ls(archives) do
@@ -213,7 +222,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
         end
 
       {:error, :enoent} ->
-        {:ok, :empty}
+        {:error, :trusted_build_hex_archive_absent}
 
       {:error, _reason} ->
         {:error, :trusted_build_hex_archive_unavailable}

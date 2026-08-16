@@ -22,6 +22,7 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
             kind, reason -> {:error, {:trusted_build_phase_exception, {kind, reason}}}
           end
 
+        _ = Lease.commit_phase_result(session.lease_pid, result)
         send(caller, {:"$arbor_trusted_build_phase", reply_ref, result})
       end)
 
@@ -31,6 +32,7 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
 
       {:error, reason} ->
         Process.exit(phase_pid, :kill)
+        _ = Lease.abort_unattached_phase(session.lease)
         {:error, reason}
     end
   end
@@ -84,31 +86,40 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
          true <- gen == session.authority_gen,
          {:ok, _reg_pid, reg_gen} <- OwnedTreeRegistry.checkout(),
          true <- reg_gen == session.registry_gen,
-         :ok <- last_boundary(session),
+         {:ok, descriptor} <- Lease.checkout_launch(session.lease_pid, session.launch_ticket),
+         :ok <- maybe_crash(descriptor),
+         :ok <- last_boundary(descriptor),
          :ok <- observe(owner_mon, session.owner_pid, authority_mon, session.authority_pid) do
-      Executor.run_trusted_build(session)
+      Executor.run_trusted_build(session.lease_pid, descriptor.launch_permit)
     else
       false -> {:error, :trusted_build_toolchain_generation_mismatch}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp last_boundary(session) do
-    identities = session.identities
-    roots = session.roots
-    binding = session.binding
+  defp maybe_crash(%{fault: :crash_phase}), do: raise("trusted_build_phase_crash")
+  defp maybe_crash(_descriptor), do: :ok
 
-    with :ok <- Identity.verify_file(identities.wrapper),
-         :ok <- Identity.verify_directory(identities.source),
-         :ok <- Identity.verify_file(binding.erl),
-         :ok <- Identity.verify_file(binding.elixir),
-         :ok <- Identity.verify_file(binding.elixir_mix),
-         :ok <- Identity.verify_directory(binding.erlang_root),
-         :ok <- Identity.verify_directory(binding.elixir_root),
-         :ok <- verify_archives(identities.archives, identities.archives_digest),
-         :ok <- Identity.verify_owned_identity(identities.source_owned),
-         :ok <- verify_wrapper_ancestry(identities.source.path, identities.wrapper.path),
-         :ok <- verify_writables(roots) do
+  defp last_boundary(descriptor) do
+    with :ok <- Identity.verify_file(descriptor.wrapper),
+         :ok <- Identity.verify_directory(descriptor.source),
+         :ok <- Identity.verify_file(descriptor.erl),
+         :ok <- Identity.verify_file(descriptor.elixir),
+         :ok <- Identity.verify_file(descriptor.elixir_mix),
+         :ok <- Identity.verify_directory(descriptor.erlang_root),
+         :ok <- Identity.verify_directory(descriptor.elixir_root),
+         :ok <- verify_archives(descriptor.archives, descriptor.archives_digest),
+         :ok <- Identity.verify_owned_identity(descriptor.source_owned),
+         :ok <- Identity.verify_ancestry(descriptor.source, descriptor.wrapper, ["bin", "mix"]),
+         :ok <-
+           Identity.verify_ancestry(descriptor.erlang_root, descriptor.erl, ["bin", "erl"]),
+         :ok <-
+           Identity.verify_ancestry(descriptor.elixir_root, descriptor.elixir, ["bin", "elixir"]),
+         :ok <-
+           Identity.verify_ancestry(descriptor.elixir_root, descriptor.elixir_mix, ["bin", "mix"]),
+         :ok <-
+           Identity.verify_ancestry(descriptor.source_owned, descriptor.source, ["source"]),
+         :ok <- verify_writables(descriptor.roots) do
       :ok
     end
   end
@@ -120,16 +131,6 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
     else
       {:ok, _other} -> {:error, :trusted_build_wrapper_identity_mismatch}
       {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp verify_wrapper_ancestry(source, wrapper) do
-    expected = Path.join([source, "bin", "mix"])
-
-    if wrapper == expected and Identity.child_of?(source, wrapper) do
-      :ok
-    else
-      {:error, :trusted_build_wrapper_identity_mismatch}
     end
   end
 

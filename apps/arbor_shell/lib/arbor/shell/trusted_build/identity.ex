@@ -230,12 +230,94 @@ defmodule Arbor.Shell.TrustedBuild.Identity do
 
   def child_of?(_parent, _child), do: false
 
+  @doc """
+  Re-verify `root`, then lstat each segment under it without following
+  symlinks, then re-verify `leaf`. The reconstructed path must equal `leaf.path`.
+  """
+  @spec verify_ancestry(map(), map(), [String.t()]) :: :ok | {:error, atom()}
+  def verify_ancestry(root, leaf, segments)
+      when is_map(root) and is_map(leaf) and is_list(segments) and segments != [] do
+    with {:ok, root_path} <- ancestry_root_path(root),
+         :ok <- verify_ancestry_root(root),
+         :ok <- walk_ancestry_segments(root_path, segments, leaf_stat_type(leaf)),
+         expected = Path.join([root_path | segments]),
+         true <- leaf.path == expected,
+         :ok <- verify_ancestry_leaf(leaf) do
+      :ok
+    else
+      false -> {:error, :trusted_build_wrapper_identity_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def verify_ancestry(_root, _leaf, _segments),
+    do: {:error, :trusted_build_wrapper_identity_mismatch}
+
   @spec overlap?(String.t(), String.t()) :: boolean()
   def overlap?(left, right) when is_binary(left) and is_binary(right) do
     left == right or child_of?(left, right) or child_of?(right, left)
   end
 
   def overlap?(_left, _right), do: true
+
+  defp ancestry_root_path(%{path: path}) when is_binary(path), do: {:ok, path}
+  defp ancestry_root_path(_root), do: {:error, :invalid_identity}
+
+  defp verify_ancestry_root(%{type: :directory, mode: _mode} = identity),
+    do: verify_directory(identity)
+
+  defp verify_ancestry_root(%{type: :directory} = identity), do: verify_owned_identity(identity)
+  defp verify_ancestry_root(_identity), do: {:error, :invalid_identity}
+
+  defp verify_ancestry_leaf(%{type: :regular} = identity), do: verify_file(identity)
+
+  defp verify_ancestry_leaf(%{type: :directory, mode: _mode} = identity),
+    do: verify_directory(identity)
+
+  defp verify_ancestry_leaf(%{type: :directory} = identity), do: verify_owned_identity(identity)
+  defp verify_ancestry_leaf(_identity), do: {:error, :invalid_identity}
+
+  defp leaf_stat_type(%{type: :regular}), do: :regular
+  defp leaf_stat_type(%{type: :directory}), do: :directory
+  defp leaf_stat_type(_leaf), do: :regular
+
+  defp walk_ancestry_segments(root_path, segments, leaf_type) do
+    last = length(segments) - 1
+
+    segments
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, root_path}, fn {segment, index}, {:ok, acc} ->
+      cond do
+        segment in ["", ".", ".."] or String.contains?(segment, ["/", "\\", <<0>>]) ->
+          {:halt, {:error, :trusted_build_wrapper_identity_mismatch}}
+
+        true ->
+          path = Path.join(acc, segment)
+          expected_type = if index == last, do: leaf_type, else: :directory
+
+          case File.lstat(path, time: :posix) do
+            {:ok, %File.Stat{type: :symlink}} ->
+              {:halt, {:error, :symlink_rejected}}
+
+            {:ok, %File.Stat{type: ^expected_type}} ->
+              {:cont, {:ok, path}}
+
+            {:ok, %File.Stat{}} ->
+              {:halt, {:error, :trusted_build_wrapper_identity_mismatch}}
+
+            {:error, :enoent} ->
+              {:halt, {:error, :path_not_found}}
+
+            {:error, _reason} ->
+              {:halt, {:error, :stat_failed}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, _path} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp lstat_regular(path) do
     case File.lstat(path, time: :posix) do

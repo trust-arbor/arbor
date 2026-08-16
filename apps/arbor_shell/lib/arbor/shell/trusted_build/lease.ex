@@ -16,10 +16,11 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   alias Arbor.Shell.Executor
   alias Arbor.Shell.OwnedTree
   alias Arbor.Shell.OwnedTreeRegistry
-  alias Arbor.Shell.ProcessGroup
   alias Arbor.Shell.TrustedBuild.Inventory
   alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.TrustedBuildToolchainAuthority
+
+  @fallback_kill_grace_ms 2_000
 
   @supervisor Arbor.Shell.TrustedBuild.LeaseSupervisor
   @reserved_ops [
@@ -92,6 +93,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
   def reserved(_lease, _op), do: {:error, :invalid_trusted_build_lease_op}
 
+  @spec abort_unattached_phase(Handle.t()) :: :ok | {:error, term()}
+  def abort_unattached_phase(%Handle{} = lease), do: call(lease, :abort_unattached_phase)
+
   @spec release(Handle.t()) :: :ok | {:error, term()}
   def release(%Handle{} = lease), do: call(lease, :release)
 
@@ -108,6 +112,12 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   def checkout_launch(lease_pid, launch_ticket)
       when is_pid(lease_pid) and is_reference(launch_ticket) do
     phase_call(lease_pid, {:checkout_launch, launch_ticket})
+  end
+
+  @spec take_launch(pid(), reference()) :: {:ok, map()} | {:error, term()}
+  def take_launch(lease_pid, launch_permit)
+      when is_pid(lease_pid) and is_reference(launch_permit) do
+    port_owner_call(lease_pid, {:take_launch, launch_permit})
   end
 
   @spec register_port_owner(pid(), pid()) :: :ok | {:error, term()}
@@ -167,6 +177,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
        phase_ref: nil,
        cancel_id: nil,
        launch_ticket: nil,
+       launch_permit: nil,
+       launch_descriptor: nil,
+       fallback_used: false,
        port_owner_pid: nil,
        port_owner_ref: nil,
        port_owner_group_id: nil,
@@ -194,8 +207,32 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         {:reply, {:error, :trusted_build_launch_unauthorized}, state}
 
       true ->
-        descriptor = build_launch_descriptor(state)
-        {:reply, {:ok, descriptor}, %{state | launch_ticket: :consumed}}
+        permit = make_ref()
+        descriptor = Map.put(build_launch_descriptor(state), :launch_permit, permit)
+
+        {:reply, {:ok, descriptor},
+         %{
+           state
+           | launch_ticket: :consumed,
+             launch_permit: permit,
+             launch_descriptor: descriptor
+         }}
+    end
+  end
+
+  def handle_call({:take_launch, launch_permit}, {caller, _}, state) do
+    cond do
+      caller != state.port_owner_pid or not is_pid(state.port_owner_pid) ->
+        {:reply, {:error, :foreign_caller}, state}
+
+      state.launch_permit != launch_permit or not is_reference(launch_permit) ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      not is_map(state.launch_descriptor) ->
+        {:reply, {:error, :trusted_build_launch_unauthorized}, state}
+
+      true ->
+        {:reply, {:ok, state.launch_descriptor}, %{state | launch_permit: :consumed}}
     end
   end
 
@@ -327,6 +364,31 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     end
   end
 
+  defp dispatch_owner_request(:abort_unattached_phase, {caller, _}, state) do
+    cond do
+      caller != state.owner ->
+        {:reply, {:error, :foreign_caller}, state}
+
+      is_pid(state.phase_pid) ->
+        {:reply, {:error, :trusted_build_phase_in_flight}, state}
+
+      state.in_flight == nil ->
+        {:reply, {:error, :trusted_build_phase_not_started}, state}
+
+      true ->
+        {:reply, :ok,
+         %{
+           state
+           | in_flight: nil,
+             cancel_id: nil,
+             launch_ticket: nil,
+             launch_permit: nil,
+             launch_descriptor: nil,
+             locked: true
+         }}
+    end
+  end
+
   defp dispatch_owner_request(:cancel_in_flight, _from, state) do
     {:reply, :ok, signal_cancel(state)}
   end
@@ -410,6 +472,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         | in_flight: phase,
           cancel_id: cancel_id,
           launch_ticket: launch_ticket,
+          launch_permit: nil,
+          launch_descriptor: nil,
+          fallback_used: false,
           binding: binding
       }
 
@@ -446,11 +511,18 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       roots: Map.put(roots, :archives, identities.archives),
       env: Plan.closed_env(roots, binding),
       argv: Plan.argv(phase),
-      timeout_ms: Plan.timeout_ms(phase),
-      max_output_bytes: Executor.default_max_output_bytes(),
-      cancel_id: state.cancel_id
+      timeout_ms: phase_timeout_ms(state, phase),
+      max_output_bytes: phase_max_output_bytes(state),
+      cancel_id: state.cancel_id,
+      fault: state.fault
     }
   end
+
+  defp phase_timeout_ms(%{fault: :force_phase_timeout}, _phase), do: 1
+  defp phase_timeout_ms(_state, phase), do: Plan.timeout_ms(phase)
+
+  defp phase_max_output_bytes(%{fault: :force_output_overflow}), do: 32
+  defp phase_max_output_bytes(_state), do: Executor.default_max_output_bytes()
 
   defp complete_phase(state, result) do
     state = demonitor_phase(state)
@@ -466,12 +538,26 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
             in_flight: nil,
             cancel_id: nil,
             launch_ticket: nil,
+            launch_permit: nil,
+            launch_descriptor: nil,
             done: completed == [:deps_get, :compile, :release]
         }
 
       _other ->
-        %{state | in_flight: nil, cancel_id: nil, launch_ticket: nil, locked: true}
+        %{
+          state
+          | in_flight: nil,
+            cancel_id: nil,
+            launch_ticket: nil,
+            launch_permit: nil,
+            launch_descriptor: nil,
+            locked: true
+        }
     end
+  end
+
+  defp lock_after_phase_loss(%{in_flight: nil} = state) do
+    %{state | phase_pid: nil, phase_ref: nil}
   end
 
   defp lock_after_phase_loss(state) do
@@ -482,7 +568,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         phase_pid: nil,
         phase_ref: nil,
         cancel_id: nil,
-        launch_ticket: nil
+        launch_ticket: nil,
+        launch_permit: nil,
+        launch_descriptor: nil
     }
   end
 
@@ -495,22 +583,78 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     %{state | port_owner_pid: nil, port_owner_ref: nil}
   end
 
-  defp handle_port_owner_loss(%{port_owner_group_id: group_id} = state)
-       when is_integer(group_id) do
-    case fallback_kill_group(group_id) do
-      :ok ->
-        %{state | port_owner_exhausted: true, port_owner_pid: nil, port_owner_ref: nil}
+  defp handle_port_owner_loss(
+         %{
+           port_owner_registered: true,
+           port_owner_group_id: group_id,
+           fallback_used: false
+         } = state
+       )
+       when is_integer(group_id) and group_id > 0 do
+    next = %{state | fallback_used: true, port_owner_pid: nil, port_owner_ref: nil}
 
-      {:error, _reason} ->
-        %{state | port_owner_pid: nil, port_owner_ref: nil, locked: true}
+    case fallback_kill_once(group_id) do
+      :ok -> %{next | port_owner_exhausted: true}
+      {:error, _reason} -> %{next | locked: true}
     end
   end
 
-  defp handle_port_owner_loss(state) do
-    %{state | port_owner_exhausted: true, port_owner_pid: nil, port_owner_ref: nil}
+  defp handle_port_owner_loss(%{port_owner_registered: true} = state) do
+    %{state | port_owner_pid: nil, port_owner_ref: nil, locked: true}
   end
 
-  defp fallback_kill_group(group_id), do: ProcessGroup.kill_group(group_id)
+  defp handle_port_owner_loss(state) do
+    %{state | port_owner_pid: nil, port_owner_ref: nil}
+  end
+
+  defp fallback_kill_once(group_id) when is_integer(group_id) and group_id > 0 do
+    case :code.priv_dir(:arbor_shell) do
+      path when is_list(path) ->
+        launcher = Path.join(List.to_string(path), "arbor_shell_launcher")
+
+        if File.regular?(launcher) do
+          await_fallback_kill_port(launcher, group_id)
+        else
+          {:error, :launcher_unavailable}
+        end
+
+      _other ->
+        {:error, :launcher_unavailable}
+    end
+  end
+
+  defp await_fallback_kill_port(launcher, group_id) do
+    port =
+      Port.open({:spawn_executable, to_charlist(launcher)}, [
+        :binary,
+        :exit_status,
+        args: [
+          ~c"kill",
+          Integer.to_charlist(group_id),
+          Integer.to_charlist(@fallback_kill_grace_ms)
+        ]
+      ])
+
+    receive do
+      {^port, {:exit_status, 0}} ->
+        :ok
+
+      {^port, {:exit_status, status}} ->
+        {:error, {:kill_helper_failed, status}}
+    after
+      @fallback_kill_grace_ms + 500 ->
+        close_fallback_port(port)
+        {:error, :kill_helper_timeout}
+    end
+  catch
+    :error, reason -> {:error, {:kill_helper_failed, reason}}
+  end
+
+  defp close_fallback_port(port) do
+    Port.close(port)
+  catch
+    :error, _ -> :ok
+  end
 
   defp signal_cancel(%{cancel_id: cancel_id} = state) do
     if is_reference(cancel_id) do
@@ -583,7 +727,8 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         port_owner_ref: nil,
         port_owner_group_id: nil,
         port_owner_registered: false,
-        port_owner_exhausted: false
+        port_owner_exhausted: false,
+        fallback_used: false
     }
   end
 

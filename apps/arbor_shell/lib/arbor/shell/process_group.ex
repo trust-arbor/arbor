@@ -3,6 +3,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutablePolicy.Executable
+  alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Common.SafePath
 
   @ready 1
@@ -116,128 +117,160 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   @doc false
-  @spec run_trusted_build_executable(
-          map(),
-          [String.t()],
-          integer(),
-          pos_integer(),
-          pos_integer(),
-          pid()
-        ) ::
-          {:ok, map()} | {:error, term()}
-  def run_trusted_build_executable(
-        launch,
-        args,
-        start_time,
-        timeout,
-        max_output_bytes,
-        lease_pid
-      )
-      when is_map(launch) and is_list(args) and is_pid(lease_pid) do
-    run_trusted_build_owned(
-      launch,
-      args,
-      start_time,
-      timeout,
-      max_output_bytes,
-      lease_pid
-    )
-  end
-
-  def run_trusted_build_executable(_launch, _args, _start_time, _timeout, _max_output, _lease),
-    do: {:error, :invalid_trusted_build_launch}
-
-  defp run_trusted_build_owned(
-         launch,
-         args,
-         start_time,
-         timeout,
-         max_output_bytes,
-         lease_pid
-       ) do
+  @spec run_trusted_build_executable(pid(), reference()) :: {:ok, map()} | {:error, term()}
+  def run_trusted_build_executable(lease_pid, launch_permit)
+      when is_pid(lease_pid) and is_reference(launch_permit) do
     caller = self()
     reply_ref = make_ref()
-    cancel_id = Map.get(launch, :cancel_id)
 
     owner =
       spawn(fn ->
         Process.flag(:trap_exit, true)
-        lease_mon = Process.monitor(lease_pid)
+        send(caller, {:port_owner_ready, reply_ref, self()})
 
         result =
-          try do
-            run_trusted_build_one_shot(
-              launch,
-              args,
-              start_time,
-              timeout,
-              max_output_bytes,
-              lease_mon,
-              lease_pid,
-              cancel_id
-            )
-          catch
-            kind, reason -> {:error, {:port_owner_exception, {kind, reason}}}
+          receive do
+            {:port_owner_registered, ^reply_ref} ->
+              try do
+                run_trusted_build_one_shot(lease_pid, launch_permit)
+              catch
+                kind, reason -> {:error, {:port_owner_exception, {kind, reason}}}
+              end
+          after
+            5_000 -> {:error, :trusted_build_launch_unauthorized}
           end
 
         send(caller, {:"$arbor_shell_port_owner_reply", reply_ref, result})
       end)
 
-    owner_mon = Process.monitor(owner)
-    await_owned_one_shot_result(owner, owner_mon, reply_ref, cancel_id)
+    receive do
+      {:port_owner_ready, ^reply_ref, owner_pid} ->
+        case Lease.register_port_owner(lease_pid, owner_pid) do
+          :ok ->
+            send(owner, {:port_owner_registered, reply_ref})
+            owner_mon = Process.monitor(owner)
+            await_trusted_build_owner_result(owner, owner_mon, reply_ref)
+
+          {:error, reason} ->
+            Process.exit(owner, :kill)
+            {:error, reason}
+        end
+    after
+      5_000 ->
+        Process.exit(owner, :kill)
+        {:error, :trusted_build_launch_unauthorized}
+    end
   end
 
-  defp run_trusted_build_one_shot(
-         launch,
-         args,
-         start_time,
-         timeout,
-         max_output_bytes,
-         lease_mon,
-         lease_pid,
-         cancel_id
-       ) do
+  def run_trusted_build_executable(_lease_pid, _launch_permit),
+    do: {:error, :trusted_build_launch_unauthorized}
+
+  defp await_trusted_build_owner_result(owner, owner_mon, reply_ref) do
+    receive do
+      {:"$arbor_shell_port_owner_reply", ^reply_ref, result} ->
+        Process.demonitor(owner_mon, [:flush])
+        result
+
+      {:DOWN, ^owner_mon, :process, ^owner, reason} ->
+        receive do
+          {:"$arbor_shell_port_owner_reply", ^reply_ref, result} ->
+            result
+        after
+          0 ->
+            {:error, {:port_owner_failed, reason}}
+        end
+
+      {:cancel_shell_execution, cancel_id} ->
+        send(owner, {:cancel_shell_execution, cancel_id})
+        await_trusted_build_owner_result(owner, owner_mon, reply_ref)
+    end
+  end
+
+  defp run_trusted_build_one_shot(lease_pid, launch_permit) do
+    lease_mon = Process.monitor(lease_pid)
+
     case ensure_caller_alive(lease_mon, lease_pid) do
       {:error, :caller_dead} ->
+        _ = Lease.record_exhaustion(lease_pid, :not_started)
         {:error, :trusted_build_lease_lost}
 
       :ok ->
-        case open_trusted_build(launch, args, start_time, timeout, max_output_bytes) do
+        case Lease.take_launch(lease_pid, launch_permit) do
+          {:ok, launch} ->
+            run_trusted_build_after_take(lease_pid, lease_mon, launch)
+
           {:error, reason} ->
+            _ = Lease.record_exhaustion(lease_pid, :not_started)
             {:error, reason}
-
-          {:ok, handle} ->
-            with :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
-                 :ok <- start(handle, nil, caller_mon: lease_mon, cancel_id: cancel_id),
-                 :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
-                 {:ok, handle} <-
-                   close_stdin(handle, caller_mon: lease_mon, cancel_id: cancel_id) do
-              collect(handle, cancel_id, [], 0, lease_mon, lease_pid)
-            else
-              {:error, :caller_dead} ->
-                {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
-
-              {:error, :timeout} ->
-                {:ok, %{reason: :timeout, exit_code: 137, output: ""}}
-
-              {:error, :cancelled} ->
-                {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
-
-              {:error, reason} ->
-                {:error, reason}
-            end
         end
     end
   end
 
-  defp open_trusted_build(launch, args, start_time, timeout, max_output_bytes) do
+  defp run_trusted_build_after_take(lease_pid, lease_mon, launch) do
+    start_time = System.monotonic_time(:millisecond)
+    timeout = launch.timeout_ms
+    max_output_bytes = launch.max_output_bytes
+    cancel_id = launch.cancel_id
+
+    case open_trusted_build(launch, start_time, timeout, max_output_bytes) do
+      {:error, :timeout_during_setup} = error ->
+        error
+
+      {:error, reason} ->
+        _ = maybe_record_setup_exhaustion(lease_pid, reason)
+        {:error, reason}
+
+      {:ok, handle} ->
+        _ = Lease.record_group_id(lease_pid, handle.group_id)
+
+        result =
+          with :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
+               :ok <- start(handle, nil, caller_mon: lease_mon, cancel_id: cancel_id),
+               :ok <- ensure_caller_alive(lease_mon, lease_pid, handle),
+               {:ok, handle} <- close_stdin(handle, caller_mon: lease_mon, cancel_id: cancel_id) do
+            collect(handle, cancel_id, [], 0, lease_mon, lease_pid)
+          else
+            {:error, :caller_dead} ->
+              {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
+
+            {:error, :timeout} ->
+              {:ok, %{reason: :timeout, exit_code: 137, output: ""}}
+
+            {:error, :cancelled} ->
+              {:ok, %{reason: :cancelled, exit_code: 137, output: ""}}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+
+        _ = record_trusted_build_exhaustion(lease_pid, result)
+        result
+    end
+  end
+
+  defp maybe_record_setup_exhaustion(_lease_pid, :timeout_during_setup), do: :ok
+  defp maybe_record_setup_exhaustion(_lease_pid, :cancelled_during_setup), do: :ok
+
+  defp maybe_record_setup_exhaustion(lease_pid, _reason) do
+    Lease.record_exhaustion(lease_pid, :setup_failed)
+  end
+
+  defp record_trusted_build_exhaustion(lease_pid, {:ok, %{reason: reason}}) do
+    Lease.record_exhaustion(lease_pid, reason)
+  end
+
+  defp record_trusted_build_exhaustion(lease_pid, {:error, _reason}) do
+    Lease.record_exhaustion(lease_pid, :error)
+  end
+
+  defp open_trusted_build(launch, start_time, timeout, max_output_bytes) do
     deadline = start_time + timeout
 
-    with :ok <- validate_args(args),
+    with :ok <- validate_args(launch.argv),
          {:ok, launcher} <- launcher_path(),
          remaining when remaining > 0 <- remaining_ms(deadline),
          {:ok, port} <-
-           open_trusted_build_port(launcher, launch, args, remaining, max_output_bytes),
+           open_trusted_build_port(launcher, launch, remaining, max_output_bytes),
          {:ok, group_id} <- await_ready(port, deadline) do
       {:ok,
        %__MODULE__{
@@ -249,13 +282,16 @@ defmodule Arbor.Shell.ProcessGroup do
          stdin_open: true
        }}
     else
-      remaining when is_integer(remaining) and remaining <= 0 -> {:error, :timeout_during_setup}
-      {:error, reason} -> {:error, reason}
+      remaining when is_integer(remaining) and remaining <= 0 ->
+        {:error, :timeout_during_setup}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp open_trusted_build_port(launcher, launch, args, timeout, max_output_bytes) do
-    launcher_args = trusted_build_argv(launch, args, timeout, max_output_bytes)
+  defp open_trusted_build_port(launcher, launch, timeout, max_output_bytes) do
+    launcher_args = trusted_build_argv(launch, timeout, max_output_bytes)
 
     port_opts = [
       :binary,
@@ -273,7 +309,7 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  defp trusted_build_argv(launch, args, timeout, max_output_bytes) do
+  defp trusted_build_argv(launch, timeout, max_output_bytes) do
     w = launch.wrapper
     erl = launch.erl
     elixir = launch.elixir
@@ -306,7 +342,7 @@ defmodule Arbor.Shell.ProcessGroup do
       wdir_id(roots.mix) ++
       wdir_id(roots.cache) ++
       wdir_id(roots.release) ++
-      ["--", w.path | args]
+      ["--", w.path | launch.argv]
   end
 
   defp file_id(id) do
@@ -317,6 +353,9 @@ defmodule Arbor.Shell.ProcessGroup do
       Integer.to_string(id.mtime),
       Integer.to_string(id.ctime),
       Integer.to_string(id.mode),
+      Integer.to_string(id.uid),
+      Integer.to_string(id.gid),
+      Integer.to_string(id.nlink),
       id.sha256,
       id.path
     ]
@@ -327,6 +366,7 @@ defmodule Arbor.Shell.ProcessGroup do
       Integer.to_string(id.device),
       Integer.to_string(id.inode),
       Integer.to_string(id.mode),
+      Integer.to_string(id.uid),
       id.path
     ]
   end
@@ -1020,39 +1060,45 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  # Optional test interceptor: fun.(group_id, &native_kill_group/1).
-  # Production never sets this; public execute paths still require a real :ok
-  # kill proof before returning a terminal.
-  @kill_group_interceptor_env :process_group_kill_group_interceptor
-
-  @doc false
-  # Public so Lease's owner-loss fallback re-containment (a distinct BEAM
-  # process from whichever port owner opened the group) can attempt the same
-  # idempotent native kill sequence when no exhaustion ack ever arrived.
-  @spec kill_group(pos_integer()) :: :ok | {:error, term()}
-  def kill_group(group_id) when is_integer(group_id) and group_id > 0 do
-    case Application.get_env(:arbor_shell, @kill_group_interceptor_env) do
-      fun when is_function(fun, 2) -> fun.(group_id, &native_kill_group/1)
-      _other -> native_kill_group(group_id)
-    end
+  defp kill_group(group_id) when is_integer(group_id) and group_id > 0 do
+    native_kill_group(group_id)
   end
 
   defp native_kill_group(group_id) when is_integer(group_id) and group_id > 0 do
     with {:ok, launcher} <- launcher_path() do
       try do
-        case System.cmd(
-               launcher,
-               ["kill", Integer.to_string(group_id), Integer.to_string(@teardown_timeout_ms)],
-               stderr_to_stdout: true
-             ) do
-          {_output, 0} -> :ok
-          {output, status} -> {:error, {:kill_helper_failed, status, output}}
-        end
-      rescue
-        error -> {:error, {:kill_helper_failed, Exception.message(error)}}
+        port =
+          Port.open({:spawn_executable, to_charlist(launcher)}, [
+            :binary,
+            :exit_status,
+            args: [
+              ~c"kill",
+              Integer.to_charlist(group_id),
+              Integer.to_charlist(@teardown_timeout_ms)
+            ]
+          ])
+
+        await_kill_port(port)
       catch
-        :exit, reason -> {:error, {:kill_helper_failed, reason}}
+        :error, reason -> {:error, {:kill_helper_failed, reason}}
       end
+    end
+  end
+
+  defp await_kill_port(port) do
+    receive do
+      {^port, {:exit_status, 0}} ->
+        :ok
+
+      {^port, {:exit_status, status}} ->
+        {:error, {:kill_helper_failed, status}}
+
+      {^port, _message} ->
+        await_kill_port(port)
+    after
+      @teardown_timeout_ms + 500 ->
+        close_port(port)
+        {:error, :kill_helper_timeout}
     end
   end
 

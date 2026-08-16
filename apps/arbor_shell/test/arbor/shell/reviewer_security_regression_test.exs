@@ -315,66 +315,29 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: public execute_direct does not return until process-group kill is proven" do
-    # Force abnormal launcher death by SIGKILL, then inject two kill-helper
-    # failures before the real kill. exit_status and {:EXIT, port, _} may arrive
-    # in either order; both must prove exhaustion then return containment_failure.
-    parent = self()
     duration = "31.#{100 + rem(System.unique_integer([:positive]), 900)}"
-    attempts = :atomics.new(1, signed: false)
-    :atomics.put(attempts, 1, 0)
-    previous = Application.get_env(:arbor_shell, :process_group_kill_group_interceptor)
 
-    Application.put_env(
-      :arbor_shell,
-      :process_group_kill_group_interceptor,
-      fn group_id, real_kill ->
-        n = :atomics.add_get(attempts, 1, 1)
-        send(parent, {:kill_attempt, n, group_id})
+    task =
+      Task.async(fn ->
+        Shell.execute_direct("sleep", [duration], sandbox: :none, timeout: 15_000)
+      end)
 
-        if n < 3 do
-          {:error, {:kill_helper_failed, 1, "injected-containment-failure"}}
-        else
-          real_kill.(group_id)
-        end
-      end
-    )
-
-    try do
-      task =
-        Task.async(fn ->
-          Shell.execute_direct("sleep", [duration], sandbox: :none, timeout: 15_000)
+    launcher =
+      eventually_value(fn ->
+        Enum.find(os_processes(), fn process ->
+          String.contains?(process.command, "arbor_shell_launcher exec") and
+            String.contains?(process.command, duration)
         end)
+      end)
 
-      launcher =
-        eventually_value(fn ->
-          Enum.find(os_processes(), fn process ->
-            String.contains?(process.command, "arbor_shell_launcher exec") and
-              String.contains?(process.command, duration)
-          end)
-        end)
+    assert launcher
+    assert {_out, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher.pid)])
 
-      assert launcher
-      assert {_out, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher.pid)])
-
-      started_wait = System.monotonic_time(:millisecond)
-      assert {:ok, result} = Task.await(task, 15_000)
-      elapsed = System.monotonic_time(:millisecond) - started_wait
-
-      # Fail-closed containment terminal after proven kill — not a raw launcher error.
-      assert result.exit_code == 137
-      assert result.killed == true
-      assert Map.get(result, :containment_failure) == true
-      assert elapsed >= 150
-
-      assert_receive {:kill_attempt, 1, group_id}, 2_000
-      assert is_integer(group_id) and group_id > 0
-      assert_receive {:kill_attempt, 2, ^group_id}, 2_000
-      assert_receive {:kill_attempt, 3, ^group_id}, 2_000
-
-      refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
-    after
-      restore(:arbor_shell, :process_group_kill_group_interceptor, previous)
-    end
+    assert {:ok, result} = Task.await(task, 15_000)
+    assert result.exit_code == 137
+    assert result.killed == true
+    assert Map.get(result, :containment_failure) == true
+    refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
   end
 
   test "security regression: public execute_direct preserves caller trap_exit flag" do

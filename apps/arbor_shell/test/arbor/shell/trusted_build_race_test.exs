@@ -30,11 +30,71 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
       {lease, identity, _source} = start_fixture!()
 
       try do
-        # Last-boundary re-pins every 0700 child. Swapping the lease worker's
-        # private tree is not caller-visible; replacing source cwd is.
-        File.rm_rf!(Path.join(identity.path, "source"))
-        File.mkdir_p!(Path.join(identity.path, "source"))
+        state = :sys.get_state(lease.worker)
+        build = state.roots.build.path
+        File.rename!(build, build <> ".old")
+        File.mkdir_p!(build)
+        File.chmod!(build, 0o700)
 
+        assert {:error, _reason} = Shell.execute_trusted_build(lease, "deps_get")
+        assert {:error, :trusted_build_phase_locked} =
+                 Shell.execute_trusted_build(lease, "compile")
+      after
+        _ = Shell.release_trusted_build_lease(lease)
+        _ = Shell.remove_owned_tree(identity)
+      end
+    end
+  end
+
+  test "symlink, hardlink, and ancestor replacement fail closed" do
+    if match?({:unix, :darwin}, :os.type()) do
+      {lease, identity, source} = start_fixture!()
+
+      try do
+        wrapper = Path.join(source, "bin/mix")
+        File.rename!(wrapper, wrapper <> ".real")
+        File.ln_s!(wrapper <> ".real", wrapper)
+        assert {:error, _reason} = Shell.execute_trusted_build(lease, "deps_get")
+      after
+        _ = Shell.release_trusted_build_lease(lease)
+        _ = Shell.remove_owned_tree(identity)
+      end
+
+      {lease2, identity2, source2} = start_fixture!()
+
+      try do
+        wrapper = Path.join(source2, "bin/mix")
+        extra = wrapper <> ".link"
+        File.ln!(wrapper, extra)
+        assert {:error, _reason} = Shell.execute_trusted_build(lease2, "deps_get")
+      after
+        _ = Shell.release_trusted_build_lease(lease2)
+        _ = Shell.remove_owned_tree(identity2)
+      end
+
+      {lease3, identity3, source3} = start_fixture!()
+
+      try do
+        bin = Path.join(source3, "bin")
+        File.rename!(bin, bin <> ".old")
+        File.mkdir_p!(bin)
+        File.ln_s!(bin <> ".old/mix", Path.join(bin, "mix"))
+        assert {:error, _reason} = Shell.execute_trusted_build(lease3, "deps_get")
+      after
+        _ = Shell.release_trusted_build_lease(lease3)
+        _ = Shell.remove_owned_tree(identity3)
+      end
+    end
+  end
+
+  test "archive content replacement fails closed" do
+    if match?({:unix, :darwin}, :os.type()) do
+      {lease, identity, _source} = start_fixture!()
+
+      try do
+        state = :sys.get_state(lease.worker)
+        archives = state.identities.archives.path
+        File.write!(Path.join(archives, "forged"), "x")
         assert {:error, _reason} = Shell.execute_trusted_build(lease, "deps_get")
       after
         _ = Shell.release_trusted_build_lease(lease)

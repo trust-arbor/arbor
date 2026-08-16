@@ -11,7 +11,15 @@ defmodule Arbor.Shell.TrustedBuild do
   alias Arbor.Shell.TrustedBuild.Request
   alias Arbor.Shell.TrustedBuildToolchainAuthority
 
-  @faults [:none, :force_cleanup_failure, :force_identity_capture_failure, :omit_hex_seed]
+  @faults [
+    :none,
+    :force_cleanup_failure,
+    :force_identity_capture_failure,
+    :omit_hex_seed,
+    :force_phase_timeout,
+    :force_output_overflow,
+    :crash_phase
+  ]
   @token_bytes 32
 
   @spec acquire(term(), atom()) :: {:ok, Lease.Handle.t(), map()} | {:error, term()}

@@ -9,7 +9,7 @@ Supervisor.start_child(Arbor.Shell.Supervisor, Arbor.Shell.OwnedTreeRegistry)
 
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
-  {Arbor.Shell.TrustedBuildToolchainAuthority, []}
+  {Arbor.Shell.TrustedBuildToolchainAuthority, [hex_archive: :empty]}
 )
 
 Supervisor.start_child(

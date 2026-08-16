@@ -40,19 +40,20 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
       {lease, source_identity} = start_fixture_lease!()
 
       try do
-        task =
+        watcher =
           Task.async(fn ->
-            Shell.execute_trusted_build(lease, "compile")
+            eventually?(fn ->
+              Enum.any?(os_processes(), fn process ->
+                String.contains?(process.command, "arbor_shell_launcher trusted-build")
+              end)
+            end)
           end)
 
-        assert eventually?(fn ->
-                 Enum.any?(os_processes(), fn process ->
-                   String.contains?(process.command, "arbor_shell_launcher trusted-build")
-                 end)
-               end)
-
-        assert {:ok, compile} = Task.await(task, 120_000)
+        assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
+        assert deps.exit_code == 0
+        assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
         assert compile.exit_code == 0
+        assert Task.await(watcher, 15_000) == true
 
         refute Enum.any?(
                  os_processes(),
