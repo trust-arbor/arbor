@@ -19,15 +19,64 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
   @fat32_arch 20
   @fat64_arch 32
 
+  @attr_keys [:executable, :identities, :owner, :path, :prefix, :size, :term_role]
+
+  @doc """
+  Classify one regular-file prefix. Required atom keys: path, size, prefix,
+  executable, term_role, owner, identities. Locked order: cookie, FOR1/BEAM,
+  thin/fat Mach-O, ELF, PE, then .beam/.app/.rel role, executable, priv,
+  releases/, other. Missing, extra, or mistyped attrs return an error.
+  """
   @spec kind(map()) :: {:ok, String.t()} | {:error, atom()}
-  def kind(attrs) when is_map(attrs) do
-    path = Map.fetch!(attrs, :path)
-    size = Map.fetch!(attrs, :size)
-    prefix = Map.fetch!(attrs, :prefix)
-    executable? = Map.fetch!(attrs, :executable)
-    term_role = Map.fetch!(attrs, :term_role)
-    owner = Map.fetch!(attrs, :owner)
-    identities = Map.fetch!(attrs, :identities)
+  def kind(attrs) when is_map(attrs) and not is_struct(attrs) do
+    case admit_attrs(attrs) do
+      {:ok, admitted} -> classify_admitted(admitted)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def kind(_), do: {:error, :malformed_signature}
+
+  defp admit_attrs(attrs) do
+    keys = Map.keys(attrs)
+
+    cond do
+      MapSet.new(keys) != MapSet.new(@attr_keys) ->
+        {:error, :malformed_signature}
+
+      not attr_types?(attrs) ->
+        {:error, :malformed_signature}
+
+      true ->
+        {:ok, attrs}
+    end
+  end
+
+  defp attr_types?(attrs) do
+    is_binary(attrs[:path]) and is_integer(attrs[:size]) and attrs[:size] >= 0 and
+      is_binary(attrs[:prefix]) and is_boolean(attrs[:executable]) and
+      attrs[:term_role] in [:app, :rel, nil] and
+      (is_nil(attrs[:owner]) or is_binary(attrs[:owner])) and
+      identities_ok?(attrs[:identities])
+  end
+
+  defp identities_ok?(list) when is_list(list) do
+    Enum.all?(list, fn
+      {name, vsn} when is_binary(name) and is_binary(vsn) -> true
+      _other -> false
+    end)
+  end
+
+  defp identities_ok?(_), do: false
+
+  defp classify_admitted(attrs) do
+    path = attrs[:path]
+    size = attrs[:size]
+    prefix = attrs[:prefix]
+    executable? = attrs[:executable]
+    term_role = attrs[:term_role]
+    owner = attrs[:owner]
+    identities = attrs[:identities]
 
     cond do
       path == "releases/COOKIE" ->
@@ -55,8 +104,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
         classify_path(path, executable?, term_role, owner, identities)
     end
   end
-
-  def kind(_), do: {:error, :malformed_signature}
 
   defp for1?(<<"FOR1", _::binary>>), do: true
   defp for1?(_), do: false
@@ -111,7 +158,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
     end
   end
 
-  defp thin64_header(size, prefix) when size < @thin64_header or byte_size(prefix) < @thin64_header do
+  defp thin64_header(size, prefix)
+       when size < @thin64_header or byte_size(prefix) < @thin64_header do
     {:error, :malformed_signature}
   end
 
@@ -350,11 +398,21 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Classify do
   end
 
   defp priv_asset?(_path, nil, _identities), do: false
+  defp priv_asset?(_path, _owner, identities) when not is_list(identities), do: false
 
-  defp priv_asset?(path, owner, identities) do
-    case Enum.find(identities, fn {name, _vsn} -> name == owner end) do
-      {name, vsn} -> String.starts_with?(path, "lib/" <> name <> "-" <> vsn <> "/priv/")
-      nil -> false
+  defp priv_asset?(path, owner, identities) when is_binary(owner) do
+    case identity_for(owner, identities) do
+      {:ok, name, vsn} -> String.starts_with?(path, "lib/" <> name <> "-" <> vsn <> "/priv/")
+      :error -> false
     end
+  end
+
+  defp priv_asset?(_path, _owner, _identities), do: false
+
+  defp identity_for(owner, identities) do
+    Enum.find_value(identities, :error, fn
+      {name, vsn} when name == owner and is_binary(vsn) -> {:ok, name, vsn}
+      _other -> nil
+    end)
   end
 end

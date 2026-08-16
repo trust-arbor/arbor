@@ -13,7 +13,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
   @finding_forbidden "forbidden_runtime_applications"
   @finding_unsafe "unsafe_native_or_executable_ownership"
 
-  @spec application_class(String.t()) :: String.t()
+  @spec application_class(term()) :: String.t() | {:error, atom()}
   def application_class(name) when is_binary(name) do
     cond do
       MapSet.member?(Encode.selected_first_party_names(), name) ->
@@ -30,7 +30,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
     end
   end
 
-  @spec findings([map()], [map()]) :: [map()]
+  def application_class(_), do: {:error, :invalid_manifest}
+
+  @spec findings(term(), term()) :: [map()] | {:error, atom()}
   def findings(applications, entries) when is_list(applications) and is_list(entries) do
     [
       class_finding(@finding_unexpected, "unexpected_first_party", applications, entries),
@@ -41,6 +43,42 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
     |> Enum.reject(&is_nil/1)
     |> Enum.sort_by(& &1["id"])
   end
+
+  def findings(_, _), do: {:error, :invalid_manifest}
+
+  @spec owner_application(String.t(), [{String.t(), String.t()}]) ::
+          {:ok, String.t() | nil} | {:error, atom()}
+  def owner_application(path, identities) when is_binary(path) and is_list(identities) do
+    matches =
+      path
+      |> String.split("/")
+      |> adjacent_lib_identities(identities)
+
+    case Enum.uniq(matches) do
+      [] -> {:ok, nil}
+      [{name, _vsn}] -> {:ok, name}
+      _many -> {:error, :ownership_ambiguity}
+    end
+  end
+
+  def owner_application(_, _), do: {:error, :ownership_ambiguity}
+
+  @spec applications_consistent?([map()], [map()]) :: :ok | {:error, term()}
+  def applications_consistent?(applications, entries)
+      when is_list(applications) and is_list(entries) do
+    names = MapSet.new(Enum.map(applications, & &1["name"]))
+    by_path = Map.new(entries, &{&1["path"], &1})
+    identities = Enum.map(applications, &{&1["name"], &1["version"]})
+
+    with :ok <- selected_present(names),
+         :ok <- app_spec_bindings(applications, by_path),
+         :ok <- declared_deps_present(applications, names),
+         :ok <- declared_deps_disjoint(applications) do
+      entry_owners(entries, identities)
+    end
+  end
+
+  def applications_consistent?(_, _), do: {:error, :invalid_manifest}
 
   @spec release_facts([map()], [map()]) :: {:ok, map()} | {:error, term()}
   def release_facts(applications, entries)
@@ -60,10 +98,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
 
   def release_facts(_, _), do: {:error, :invalid_manifest}
 
-  @spec reproducibility_consistent?(map(), String.t()) :: :ok | {:error, atom()}
-  def reproducibility_consistent?(repro, payload_digest)
-      when is_map(repro) and is_binary(payload_digest) do
-    with :ok <- first_digest_match(repro, payload_digest),
+  # Residual: second-snapshot applications are not in the manifest, so
+  # app-only drift is status=different with equal payload digests and
+  # empty differing_paths. Do not reject that shape.
+  @spec reproducibility_consistent?(map(), map()) :: :ok | {:error, atom()}
+  def reproducibility_consistent?(repro, facts) when is_map(repro) and is_map(facts) do
+    with :ok <- first_digest_match(repro, facts),
          :ok <- rule_match(repro) do
       status_consistent(repro)
     end
@@ -149,9 +189,92 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
   defp sum_sizes([], acc), do: acc
   defp sum_sizes([entry | rest], acc), do: sum_sizes(rest, acc + entry["size"])
 
-  defp first_digest_match(%{"payload_tree_digests" => [first, _second]}, expected)
-       when first == expected do
-    :ok
+  defp selected_present(names) do
+    if MapSet.subset?(Encode.selected_first_party_names(), names) do
+      :ok
+    else
+      {:error, :missing_selected_application}
+    end
+  end
+
+  defp app_spec_bindings([], _by_path), do: :ok
+
+  defp app_spec_bindings([app | rest], by_path) do
+    path = "lib/" <> app["name"] <> "-" <> app["version"] <> "/ebin/" <> app["name"] <> ".app"
+    entry = Map.get(by_path, path)
+
+    cond do
+      app["app_spec_path"] != path ->
+        {:error, {:invalid_field, "app_spec_path", :derived_mismatch}}
+
+      is_nil(entry) ->
+        {:error, {:invalid_field, "app_spec_path", :missing_app_spec}}
+
+      entry["sha256"] != app["app_spec_sha256"] ->
+        {:error, {:invalid_field, "app_spec_sha256", :derived_mismatch}}
+
+      entry["content_kind"] != "app_spec" ->
+        {:error, {:invalid_field, "content_kind", :derived_mismatch}}
+
+      entry["owner_application"] != app["name"] ->
+        {:error, {:invalid_field, "owner_application", :derived_mismatch}}
+
+      true ->
+        app_spec_bindings(rest, by_path)
+    end
+  end
+
+  defp declared_deps_present([], _names), do: :ok
+
+  defp declared_deps_present([app | rest], names) do
+    declared = app["declared_applications"]
+    needed = declared["required"] ++ declared["included"]
+
+    if Enum.all?(needed, &MapSet.member?(names, &1)) do
+      declared_deps_present(rest, names)
+    else
+      {:error, :missing_dependency}
+    end
+  end
+
+  defp entry_owners([], _identities), do: :ok
+
+  defp entry_owners([entry | rest], identities) do
+    expected_owner = entry["owner_application"]
+
+    case owner_application(entry["path"], identities) do
+      {:ok, ^expected_owner} ->
+        entry_owners(rest, identities)
+
+      {:ok, _} ->
+        {:error, {:invalid_field, "owner_application", :derived_mismatch}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp adjacent_lib_identities(segments, identities) do
+    segments
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.flat_map(&match_lib_pair(&1, identities))
+  end
+
+  defp match_lib_pair(["lib", ident], identities) do
+    Enum.filter(identities, fn
+      {name, vsn} when is_binary(name) and is_binary(vsn) -> ident == name <> "-" <> vsn
+      _other -> false
+    end)
+  end
+
+  defp match_lib_pair(_, _), do: []
+
+  defp first_digest_match(%{"payload_tree_digests" => [first, _second]}, facts) do
+    if first == facts["payload_tree_digest"] do
+      :ok
+    else
+      {:error, :inconsistent_reproducibility}
+    end
   end
 
   defp first_digest_match(_, _), do: {:error, :inconsistent_reproducibility}
@@ -169,6 +292,26 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
 
   defp status_consistent(%{"status" => "identical"}), do: {:error, :inconsistent_reproducibility}
 
+  # App-only drift: equal payload digests and empty differing_paths.
   defp status_consistent(%{"status" => "different"}), do: :ok
   defp status_consistent(_), do: {:error, :inconsistent_reproducibility}
+
+  defp declared_deps_disjoint([]), do: :ok
+
+  defp declared_deps_disjoint([app | rest]) do
+    declared = app["declared_applications"]
+    required = MapSet.new(declared["required"])
+    included = MapSet.new(declared["included"])
+    optional = MapSet.new(declared["optional"])
+
+    overlap? =
+      not MapSet.disjoint?(required, included) or not MapSet.disjoint?(required, optional) or
+        not MapSet.disjoint?(included, optional)
+
+    if overlap? do
+      {:error, :invalid_dependency_list}
+    else
+      declared_deps_disjoint(rest)
+    end
+  end
 end

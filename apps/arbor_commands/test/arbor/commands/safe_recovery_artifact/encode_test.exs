@@ -31,13 +31,19 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.EncodeTest do
     bad_digest = String.duplicate("c", 64)
 
     assert {:error, {:invalid_field, "build_inputs_digest", :derived_mismatch}} =
-             Encode.validate_manifest(put_in(manifest, ["source", "build_inputs_digest"], bad_digest))
+             Encode.validate_manifest(
+               put_in(manifest, ["source", "build_inputs_digest"], bad_digest)
+             )
 
     assert {:error, {:invalid_field, "payload_tree_digest", :derived_mismatch}} =
-             Encode.validate_manifest(put_in(manifest, ["release", "payload_tree_digest"], bad_digest))
+             Encode.validate_manifest(
+               put_in(manifest, ["release", "payload_tree_digest"], bad_digest)
+             )
 
     assert {:error, {:invalid_field, "applications_digest", :derived_mismatch}} =
-             Encode.validate_manifest(put_in(manifest, ["release", "applications_digest"], bad_digest))
+             Encode.validate_manifest(
+               put_in(manifest, ["release", "applications_digest"], bad_digest)
+             )
 
     assert {:error, {:invalid_field, "entry_count", :derived_mismatch}} =
              Encode.validate_manifest(put_in(manifest, ["release", "entry_count"], 0))
@@ -65,6 +71,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.EncodeTest do
     assert {:error, :inconsistent_reproducibility} =
              Encode.validate_manifest(%{manifest | "reproducibility" => repro})
 
+    # Residual: app-only drift is status=different with equal payload
+    # digests and empty differing_paths. The frozen shape has no second
+    # applications digest, so this remains valid Core output.
     app_only = %{
       manifest["reproducibility"]
       | "status" => "different",
@@ -72,6 +81,64 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.EncodeTest do
     }
 
     assert :ok = Encode.validate_manifest(%{manifest | "reproducibility" => app_only})
+  end
+
+  test "rejects mutated application evidence that no longer matches entries", %{
+    manifest: manifest
+  } do
+    [app | rest] = manifest["applications"]
+    mutated_hash = [%{app | "app_spec_sha256" => String.duplicate("a", 64)} | rest]
+    {:ok, hash_digest} = Encode.applications_digest(mutated_hash)
+
+    assert {:error, {:invalid_field, "app_spec_sha256", :derived_mismatch}} =
+             Encode.validate_manifest(%{
+               manifest
+               | "applications" => mutated_hash,
+                 "release" => %{manifest["release"] | "applications_digest" => hash_digest}
+             })
+
+    mutated_path = [%{app | "app_spec_path" => "lib/other-1.0.0/ebin/other.app"} | rest]
+    {:ok, path_digest} = Encode.applications_digest(mutated_path)
+
+    assert {:error, {:invalid_field, "app_spec_path", :derived_mismatch}} =
+             Encode.validate_manifest(%{
+               manifest
+               | "applications" => mutated_path,
+                 "release" => %{manifest["release"] | "applications_digest" => path_digest}
+             })
+
+    [entry | entry_rest] = manifest["entries"]
+    mutated_owner = [%{entry | "owner_application" => "jason"} | entry_rest]
+    {:ok, payload} = Encode.payload_tree_digest(mutated_owner)
+    [_, second] = manifest["reproducibility"]["payload_tree_digests"]
+
+    assert {:error, {:invalid_field, "owner_application", :derived_mismatch}} =
+             Encode.validate_manifest(%{
+               manifest
+               | "entries" => mutated_owner,
+                 "release" => %{manifest["release"] | "payload_tree_digest" => payload},
+                 "reproducibility" => %{
+                   manifest["reproducibility"]
+                   | "payload_tree_digests" => [payload, second]
+                 }
+             })
+
+    declared = app["declared_applications"]
+    overlap = %{declared | "included" => declared["required"]}
+    mutated_deps = [%{app | "declared_applications" => overlap} | rest]
+    {:ok, deps_digest} = Encode.applications_digest(mutated_deps)
+
+    assert {:error, :invalid_dependency_list} =
+             Encode.validate_manifest(%{
+               manifest
+               | "applications" => mutated_deps,
+                 "release" => %{manifest["release"] | "applications_digest" => deps_digest}
+             })
+  end
+
+  test "canonical_json/1 rejects atoms and floats" do
+    assert {:error, :non_string_keys} = Encode.canonical_json(:atom)
+    assert {:error, :unsupported_syntax} = Encode.canonical_json(1.5)
   end
 
   test "digest avalanche across domains", %{manifest: manifest} do

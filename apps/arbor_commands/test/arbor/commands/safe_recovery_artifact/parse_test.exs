@@ -63,10 +63,27 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
       assert {:error, :unsupported_syntax} = Parse.app_spec("{application,foo,[{vsn,1.0}]}.")
     end
 
+    test "rejects octal escapes above 255 and hidden controls" do
+      assert {:error, :unsupported_syntax} =
+               Parse.app_spec("{application,foo,[{vsn,\"\\400\"}]}.")
+
+      assert {:error, :control_character} =
+               Parse.app_spec("% \0 hidden\n{application,foo,[{vsn,\"1\"}]}.")
+
+      assert {:error, :invalid_utf8} =
+               Parse.app_spec(<<0xFF, 0xFF, "{application,foo,[{vsn,\"1\"}]}."::binary>>)
+    end
+
     test "rejects maps, improper lists, and missing terminator" do
       assert {:error, :unsupported_syntax} = Parse.app_spec(~S({application,foo,#{a=>1}}.))
       assert {:error, :improper_list} = Parse.app_spec("{application,foo,[{vsn,\"1\"}|x]}.")
       assert {:error, :malformed_term} = Parse.app_spec("{application,foo,[{vsn,\"1\"}]}")
+    end
+
+    test "parses a long integer list with an explicit item count" do
+      items = Enum.map_join(1..2_048, ",", &Integer.to_string/1)
+      assert {:ok, list} = Parse.term("[" <> items <> "].")
+      assert length(list) == 2_048
     end
 
     test "rejects oversized and overly nested terms" do

@@ -17,7 +17,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ClassifyTest do
     truncated = binary_part(beam, 0, 8)
     assert {:error, :truncated_beam} = kind("x.beam", truncated, 8, false, nil)
 
-    assert {:error, :malformed_signature} =
+    assert {:error, :truncated_beam} =
              kind("x.beam", <<"FOR1", 99::unsigned-big-32, "BEAM">>, 20, false, nil)
 
     assert {:error, :suffix_signature_mismatch} =
@@ -54,10 +54,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ClassifyTest do
     assert {:error, :malformed_signature} = kind("bin/fat", header, 8, false, nil)
 
     bad_reserved = fat64_record(reserved: 1)
-    assert {:error, :malformed_signature} = kind("bin/fat", bad_reserved, byte_size(bad_reserved), false, nil)
+
+    assert {:error, :malformed_signature} =
+             kind("bin/fat", bad_reserved, byte_size(bad_reserved), false, nil)
 
     overlap = overlapping_fat()
-    assert {:error, :malformed_signature} = kind("bin/fat", overlap, byte_size(overlap), false, nil)
+
+    assert {:error, :malformed_signature} =
+             kind("bin/fat", overlap, byte_size(overlap), false, nil)
 
     oob = out_of_file_fat()
     assert {:error, :malformed_signature} = kind("bin/fat", oob, 40, false, nil)
@@ -90,6 +94,24 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ClassifyTest do
     assert {:ok, "other"} = kind("README", "x", 1, false, nil)
     assert {:ok, "app_spec"} = kind("lib/kernel-1.0.0/ebin/kernel.app", "x", 1, false, nil, :app)
     assert {:ok, "release_metadata"} = kind("releases/0.1.0/x.rel", "x", 1, false, nil, :rel)
+  end
+
+  test "returns an error for missing, extra, or mistyped attrs" do
+    base = %{
+      path: "README",
+      size: 1,
+      prefix: "x",
+      executable: false,
+      term_role: nil,
+      owner: nil,
+      identities: @identities
+    }
+
+    assert {:error, :malformed_signature} = Classify.kind(Map.delete(base, :path))
+    assert {:error, :malformed_signature} = Classify.kind(Map.put(base, :extra, 1))
+    assert {:error, :malformed_signature} = Classify.kind(%{base | size: "1"})
+    assert {:error, :malformed_signature} = Classify.kind(%{base | identities: [:bad]})
+    assert {:error, :malformed_signature} = Classify.kind(Date.utc_today())
   end
 
   test "rejects cookie and suffix/signature disagreement" do
@@ -172,8 +194,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ClassifyTest do
     header = <<0xCAFEBABE::unsigned-big-32, 1::unsigned-big-32>>
 
     arch =
-      <<0x0100000C::unsigned-big-32, 0::unsigned-big-32, 28::unsigned-big-32, 100::unsigned-big-32,
-        2::unsigned-big-32>>
+      <<0x0100000C::unsigned-big-32, 0::unsigned-big-32, 28::unsigned-big-32,
+        100::unsigned-big-32, 2::unsigned-big-32>>
 
     header <> arch
   end
