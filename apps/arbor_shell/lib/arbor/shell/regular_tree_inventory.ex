@@ -323,7 +323,9 @@ defmodule Arbor.Shell.RegularTreeInventory do
     fail_listing(listing, state, :unsafe_path)
   end
 
-  defp finish_listing_down(listing, :killed), do: finish_listing(listing, :listing_memory_exceeded)
+  defp finish_listing_down(listing, :killed),
+    do: finish_listing(listing, :listing_memory_exceeded)
+
   defp finish_listing_down(listing, _reason), do: finish_listing(listing, :listing_failed)
 
   defp finish_listing(listing, reason) do
