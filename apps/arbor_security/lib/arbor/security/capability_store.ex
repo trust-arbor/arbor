@@ -2219,9 +2219,8 @@ defmodule Arbor.Security.CapabilityStore do
   defp deep_validate_and_certify(state) do
     with {:ok, by_id} <- validate_by_id(state),
          :ok <- validate_by_resource(state, by_id),
-         :ok <- validate_pending_intents(state),
-         {:ok, certified} <- certify(state) do
-      {:ok, certified}
+         :ok <- validate_pending_intents(state) do
+      certify(state)
     end
   end
 
