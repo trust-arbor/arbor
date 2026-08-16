@@ -8,6 +8,8 @@ defmodule Arbor.Shell.TrustedBuild.Identity do
   @chunk_size 65_536
   @max_file_bytes 512 * 1024 * 1024
   @max_path_bytes 4_096
+  @euid_probe_retries 8
+  @max_probe_filename_bytes 256
 
   @type file_identity :: %{
           path: String.t(),
@@ -159,6 +161,45 @@ defmodule Arbor.Shell.TrustedBuild.Identity do
 
   def tree_digest(_path), do: {:error, :invalid_path}
 
+  @doc """
+  Mode-excluded sibling of `tree_digest/1`.
+
+  Used only for copy-fidelity verification immediately after a writable-temp-mode
+  copy and before modes are normalized to their final policy — the two trees are
+  guaranteed to have different modes at that point (source's original modes vs. the
+  copy's temporary modes), so a mode-inclusive digest could never match.
+  """
+  @spec content_digest(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def content_digest(path) when is_binary(path) do
+    case RegularTreeInventory.scan_resolved(path) do
+      {:ok, facts} -> {:ok, content_digest_facts(facts)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def content_digest(_path), do: {:error, :invalid_path}
+
+  @spec content_digest_facts(RegularTreeInventory.facts()) :: String.t()
+  def content_digest_facts(%{directories: directories, regular_files: files}) do
+    dir_rows =
+      Enum.map(directories, fn %{path: path} ->
+        ["d", path]
+      end)
+
+    file_rows =
+      Enum.map(files, fn %{path: path, sha256: sha, size: size} ->
+        ["f", path, sha, Integer.to_string(size)]
+      end)
+
+    canonical =
+      (dir_rows ++ file_rows)
+      |> Enum.sort()
+      |> Enum.map(&Enum.join(&1, "\0"))
+      |> Enum.join("\n")
+
+    :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower)
+  end
+
   @spec digest_facts(RegularTreeInventory.facts()) :: String.t()
   def digest_facts(%{directories: directories, regular_files: files}) do
     dir_rows =
@@ -224,14 +265,73 @@ defmodule Arbor.Shell.TrustedBuild.Identity do
   end
 
   defp require_owner(uid) do
-    case :os.getuid() do
-      ^uid -> :ok
-      _other -> {:error, :untrusted_owner}
+    case current_euid() do
+      {:ok, ^uid} -> :ok
+      {:ok, _other} -> {:error, :untrusted_owner}
+      :error -> {:error, :untrusted_owner}
     end
   end
 
   defp require_nlink(nlink, expected) when nlink == expected, do: :ok
   defp require_nlink(_nlink, _expected), do: {:error, :hardlink_rejected}
+
+  # OTP has no :os.getuid/0. Resolve the effective uid by creating an
+  # exclusive temp file and reading its own recorded owner back via
+  # File.lstat/2 -- no shell/`id` subprocess, no process-global executable
+  # selector. Cached in the process dictionary; the euid cannot change
+  # within a running BEAM process.
+  defp current_euid do
+    case Process.get({__MODULE__, :euid}) do
+      uid when is_integer(uid) ->
+        {:ok, uid}
+
+      _other ->
+        case probe_euid() do
+          {:ok, uid} = ok ->
+            Process.put({__MODULE__, :euid}, uid)
+            ok
+
+          :error ->
+            :error
+        end
+    end
+  end
+
+  defp probe_euid do
+    probe_euid_attempt(System.tmp_dir!(), @euid_probe_retries)
+  end
+
+  defp probe_euid_attempt(_dir, 0), do: :error
+
+  defp probe_euid_attempt(dir, remaining) when remaining > 0 do
+    name = ".arbor-euid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+    if byte_size(name) > @max_probe_filename_bytes do
+      :error
+    else
+      path = Path.join(dir, name)
+
+      case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+        {:ok, io} ->
+          _ = :file.close(io)
+
+          try do
+            case File.lstat(path, time: :posix) do
+              {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
+              _other -> :error
+            end
+          after
+            _ = File.rm(path)
+          end
+
+        {:error, :eexist} ->
+          probe_euid_attempt(dir, remaining - 1)
+
+        {:error, _reason} ->
+          :error
+      end
+    end
+  end
 
   defp enforce_max_file_size(size) when is_integer(size) and size > @max_file_bytes,
     do: {:error, :file_too_large}

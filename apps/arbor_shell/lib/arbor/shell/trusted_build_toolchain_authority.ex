@@ -206,7 +206,7 @@ defmodule Arbor.Shell.TrustedBuildToolchainAuthority do
             end
 
           [] ->
-            {:ok, :empty}
+            {:error, :trusted_build_hex_archive_absent}
 
           _many ->
             {:error, :trusted_build_hex_archive_ambiguous}

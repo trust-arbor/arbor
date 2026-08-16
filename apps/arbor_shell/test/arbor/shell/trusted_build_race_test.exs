@@ -4,6 +4,7 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuild
 
   test "replacing wrapper or source after acquire fails closed" do
     if match?({:unix, :darwin}, :os.type()) do
@@ -79,7 +80,7 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
       }
     }
 
-    {:ok, lease, _view} = Shell.acquire_trusted_build_lease_for_test(request, :omit_hex_seed)
+    {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
     {lease, identity, source}
   end
 end

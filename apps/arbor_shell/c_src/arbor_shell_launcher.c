@@ -492,6 +492,27 @@ static int format_assign(char *buffer, size_t size, const char *key, const char 
   return written > 0 && (size_t)written < size ? 0 : -1;
 }
 
+/* Darwin's libSystem has no declared clearenv() prototype (it is a glibc
+ * extension); unsetenv() repeatedly on environ[0] is portable POSIX and
+ * converges to an empty environment because unsetenv() compacts environ
+ * in place, so re-reading environ[0] each pass always sees the next entry. */
+static void trusted_build_clear_environ(void) {
+  while (environ != NULL && environ[0] != NULL) {
+    char *entry = environ[0];
+    char *separator = strchr(entry, '=');
+    if (separator == NULL) _exit(126);
+
+    size_t name_length = (size_t)(separator - entry);
+    char name[4096];
+    if (name_length == 0 || name_length >= sizeof(name)) _exit(126);
+
+    memcpy(name, entry, name_length);
+    name[name_length] = '\0';
+    if (unsetenv(name) != 0) _exit(126);
+  }
+  if (environ != NULL && environ[0] != NULL) _exit(126);
+}
+
 static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   char erlang_bin[4096];
   char elixir_bin[4096];
@@ -503,7 +524,7 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   if (snprintf(path_value, sizeof(path_value), "%s:%s", erlang_bin, elixir_bin) <= 0) _exit(126);
   if (snprintf(crash, sizeof(crash), "%s/erl_crash.dump", paths->tmp) <= 0) _exit(126);
 
-  if (clearenv() != 0) _exit(126);
+  trusted_build_clear_environ();
   if (setenv("MIX_ENV", "prod", 1) != 0) _exit(126);
   if (setenv("HEX_OFFLINE", "1", 1) != 0) _exit(126);
   if (setenv("ARBOR_MIX_CONTAINED", "1", 1) != 0) _exit(126);
@@ -1736,10 +1757,10 @@ static int run_trusted_build(int argc, char **argv) {
   exec_argv[8] = argv[8];
   exec_argv[9] = argv[9];
   exec_argv[10] = argv[10];
-  exec_argv[11] = wrap_path;
+  exec_argv[11] = (char *)wrap_path;
   exec_argv[12] = argv[36];
   exec_argv[13] = argv[37];
-  exec_argv[14] = source_path;
+  exec_argv[14] = (char *)source_path;
   exec_argv[15] = (char *)"--";
   exec_argv[16] = (char *)wrap_path;
   int exec_argc = 17;

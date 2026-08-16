@@ -1025,7 +1025,12 @@ defmodule Arbor.Shell.ProcessGroup do
   # kill proof before returning a terminal.
   @kill_group_interceptor_env :process_group_kill_group_interceptor
 
-  defp kill_group(group_id) when is_integer(group_id) and group_id > 0 do
+  @doc false
+  # Public so Lease's owner-loss fallback re-containment (a distinct BEAM
+  # process from whichever port owner opened the group) can attempt the same
+  # idempotent native kill sequence when no exhaustion ack ever arrived.
+  @spec kill_group(pos_integer()) :: :ok | {:error, term()}
+  def kill_group(group_id) when is_integer(group_id) and group_id > 0 do
     case Application.get_env(:arbor_shell, @kill_group_interceptor_env) do
       fun when is_function(fun, 2) -> fun.(group_id, &native_kill_group/1)
       _other -> native_kill_group(group_id)

@@ -4,12 +4,13 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuild
 
   test "release proves workspace absence and cleanup fault is retained" do
     {lease, identity} = start_source!()
 
     assert {:ok, fail_lease, _view} =
-             Shell.acquire_trusted_build_lease_for_test(
+             TrustedBuild.acquire(
                request_for(identity),
                :force_cleanup_failure
              )
@@ -23,7 +24,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     {lease2, identity2} = start_source!()
 
     {:ok, ok_lease, _view} =
-      Shell.acquire_trusted_build_lease_for_test(request_for(identity2), :omit_hex_seed)
+      TrustedBuild.acquire(request_for(identity2), :omit_hex_seed)
 
     assert :ok = Shell.release_trusted_build_lease(ok_lease)
     refute File.exists?(workspace_gone_probe(ok_lease))
@@ -36,7 +37,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     {_lease, identity} = start_source!()
 
     assert {:error, :root_identity_capture_failed} =
-             Shell.acquire_trusted_build_lease_for_test(
+             TrustedBuild.acquire(
                request_for(identity),
                :force_identity_capture_failure
              )
@@ -48,10 +49,10 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     if match?({:unix, :darwin}, :os.type()) do
       {_unused, identity} = start_source!()
       request = request_for(identity)
-      {:ok, lease, _view} = Shell.acquire_trusted_build_lease_for_test(request, :omit_hex_seed)
+      {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
 
       assert {:error, :owned_tree_purpose_mismatch} =
-               Shell.acquire_trusted_build_lease_for_test(request, :omit_hex_seed)
+               TrustedBuild.acquire(request, :omit_hex_seed)
 
       _ = Shell.release_trusted_build_lease(lease)
       _ = Shell.remove_owned_tree(identity)

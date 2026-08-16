@@ -849,17 +849,6 @@ defmodule Arbor.Shell do
     Arbor.Shell.TrustedBuild.release(lease)
   end
 
-  @doc false
-  @spec acquire_trusted_build_lease_for_test(term(), atom()) ::
-          {:ok, term(), map()} | {:error, term()}
-  def acquire_trusted_build_lease_for_test(request, fault)
-      when fault in [:force_cleanup_failure, :force_identity_capture_failure, :omit_hex_seed] do
-    Arbor.Shell.TrustedBuild.acquire(request, fault)
-  end
-
-  def acquire_trusted_build_lease_for_test(_request, _fault),
-    do: {:error, :invalid_trusted_build_request}
-
   @doc """
   Verified startup-pinned Linux dependency-baseline mix.lock digest.
 

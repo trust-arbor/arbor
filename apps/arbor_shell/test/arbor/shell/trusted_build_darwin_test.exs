@@ -4,6 +4,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
   @moduletag :fast
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuild
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
@@ -86,7 +87,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
 
     request = request_for(identity)
-    {:ok, lease, view} = Shell.acquire_trusted_build_lease_for_test(request, :omit_hex_seed)
+    {:ok, lease, view} = TrustedBuild.acquire(request, :omit_hex_seed)
     assert view["schema"] == "arbor.shell.trusted_build.lease.v1"
     refute Map.has_key?(view, "path")
     {lease, identity, source}

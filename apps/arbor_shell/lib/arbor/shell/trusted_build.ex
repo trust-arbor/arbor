@@ -47,9 +47,9 @@ defmodule Arbor.Shell.TrustedBuild do
          %Lease.Handle{} <- lease,
          {:ok, session} <- Lease.begin_phase(lease, admitted_phase, self()) do
       session = Map.put(session, :lease, lease)
-      result = Phase.run(session)
-      _ = Lease.finish_phase(lease, session, result)
-      result
+      # Phase.run/1 commits the terminal result to the lease itself, inside the
+      # phase process, before it replies here -- no separate owner-side commit.
+      Phase.run(session)
     else
       {:error, reason} -> {:error, reason}
       _other -> {:error, :invalid_lease}
@@ -253,8 +253,13 @@ defmodule Arbor.Shell.TrustedBuild do
         {_, {:tree, source, _dir, digest}} ->
           child = Path.join(dest, Path.basename(source))
 
-          with :ok <- ensure_dir_mode_create(dest, 0o555),
-               {:ok, ^digest} <- HexSeed.seed_tree(source, child, digest, :readonly) do
+          # `dest` (the outer archives root) must stay writable until `child`
+          # has been fully created and finalized inside it -- HexSeed.seed_tree/4
+          # already normalizes `child`'s own modes to :readonly; only after that
+          # does `dest` itself get its final read-only mode.
+          with :ok <- ensure_dir_mode_create(dest, 0o700),
+               {:ok, _child_digest} <- HexSeed.seed_tree(source, child, digest, :readonly),
+               :ok <- File.chmod(dest, 0o555) do
             Identity.tree_digest(dest)
           end
       end
@@ -277,8 +282,7 @@ defmodule Arbor.Shell.TrustedBuild do
 
   defp seed_hex_cache(hex_home, %{hex_cache: {:tree, source, _dir, digest}}, _fault) do
     case HexSeed.seed_tree(source, hex_home, digest, :writable) do
-      {:ok, ^digest} -> :ok
-      {:ok, _other} -> {:error, :hex_seed_digest_mismatch}
+      {:ok, _digest} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end

@@ -5,6 +5,11 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   @moduletag :security_regression
 
   alias Arbor.Shell
+  alias Arbor.Shell.TrustedBuild
+
+  test "security regression: the test-only lease facade is not exposed on Arbor.Shell" do
+    refute function_exported?(Shell, :acquire_trusted_build_lease_for_test, 2)
+  end
 
   test "security regression: only the trusted-build facade may fork Mix; generic exec stays childless" do
     assert function_exported?(Shell, :acquire_trusted_build_lease, 1)
@@ -92,7 +97,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
       }
     }
 
-    {:ok, lease, _view} = Shell.acquire_trusted_build_lease_for_test(request, :omit_hex_seed)
+    {:ok, lease, _view} = TrustedBuild.acquire(request, :omit_hex_seed)
     {lease, identity}
   end
 
