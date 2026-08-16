@@ -23,6 +23,8 @@ defmodule Arbor.Commands.CodingBenchmark do
     UsageObservations
   }
 
+  alias Arbor.Commands.ImmutableGitSource.Reconstruct
+
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
 
@@ -69,6 +71,13 @@ defmodule Arbor.Commands.CodingBenchmark do
   @max_fixture_total_bytes 268_435_456
   @max_fixture_listing_bytes 8_388_608
   @max_fixture_symlink_bytes 4_096
+  @fixture_reconstruct_limits %{
+    max_entries: @max_fixture_entries,
+    max_listing_bytes: @max_fixture_listing_bytes,
+    max_object_bytes: @max_fixture_object_bytes,
+    max_total_bytes: @max_fixture_total_bytes,
+    max_symlink_bytes: @max_fixture_symlink_bytes
+  }
   @max_fixtures 100
   @max_repetitions 100
   @max_seed 2_147_483_647
@@ -129,10 +138,21 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, commit_oid} <- oid(commit_oid, "commit_oid"),
          {:ok, expected_tree} <- oid(expected_tree, "base_tree_oid"),
          {:ok, source} <- directory(source, "source"),
-         {:ok, destination} <- reconstruct_destination(destination, source) do
-      case clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
+         {:ok, destination} <- reconstruct_destination(destination, source),
+         {:ok, parent_identity} <- parent_identity(destination) do
+      case Reconstruct.run(
+             source,
+             Path.basename(destination),
+             commit_oid,
+             expected_tree,
+             parent_identity,
+             @fixture_reconstruct_limits,
+             timeout_ms: timeout_ms,
+             branch: "benchmark",
+             require_private: false
+           ) do
         :ok -> :ok
-        {:error, reason} when is_binary(reason) -> {:error, reason}
+        {:error, reason} when is_binary(reason) -> {:error, map_reconstruct_error(reason)}
         {:error, reason} -> {:error, reason_string(reason)}
       end
     else
@@ -172,6 +192,60 @@ defmodule Arbor.Commands.CodingBenchmark do
         end
     end
   end
+
+  defp parent_identity(destination) when is_binary(destination) do
+    parent = Path.dirname(destination)
+
+    case File.lstat(parent) do
+      {:ok,
+       %File.Stat{
+         type: :directory,
+         major_device: device,
+         minor_device: minor_device,
+         inode: inode
+       }} ->
+        {:ok,
+         %{
+           path: parent,
+           type: :directory,
+           device: device,
+           minor_device: minor_device,
+           inode: inode
+         }}
+
+      _other ->
+        {:error, "invalid_reconstruct_request"}
+    end
+  end
+
+  defp map_reconstruct_error("unsupported_or_oversized_tree"),
+    do: "unsupported_or_oversized_fixture_tree"
+
+  defp map_reconstruct_error("invalid_tree"), do: "invalid_fixture_tree"
+  defp map_reconstruct_error("invalid_tree_entry"), do: "invalid_fixture_tree_entry"
+  defp map_reconstruct_error("repository_init_failed"), do: "fixture_repository_init_failed"
+  defp map_reconstruct_error("object_attestation_failed"), do: "fixture_object_attestation_failed"
+  defp map_reconstruct_error("object_write_failed"), do: "fixture_object_write_failed"
+
+  defp map_reconstruct_error("object_missing_for_materialization"),
+    do: "fixture_object_missing_for_materialization"
+
+  defp map_reconstruct_error("materialization_failed"), do: "fixture_materialization_failed"
+  defp map_reconstruct_error("unsafe_symlink"), do: "unsafe_fixture_symlink"
+  defp map_reconstruct_error("unsafe_parent"), do: "unsafe_fixture_parent"
+  defp map_reconstruct_error("repository_not_clean"), do: "fixture_repository_not_clean"
+
+  defp map_reconstruct_error("reconstruction_attestation_failed"),
+    do: "fixture_reconstruction_attestation_failed"
+
+  defp map_reconstruct_error("base_tree_oid_mismatch"), do: "base_tree_oid_mismatch"
+
+  defp map_reconstruct_error("parent_identity_mismatch"), do: "invalid_reconstruct_request"
+  defp map_reconstruct_error("parent_not_private"), do: "invalid_reconstruct_request"
+
+  defp map_reconstruct_error("write_failed:" <> rest), do: "fixture_write_failed:" <> rest
+
+  defp map_reconstruct_error(reason) when is_binary(reason), do: reason
 
   defp path_within_git_metadata?(path, source) do
     case path |> Path.relative_to(source) |> Path.split() do
@@ -939,271 +1013,21 @@ defmodule Arbor.Commands.CodingBenchmark do
     if String.downcase(actual) == expected, do: :ok, else: {:error, "base_tree_oid_mismatch"}
   end
 
-  defp mkdir(path) do
-    case File.mkdir(path) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "mkdir_failed:#{reason}"}
-    end
-  end
-
   defp clone_pair(source, commit_oid, expected_tree, pair_root, timeout_ms) do
     Enum.reduce_while(@executor_paths, {:ok, %{}}, fn executor, {:ok, acc} ->
       destination = Path.join(pair_root, executor)
 
-      case clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
+      case reconstruct_fixture_repository(
+             source,
+             destination,
+             commit_oid,
+             expected_tree,
+             timeout_ms: timeout_ms
+           ) do
         :ok -> {:cont, {:ok, Map.put(acc, executor, destination)}}
         {:error, _reason} = error -> {:halt, error}
       end
     end)
-  end
-
-  defp clone_fixture(source, destination, commit_oid, expected_tree, timeout_ms) do
-    deadline = Git.deadline(timeout_ms)
-
-    with {:ok, entries} <- fixture_tree_entries(source, commit_oid, expected_tree, deadline),
-         :ok <- initialize_fixture_repository(destination, commit_oid, deadline),
-         {:ok, objects} <-
-           load_fixture_objects(source, commit_oid, expected_tree, entries, deadline),
-         :ok <- import_fixture_objects(destination, objects),
-         :ok <- materialize_fixture_tree(destination, entries, objects),
-         :ok <- attach_fixture_commit(destination, commit_oid, deadline),
-         {:ok, ^commit_oid} <-
-           git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], deadline),
-         {:ok, actual_tree} <-
-           git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], deadline),
-         :ok <- matching_tree(actual_tree, expected_tree),
-         {:ok, ""} <- git_output(destination, ["status", "--porcelain=v1"], deadline) do
-      :ok
-    else
-      {:ok, dirty} when is_binary(dirty) and dirty != "" ->
-        {:error, "fixture_repository_not_clean"}
-
-      {:error, reason} when is_binary(reason) ->
-        {:error, reason}
-
-      _other ->
-        {:error, "fixture_reconstruction_attestation_failed"}
-    end
-  end
-
-  defp fixture_tree_entries(source, commit_oid, expected_tree, timeout_ms) do
-    with {:ok, listing} <-
-           Git.run(
-             source,
-             ["ls-tree", "-r", "-t", "-z", "--full-tree", commit_oid],
-             timeout_ms,
-             max_output_bytes: @max_fixture_listing_bytes
-           ),
-         {:ok, entries} <- parse_fixture_tree(listing),
-         true <- length(entries) <= @max_fixture_entries,
-         true <- Enum.all?(entries, &supported_fixture_entry?/1),
-         true <- Enum.all?(entries, &safe_fixture_path?(&1.path)),
-         {:ok, ^expected_tree} <-
-           git_output(source, ["rev-parse", "--verify", "#{commit_oid}^{tree}"], timeout_ms) do
-      {:ok, entries}
-    else
-      false -> {:error, "unsupported_or_oversized_fixture_tree"}
-      {:error, reason} when is_binary(reason) -> {:error, reason}
-      _other -> {:error, "invalid_fixture_tree"}
-    end
-  end
-
-  defp parse_fixture_tree(listing) do
-    listing
-    |> :binary.split(<<0>>, [:global])
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.reduce_while({:ok, []}, fn record, {:ok, acc} ->
-      case Regex.run(~r/\A([0-7]{6}) (blob|tree) ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)\z/s, record) do
-        [_, mode, type, oid, path] ->
-          {:cont, {:ok, [%{mode: mode, oid: oid, path: path, type: type} | acc]}}
-
-        _other ->
-          {:halt, {:error, "invalid_fixture_tree_entry"}}
-      end
-    end)
-    |> case do
-      {:ok, entries} -> {:ok, Enum.reverse(entries)}
-      error -> error
-    end
-  end
-
-  defp supported_fixture_entry?(%{type: "tree", mode: "040000"}), do: true
-
-  defp supported_fixture_entry?(%{type: "blob", mode: mode})
-       when mode in ["100644", "100755", "120000"],
-       do: true
-
-  defp supported_fixture_entry?(_entry), do: false
-
-  defp safe_fixture_path?(path) do
-    String.valid?(path) and path != "" and not String.contains?(path, <<0>>) and
-      Path.type(path) != :absolute and
-      Enum.all?(Path.split(path), fn segment ->
-        segment not in ["", ".", ".."] and String.downcase(segment) != ".git"
-      end)
-  end
-
-  defp initialize_fixture_repository(destination, commit_oid, timeout_ms) do
-    template = Path.join(destination, ".empty-git-template")
-    object_format = if byte_size(commit_oid) == 64, do: "sha256", else: "sha1"
-
-    with :ok <- mkdir(destination),
-         :ok <- mkdir(template),
-         {:ok, _output} <-
-           Git.run(
-             destination,
-             [
-               "init",
-               "--quiet",
-               "--initial-branch=benchmark",
-               "--object-format=#{object_format}",
-               "--template=#{template}",
-               "."
-             ],
-             timeout_ms
-           ),
-         :ok <- remove_empty_directory(template),
-         {:ok, _output} <-
-           Git.run(destination, ["config", "--local", "core.hooksPath", "/dev/null"], timeout_ms),
-         {:ok, _output} <-
-           Git.run(destination, ["config", "--local", "core.filemode", "true"], timeout_ms),
-         {:ok, %{type: :directory}} <- File.lstat(Path.join(destination, ".git")) do
-      :ok
-    else
-      {:error, reason} when is_binary(reason) -> {:error, reason}
-      _other -> {:error, "fixture_repository_init_failed"}
-    end
-  end
-
-  defp remove_empty_directory(path) do
-    case File.rmdir(path) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "template_cleanup_failed:#{reason}"}
-    end
-  end
-
-  defp load_fixture_objects(source, commit_oid, root_tree_oid, entries, timeout_ms) do
-    requests =
-      [%{oid: commit_oid, type: "commit"}, %{oid: root_tree_oid, type: "tree"}] ++
-        Enum.map(entries, &Map.take(&1, [:oid, :type]))
-
-    Git.read_objects(source, requests, timeout_ms,
-      max_object_bytes: @max_fixture_object_bytes,
-      max_total_bytes: @max_fixture_total_bytes
-    )
-  end
-
-  defp import_fixture_objects(destination, objects) when is_map(objects) do
-    Enum.reduce_while(objects, :ok, fn {oid, %{type: type, content: content}}, :ok ->
-      case write_loose_object(destination, type, content, oid) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp write_loose_object(destination, type, content, expected_oid) do
-    object = [type, " ", Integer.to_string(byte_size(content)), <<0>>, content]
-    object = IO.iodata_to_binary(object)
-    algorithm = if byte_size(expected_oid) == 40, do: :sha, else: :sha256
-    actual_oid = :crypto.hash(algorithm, object) |> Base.encode16(case: :lower)
-
-    object_path =
-      Path.join([
-        destination,
-        ".git",
-        "objects",
-        String.slice(actual_oid, 0, 2),
-        String.slice(actual_oid, 2..-1//1)
-      ])
-
-    with true <- actual_oid == expected_oid,
-         :ok <- File.mkdir_p(Path.dirname(object_path)),
-         :ok <- write_exclusive_file(object_path, :zlib.compress(object)) do
-      :ok
-    else
-      false -> {:error, "fixture_object_attestation_failed"}
-      {:error, reason} when is_binary(reason) -> {:error, reason}
-      _other -> {:error, "fixture_object_write_failed"}
-    end
-  end
-
-  defp materialize_fixture_tree(destination, entries, objects) when is_map(objects) do
-    entries
-    |> Enum.filter(&(&1.type == "blob"))
-    |> Enum.reduce_while(:ok, fn entry, :ok ->
-      with {:ok, path} <- SafePath.safe_join(destination, entry.path),
-           {:ok, ^path} <- SafePath.resolve_within(path, destination),
-           :ok <- ensure_fixture_parent(Path.dirname(path), destination),
-           {:ok, %{type: "blob", content: content}} <- Map.fetch(objects, entry.oid),
-           :ok <- materialize_fixture_entry(path, content, entry.mode, destination) do
-        {:cont, :ok}
-      else
-        :error -> {:halt, {:error, "fixture_object_missing_for_materialization"}}
-        {:error, reason} when is_binary(reason) -> {:halt, {:error, reason}}
-        _other -> {:halt, {:error, "fixture_materialization_failed"}}
-      end
-    end)
-  end
-
-  defp materialize_fixture_entry(path, content, "120000", destination) do
-    with true <- byte_size(content) in 1..@max_fixture_symlink_bytes,
-         true <- String.valid?(content) and not String.contains?(content, <<0>>),
-         true <- Path.type(content) == :relative,
-         resolved = Path.expand(content, Path.dirname(path)),
-         {:ok, ^resolved} <- SafePath.resolve_within(resolved, destination),
-         false <- path_within_git_metadata?(resolved, destination),
-         :ok <- File.ln_s(content, path) do
-      :ok
-    else
-      _other -> {:error, "unsafe_fixture_symlink"}
-    end
-  end
-
-  defp materialize_fixture_entry(path, content, mode, _destination)
-       when mode in ["100644", "100755"] do
-    with :ok <- write_exclusive_file(path, content),
-         :ok <- File.chmod(path, if(mode == "100755", do: 0o755, else: 0o644)) do
-      :ok
-    end
-  end
-
-  defp ensure_fixture_parent(parent, destination) do
-    with {:ok, ^parent} <- SafePath.resolve_within(parent, destination),
-         :ok <- File.mkdir_p(parent),
-         {:ok, ^parent} <- SafePath.resolve_real(parent),
-         {:ok, ^parent} <- SafePath.resolve_within(parent, destination) do
-      :ok
-    else
-      _other -> {:error, "unsafe_fixture_parent"}
-    end
-  end
-
-  defp write_exclusive_file(path, content) do
-    case File.open(path, [:write, :binary, :exclusive], fn io -> IO.binwrite(io, content) end) do
-      {:ok, :ok} -> :ok
-      {:ok, {:error, reason}} -> {:error, "fixture_write_failed:#{reason}"}
-      {:error, reason} -> {:error, "fixture_write_failed:#{reason}"}
-    end
-  end
-
-  defp attach_fixture_commit(destination, commit_oid, timeout_ms) do
-    with :ok <- write_shallow_boundary(destination, commit_oid),
-         {:ok, _output} <- Git.run(destination, ["read-tree", commit_oid], timeout_ms),
-         {:ok, _output} <-
-           Git.run(destination, ["update-ref", "refs/heads/benchmark", commit_oid], timeout_ms),
-         {:ok, _output} <-
-           Git.run(destination, ["symbolic-ref", "HEAD", "refs/heads/benchmark"], timeout_ms) do
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp write_shallow_boundary(destination, commit_oid) do
-    destination
-    |> Path.join(".git/shallow")
-    |> write_exclusive_file(commit_oid <> "\n")
   end
 
   defp execute_adapter(executor, pair, prepared, runtime, execution_namespace) do
