@@ -2413,7 +2413,11 @@ static int run_trusted_build(int argc, char **argv) {
   send_error("trusted build launcher unavailable");
   return 126;
 #else
-  /* timeout max_output + 4 file-ids(11) + 5 dir-ids(5) + digest + 8 wdirs(3) + -- + argv0 */
+  /* Port.spawn_executable sets argv[0] to the launcher path. Elixir
+   * trusted_build_argv/3 occupies argv[1..]: command, timeout, max_output,
+   * 4 file-ids(11), 5 dir-ids(5), digest, 8 wdirs(3), "--", wrapper, mix.
+   * Parent used argc<95 and "--" at argv[93]; the extra project dir-id
+   * keeps source at argv[48..52] and shifts "--" to argv[98]. */
   if (argc < 100 || strcmp(argv[98], "--") != 0) {
     send_error("invalid trusted-build arguments");
     return 2;

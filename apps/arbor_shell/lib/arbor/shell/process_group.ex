@@ -303,6 +303,9 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
+  # Native argv[0] is the launcher path from Port.spawn_executable. This list
+  # is argv[1..], matching run_trusted_build: source dir-id argv[48..52],
+  # project dir-id argv[53..57], "--" argv[98], wrapper path argv[99].
   defp trusted_build_argv(launch, timeout, max_output_bytes) do
     w = launch.wrapper
     erl = launch.erl
