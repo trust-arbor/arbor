@@ -2,11 +2,18 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeLedger do
   @moduledoc false
 
   # Authoritative owner-process ledger for the two-build composer. Backed by
-  # the Process dictionary under one fixed key so at most one unresolved
-  # cleanup episode can exist per owner process at a time (compose/1 checks
-  # try_acquire/1 and fails closed with :cleanup_ledger_busy otherwise).
+  # the Process dictionary under a domain-scoped key -- :production (real
+  # Arbor.Shell/SourceStaging resources, driven only by ComposeShell) and
+  # :fact (test-only fixture placeholders, driven only by
+  # ComposeFactInterpreter) are two entirely disjoint storage slots. This is
+  # a security boundary, not just a naming convention: a receipt minted in
+  # one domain must never be resolvable by looking up the other domain's
+  # slot, so a synthetic fixture cleanup reply can never be mistaken for a
+  # real Arbor.Shell release. Each domain still allows at most one
+  # unresolved cleanup episode per owner process (try_acquire/2 fails closed
+  # with :busy otherwise).
 
-  @ledger_key {__MODULE__, :ledger}
+  @type domain :: :production | :fact
 
   @type resource :: :none | {:live, term()} | {:retained, term()}
 
@@ -17,11 +24,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeLedger do
           build: %{a: resource(), b: resource()}
         }
 
-  @spec try_acquire(binary()) :: :ok | :busy
-  def try_acquire(token) when is_binary(token) do
-    case Process.get(@ledger_key) do
+  @spec try_acquire(domain(), binary()) :: :ok | :busy
+  def try_acquire(domain, token) when domain in [:production, :fact] and is_binary(token) do
+    case Process.get(key(domain)) do
       nil ->
-        Process.put(@ledger_key, initial(token))
+        Process.put(key(domain), initial(token))
         :ok
 
       _existing ->
@@ -29,23 +36,23 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeLedger do
     end
   end
 
-  @spec fetch() :: {:ok, t()} | :error
-  def fetch do
-    case Process.get(@ledger_key) do
+  @spec fetch(domain()) :: {:ok, t()} | :error
+  def fetch(domain) when domain in [:production, :fact] do
+    case Process.get(key(domain)) do
       nil -> :error
       ledger -> {:ok, ledger}
     end
   end
 
-  @spec persist(t()) :: :ok
-  def persist(ledger) when is_map(ledger) do
-    Process.put(@ledger_key, ledger)
+  @spec persist(domain(), t()) :: :ok
+  def persist(domain, ledger) when domain in [:production, :fact] and is_map(ledger) do
+    Process.put(key(domain), ledger)
     :ok
   end
 
-  @spec delete() :: :ok
-  def delete do
-    Process.delete(@ledger_key)
+  @spec delete(domain()) :: :ok
+  def delete(domain) when domain in [:production, :fact] do
+    Process.delete(key(domain))
     :ok
   end
 
@@ -60,17 +67,19 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeLedger do
   # lease, a C1 cleanup-retained identity, or a build handle returns -- always
   # fetch-mutate-persist in one call so the ledger is correct even if a later
   # step raises before returning.
-  @spec record_source(:a | :b, resource()) :: :ok
-  def record_source(slot, value) when slot in [:a, :b] do
-    {:ok, ledger} = fetch()
-    persist(put_in(ledger, [:source, slot], value))
+  @spec record_source(domain(), :a | :b, resource()) :: :ok
+  def record_source(domain, slot, value) when slot in [:a, :b] do
+    {:ok, ledger} = fetch(domain)
+    persist(domain, put_in(ledger, [:source, slot], value))
   end
 
-  @spec record_build(:a | :b, resource()) :: :ok
-  def record_build(slot, value) when slot in [:a, :b] do
-    {:ok, ledger} = fetch()
-    persist(put_in(ledger, [:build, slot], value))
+  @spec record_build(domain(), :a | :b, resource()) :: :ok
+  def record_build(domain, slot, value) when slot in [:a, :b] do
+    {:ok, ledger} = fetch(domain)
+    persist(domain, put_in(ledger, [:build, slot], value))
   end
+
+  defp key(domain), do: {__MODULE__, domain}
 
   defp initial(token) do
     %{

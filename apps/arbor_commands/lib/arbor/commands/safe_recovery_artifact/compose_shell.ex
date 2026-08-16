@@ -6,6 +6,13 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
   # maps each ComposeCore step to exactly one hardcoded call and ledgers the
   # result the instant it returns. Owns its own hardcoded cleanup-plan loop
   # (no shared callback crosses to ComposeFactInterpreter).
+  #
+  # This module owns the :production ComposeLedger domain exclusively.
+  # ComposeFactInterpreter owns a disjoint :fact domain under its own receipt
+  # schema -- neither module's ledger storage or receipt shape is reachable
+  # from the other, so a fixture-mode retry can never resolve (and silently
+  # "launder" as cleaned) a real pending Shell/SourceStaging resource, and a
+  # real receipt can never be replayed against fixture-only cleanup logic.
 
   alias Arbor.Commands.SafeRecoveryArtifact.{
     CleanupPlan,
@@ -16,16 +23,21 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
     TrustedInventory
   }
 
+  @domain :production
   @receipt_schema "arbor.commands.safe_recovery_artifact.two_build_cleanup_receipt.v1"
   @cleanup_opts [max_entries: 1_000_000, timeout_ms: 10_000]
   @token_bytes 32
+
+  @doc false
+  @spec receipt_schema() :: String.t()
+  def receipt_schema, do: @receipt_schema
 
   @spec compose(keyword()) ::
           {:ok, map()} | {:error, term()} | {:error, {:cleanup_retained, CleanupReceipt.t()}}
   def compose(opts) when is_list(opts) do
     token = :crypto.strong_rand_bytes(@token_bytes)
 
-    case ComposeLedger.try_acquire(token) do
+    case ComposeLedger.try_acquire(@domain, token) do
       :busy -> {:error, :cleanup_ledger_busy}
       :ok -> opts |> run_compose() |> settle()
     end
@@ -38,7 +50,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
   def retry_cleanup(%CleanupReceipt{schema: @receipt_schema, owner: owner, token: token})
       when is_binary(token) do
     if owner == self() do
-      case ComposeLedger.fetch() do
+      case ComposeLedger.fetch(@domain) do
         {:ok, %{token: ^token} = ledger} -> resettle(ledger)
         _other -> {:error, :invalid_cleanup_receipt}
       end
@@ -78,11 +90,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
   defp perform_effect({:stage_source, slot}, _state, opts) do
     case SourceStaging.stage(opts, :production) do
       {:ok, lease} = ok ->
-        ComposeLedger.record_source(slot, {:live, lease})
+        ComposeLedger.record_source(@domain, slot, {:live, lease})
         ok
 
       {:error, {:cleanup_retained, _reason, identity}} = error ->
-        ComposeLedger.record_source(slot, {:retained, identity})
+        ComposeLedger.record_source(@domain, slot, {:retained, identity})
         error
 
       {:error, _reason} = error ->
@@ -103,7 +115,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
 
     case Arbor.Shell.acquire_trusted_build_lease(request) do
       {:ok, handle, _view} ->
-        ComposeLedger.record_build(slot, {:live, handle})
+        ComposeLedger.record_build(@domain, slot, {:live, handle})
         {:ok, handle}
 
       {:error, _reason} = error ->
@@ -152,7 +164,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
 
   defp settle(outcome) do
     outcome = normalize_outcome(outcome)
-    {:ok, ledger} = ComposeLedger.fetch()
+    {:ok, ledger} = ComposeLedger.fetch(@domain)
     ledger = ComposeLedger.set_preserved_outcome_once(ledger, outcome)
 
     finish_sweep(ledger, outcome)
@@ -165,11 +177,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
 
     case CleanupPlan.pending(swept) do
       [] ->
-        ComposeLedger.delete()
+        ComposeLedger.delete(@domain)
         outcome
 
       _pending ->
-        ComposeLedger.persist(swept)
+        ComposeLedger.persist(@domain, swept)
         {:error, {:cleanup_retained, receipt_from(swept)}}
     end
   end
@@ -195,24 +207,20 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeShell do
     end
   end
 
+  # Direct per-clause catch -- no `fun` parameter anywhere in the cleanup
+  # dispatch path.
   defp dispatch_cleanup(ledger, {:build, slot}) do
-    guarded(fn ->
-      {:live, handle} = ledger.build[slot]
-      Arbor.Shell.release_trusted_build_lease(handle)
-    end)
+    {:live, handle} = ledger.build[slot]
+    Arbor.Shell.release_trusted_build_lease(handle)
+  catch
+    kind, reason -> {:threw, kind, reason}
   end
 
   defp dispatch_cleanup(ledger, {:source, slot}) do
-    guarded(fn ->
-      case ledger.source[slot] do
-        {:live, lease} -> SourceStaging.release(lease)
-        {:retained, identity} -> Arbor.Shell.remove_owned_tree(identity, @cleanup_opts)
-      end
-    end)
-  end
-
-  defp guarded(fun) do
-    fun.()
+    case ledger.source[slot] do
+      {:live, lease} -> SourceStaging.release(lease)
+      {:retained, identity} -> Arbor.Shell.remove_owned_tree(identity, @cleanup_opts)
+    end
   catch
     kind, reason -> {:threw, kind, reason}
   end

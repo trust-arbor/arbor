@@ -76,6 +76,17 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeCore do
     {:ok, put_in(state, [:source, slot], lease)}
   end
 
+  # The C1 identity map (raw paths/inode/device) is private cleanup/runtime
+  # state -- it is ledgered separately for the actual retry (see
+  # ComposeShell/ComposeFactInterpreter), but it and the internal
+  # :cleanup_retained tag must never themselves become part of the outcome
+  # returned to a caller, whether the resolution is immediate or via a later
+  # retry (preserved_outcome is set from this normalized value, not the raw
+  # one).
+  def step_result(_state, {:stage_source, slot}, {:error, {:cleanup_retained, reason, _identity}}) do
+    {:error, {:source_staging_failed, slot, reason}}
+  end
+
   def step_result(_state, {:stage_source, _slot}, {:error, reason}), do: {:error, reason}
 
   def step_result(state, {:acquire_build, slot}, {:ok, handle}) do

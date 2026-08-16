@@ -53,13 +53,16 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CleanupPlan do
     {ledger, cursor}
   end
 
-  @spec pending(map()) :: [{tag(), term()}]
+  # Tags only -- never the underlying resource (lease handle, identity map).
+  # Callers use this only to decide delete-vs-persist; the resource value
+  # itself must never travel outside the ledger.
+  @spec pending(map()) :: [tag()]
   def pending(ledger) do
     for kind <- [:build, :source],
         slot <- [:a, :b],
         resource = get_in(ledger, [kind, slot]),
         resource != :none do
-      {{kind, slot}, resource}
+      {kind, slot}
     end
   end
 

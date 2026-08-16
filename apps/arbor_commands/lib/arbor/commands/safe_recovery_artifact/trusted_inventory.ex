@@ -31,9 +31,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.TrustedInventory do
 
   @spec project_release_root(map()) :: {:ok, map()} | {:error, term()}
   def project_release_root(admitted) do
-    with {:ok, dirs, dir_roots} <- strip_segment(admitted["directories"]),
-         {:ok, files, file_roots} <- strip_segment(admitted["regular_files"]),
-         :ok <- require_single_root(dir_roots + file_roots),
+    with {:ok, dirs, dir_roots} <- strip_directory_segment(admitted["directories"]),
+         {:ok, files} <- strip_file_segment(admitted["regular_files"]),
+         :ok <- require_single_root(dir_roots),
          :ok <- reject_cookie(files) do
       sorted_dirs = Enum.sort_by(dirs, & &1["path"])
       sorted_files = Enum.sort_by(files, & &1["path"])
@@ -196,7 +196,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.TrustedInventory do
     end
   end
 
-  defp strip_segment(rows) do
+  # Only a directory row may legitimately BE the root: "arbor_trust" is
+  # created as a directory by the trusted-build workspace layout, so this is
+  # the sole place a bare [@root_segment] match is dropped-and-counted
+  # rather than rejected.
+  defp strip_directory_segment(rows) do
     result =
       Enum.reduce_while(rows, {:ok, [], 0}, fn row, {:ok, acc, root_count} ->
         case Path.split(row["path"]) do
@@ -213,6 +217,31 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.TrustedInventory do
 
     case result do
       {:ok, acc, root_count} -> {:ok, Enum.reverse(acc), root_count}
+      error -> error
+    end
+  end
+
+  # A regular file can never legitimately BE the root -- a bare
+  # [@root_segment] here is rejected outright, never silently dropped and
+  # never counted toward require_single_root/1, regardless of whether a
+  # genuine directory root row is also present.
+  defp strip_file_segment(rows) do
+    result =
+      Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+        case Path.split(row["path"]) do
+          [@root_segment] ->
+            {:halt, {:error, :release_root_not_a_directory}}
+
+          [@root_segment | [_ | _] = rest] ->
+            {:cont, {:ok, [%{row | "path" => Path.join(rest)} | acc]}}
+
+          _other ->
+            {:halt, {:error, :release_root_segment_mismatch}}
+        end
+      end)
+
+    case result do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
       error -> error
     end
   end
