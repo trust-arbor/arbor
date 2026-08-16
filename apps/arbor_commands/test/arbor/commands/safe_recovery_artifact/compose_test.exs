@@ -4,7 +4,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
   alias Arbor.Commands.SafeRecoveryArtifact
 
   alias Arbor.Commands.SafeRecoveryArtifact.{
+    CleanupPlan,
     CleanupReceipt,
+    ComposeCore,
     ComposeFactInterpreter,
     ComposeLedger,
     ComposeShell
@@ -17,12 +19,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
 
   # The ledger lives in this process's Process dictionary under
   # domain-scoped keys (:production, :fact) -- each ExUnit test is its own
-  # process so these die with the process regardless, but clear both
-  # explicitly for defensive hygiene.
+  # process so these die with the process regardless. Clear those plus the
+  # vulnerable parent's legacy :ledger key without calling corrected-only APIs;
+  # this lets the security regression execute behaviorally on the exact parent.
   setup do
     on_exit(fn ->
-      ComposeLedger.delete(:production)
-      ComposeLedger.delete(:fact)
+      for domain <- [:ledger, :production, :fact] do
+        Process.delete({ComposeLedger, domain})
+      end
     end)
 
     :ok
@@ -58,12 +62,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
 
   describe "exact operation trace" do
     test "the fixed step order is observed exactly: slot A's full precompile before slot B's, both before compile" do
-      facts = Map.put(TB.facts(), :trace_pid, self())
-
-      assert {:ok, _manifest} =
-               SafeRecoveryArtifact.compose_from_facts_for_test(%{mode: :compose, facts: facts})
-
-      assert drain(:composer_step) == [
+      assert compose_steps(TB.facts()) == [
                {:stage_source, :a},
                {:stage_source, :b},
                {:acquire_build, :a},
@@ -345,22 +344,26 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
   end
 
   describe "skip-source-on-build-cleanup-failure" do
-    test "a stuck build B cleanup leaves only build B pending; source B is never attempted while pair A cleans in full" do
+    test "a stuck build B retains its dependent source without attempting it while pair A cleans in full" do
       facts =
         TB.facts()
-        |> Map.put(:trace_pid, self())
         |> put_in([:replies, {:run_phase, :b, "compile"}], {:error, :boom})
         |> put_in([:cleanup_replies, {:build, :b}], {:error, :stuck})
 
       assert {:error, {:cleanup_retained, receipt}} =
                SafeRecoveryArtifact.compose_from_facts_for_test(%{mode: :compose, facts: facts})
 
-      attempts = drain(:cleanup_attempt)
+      ledger = %{
+        token: <<0>>,
+        preserved_outcome: {:error, :boom},
+        source: %{a: {:live, :source_a}, b: {:live, :source_b}},
+        build: %{a: {:live, :build_a}, b: {:live, :build_b}}
+      }
 
-      assert {:build, :b} in attempts
-      refute {:source, :b} in attempts
-      assert {:build, :a} in attempts
-      assert {:source, :a} in attempts
+      {swept, attempts} = cleanup_attempts(ledger, %{{:build, :b} => {:error, :stuck}})
+
+      assert attempts == [{:build, :b}, {:build, :a}, {:source, :a}]
+      assert CleanupPlan.pending(swept) == [{:build, :b}, {:source, :b}]
 
       cleared = %{facts | cleanup_replies: %{}}
 
@@ -683,6 +686,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
 
       refute source =~ "Arbor.Shell."
       refute source =~ "SourceStaging."
+      refute source =~ "trace_pid"
+      refute source =~ "send("
     end
 
     test "the cleanup dispatch path in ComposeShell and ComposeFactInterpreter takes no fun/MFA parameter" do
@@ -731,11 +736,39 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
     end
   end
 
-  defp drain(tag, acc \\ []) do
-    receive do
-      {^tag, payload} -> drain(tag, [payload | acc])
-    after
-      0 -> Enum.reverse(acc)
+  defp compose_steps(facts), do: compose_steps(ComposeCore.init(), facts.replies, [])
+
+  defp compose_steps(state, replies, acc) do
+    case ComposeCore.next(state) do
+      {:effect, step, next_state} ->
+        case ComposeCore.step_result(next_state, step, Map.fetch!(replies, step)) do
+          {:ok, state2} -> compose_steps(state2, replies, [step | acc])
+          {:error, reason} -> flunk("fixture failed while collecting trace: #{inspect(reason)}")
+        end
+
+      {:done, {:ok, _manifest}} ->
+        Enum.reverse(acc)
+
+      {:done, {:error, reason}} ->
+        flunk("projection failed while collecting trace: #{inspect(reason)}")
+
+      {:error, reason} ->
+        flunk("composition failed while collecting trace: #{inspect(reason)}")
+    end
+  end
+
+  defp cleanup_attempts(ledger, replies),
+    do: cleanup_attempts(ledger, CleanupPlan.init(), replies, [])
+
+  defp cleanup_attempts(ledger, cursor, replies, acc) do
+    case CleanupPlan.next(ledger, cursor) do
+      :done ->
+        {ledger, Enum.reverse(acc)}
+
+      {:cleanup, tag, cursor2} ->
+        result = Map.get(replies, tag, :ok)
+        {ledger2, cursor3} = CleanupPlan.record(ledger, cursor2, tag, result)
+        cleanup_attempts(ledger2, cursor3, replies, [tag | acc])
     end
   end
 end

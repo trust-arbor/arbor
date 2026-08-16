@@ -80,7 +80,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeFactInterpreter do
         error
 
       {:effect, step, next_state} ->
-        trace(facts, {:composer_step, step})
         raw_result = Map.get(facts.replies, step, {:error, :fixture_missing})
         ledger_effect(step, raw_result)
 
@@ -157,17 +156,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeFactInterpreter do
   end
 
   defp dispatch_cleanup(tag, facts) do
-    trace(facts, {:cleanup_attempt, tag})
-
     facts
     |> Map.get(:cleanup_replies, %{})
     |> Map.get(tag, :ok)
   end
-
-  # Test-only instrumentation: when `facts` carries a :trace_pid, every step
-  # dispatch and every cleanup attempt is reported to it so tests can assert
-  # the exact operation trace and the exact cleanup call log, rather than
-  # inferring them from side effects.
-  defp trace(%{trace_pid: pid}, message) when is_pid(pid), do: send(pid, message)
-  defp trace(_facts, _message), do: :ok
 end
