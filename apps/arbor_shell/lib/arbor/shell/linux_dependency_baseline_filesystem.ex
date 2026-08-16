@@ -253,10 +253,10 @@ defmodule Arbor.Shell.LinuxDependencyBaselineFilesystem do
     end
   end
 
-  defp prefix(prefix, _chunk) when byte_size(prefix) >= 20, do: prefix
+  defp prefix(prefix, _chunk) when byte_size(prefix) >= 256, do: prefix
 
   defp prefix(prefix, chunk) do
-    wanted = min(20 - byte_size(prefix), byte_size(chunk))
+    wanted = min(256 - byte_size(prefix), byte_size(chunk))
     prefix <> binary_part(chunk, 0, wanted)
   end
 

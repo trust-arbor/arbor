@@ -67,6 +67,7 @@ defmodule Arbor.Shell do
     LinuxDependencyBaselineBuilder,
     LinuxDependencyBaselineFilesystem,
     PortSession,
+    RegularTreeInventory,
     Sandbox,
     SpawnCapableArgvLimits,
     SpawnCapableTimeout
@@ -75,6 +76,17 @@ defmodule Arbor.Shell do
   alias Arbor.Signals
 
   @default_sandbox :basic
+
+  @doc """
+  Build a bounded regular-file and directory inventory of one explicit source tree.
+
+  Accepts a single absolute canonical non-root directory path and fixed system
+  ceilings. Returns a JSON-clean document of relative paths, modes, sizes,
+  SHA-256 digests, and leading-byte prefixes. It never follows symlinks and
+  never returns authority, process, or identity fields.
+  """
+  @spec inventory_regular_tree(term()) :: {:ok, map()} | {:error, term()}
+  def inventory_regular_tree(source_root), do: RegularTreeInventory.inventory(source_root)
 
   @doc """
   Build and validate an evidence-only Linux dependency-baseline document.
