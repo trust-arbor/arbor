@@ -49,19 +49,19 @@ defmodule Arbor.Security.CapabilityStore do
   @current_state_version 1
 
   # Phase 4C C3A one-time validation certificate. A private state-resident
-  # epoch field produced ONLY by init, a successful deep validation, or a
-  # successful legacy migration. Ordinary callbacks on a certified state skip
-  # deep validation entirely (O(1) readiness); a missing or stale certificate
-  # (e.g. after a development reload whose source bytes changed produced a
-  # new @cert_epoch) deep-validates exactly once. code_change/3 always
-  # deep-validates regardless of the certificate. Never serialized; not
-  # defended against :sys.replace_state that preserves/forges a trusted
-  # certificate.
+  # field produced ONLY by init, a successful deep validation, or a
+  # successful legacy migration. Live value is
+  # {@cert_epoch, store_md5, uri_md5}: a source-byte change, a same-source
+  # executable change, or a CapabilityUri reload stale-marks it. Ordinary
+  # callbacks on a certified state skip deep validation entirely (O(1)
+  # readiness). code_change/3 always deep-validates regardless of the
+  # certificate. Never serialized; not defended against :sys.replace_state
+  # that preserves/forges a trusted certificate.
   @cert_field :__c3a_cert__
   # Domain-separated SHA-256 of this file's exact source bytes. The path is a
   # compile-time locator only and is not hashed. Identical source compiles to
   # the same epoch; any source-byte change changes the epoch so a preserved
-  # live certificate becomes stale.
+  # live certificate becomes stale. First element of the live certificate.
   @cert_epoch_domain "arbor.security.capability_store.cert_epoch.v1"
   @cert_epoch :crypto.hash(:sha256, [@cert_epoch_domain, <<0>>, File.read!(__ENV__.file)])
   @signal_events [
@@ -496,8 +496,15 @@ defmodule Arbor.Security.CapabilityStore do
 
         case restore_from_store(state) do
           {:ok, restored} ->
-            schedule_cleanup()
-            {:ok, certify(restored)}
+            case certify(restored) do
+              {:ok, certified} ->
+                schedule_cleanup()
+                {:ok, certified}
+
+              {:error, reason} ->
+                _ = SignalSync.release(signal_sync)
+                {:stop, {:capability_restore_failed, reason}}
+            end
 
           {:error, reason} when is_atom(reason) ->
             _ = SignalSync.release(signal_sync)
@@ -2151,15 +2158,54 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
-  # A current-version state is certified iff it carries the current compile
-  # epoch under the private certificate field. A development reload whose
-  # source bytes changed produces a new @cert_epoch, so the preserved live
-  # state's certificate becomes stale and the first callback deep-validates
-  # exactly once. Trusted while resident; never serialized; not defended
-  # against :sys.replace_state that preserves/forges a trusted certificate.
-  defp certified?(state), do: Map.get(state, @cert_field) == @cert_epoch
+  # A current-version state is certified iff :__c3a_cert__ equals the current
+  # live certificate (source epoch + this executable md5 + CapabilityUri md5).
+  # Lookup failure never accepts a stale certificate.
+  defp certified?(state) do
+    case current_live_certificate() do
+      {:ok, expected} -> Map.get(state, @cert_field) == expected
+      :error -> false
+    end
+  end
 
-  defp certify(state), do: Map.put(state, @cert_field, @cert_epoch)
+  defp certify(state) do
+    case current_live_certificate() do
+      {:ok, cert} -> {:ok, Map.put(state, @cert_field, cert)}
+      :error -> {:error, :certification_identity_unavailable}
+    end
+  end
+
+  # Validator identity closure for deep_validate_and_certify/1:
+  # validate_by_id/1 and validate_pending_intents/1 are local; by_resource
+  # rebuilds via build_resource_index/1 -> resource_key/1 ->
+  # canonical_resource/1 -> CapabilityUri.parse/1 and canonical/1.
+  # Bind this executable (same source can still yield a different BEAM) and
+  # CapabilityUri via the existing alias (only non-OTP runtime that changes
+  # rebuilt keys). Capability functions are not called; OTP is covered by
+  # code_change/3. module_info/1 may cold-load CapabilityUri (required for
+  # empty-store init). O(1): two md5 reads, no file I/O or inventory scan.
+  defp current_live_certificate do
+    with {:ok, store_md5} <- loaded_module_md5(__MODULE__),
+         {:ok, uri_md5} <- loaded_module_md5(CapabilityUri) do
+      {:ok, {@cert_epoch, store_md5, uri_md5}}
+    else
+      _ -> :error
+    end
+  end
+
+  defp loaded_module_md5(module) when is_atom(module) do
+    md5 = module.module_info(:md5)
+
+    if is_binary(md5) and byte_size(md5) == 16 do
+      {:ok, md5}
+    else
+      :error
+    end
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
 
   # Deep, pure, deterministic validation of a current-version state. Runs ONLY
   # at certification boundaries: a missing or stale certificate seen by
@@ -2173,8 +2219,9 @@ defmodule Arbor.Security.CapabilityStore do
   defp deep_validate_and_certify(state) do
     with {:ok, by_id} <- validate_by_id(state),
          :ok <- validate_by_resource(state, by_id),
-         :ok <- validate_pending_intents(state) do
-      {:ok, certify(state)}
+         :ok <- validate_pending_intents(state),
+         {:ok, certified} <- certify(state) do
+      {:ok, certified}
     end
   end
 
