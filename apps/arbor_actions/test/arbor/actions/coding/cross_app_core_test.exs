@@ -788,7 +788,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches is deterministic, exact-once, ordered, and bound-respecting" do
-    assert Core.max_test_batch_runtime_files() == 20
+    assert Core.max_test_batch_runtime_files() == 5
 
     assert Core.max_test_batch_argv_files() ==
              Arbor.Shell.spawn_capable_max_command_args() - 2
@@ -796,7 +796,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
 
-    assert Core.max_test_batch_files() == 20
+    assert Core.max_test_batch_files() == 5
     assert Core.max_test_batch_arg_bytes() == 65_536
 
     # Two files pack into one multi-file child while preserving inventory order.
@@ -856,7 +856,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
         "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
       end
 
-    assert length(many) == 23
+    assert length(many) == Core.max_test_batch_files() + 3
     assert {:ok, batches} = Core.partition_test_batches(many)
     assert length(batches) == 2
     assert Enum.at(batches, 0).count == Core.max_test_batch_files()
@@ -875,7 +875,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     end
 
     # Uneven inventories always retain a non-empty final partial batch.
-    for remainder <- [1, 5, 11] do
+    for remainder <- 1..(Core.max_test_batch_files() - 1) do
       uneven =
         for i <- 1..(Core.max_test_batch_files() + remainder) do
           "apps/alpha/test/u#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
@@ -899,7 +899,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       end
 
     assert {:ok, heavy_batches} = Core.partition_test_batches(heavy)
-    assert length(heavy_batches) == 4
+
+    assert length(heavy_batches) ==
+             div(length(heavy) + Core.max_test_batch_files() - 1, Core.max_test_batch_files())
+
     assert Enum.at(heavy_batches, 0).count == Core.max_test_batch_files()
     assert Enum.at(heavy_batches, 3).count == Core.max_test_batch_files()
     assert Enum.flat_map(heavy_batches, & &1.paths) == heavy
@@ -922,10 +925,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches representative inventories are exact-once and deterministic" do
-    assert Core.max_test_batch_runtime_files() == 20
-    assert Core.max_test_batch_files() == 20
+    assert Core.max_test_batch_runtime_files() == 5
+    assert Core.max_test_batch_files() == 5
 
-    for {size, expected_batches} <- [{40, 2}, {511, 26}, {707, 36}] do
+    for {size, expected_batches} <- [{40, 8}, {511, 103}, {707, 142}] do
       inventory =
         for i <- 1..size do
           "apps/alpha/test/r#{String.pad_leading(Integer.to_string(i), 5, "0")}_test.exs"
@@ -972,6 +975,19 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       assert Core.partition_test_batches(inventory) == {:ok, batches}
       assert Core.partition_test_batches(inventory) == {:ok, batches}
     end
+  end
+
+  test "validation timeout regression: twenty exact files split into four resumable children" do
+    files =
+      for i <- 1..20 do
+        "apps/alpha/test/slow_#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert Enum.map(batches, & &1.count) == [5, 5, 5, 5]
+    assert Enum.flat_map(batches, & &1.paths) == files
+    assert Enum.map(batches, & &1.index) == [1, 2, 3, 4]
+    assert Enum.all?(batches, &(&1.total == 4))
   end
 
   test "partition_test_batches fails closed on malformed or non-normalized input" do
@@ -1604,7 +1620,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:ok, _} = Jason.encode(aggregated)
   end
 
-  test "app root boundary: full 20-slot batch cannot absorb next app's first file" do
+  test "app root boundary: full runtime batch cannot absorb next app's first file" do
     max = Core.max_test_batch_files()
 
     alpha_files =
@@ -1670,7 +1686,11 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
           do: "apps/alpha/test/heavy#{String.pad_leading(Integer.to_string(i), 3, "0")}_test.exs"
 
     assert {:ok, batches} = Core.partition_test_batches(alpha_heavy)
-    assert length(batches) == 2
+
+    expected_batch_count =
+      div(length(alpha_heavy) + Core.max_test_batch_files() - 1, Core.max_test_batch_files())
+
+    assert length(batches) == expected_batch_count
     all_paths = Enum.flat_map(batches, & &1.paths)
     assert all_paths == alpha_heavy
 

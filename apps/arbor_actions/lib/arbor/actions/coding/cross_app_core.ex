@@ -60,14 +60,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # Closed Mix argv batch limits after exact-file normalization/lstat. Each
   # invocation prepends `["test", "--"]`. Path slots are the minimum of:
   #   * Shell's public non-bypassable argv ceiling minus fixed args
-  #   * a reviewed runtime batch cap (at most 20 exact test files per child)
+  #   * a reviewed runtime batch cap (at most 5 exact test files per child)
   # so multi-file suites amortize container startup without exhausting the
   # intensive per-process wall clock, while still preserving the complete
-  # exact inventory across sequential batches. The sum of each path's UTF-8
-  # bytes plus one separator byte must also stay under the byte ceiling. A
-  # single normalized path (max 1024 bytes) always fits both bounds.
+  # exact inventory across sequential batches. Twenty files proved too coarse:
+  # an arbor_commands batch made continuous progress but exceeded the immutable
+  # 20-minute child ceiling on 2026-08-16 before aggregate-capacity handoff could
+  # run. Five keeps that observed workload split four ways without weakening the
+  # admitted inventory. The sum of each path's UTF-8 bytes plus one separator
+  # byte must also stay under the byte ceiling. A single normalized path (max
+  # 1024 bytes) always fits both bounds.
   @test_batch_fixed_args 2
-  @max_test_batch_runtime_files 20
+  @max_test_batch_runtime_files 5
   @max_test_batch_argv_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
   @max_test_batch_files min(@max_test_batch_runtime_files, @max_test_batch_argv_files)
   @max_test_batch_arg_bytes 65_536
@@ -1116,7 +1120,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Input must already be the post-normalization inventory: unique, grouped
   contiguously by app, strictly sorted within each app, and every path must
   re-normalize to itself. Partitioning is greedy left-to-right under the closed
-  runtime file-count cap (at most 20 exact files per child), Shell argv-count
+  runtime file-count cap (at most 5 exact files per child), Shell argv-count
   ceiling, argument-byte ceiling, and app test root boundary (a batch never
   mixes files from different `apps/<app>/test` roots). Every path appears in
   exactly one non-empty batch, including a final partial batch; labels bind

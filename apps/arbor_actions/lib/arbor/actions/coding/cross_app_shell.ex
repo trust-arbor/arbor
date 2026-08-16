@@ -26,7 +26,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   exact `*_test.exs` files (ignored/generated paths never enter validation). The
   selected root, every listed file, and intermediate path components are
   lstat'd without following symlinks. Verified paths are then partitioned into
-  pure Core batches (at most 20 exact test files per child, Shell argv ceiling
+  pure Core batches (at most 5 exact test files per child, Shell argv ceiling
   minus two fixed args, and <=64 KiB of path+separator argument bytes) so the
   complete inventory is preserved across sequential children without excluding
   slow or integration-tagged files. Each batch runs as one argv-safe

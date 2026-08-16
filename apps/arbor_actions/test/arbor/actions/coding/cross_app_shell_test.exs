@@ -1543,9 +1543,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 30_000, 60_000)
     assert check["passed"]
 
-    # Runtime batch cap admits up to 20 exact files; three-file inventory is one child.
-    assert Core.max_test_batch_files() == 20
-    assert Core.max_test_batch_runtime_files() == 20
+    # Runtime batch cap admits up to 5 exact files; three-file inventory is one child.
+    assert Core.max_test_batch_files() == 5
+    assert Core.max_test_batch_runtime_files() == 5
 
     expected_batch = [
       "test",
@@ -1573,7 +1573,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Enum.at(batches, 1).count == 5
     assert Enum.flat_map(batches, & &1.paths) == paths
 
-    assert Core.max_test_batch_runtime_files() == 20
+    assert Core.max_test_batch_runtime_files() == 5
 
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
