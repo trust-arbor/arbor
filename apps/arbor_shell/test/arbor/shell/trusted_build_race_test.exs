@@ -165,7 +165,7 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
   end
 
   defp start_fixture! do
-    parent = Path.join(System.tmp_dir!(), "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
@@ -187,6 +187,7 @@ defmodule Arbor.Shell.TrustedBuildRaceTest do
 
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
+    :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     request = %{
       "schema" => "arbor.shell.trusted_build.request.v1",

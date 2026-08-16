@@ -19,6 +19,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   alias Arbor.Shell.TrustedBuild.FallbackOwner
   alias Arbor.Shell.TrustedBuild.Inventory
   alias Arbor.Shell.TrustedBuild.Plan
+  alias Arbor.Shell.TrustedBuild.PostPhase
   alias Arbor.Shell.TrustedBuildToolchainAuthority
 
   @fallback_kill_grace_ms 2_000
@@ -27,12 +28,6 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   @max_cleanup_attempts 8
 
   @supervisor Arbor.Shell.TrustedBuild.LeaseSupervisor
-  @reserved_ops [
-    :stage_native_cache,
-    :inventory_deps,
-    :remove_release_cookie,
-    :read_descriptor
-  ]
 
   @spec supervisor_child_spec() :: Supervisor.child_spec()
   def supervisor_child_spec do
@@ -88,12 +83,18 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   @spec inventory_release(Handle.t()) :: {:ok, map()} | {:error, term()}
   def inventory_release(%Handle{} = lease), do: call(lease, :inventory_release)
 
-  @spec reserved(Handle.t(), atom()) :: {:error, term()}
-  def reserved(%Handle{} = lease, op) when op in @reserved_ops do
-    call(lease, {:reserved, op})
-  end
+  @spec stage_native(Handle.t()) :: {:ok, map()} | {:error, term()}
+  def stage_native(%Handle{} = lease), do: call(lease, :stage_native_cache)
 
-  def reserved(_lease, _op), do: {:error, :invalid_trusted_build_lease_op}
+  @spec inventory_deps(Handle.t()) :: {:ok, map()} | {:error, term()}
+  def inventory_deps(%Handle{} = lease), do: call(lease, :inventory_deps)
+
+  @spec remove_release_cookie(Handle.t()) :: {:ok, map()} | {:error, term()}
+  def remove_release_cookie(%Handle{} = lease), do: call(lease, :remove_release_cookie)
+
+  @spec read_descriptor(Handle.t(), term()) :: {:ok, map()} | {:error, term()}
+  def read_descriptor(%Handle{} = lease, selector),
+    do: call(lease, {:read_descriptor, selector})
 
   @spec abort_unattached_phase(Handle.t()) :: :ok | {:error, term()}
   def abort_unattached_phase(%Handle{} = lease), do: call(lease, :abort_unattached_phase)
@@ -205,7 +206,13 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
        cleanup_dormant: false,
        cleanup_timer: nil,
        cleanup_reason: nil,
-       released: false
+       cleanup_attested: false,
+       cleanup_attestation_reason: nil,
+       released: false,
+       native_staged: false,
+       deps_inventory: nil,
+       cookie_removed: false,
+       release_inventory: nil
      }}
   end
 
@@ -330,7 +337,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         {:reply, {:error, :trusted_build_exhaustion_unproven}, lock_without_reset(state, result)}
 
       true ->
-        {:reply, :ok, complete_phase(state, result)}
+        case complete_phase(state, result) do
+          {:ok, next} -> reply_after_phase(:ok, next)
+          {:error, reason, next} -> reply_after_phase({:error, reason}, next)
+        end
     end
   end
 
@@ -394,20 +404,88 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       state.locked ->
         {:reply, {:error, :trusted_build_phase_locked}, state}
 
-      not state.done ->
+      not state.done or state.cookie_removed != true ->
         {:reply, {:error, :trusted_build_release_absent}, state}
 
+      is_map(state.release_inventory) ->
+        {:reply, {:ok, state.release_inventory}, state}
+
       true ->
-        {:reply, Inventory.release_document(state.roots.build.path), state}
+        finish_release_inventory(state)
     end
   end
 
-  defp dispatch_owner_request({:reserved, op}, {caller, _}, state) when op in @reserved_ops do
-    if caller == state.owner do
-      {:reply, {:error, :trusted_build_op_reserved}, state}
-    else
-      {:reply, {:error, :foreign_caller}, state}
-    end
+  defp dispatch_owner_request(:stage_native_cache, {caller, _}, state) do
+    run_post_phase(state, caller, :stage_native_cache, fn admitted ->
+      cond do
+        admitted.completed != [:deps_get] ->
+          {:error, :trusted_build_phase_rejected, admitted}
+
+        is_map(admitted.native_staged) ->
+          {:error, :trusted_build_op_repeat, admitted}
+
+        true ->
+          case PostPhase.stage(admitted) do
+            {:ok, evidence, dest} -> {:ok, evidence, %{admitted | native_staged: dest}}
+            {:error, reason} -> {:error, reason, admitted}
+            {:lock, reason} -> {:error, reason, %{admitted | locked: true}}
+          end
+      end
+    end)
+  end
+
+  defp dispatch_owner_request(:inventory_deps, {caller, _}, state) do
+    run_post_phase(state, caller, :inventory_deps, fn admitted ->
+      cond do
+        not is_map(admitted.native_staged) ->
+          {:error, :trusted_build_phase_rejected, admitted}
+
+        is_map(admitted.deps_inventory) ->
+          {:error, :trusted_build_op_repeat, admitted}
+
+        true ->
+          case PostPhase.rescan_deps_document(admitted) do
+            {:ok, document} ->
+              {:ok, document, %{admitted | deps_inventory: document}}
+
+            {:error, reason} ->
+              {:error, reason, %{admitted | locked: true}}
+          end
+      end
+    end)
+  end
+
+  defp dispatch_owner_request(:remove_release_cookie, {caller, _}, state) do
+    run_post_phase(state, caller, :remove_release_cookie, fn admitted ->
+      cond do
+        not admitted.done ->
+          {:error, :trusted_build_phase_rejected, admitted}
+
+        admitted.cookie_removed ->
+          {:error, :trusted_build_op_repeat, admitted}
+
+        true ->
+          case PostPhase.remove_cookie(admitted) do
+            {:ok, evidence} -> {:ok, evidence, %{admitted | cookie_removed: true}}
+            {:error, reason} -> {:error, reason, admitted}
+            {:lock, reason} -> {:error, reason, %{admitted | locked: true}}
+          end
+      end
+    end)
+  end
+
+  defp dispatch_owner_request({:read_descriptor, selector}, {caller, _}, state) do
+    run_post_phase(state, caller, :read_descriptor, fn admitted ->
+      if is_map(admitted.release_inventory) do
+        case PostPhase.read_descriptor(admitted, selector) do
+          {:ok, evidence} -> {:ok, evidence, admitted}
+          {:error, reason} -> {:error, reason, admitted}
+          {:lock, reason} -> {:error, reason, %{admitted | locked: true}}
+        end
+      else
+        {:error, :trusted_build_release_absent, admitted}
+      end
+    end)
   end
 
   defp dispatch_owner_request(:abort_unattached_phase, {caller, _}, state) do
@@ -534,6 +612,99 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     :ok
   end
 
+  defp run_post_phase(state, caller, _op, fun) do
+    cond do
+      caller != state.owner ->
+        {:reply, {:error, :foreign_caller}, state}
+
+      state.released or state.locked ->
+        {:reply, {:error, :trusted_build_phase_locked}, state}
+
+      state.in_flight != nil ->
+        {:reply, {:error, :trusted_build_phase_in_flight}, state}
+
+      true ->
+        case admit_post_phase(state) do
+          {:ok, admitted} ->
+            case fun.(admitted) do
+              {:ok, evidence, next} -> {:reply, {:ok, evidence}, next}
+              {:error, reason, next} -> {:reply, {:error, reason}, next}
+            end
+
+          {:error, reason, next} ->
+            {:reply, {:error, reason}, next}
+        end
+    end
+  end
+
+  defp admit_post_phase(state) do
+    with :ok <- PostPhase.verify_pinned_source_tree(state.identities),
+         :ok <- checkout_generations(state) do
+      {:ok, state}
+    else
+      {:error, reason} ->
+        {:error, reason, %{state | locked: true}}
+    end
+  end
+
+  defp checkout_generations(state) do
+    with {:ok, _binding, authority_pid, generation} <-
+           TrustedBuildToolchainAuthority.checkout_generation(
+             state.authority_pid,
+             state.authority_gen
+           ),
+         {:ok, registry_pid, registry_gen} <- OwnedTreeRegistry.checkout(),
+         true <- authority_pid == state.authority_pid and generation == state.authority_gen,
+         true <- registry_pid == state.registry_pid and registry_gen == state.registry_gen do
+      :ok
+    else
+      false -> {:error, :trusted_build_toolchain_generation_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_release_inventory(state) do
+    case admit_post_phase(state) do
+      {:ok, admitted} ->
+        retain_release_inventory(admitted)
+
+      {:error, reason, next} ->
+        {:reply, {:error, reason}, next}
+    end
+  end
+
+  defp retain_release_inventory(state) do
+    case compare_deps_inventory(state) do
+      :ok -> scan_release_inventory(state)
+      {:error, reason} -> {:reply, {:error, reason}, %{state | locked: true}}
+    end
+  end
+
+  defp scan_release_inventory(state) do
+    case PostPhase.scan_release_document(state) do
+      {:ok, document} -> retain_release_document(state, document)
+      {:error, reason} -> {:reply, {:error, reason}, %{state | locked: true}}
+    end
+  end
+
+  defp retain_release_document(state, document) do
+    if Inventory.cookie_present?(document) do
+      {:reply, {:error, :trusted_build_cookie_replacement}, %{state | locked: true}}
+    else
+      {:reply, {:ok, document}, %{state | release_inventory: document}}
+    end
+  end
+
+  defp compare_deps_inventory(%{deps_inventory: nil}), do: :ok
+
+  defp compare_deps_inventory(%{deps_inventory: retained} = state) do
+    case PostPhase.rescan_deps_document(state) do
+      {:ok, ^retained} -> :ok
+      {:ok, _other} -> {:error, :identity_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp start_phase(state, phase) do
     case Plan.admit_order(phase, state.completed) do
       # Plan.admit_order policy rejection is recoverable; later identity,
@@ -542,7 +713,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         {:error, :trusted_build_phase_rejected, state}
 
       :ok ->
-        with {:ok, binding, authority_pid, generation} <-
+        with :ok <- PostPhase.verify_pinned_source_tree(state.identities),
+             :ok <- compile_and_deps_gate(phase, state),
+             {:ok, binding, authority_pid, generation} <-
                TrustedBuildToolchainAuthority.checkout_generation(
                  state.authority_pid,
                  state.authority_gen
@@ -585,6 +758,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
           {:ok, session, next}
         else
+          {:error, :trusted_build_phase_rejected} ->
+            {:error, :trusted_build_phase_rejected, state}
+
           false ->
             {:error, :trusted_build_toolchain_generation_mismatch, %{state | locked: true}}
 
@@ -593,6 +769,17 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         end
     end
   end
+
+  defp compile_and_deps_gate(:compile, state) do
+    if is_map(state.native_staged) and is_map(state.deps_inventory) do
+      compare_deps_inventory(state)
+    else
+      {:error, :trusted_build_phase_rejected}
+    end
+  end
+
+  defp compile_and_deps_gate(:release, state), do: compare_deps_inventory(state)
+  defp compile_and_deps_gate(_phase, _state), do: :ok
 
   defp build_launch_descriptor(state) do
     identities = state.identities
@@ -607,6 +794,10 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       elixir_mix: binding.elixir_mix,
       source: identities.source,
       source_owned: identities.source_owned,
+      overlay: identities.overlay,
+      source_tree_digest: identities.source_tree_digest,
+      native_staged: state.native_staged,
+      phase: phase,
       erlang_root: binding.erlang_root,
       elixir_root: binding.elixir_root,
       archives: identities.archives,
@@ -632,21 +823,48 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
   defp complete_phase(state, result) do
     if success_result?(result) do
-      state = demonitor_phase(state)
-      state = reset_port_owner(demonitor_port_owner_ref(state))
-      completed = state.completed ++ [state.in_flight]
+      case after_mix_success(state) do
+        :ok ->
+          state = demonitor_phase(state)
+          state = reset_port_owner(demonitor_port_owner_ref(state))
+          completed = state.completed ++ [state.in_flight]
 
-      clear_launch(%{
-        state
-        | completed: completed,
-          in_flight: nil,
-          cancel_id: nil,
-          done: completed == [:deps_get, :compile, :release]
-      })
+          {:ok,
+           clear_launch(%{
+             state
+             | completed: completed,
+               in_flight: nil,
+               cancel_id: nil,
+               done: completed == [:deps_get, :compile, :release]
+           })}
+
+        {:error, reason} ->
+          {:error, reason, lock_without_reset(state, result)}
+      end
     else
-      lock_without_reset(state, result)
+      {:ok, lock_without_reset(state, result)}
     end
   end
+
+  defp after_mix_success(%{fault: :force_source_overlay_drift_after_mix} = state) do
+    _ = drift_pinned_overlay(state)
+    verify_after_mix(state)
+  end
+
+  defp after_mix_success(state), do: verify_after_mix(state)
+
+  defp verify_after_mix(state) do
+    with :ok <- PostPhase.verify_pinned_source_tree(state.identities) do
+      compare_deps_inventory(state)
+    end
+  end
+
+  defp drift_pinned_overlay(%{identities: %{overlay: %{path: path, size: size}}})
+       when is_binary(path) and is_integer(size) and size > 0 do
+    File.write(path, :binary.copy(<<1>>, size))
+  end
+
+  defp drift_pinned_overlay(_state), do: :ok
 
   defp lock_without_reset(state, _result) do
     state = demonitor_phase(state)
@@ -836,6 +1054,15 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     end
   end
 
+  defp reply_after_phase(reply, %{owner_dead: true} = state) do
+    case maybe_settle(state) do
+      {:noreply, next} -> {:reply, reply, next}
+      {:stop, reason, next} -> {:stop, reason, reply, next}
+    end
+  end
+
+  defp reply_after_phase(reply, state), do: {:reply, reply, state}
+
   defp finish_release_call(state) do
     {state, result} = advance_cleanup(state)
 
@@ -844,7 +1071,12 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         {:stop, :normal, :ok, mark_released(state)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, maybe_schedule_retry(%{state | locked: true, released: false})}
+        if cleanup_complete?(state) do
+          {:stop, :normal, {:error, reason}, mark_released(%{state | locked: true})}
+        else
+          {:reply, {:error, reason},
+           maybe_schedule_retry(%{state | locked: true, released: false})}
+        end
     end
   end
 
@@ -859,7 +1091,12 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
       {:error, reason} ->
         GenServer.reply(from, {:error, reason})
-        {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+
+        if cleanup_complete?(state) do
+          {:stop, :normal, mark_released(%{state | locked: true})}
+        else
+          {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+        end
     end
   end
 
@@ -871,7 +1108,11 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         {:stop, :normal, mark_released(state)}
 
       {:error, _reason} ->
-        {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+        if cleanup_complete?(state) do
+          {:stop, :normal, mark_released(%{state | locked: true})}
+        else
+          {:noreply, maybe_schedule_retry(%{state | locked: true, released: false})}
+        end
     end
   end
 
@@ -901,16 +1142,51 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   defp advance_cleanup(state) do
     state =
       state
+      |> maybe_attest_cleanup()
       |> maybe_clean_workspace()
       |> maybe_unbind_source()
 
-    if state.workspace_cleaned and state.source_unbound do
-      {state, :ok}
-    else
-      {state,
-       {:error, {:cleanup_retained, state.cleanup_reason || :incomplete, cleanup_evidence(state)}}}
+    cond do
+      cleanup_complete?(state) and not is_nil(state.cleanup_attestation_reason) ->
+        {state,
+         {:error, {:trusted_build_cleanup_attestation_failed, state.cleanup_attestation_reason}}}
+
+      cleanup_complete?(state) ->
+        {state, :ok}
+
+      true ->
+        {state,
+         {:error,
+          {:cleanup_retained, state.cleanup_reason || :incomplete, cleanup_evidence(state)}}}
     end
   end
+
+  defp maybe_attest_cleanup(%{cleanup_attestation_reason: reason} = state)
+       when not is_nil(reason),
+       do: state
+
+  # Freeze the successful pre-cleanup attestation before the first destructive
+  # removal step. OwnedTree removal is progressive, so a retry cannot distinguish
+  # Arbor's own partial deletion from external drift.
+  defp maybe_attest_cleanup(%{cleanup_attested: true} = state), do: state
+
+  defp maybe_attest_cleanup(state) do
+    with :ok <- PostPhase.verify_pinned_source_tree(state.identities),
+         :ok <- verify_staged_native_for_cleanup(state),
+         :ok <- compare_deps_inventory(state) do
+      %{state | cleanup_attested: true}
+    else
+      {:error, reason} ->
+        %{state | locked: true, cleanup_attestation_reason: reason}
+    end
+  end
+
+  defp verify_staged_native_for_cleanup(%{native_staged: dest} = state) when is_map(dest),
+    do: PostPhase.verify_staged_native(state)
+
+  defp verify_staged_native_for_cleanup(_state), do: :ok
+
+  defp cleanup_complete?(state), do: state.workspace_cleaned and state.source_unbound
 
   defp maybe_clean_workspace(%{workspace_cleaned: true} = state), do: state
 
@@ -1100,7 +1376,11 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       "schema" => "arbor.shell.trusted_build.lease.v1",
       "state" => view_state(state),
       "completed_phases" => Enum.map(state.completed, &Atom.to_string/1),
-      "locked" => state.locked
+      "locked" => state.locked,
+      "native_staged" => is_map(state.native_staged),
+      "deps_inventoried" => is_map(state.deps_inventory),
+      "cookie_removed" => state.cookie_removed == true,
+      "release_inventoried" => is_map(state.release_inventory)
     }
   end
 
@@ -1114,20 +1394,22 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     if self() != owner do
       {:error, :foreign_caller}
     else
-      GenServer.call(worker, {:owner_request, token, request})
+      # Long tree scans carry their own bounded deadlines. A GenServer timeout
+      # would not cancel the request and could report failure before it commits.
+      GenServer.call(worker, {:owner_request, token, request}, :infinity)
     end
   catch
     :exit, _ -> {:error, :invalid_lease}
   end
 
   defp phase_call(lease_pid, request) do
-    GenServer.call(lease_pid, request)
+    GenServer.call(lease_pid, request, :infinity)
   catch
     :exit, _ -> {:error, :invalid_lease}
   end
 
   defp port_owner_call(lease_pid, request) do
-    GenServer.call(lease_pid, request)
+    GenServer.call(lease_pid, request, :infinity)
   catch
     :exit, _ -> {:error, :invalid_lease}
   end

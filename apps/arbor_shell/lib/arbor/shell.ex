@@ -71,7 +71,8 @@ defmodule Arbor.Shell do
     RegularTreeInventory,
     Sandbox,
     SpawnCapableArgvLimits,
-    SpawnCapableTimeout
+    SpawnCapableTimeout,
+    TrustedBuild
   }
 
   alias Arbor.Signals
@@ -843,27 +844,79 @@ defmodule Arbor.Shell do
   """
   @spec acquire_trusted_build_lease(term()) :: {:ok, term(), map()} | {:error, term()}
   def acquire_trusted_build_lease(request) do
-    Arbor.Shell.TrustedBuild.acquire(request)
+    TrustedBuild.acquire(request)
+  end
+
+  @doc """
+  Inert JSON-clean sqlite_vec native-overlay descriptor.
+
+  **Trusted system API only.** No IO. Callers cannot select dest, digest, or root.
+  """
+  @spec trusted_build_native_overlay_descriptor() :: map()
+  def trusted_build_native_overlay_descriptor do
+    TrustedBuild.native_overlay_descriptor()
   end
 
   @doc """
   Run one fixed Mix phase on a live trusted-build lease.
 
   Accepts only `\"deps_get\"`, `\"compile\"`, or `\"release\"` in that order,
-  once. After a failed or cancelled phase only `release_trusted_build_lease/1`
+  once. Compile is admitted only after native staging and deps inventory.
+  After a failed or cancelled phase only `release_trusted_build_lease/1`
   is admitted.
   """
   @spec execute_trusted_build(term(), term()) :: {:ok, map()} | {:error, term()}
   def execute_trusted_build(lease, phase) do
-    Arbor.Shell.TrustedBuild.execute(lease, phase)
+    TrustedBuild.execute(lease, phase)
   end
 
   @doc """
-  Closed relative inventory of `$MIX_BUILD_PATH/rel` for a completed lease.
+  Stage the Shell-owned sqlite_vec native overlay into the lease MIX_DEPS_PATH.
+
+  **Trusted system API only.** Owner-only, once, after successful deps_get.
+  """
+  @spec stage_trusted_build_native(term()) :: {:ok, map()} | {:error, term()}
+  def stage_trusted_build_native(lease) do
+    TrustedBuild.stage_native(lease)
+  end
+
+  @doc """
+  Retain a closed relative inventory of the lease MIX_DEPS_PATH.
+
+  **Trusted system API only.** Owner-only, once, after native staging.
+  """
+  @spec inventory_trusted_build_deps(term()) :: {:ok, map()} | {:error, term()}
+  def inventory_trusted_build_deps(lease) do
+    TrustedBuild.inventory_deps(lease)
+  end
+
+  @doc """
+  Remove exactly `rel/arbor_trust/releases/COOKIE` after a successful release.
+
+  **Trusted system API only.** Owner-only, once.
+  """
+  @spec remove_trusted_build_release_cookie(term()) :: {:ok, map()} | {:error, term()}
+  def remove_trusted_build_release_cookie(lease) do
+    TrustedBuild.remove_release_cookie(lease)
+  end
+
+  @doc """
+  Closed relative inventory of `$MIX_BUILD_PATH/rel` after cookie removal.
   """
   @spec inventory_trusted_build(term()) :: {:ok, map()} | {:error, term()}
   def inventory_trusted_build(lease) do
-    Arbor.Shell.TrustedBuild.inventory(lease)
+    TrustedBuild.inventory(lease)
+  end
+
+  @doc """
+  Read one inventory-attested `.app` or `.rel` as `%{\"path\" => rel, \"bytes\" => binary}`.
+
+  **Trusted system API only.** Selector is a relative path already in the
+  retained release inventory.
+  """
+  @spec read_trusted_build_descriptor(term(), term()) :: {:ok, map()} | {:error, term()}
+  def read_trusted_build_descriptor(lease, selector) do
+    TrustedBuild.read_descriptor(lease, selector)
   end
 
   @doc """
@@ -871,7 +924,7 @@ defmodule Arbor.Shell do
   """
   @spec release_trusted_build_lease(term()) :: :ok | {:error, term()}
   def release_trusted_build_lease(lease) do
-    Arbor.Shell.TrustedBuild.release(lease)
+    TrustedBuild.release(lease)
   end
 
   @doc """

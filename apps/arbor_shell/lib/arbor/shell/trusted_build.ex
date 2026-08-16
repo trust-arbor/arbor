@@ -7,6 +7,7 @@ defmodule Arbor.Shell.TrustedBuild do
   alias Arbor.Shell.TrustedBuild.HexSeed
   alias Arbor.Shell.TrustedBuild.Identity
   alias Arbor.Shell.TrustedBuild.Lease
+  alias Arbor.Shell.TrustedBuild.NativeOverlay
   alias Arbor.Shell.TrustedBuild.Phase
   alias Arbor.Shell.TrustedBuild.Plan
   alias Arbor.Shell.TrustedBuild.Request
@@ -21,7 +22,11 @@ defmodule Arbor.Shell.TrustedBuild do
     :force_output_overflow,
     :crash_phase,
     :force_kill_helper_failure,
-    :force_source_unbind_failure
+    :force_source_unbind_failure,
+    :force_native_dest_hardlink_before_admission,
+    :force_cookie_hardlink_before_unlink,
+    :force_cookie_recreate_after_unlink,
+    :force_source_overlay_drift_after_mix
   ]
   @token_bytes 32
 
@@ -66,6 +71,27 @@ defmodule Arbor.Shell.TrustedBuild do
       _other -> {:error, :invalid_lease}
     end
   end
+
+  @spec native_overlay_descriptor() :: map()
+  def native_overlay_descriptor, do: NativeOverlay.descriptor()
+
+  @spec stage_native(term()) :: {:ok, map()} | {:error, term()}
+  def stage_native(%Lease.Handle{} = lease), do: Lease.stage_native(lease)
+  def stage_native(_lease), do: {:error, :invalid_lease}
+
+  @spec inventory_deps(term()) :: {:ok, map()} | {:error, term()}
+  def inventory_deps(%Lease.Handle{} = lease), do: Lease.inventory_deps(lease)
+  def inventory_deps(_lease), do: {:error, :invalid_lease}
+
+  @spec remove_release_cookie(term()) :: {:ok, map()} | {:error, term()}
+  def remove_release_cookie(%Lease.Handle{} = lease), do: Lease.remove_release_cookie(lease)
+  def remove_release_cookie(_lease), do: {:error, :invalid_lease}
+
+  @spec read_descriptor(term(), term()) :: {:ok, map()} | {:error, term()}
+  def read_descriptor(%Lease.Handle{} = lease, selector),
+    do: Lease.read_descriptor(lease, selector)
+
+  def read_descriptor(_lease, _selector), do: {:error, :invalid_lease}
 
   @spec inventory(Lease.Handle.t()) :: {:ok, map()} | {:error, term()}
   def inventory(%Lease.Handle{} = lease), do: Lease.inventory_release(lease)
@@ -240,13 +266,16 @@ defmodule Arbor.Shell.TrustedBuild do
          :ok <- seed_hex_cache(children.hex.path, binding, fault),
          :ok <- reject_source_overlap(source_root, children, archives),
          {:ok, source} <- Identity.pin_directory(source_root),
-         {:ok, wrapper} <- Identity.pin_regular_file(wrapper_path) do
+         {:ok, wrapper} <- Identity.pin_regular_file(wrapper_path),
+         {:ok, overlay, source_tree_digest} <- pin_source_overlay(source_identity) do
       roots = Map.merge(children, %{parent: parent, archives: archives})
 
       identities = %{
         source: source,
         source_owned: source_identity,
         wrapper: wrapper,
+        overlay: overlay,
+        source_tree_digest: source_tree_digest,
         archives: archives,
         archives_digest: digest
       }
@@ -256,6 +285,23 @@ defmodule Arbor.Shell.TrustedBuild do
       {:error, reason} ->
         _ = cleanup_workspace(parent)
         {:error, reason}
+    end
+  end
+
+  defp pin_source_overlay(source_owned) do
+    segments = NativeOverlay.staging_segments()
+    joined = Path.join([source_owned.path | segments])
+
+    with {:ok, contained} <- SafePath.safe_join(source_owned.path, NativeOverlay.staging_rel()),
+         true <- Path.expand(contained) == Path.expand(joined),
+         {:ok, overlay} <- Identity.pin_regular_file(joined),
+         true <- NativeOverlay.matches_pin?(overlay),
+         :ok <- Identity.verify_ancestry(source_owned, overlay, segments),
+         {:ok, digest} <- Identity.tree_digest(source_owned.path) do
+      {:ok, overlay, digest}
+    else
+      false -> {:error, :trusted_build_native_overlay_unpinned}
+      {:error, _reason} -> {:error, :trusted_build_native_overlay_unpinned}
     end
   end
 

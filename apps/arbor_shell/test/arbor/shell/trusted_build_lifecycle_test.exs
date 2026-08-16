@@ -93,6 +93,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
         assert deps.exit_code == 0
         assert deps.timed_out == false
+        :ok = Helpers.after_deps_get!(lease)
         assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
         assert result.exit_code == 0
         assert result.timed_out == false
@@ -112,11 +113,12 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       {lease, identity, handle} = acquire_source!(:broken)
 
       try do
-        assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
+        assert {:ok, result} = Shell.execute_trusted_build(lease, "deps_get")
         assert result.exit_code != 0
         refute trusted_build_running?()
+
         assert {:error, :trusted_build_phase_locked} =
-                 Shell.execute_trusted_build(lease, "deps_get")
+                 Shell.execute_trusted_build(lease, "compile")
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
@@ -130,7 +132,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       {timeout_lease, timeout_id, timeout_handle} = acquire_source!(:ok, :force_phase_timeout)
 
       try do
-        assert {:ok, result} = Shell.execute_trusted_build(timeout_lease, "compile")
+        assert {:ok, result} = Shell.execute_trusted_build(timeout_lease, "deps_get")
         assert result.timed_out == true or result.killed == true
         refute trusted_build_running?()
         {:ok, view} = Lease.view(timeout_lease)
@@ -145,7 +147,8 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         acquire_source!(:ok, :force_output_overflow)
 
       try do
-        assert {:ok, result} = Shell.execute_trusted_build(overflow_lease, "compile")
+        assert {:ok, result} = Shell.execute_trusted_build(overflow_lease, "deps_get")
+
         assert result.output_limit_exceeded == true or result.killed == true or
                  result.exit_code != 0
 
@@ -160,9 +163,12 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
   test "explicit cancellation reaches the port owner" do
     if @darwin? do
-      {lease, identity, handle} = acquire_source!()
+      {lease, identity, handle} = acquire_source!(:slow)
 
       try do
+        assert {:ok, %{exit_code: 0}} = Shell.execute_trusted_build(lease, "deps_get")
+        :ok = Helpers.after_deps_get!(lease)
+
         helper =
           spawn(fn ->
             wait_until(fn ->
@@ -179,6 +185,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
         _ = helper
         result = Shell.execute_trusted_build(lease, "compile")
+
         assert match?({:ok, %{killed: true}}, result) or match?({:ok, %{cancelled: true}}, result) or
                  match?({:ok, %{exit_code: 137}}, result)
 
@@ -196,7 +203,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       {lease, identity, handle} = acquire_source!(:ok, :crash_phase)
 
       try do
-        assert {:error, _reason} = Shell.execute_trusted_build(lease, "compile")
+        assert {:error, _reason} = Shell.execute_trusted_build(lease, "deps_get")
         {:ok, view} = Lease.view(lease)
         assert view["locked"] == true
         refute trusted_build_running?()
@@ -217,6 +224,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         File.chmod!(Path.join(source, "bin/mix"), 0o755)
         assert {:error, _reason} = Shell.execute_trusted_build(lease, "deps_get")
         refute trusted_build_running?()
+
         assert {:error, :trusted_build_phase_locked} =
                  Shell.execute_trusted_build(lease, "compile")
       after
@@ -233,7 +241,9 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
       owner =
         spawn(fn ->
-          {lease, identity, handle} = acquire_source!()
+          {lease, identity, handle} = acquire_source!(:slow)
+          {:ok, %{exit_code: 0}} = Shell.execute_trusted_build(lease, "deps_get")
+          :ok = Helpers.after_deps_get!(lease)
           workspace = :sys.get_state(lease.worker).roots.parent.path
           send(parent, {:ready, lease.worker, identity, handle, workspace})
           _ = Shell.execute_trusted_build(lease, "compile")
@@ -246,6 +256,14 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       assert workspace_path == workspace
       registry_gen = state.registry_gen
       worker_mon = Process.monitor(worker)
+
+      assert wait_until(fn ->
+               case safe_worker_state(worker) do
+                 {:ok, st} -> st.in_flight == :compile
+                 :down -> false
+               end
+             end)
+
       Process.exit(owner, :kill)
       wait_until(fn -> not Process.alive?(owner) end)
       refute trusted_build_running?()
@@ -269,7 +287,8 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
                  end
                end,
                10_000
-             )
+             ),
+             "owner-death settlement stalled: #{inspect(owner_death_state(worker))}"
 
       case Process.alive?(worker) && safe_worker_state(worker) do
         {:ok, st} ->
@@ -294,7 +313,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       {lease, identity, handle} = acquire_source!(:fork)
 
       try do
-        result = Shell.execute_trusted_build(lease, "compile")
+        result = Shell.execute_trusted_build(lease, "deps_get")
         assert match?({:ok, _}, result) or match?({:error, _}, result)
         refute trusted_build_running?()
         refute Enum.any?(os_processes(), &String.contains?(&1.command, "arbor-tb-fork-marker"))
@@ -307,7 +326,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   end
 
   defp start_source!(kind \\ :ok) do
-    parent = Path.join(System.tmp_dir!(), "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
@@ -317,6 +336,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     File.write!(Path.join(source, "lib/trusted_build_fixture.ex"), source_module(kind))
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
+    :ok = Helpers.plant_fixed_overlay!(identity.path)
     {nil, identity, handle}
   end
 
@@ -367,7 +387,23 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   end
 
   defp source_module(:broken), do: "defmodule TrustedBuildFixture do\n"
-  defp source_module(_kind), do: "defmodule TrustedBuildFixture, do: def hello, do: :ok\n"
+
+  defp source_module(:slow) do
+    """
+    defmodule TrustedBuildFixture do
+      Process.sleep(2_000)
+      def hello, do: :ok
+    end
+    """
+  end
+
+  defp source_module(_kind) do
+    """
+    defmodule TrustedBuildFixture do
+      def hello, do: :ok
+    end
+    """
+  end
 
   defp request_for(identity) do
     %{
@@ -406,6 +442,30 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     {:ok, :sys.get_state(worker)}
   catch
     :exit, _ -> :down
+  end
+
+  defp owner_death_state(worker) do
+    case safe_worker_state(worker) do
+      {:ok, state} ->
+        Map.take(state, [
+          :owner_dead,
+          :in_flight,
+          :phase_pid,
+          :port_owner_pid,
+          :port_owner_exhausted,
+          :fallback_pending,
+          :workspace_cleaned,
+          :source_unbound,
+          :cleanup_reason,
+          :cleanup_timer,
+          :cleanup_dormant,
+          :cleanup_attempts,
+          :locked
+        ])
+
+      :down ->
+        :down
+    end
   end
 
   defp wait_until(fun, timeout \\ 5_000) do

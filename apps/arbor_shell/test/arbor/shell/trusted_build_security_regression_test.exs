@@ -53,6 +53,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
 
         assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
         assert deps.exit_code == 0
+        :ok = Helpers.after_deps_get!(lease)
         assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
         assert compile.exit_code == 0
         assert Task.await(watcher, 15_000) == true
@@ -84,8 +85,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   end
 
   defp start_fixture_lease! do
-    tmp = System.tmp_dir!()
-    parent = Path.join(tmp, "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     source = Path.join(parent, "source")
     File.mkdir_p!(Path.join(source, "lib"))
@@ -100,6 +100,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
 
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
+    :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     request = %{
       "schema" => "arbor.shell.trusted_build.request.v1",

@@ -3,55 +3,28 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Overlay do
 
   alias Arbor.Common.SafePath
 
-  @schema "arbor.packaging.safe_recovery_native_overlay.v1"
-  @name "sqlite_vec"
-  @overlay_version 1
-  @native_version "0.1.5"
-  @hex_package "sqlite_vec"
-  @hex_version "0.1.0"
-  @target "aarch64-apple-darwin"
-  @filename "vec0.dylib"
-  @logical_path "deps/sqlite_vec/priv/0.1.5/vec0.dylib"
-  @staging_rel "native_overlay/v1/aarch64-apple-darwin/sqlite_vec/0.1.5/vec0.dylib"
-  @size 126_600
-  @sha256 "45d67c7868152c1b9b4b86cd1cea1d8834136e13f8e0348648b89f8aa90e7b5b"
+  @spec descriptor() :: map()
+  def descriptor, do: Arbor.Shell.trusted_build_native_overlay_descriptor()
 
   @spec logical_path() :: String.t()
-  def logical_path, do: @logical_path
+  def logical_path, do: descriptor()["logical_path"]
 
   @spec source_path() :: String.t()
-  def source_path, do: @logical_path
+  def source_path, do: logical_path()
 
   @spec staging_rel() :: String.t()
-  def staging_rel, do: @staging_rel
+  def staging_rel, do: descriptor()["staging_rel"]
 
   @spec sha256() :: String.t()
-  def sha256, do: @sha256
+  def sha256, do: descriptor()["sha256"]
 
   @spec size() :: pos_integer()
-  def size, do: @size
-
-  @spec descriptor() :: map()
-  def descriptor do
-    %{
-      schema: @schema,
-      name: @name,
-      overlay_version: @overlay_version,
-      native_version: @native_version,
-      hex_package: @hex_package,
-      hex_version: @hex_version,
-      target: @target,
-      filename: @filename,
-      logical_path: @logical_path,
-      size: @size,
-      sha256: @sha256
-    }
-  end
+  def size, do: descriptor()["size"]
 
   @spec bind(String.t()) ::
           {:ok, %{path: String.t(), sha256: String.t(), bytes: binary()}} | {:error, term()}
   def bind(root) when is_binary(root) do
-    bind_expected(root, @size, @sha256)
+    bind_expected(root, size(), sha256())
   end
 
   def bind(_root), do: {:error, :invalid_root}
@@ -74,7 +47,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Overlay do
           {:error, :overlay_digest_mismatch}
 
         true ->
-          {:ok, %{path: @logical_path, sha256: digest, bytes: bytes}}
+          {:ok, %{path: logical_path(), sha256: digest, bytes: bytes}}
       end
     end
   end
@@ -104,7 +77,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Overlay do
   end
 
   defp resolve_overlay_path(root) do
-    with {:ok, lexical} <- SafePath.safe_join(root, @logical_path),
+    with {:ok, lexical} <- SafePath.safe_join(root, logical_path()),
          true <- SafePath.within?(lexical, root),
          :ok <- verify_ancestors(root, lexical),
          {:ok, %File.Stat{type: :regular, links: 1}} <- File.lstat(lexical) do

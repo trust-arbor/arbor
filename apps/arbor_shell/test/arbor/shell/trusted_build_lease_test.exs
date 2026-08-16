@@ -279,7 +279,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
   end
 
   test "unregistered live tree is not deleted; absent unregistered is ok" do
-    parent = Path.join(System.tmp_dir!(), "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
 
@@ -303,6 +303,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
       try do
         Process.exit(old, :kill)
+
         wait_until(fn ->
           pid = Process.whereis(OwnedTreeRegistry)
           is_pid(pid) and pid != old
@@ -345,6 +346,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
             :ok = Lease.register_port_owner(session.lease_pid, owner)
             :ok = Lease.record_group_id(session.lease_pid, 65_534)
             send(parent, {:owner_ready, owner})
+
             receive do
               :hold -> :ok
             end
@@ -403,6 +405,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
             owner = spawn(fn -> Process.sleep(20) end)
             :ok = Lease.register_port_owner(session.lease_pid, owner)
+
             receive do
               :hold -> :ok
             end
@@ -429,15 +432,23 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
     end
   end
 
-  test "reserved C3 ops fail closed" do
+  test "post-phase ops reject wrong order and remain releasable" do
     if @darwin? do
       {lease, identity, handle} = acquire_fixture!()
 
       try do
-        assert {:error, :trusted_build_op_reserved} = Lease.reserved(lease, :stage_native_cache)
-        assert {:error, :trusted_build_op_reserved} = Lease.reserved(lease, :inventory_deps)
-        assert {:error, :trusted_build_op_reserved} = Lease.reserved(lease, :remove_release_cookie)
-        assert {:error, :trusted_build_op_reserved} = Lease.reserved(lease, :read_descriptor)
+        assert {:error, :trusted_build_phase_rejected} = Shell.stage_trusted_build_native(lease)
+
+        assert {:error, :trusted_build_phase_rejected} =
+                 Shell.inventory_trusted_build_deps(lease)
+
+        assert {:error, :trusted_build_phase_rejected} =
+                 Shell.remove_trusted_build_release_cookie(lease)
+
+        assert {:error, :trusted_build_release_absent} =
+                 Shell.read_trusted_build_descriptor(lease, "releases/arbor_trust.app")
+
+        assert :ok = Shell.release_trusted_build_lease(lease)
       after
         _ = Shell.release_trusted_build_lease(lease)
         _ = Shell.remove_owned_tree(identity)
@@ -447,7 +458,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
   end
 
   defp acquire_fixture!(fault \\ :omit_hex_seed) do
-    parent = Path.join(System.tmp_dir!(), "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     handle = Helpers.handle_for_owned!(identity)
     source = Path.join(parent, "source")
@@ -462,6 +473,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
 
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
+    :ok = Helpers.plant_fixed_overlay!(identity.path)
     {:ok, lease, _view} = TrustedBuild.acquire(request_for(identity), fault)
     {lease, identity, handle}
   end

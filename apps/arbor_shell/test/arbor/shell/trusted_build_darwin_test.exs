@@ -36,6 +36,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       source = context.source
       assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
       assert deps.exit_code == 0
+      :ok = Helpers.after_deps_get!(lease)
       assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
       assert result.exit_code == 0
       refute File.exists?(Path.join(source, "SHOULD_NOT_WRITE"))
@@ -84,6 +85,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
 
       assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
       assert deps.exit_code == 0
+      :ok = Helpers.after_deps_get!(lease)
       assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
       assert compile.exit_code == 0
       assert {:ok, release} = Shell.execute_trusted_build(lease, "release")
@@ -93,6 +95,10 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       assert view["state"] == "done"
       assert view["completed_phases"] == ["deps_get", "compile", "release"]
       refute Map.has_key?(view, "path")
+
+      state = :sys.get_state(lease.worker)
+      :ok = Helpers.plant_release_cookie!(state.roots.build.path)
+      assert {:ok, _cookie} = Shell.remove_trusted_build_release_cookie(lease)
 
       assert {:ok, inventory} = Shell.inventory_trusted_build(lease)
       assert inventory["schema"] == "arbor.shell.trusted_build.inventory.v1"
@@ -120,6 +126,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
         end)
 
       assert {:ok, _deps} = Shell.execute_trusted_build(lease, "deps_get")
+      :ok = Helpers.after_deps_get!(lease)
       assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
       assert compile.exit_code == 0
       assert Task.await(task, 15_000) == true
@@ -127,8 +134,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
   end
 
   defp start_fixture! do
-    tmp = System.tmp_dir!()
-    parent = Path.join(tmp, "arbor-tb-src-#{System.unique_integer([:positive])}")
+    parent = Helpers.unique_source_root()
     {:ok, identity} = Shell.create_private_owned_tree(parent)
     source = Path.join(parent, "source")
     File.mkdir_p!(Path.join(source, "lib"))
@@ -180,6 +186,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
 
     File.cp!(Path.expand("../../../../../bin/mix", __DIR__), Path.join(source, "bin/mix"))
     File.chmod!(Path.join(source, "bin/mix"), 0o755)
+    :ok = Helpers.plant_fixed_overlay!(identity.path)
 
     handle = Helpers.handle_for_owned!(identity)
     request = request_for(identity)

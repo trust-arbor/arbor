@@ -1567,7 +1567,11 @@ static int walk_openat_segments(int root_fd, const char *const *segments, size_t
 
   for (size_t i = 0; i < count; i++) {
     int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
-    if (!(last_is_file && i + 1U == count)) flags |= O_DIRECTORY;
+    if (last_is_file && i + 1U == count) {
+      flags |= O_NONBLOCK;
+    } else {
+      flags |= O_DIRECTORY;
+    }
     int next = openat(current, segments[i], flags);
     if (owned) close(current);
     if (next < 0) return -1;
@@ -1898,6 +1902,472 @@ static int trusted_build_mix_argv(int argc, char **argv) {
   }
   return -1;
 }
+
+/* Post-phase operations are root-bound, never absolute-leaf operations. The
+ * caller supplies one Shell-owned 0700 root plus its pinned device/inode. Read
+ * selectors stay beneath root/rel and end in .app or .rel; quarantine moves
+ * only the fixed release COOKIE outside rel. All traversal is descriptor-relative. */
+#define TB_PP_INVALID 64
+#define TB_PP_NOT_FOUND 65
+#define TB_PP_SYMLINK 66
+#define TB_PP_HARDLINK 67
+#define TB_PP_NOT_REGULAR 68
+#define TB_PP_IDENTITY_CHANGED 69
+#define TB_PP_IO_FAILED 70
+#define TB_PP_OUTPUT_FAILED 71
+#define TB_PP_MAX_DESCRIPTOR (256U * 1024U)
+#define TB_PP_MAX_SEGMENTS 49U
+
+static int tb_pp_open_root(const char *dev_s, const char *ino_s, const char *path,
+                           int *root_fd) {
+  uint64_t dev, ino;
+  if (parse_u64(dev_s, &dev) != 0 || parse_u64(ino_s, &ino) != 0 || path == NULL ||
+      path[0] != '/' || strnlen(path, TB_MAX_REL + 1U) > TB_MAX_REL) {
+    return TB_PP_INVALID;
+  }
+
+  int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return errno == ENOENT ? TB_PP_NOT_FOUND : TB_PP_IO_FAILED;
+
+  struct stat actual;
+  if (fstat(fd, &actual) != 0 || !S_ISDIR(actual.st_mode) ||
+      actual.st_dev != (dev_t)dev ||
+      ((((uint64_t)actual.st_ino) & 0xffffffffULL) != (ino & 0xffffffffULL)) ||
+      (actual.st_mode & 0777) != 0700 || actual.st_uid != geteuid()) {
+    close(fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  *root_fd = fd;
+  return 0;
+}
+
+static int tb_pp_open_leaf(int root_fd, const char *const *segments, size_t count,
+                           int leaf_flags, int allow_write_fallback, int *parent_fd,
+                           int *leaf_fd) {
+  if (count == 0U) return TB_PP_INVALID;
+  int current = dup(root_fd);
+  if (current < 0) return TB_PP_IO_FAILED;
+
+  for (size_t i = 0; i + 1U < count; i++) {
+    int next = openat(current, segments[i], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (next < 0) {
+      int open_error = errno;
+      close(current);
+      if (open_error == ELOOP) return TB_PP_SYMLINK;
+      return open_error == ENOENT || open_error == ENOTDIR ? TB_PP_NOT_FOUND : TB_PP_IO_FAILED;
+    }
+    close(current);
+    current = next;
+  }
+
+  int leaf = openat(current, segments[count - 1U], leaf_flags | O_NOFOLLOW | O_CLOEXEC);
+  if (leaf < 0 && allow_write_fallback && (errno == EACCES || errno == EPERM)) {
+    /* Holding unlink evidence needs no content access. A write-only regular
+     * COOKIE is valid, and O_NONBLOCK keeps the fallback bounded for FIFOs. */
+    leaf = openat(current, segments[count - 1U],
+                  O_WRONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  }
+
+  if (leaf < 0) {
+    int open_error = errno;
+    int result = open_error == ELOOP
+                     ? TB_PP_SYMLINK
+                     : (open_error == ENOENT || open_error == ENOTDIR ? TB_PP_NOT_FOUND
+                                                                      : TB_PP_IO_FAILED);
+    close(current);
+    return result;
+  }
+
+  *parent_fd = current;
+  *leaf_fd = leaf;
+  return 0;
+}
+
+static int tb_pp_leaf_type(const struct stat *st) {
+  if (S_ISLNK(st->st_mode)) return TB_PP_SYMLINK;
+  if (!S_ISREG(st->st_mode)) return TB_PP_NOT_REGULAR;
+  if (st->st_nlink != 1) return TB_PP_HARDLINK;
+  return 0;
+}
+
+static int tb_pp_same_leaf(const struct stat *left, const struct stat *right) {
+  return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+         left->st_size == right->st_size && left->st_mtime == right->st_mtime &&
+         left->st_ctime == right->st_ctime && left->st_mode == right->st_mode &&
+         left->st_uid == right->st_uid && left->st_gid == right->st_gid &&
+         left->st_nlink == right->st_nlink;
+}
+
+static int tb_pp_same_inode(const struct stat *left, const struct stat *right) {
+  return left->st_dev == right->st_dev && left->st_ino == right->st_ino &&
+         left->st_size == right->st_size && left->st_mode == right->st_mode &&
+         left->st_uid == right->st_uid && left->st_gid == right->st_gid &&
+         left->st_nlink == right->st_nlink;
+}
+
+static int tb_pp_split_selector(const char *selector, char buffer[TB_MAX_REL],
+                                const char **segments, size_t *count) {
+  if (selector == NULL || selector[0] == '/' || selector[0] == '\0') return TB_PP_INVALID;
+  size_t length = strnlen(selector, TB_MAX_REL + 1U);
+  if (length == 0U || length >= TB_MAX_REL || selector[length - 1U] == '/') {
+    return TB_PP_INVALID;
+  }
+  if (!((length >= 4U && strcmp(selector + length - 4U, ".app") == 0) ||
+        (length >= 4U && strcmp(selector + length - 4U, ".rel") == 0))) {
+    return TB_PP_INVALID;
+  }
+
+  memcpy(buffer, selector, length + 1U);
+  segments[0] = "rel";
+  size_t used = 1U;
+  char *component = buffer;
+
+  for (size_t i = 0; i <= length; i++) {
+    if (buffer[i] == '\\') return TB_PP_INVALID;
+    if (buffer[i] != '/' && buffer[i] != '\0') continue;
+
+    size_t component_length = (size_t)(&buffer[i] - component);
+    if (component_length == 0U || component_length > 255U ||
+        (component_length == 1U && component[0] == '.') ||
+        (component_length == 2U && component[0] == '.' && component[1] == '.') ||
+        used >= TB_PP_MAX_SEGMENTS) {
+      return TB_PP_INVALID;
+    }
+
+    buffer[i] = '\0';
+    segments[used++] = component;
+    component = &buffer[i + 1U];
+  }
+
+  *count = used;
+  return 0;
+}
+
+static void tb_pp_digest(const uint8_t *bytes, size_t length, char hex[65]) {
+  uint8_t digest[32];
+  sha256_ctx ctx;
+  sha256_init(&ctx);
+  sha256_update(&ctx, bytes, length);
+  sha256_final(&ctx, digest);
+  for (size_t i = 0; i < 32U; i++) {
+    (void)snprintf(hex + (i * 2U), 3U, "%02x", digest[i]);
+  }
+  hex[64] = '\0';
+}
+
+static int run_trusted_build_post_phase_read(int argc, char **argv) {
+  uint64_t expected_size_u64;
+  if (argc != 8 || parse_u64(argv[6], &expected_size_u64) != 0 ||
+      expected_size_u64 > TB_PP_MAX_DESCRIPTOR || strlen(argv[7]) != 64U) {
+    return TB_PP_INVALID;
+  }
+  for (size_t i = 0; i < 64U; i++) {
+    if (!((argv[7][i] >= '0' && argv[7][i] <= '9') ||
+          (argv[7][i] >= 'a' && argv[7][i] <= 'f'))) {
+      return TB_PP_INVALID;
+    }
+  }
+
+  char selector_buffer[TB_MAX_REL];
+  const char *segments[TB_PP_MAX_SEGMENTS];
+  size_t segment_count = 0;
+  int result = tb_pp_split_selector(argv[5], selector_buffer, segments, &segment_count);
+  if (result != 0) return result;
+
+  int root_fd = -1;
+  result = tb_pp_open_root(argv[2], argv[3], argv[4], &root_fd);
+  if (result != 0) return result;
+
+  int parent_fd = -1;
+  int leaf_fd = -1;
+  result = tb_pp_open_leaf(root_fd, segments, segment_count, O_RDONLY | O_NONBLOCK, 0,
+                           &parent_fd, &leaf_fd);
+  close(root_fd);
+  if (result != 0) return result;
+
+  struct stat before;
+  struct stat path_before;
+  if (fstat(leaf_fd, &before) != 0 ||
+      fstatat(parent_fd, segments[segment_count - 1U], &path_before, AT_SYMLINK_NOFOLLOW) != 0) {
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IO_FAILED;
+  }
+
+  result = tb_pp_leaf_type(&before);
+  size_t expected_size = (size_t)expected_size_u64;
+  if (result != 0 || before.st_size != (off_t)expected_size ||
+      !tb_pp_same_leaf(&before, &path_before)) {
+    close(leaf_fd);
+    close(parent_fd);
+    return result != 0 ? result : TB_PP_IDENTITY_CHANGED;
+  }
+
+  uint8_t *bytes = malloc(expected_size == 0U ? 1U : expected_size);
+  if (bytes == NULL) {
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IO_FAILED;
+  }
+
+  size_t offset = 0;
+  while (offset < expected_size) {
+    ssize_t read_count = read(leaf_fd, bytes + offset, expected_size - offset);
+    if (read_count < 0 && errno == EINTR) continue;
+    if (read_count <= 0) {
+      free(bytes);
+      close(leaf_fd);
+      close(parent_fd);
+      return TB_PP_IDENTITY_CHANGED;
+    }
+    offset += (size_t)read_count;
+  }
+
+  uint8_t extra;
+  ssize_t extra_count;
+  do {
+    extra_count = read(leaf_fd, &extra, 1U);
+  } while (extra_count < 0 && errno == EINTR);
+
+  struct stat after_fd;
+  struct stat after_path;
+  if (extra_count != 0 || fstat(leaf_fd, &after_fd) != 0 ||
+      fstatat(parent_fd, segments[segment_count - 1U], &after_path, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !tb_pp_same_leaf(&before, &after_fd) || !tb_pp_same_leaf(&after_fd, &after_path)) {
+    free(bytes);
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  char digest[65];
+  tb_pp_digest(bytes, expected_size, digest);
+  if (strcmp(digest, argv[7]) != 0) {
+    free(bytes);
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  int output_result = write_all(STDOUT_FILENO, bytes, expected_size);
+  free(bytes);
+  close(leaf_fd);
+  close(parent_fd);
+  return output_result == 0 ? 0 : TB_PP_OUTPUT_FAILED;
+}
+
+static int run_trusted_build_post_phase_pin_native(int argc, char **argv) {
+  static const char *native_segments[] = {"sqlite_vec", "priv", "0.1.5", "vec0.dylib"};
+  uint64_t expected_size_u64;
+  if (argc != 7 || parse_u64(argv[5], &expected_size_u64) != 0 ||
+      expected_size_u64 > TB_PP_MAX_DESCRIPTOR || strlen(argv[6]) != 64U) {
+    return TB_PP_INVALID;
+  }
+  for (size_t i = 0; i < 64U; i++) {
+    if (!((argv[6][i] >= '0' && argv[6][i] <= '9') ||
+          (argv[6][i] >= 'a' && argv[6][i] <= 'f'))) {
+      return TB_PP_INVALID;
+    }
+  }
+
+  int root_fd = -1;
+  int result = tb_pp_open_root(argv[2], argv[3], argv[4], &root_fd);
+  if (result != 0) return result;
+
+  int parent_fd = -1;
+  int leaf_fd = -1;
+  size_t segment_count = sizeof(native_segments) / sizeof(native_segments[0]);
+  result = tb_pp_open_leaf(root_fd, native_segments, segment_count,
+                           O_RDONLY | O_NONBLOCK, 0, &parent_fd, &leaf_fd);
+  close(root_fd);
+  if (result != 0) return result;
+
+  struct stat before;
+  struct stat path_before;
+  if (fstat(leaf_fd, &before) != 0 ||
+      fstatat(parent_fd, native_segments[segment_count - 1U], &path_before,
+              AT_SYMLINK_NOFOLLOW) != 0) {
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IO_FAILED;
+  }
+
+  size_t expected_size = (size_t)expected_size_u64;
+  result = tb_pp_leaf_type(&before);
+  if (result != 0 || before.st_size != (off_t)expected_size ||
+      (before.st_mode & 0022) != 0 || !tb_pp_same_leaf(&before, &path_before)) {
+    close(leaf_fd);
+    close(parent_fd);
+    return result != 0 ? result : TB_PP_IDENTITY_CHANGED;
+  }
+
+  uint8_t *bytes = malloc(expected_size == 0U ? 1U : expected_size);
+  if (bytes == NULL) {
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IO_FAILED;
+  }
+
+  size_t offset = 0;
+  while (offset < expected_size) {
+    ssize_t read_count = read(leaf_fd, bytes + offset, expected_size - offset);
+    if (read_count < 0 && errno == EINTR) continue;
+    if (read_count <= 0) {
+      free(bytes);
+      close(leaf_fd);
+      close(parent_fd);
+      return TB_PP_IDENTITY_CHANGED;
+    }
+    offset += (size_t)read_count;
+  }
+
+  uint8_t extra;
+  ssize_t extra_count;
+  do {
+    extra_count = read(leaf_fd, &extra, 1U);
+  } while (extra_count < 0 && errno == EINTR);
+
+  struct stat after_fd;
+  struct stat after_path;
+  if (extra_count != 0 || fstat(leaf_fd, &after_fd) != 0 ||
+      fstatat(parent_fd, native_segments[segment_count - 1U], &after_path,
+              AT_SYMLINK_NOFOLLOW) != 0 ||
+      !tb_pp_same_leaf(&before, &after_fd) || !tb_pp_same_leaf(&after_fd, &after_path)) {
+    free(bytes);
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  char digest[65];
+  tb_pp_digest(bytes, expected_size, digest);
+  free(bytes);
+  if (strcmp(digest, argv[6]) != 0) {
+    close(leaf_fd);
+    close(parent_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  char output[512];
+  int output_length = snprintf(
+      output, sizeof(output), "%llu\n%llu\n%lld\n%lld\n%lld\n%u\n%u\n%u\n%llu\n",
+      (unsigned long long)after_fd.st_dev,
+      (unsigned long long)after_fd.st_ino & 0xffffffffULL,
+      (long long)after_fd.st_size, (long long)after_fd.st_mtime,
+      (long long)after_fd.st_ctime, (unsigned int)after_fd.st_mode,
+      (unsigned int)after_fd.st_uid, (unsigned int)after_fd.st_gid,
+      (unsigned long long)after_fd.st_nlink);
+  close(leaf_fd);
+  close(parent_fd);
+
+  if (output_length < 0 || (size_t)output_length >= sizeof(output)) {
+    return TB_PP_OUTPUT_FAILED;
+  }
+  return write_all(STDOUT_FILENO, (const uint8_t *)output, (size_t)output_length) == 0
+             ? 0
+             : TB_PP_OUTPUT_FAILED;
+}
+
+static int run_trusted_build_post_phase_quarantine_cookie(int argc, char **argv) {
+  if (argc != 5) return TB_PP_INVALID;
+
+  static const char *cookie_segments[] = {"rel", "arbor_trust", "releases", "COOKIE"};
+  static const char quarantine_name[] = ".arbor-trusted-build-release-cookie";
+  size_t segment_count = sizeof(cookie_segments) / sizeof(cookie_segments[0]);
+  const char *leaf_name = cookie_segments[segment_count - 1U];
+
+  int root_fd = -1;
+  int result = tb_pp_open_root(argv[2], argv[3], argv[4], &root_fd);
+  if (result != 0) return result;
+
+  int parent_fd = -1;
+  int leaf_fd = -1;
+  result = tb_pp_open_leaf(root_fd, cookie_segments, segment_count, O_RDONLY | O_NONBLOCK, 1,
+                           &parent_fd, &leaf_fd);
+  if (result != 0) {
+    close(root_fd);
+    return result;
+  }
+
+  struct stat before;
+  struct stat path_before;
+  if (fstat(leaf_fd, &before) != 0 ||
+      fstatat(parent_fd, leaf_name, &path_before, AT_SYMLINK_NOFOLLOW) != 0) {
+    close(leaf_fd);
+    close(parent_fd);
+    close(root_fd);
+    return TB_PP_IO_FAILED;
+  }
+
+  result = tb_pp_leaf_type(&before);
+  if (result != 0 || !tb_pp_same_leaf(&before, &path_before)) {
+    close(leaf_fd);
+    close(parent_fd);
+    close(root_fd);
+    return result != 0 ? result : TB_PP_IDENTITY_CHANGED;
+  }
+
+  struct stat quarantine_before;
+  errno = 0;
+  if (fstatat(root_fd, quarantine_name, &quarantine_before, AT_SYMLINK_NOFOLLOW) == 0 ||
+      errno != ENOENT) {
+    close(leaf_fd);
+    close(parent_fd);
+    close(root_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  if (renameatx_np(parent_fd, leaf_name, root_fd, quarantine_name,
+                   RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH) != 0) {
+    int rename_error = errno;
+    close(leaf_fd);
+    close(parent_fd);
+    close(root_fd);
+    return rename_error == ENOENT ? TB_PP_NOT_FOUND : TB_PP_IO_FAILED;
+  }
+
+  struct stat after_fd;
+  struct stat quarantined;
+  struct stat source_after;
+  errno = 0;
+  int source_result = fstatat(parent_fd, leaf_name, &source_after, AT_SYMLINK_NOFOLLOW);
+  int source_error = errno;
+  if (fstat(leaf_fd, &after_fd) != 0 ||
+      fstatat(root_fd, quarantine_name, &quarantined, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !tb_pp_same_inode(&before, &after_fd) || !tb_pp_same_inode(&after_fd, &quarantined) ||
+      source_result == 0 || source_error != ENOENT) {
+    close(leaf_fd);
+    close(parent_fd);
+    close(root_fd);
+    return TB_PP_IDENTITY_CHANGED;
+  }
+
+  close(leaf_fd);
+  close(parent_fd);
+  close(root_fd);
+  return 0;
+}
+#endif
+
+#ifndef __APPLE__
+static int run_trusted_build_post_phase_read(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  return 126;
+}
+
+static int run_trusted_build_post_phase_pin_native(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  return 126;
+}
+
+static int run_trusted_build_post_phase_quarantine_cookie(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  return 126;
+}
 #endif
 
 static int run_trusted_build(int argc, char **argv) {
@@ -2155,6 +2625,15 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && strcmp(argv[1], "trusted-build") == 0) {
     return run_trusted_build(argc, argv);
+  }
+  if (argc >= 2 && strcmp(argv[1], "trusted-build-post-phase-read") == 0) {
+    return run_trusted_build_post_phase_read(argc, argv);
+  }
+  if (argc >= 2 && strcmp(argv[1], "trusted-build-post-phase-pin-native") == 0) {
+    return run_trusted_build_post_phase_pin_native(argc, argv);
+  }
+  if (argc >= 2 && strcmp(argv[1], "trusted-build-post-phase-quarantine-cookie") == 0) {
+    return run_trusted_build_post_phase_quarantine_cookie(argc, argv);
   }
   if (argc >= 2 && strcmp(argv[1], "kill") == 0) return run_kill(argc, argv);
   return 2;

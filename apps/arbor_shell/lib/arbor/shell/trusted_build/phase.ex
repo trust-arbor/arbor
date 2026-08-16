@@ -5,7 +5,9 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
   alias Arbor.Shell.OwnedTreeRegistry
   alias Arbor.Shell.TrustedBuild.Identity
   alias Arbor.Shell.TrustedBuild.Lease
+  alias Arbor.Shell.TrustedBuild.NativeOverlay
   alias Arbor.Shell.TrustedBuild.Plan
+  alias Arbor.Shell.TrustedBuild.PostPhase
   alias Arbor.Shell.TrustedBuildToolchainAuthority
 
   @go_timeout_ms 5_000
@@ -140,10 +142,33 @@ defmodule Arbor.Shell.TrustedBuild.Phase do
            Identity.verify_ancestry(descriptor.elixir_root, descriptor.elixir_mix, ["bin", "mix"]),
          :ok <-
            Identity.verify_ancestry(descriptor.source_owned, descriptor.source, ["source"]),
-         :ok <- verify_writables(descriptor.roots) do
-      :ok
+         :ok <-
+           Identity.verify_ancestry(
+             descriptor.source_owned,
+             descriptor.overlay,
+             NativeOverlay.staging_segments()
+           ),
+         :ok <-
+           PostPhase.verify_pinned_source_tree(%{
+             source: descriptor.source,
+             source_owned: descriptor.source_owned,
+             wrapper: descriptor.wrapper,
+             overlay: descriptor.overlay,
+             source_tree_digest: descriptor.source_tree_digest
+           }),
+         :ok <- verify_native_for_phase(descriptor) do
+      verify_writables(descriptor.roots)
     end
   end
+
+  defp verify_native_for_phase(%{phase: :deps_get}), do: :ok
+
+  defp verify_native_for_phase(%{native_staged: native, roots: %{deps: deps}})
+       when is_map(native) do
+    PostPhase.verify_staged_native(%{native_staged: native, roots: %{deps: deps}})
+  end
+
+  defp verify_native_for_phase(_descriptor), do: {:error, :identity_mismatch}
 
   defp verify_archives(dir, digest) do
     with :ok <- Identity.verify_directory(dir),

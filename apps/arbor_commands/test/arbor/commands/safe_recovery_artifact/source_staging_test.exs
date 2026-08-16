@@ -116,8 +116,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       _ = SafeRecoveryArtifact.release_source_for_test(second)
     end)
 
+    desc = Arbor.Shell.trusted_build_native_overlay_descriptor()
+    assert Overlay.descriptor() == desc
+    assert Overlay.logical_path() == desc["logical_path"]
+    assert Overlay.source_path() == desc["logical_path"]
+    assert Overlay.staging_rel() == desc["staging_rel"]
+    assert Overlay.size() == desc["size"]
+    assert Overlay.sha256() == desc["sha256"]
     assert Overlay.logical_path() == @overlay_source_path
-    assert Overlay.source_path() == @overlay_source_path
     assert Overlay.size() == @overlay_size
     assert Overlay.sha256() == @overlay_sha256
     assert first["build_inputs"] == second["build_inputs"]
