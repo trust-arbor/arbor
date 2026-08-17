@@ -347,6 +347,30 @@ defmodule Arbor.Contracts.Extension.Envelope do
   @spec canonical_json(term()) :: {:ok, binary()} | {:error, atom()}
   def canonical_json(document), do: TaintEnvelope.canonical_json(document)
 
+  @doc """
+  Detached-signature input for a signed envelope.
+
+  Domain, schema, and payload digest are joined with NUL so a signature
+  cannot be replayed across kinds.
+  """
+  @spec signing_message(map()) :: {:ok, binary()} | {:error, atom()}
+  def signing_message(%{"domain" => domain, "schema" => schema, "payload_sha256" => digest})
+      when is_binary(domain) and is_binary(schema) and is_binary(digest) do
+    with :ok <- digest(digest) do
+      {:ok, Enum.join([domain, schema, digest], "\0")}
+    end
+  end
+
+  def signing_message(_document), do: {:error, :invalid_envelope}
+
+  @doc "Resolves a signed-envelope domain to a payload kind."
+  @spec kind_from_domain(term()) :: {:ok, kind()} | :error
+  def kind_from_domain(domain) do
+    Enum.find_value(@schemas, :error, fn {kind, schema} ->
+      if schema == domain, do: {:ok, kind}
+    end)
+  end
+
   @doc "Returns a closed, byte-stable fixture for `kind`."
   @spec fixture(kind()) :: map()
   def fixture(:artifact_manifest) do
@@ -671,12 +695,6 @@ defmodule Arbor.Contracts.Extension.Envelope do
          :ok <- metering(doc["metering"]) do
       member(doc["effect_disposition"], @dispositions)
     end
-  end
-
-  defp kind_from_domain(domain) do
-    Enum.find_value(@schemas, :error, fn {kind, schema} ->
-      if schema == domain, do: {:ok, kind}
-    end)
   end
 
   defp exact_keys(value, keys) when is_map(value) and not is_struct(value) do

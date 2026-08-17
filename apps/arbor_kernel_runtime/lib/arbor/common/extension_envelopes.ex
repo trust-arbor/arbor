@@ -42,10 +42,10 @@ defmodule Arbor.Common.ExtensionEnvelopes do
   end
 
   defp signed_kind(%{"domain" => domain}) do
-    Envelope.kinds()
-    |> Enum.find_value({:error, :unknown_kind}, fn kind ->
-      if Envelope.schema(kind) == domain, do: {:ok, kind}
-    end)
+    case Envelope.kind_from_domain(domain) do
+      {:ok, kind} -> {:ok, kind}
+      :error -> {:error, :unknown_kind}
+    end
   end
 
   defp reject_executable_identity(:provider_handle, document) do

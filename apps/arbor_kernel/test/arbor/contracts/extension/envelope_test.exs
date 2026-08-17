@@ -65,6 +65,16 @@ defmodule Arbor.Contracts.Extension.EnvelopeTest do
              )
   end
 
+  test "signing message binds domain, schema, and payload digest" do
+    signed = Envelope.signed_fixture(:activation_authorization)
+    assert {:ok, message} = Envelope.signing_message(signed)
+
+    assert message ==
+             Enum.join([signed["domain"], signed["schema"], signed["payload_sha256"]], "\0")
+
+    assert {:error, :invalid_envelope} = Envelope.signing_message(%{})
+  end
+
   test "public error codes are grouped and bounded" do
     assert Envelope.error_code?(:activation, "authorization_replayed")
     assert Envelope.error_code?(:invocation, "effect_disposition_unknown")

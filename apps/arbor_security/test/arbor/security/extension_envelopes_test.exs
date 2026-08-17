@@ -33,6 +33,18 @@ defmodule Arbor.Security.ExtensionEnvelopesTest do
              Security.validate_signed_extension_envelope(forged, public_key: public_key)
   end
 
+  test "security rejects a replayed authorization nonce" do
+    {public_key, private_key} = Crypto.generate_keypair()
+    signed = signed_authorization(private_key)
+    nonce = signed["payload"]["nonce"]
+
+    assert {:error, :authorization_replayed} =
+             Security.validate_signed_extension_envelope(signed,
+               public_key: public_key,
+               consumed_nonces: MapSet.new([nonce])
+             )
+  end
+
   test "security rejects an expired authorization against a supplied clock" do
     {public_key, private_key} = Crypto.generate_keypair()
     signed = signed_authorization(private_key)
@@ -60,12 +72,7 @@ defmodule Arbor.Security.ExtensionEnvelopesTest do
       "payload" => payload
     }
 
-    message =
-      Enum.join(
-        [envelope["domain"], envelope["schema"], envelope["payload_sha256"]],
-        "\0"
-      )
-
+    {:ok, message} = Envelope.signing_message(envelope)
     signature = Crypto.sign(message, private_key)
     %{envelope | "signature" => Base.encode16(signature, case: :lower)}
   end

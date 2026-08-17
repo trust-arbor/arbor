@@ -28,7 +28,8 @@ defmodule Arbor.Security.ExtensionEnvelopes do
          {:ok, kind} <- signed_kind(envelope),
          true <- kind in @authorization_kinds,
          :ok <- maybe_verify(envelope, opts),
-         :ok <- maybe_unexpired(envelope["payload"], opts) do
+         :ok <- maybe_unexpired(envelope["payload"], opts),
+         :ok <- maybe_unreplayed(envelope["payload"], opts) do
       {:ok, envelope}
     else
       false -> {:error, :unsupported_kind}
@@ -37,10 +38,10 @@ defmodule Arbor.Security.ExtensionEnvelopes do
   end
 
   defp signed_kind(%{"domain" => domain}) do
-    Envelope.kinds()
-    |> Enum.find_value({:error, :unknown_kind}, fn kind ->
-      if Envelope.schema(kind) == domain, do: {:ok, kind}
-    end)
+    case Envelope.kind_from_domain(domain) do
+      {:ok, kind} -> {:ok, kind}
+      :error -> {:error, :unknown_kind}
+    end
   end
 
   defp maybe_verify(envelope, opts) do
@@ -49,18 +50,11 @@ defmodule Arbor.Security.ExtensionEnvelopes do
         :ok
 
       public_key when is_binary(public_key) ->
-        message = signing_message(envelope)
-        signature = decode_signature(envelope["signature"])
-
-        cond do
-          signature == :error ->
-            {:error, :invalid_signature}
-
-          Crypto.verify(message, signature, public_key) ->
-            :ok
-
-          true ->
-            {:error, :signature_mismatch}
+        with {:ok, message} <- Envelope.signing_message(envelope),
+             {:ok, signature} <- decode_signature(envelope["signature"]) do
+          if Crypto.verify(message, signature, public_key),
+            do: :ok,
+            else: {:error, :signature_mismatch}
         end
 
       _other ->
@@ -74,28 +68,38 @@ defmodule Arbor.Security.ExtensionEnvelopes do
         :ok
 
       now when is_binary(now) ->
-        if payload["expires_at"] >= now, do: :ok, else: {:error, :authorization_expired}
+        expires_at = Map.get(payload, "expires_at") || Map.get(payload, "deadline")
+
+        if is_binary(expires_at) and expires_at >= now,
+          do: :ok,
+          else: {:error, :authorization_expired}
 
       _other ->
         {:error, :invalid_timestamp}
     end
   end
 
-  defp signing_message(envelope) do
-    Enum.join(
-      [
-        envelope["domain"],
-        envelope["schema"],
-        envelope["payload_sha256"]
-      ],
-      "\0"
-    )
+  defp maybe_unreplayed(payload, opts) do
+    case Keyword.get(opts, :consumed_nonces) do
+      nil ->
+        :ok
+
+      %MapSet{} = consumed ->
+        nonce = Map.get(payload, "nonce")
+
+        if is_binary(nonce) and MapSet.member?(consumed, nonce),
+          do: {:error, :authorization_replayed},
+          else: :ok
+
+      _other ->
+        {:error, :invalid_nonce}
+    end
   end
 
   defp decode_signature(hex) when is_binary(hex) do
     case Base.decode16(hex, case: :lower) do
-      {:ok, bytes} when byte_size(bytes) == 64 -> bytes
-      _ -> :error
+      {:ok, bytes} when byte_size(bytes) == 64 -> {:ok, bytes}
+      _ -> {:error, :invalid_signature}
     end
   end
 end
