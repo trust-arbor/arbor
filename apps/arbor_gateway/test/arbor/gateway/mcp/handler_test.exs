@@ -241,7 +241,14 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
     test "defaults protocol version when not provided", %{state: state} do
       {:ok, result, _state} = Handler.handle_initialize(%{}, state)
-      assert result.protocolVersion == "2024-11-05"
+      assert result.protocolVersion == "2025-11-25"
+    end
+
+    test "falls back to the newest legacy revision for an unsupported version", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_initialize(%{"protocolVersion" => "1999-01-01"}, state)
+
+      assert result.protocolVersion == "2025-11-25"
     end
   end
 

@@ -180,7 +180,13 @@ defmodule Arbor.AI.AcpSession.Config do
          {:ok, provider_config} <- enforce_grok_command_policy(provider, provider_config),
          :ok <- validate_requested_model(provider, Keyword.get(opts, :model)) do
       opts = maybe_inject_alternate_endpoint(provider, opts)
-      {:ok, merge_opts(provider_config, opts)}
+
+      resolved_opts =
+        provider_config
+        |> merge_opts(opts)
+        |> enforce_adapter_environment_isolation()
+
+      {:ok, resolved_opts}
     else
       {:error, _} = error ->
         error
@@ -415,6 +421,24 @@ defmodule Arbor.AI.AcpSession.Config do
         value -> Keyword.put(acc, key, value)
       end
     end)
+  end
+
+  # Adapted coding agents are untrusted subprocesses. This is an Arbor security
+  # ceiling, not a caller preference: explicit env entries still pass through,
+  # but no provider or per-launch override may restore ambient host inheritance.
+  defp enforce_adapter_environment_isolation(opts) do
+    case Keyword.fetch(opts, :adapter) do
+      {:ok, _adapter} ->
+        adapter_opts =
+          opts
+          |> Keyword.get(:adapter_opts, [])
+          |> Keyword.put(:environment_policy, :isolated)
+
+        Keyword.put(opts, :adapter_opts, adapter_opts)
+
+      :error ->
+        opts
+    end
   end
 
   # Append operator-configured extra CLI args to a native agent's command list.

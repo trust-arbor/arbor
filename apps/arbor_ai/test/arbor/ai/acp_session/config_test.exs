@@ -11,7 +11,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
 
     stripped_providers =
       case prior_providers do
-        {:ok, providers} -> Map.delete(providers, :grok)
+        {:ok, providers} -> Map.drop(providers, [:grok, :pi])
         :error -> %{}
       end
 
@@ -33,6 +33,31 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
 
     Enum.each(@env_vars, &System.delete_env/1)
     :ok
+  end
+
+  describe "resolve/2 for adapted subprocess isolation" do
+    @describetag :fast
+
+    test "security regression: ambient environment inheritance cannot be enabled per launch" do
+      assert {:ok, default_opts} = Config.resolve(:pi, [])
+
+      assert default_opts
+             |> Keyword.fetch!(:adapter_opts)
+             |> Keyword.fetch!(:environment_policy) == :isolated
+
+      assert {:ok, overridden_opts} =
+               Config.resolve(:pi,
+                 adapter_opts: [
+                   environment_policy: :inherit,
+                   env: [{"EXPLICIT_PROVIDER_SETTING", "preserved"}]
+                 ]
+               )
+
+      adapter_opts = Keyword.fetch!(overridden_opts, :adapter_opts)
+
+      assert Keyword.fetch!(adapter_opts, :environment_policy) == :isolated
+      assert {"EXPLICIT_PROVIDER_SETTING", "preserved"} in Keyword.fetch!(adapter_opts, :env)
+    end
   end
 
   describe "resolve/2 for :claude (default Anthropic path)" do

@@ -22,6 +22,8 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   require Logger
 
+  alias ExMCP.Protocol.VersionNegotiator
+
   @doc """
   Start an HTTP MCP server exposing the given action modules as tools.
 
@@ -38,6 +40,15 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   """
   @spec start([module()], keyword()) :: {:ok, map()} | {:error, term()}
   def start(action_modules, opts \\ []) when is_list(action_modules) do
+    # rc.8 HttpPlug issues server-owned Streamable HTTP sessions from
+    # ExMCP.SessionManager. Without the :ex_mcp application, initialize
+    # returns 503 and later calls fail closed with "Session ID required".
+    with {:ok, _apps} <- Application.ensure_all_started(:ex_mcp) do
+      start_http(action_modules, opts)
+    end
+  end
+
+  defp start_http(action_modules, opts) do
     agent_id = Keyword.get(opts, :agent_id, "anonymous")
     workspace = Keyword.get(opts, :workspace)
     port = Keyword.get(opts, :port, 0)
@@ -57,6 +68,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
     plug_opts = [
       handler: handler,
       server_info: %{"name" => "arbor-tools", "version" => "1.0.0"},
+      protocol_mode: :legacy_only,
       sse_enabled: false,
       cors_enabled: true
     ]
@@ -130,12 +142,13 @@ defmodule Arbor.AI.AcpPool.ToolServer do
          _exec_context
        ) do
     id = Map.get(req, "id")
+    params = Map.get(req, "params", %{})
 
     %{
       "jsonrpc" => "2.0",
       "id" => id,
       "result" => %{
-        "protocolVersion" => "2025-06-18",
+        "protocolVersion" => negotiate_protocol_version(params),
         "serverInfo" => %{"name" => "arbor-tools", "version" => "1.0.0"},
         "capabilities" => %{"tools" => %{"listChanged" => false}}
       }
@@ -224,6 +237,22 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       {:ok, nil}
     end
   end
+
+  # rc.8 HttpPlug binds the session to the negotiated initialize version and
+  # rejects a result that does not echo it. Prefer the client's requested
+  # legacy revision when we support it; otherwise advertise the newest
+  # initialize-compatible revision.
+  defp negotiate_protocol_version(params) when is_map(params) do
+    requested = Map.get(params, "protocolVersion") || Map.get(params, :protocolVersion)
+
+    if is_binary(requested) and VersionNegotiator.supported?(requested) do
+      requested
+    else
+      VersionNegotiator.latest_version()
+    end
+  end
+
+  defp negotiate_protocol_version(_params), do: VersionNegotiator.latest_version()
 
   # -- Tool Execution --
 

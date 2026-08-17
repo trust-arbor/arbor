@@ -367,6 +367,42 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
+  test "binds ex_mcp rc.8 ACP request timeouts above the 30s client default" do
+    install_fake_progress_client(100)
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               client_opts: [test_pid: self()],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+    started_opts = Agent.get(:sys.get_state(session).client, & &1.opts)
+
+    assert Keyword.fetch!(started_opts, :pending_request_timeout) == 5_400_000
+    assert Keyword.fetch!(started_opts, :handler_request_timeout) == 1_200_000
+    assert :ok = AcpSession.close(session)
+
+    assert {:ok, overridden} =
+             AcpSession.start_link(
+               provider: :test,
+               client_opts: [
+                 test_pid: self(),
+                 pending_request_timeout: 45_000,
+                 handler_request_timeout: 15_000
+               ],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(overridden, timeout: 1_000)
+    overridden_opts = Agent.get(:sys.get_state(overridden).client, & &1.opts)
+    assert Keyword.fetch!(overridden_opts, :pending_request_timeout) == 45_000
+    assert Keyword.fetch!(overridden_opts, :handler_request_timeout) == 15_000
+    assert :ok = AcpSession.close(overridden)
+  end
+
   test "rejects an invalid provider initialize timeout before spawning the client" do
     install_fake_progress_client(100)
 

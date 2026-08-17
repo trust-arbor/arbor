@@ -86,6 +86,7 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert is_integer(port)
       assert port > 0
       assert is_atom(ref)
+      assert is_pid(Process.whereis(ExMCP.SessionManager))
 
       :ok = ToolServer.stop(ref)
     end
@@ -147,18 +148,20 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       install_passthrough_runner()
       {:ok, %{port: port, ref: ref}} = ToolServer.start([TestAction, AnotherAction])
       on_exit(fn -> ToolServer.stop(ref) end)
-      {:ok, port: port}
+      {init_response, session_id} = initialize_mcp(port)
+      {:ok, port: port, session_id: session_id, init_response: init_response}
     end
 
-    test "responds to initialize", %{port: port} do
-      {:ok, response} = mcp_request(port, "initialize", %{})
-      assert response["result"]["protocolVersion"]
+    test "responds to initialize", %{init_response: response, session_id: session_id} do
+      assert is_binary(session_id)
+      assert session_id != ""
+      assert response["result"]["protocolVersion"] == "2025-11-25"
       assert response["result"]["serverInfo"]["name"] == "arbor-tools"
       assert response["result"]["capabilities"]["tools"]
     end
 
-    test "responds to tools/list", %{port: port} do
-      {:ok, response} = mcp_request(port, "tools/list", %{})
+    test "responds to tools/list", %{port: port, session_id: session_id} do
+      {:ok, response} = mcp_request(port, "tools/list", %{}, session_id)
       tools = response["result"]["tools"]
       assert length(tools) == 2
 
@@ -171,12 +174,17 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert test_tool["inputSchema"]["properties"]["input"]
     end
 
-    test "responds to tools/call", %{port: port} do
+    test "responds to tools/call", %{port: port, session_id: session_id} do
       {:ok, response} =
-        mcp_request(port, "tools/call", %{
-          "name" => "test_action",
-          "arguments" => %{"input" => "hello"}
-        })
+        mcp_request(
+          port,
+          "tools/call",
+          %{
+            "name" => "test_action",
+            "arguments" => %{"input" => "hello"}
+          },
+          session_id
+        )
 
       result = response["result"]
       refute result["isError"]
@@ -187,24 +195,29 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
       assert decoded["result"] == "processed: hello"
     end
 
-    test "returns error for unknown tool", %{port: port} do
+    test "returns error for unknown tool", %{port: port, session_id: session_id} do
       {:ok, response} =
-        mcp_request(port, "tools/call", %{
-          "name" => "nonexistent_tool",
-          "arguments" => %{}
-        })
+        mcp_request(
+          port,
+          "tools/call",
+          %{
+            "name" => "nonexistent_tool",
+            "arguments" => %{}
+          },
+          session_id
+        )
 
       result = response["result"]
       assert result["isError"]
     end
 
-    test "responds to ping", %{port: port} do
-      {:ok, response} = mcp_request(port, "ping", %{})
+    test "responds to ping", %{port: port, session_id: session_id} do
+      {:ok, response} = mcp_request(port, "ping", %{}, session_id)
       assert response["result"] == %{}
     end
 
-    test "returns method not found for unknown methods", %{port: port} do
-      {:ok, response} = mcp_request(port, "unknown/method", %{})
+    test "returns method not found for unknown methods", %{port: port, session_id: session_id} do
+      {:ok, response} = mcp_request(port, "unknown/method", %{}, session_id)
       assert response["error"]["code"] == -32601
     end
   end
@@ -220,12 +233,18 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
         ToolServer.start([ContextEchoAction], workspace: "/tmp/agent_workspace_xyz")
 
       on_exit(fn -> ToolServer.stop(ref) end)
+      {_init, session_id} = initialize_mcp(port)
 
       {:ok, response} =
-        mcp_request(port, "tools/call", %{
-          "name" => "context_echo",
-          "arguments" => %{}
-        })
+        mcp_request(
+          port,
+          "tools/call",
+          %{
+            "name" => "context_echo",
+            "arguments" => %{}
+          },
+          session_id
+        )
 
       result = response["result"]
       refute result["isError"]
@@ -237,12 +256,18 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     test "absent workspace yields nil in action context" do
       {:ok, %{port: port, ref: ref}} = ToolServer.start([ContextEchoAction])
       on_exit(fn -> ToolServer.stop(ref) end)
+      {_init, session_id} = initialize_mcp(port)
 
       {:ok, response} =
-        mcp_request(port, "tools/call", %{
-          "name" => "context_echo",
-          "arguments" => %{}
-        })
+        mcp_request(
+          port,
+          "tools/call",
+          %{
+            "name" => "context_echo",
+            "arguments" => %{}
+          },
+          session_id
+        )
 
       decoded = Jason.decode!(hd(response["result"]["content"])["text"])
       assert decoded["workspace"] == nil
@@ -283,9 +308,15 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
 
       {:ok, %{port: port, ref: ref}} = ToolServer.start([SideEffectAction])
       on_exit(fn -> ToolServer.stop(ref) end)
+      {_init, session_id} = initialize_mcp(port)
 
       {:ok, response} =
-        mcp_request(port, "tools/call", %{"name" => "side_effect", "arguments" => %{}})
+        mcp_request(
+          port,
+          "tools/call",
+          %{"name" => "side_effect", "arguments" => %{}},
+          session_id
+        )
 
       assert response["result"]["isError"],
              "an unauthorized/unavailable action call must fail closed — got #{inspect(response["result"])}"
@@ -296,7 +327,24 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
 
   # -- Helpers --
 
-  defp mcp_request(port, method, params) do
+  defp initialize_mcp(port) do
+    {:ok, response, headers} = do_mcp_request(port, "initialize", %{}, nil)
+    session_id = session_id_from_headers(headers)
+
+    assert is_binary(session_id) and session_id != "",
+           "expected server-issued mcp-session-id, got #{inspect(headers)}"
+
+    {response, session_id}
+  end
+
+  defp mcp_request(port, method, params, session_id) do
+    case do_mcp_request(port, method, params, session_id) do
+      {:ok, response, _headers} -> {:ok, response}
+      other -> other
+    end
+  end
+
+  defp do_mcp_request(port, method, params, session_id) do
     body =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
@@ -305,18 +353,20 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
         "params" => params
       })
 
+    headers =
+      [{"content-type", "application/json"}]
+      |> maybe_put_session_header(session_id)
+
     url = "http://127.0.0.1:#{port}"
 
-    case Req.post(url,
-           body: body,
-           headers: [{"content-type", "application/json"}],
-           receive_timeout: 5_000
-         ) do
-      {:ok, %{status: 200, body: response_body}} when is_binary(response_body) ->
-        {:ok, Jason.decode!(response_body)}
+    case Req.post(url, body: body, headers: headers, receive_timeout: 5_000) do
+      {:ok, %{status: 200, body: response_body, headers: resp_headers}}
+      when is_binary(response_body) ->
+        {:ok, Jason.decode!(response_body), resp_headers}
 
-      {:ok, %{status: 200, body: response_body}} when is_map(response_body) ->
-        {:ok, response_body}
+      {:ok, %{status: 200, body: response_body, headers: resp_headers}}
+      when is_map(response_body) ->
+        {:ok, response_body, resp_headers}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:unexpected_status, status, body}}
@@ -325,4 +375,36 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
         {:error, reason}
     end
   end
+
+  defp maybe_put_session_header(headers, session_id) when is_binary(session_id),
+    do: [{"mcp-session-id", session_id} | headers]
+
+  defp maybe_put_session_header(headers, _session_id), do: headers
+
+  defp session_id_from_headers(headers) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn
+      {key, [value | _]} ->
+        if session_header?(key), do: value
+
+      {key, value} when is_binary(value) ->
+        if session_header?(key), do: value
+
+      _other ->
+        nil
+    end)
+  end
+
+  defp session_id_from_headers(headers) when is_list(headers) do
+    Enum.find_value(headers, fn
+      {key, value} -> if session_header?(key), do: value
+      _other -> nil
+    end)
+  end
+
+  defp session_id_from_headers(_headers), do: nil
+
+  defp session_header?(key) when is_binary(key), do: String.downcase(key) == "mcp-session-id"
+  defp session_header?(:mcp_session_id), do: true
+  defp session_header?(_key), do: false
 end

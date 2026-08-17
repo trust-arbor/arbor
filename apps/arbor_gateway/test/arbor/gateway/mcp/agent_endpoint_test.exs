@@ -213,7 +213,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [EchoAction, AddAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       # Client should have connected
       status = AgentEndpoint.status(endpoint)
@@ -234,7 +235,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     test "client calls tool and gets result" do
       {agent_id, endpoint} = start_authorized_endpoint([EchoAction])
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "hello"})
 
@@ -251,7 +253,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     test "client calls tool with integer params" do
       {agent_id, endpoint} = start_authorized_endpoint([AddAction])
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "add", %{"a" => 3, "b" => 7})
 
@@ -269,7 +272,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [EchoAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "nonexistent", %{})
 
@@ -284,7 +288,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     test "client handles tool failure" do
       {agent_id, endpoint} = start_authorized_endpoint([FailAction])
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "fail", %{"reason" => "test failure"})
 
@@ -552,7 +557,9 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
         )
 
       :ok = EndpointRegistry.register(agent_id, self(), [])
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, denied} =
         ExMCP.Client.call_tool(client, "shell_execute", %{
@@ -648,7 +655,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           signed_request: signed_request
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "TOPSECRET"})
 
@@ -684,7 +692,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           signed_request: signed_request
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+      {:ok, client} =
+        ExMCP.Client.start_link(transport: :beam, server: endpoint, protocol_mode: :legacy_only)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "AUTHORIZED"})
 

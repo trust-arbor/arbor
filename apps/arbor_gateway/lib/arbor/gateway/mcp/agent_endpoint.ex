@@ -17,7 +17,8 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       # Another agent connects as MCP client
       {:ok, client} = ExMCP.Client.start_link(
         transport: :beam,
-        server: pid
+        server: pid,
+        protocol_mode: :legacy_only
       )
 
       # Call the agent's action through MCP

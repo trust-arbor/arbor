@@ -532,6 +532,10 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
           [transport: :test, server: Map.fetch!(config, :server)]
       end
 
+    # Existing MCP servers and AgentEndpoint still speak the legacy initialize
+    # handshake. rc.8 defaults to :prefer_modern (MCP 2026-07-28 / server/discover).
+    base = Keyword.put(base, :protocol_mode, :legacy_only)
+
     # Add name if provided
     case Map.get(config, :name) do
       nil -> base

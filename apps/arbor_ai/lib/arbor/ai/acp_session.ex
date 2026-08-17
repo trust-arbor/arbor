@@ -73,6 +73,12 @@ defmodule Arbor.AI.AcpSession do
   @default_acp_client ExMCP.ACP.Client
   @default_inactivity_timeout_ms 300_000
   @default_operation_timeout_ms 120_000
+  # ex_mcp 1.0.0-rc.8 ACP Client defaults these to 30_000 ms. That is shorter
+  # than Arbor's prompt GenServer.call timeout and coding-graph send budget, so
+  # an unbound client returns :request_timeout while the worker is still
+  # thinking. These are session-lifetime ceilings, not start-handshake bounds.
+  @default_pending_request_timeout_ms 5_400_000
+  @default_handler_request_timeout_ms 1_200_000
   @default_close_timeout_ms 5_000
   @stream_callback_timeout_ms 5_000
   @default_transcript_sink_timeout_ms 5_000
@@ -935,6 +941,8 @@ defmodule Arbor.AI.AcpSession do
     |> Keyword.put(:event_listener, session_pid)
     |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
     |> Keyword.put(:handler_opts, handler_opts)
+    |> Keyword.put_new(:pending_request_timeout, @default_pending_request_timeout_ms)
+    |> Keyword.put_new(:handler_request_timeout, @default_handler_request_timeout_ms)
     |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
     |> inject_os_cwd(cwd)
   end

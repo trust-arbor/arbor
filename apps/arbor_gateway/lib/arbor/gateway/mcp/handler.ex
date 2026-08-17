@@ -25,6 +25,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Gateway.MCP.ToolBridge
+  alias ExMCP.Protocol.VersionNegotiator
 
   require Logger
 
@@ -113,13 +114,27 @@ defmodule Arbor.Gateway.MCP.Handler do
   def handle_initialize(params, state) do
     {:ok,
      %{
-       protocolVersion: params["protocolVersion"] || "2024-11-05",
+       protocolVersion: negotiate_protocol_version(params),
        serverInfo: %{name: @server_name, version: @server_version},
        capabilities: %{
          tools: %{}
        }
      }, state}
   end
+
+  # rc.8 HttpPlug binds the Streamable HTTP session to the negotiated
+  # initialize version and rejects a result that does not echo it.
+  defp negotiate_protocol_version(params) when is_map(params) do
+    requested = Map.get(params, "protocolVersion") || Map.get(params, :protocolVersion)
+
+    if is_binary(requested) and VersionNegotiator.supported?(requested) do
+      requested
+    else
+      VersionNegotiator.latest_version()
+    end
+  end
+
+  defp negotiate_protocol_version(_params), do: VersionNegotiator.latest_version()
 
   @impl ExMCP.Server.Handler
   def handle_list_tools(_cursor, state) do

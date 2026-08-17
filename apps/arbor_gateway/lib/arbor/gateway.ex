@@ -336,7 +336,8 @@ defmodule Arbor.Gateway do
       {:ok, endpoint_pid, _tools} ->
         ExMCP.Client.start_link(
           transport: :beam,
-          server: endpoint_pid
+          server: endpoint_pid,
+          protocol_mode: :legacy_only
         )
 
       :error ->

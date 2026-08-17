@@ -170,6 +170,12 @@ config :arbor_kernel,
     }
   ]
 
+# ExMCP 1.0.0-rc.6+ defaults to :prefer_modern (MCP 2026-07-28 first). Arbor's
+# existing HTTP MCP clients, BEAM agent endpoints, and ACP ToolServer peers
+# still speak the legacy initialize handshake. Pin the era explicitly so a
+# later ExMCP default change cannot flip production wire behavior.
+config :ex_mcp, protocol_mode: :legacy_only
+
 # ACP CLI agents for the multi-model review council (subscription-based, no per-token cost).
 # Built-in defaults (Arbor.AI.AcpSession.Config) cover native providers, including the
 # security-sensitive Grok command. Overrides REPLACE the per-provider default rather than
