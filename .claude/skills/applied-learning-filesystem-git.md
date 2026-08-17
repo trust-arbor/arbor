@@ -378,4 +378,45 @@ repair is dispatched atop an unintegrated retained candidate and both commits ar
 cherry-picked, Git rewrites both OIDs and the original base is not a destination ancestor even
 though the resulting tree contains the patches. Integrate the prerequisite before dispatching
 the repair, or deliberately preserve the stacked ancestry; do not assume tree equivalence alone
-can settle retained task evidence (found 2026-08-02 adopting the VP-04D1 race repair).
+can settle retained task evidence. If an accepted stack was already cherry-picked, first prove the
+destination contains the full task-tip change and inspect every remaining delta; only then may an
+explicit no-content ancestry merge preserve the exact base/tip lineage. Never use an `ours` merge
+as a substitute for integrating or reviewing content (found 2026-08-02 adopting the VP-04D1 race
+repair; reinforced 2026-08-15 settling the stacked E0B2P dependency-binding repair).
+
+<!-- applied-learning: hardened-git-can-reject-repositories-that-ordinary-git-accepts -->
+<a id="applied-learning-hardened-git-can-reject-repositories-that-ordinary-git-accepts"></a>
+**Hardened Git can reject repositories that ordinary Git accepts.** Arbor's Git boundary denies
+repository-local settings that can launch helper processes, including `core.fsmonitor`; workspace
+acquisition currently collapses that denial to `:invalid_git_repository`. When ordinary Git
+succeeds but `coding_workspace_acquire` reports an invalid repository, probe
+`Arbor.Actions.Git.execute(repo, ["rev-parse", "--show-toplevel"])` or audit local process-bearing
+Git config before retrying. Remove the setting only when doing so preserves the intended hardened
+workflow (found 2026-08-03 when Voice VP-05D1 acquisition masked `core.fsmonitor=true`).
+
+<!-- applied-learning: target-every-post-worktree-git-mutation-explicitly -->
+<a id="applied-learning-target-every-post-worktree-git-mutation-explicitly"></a>
+**Target every post-creation worktree Git mutation explicitly.** `git worktree add`
+creates a checkout but does not change the shell's working directory. In a compound
+command, a following bare `git cherry-pick`, `merge`, or `commit` still mutates the
+original checkout. Run each mutation as `git -C /exact/worktree ...` (or start a new
+command with that worktree as its working directory), then verify both branches before
+continuing (found 2026-08-04 while combining Voice D2B B0/B1).
+
+<!-- applied-learning: checked-artifacts-must-survive-their-containing-commit -->
+<a id="applied-learning-checked-artifacts-must-survive-their-containing-commit"></a>
+**Checked artifacts must survive their containing commit.** A generator that
+reads the Git index must run only after every source input is staged, and acceptance
+must rerun the read-only check after the artifact is committed. Never embed the
+containing `HEAD` commit or tree identity in normative bytes: adding the tracked
+artifact changes that identity and makes the artifact self-referential. Bind stable
+source inputs with scoped manifests and blob digests instead (found 2026-08-13
+during PK-K0 acceptance).
+
+<!-- applied-learning: git-pathspec-wildcards-do-not-enforce-directory-depth -->
+<a id="applied-learning-git-pathspec-wildcards-do-not-enforce-directory-depth"></a>
+**Git pathspec wildcards do not enforce directory depth.** A command such as
+`git ls-files 'apps/*/mix.exs'` can include nested fixtures like
+`apps/arbor_kernel/priv/.../mix.exs`. When a guard means exactly
+`apps/<app>/mix.exs`, filter tracked results by parsed path segments before
+treating them as package roots (found 2026-08-14 during K2 app-env validation).

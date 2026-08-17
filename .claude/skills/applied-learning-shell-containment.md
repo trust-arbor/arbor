@@ -4,6 +4,29 @@ Read this when executing commands, configuring process or container containment,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: a-hex-lock-does-not-attest-compile-time-native-downloads -->
+<a id="applied-learning-a-hex-lock-does-not-attest-compile-time-native-downloads"></a>
+**A Hex lock does not attest compile-time native downloads.** A locked Hex package
+can invoke a build provider that fetches a second native archive outside Hex's
+checksum. `membrane_portaudio_plugin` 0.19.6 selects a PortAudio 19.7.0 URL and
+Bundlex 1.5.8 downloads and extracts it without comparing a declared content digest.
+For no-network contained builds, disable unverified precompiled OS dependencies and
+provide the exact library through the immutable image/pkg-config path, or introduce
+an explicit checksum-bound artifact admission. Never treat `mix.lock` alone as proof
+of the resulting NIF's native inputs (found 2026-08-03 during Voice VP-07 dependency
+preflight).
+
+<!-- applied-learning: a-silent-macos-say-probe-needs-a-real-audio-file-suffix -->
+<a id="applied-learning-a-silent-macos-say-probe-needs-a-real-audio-file-suffix"></a>
+**A silent macOS `say` probe needs a real audio-file suffix.** Startup-pinned
+`/usr/bin/say` works through `Arbor.Shell.execute_direct/3` with a cleared
+environment and bounded one-shot stdin, but `say -o /dev/null` exits 1 with
+`Speaking failed: -241` because the destination supplies no usable audio format.
+For a non-audible containment probe, use an owner-generated unique `.aiff` path,
+assert normal terminal metadata plus nonzero output bytes, and remove that exact
+file in an `after` block. Do not diagnose the `/dev/null` result as launcher or
+stdin containment failure (verified 2026-08-03 during Voice VP-07 preflight).
+
 <!-- applied-learning: transient-authority-capacity-failures-are-not-integrity-drift -->
 <a id="applied-learning-transient-authority-capacity-failures-are-not-integrity-drift"></a>
 **Transient authority capacity failures are not integrity drift.** A serialized

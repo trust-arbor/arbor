@@ -80,7 +80,11 @@ absent.** `MIX_ENV=test` commonly starts an application supervisor with
 `start_children: false`; a direct diagnostic that needs a child such as
 `Arbor.Shell.ExecutionRegistry` must start that test-owned child explicitly.
 Checking only `Application.started_applications/0` can misdiagnose a missing
-child as a broken API (found 2026-07-13 during Phase 6 shell diagnostics).
+child as a broken API. A subprocess regression for a documented production
+Mix command must instead run with the production/dev topology; launching it
+under `MIX_ENV=test` only proves the intentional child suppression (found
+2026-07-13 during Phase 6 shell diagnostics; recurred 2026-08-11 in the
+source-coupling standalone-task regression).
 
 <!-- applied-learning: in-elixir-map-literals-place-every-key-value-entry-before-keyword-style-atom-entries -->
 <a id="applied-learning-in-elixir-map-literals-place-every-key-value-entry-before-keyword-style-atom-entries"></a>
@@ -434,7 +438,7 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 
 <!-- applied-learning: serialize-mix-commands-within-each-worktree -->
 <a id="applied-learning-serialize-mix-commands-within-each-worktree"></a>
-**Serialize Mix commands within each worktree.** A worktree isolates source and runtime paths from the live checkout, but concurrent `./bin/mix` processes inside that same worktree still share `_build`, deps, compile locks, and application-level resources. Run focused suites one at a time; parallelize by giving each process its own worktree and runtime paths, never by launching concurrent Mix commands in one checkout (found 2026-07-20 during delegated branch-lifecycle validation).
+**Serialize Mix commands within each worktree.** A worktree isolates source and runtime paths from the live checkout, but concurrent `./bin/mix` processes inside that same worktree still share `_build`, deps, compile locks, and application-level resources. Run focused suites one at a time; parallelize by giving each process its own worktree and runtime paths, never by launching concurrent Mix commands in one checkout. Do not run manager-side tests in a retained coding-task worktree while pipeline validation owns it, even with a private `MIX_BUILD_PATH`: ExUnit `@tag :tmp_dir` defaults beneath the application and can invalidate the attested candidate fingerprint. For a tree-bound regression, allocate an exclusive cryptorandom directory under `System.tmp_dir!()`, register cleanup, and keep all scratch bytes there. Verify through a separate worktree or wait until the task is terminal (found 2026-07-20 during delegated branch-lifecycle validation; reinforced 2026-08-15 when an independent E0B2P test made exact validation fail closed as `:dirty_workspace`).
 
 <!-- applied-learning: format-only-scoped-paths-in-an-inherited-or-dirty-worktree -->
 <a id="applied-learning-format-only-scoped-paths-in-an-inherited-or-dirty-worktree"></a>
@@ -532,7 +536,13 @@ fixture failures). The same rule applies to semantic-preflight helpers:
 derive profile-specific validation timeouts through `Profiles` and
 `ValidationProgram`, because default/cross-app and security-regression have
 different ceilings under the same plan budget (reinforced 2026-07-28 after a
-generic 600-second fixture default caused nine base-identical failures).
+generic 600-second fixture default caused nine base-identical failures). The
+same residual-deadline rule applies to production dispatch: a 600-second child
+ceiling does not create 600 seconds when worker and review stages have consumed
+most of a 15-minute task budget. Size `budgets.wall_clock_ms` for those stages
+plus both cold isolated validation legs, or capacity will fail closed before
+the selected test runs (reinforced 2026-08-15 when E0B2P timed out compiling
+candidate dependencies with the base leg still `not_run`).
 
 <!-- applied-learning: required-evidence-is-intent-not-an-executable-validation-program -->
 <a id="applied-learning-required-evidence-is-intent-not-an-executable-validation-program"></a>
@@ -739,3 +749,59 @@ boundary, load and inspect exports deterministically (for example with a
 catch-safe `module.module_info(:exports)`) before validating callbacks; prove
 the behavior from an explicitly unloaded compiled module instead of preloading
 it in the test (found 2026-08-03 while isolating VP-04D2B Session startup).
+
+<!-- applied-learning: elixir-typespecs-cannot-express-singleton-binary-map-keys -->
+<a id="applied-learning-elixir-typespecs-cannot-express-singleton-binary-map-keys"></a>
+**Elixir typespecs cannot express singleton binary map keys.** Both
+`%{"provider" => String.t()}` and `%{required("provider") => String.t()}` are
+rejected as unexpected expressions in Elixir 1.19. When runtime data
+deliberately uses exact string keys, keep a compilable generic string-key map
+type and document the closed runtime shape in `@typedoc`; do not "fix" one
+invalid literal-key form by switching to the other (found 2026-08-03 during
+VP-05D1 validation rework).
+
+<!-- applied-learning: test-facades-must-observe-production-ownership-not-reimplement-it -->
+<a id="applied-learning-test-facades-must-observe-production-ownership-not-reimplement-it"></a>
+**Test facades must observe production ownership, not reimplement it.** A
+compatibility fake that translates a new handoff into an old one and separately
+registers, drains, or removes cleanup can duplicate effects and turn valid
+production behavior into broad failures. Once the concrete owner supports the
+canonical protocol, delete the shim: delegate lifecycle operations to the real
+owner and retain only observability and failure injection. Assert state on the
+process that actually owns it, such as a cleanup lease that outlives its
+coordinator (found 2026-08-04 reconciling Voice Session and ResourceOwner
+migrations).
+
+<!-- applied-learning: test-observation-helpers-must-not-acquire-authority -->
+<a id="applied-learning-test-observation-helpers-must-not-acquire-authority"></a>
+**Test observation helpers must not acquire authority.** A helper named
+`fence_active_count` installed an operation-owned target fence on every read,
+so its first observation changed admission behavior and every later probe failed
+under a different owner. Inspect state without mutation, or reuse and explicitly
+release one exact test-owned lease when acquisition is the behavior under test.
+Also, serialization at one GenServer does not establish arrival order after
+different helper processes forward its replies (found 2026-08-11 while repairing
+runtime-admission settlement regressions).
+
+<!-- applied-learning: do-not-follow-a-linearized-intermediate-observation-with-a-negative-receive-window -->
+<a id="applied-learning-do-not-follow-a-linearized-intermediate-observation-with-a-negative-receive-window"></a>
+**Do not follow a linearized intermediate observation with a negative receive
+window.** A synchronous owner-state read can prove that a barrier existed before
+terminalization; the valid terminal may then reach the test mailbox before the
+next `refute_receive` executes. Treat the serialized state response as the
+ordering evidence and assert the exact terminal next. Queue an observer between
+events at the owner only when the intermediate state itself must be held
+deterministically (found 2026-08-11 while repeating runtime-admission liveness
+regressions).
+
+<!-- applied-learning: hermetic-readiness-canaries-must-inject-reviewed-toolchain-evidence -->
+<a id="applied-learning-hermetic-readiness-canaries-must-inject-reviewed-toolchain-evidence"></a>
+**Hermetic readiness canaries must inject reviewed toolchain evidence.** A
+production toolchain resolver correctly fails closed when candidate BEAMs load
+from an isolated build root because it must not authorize the
+candidate-controlled `/workspace/bin/mix`. A deterministic readiness-green
+canary should instead supply a bounded, digest-valid identity through its test
+observer, while dedicated production tests cover resolver success and failure;
+otherwise root-wide validation reports `toolchain_identity_unavailable` before
+exercising the intended canary behavior (found 2026-08-14 during K2 app-env
+validation).

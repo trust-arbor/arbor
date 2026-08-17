@@ -4,6 +4,19 @@ Read this when dispatching, steering, approving, resuming, or reviewing delegate
 
 ## Retained Applied Learning
 
+<!-- applied-learning: bind-ex-mcp-acp-pending-request-timeouts-at-client-start -->
+<a id="applied-learning-bind-ex-mcp-acp-pending-request-timeouts-at-client-start"></a>
+**Bind `ExMCP.ACP.Client` pending and handler request timeouts at client start.**
+`ex_mcp` 1.0.0-rc.8 defaults `pending_request_timeout` and
+`handler_request_timeout` to 30,000 ms. Arbor's prompt `GenServer.call`
+timeout is a separate caller deadline; the client `send_after` uses the
+init-time pending timeout and returns `:request_timeout` first. Passing a
+long `timeout` on `prompt/3` does not raise that ceiling. Set both options
+in `AcpSession.configure_client_opts/4` to session-lifetime reviewed
+ceilings (coding wall clock / intensive Mix child), not the start-handshake
+remainder. Found 2026-08-16 when C3c0.5 Pi design turns died at 32s on
+`task_58d8a4cf466dbb167d0e46bf0ab4b765`.
+
 <!-- applied-learning: build-structured-coding-work-packet-digests-with-the-contract-helper -->
 <a id="applied-learning-build-structured-coding-work-packet-digests-with-the-contract-helper"></a>
 **Build structured coding WorkPacket digests with the contract helper.**
@@ -250,6 +263,19 @@ The structured coding dispatcher currently allocates a new workspace for each ne
 Grok resume fields there unless that path has first gained explicit retained-workspace reactivation;
 reserve provider-session resume for a rework path that can reopen the original workspace (reconfirmed
 2026-07-14 by `task_74242` failing at `acp_start_session` before implementation).
+
+<!-- applied-learning: dispatch-provider-selection-must-satisfy-worker-owned-packet-operations -->
+<a id="applied-learning-dispatch-provider-selection-must-satisfy-worker-owned-packet-operations"></a>
+**Dispatch provider selection must satisfy worker-owned packet operations.** A
+valid Coding Plan and a healthy provider do not prove that the worker can execute
+the packet. Grok's `arbor-no-shell` profile intentionally exposes native file
+tools but denies terminal execution, so a packet that required generating a
+baseline through a Mix command correctly ended with no changes. Before dispatch,
+intersect worker-owned mutations and evidence commands with the provider's
+attested tool profile. A no-shell worker can still make bounded file edits when
+the manager owns later validation, but route command-derived artifact generation
+to a shell-capable provider (found 2026-08-11 while freezing the SPIKE-3B
+source-coupling baseline).
 
 <!-- applied-learning: budget-agent-work-by-model-provider-but-distinguish-native-subagents-from-acp-workers -->
 <a id="applied-learning-budget-agent-work-by-model-provider-but-distinguish-native-subagents-from-acp-workers"></a>
@@ -895,3 +921,48 @@ issue still surfaces, preserve the retained workspace and finish the narrow repa
 locally or redispatch from an exact checkpoint instead of discarding good work
 (found 2026-08-03 while integrating VP-05A after a second commit correction hit
 the category budget).
+
+<!-- applied-learning: acp-adapter-bootstrap-ids-are-not-resumable-provider-identities -->
+<a id="applied-learning-acp-adapter-bootstrap-ids-are-not-resumable-provider-identities"></a>
+**ACP adapter bootstrap IDs are not resumable provider identities.** Claude's
+`session/new` can return a transient `claude_sdk_*` handle while the first
+`session/update` already carries the provider's durable UUID. Reconcile and
+validate that live update identity before processing the update, then use the
+adopted identity for inactivity accounting, cancellation, status, transcripts,
+and recovery. Ignore every update that matches neither the bound identity nor
+this permitted one-time transition before callback or text accumulation.
+Otherwise active streaming does not refresh the silence timer and timeout
+recovery retries an invalid synthetic handle (found 2026-08-03 during the Voice
+VP-05D2A0 Claude fallback).
+
+<!-- applied-learning: coding-dispatch-authority-uses-the-agent-dispatch-namespace -->
+<a id="applied-learning-coding-dispatch-authority-uses-the-agent-dispatch-namespace"></a>
+**Coding dispatch authority uses `arbor://agent/dispatch`, not the task-control
+namespace.** Prefer the least-privilege exact target URI
+`arbor://agent/dispatch/<agent_id>`; `arbor://agent/task/read`, `cancel`, `steer`,
+and `adopt` are separate post-dispatch controls. A grant for the unregistered
+`arbor://agent/task/dispatch` can be signed and stored, but authorization rejects
+it at the URI registry and MCP reports `:agent_dispatch_required`. Compile the
+plan's authority horizon and separately verify the exact dispatch URI before
+allocating a task (found 2026-08-07 while starting Voice C3I0C1).
+
+<!-- applied-learning: do-not-queue-future-stage-controls-before-the-semantic-phase-advances -->
+<a id="applied-learning-do-not-queue-future-stage-controls-before-the-semantic-phase-advances"></a>
+**Do not queue future-stage controls before the semantic worker phase advances.**
+A control targeted at `implement` may be delivered after a design provider turn
+ends but before the pipeline inspects the no-write design workspace. The retained
+agent can then write correct source while Arbor still enforces the design invariant
+and terminalize `design_turn_modified_workspace`. Wait for task status/checkpoint
+evidence that the worker phase has durably changed; if source is produced anyway,
+checkpoint that exact tree and continue from its commit rather than replaying the
+packet (found 2026-08-13 during PK-K0 design rework).
+
+<!-- applied-learning: inline-load-bearing-nested-repository-context-in-delegated-work-packets -->
+<a id="applied-learning-inline-load-bearing-nested-repository-context-in-delegated-work-packets"></a>
+**Inline load-bearing nested-repository context in delegated work packets.**
+Arbor coding worktrees contain files tracked by the parent repository; the separate
+`.arbor` Git repository and its roadmap documents are absent. Treat `.arbor` paths in
+`architecture_refs` as manager provenance only, and copy every constraint the worker
+must follow into the canonical WorkPacket and task prompt. Otherwise a correctly
+isolated worker cannot read the cited design and may silently reconstruct weaker
+requirements (found 2026-08-15 while dispatching E0B2P).

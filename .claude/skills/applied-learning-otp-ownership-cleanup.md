@@ -64,7 +64,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 
 <!-- applied-learning: hot-loading-a-genserver-module-does-not-migrate-its-running-state -->
 <a id="applied-learning-hot-loading-a-genserver-module-does-not-migrate-its-running-state"></a>
-**Hot-loading a GenServer module does not migrate its running state or stored local function captures.** A recompiled callback can expect new struct fields while the live process still holds the old map, causing writes to fail long after code loading reports success. A local capture such as `&cleanup/1` stored in state can likewise point at purged code and raise `BadFunctionError`; represent production callback selection as data, an MFA, or a reload-stable external function reference. Before exercising a hot-loaded stateful subsystem, compare `:sys.get_state/1` keys with current expectations; use an explicit in-place state migration when semantics are clear, or restart under its supervisor only when persisted reconstruction is safe. Do not restart a memory-backed policy store casually (found 2026-07-10 when `Arbor.Trust.Store` lacked newly added durable-backend fields after hot reload; extended 2026-07-25 when retained workspace settlement failed through a stale cleanup capture).
+**Hot-loading a GenServer module does not migrate its running state or stored local function captures.** A recompiled callback can expect new struct fields while the live process still holds the old map, causing writes to fail long after code loading reports success. A local capture such as `&cleanup/1` stored in state can likewise point at purged code and raise `BadFunctionError`; represent production callback selection as data, an MFA, or a reload-stable external function reference. Before exercising a hot-loaded stateful subsystem, compare `:sys.get_state/1` keys with current expectations; use an explicit in-place state migration when semantics are clear, or restart under its supervisor only when persisted reconstruction is safe. A private state-validity certificate must also bind the loaded executable identity of every runtime module whose semantics its validator executes: a source-only owner hash remains unchanged when a dependency reloads. Recompute that bounded identity at the callback gate and fail closed when unavailable; do not memoize it across independently reloadable modules. Do not restart a memory-backed policy store casually (found 2026-07-10 when `Arbor.Trust.Store` lacked newly added durable-backend fields after hot reload; extended 2026-07-25 when retained workspace settlement failed through a stale cleanup capture and 2026-08-15 when E0B2P initially certified across a `CapabilityUri` reload).
 
 <!-- applied-learning: publish-terminal-state-before-invoking-optional-cleanup-infrastructure -->
 <a id="applied-learning-publish-terminal-state-before-invoking-optional-cleanup-infrastructure"></a>
@@ -244,7 +244,7 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 
 <!-- applied-learning: negative-cleanup-tests-must-snapshot-and-remove-only-their-own-exact-roots -->
 <a id="applied-learning-negative-cleanup-tests-must-snapshot-and-remove-only-their-own-exact-roots"></a>
-**Negative cleanup tests must snapshot and remove only their own exact roots.** Never clean test artifacts by scanning a shared temporary directory for broad prefixes or by piping matches to `rm -rf`; retained and live resources from unrelated tasks use those same prefixes. Record the exact paths before the negative run, reconstruct or retain their lstat-pinned identities, and remove only that allowlist through the owning public cleanup API. A delegated worker attempted a broad prefix cleanup on 2026-07-17; the ACP client did not execute it, and the two test-created roots were then removed individually through `Arbor.Shell.remove_owned_tree/2`.
+**Negative cleanup tests must snapshot and remove only their own exact roots.** Never clean test artifacts by scanning a shared temporary directory for broad prefixes, deriving a cleanup target with `Path.dirname/1` from a payload path, or piping matches to `rm -rf`; retained and live resources from unrelated tasks use those same prefixes. Fixture constructors must return the exact owned root separately from paths inside it, and destructive cleanup must fail closed when the target equals `System.tmp_dir!()`, a filesystem root, or any ancestor of the fixture root. Record the exact paths before the negative run, reconstruct or retain their lstat-pinned identities, and remove only that allowlist through the owning public cleanup API. A delegated worker attempted a broad prefix cleanup on 2026-07-17; the ACP client did not execute it, and the two test-created roots were then removed individually through `Arbor.Shell.remove_owned_tree/2`. This guard became mandatory on 2026-08-16 after a Hex fixture returned its root as `source` and an `after` block called `File.rm_rf!(Path.dirname(source))`, deleting user-owned task artifacts and worktrees under the shared macOS temp directory before protected entries stopped the traversal.
 
 <!-- applied-learning: linked-worktree-git-storage-authority-must-come-from-the-active-lease -->
 <a id="applied-learning-linked-worktree-git-storage-authority-must-come-from-the-active-lease"></a>
@@ -309,3 +309,40 @@ select one permanent effect before external I/O, never clear that selection, mak
 follow it, and report completion-CAS loss as success only when the terminal state is already
 published. Regress the losing mode change while the winning effect is paused after durable
 acceptance but before return (found 2026-08-02 repairing the VP-04D1 release-versus-arm race).
+
+<!-- applied-learning: do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox -->
+<a id="applied-learning-do-not-perform-large-or-backpressured-effects-in-the-control-owner-s-mailbox"></a>
+**Do not perform large or backpressured effects in the control owner's mailbox.** A
+finite `GenServer.call` timeout bounds the caller, not the callee or its mailbox:
+synchronous PCM encoding/socket send would delay stop, owner-death, and hard-timeout
+handling. Reserve and fence the operation in the control process, hand the payload to
+a separately owned bounded effect path, keep the control mailbox responsive, and
+close external protocol state before reuse when delivery is ambiguous. Do not replace
+the GenServer callback loop with a private blocking `receive` while such a child must
+call back for authority: its `GenServer.call` arrives as raw `$gen_call` data and is
+rejected or never dispatched. Keep teardown as ordinary `handle_info` state
+transitions and defer caller replies with `GenServer.reply/2` (found 2026-08-03
+reviewing Voice VP-07 audio ownership; reinforced 2026-08-16 reviewing E0B2C2's
+fallback process owner).
+
+<!-- applied-learning: admit-effect-ownership-before-invalidating-retryable-discovery -->
+<a id="applied-learning-admit-effect-ownership-before-invalidating-retryable-discovery"></a>
+**Admit effect ownership before invalidating retryable discovery.** A lifecycle owner
+must not remove the registry row or other discovery evidence before a bounded worker
+has been successfully admitted to own the destructive effect.
+`Task.Supervisor.start_child/2` is synchronous and can stall or fail; invalidating
+first can leave a live runtime undiscoverable with no retry owner. Admit a
+release-gated worker under the fixed supervisor, monitor the caller, then revalidate
+the exact fence immediately before releasing the effect; admission, caller death, or
+fence uncertainty must preserve the original owner (found 2026-08-10 while closing
+Phase 4C C2B runtime quiescence).
+
+<!-- applied-learning: sys-suspend-does-not-hold-external-exit-signal-retirement -->
+<a id="applied-learning-sys-suspend-does-not-hold-external-exit-signal-retirement"></a>
+**`:sys.suspend/1` does not hold external exit-signal retirement.** It suspends
+system-message and callback processing, but an external exit signal can still retire
+the process before a monitor observer can inspect the intended intermediate state.
+Concurrency tests that must hold an owner alive across shutdown should use a
+controlled trap-exit owner, and tests that need exact message ordering should queue
+the messages at the receiving owner before resuming it (found 2026-08-11 while
+repairing runtime-admission settlement regressions).

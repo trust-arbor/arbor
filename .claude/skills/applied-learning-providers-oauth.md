@@ -217,3 +217,26 @@ Arbor will faithfully snapshot that stale file, and the provider may classify th
 request as an account-limit 403. Treat the canary plus bounded credential generation metadata as
 readiness evidence, and never print credential contents (found 2026-08-03 when Grok displayed 0%
 usage but an exact `grok-4.5` CLI call reported that it was not signed in and removed stale auth).
+
+<!-- applied-learning: long-lived-provider-processes-can-outlive-cli-upgrades-and-oauth-relogin -->
+<a id="applied-learning-long-lived-provider-processes-can-outlive-cli-upgrades-and-oauth-relogin"></a>
+**Long-lived provider processes can outlive CLI upgrades and OAuth relogin.** A fresh credential
+file and a passing new-process canary do not prove durable refresh while older interactive or ACP
+processes remain alive with prior in-memory credential state. Before attributing repeated refresh
+revocation to the current binary, inventory provider PIDs, start times, executable paths, runtime
+homes, and open connections without reading secrets; close or deliberately isolate stale owners,
+then verify across the next real access-token refresh. On 2026-08-03, Grok's log proved xAI had
+revoked the cached refresh token, while two still-connected Grok TUI processes were running
+versions 0.2.93 and 0.2.101 weeks after 0.2.118 was installed. That makes stale process ownership a
+live hypothesis, not proof of causation; preserve the distinction until a clean single-owner
+refresh succeeds.
+
+<!-- applied-learning: oauth-readiness-must-separate-local-validity-from-remote-acceptance -->
+<a id="applied-learning-oauth-readiness-must-separate-local-validity-from-remote-acceptance"></a>
+**OAuth readiness must separate local validity from remote acceptance.** A structurally valid,
+correctly scoped, unexpired access token can still be revoked server-side. On an ordinary
+Arbor-owned 401, acquire recovery authority from an internally issued one-shot receipt,
+force-refresh once under the provider lock, and retry at most once; keep single-attempt calls to
+one resource request. Report local metadata health separately from active resource canaries, and
+describe login or rotation as a trigger inference unless the provider confirms the invalidation
+cause (found 2026-08-13 while repairing recurring OpenAI council abstentions).

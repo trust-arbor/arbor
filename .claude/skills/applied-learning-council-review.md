@@ -114,6 +114,15 @@ reviewed subgraph changes its exec action.
 <a id="applied-learning-reviewer-failure-evidence-must-be-bounded-at-first-projection-and-survive-rework-feedback"></a>
 **Reviewer failure evidence must be bounded at first projection and survive rework feedback.** Turning failed, missing, or malformed reviewer branches into abstentions preserves voting semantics but destroys diagnosis unless the reducer emits separate evidence. Sanitize and redact that evidence before the first public Engine projection, then retain it in the council result, persisted verdict, terminal evidence, and bounded feedback sent to the same worker. Apply byte/count caps before UTF-8 scans, regexes, sorting, inspection, or numeric conversion; accept only fixed-size text/scalars for diagnostic reasons rather than inspecting containers or rendering arbitrary-precision integers; and ensure truncation cannot hide a terminator-dependent secret whose quote or credential-URI `@` falls outside the scan window. Sanitizing only at the final action boundary leaves lower-level callers exposed, while persisting without feedback leaves rework blind (found 2026-07-20 reviewing council abstention observability).
 
+<!-- applied-learning: an-aggregate-council-accept-can-still-contain-a-real-major-finding -->
+<a id="applied-learning-an-aggregate-council-accept-can-still-contain-a-real-major-finding"></a>
+**An aggregate council accept can still contain a real major finding.** Quorum and tier reducers
+decide whether the workflow may proceed; they do not erase `active_findings`, and aggregation can
+leave a finding nonblocking even when its evidence proves a public-boundary bug. Owner review must
+inspect and independently classify the structured findings before adoption instead of trusting the
+disposition or vote counts alone (found 2026-08-03 when VP-05D1 was approved 9-0 while Comms still
+admitted partial delegation receipts).
+
 <!-- applied-learning: consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution -->
 <a id="applied-learning-consensus-proposals-must-reference-authoritative-validation-evidence-not-select-execution"></a>
 **Consensus proposals must reference authoritative validation evidence, not select execution.** Accepting proposal-controlled project paths, environments, commands, test paths, or per-call runners turns deliberation input into execution authority even when the current shell sandbox happens to block it. Derive a closed request from the proposal identity and perspective, resolve it through an operator-configured authorization-bound backend, and reject missing, timed-out, or malformed evidence; keep commands, paths, credentials, and runner selection outside the proposal surface (found 2026-07-23 while repairing the deterministic evaluator after shell hardening).
