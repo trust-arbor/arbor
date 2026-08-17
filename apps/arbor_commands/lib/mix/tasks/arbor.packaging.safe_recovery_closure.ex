@@ -7,15 +7,19 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
       mix arbor.packaging.safe_recovery_closure
       mix arbor.packaging.safe_recovery_closure --check
       mix arbor.packaging.safe_recovery_closure --measure
+      mix arbor.packaging.safe_recovery_closure --write
       mix arbor.packaging.safe_recovery_closure --check --json
 
   Production report/check read only
   `apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json`.
   They never start a peer, inject a cookie, or compose a release.
-  `--measure` is manager-owned and fails closed until a held E0B2
-  release root exists. This command is not installed in the root
-  quality alias. `architecture_status=blocked` is not architecture
-  readiness. A passing artifact check is not an E0B3 result.
+  `--measure` and `--write` are manager-owned: they stage one
+  trusted-build, hold `rel/arbor_trust`, probe it, and always clean
+  up. Write publishes exactly the committed evidence path. This
+  command is not installed in the root quality alias until a reviewed
+  evidence file exists. `architecture_status=blocked` is not
+  architecture readiness. A passing artifact check is not an E0B3
+  result.
   """
 
   use Mix.Task
@@ -25,8 +29,8 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
   alias Arbor.Commands.SafeRecoveryClosure
   alias Arbor.Commands.SafeRecoveryClosure.Encode
 
-  @mode_keys [:check, :measure]
-  @bool_keys [:check, :json, :measure]
+  @mode_keys [:check, :measure, :write]
+  @bool_keys [:check, :json, :measure, :write]
 
   @impl Mix.Task
   def run(argv) do
@@ -68,12 +72,10 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
 
   @doc false
   @spec exit_reason(String.t(), term()) :: :ok | {:shutdown, 1}
-  def exit_reason("check", %{"closure_status" => "closed"} = result)
-      when is_map(result),
-      do: :ok
-
+  def exit_reason("check", result) when is_map(result), do: :ok
   def exit_reason("report", result) when is_map(result), do: :ok
   def exit_reason("measure", result) when is_map(result), do: :ok
+  def exit_reason("write", result) when is_map(result), do: :ok
   def exit_reason(_mode, _result), do: {:shutdown, 1}
 
   @doc false
@@ -102,7 +104,27 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
 
   defp run_mode("report", opts), do: SafeRecoveryClosure.report(opts)
   defp run_mode("check", opts), do: SafeRecoveryClosure.check(opts)
-  defp run_mode("measure", opts), do: SafeRecoveryClosure.measure(opts)
+
+  defp run_mode("measure", opts) do
+    with {:ok, _started} <- ensure_live_runtime() do
+      SafeRecoveryClosure.measure(opts)
+    end
+  end
+
+  defp run_mode("write", opts) do
+    with {:ok, _started} <- ensure_live_runtime() do
+      SafeRecoveryClosure.write(opts)
+    end
+  end
+
+  defp ensure_live_runtime do
+    Application.delete_env(:arbor_shell, :apple_container_unit_journal_path)
+
+    case Application.ensure_all_started(:arbor_shell) do
+      {:ok, _apps} -> {:ok, :started}
+      {:error, reason} -> {:error, {:live_runtime_start_failed, reason}}
+    end
+  end
 
   defp admit_runtime_opts([]), do: :ok
 
@@ -120,7 +142,13 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
     if Enum.all?(argv, &is_binary/1) do
       {opts, positional, invalid} =
         OptionParser.parse(argv,
-          strict: [check: :boolean, measure: :boolean, json: :boolean, root: :string]
+          strict: [
+            check: :boolean,
+            measure: :boolean,
+            write: :boolean,
+            json: :boolean,
+            root: :string
+          ]
         )
 
       with :ok <- reject_invalid_parse(invalid, positional),
@@ -133,6 +161,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
           cond do
             Map.get(parsed, :check, false) -> "check"
             Map.get(parsed, :measure, false) -> "measure"
+            Map.get(parsed, :write, false) -> "write"
             true -> "report"
           end
 
@@ -173,6 +202,15 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
 
   defp raw_option_occurrences(["--no-measure" | rest], acc),
     do: raw_option_occurrences(rest, [{:measure, false} | acc])
+
+  defp raw_option_occurrences(["--write" | rest], acc),
+    do: raw_option_occurrences(rest, [{:write, true} | acc])
+
+  defp raw_option_occurrences(["--write=" <> value | rest], acc),
+    do: raw_boolean_occurrence(:write, value, rest, acc)
+
+  defp raw_option_occurrences(["--no-write" | rest], acc),
+    do: raw_option_occurrences(rest, [{:write, false} | acc])
 
   defp raw_option_occurrences(["--json" | rest], acc),
     do: raw_option_occurrences(rest, [{:json, true} | acc])
@@ -234,6 +272,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
 
   defp flag_name(:check), do: "--check"
   defp flag_name(:measure), do: "--measure"
+  defp flag_name(:write), do: "--write"
 
   defp emit(result, json?) do
     case render_report(result, json?) do

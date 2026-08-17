@@ -910,6 +910,17 @@ defmodule Arbor.Shell do
   end
 
   @doc """
+  Pin the held Mix-release root at `rel/arbor_trust` after cookie removal.
+
+  **Trusted system API only.** Owner-only. Returns the lease-derived
+  directory; callers cannot supply a path, destination, or executable.
+  """
+  @spec trusted_build_release_root(term()) :: {:ok, String.t()} | {:error, term()}
+  def trusted_build_release_root(lease) do
+    TrustedBuild.release_root(lease)
+  end
+
+  @doc """
   Read one inventory-attested `.app` or `.rel` as `%{\"path\" => rel, \"bytes\" => binary}`.
 
   **Trusted system API only.** Selector is a relative path already in the

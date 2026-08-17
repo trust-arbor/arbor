@@ -311,13 +311,15 @@ shutdown. `architecture_status=blocked` is not architecture readiness.
 This command is not installed in the root `quality` alias; there is
 not yet a reviewed committed closure file.
 
-`--measure` is manager-owned. It injects a process-private
-`RELEASE_COOKIE` and starts the fixed Commands-owned probe in a fresh
-OTP `:peer` over `standard_io`. Production measure does not accept a
-caller-selected executable, cookie, MFA, or artifact path. Until a
-held E0B2 release root is available from compose-hold, `--measure`
-fails closed with `held_release_unavailable`. A passing artifact
-`--check` is not an E0B3 result.
+`--measure` and `--write` are manager-owned. They stage one trusted
+source lease, run one `arbor_trust` trusted-build, remove
+`releases/COOKIE`, pin the lease-owned `rel/arbor_trust` directory,
+inject a process-private `RELEASE_COOKIE`, probe in a fresh OTP
+`:peer` over `standard_io`, then always release the lease. Production
+does not accept a caller-selected executable, cookie, MFA, or artifact
+path. `--write` publishes exactly
+`apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json`.
+A passing artifact `--check` is not an E0B3 result.
 
 ## Retired K migration gates
 

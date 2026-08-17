@@ -4,16 +4,24 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
 
   Production `report/1` and `check/1` read only the committed evidence
   file. They never start a peer, inject a cookie, or compose a release.
-  `measure/1` is the manager-owned live path: it requires a held
-  Mix-release root and is not implemented as a caller-selected
-  destination. Until compose-hold lands, production measure fails
-  closed with `:held_release_unavailable`.
+  `measure/1` stages one trusted-build, holds `rel/arbor_trust` through
+  the peer probe, then always releases the lease. `write/1` publishes
+  that evidence to the single committed path. Production accepts no
+  caller-selected destination, cookie, MFA, or executable.
   """
 
   alias Arbor.Commands.PackagingRoot
   alias Arbor.Commands.SafeRecoveryArtifact.{CheckCore, CommittedStore}
   alias Arbor.Commands.SafeRecoveryArtifact.Encode, as: ArtifactEncode
-  alias Arbor.Commands.SafeRecoveryClosure.{Core, Encode, PeerRunner}
+
+  alias Arbor.Commands.SafeRecoveryClosure.{
+    Core,
+    Encode,
+    EvidenceStore,
+    MeasureShell,
+    PeerRunner
+  }
+
   alias Arbor.Common.SafePath
 
   @evidence_rel "apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json"
@@ -26,7 +34,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
                    @measure_opt_keys,
                    MapSet.new([:run_peer, :evidence, :release_root, :selected])
                  )
-  @default_opts %{json: false, root: nil, timeout_ms: 180_000}
+  @default_opts %{json: false, root: nil, timeout_ms: 1_800_000}
 
   @doc "Fixed committed evidence path relative to the umbrella root."
   @spec default_evidence_path() :: String.t()
@@ -51,6 +59,26 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
   def measure(opts) when is_list(opts), do: run(:measure, opts, :production)
   def measure(_opts), do: {:error, :invalid_opts}
 
+  @spec write(keyword()) :: {:ok, map()} | {:error, term()}
+  def write(opts \\ [])
+  def write(opts) when is_list(opts), do: run(:write, opts, :production)
+  def write(_opts), do: {:error, :invalid_opts}
+
+  @doc false
+  @spec write_from_evidence_for_test(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def write_from_evidence_for_test(evidence, opts)
+      when is_map(evidence) and is_list(opts) do
+    with {:ok, admitted} <- admit_opts(opts, @report_opt_keys),
+         {:ok, root} <- resolve_root(admitted.root),
+         {:ok, projected} <- Core.project(evidence),
+         {:ok, bytes} <- Encode.canonical_json(projected),
+         :ok <- EvidenceStore.write(root, bytes) do
+      finish(:write, admitted.json, projected)
+    end
+  end
+
+  def write_from_evidence_for_test(_evidence, _opts), do: {:error, :invalid_opts}
+
   @doc false
   @spec run_for_test(keyword()) :: {:ok, map()} | {:error, term()}
   def run_for_test(opts) when is_list(opts) do
@@ -69,7 +97,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
     end
   end
 
-  defp allowed_keys(:measure), do: @measure_opt_keys
+  defp allowed_keys(mode) when mode in [:measure, :write], do: @measure_opt_keys
   defp allowed_keys(_mode), do: @report_opt_keys
 
   defp dispatch(mode, admitted, root, kind) when mode in [:report, :check] do
@@ -81,9 +109,27 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
   end
 
   defp dispatch(:measure, admitted, root, :production) do
-    _ = {admitted, root}
-    {:error, :held_release_unavailable}
+    project_measurement(
+      MeasureShell.measure(root: root, timeout_ms: admitted.timeout_ms),
+      root,
+      admitted.json
+    )
   end
+
+  defp dispatch(:write, admitted, root, :production) do
+    with {:ok, result} <-
+           project_measurement(
+             MeasureShell.measure(root: root, timeout_ms: admitted.timeout_ms),
+             root,
+             admitted.json
+           ),
+         {:ok, bytes} <- Encode.canonical_json(result["evidence"]),
+         :ok <- EvidenceStore.write(root, bytes) do
+      {:ok, %{result | "mode" => "write"}}
+    end
+  end
+
+  defp dispatch(:write, _admitted, _root, :test), do: {:error, :use_write_from_evidence_for_test}
 
   defp dispatch(:measure, admitted, root, :test) do
     cond do
@@ -114,10 +160,13 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
   end
 
   defp require_check(:check, evidence) do
-    cond do
-      evidence["closure_status"] != "closed" -> {:error, :closure_open}
-      evidence["findings"] != [] -> {:error, :closure_findings}
-      true -> :ok
+    with :ok <- Encode.validate_evidence(evidence),
+         {:ok, again} <- Core.project(evidence),
+         true <- again == evidence do
+      :ok
+    else
+      false -> {:error, :evidence_not_canonical}
+      {:error, _} = error -> error
     end
   end
 
@@ -142,6 +191,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
   defp mode_name(:report), do: "report"
   defp mode_name(:check), do: "check"
   defp mode_name(:measure), do: "measure"
+  defp mode_name(:write), do: "write"
 
   defp load_evidence(root, admitted, :test) do
     case Map.get(admitted, :evidence) do

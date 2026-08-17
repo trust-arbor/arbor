@@ -141,7 +141,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
       peer_down: :crash,
       env: [
         {~c"RELEASE_COOKIE", String.to_charlist(cookie)},
-        {~c"MIX_ENV", ~c"prod"}
+        {~c"MIX_ENV", ~c"prod"},
+        {~c"ARBOR_HOME", String.to_charlist(absent_home())}
       ]
     }
   end
@@ -596,6 +597,11 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
 
   defp random_cookie do
     :crypto.strong_rand_bytes(@cookie_bytes) |> Base.encode16(case: :lower)
+  end
+
+  defp absent_home do
+    "/private/tmp/arbor-e0b3-absent-" <>
+      Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   end
 
   defp worker_budget_ms do

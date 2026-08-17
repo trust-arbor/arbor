@@ -13,6 +13,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     def inspect(_lease, _opts), do: "#Arbor.Shell.TrustedBuild.Lease<redacted>"
   end
 
+  alias Arbor.Common.SafePath
   alias Arbor.Shell.Executor
   alias Arbor.Shell.OwnedTree
   alias Arbor.Shell.OwnedTreeRegistry
@@ -82,6 +83,9 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
   @spec inventory_release(Handle.t()) :: {:ok, map()} | {:error, term()}
   def inventory_release(%Handle{} = lease), do: call(lease, :inventory_release)
+
+  @spec release_root(Handle.t()) :: {:ok, String.t()} | {:error, term()}
+  def release_root(%Handle{} = lease), do: call(lease, :release_root)
 
   @spec stage_native(Handle.t()) :: {:ok, map()} | {:error, term()}
   def stage_native(%Handle{} = lease), do: call(lease, :stage_native_cache)
@@ -393,6 +397,19 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
 
         next = %{state | phase_pid: phase_pid, phase_ref: ref, launch_released: true}
         {:reply, :ok, next}
+    end
+  end
+
+  defp dispatch_owner_request(:release_root, {caller, _}, state) do
+    cond do
+      caller != state.owner ->
+        {:reply, {:error, :foreign_caller}, state}
+
+      not state.done or state.cookie_removed != true or not is_map(state.release_inventory) ->
+        {:reply, {:error, :trusted_build_release_absent}, state}
+
+      true ->
+        {:reply, pin_release_root(state), state}
     end
   end
 
@@ -1389,6 +1406,31 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
         fallback_pending: false,
         fallback_claimed: false
     }
+  end
+
+  defp pin_release_root(state) do
+    build = state.roots.build.path
+    path = Path.join([build, "rel", "arbor_trust"])
+
+    case File.lstat(path) do
+      {:ok, %{type: :directory}} ->
+        case SafePath.resolve_real(path) do
+          {:ok, real} -> {:ok, real}
+          {:error, reason} -> {:error, {:release_root_unresolved, reason}}
+        end
+
+      {:ok, %{type: :symlink}} ->
+        {:error, :release_root_symlink}
+
+      {:ok, _} ->
+        {:error, :release_root_not_directory}
+
+      {:error, :enoent} ->
+        {:error, :trusted_build_release_absent}
+
+      {:error, reason} ->
+        {:error, {:release_root_unreadable, reason}}
+    end
   end
 
   defp render_view(state) do

@@ -17,13 +17,12 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosureTest do
 
     assert {:error, {:arguments, {:conflicting_mode, ["--check", "--measure"]}}} =
              Task.execute(["--check", "--measure"])
+
+    assert {:error, {:arguments, {:conflicting_mode, ["--measure", "--write"]}}} =
+             Task.execute(["--measure", "--write"])
   end
 
   test "report fails closed when committed evidence is absent" do
     assert {:error, :evidence_missing} = Task.execute([])
-  end
-
-  test "measure fails closed without a held release" do
-    assert {:error, :held_release_unavailable} = Task.execute(["--measure"])
   end
 end

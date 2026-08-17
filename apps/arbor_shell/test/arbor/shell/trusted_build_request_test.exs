@@ -167,8 +167,11 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
     assert function_exported?(Shell, :inventory_trusted_build_deps, 1)
     assert function_exported?(Shell, :remove_trusted_build_release_cookie, 1)
     assert function_exported?(Shell, :read_trusted_build_descriptor, 2)
+    assert function_exported?(Shell, :trusted_build_release_root, 1)
     refute function_exported?(Shell, :stage_trusted_build_native, 2)
     refute function_exported?(Shell, :read_trusted_build_descriptor, 3)
+    refute function_exported?(Shell, :trusted_build_release_root, 2)
+    assert {:error, :invalid_lease} = Shell.trusted_build_release_root(:nope)
   end
 
   test "closed env PATH is the fixed Darwin utility suffix and ignores caller input" do

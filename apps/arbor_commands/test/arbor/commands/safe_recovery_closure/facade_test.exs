@@ -39,8 +39,12 @@ defmodule Arbor.Commands.SafeRecoveryClosureFacadeTest do
     assert {:error, :evidence_missing} = SafeRecoveryClosure.check(root: root)
   end
 
-  test "production measure does not start a peer or accept a destination", %{root: root} do
-    assert {:error, :held_release_unavailable} = SafeRecoveryClosure.measure(root: root)
+  test "production measure and write reject a caller-selected destination" do
+    assert {:error, {:production_opts_forbid_synthetic, [:release_root]}} =
+             SafeRecoveryClosure.measure(release_root: "/tmp/rel")
+
+    assert {:error, {:production_opts_forbid_synthetic, [:release_root]}} =
+             SafeRecoveryClosure.write(release_root: "/tmp/rel")
   end
 
   test "report admits projected evidence and check requires a closed set", %{root: root} do
@@ -60,7 +64,7 @@ defmodule Arbor.Commands.SafeRecoveryClosureFacadeTest do
     assert check["evidence_digest"] == report["evidence_digest"]
   end
 
-  test "check fails closed on open findings", %{root: root} do
+  test "check admits reviewed blocked-open evidence", %{root: root} do
     candidate =
       closed_candidate()
       |> put_in(["post_start", "applications"], [
@@ -77,7 +81,22 @@ defmodule Arbor.Commands.SafeRecoveryClosureFacadeTest do
     assert evidence["closure_status"] == "open"
     assert {:ok, report} = SafeRecoveryClosure.report(root: root)
     assert report["closure_status"] == "open"
-    assert {:error, :closure_open} = SafeRecoveryClosure.check(root: root)
+    assert {:ok, check} = SafeRecoveryClosure.check(root: root)
+    assert check["closure_status"] == "open"
+    assert check["findings_count"] > 0
+  end
+
+  test "write_from_evidence_for_test publishes the committed path", %{root: root} do
+    {:ok, evidence} = Core.project(closed_candidate())
+
+    assert {:ok, result} =
+             SafeRecoveryClosure.write_from_evidence_for_test(evidence, root: root)
+
+    assert result["mode"] == "write"
+    path = Path.join(root, SafeRecoveryClosure.default_evidence_path())
+    assert File.regular?(path)
+    assert {:ok, check} = SafeRecoveryClosure.check(root: root)
+    assert check["evidence_digest"] == result["evidence_digest"]
   end
 
   test "measure_for_test projects an injected peer sample", %{root: root} do

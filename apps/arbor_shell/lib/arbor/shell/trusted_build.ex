@@ -98,6 +98,10 @@ defmodule Arbor.Shell.TrustedBuild do
   def inventory(%Lease.Handle{} = lease), do: Lease.inventory_release(lease)
   def inventory(_lease), do: {:error, :invalid_lease}
 
+  @spec release_root(Lease.Handle.t()) :: {:ok, String.t()} | {:error, term()}
+  def release_root(%Lease.Handle{} = lease), do: Lease.release_root(lease)
+  def release_root(_lease), do: {:error, :invalid_lease}
+
   @spec release(Lease.Handle.t()) :: :ok | {:error, term()}
   def release(%Lease.Handle{} = lease), do: Lease.release(lease)
   def release(_lease), do: {:error, :invalid_lease}
