@@ -294,11 +294,30 @@ a live `--write` / `--build-verify` produced identical two-build
 payloads from `fe0ed0a9d`. `--check` now admits those files. It is
 still not an E0B3 result.
 
-E0B3 (ephemeral `RELEASE_COOKIE` and fresh-VM executable closure)
-starts with a pure CRC core (E0B3A:
-`Arbor.Commands.SafeRecoveryClosure`). Nothing in this command starts
-a peer or injects a cookie; a passing artifact check is not an E0B3
-result.
+E0B3 (ephemeral `RELEASE_COOKIE` and fresh-VM executable closure) is a
+separate proof from the artifact pair.
+
+```bash
+./bin/mix arbor.packaging.safe_recovery_closure
+./bin/mix arbor.packaging.safe_recovery_closure --check
+./bin/mix arbor.packaging.safe_recovery_closure --check --json
+```
+
+Report and check read only
+`apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json`.
+They never start a peer, inject a cookie, or compose a release. Check
+fails closed on missing evidence, open findings, or unbounded
+shutdown. `architecture_status=blocked` is not architecture readiness.
+This command is not installed in the root `quality` alias; there is
+not yet a reviewed committed closure file.
+
+`--measure` is manager-owned. It injects a process-private
+`RELEASE_COOKIE` and starts the fixed Commands-owned probe in a fresh
+OTP `:peer` over `standard_io`. Production measure does not accept a
+caller-selected executable, cookie, MFA, or artifact path. Until a
+held E0B2 release root is available from compose-hold, `--measure`
+fails closed with `held_release_unavailable`. A passing artifact
+`--check` is not an E0B3 result.
 
 ## Retired K migration gates
 
