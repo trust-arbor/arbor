@@ -24,7 +24,7 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
     MIX_ENV HEX_OFFLINE MIX_OS_CONCURRENCY_LOCK ARBOR_MIX_CONTAINED
     ARBOR_ERLANG_ROOT ARBOR_ELIXIR_ROOT HOME TMPDIR TMP HEX_HOME MIX_HOME
     MIX_ARCHIVES MIX_DEPS_PATH MIX_BUILD_PATH ELIXIR_MAKE_CACHE_DIR
-    ERL_CRASH_DUMP PATH LANG LC_ALL
+    ERL_CRASH_DUMP ERL_COMPILER_OPTIONS SOURCE_DATE_EPOCH PATH LANG LC_ALL
   )
   # Locked to trusted_build_replace_environ() Darwin PATH suffix.
   @darwin_utility_path "/usr/bin:/bin"
@@ -103,6 +103,10 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
       "MIX_BUILD_PATH" => roots.build.path,
       "ELIXIR_MAKE_CACHE_DIR" => roots.cache.path,
       "ERL_CRASH_DUMP" => Path.join(tmp, "erl_crash.dump"),
+      # Strip compile-time timestamps from BEAM CInf so two trusted-builds
+      # of the same tree compare equal. Native objects also read SOURCE_DATE_EPOCH.
+      "ERL_COMPILER_OPTIONS" => "deterministic",
+      "SOURCE_DATE_EPOCH" => "0",
       "PATH" => closed_path(erlang, elixir),
       "LANG" => "C",
       "LC_ALL" => "C"

@@ -20,7 +20,20 @@ defmodule Arbor.Contracts.Trust.Profile do
 
   use TypedStruct
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :agent_id,
+             :frozen,
+             :frozen_reason,
+             :frozen_at,
+             :baseline,
+             :rules,
+             :model_constraints,
+             :egress_modes,
+             :created_at,
+             :updated_at,
+             :last_activity_at
+           ]}
   typedstruct enforce: true do
     @typedoc "Trust profile for a self-improving agent"
 

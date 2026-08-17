@@ -37,7 +37,27 @@ defmodule Arbor.Contracts.Security.Capability do
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Types
 
-  @derive {Jason.Encoder, except: [:issuer_signature]}
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :resource_uri,
+             :principal_id,
+             :granted_at,
+             :expires_at,
+             :not_before,
+             :parent_capability_id,
+             :delegation_depth,
+             :max_uses,
+             :allowed_delegatees,
+             :session_id,
+             :task_id,
+             :principal_scope,
+             :constraints,
+             :issuer_id,
+             :signed_at,
+             :delegation_chain,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "A capability granting access to a specific resource"
 

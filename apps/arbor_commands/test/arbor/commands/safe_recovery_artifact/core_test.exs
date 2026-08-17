@@ -262,6 +262,22 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
 
       assert {:error, :missing_dependency} = Core.project(Fixture.candidate(snapshot: snapshot))
     end
+
+    test "admits Mix-shaped optional apps listed in applications but absent from the release" do
+      snapshot = Fixture.golden_snapshot()
+
+      body =
+        Fixture.app_body("arbor_trust")
+        |> String.replace(
+          "{applications,[kernel]}",
+          "{applications,[kernel,jason]},{optional_applications,[jason]}"
+        )
+
+      snapshot =
+        Fixture.replace_file(snapshot, "lib/arbor_trust-0.1.0/ebin/arbor_trust.app", body, 0o644)
+
+      assert {:ok, _manifest} = Core.project(Fixture.candidate(snapshot: snapshot))
+    end
   end
 
   describe "inventory ceilings" do

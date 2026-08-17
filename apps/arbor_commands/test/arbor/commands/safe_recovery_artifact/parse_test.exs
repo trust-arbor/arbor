@@ -56,6 +56,24 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ParseTest do
                )
     end
 
+    test "admits Mix compile_env and Hex package metadata keys" do
+      bytes =
+        "{application,tesla,[{vsn,\"1.16.0\"},{compile_env,[{tesla,[logger],error}]},{doc,\"doc\"},{include_files,[\"mix.exs\"]}]}."
+
+      assert {:ok, spec} = Parse.app_spec(bytes)
+      assert spec.name == "tesla"
+    end
+
+    test "admits Mix-shaped optional apps that also appear in applications" do
+      assert {:ok, parsed} =
+               Parse.app_spec(
+                 "{application,jason,[{vsn,\"1.4.5\"},{applications,[kernel,stdlib,elixir,decimal]},{optional_applications,[decimal]}]}."
+               )
+
+      assert parsed.required == ["kernel", "stdlib", "elixir", "decimal"]
+      assert parsed.optional == ["decimal"]
+    end
+
     test "rejects variables, calls, trailing terms, and floats" do
       assert {:error, :variable} = Parse.app_spec("{application,Foo,[{vsn,\"1\"}]}.")
       assert {:error, :executable_form} = Parse.app_spec("{application,foo(1),[{vsn,\"1\"}]}.")

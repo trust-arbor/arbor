@@ -228,9 +228,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
 
   defp declared_deps_present([app | rest], names) do
     declared = app["declared_applications"]
-    needed = declared["required"] ++ declared["included"]
 
-    if Enum.all?(needed, &MapSet.member?(names, &1)) do
+    hard_required =
+      declared["required"]
+      |> MapSet.new()
+      |> MapSet.difference(MapSet.new(declared["optional"]))
+      |> MapSet.union(MapSet.new(declared["included"]))
+
+    if Enum.all?(hard_required, &MapSet.member?(names, &1)) do
       declared_deps_present(rest, names)
     else
       {:error, :missing_dependency}
@@ -304,9 +309,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Derive do
     included = MapSet.new(declared["included"])
     optional = MapSet.new(declared["optional"])
 
+    # Mix records a compiled-in optional dep in both required and optional.
     overlap? =
-      not MapSet.disjoint?(required, included) or not MapSet.disjoint?(required, optional) or
-        not MapSet.disjoint?(included, optional)
+      not MapSet.disjoint?(required, included) or not MapSet.disjoint?(included, optional)
 
     if overlap? do
       {:error, :invalid_dependency_list}

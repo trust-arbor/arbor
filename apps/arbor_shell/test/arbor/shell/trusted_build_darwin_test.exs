@@ -44,6 +44,8 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       assert File.exists?(Path.join(source, "apps/arbor_trust/lib/trusted_build_fixture.ex"))
 
       state = :sys.get_state(lease.worker)
+      assert File.exists?(Path.join(state.roots.build.path, "HEX_TMP_WRITE"))
+      assert File.exists?(Path.join(state.roots.deps.path, "COMPILE_DEPS_WRITE"))
       env_file = Path.join(state.roots.build.path, "env_keys.txt")
       assert File.exists?(env_file)
       keys = env_file |> File.read!() |> String.split("\n", trim: true)
@@ -212,6 +214,22 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
                 System.get_env("MIX_OS_CONCURRENCY_LOCK") || ""
               )
               File.write!(Path.join(build, "PRIVATE_WRITE"), "ok")
+              deps = System.get_env("MIX_DEPS_PATH")
+
+              if is_binary(deps) and File.dir?(deps) and "compile" in System.argv() do
+                File.write!(Path.join(deps, "COMPILE_DEPS_WRITE"), "ok")
+              end
+
+              hex_tmp = Path.join(File.cwd!(), "tmp_" <> String.duplicate("A", 64))
+
+              case File.mkdir(hex_tmp) do
+                :ok ->
+                  _ = File.rmdir(hex_tmp)
+                  File.write!(Path.join(build, "HEX_TMP_WRITE"), "ok")
+
+                _other ->
+                  :ok
+              end
             end
             _ = File.write(Path.join(File.cwd!(), "SHOULD_NOT_WRITE"), "x")
             net =

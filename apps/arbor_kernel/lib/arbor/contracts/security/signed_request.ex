@@ -30,7 +30,7 @@ defmodule Arbor.Contracts.Security.SignedRequest do
   @nonce_size 16
   @signature_size 64
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:payload, :agent_id, :timestamp, :nonce, :signature]}
   typedstruct enforce: true do
     @typedoc "A signed request with replay protection"
 

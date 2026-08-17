@@ -63,7 +63,18 @@ defmodule Arbor.Contracts.Checkpoint do
   @valid_source_types [:engine, :session, :event_log, :custom]
   @valid_classifications [:public, :internal, :sensitive, :restricted]
 
-  @derive {Jason.Encoder, except: [:hmac]}
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :source_type,
+             :source_id,
+             :timestamp,
+             :version,
+             :parent_id,
+             :classification,
+             :data,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "A unified checkpoint envelope"
 

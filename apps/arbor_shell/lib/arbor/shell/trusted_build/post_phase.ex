@@ -2,6 +2,7 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
   @moduledoc false
 
   alias Arbor.Common.SafePath
+  alias Arbor.Shell.TrustedBuild.BeamIdentity
   alias Arbor.Shell.TrustedBuild.Identity
   alias Arbor.Shell.TrustedBuild.Inventory
   alias Arbor.Shell.TrustedBuild.NativeFs
@@ -140,8 +141,9 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
   def verify_staged_native(_state), do: {:error, :identity_mismatch}
 
   @spec scan_release_document(map()) :: {:ok, map()} | {:error, atom()}
-  def scan_release_document(%{roots: %{build: build}}) do
+  def scan_release_document(%{roots: %{build: build}} = state) do
     with :ok <- Identity.verify_writable(build),
+         :ok <- maybe_normalize_release_beams(state),
          {:ok, document} <- Inventory.release_document(build.path),
          :ok <- Identity.verify_writable(build) do
       {:ok, document}
@@ -149,6 +151,31 @@ defmodule Arbor.Shell.TrustedBuild.PostPhase do
   end
 
   def scan_release_document(_state), do: {:error, :identity_mismatch}
+
+  defp maybe_normalize_release_beams(%{
+         roots: %{build: %{path: build_path}, parent: %{path: workspace_path}},
+         identities: %{source_owned: %{path: identity_path}}
+       })
+       when is_binary(build_path) and is_binary(workspace_path) and is_binary(identity_path) do
+    replacements =
+      BeamIdentity.replacements(path_spellings(identity_path), path_spellings(workspace_path))
+
+    BeamIdentity.normalize_release_tree(Path.join(build_path, "rel"), replacements)
+  end
+
+  defp maybe_normalize_release_beams(_state), do: :ok
+
+  defp path_spellings(path) do
+    expanded = Path.expand(path)
+
+    resolved =
+      case SafePath.resolve_real(path) do
+        {:ok, real} -> [real]
+        _other -> []
+      end
+
+    Enum.uniq([path, expanded | resolved])
+  end
 
   defp verify_source_pins(source_owned, source, project, wrapper, overlay) do
     with :ok <- Identity.verify_owned_identity(source_owned),

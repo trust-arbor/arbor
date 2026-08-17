@@ -46,7 +46,24 @@ defmodule Arbor.Contracts.Persistence.VectorRecord do
   @type encoding :: :ieee754_float32_be_v1
   @type identity :: {String.t(), String.t(), String.t()}
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :agent_id,
+             :source_namespace,
+             :source_key,
+             :payload,
+             :vector,
+             :payload_digest,
+             :vector_digest,
+             :model_id,
+             :dimensions,
+             :encoding,
+             :category,
+             :generation,
+             :revision,
+             :tombstone
+           ]}
   typedstruct enforce: true do
     @typedoc "A bounded vector row independent of any concrete database adapter"
 

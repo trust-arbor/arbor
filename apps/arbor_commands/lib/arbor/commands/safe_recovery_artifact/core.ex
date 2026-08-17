@@ -631,10 +631,16 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Core do
     present = MapSet.new(Enum.map(pairs, fn {rel_app, _spec, _path} -> rel_app.name end))
 
     Enum.reduce_while(pairs, :ok, fn {_rel, spec, _path}, :ok ->
-      missing =
-        Enum.any?(spec.required ++ spec.included, fn name ->
-          not MapSet.member?(present, name)
-        end)
+      # Mix lists a compiled-in optional dep in both `applications` and
+      # `optional_applications`. Only the non-optional remainder plus
+      # included applications must be present in the release.
+      hard_required =
+        spec.required
+        |> MapSet.new()
+        |> MapSet.difference(MapSet.new(spec.optional))
+        |> MapSet.union(MapSet.new(spec.included))
+
+      missing = Enum.any?(hard_required, &(not MapSet.member?(present, &1)))
 
       if missing, do: {:halt, {:error, :missing_dependency}}, else: {:cont, :ok}
     end)

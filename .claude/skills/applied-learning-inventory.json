@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 648,
+  "entry_count": 651,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7968,8 +7968,47 @@
       "source_incident": "found 2026-08-16 when C3c0.5 Pi design turns died at 32s on task_58d8a4cf466dbb167d0e46bf0ab4b765).",
       "content_sha256": "7a212a532b99c1486042b54cb0685f077e1ae3e8ca6f76f1c817b198bb10d8e1",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 649,
+      "source_kind": "post-migration",
+      "slug": "mix-app-optional-applications-overlap-applications",
+      "title": "Mix `.app` files list present optional deps in both `applications` and `optional_applications`.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-mix-app-optional-applications-overlap-applications",
+      "source_date": "2026-08-17",
+      "source_incident": "found 2026-08-17 during E0B2C `--write`).",
+      "content_sha256": "2579e9b25a7ba985af0f9d3cdfcf7c12e3095b66902b4580d98a8fb9655de1b4",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 650,
+      "source_kind": "post-migration",
+      "slug": "trusted-build-deps-are-writable-after-compile",
+      "title": "Trusted-build deps inventory is a pre-compile snapshot, not a post-compile pin.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-trusted-build-deps-are-writable-after-compile",
+      "source_date": "2026-08-17",
+      "source_incident": "found 2026-08-17 when compose compile succeeded then `after_mix_success` returned `:identity_mismatch`).",
+      "content_sha256": "1a46ce32325bb29b0e161647fca680c05614002a9c5d202a392d99b272f95061",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 651,
+      "source_kind": "post-migration",
+      "slug": "mix-release-strip-beams-keeps-attr-lease-paths",
+      "title": "Mix release `strip_beams` keeps the Attr chunk, which still embeds lease-absolute paths.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-mix-release-strip-beams-keeps-attr-lease-paths",
+      "source_date": "2026-08-17",
+      "source_incident": "found 2026-08-17 during E0B2C `--write`).",
+      "content_sha256": "7490fc0ec31983393d3c8fd60867ac7c5d9026b86627a1d3f477003d986c714f",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 187
+  "post_migration_entry_count": 190
 }

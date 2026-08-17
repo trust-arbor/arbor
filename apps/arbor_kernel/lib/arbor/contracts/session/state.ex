@@ -31,7 +31,20 @@ defmodule Arbor.Contracts.Session.State do
 
   @valid_phases [:idle, :receiving, :processing, :acting, :finalizing, :error, :terminated]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :phase,
+             :messages,
+             :working_memory,
+             :goals,
+             :cognitive_mode,
+             :turn_count,
+             :trace_id,
+             :started_at,
+             :last_activity_at,
+             :error_count,
+             :metadata
+           ]}
   typedstruct do
     @typedoc "Mutable session state, updated on every turn"
 

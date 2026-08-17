@@ -39,7 +39,15 @@ defmodule Arbor.Contracts.Persistence.VectorOperation do
   @type single_kind :: :insert | :update | :delete | :reinsert
   @type kind :: single_kind() | :batch
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :kind,
+             :record,
+             :expected_generation,
+             :expected_revision,
+             :operations,
+             :fingerprint
+           ]}
   typedstruct enforce: true do
     @typedoc "A bounded vector mutation or atomic mutation batch"
 

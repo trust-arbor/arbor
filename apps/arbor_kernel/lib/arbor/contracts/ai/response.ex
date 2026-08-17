@@ -32,7 +32,19 @@ defmodule Arbor.Contracts.AI.Response do
 
   @valid_taint_levels [:public, :internal, :sensitive, :restricted]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :request_id,
+             :content,
+             :tool_calls,
+             :thinking,
+             :usage,
+             :model,
+             :provider,
+             :taint_level,
+             :latency_ms,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "A validated AI/LLM response envelope"
 

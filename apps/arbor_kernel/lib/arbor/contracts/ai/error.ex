@@ -46,7 +46,8 @@ defmodule Arbor.Contracts.AI.Error do
           request_id: String.t() | nil
         }
 
-  @derive {Jason.Encoder, except: [:__exception__]}
+  @derive {Jason.Encoder,
+           only: [:code, :message, :provider, :retryable?, :detail, :redacted, :request_id]}
   defexception [
     :code,
     :message,

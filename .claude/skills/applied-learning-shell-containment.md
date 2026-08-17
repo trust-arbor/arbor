@@ -4,6 +4,35 @@ Read this when executing commands, configuring process or container containment,
 
 ## Retained Applied Learning
 
+<!-- applied-learning: mix-app-optional-applications-overlap-applications -->
+<a id="applied-learning-mix-app-optional-applications-overlap-applications"></a>
+**Mix `.app` files list present optional deps in both `applications` and
+`optional_applications`.** Treating those lists as pairwise-disjoint rejects
+real tesla/jason/ecto/postgrex specs. Hard-required deps are
+`applications − optional_applications`, plus `included_applications`. OTP
+still forbids `applications` ∩ `included_applications`. Hex also emits
+`compile_env`, `doc`, and `include_files` as top-level keys (found 2026-08-17
+during E0B2C `--write`).
+
+<!-- applied-learning: trusted-build-deps-are-writable-after-compile -->
+<a id="applied-learning-trusted-build-deps-are-writable-after-compile"></a>
+**Trusted-build deps inventory is a pre-compile snapshot, not a post-compile
+pin.** `elixir_make` / `exqlite` / Mix `project/0` write into the writable
+deps root during compile. Compare that inventory at compile *start* (two-build
+equality). After compile has completed, do not re-require the pre-compile
+digest on release, release inventory, or cleanup attestation (found 2026-08-17
+when compose compile succeeded then `after_mix_success` returned
+`:identity_mismatch`).
+
+<!-- applied-learning: mix-release-strip-beams-keeps-attr-lease-paths -->
+<a id="applied-learning-mix-release-strip-beams-keeps-attr-lease-paths"></a>
+**Mix release `strip_beams` still leaves lease-absolute paths in Attr,
+Line, LitT, and `sys.config`.** `use Boundary` persists `env.file`, Hex
+packages persist `@external_resource` from `__DIR__`, and generated
+modules keep the compile file in Line/LitT. Replace those prefixes
+with same-length canonical tokens before release inventory so two
+isolated leases compare equal (found 2026-08-17 during E0B2C `--write`).
+
 <!-- applied-learning: a-hex-lock-does-not-attest-compile-time-native-downloads -->
 <a id="applied-learning-a-hex-lock-does-not-attest-compile-time-native-downloads"></a>
 **A Hex lock does not attest compile-time native downloads.** A locked Hex package

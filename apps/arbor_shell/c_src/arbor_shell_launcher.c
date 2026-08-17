@@ -69,9 +69,12 @@ extern char **environ;
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
 /* Residual risk: file-read*, mach-lookup, process-info*, sysctl-read, signal,
  * and posix shm/sem are intentionally broad so Mix/ERTS can start. Writes are
- * only the eight -D private roots. SOURCE writes stay denied. Only localhost
- * bind+inbound are added for Mix 1.19; outbound including loopback outbound
- * stays denied by network*. */
+ * the eight -D private roots plus Hex 2.5.1 CWD unpack temps
+ * (paths containing /apps/arbor_trust/tmp_ ). Seatbelt regex has no {n}.
+ * Hex mkdir does not honor TMPDIR.
+ * Other SOURCE writes stay denied by default. Only localhost bind+inbound
+ * are added for Mix 1.19; outbound including loopback outbound stays denied
+ * by network*. */
 #define DARWIN_TRUSTED_BUILD_PROFILE \
   "(version 1)\n" \
   "(deny default)\n" \
@@ -95,6 +98,7 @@ extern char **environ;
   "(allow file-write* (subpath (param \"CACHE\")))\n" \
   "(allow file-write* (subpath (param \"RELEASE\")))\n" \
   "(deny file-write* (subpath (param \"SOURCE\")))\n" \
+  "(allow file-write* (subpath (param \"SOURCE\")) (regex #\"/apps/arbor_trust/tmp_\"))\n" \
   "(allow network-bind (local ip \"localhost:*\"))\n" \
   "(allow network-inbound (local ip \"localhost:*\"))\n" \
   "(deny network*)"
@@ -557,6 +561,8 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   if (setenv("MIX_BUILD_PATH", paths->build, 1) != 0) _exit(126);
   if (setenv("ELIXIR_MAKE_CACHE_DIR", paths->cache, 1) != 0) _exit(126);
   if (setenv("ERL_CRASH_DUMP", crash, 1) != 0) _exit(126);
+  if (setenv("ERL_COMPILER_OPTIONS", "deterministic", 1) != 0) _exit(126);
+  if (setenv("SOURCE_DATE_EPOCH", "0", 1) != 0) _exit(126);
   if (setenv("PATH", path_value, 1) != 0) _exit(126);
   if (setenv("LANG", "C", 1) != 0) _exit(126);
   if (setenv("LC_ALL", "C", 1) != 0) _exit(126);

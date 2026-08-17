@@ -15,7 +15,7 @@ defmodule Arbor.Contracts.Persistence.VectorMatch do
   @attribute_aliases Map.new(@fields, fn key -> {key, key} end)
                      |> Map.merge(Map.new(@fields, fn key -> {Atom.to_string(key), key} end))
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:record, :similarity]}
   typedstruct enforce: true do
     @typedoc "A digest-verifiable vector row and finite cosine similarity"
 

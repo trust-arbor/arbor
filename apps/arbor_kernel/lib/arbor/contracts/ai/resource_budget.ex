@@ -29,7 +29,15 @@ defmodule Arbor.Contracts.AI.ResourceBudget do
 
   @valid_billing_classes [:free, :paid, :any]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :max_llm_calls,
+             :max_tokens,
+             :max_cost_usd,
+             :max_tool_iterations,
+             :max_duration_ms,
+             :billing_class
+           ]}
   typedstruct do
     @typedoc "Per-session resource budget with optional limits"
 

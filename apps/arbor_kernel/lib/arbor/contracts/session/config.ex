@@ -39,7 +39,19 @@ defmodule Arbor.Contracts.Session.Config do
 
   @valid_session_types [:primary, :background, :delegation, :consultation]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :session_id,
+             :agent_id,
+             :session_type,
+             :parent_session_id,
+             :graph_ref,
+             :resource_budget,
+             :max_messages,
+             :max_tool_iterations,
+             :schema_version,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "Immutable session configuration, created once at session start"
 

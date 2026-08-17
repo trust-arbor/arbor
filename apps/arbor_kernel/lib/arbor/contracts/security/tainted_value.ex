@@ -14,7 +14,7 @@ defmodule Arbor.Contracts.Security.TaintedValue do
 
   alias Arbor.Contracts.Security.Taint
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:value, :taint]}
   typedstruct enforce: true do
     field(:value, term())
     field(:taint, Taint.t())

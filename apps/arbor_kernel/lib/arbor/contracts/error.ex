@@ -37,7 +37,8 @@ defmodule Arbor.Contracts.Error do
 
   use TypedStruct
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [:code, :message, :source, :detail, :redacted, :timestamp, :trace_id, :metadata]}
   typedstruct enforce: true do
     @typedoc "A structured, redactable error"
 

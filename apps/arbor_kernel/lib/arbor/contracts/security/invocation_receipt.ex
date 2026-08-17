@@ -27,7 +27,22 @@ defmodule Arbor.Contracts.Security.InvocationReceipt do
 
   alias Arbor.Types
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :capability_id,
+             :principal_id,
+             :resource_uri,
+             :action,
+             :result,
+             :timestamp,
+             :nonce,
+             :delegation_chain,
+             :session_id,
+             :task_id,
+             :issuer_id,
+             :signature
+           ]}
   typedstruct enforce: true do
     @typedoc "A signed proof of capability invocation"
 

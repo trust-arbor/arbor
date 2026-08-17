@@ -38,7 +38,18 @@ defmodule Arbor.Contracts.Trust.Event do
 
   use TypedStruct
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :agent_id,
+             :event_type,
+             :timestamp,
+             :previous_score,
+             :new_score,
+             :delta,
+             :reason,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "An immutable trust change event"
 

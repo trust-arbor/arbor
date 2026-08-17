@@ -26,7 +26,7 @@ defmodule Arbor.Contracts.Persistence.VectorReceipt do
   @batch_fixed_bytes 16
   @receipt_fixed_bytes 73
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:operation_fingerprint, :kind, :record, :receipts]}
   typedstruct enforce: true do
     @typedoc "An exact committed row or ordered batch result"
 

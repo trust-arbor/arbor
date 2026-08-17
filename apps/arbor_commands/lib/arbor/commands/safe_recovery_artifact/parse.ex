@@ -33,7 +33,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
                    "files",
                    "id",
                    "runtime_dependencies",
-                   "metadata"
+                   "metadata",
+                   "compile_env",
+                   "doc",
+                   "include_files"
                  ])
 
   @start_types MapSet.new(["permanent", "transient", "temporary", "load", "none"])
@@ -606,15 +609,20 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Parse do
     end
   end
 
+  # Mix lists a present optional dependency in both `applications` and
+  # `optional_applications`. OTP still forbids `applications` ∩
+  # `included_applications` and `included_applications` ∩ `optional_applications`.
   defp disjoint_deps(required, included, optional) do
-    sets = [MapSet.new(required), MapSet.new(included), MapSet.new(optional)]
-    overlap? = pairwise_overlap?(sets)
+    required_set = MapSet.new(required)
+    included_set = MapSet.new(included)
+    optional_set = MapSet.new(optional)
 
-    if overlap?, do: {:error, :invalid_dependency_list}, else: :ok
-  end
-
-  defp pairwise_overlap?([a, b, c]) do
-    not MapSet.disjoint?(a, b) or not MapSet.disjoint?(a, c) or not MapSet.disjoint?(b, c)
+    if MapSet.disjoint?(required_set, included_set) and
+         MapSet.disjoint?(included_set, optional_set) do
+      :ok
+    else
+      {:error, :invalid_dependency_list}
+    end
   end
 
   defp stringify_name({:atom, name}) when is_binary(name), do: {:ok, name}

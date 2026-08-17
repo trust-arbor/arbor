@@ -47,7 +47,22 @@ defmodule Arbor.Contracts.Security.CapabilityProfile do
 
   @required_fields @fields -- [:compensation, :default_constraints]
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder,
+           only: [
+             :uri_prefix,
+             :owner,
+             :blast_radius,
+             :reversibility,
+             :compensation,
+             :effect_class,
+             :data_class,
+             :arg_dependent,
+             :default_approval,
+             :default_constraints,
+             :delegable,
+             :cost_class,
+             :graduation_eligible
+           ]}
   typedstruct enforce: true do
     field(:uri_prefix, String.t())
     field(:owner, atom())

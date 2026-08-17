@@ -46,7 +46,17 @@ defmodule Arbor.Contracts.Session.Message do
   @valid_roles [:user, :assistant, :system, :tool]
   @valid_taint_levels [:public, :internal, :sensitive, :restricted]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :message_id,
+             :role,
+             :content,
+             :tool_call_id,
+             :name,
+             :taint_level,
+             :timestamp,
+             :metadata
+           ]}
   typedstruct do
     @typedoc "A single message in a session conversation"
 

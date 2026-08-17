@@ -30,7 +30,18 @@ defmodule Arbor.Contracts.Session.ToolCall do
 
   alias Arbor.Identifiers
 
-  @derive {Jason.Encoder, except: [:result]}
+  @derive {Jason.Encoder,
+           only: [
+             :id,
+             :name,
+             :arguments,
+             :capability_uri,
+             :authorized_at,
+             :executed_at,
+             :duration_ms,
+             :error,
+             :metadata
+           ]}
   typedstruct do
     @typedoc "A single tool call within a session turn"
 

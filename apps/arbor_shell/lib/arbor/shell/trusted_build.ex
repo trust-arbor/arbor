@@ -288,6 +288,8 @@ defmodule Arbor.Shell.TrustedBuild do
     with {:ok, children} <- create_writables(parent.path),
          {:ok, archives, digest} <- seed_archives(parent.path, binding, fault),
          :ok <- seed_hex_cache(children.hex.path, binding, fault),
+         :ok <- seed_rebar(children.mix.path, binding, fault),
+         :ok <- seed_make_cache(children.cache.path, binding, fault),
          :ok <- reject_source_overlap(source_root, children, archives),
          {:ok, source} <- Identity.pin_directory(source_root),
          {:ok, project} <-
@@ -414,6 +416,89 @@ defmodule Arbor.Shell.TrustedBuild do
       {:ok, _digest} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp seed_make_cache(_cache_home, _binding, :omit_hex_seed), do: :ok
+
+  defp seed_make_cache(cache_home, _binding, _fault) when is_binary(cache_home) do
+    case Application.get_env(:arbor_shell, :trusted_build_elixir_make_cache) do
+      nil ->
+        :ok
+
+      source when is_binary(source) ->
+        copy_make_cache(source, cache_home)
+
+      _other ->
+        {:error, :invalid_elixir_make_cache}
+    end
+  end
+
+  defp seed_make_cache(_cache_home, _binding, _fault), do: {:error, :invalid_elixir_make_cache}
+
+  defp copy_make_cache(source, dest) do
+    case File.ls(source) do
+      {:ok, names} ->
+        Enum.reduce_while(names, :ok, fn name, :ok ->
+          copy_make_cache_file(source, dest, name)
+        end)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :elixir_make_cache_unavailable}
+    end
+  end
+
+  defp copy_make_cache_file(source, dest, name) do
+    if String.ends_with?(name, ".tar.gz") do
+      from = Path.join(source, name)
+      to = Path.join(dest, name)
+
+      cond do
+        not File.regular?(from) ->
+          {:cont, :ok}
+
+        true ->
+          case File.cp(from, to) do
+            :ok ->
+              case File.chmod(to, 0o600) do
+                :ok -> {:cont, :ok}
+                {:error, _reason} -> {:halt, {:error, :elixir_make_cache_copy_failed}}
+              end
+
+            {:error, _reason} ->
+              {:halt, {:error, :elixir_make_cache_copy_failed}}
+          end
+      end
+    else
+      {:cont, :ok}
+    end
+  end
+
+  defp seed_rebar(_mix_home, _binding, :omit_hex_seed), do: :ok
+
+  defp seed_rebar(mix_home, binding, _fault) when is_binary(mix_home) and is_map(binding) do
+    rel = mix_rebar_rel()
+    source = Path.join([binding.elixir_root.path, ".mix", rel])
+    dest = Path.join(mix_home, rel)
+
+    with true <- File.regular?(source),
+         :ok <- File.mkdir_p(Path.dirname(dest)),
+         :ok <- File.cp(source, dest),
+         :ok <- File.chmod(dest, 0o755) do
+      :ok
+    else
+      false -> {:error, :trusted_build_rebar_unavailable}
+      {:error, _reason} -> {:error, :trusted_build_rebar_unavailable}
+    end
+  end
+
+  defp seed_rebar(_mix_home, _binding, _fault), do: {:error, :trusted_build_rebar_unavailable}
+
+  defp mix_rebar_rel do
+    [major, minor | _rest] = String.split(System.version(), ".")
+    Path.join(["elixir", "#{major}-#{minor}-otp-#{:erlang.system_info(:otp_release)}", "rebar3"])
   end
 
   defp ensure_dir_mode_create(path, mode) do

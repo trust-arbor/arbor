@@ -56,7 +56,18 @@ defmodule Arbor.Contracts.Signal.Event do
 
   @privacy_levels [:public, :internal, :sensitive, :restricted]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :type,
+             :privacy_floor,
+             :privacy_escalation,
+             :correlation_id,
+             :trace_id,
+             :causality_chain,
+             :sensitive_fields,
+             :coalescing_key,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "A signal event with privacy classification"
 

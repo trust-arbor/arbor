@@ -34,7 +34,24 @@ defmodule Arbor.Contracts.AI.Request do
   @valid_taint_levels [:public, :internal, :sensitive, :restricted]
   @valid_billing_classes [:free, :paid, :any]
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :request_id,
+             :parent_request_id,
+             :model,
+             :messages,
+             :tools,
+             :system_prompt,
+             :temperature,
+             :max_tokens,
+             :max_input_tokens,
+             :taint_level,
+             :cache_control,
+             :billing_class,
+             :streaming,
+             :agent_id,
+             :metadata
+           ]}
   typedstruct enforce: true do
     @typedoc "A validated AI/LLM request envelope"
 

@@ -22,7 +22,7 @@ defmodule Arbor.Contracts.Persistence.AppendOperation do
     "fingerprints" => :fingerprints
   }
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:operation_id, :stream_id, :event_ids, :fingerprints]}
   typedstruct enforce: true do
     @typedoc "A bounded, reconcilable append operation"
 

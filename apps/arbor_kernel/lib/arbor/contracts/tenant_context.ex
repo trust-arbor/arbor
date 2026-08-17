@@ -36,7 +36,7 @@ defmodule Arbor.Contracts.TenantContext do
 
   use TypedStruct
 
-  @derive Jason.Encoder
+  @derive {Jason.Encoder, only: [:principal_id, :workspace_root, :display_name, :metadata]}
   typedstruct do
     @typedoc "Identifies the acting principal and their operational scope"
 

@@ -32,7 +32,21 @@ defmodule Arbor.Contracts.Session.Turn do
 
   alias Arbor.Identifiers
 
-  @derive {Jason.Encoder, except: []}
+  @derive {Jason.Encoder,
+           only: [
+             :turn_id,
+             :parent_turn_id,
+             :turn_number,
+             :input,
+             :response,
+             :tool_calls_made,
+             :context_snapshot,
+             :thinking,
+             :usage,
+             :started_at,
+             :completed_at,
+             :metadata
+           ]}
   typedstruct do
     @typedoc "A single completed turn in a session"
 

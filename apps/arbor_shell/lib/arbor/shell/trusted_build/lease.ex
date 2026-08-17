@@ -674,7 +674,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   end
 
   defp retain_release_inventory(state) do
-    case compare_deps_inventory(state) do
+    case cleanup_deps_attestation(state) do
       :ok -> scan_release_inventory(state)
       {:error, reason} -> {:reply, {:error, reason}, %{state | locked: true}}
     end
@@ -778,7 +778,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
     end
   end
 
-  defp compile_and_deps_gate(:release, state), do: compare_deps_inventory(state)
+  defp compile_and_deps_gate(:release, _state), do: :ok
   defp compile_and_deps_gate(_phase, _state), do: :ok
 
   defp build_launch_descriptor(state) do
@@ -853,6 +853,15 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   end
 
   defp after_mix_success(state), do: verify_after_mix(state)
+
+  # Source must stay frozen after every Mix phase. The deps tree is a writable
+  # sandbox root: `deps.get` plus native compilers (elixir_make, sqlite_vec,
+  # exqlite) write into it. Inventory equality is enforced at compile *start*
+  # (`compile_and_deps_gate/2`) so the two-build compare stays meaningful;
+  # requiring it again after compile/release rejects a legitimate Mix.
+  defp verify_after_mix(%{in_flight: phase} = state) when phase in [:compile, :release] do
+    PostPhase.verify_pinned_source_tree(state.identities)
+  end
 
   defp verify_after_mix(state) do
     with :ok <- PostPhase.verify_pinned_source_tree(state.identities) do
@@ -1174,11 +1183,21 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
   defp maybe_attest_cleanup(state) do
     with :ok <- PostPhase.verify_pinned_source_tree(state.identities),
          :ok <- verify_staged_native_for_cleanup(state),
-         :ok <- compare_deps_inventory(state) do
+         :ok <- cleanup_deps_attestation(state) do
       %{state | cleanup_attested: true}
     else
       {:error, reason} ->
         %{state | locked: true, cleanup_attestation_reason: reason}
+    end
+  end
+
+  # Compile may write into the writable deps root. Once compile has completed,
+  # the pre-compile inventory is no longer an after-the-fact pin.
+  defp cleanup_deps_attestation(%{completed: completed} = state) do
+    if :compile in completed do
+      :ok
+    else
+      compare_deps_inventory(state)
     end
   end
 
