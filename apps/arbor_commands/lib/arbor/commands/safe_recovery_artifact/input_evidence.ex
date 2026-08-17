@@ -132,39 +132,55 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.InputEvidence do
   defp selected_digests(root, selected, blobs, timeout_ms) do
     by_path = Map.new(blobs, &{&1.path, &1})
 
-    requests =
-      selected
-      |> Enum.map(fn path -> %{oid: Map.fetch!(by_path, path).oid, type: "blob"} end)
-      |> Enum.uniq_by(& &1.oid)
+    with {:ok, oids} <- selected_oids(selected, by_path) do
+      requests = Enum.map(Enum.uniq(oids), &%{oid: &1, type: "blob"})
 
-    case Git.read_objects(root, requests, timeout_ms,
-           max_object_bytes: @max_file_bytes,
-           max_total_bytes: @max_total_bytes
-         ) do
-      {:ok, objects} ->
-        digests_for(selected, by_path, objects)
+      case Git.read_objects(root, requests, timeout_ms,
+             max_object_bytes: @max_file_bytes,
+             max_total_bytes: @max_total_bytes
+           ) do
+        {:ok, objects} ->
+          digests_for(selected, by_path, objects)
 
-      {:error, "object_attestation_failed"} ->
-        {:error, :total_byte_limit}
+        {:error, "object_attestation_failed"} ->
+          {:error, :total_byte_limit}
 
-      {:error, "git_object_request_limit"} ->
-        {:error, :file_limit}
+        {:error, "git_object_request_limit"} ->
+          {:error, :file_limit}
 
-      {:error, _reason} ->
-        {:error, :selected_object_unreadable}
+        {:error, _reason} ->
+          {:error, :selected_object_unreadable}
+      end
+    end
+  end
+
+  defp selected_oids(selected, by_path) do
+    Enum.reduce_while(selected, {:ok, []}, fn path, {:ok, acc} ->
+      case Map.fetch(by_path, path) do
+        {:ok, %{oid: oid}} -> {:cont, {:ok, [oid | acc]}}
+        :error -> {:halt, {:error, :selected_object_unreadable}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, _reason} = error -> error
     end
   end
 
   defp digests_for(selected, by_path, objects) do
     selected
     |> Enum.reduce_while({:ok, []}, fn path, {:ok, acc} ->
-      oid = Map.fetch!(by_path, path).oid
+      case Map.fetch(by_path, path) do
+        {:ok, %{oid: oid}} ->
+          case Map.fetch(objects, oid) do
+            {:ok, %{type: "blob", content: content}} ->
+              {:cont, {:ok, [%{"path" => path, "sha256" => sha256_hex(content)} | acc]}}
 
-      case Map.fetch(objects, oid) do
-        {:ok, %{type: "blob", content: content}} ->
-          {:cont, {:ok, [%{"path" => path, "sha256" => sha256_hex(content)} | acc]}}
+            _other ->
+              {:halt, {:error, :selected_object_unreadable}}
+          end
 
-        _other ->
+        :error ->
           {:halt, {:error, :selected_object_unreadable}}
       end
     end)

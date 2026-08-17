@@ -207,7 +207,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStoreTest do
           Path.join(root, "apps/arbor_commands/priv/packaging")
         )
 
-        assert {:error, :destination_parent_not_directory} =
+        assert {:error, :destination_parent_symlink} =
                  CommittedStore.write(root, "e", "p")
 
         # Nothing landed outside the root through the symlinked parent.
@@ -235,11 +235,84 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStoreTest do
       end
     end
 
+    test "security regression: a symlinked ancestor targets an outside tree whose packaging child is absent — nothing is created outside",
+         %{root: root} do
+      root = real!(root)
+      outside = outside_dir!()
+
+      try do
+        # Swap `priv` for a symlink to an outside tree WITHOUT `packaging`;
+        # the old mkdir_p path would have created it outside the root.
+        File.rm_rf!(Path.join(root, "apps/arbor_commands/priv"))
+        File.mkdir_p!(Path.join(root, "apps/arbor_commands"))
+        File.ln_s!(outside, Path.join(root, "apps/arbor_commands/priv"))
+
+        assert {:error, :destination_parent_symlink} =
+                 CommittedStore.write(root, "e", "p")
+
+        # The outside tree is completely unchanged.
+        assert File.ls!(outside) == []
+        assert File.exists?(Path.join(outside, "packaging")) == false
+      after
+        File.rm_rf!(outside)
+      end
+    end
+
     test "a directory parked at a destination is refused", %{root: root} do
       root = real!(root)
       File.mkdir_p!(Path.join(root, rel(:envelope)))
 
       assert {:error, :destination_not_regular} = CommittedStore.write(root, "e", "p")
+    end
+
+    test "security regression: a destination swapped to a symlink after admission never redirects the bytes outside",
+         %{root: root} do
+      root = real!(root)
+      outside = outside_dir!()
+      handler_id = {__MODULE__, :before_publish_swap, System.unique_integer()}
+
+      try do
+        # Plant a pre-existing payload so the seam can swap it after admission.
+        plant_payload!(root, "old payload")
+        target = Path.join(outside, "hijack.json")
+        File.write!(target, "outside target")
+
+        # Swap the payload destination to a symlink AFTER admission, BEFORE
+        # publication (the before_publish seam).
+        :telemetry.attach(
+          handler_id,
+          [:arbor, :commands, :safe_recovery_artifact, :before_publish],
+          fn _event, _measurements, %{root: event_root}, %{root: want, target: target} ->
+            if event_root == want do
+              dest = Path.join(event_root, rel(:payload))
+              File.rm!(dest)
+              File.ln_s!(target, dest)
+            end
+
+            :ok
+          end,
+          %{root: root, target: target}
+        )
+
+        assert :ok = CommittedStore.write(root, "envelope", "payload")
+
+        # The outside target was never written through the swapped symlink.
+        assert File.read!(target) == "outside target"
+
+        # The destination is our regular file with our bytes (the atomic
+        # rename replaced the symlink entry itself, never following it).
+        assert {:ok, %{envelope_bytes: "envelope", payload_bytes: "payload"}} =
+                 CommittedStore.read(root)
+
+        # No transient temp files remain in the packaging parent.
+        assert Enum.sort(File.ls!(Path.join(root, "apps/arbor_commands/priv/packaging"))) == [
+                 "safe_recovery_artifact.payload.v1.json",
+                 "safe_recovery_artifact.v1.json"
+               ]
+      after
+        :telemetry.detach(handler_id)
+        File.rm_rf!(outside)
+      end
     end
 
     test "security regression: repeat-write after symlink substitution fails closed, then a clean re-write succeeds",
@@ -283,7 +356,6 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStoreTest do
   defp rel(:payload),
     do: "apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json"
 
-  defp store_name(:envelope), do: "safe_recovery_artifact.v1.json"
   defp store_name(:payload), do: "safe_recovery_artifact.payload.v1.json"
 
   defp plant_envelope!(root, bytes),

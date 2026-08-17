@@ -165,6 +165,40 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CheckCoreTest do
       assert {:error, :invalid_inputs} = CheckCore.compare_inputs(:a, [])
       assert {:error, :invalid_inputs} = CheckCore.compare_inputs([], :b)
     end
+
+    test "a malformed list element fails closed instead of raising" do
+      digest_a = digest(1)
+      digest_b = digest(2)
+      good = [%{"path" => "a", "sha256" => digest_a}]
+
+      for bad <- [
+            [%{"path" => "a"}],
+            [%{"sha256" => digest_a}],
+            [%{"path" => 1, "sha256" => digest_a}],
+            [%{"path" => "a", "sha256" => :not_binary}],
+            [%{"path" => "", "sha256" => digest_a}],
+            ["not a map"],
+            [%{"path" => "a", "sha256" => digest_a, "extra" => 1}]
+          ] do
+        assert {:error, :invalid_inputs} = CheckCore.compare_inputs(good, bad)
+        assert {:error, :invalid_inputs} = CheckCore.compare_inputs(bad, good)
+      end
+
+      # Duplicate rows at equal count are malformed evidence, not a silent
+      # collapse onto one path.
+      committed = [
+        %{"path" => "a", "sha256" => digest_a},
+        %{"path" => "b", "sha256" => digest_b}
+      ]
+
+      duplicated = [
+        %{"path" => "a", "sha256" => digest_a},
+        %{"path" => "a", "sha256" => digest_a}
+      ]
+
+      assert {:error, :invalid_inputs} = CheckCore.compare_inputs(committed, duplicated)
+      assert {:error, :invalid_inputs} = CheckCore.compare_inputs(duplicated, committed)
+    end
   end
 
   defp put_status(manifest, status) do

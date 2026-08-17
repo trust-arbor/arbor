@@ -110,17 +110,32 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CheckCore do
   end
 
   defp compare_paths(committed, observed) do
-    committed_by_path = index_inputs(committed)
-    observed_by_path = index_inputs(observed)
-
-    with :ok <- require_no_missing(committed_by_path, observed_by_path),
-         :ok <- require_no_extra(committed_by_path, observed_by_path) do
-      require_digests(committed_by_path, observed_by_path)
+    with {:ok, committed_by_path} <- index_inputs(committed),
+         {:ok, observed_by_path} <- index_inputs(observed) do
+      with :ok <- require_no_missing(committed_by_path, observed_by_path),
+           :ok <- require_no_extra(committed_by_path, observed_by_path) do
+        require_digests(committed_by_path, observed_by_path)
+      end
     end
   end
 
+  # Every element must be a closed %{"path" => binary, "sha256" => binary}
+  # row; a malformed or duplicate row fails closed instead of raising.
   defp index_inputs(inputs) do
-    Map.new(inputs, fn input -> {Map.fetch!(input, "path"), Map.fetch!(input, "sha256")} end)
+    Enum.reduce_while(inputs, {:ok, %{}}, fn input, {:ok, acc} ->
+      case input do
+        %{"path" => path, "sha256" => digest} = row
+        when map_size(row) == 2 and is_binary(path) and path != "" and is_binary(digest) ->
+          if Map.has_key?(acc, path) do
+            {:halt, {:error, :invalid_inputs}}
+          else
+            {:cont, {:ok, Map.put(acc, path, digest)}}
+          end
+
+        _other ->
+          {:halt, {:error, :invalid_inputs}}
+      end
+    end)
   end
 
   defp require_no_missing(committed, observed) do

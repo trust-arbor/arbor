@@ -165,11 +165,15 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
       |> Map.put("mode", "check")
       |> Map.merge(%{
         "inputs_checked" => length(observed.inputs),
-        "head_commit" => observed.commit
+        "head_commit" => observed.commit,
+        "head_tree" => observed.tree
       })
 
     assert {:ok, human} = Task.render_report(human_checked, false)
-    assert human =~ " inputs=#{length(observed.inputs)} head=#{observed.commit}"
+
+    assert human =~
+             " inputs=#{length(observed.inputs)} head=#{observed.commit} tree=#{observed.tree}"
+
     refute human =~ "ready"
 
     checked = Map.put(human_checked, "output", "json")
@@ -184,6 +188,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
     assert decoded["output"] == "json"
     assert decoded["inputs_checked"] == length(observed.inputs)
     assert decoded["head_commit"] == observed.commit
+    assert decoded["head_tree"] == observed.tree
   end
 
   test "check fails closed with :artifact_missing on a bare root" do
@@ -251,6 +256,20 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifactTest do
 
     assert {:ok, write_line} = Task.render_report(Map.put(write_result, "mode", "write"), false)
     assert write_line =~ " wrote=2 payload_sha256="
+
+    # The JSON renderer must emit the written path list, not fail on it.
+    write_json_result = write_result |> Map.put("mode", "write") |> Map.put("output", "json")
+
+    assert {:ok, write_json} = Task.render_report(write_json_result, true)
+    assert {:ok, write_decoded} = Jason.decode(write_json)
+
+    assert write_decoded["written_paths"] == [
+             "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json",
+             "apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json"
+           ]
+
+    assert write_decoded["mode"] == "write"
+    assert write_decoded["payload_sha256"] == write_result["payload_sha256"]
 
     assert {:error, {:invalid_result_field, "written_paths"}} =
              Task.render_report(Map.put(verified, "mode", "write"), false)

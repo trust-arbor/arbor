@@ -10,6 +10,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
   alias Arbor.Commands.SafeRecoveryArtifact.SourcePolicy
   alias Arbor.Common.SafePath
 
+  @before_publish_event [:arbor, :commands, :safe_recovery_artifact, :before_publish]
+  @max_temp_attempts 8
+
   @envelope_rel "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json"
   @payload_rel "apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json"
 
@@ -57,10 +60,18 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
   @doc """
   Create or replace exactly the two committed artifact files.
 
-  Takes no path arguments. Rejects symlinked or non-regular destinations,
-  symlinked parents, and any drift of the destination set away from the
-  SourcePolicy exclusions. The payload is written before the envelope; the
-  readback byte-compares both files.
+  Takes no path arguments. Every existing ancestor is validated WITHOUT
+  following symlinks before anything is created; missing ancestors are then
+  created one component at a time with post-create re-validation. Each file
+  is published through an exclusive temporary file inside the validated
+  parent followed by an atomic rename over the destination (rename replaces
+  the directory entry itself, so a destination swapped to a symlink after
+  admission can never redirect the bytes outside the root). A destination
+  that is already a symlink, non-regular, or under a redirected parent
+  fails closed. The payload is written before the envelope; the readback
+  byte-compares both files. On success exactly the two committed paths
+  remain -- temporary files exist only transiently and are removed on every
+  failure path.
   """
   @spec write(String.t(), binary(), binary()) :: :ok | {:error, term()}
   def write(root, envelope_bytes, payload_bytes)
@@ -71,6 +82,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
          true <- byte_size(payload_bytes) <= @max_payload_bytes || {:error, :payload_unbounded},
          :ok <- prepare_destination(root, @payload_rel),
          :ok <- prepare_destination(root, @envelope_rel),
+         :ok <- emit_before_publish(root),
          :ok <- write_one(root, @payload_rel, payload_bytes),
          :ok <- write_one(root, @envelope_rel, envelope_bytes) do
       readback(root, envelope_bytes, payload_bytes)
@@ -218,30 +230,93 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
     parent = Path.dirname(lexical)
 
     with :ok <- require_within(parent, root),
-         {:ok, _} <- mkdir_parent(parent),
-         :ok <- require_directory(parent),
-         :ok <- require_parent_unredirected(parent, root) do
+         {:ok, root_identity} <- identity_of(root),
+         {:ok, missing} <- validate_existing_ancestors(root, parent),
+         :ok <- create_missing_ancestors(missing),
+         :ok <- require_parent_unredirected(parent, root),
+         :ok <- require_same_identity(root, root_identity) do
       {:ok, parent}
+    end
+  end
+
+  # Walk the ancestor chain top-down (just under the root). Every component
+  # that already exists must be a real directory per lstat -- a symlinked
+  # ancestor is rejected WITHOUT following it, so nothing is ever created
+  # through a redirection. Components deeper than a missing one must also be
+  # missing (an existing child of a missing parent means a race).
+  defp validate_existing_ancestors(root, parent) do
+    rel = Path.relative_to(parent, root)
+
+    if rel == parent do
+      {:error, :destination_path_escape}
+    else
+      rel
+      |> Path.split()
+      |> Enum.reduce_while({:ok, root, false, []}, fn component,
+                                                      {:ok, current, saw_missing, missing} ->
+        path = Path.join(current, component)
+
+        case File.lstat(path) do
+          {:ok, %File.Stat{type: :directory}} ->
+            if saw_missing,
+              do: {:halt, {:error, :destination_parent_not_directory}},
+              else: {:cont, {:ok, path, saw_missing, missing}}
+
+          {:ok, %File.Stat{type: :symlink}} ->
+            {:halt, {:error, :destination_parent_symlink}}
+
+          {:ok, _other} ->
+            {:halt, {:error, :destination_parent_not_directory}}
+
+          {:error, :enoent} ->
+            # Chain deeper missing components from this (missing) path.
+            {:cont, {:ok, path, true, missing ++ [path]}}
+
+          {:error, _reason} ->
+            {:halt, {:error, :destination_not_writable}}
+        end
+      end)
+      |> case do
+        {:ok, _current, _saw_missing, missing} -> {:ok, missing}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  # Create each missing ancestor one component at a time. Immediately
+  # before each mkdir the immediate parent is re-lstat'd (must still be a
+  # real directory), and after each mkdir the created component is
+  # re-lstat'd and resolved to its real path, which must be unchanged and
+  # inside the root -- so a component swapped to a symlink mid-walk is
+  # caught and the walk never proceeds through it.
+  defp create_missing_ancestors([]), do: :ok
+
+  defp create_missing_ancestors([path | rest]) do
+    parent = Path.dirname(path)
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(parent),
+         :ok <- mkdir_one(path),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(path),
+         {:ok, ^path} <- SafePath.resolve_real(path) do
+      create_missing_ancestors(rest)
+    else
+      {:ok, %File.Stat{type: :symlink}} -> {:error, :destination_parent_symlink}
+      {:ok, _other} -> {:error, :destination_parent_not_directory}
+      {:error, _reason} -> {:error, :destination_not_writable}
+      _other -> {:error, :destination_parent_symlink}
+    end
+  end
+
+  defp mkdir_one(path) do
+    case File.mkdir(path) do
+      :ok -> :ok
+      {:error, :eexist} -> :ok
+      {:error, _reason} -> {:error, :destination_not_writable}
     end
   end
 
   defp require_within(path, root) do
     if SafePath.within?(path, root), do: :ok, else: {:error, :destination_path_escape}
-  end
-
-  defp mkdir_parent(parent) do
-    case File.mkdir_p(parent) do
-      :ok -> {:ok, parent}
-      {:error, _reason} -> {:error, :destination_not_writable}
-    end
-  end
-
-  defp require_directory(parent) do
-    case File.lstat(parent) do
-      {:ok, %File.Stat{type: :directory}} -> :ok
-      {:ok, _other} -> {:error, :destination_parent_not_directory}
-      {:error, _reason} -> {:error, :destination_not_writable}
-    end
   end
 
   defp require_parent_unredirected(parent, root) do
@@ -267,11 +342,103 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CommittedStore do
     end
   end
 
+  # Publish through an exclusive temporary file inside the validated
+  # parent plus an atomic rename. rename/2 replaces the destination's
+  # directory entry itself and never follows a symlink parked at the
+  # destination, so a post-admission symlink swap cannot redirect the bytes
+  # outside the root; the verified parent's identity is revalidated
+  # immediately before the rename.
   defp write_one(root, rel, bytes) do
-    case File.write(Path.join(root, rel), bytes) do
-      :ok -> :ok
-      {:error, _reason} -> {:error, :write_failed}
+    dest = Path.join(root, rel)
+    parent = Path.dirname(dest)
+
+    with {:ok, parent_identity} <- identity_of(parent) do
+      case open_exclusive_temp(parent) do
+        {:ok, temp} ->
+          with :ok <- write_temp(temp, bytes),
+               :ok <- require_same_identity(parent, parent_identity) do
+            case :file.rename(temp.path, dest) do
+              :ok ->
+                :ok
+
+              {:error, _reason} ->
+                discard_temp(temp.path)
+                {:error, :write_failed}
+            end
+          else
+            {:error, _reason} = error ->
+              discard_temp(temp.path)
+              error
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
     end
+  end
+
+  defp open_exclusive_temp(parent), do: open_exclusive_temp(parent, 0)
+
+  defp open_exclusive_temp(parent, attempt) when attempt < @max_temp_attempts do
+    name = ".safe_recovery_artifact.tmp.#{System.unique_integer([:positive, :monotonic])}"
+    path = Path.join(parent, name)
+
+    case File.open(path, [:write, :exclusive, :raw, :binary]) do
+      {:ok, io} ->
+        {:ok, %{path: path, io: io}}
+
+      {:error, :eexists} ->
+        open_exclusive_temp(parent, attempt + 1)
+
+      {:error, _reason} ->
+        {:error, :destination_not_writable}
+    end
+  end
+
+  defp open_exclusive_temp(_parent, _attempt), do: {:error, :temp_unavailable}
+
+  defp write_temp(%{path: path, io: io}, bytes) do
+    case :file.write(io, bytes) do
+      :ok ->
+        :file.close(io)
+        :ok
+
+      {:error, _reason} ->
+        :file.close(io)
+        discard_temp(path)
+        {:error, :write_failed}
+    end
+  end
+
+  defp discard_temp(path) do
+    _ = File.rm(path)
+    :ok
+  end
+
+  defp identity_of(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        {:ok, {stat.inode, stat.major_device, stat.minor_device}}
+
+      {:ok, _other} ->
+        {:error, :destination_parent_not_directory}
+
+      {:error, _reason} ->
+        {:error, :destination_not_writable}
+    end
+  end
+
+  defp require_same_identity(path, identity) do
+    with {:ok, identity_now} <- identity_of(path) do
+      if identity_now == identity, do: :ok, else: {:error, :destination_parent_changed}
+    end
+  end
+
+  # Post-admission, pre-publication TOCTOU seam used by the security
+  # regression tests (mirrors the safe-recovery profile reader seam).
+  defp emit_before_publish(root) do
+    :telemetry.execute(@before_publish_event, %{count: 1}, %{root: root})
+    :ok
   end
 
   defp readback(root, envelope_bytes, payload_bytes) do

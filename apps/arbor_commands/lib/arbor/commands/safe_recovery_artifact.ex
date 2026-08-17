@@ -302,8 +302,10 @@ defmodule Arbor.Commands.SafeRecoveryArtifact do
   defp load_artifact(root) do
     with {:ok, %{envelope_bytes: envelope_bytes, payload_bytes: payload_bytes}} <-
            CommittedStore.read(root),
-         {:ok, envelope_map} <- decode_map(envelope_bytes, :invalid_envelope_json),
-         {:ok, manifest_map} <- decode_map(payload_bytes, :invalid_payload_json),
+         {:ok, envelope_map} <-
+           decode_map(envelope_bytes, :invalid_envelope_json, :invalid_envelope_shape),
+         {:ok, manifest_map} <-
+           decode_map(payload_bytes, :invalid_payload_json, :invalid_payload_shape),
          {:ok, admitted} <-
            CheckCore.admit_artifact(%{envelope_map: envelope_map, manifest_map: manifest_map}),
          :ok <- CheckCore.bind_payload_bytes(envelope_map, payload_bytes) do
@@ -311,15 +313,15 @@ defmodule Arbor.Commands.SafeRecoveryArtifact do
     end
   end
 
-  defp decode_map(bytes, json_error) when is_binary(bytes) do
+  defp decode_map(bytes, json_error, shape_error) when is_binary(bytes) do
     case Jason.decode(bytes) do
       {:ok, %{} = map} when not is_struct(map) -> {:ok, map}
-      {:ok, _other} -> {:error, :invalid_manifest}
+      {:ok, _other} -> {:error, shape_error}
       {:error, _reason} -> {:error, json_error}
     end
   end
 
-  defp decode_map(_bytes, _json_error), do: {:error, :invalid_manifest}
+  defp decode_map(_bytes, _json_error, _shape_error), do: {:error, :invalid_manifest}
 
   defp artifact_result(mode, json, %{envelope: envelope, manifest: manifest}) do
     with {:ok, manifest_digest} <- Encode.manifest_digest(manifest) do

@@ -71,6 +71,28 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ArtifactTest do
       File.write!(Path.join(root, @payload_rel), "{}")
 
       assert {:error, :invalid_envelope_json} = SafeRecoveryArtifact.report(root: root)
+
+      # A valid-JSON non-object envelope names the envelope, not the payload.
+      File.write!(Path.join(root, @envelope_rel), "[1,2]")
+      assert {:error, :invalid_envelope_shape} = SafeRecoveryArtifact.report(root: root)
+
+      # Likewise for a non-object payload.
+      File.write!(
+        Path.join(root, @envelope_rel),
+        Jason.encode!(%{
+          "schema" => "arbor.packaging.safe_recovery_artifact.envelope.v1",
+          "version" => 1,
+          "payload" => %{
+            "schema" => Arbor.Commands.SafeRecoveryArtifact.Encode.schema(),
+            "path" => @payload_rel,
+            "byte_size" => 4,
+            "sha256" => :crypto.hash(:sha256, "[3]") |> Base.encode16(case: :lower)
+          }
+        })
+      )
+
+      File.write!(Path.join(root, @payload_rel), "[3]")
+      assert {:error, :invalid_payload_shape} = SafeRecoveryArtifact.report(root: root)
     end
   end
 

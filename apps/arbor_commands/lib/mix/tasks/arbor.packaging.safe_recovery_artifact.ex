@@ -102,8 +102,28 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
   defp run_mode("report", opts), do: SafeRecoveryArtifact.report(opts)
   defp run_mode("check", opts), do: SafeRecoveryArtifact.check(opts)
 
-  defp run_mode("build_verify", opts), do: SafeRecoveryArtifact.build_verify(opts)
-  defp run_mode("write", opts), do: SafeRecoveryArtifact.write(opts)
+  defp run_mode("build_verify", opts) do
+    with {:ok, _started} <- ensure_live_runtime() do
+      SafeRecoveryArtifact.build_verify(opts)
+    end
+  end
+
+  defp run_mode("write", opts) do
+    with {:ok, _started} <- ensure_live_runtime() do
+      SafeRecoveryArtifact.write(opts)
+    end
+  end
+
+  # The two live modes drive the production two-build compose, which needs
+  # the arbor_shell supervision tree (owned-tree registry, toolchain
+  # authority). Starting it here is closed production bootstrapping, not a
+  # caller-supplied hook.
+  defp ensure_live_runtime do
+    case Application.ensure_all_started(:arbor_shell) do
+      {:ok, _apps} -> {:ok, :started}
+      {:error, reason} -> {:error, {:live_runtime_start_failed, reason}}
+    end
+  end
 
   defp admit_runtime_opts([]), do: :ok
 
@@ -289,8 +309,9 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
 
   defp mode_suffix("check", result, line) do
     with {:ok, inputs} <- fetch_count(result, "inputs_checked"),
-         {:ok, head} <- fetch_binary(result, "head_commit") do
-      {:ok, line <> " inputs=#{inputs} head=#{head}"}
+         {:ok, head} <- fetch_binary(result, "head_commit"),
+         {:ok, tree} <- fetch_binary(result, "head_tree") do
+      {:ok, line <> " inputs=#{inputs} head=#{head} tree=#{tree}"}
     end
   end
 
@@ -343,8 +364,9 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
 
   defp mode_json_fields("check", result) do
     with {:ok, inputs} <- fetch_count(result, "inputs_checked"),
-         {:ok, head} <- fetch_binary(result, "head_commit") do
-      {:ok, [{"inputs_checked", inputs}, {"head_commit", head}]}
+         {:ok, head} <- fetch_binary(result, "head_commit"),
+         {:ok, tree} <- fetch_binary(result, "head_tree") do
+      {:ok, [{"inputs_checked", inputs}, {"head_commit", head}, {"head_tree", tree}]}
     end
   end
 
@@ -362,7 +384,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
   end
 
   defp mode_json_fields("write", result) do
-    with {:ok, written} <- fetch_binary(result, "written_paths") do
+    with {:ok, written} <- fetch_list(result, "written_paths") do
       {:ok, [{"written_paths", written}]}
     end
   end
