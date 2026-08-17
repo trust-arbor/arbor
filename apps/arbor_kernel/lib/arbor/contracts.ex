@@ -27,6 +27,7 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.Security.Capability` - Permission tokens
   - `Arbor.Contracts.Security.Identity` - Cryptographic agent identity
   - `Arbor.Contracts.Security.SignedRequest` - Signed request envelope
+  - `Arbor.Contracts.Extension.Envelope` - Closed activation/invocation JSON envelopes
 
   ### Consensus
   - `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
@@ -91,6 +92,7 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Security.Capability,
       Arbor.Contracts.Security.Identity,
       Arbor.Contracts.Security.SignedRequest,
+      Arbor.Contracts.Extension.Envelope,
       # Consensus
       Arbor.Contracts.Consensus.Protocol,
       Arbor.Contracts.Consensus.Proposal,

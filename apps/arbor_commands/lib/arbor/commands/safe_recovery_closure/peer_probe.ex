@@ -52,26 +52,31 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   defp measure_selected(selected) do
     apps = Enum.map(selected, &app_atom!/1)
     pre = snapshot()
-    started_at = :erlang.monotonic_time()
-    started = start_selected(apps)
 
-    boot_time_us =
-      System.convert_time_unit(:erlang.monotonic_time() - started_at, :native, :microsecond)
+    with {:ok, sys_config} <- apply_release_sys_config() do
+      started_at = :erlang.monotonic_time()
+      {started, start_failures} = start_selected(apps)
 
-    post = snapshot()
-    shutdown = stop_started(started)
+      boot_time_us =
+        System.convert_time_unit(:erlang.monotonic_time() - started_at, :native, :microsecond)
 
-    {:ok,
-     %{
-       "pre_start" => pre,
-       "post_start" => post,
-       "shutdown" => shutdown,
-       "observations" => %{
-         "os_pid" => os_pid(),
-         "boot_time_us" => boot_time_us,
-         "cookie_set" => cookie_set?()
-       }
-     }}
+      post = snapshot()
+      shutdown = stop_started(started)
+
+      {:ok,
+       %{
+         "pre_start" => pre,
+         "post_start" => post,
+         "shutdown" => shutdown,
+         "observations" => %{
+           "os_pid" => os_pid(),
+           "boot_time_us" => boot_time_us,
+           "cookie_set" => cookie_set?(),
+           "sys_config" => sys_config,
+           "start_failures" => Enum.sort_by(start_failures, & &1["name"])
+         }
+       }}
+    end
   end
 
   defp app_atom!(name) do
@@ -82,15 +87,144 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   end
 
   defp start_selected(apps) do
-    Enum.reduce(apps, [], fn app, acc ->
-      case Application.ensure_all_started(app) do
-        {:ok, started} -> acc ++ started
-        {:error, {:already_started, ^app}} -> acc
-        {:error, _reason} -> acc
-      end
+    {started, failed} =
+      Enum.reduce(apps, {[], []}, fn app, {started_acc, failed_acc} ->
+        case Application.ensure_all_started(app) do
+          {:ok, started} ->
+            {started_acc ++ started, failed_acc}
+
+          {:error, {:already_started, ^app}} ->
+            {started_acc, failed_acc}
+
+          {:error, reason} ->
+            {started_acc,
+             [
+               %{
+                 "name" => Atom.to_string(app),
+                 "reason" => format_start_reason(reason)
+               }
+               | failed_acc
+             ]}
+        end
+      end)
+
+    started =
+      started
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(@keep_apps, &1))
+
+    {started, failed}
+  end
+
+  defp format_start_reason(reason) do
+    text = inspect(reason, limit: 8, printable_limit: 64)
+
+    cond do
+      not String.valid?(text) -> "invalid_utf8"
+      byte_size(text) > 256 -> binary_part(text, 0, 256)
+      true -> text
+    end
+  end
+
+  defp apply_release_sys_config do
+    case System.fetch_env("RELEASE_ROOT") do
+      :error ->
+        {:ok, "absent"}
+
+      {:ok, root} ->
+        apply_sys_config_from_root(root)
+    end
+  end
+
+  defp apply_sys_config_from_root(root) do
+    cond do
+      not is_binary(root) or root == "" or not String.valid?(root) ->
+        {:error, :invalid_release_root}
+
+      String.contains?(root, <<0>>) or String.contains?(root, "\n") ->
+        {:error, :invalid_release_root}
+
+      true ->
+        case find_sys_config(root) do
+          {:ok, path} -> consult_and_apply_sys_config(path)
+          :none -> {:ok, "absent"}
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  defp find_sys_config(root) do
+    releases = Path.join(root, "releases")
+
+    case File.lstat(releases) do
+      {:error, :enoent} -> :none
+      {:ok, %{type: :symlink}} -> {:error, :sys_config_releases_symlink}
+      {:ok, %{type: :directory}} -> list_sys_configs(releases)
+      {:ok, _} -> {:error, :sys_config_releases_not_directory}
+      {:error, reason} -> {:error, {:sys_config_releases_unreadable, reason}}
+    end
+  end
+
+  defp list_sys_configs(releases) do
+    case File.ls(releases) do
+      {:ok, entries} -> select_sys_config(releases, Enum.sort(entries))
+      {:error, reason} -> {:error, {:sys_config_releases_unreadable, reason}}
+    end
+  end
+
+  defp select_sys_config(releases, entries) do
+    paths = Enum.flat_map(entries, &sys_config_entry(releases, &1))
+
+    case paths do
+      [] -> :none
+      [{:error, _} = error | _] -> error
+      [path] -> {:ok, path}
+      [_ | _] -> {:error, :sys_config_ambiguous}
+    end
+  end
+
+  defp sys_config_entry(releases, entry) do
+    path = Path.join([releases, entry, "sys.config"])
+
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} -> [path]
+      {:ok, %{type: :symlink}} -> [{:error, :sys_config_symlink}]
+      _ -> []
+    end
+  end
+
+  defp consult_and_apply_sys_config(path) do
+    case :file.consult(String.to_charlist(path)) do
+      {:ok, [config]} when is_list(config) ->
+        case apply_consulted_config(config) do
+          :ok -> {:ok, "applied"}
+          {:error, _} = error -> error
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_sys_config}
+
+      {:error, reason} ->
+        {:error, {:sys_config_unreadable, reason}}
+    end
+  end
+
+  defp apply_consulted_config(config) do
+    Enum.reduce_while(config, :ok, fn
+      {app, kvs}, :ok when is_atom(app) and is_list(kvs) ->
+        if Keyword.keyword?(kvs) do
+          Enum.each(kvs, fn {key, value} ->
+            Application.put_env(app, key, value)
+          end)
+
+          {:cont, :ok}
+        else
+          {:halt, {:error, :invalid_sys_config}}
+        end
+
+      _other, :ok ->
+        {:halt, {:error, :invalid_sys_config}}
     end)
-    |> Enum.uniq()
-    |> Enum.reject(&MapSet.member?(@keep_apps, &1))
   end
 
   defp stop_started(started) do

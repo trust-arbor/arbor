@@ -2,6 +2,7 @@ defmodule Arbor.Security.SignalSync do
   @moduledoc false
 
   alias Arbor.Signals
+  alias Arbor.Signals.Config, as: SignalsConfig
 
   @max_resubscribe_attempts 5
   @resubscribe_base_delay_ms 50
@@ -29,7 +30,11 @@ defmodule Arbor.Security.SignalSync do
   def establish(_role, _events, false), do: {:ok, nil}
 
   def establish(role, events, true) when is_atom(role) and is_list(events) do
-    establish_with_bus(role, events)
+    if SignalsConfig.security_sync_role_configured?(role) do
+      establish_with_bus(role, events)
+    else
+      {:ok, nil}
+    end
   end
 
   @spec handle_info(term(), t() | nil) ::

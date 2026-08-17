@@ -1,0 +1,38 @@
+{
+  "domain": "arbor.extension.artifact_manifest.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "artifact_id": "artifact.vector",
+    "artifact_version": "1.0.0",
+    "author_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+    "compatibility": {
+      "max_host_version": "1",
+      "min_host_version": "1"
+    },
+    "contribution_set_sha256": "abababababababababababababababababababababababababababababababab",
+    "kind": "embedded",
+    "payload_set_sha256": "abababababababababababababababababababababababababababababababab",
+    "provenance_sha256": "abababababababababababababababababababababababababababababababab",
+    "provided_protocols": [
+      {
+        "id": "vector.store",
+        "version": "1"
+      }
+    ],
+    "requested_isolation": "in_vm",
+    "required_protocols": [
+      {
+        "id": "vector.store",
+        "version": "1"
+      }
+    ],
+    "schema": "arbor.extension.artifact_manifest.v1",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "8afff344b6da000d6d9f73a462f3e3f0116e39a634ece58fce216ea3e6d62d2e",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

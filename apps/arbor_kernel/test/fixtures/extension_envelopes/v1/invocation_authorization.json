@@ -1,0 +1,27 @@
+{
+  "action": "execute",
+  "audience": "host.local",
+  "caller_principal": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "capability_id": "cap.vector.1",
+  "correlation_id": "corr.vector.1",
+  "deadline": "2026-08-17T00:00:00Z",
+  "egress_mode": "allow",
+  "generation": 1,
+  "handle_id": "handle.vector.1",
+  "lease_id": "lease.vector.1",
+  "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "operation": "upsert",
+  "protocol_id": "vector.store",
+  "request_sha256": "abababababababababababababababababababababababababababababababab",
+  "resource": "arbor://extension/vector/store",
+  "resource_constraints": {
+    "max_bytes": 4096,
+    "max_ms": 1000
+  },
+  "schema": "arbor.extension.invocation_authorization.v1",
+  "session_id": "session.vector.1",
+  "taint_sha256": "abababababababababababababababababababababababababababababababab",
+  "task_id": "task.vector.1",
+  "trust_decision_id": "trust.vector.1",
+  "version": 1
+}

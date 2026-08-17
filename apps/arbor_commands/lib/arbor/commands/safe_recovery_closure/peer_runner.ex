@@ -36,7 +36,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
          {:ok, commands} <- commands_ebin(),
          {:ok, paths} <- admit_paths(runtime ++ ebins ++ [commands]) do
       cookie = random_cookie()
-      run_owned(cookie, paths)
+      run_owned(cookie, paths, release_root)
     end
   end
 
@@ -53,33 +53,33 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
            {:ok, commands} <- commands_ebin(),
            {:ok, paths} <- admit_paths(runtime ++ ebins ++ [commands]) do
         cookie = random_cookie()
-        run_owned(cookie, paths, profile_or_selected)
+        run_owned(cookie, paths, release_root, profile_or_selected)
       end
     end
 
     def __test_measure__(_, _), do: {:error, :invalid_test_measure}
   end
 
-  defp run_owned(cookie, paths, request \\ "safe_recovery") do
+  defp run_owned(cookie, paths, release_root, request \\ "safe_recovery") do
     parent = self()
     token = make_ref()
     budget_ms = worker_budget_ms()
 
     {worker, worker_mon} =
       spawn_monitor(fn ->
-        owned_worker(parent, token, cookie, paths, request)
+        owned_worker(parent, token, cookie, paths, release_root, request)
       end)
 
     deadline = monotonic_ms() + budget_ms
     await_owned(token, worker, worker_mon, nil, nil, nil, false, false, deadline)
   end
 
-  defp owned_worker(caller, token, cookie, paths, request) do
+  defp owned_worker(caller, token, cookie, paths, release_root, request) do
     guardian = spawn_link(fn -> guard_caller(caller) end)
     send(caller, {token, :guardian, guardian})
 
     result =
-      case start_peer(cookie) do
+      case start_peer(cookie, release_root) do
         {:ok, control} ->
           send(caller, {token, :control, control})
           work_result = invoke_work(control, paths, request)
@@ -116,9 +116,9 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
     {:error, {:peer_cleanup_failed, control, reason}}
   end
 
-  defp start_peer(cookie) do
+  defp start_peer(cookie, release_root) do
     with {:ok, exec} <- pinned_erlang_executable() do
-      case :peer.start_link(fixed_start_opts(exec, cookie)) do
+      case :peer.start_link(fixed_start_opts(exec, cookie, release_root)) do
         {:ok, control, _node} when is_pid(control) -> {:ok, control}
         {:ok, control} when is_pid(control) -> {:ok, control}
         {:error, reason} -> {:error, {:peer_boot_failed, reason}}
@@ -132,7 +132,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
       {:error, {:peer_boot_failed, {kind, reason}}}
   end
 
-  defp fixed_start_opts(exec, cookie) do
+  defp fixed_start_opts(exec, cookie, release_root) do
     %{
       connection: :standard_io,
       exec: String.to_charlist(exec),
@@ -141,6 +141,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
       peer_down: :crash,
       env: [
         {~c"RELEASE_COOKIE", String.to_charlist(cookie)},
+        {~c"RELEASE_ROOT", String.to_charlist(release_root)},
         {~c"MIX_ENV", ~c"prod"},
         {~c"ARBOR_HOME", String.to_charlist(absent_home())}
       ]

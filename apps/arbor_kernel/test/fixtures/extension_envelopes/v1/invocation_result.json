@@ -1,0 +1,19 @@
+{
+  "effect_disposition": "applied",
+  "error_code": null,
+  "generation": 1,
+  "metering": {
+    "bytes": 8,
+    "ms": 1,
+    "tokens": 0
+  },
+  "payload_sha256": "abababababababababababababababababababababababababababababababab",
+  "protocol_id": "vector.store",
+  "protocol_schema": "vector.store.upsert.v1",
+  "request_sha256": "abababababababababababababababababababababababababababababababab",
+  "result_sha256": "abababababababababababababababababababababababababababababababab",
+  "schema": "arbor.extension.invocation_result.v1",
+  "status": "ok",
+  "taint_sha256": "abababababababababababababababababababababababababababababababab",
+  "version": 1
+}

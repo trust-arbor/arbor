@@ -1,0 +1,36 @@
+{
+  "domain": "arbor.extension.activation_transaction.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "admitted_isolation": "in_vm",
+    "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+    "boot_profile_id": "safe_recovery",
+    "boot_profile_sha256": "abababababababababababababababababababababababababababababababab",
+    "deadline": "2026-08-17T00:00:00Z",
+    "generation": 1,
+    "payload_set_sha256": "abababababababababababababababababababababababababababababababab",
+    "principal_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+    "requested_grants": [
+      {
+        "action": "execute",
+        "resource": "arbor://extension/vector/store"
+      }
+    ],
+    "schema": "arbor.extension.activation_transaction.v1",
+    "staged_effects": [
+      {
+        "class": "reversible",
+        "id": "effect.register",
+        "kind": "register_handle"
+      }
+    ],
+    "transaction_id": "txn.vector.1",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "6ffc58c0e8c127bd211ac36a19586dcb930ec517b98051049dd790efbf035d14",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

@@ -1,0 +1,24 @@
+{
+  "domain": "arbor.extension.provider_handle.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "activation_principal": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+    "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+    "generation": 1,
+    "handle_id": "handle.vector.1",
+    "health_epoch": 1,
+    "lease_expires_at": "2026-08-17T00:00:00Z",
+    "lease_id": "lease.vector.1",
+    "protocol_id": "vector.store",
+    "protocol_version": "1",
+    "schema": "arbor.extension.provider_handle.v1",
+    "transport_class": "local_module",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "c0cad930b493bf10e74fbf53c131bb504b197c57a76d170ca0970e61bab5247c",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

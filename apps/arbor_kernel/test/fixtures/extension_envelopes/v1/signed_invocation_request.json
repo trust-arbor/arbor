@@ -1,0 +1,27 @@
+{
+  "domain": "arbor.extension.invocation_request.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "generation": 1,
+    "payload": {
+      "items": [
+        {
+          "id": "doc.1",
+          "text": "hello"
+        }
+      ]
+    },
+    "payload_sha256": "296319bd452ad86965096de82240ec0a0b2af74331cdd92453d7171cedb9907c",
+    "protocol_id": "vector.store",
+    "protocol_schema": "vector.store.upsert.v1",
+    "request_sha256": "abababababababababababababababababababababababababababababababab",
+    "schema": "arbor.extension.invocation_request.v1",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "1d36174375a8ad3a69e11650c09cc9f5a30f9e1715bd9aa94bc539bd758b6afa",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

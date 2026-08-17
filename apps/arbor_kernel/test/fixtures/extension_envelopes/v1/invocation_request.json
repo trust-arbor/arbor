@@ -1,0 +1,17 @@
+{
+  "generation": 1,
+  "payload": {
+    "items": [
+      {
+        "id": "doc.1",
+        "text": "hello"
+      }
+    ]
+  },
+  "payload_sha256": "296319bd452ad86965096de82240ec0a0b2af74331cdd92453d7171cedb9907c",
+  "protocol_id": "vector.store",
+  "protocol_schema": "vector.store.upsert.v1",
+  "request_sha256": "abababababababababababababababababababababababababababababababab",
+  "schema": "arbor.extension.invocation_request.v1",
+  "version": 1
+}

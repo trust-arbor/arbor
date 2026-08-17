@@ -13,6 +13,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     assert {:ok, sample} = PeerRunner.__test_measure__(root, ["e0b3_fixture"])
 
     assert sample["observations"]["cookie_set"] == true
+    assert sample["observations"]["sys_config"] == "applied"
+    assert sample["observations"]["start_failures"] == []
     refute Map.has_key?(sample, "cookie")
     refute inspect(sample) =~ "RELEASE_COOKIE="
 
@@ -65,6 +67,17 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
       """)
 
     File.write!(Path.join(ebin, "Elixir.E0B3Fixture.beam"), bin)
+
+    release_dir = Path.join(root, "releases/0.1.0")
+    File.mkdir_p!(release_dir)
+
+    File.write!(
+      Path.join(release_dir, "sys.config"),
+      """
+      [{kernel, [{logger_level, notice}]}].
+      """
+    )
+
     root
   end
 end

@@ -1,0 +1,14 @@
+{
+  "audience_host_id": "host.local",
+  "audience_install_id": "install.local",
+  "boot_epoch": 1,
+  "boot_profile_sha256": "abababababababababababababababababababababababababababababababab",
+  "expires_at": "2026-08-17T00:00:00Z",
+  "issued_at": "2026-08-17T00:00:00Z",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "schema": "arbor.extension.activation_authorization.v1",
+  "transaction_sha256": "abababababababababababababababababababababababababababababababab",
+  "version": 1
+}

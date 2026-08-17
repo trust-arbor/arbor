@@ -1,0 +1,14 @@
+{
+  "activation_principal": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+  "generation": 1,
+  "handle_id": "handle.vector.1",
+  "health_epoch": 1,
+  "lease_expires_at": "2026-08-17T00:00:00Z",
+  "lease_id": "lease.vector.1",
+  "protocol_id": "vector.store",
+  "protocol_version": "1",
+  "schema": "arbor.extension.provider_handle.v1",
+  "transport_class": "local_module",
+  "version": 1
+}

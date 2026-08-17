@@ -1,0 +1,29 @@
+{
+  "domain": "arbor.extension.invocation_result.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "effect_disposition": "applied",
+    "error_code": null,
+    "generation": 1,
+    "metering": {
+      "bytes": 8,
+      "ms": 1,
+      "tokens": 0
+    },
+    "payload_sha256": "abababababababababababababababababababababababababababababababab",
+    "protocol_id": "vector.store",
+    "protocol_schema": "vector.store.upsert.v1",
+    "request_sha256": "abababababababababababababababababababababababababababababababab",
+    "result_sha256": "abababababababababababababababababababababababababababababababab",
+    "schema": "arbor.extension.invocation_result.v1",
+    "status": "ok",
+    "taint_sha256": "abababababababababababababababababababababababababababababababab",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "e405ad87bac1fddb9531edd6a374ae50af1d91f03ceffd94a339a83104553f25",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

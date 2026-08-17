@@ -70,6 +70,12 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
     assert {:error, :unauthorized} = Signals.subscribe("security.*", fn _signal -> :ok end)
   end
 
+  test "security regression: empty subscriber map is unconfigured local-only transport" do
+    Arbor.Signals.Config.Testing.delete(:security_sync_subscribers)
+    refute Arbor.Signals.Config.security_sync_transport_configured?()
+    refute Arbor.Signals.Config.security_sync_role_configured?(:nonce_cache)
+  end
+
   test "security regression: missing or malformed security-sync config fails closed" do
     owner_name = :"Elixir.Arbor.Security.Identity.NonceCache"
     owner_pid = start_registered_owner(owner_name)

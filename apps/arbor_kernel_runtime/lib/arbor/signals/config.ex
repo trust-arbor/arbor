@@ -94,6 +94,39 @@ defmodule Arbor.Signals.Config do
 
   def security_sync_owner(_role, _event), do: :error
 
+  @doc """
+  Whether any well-formed security-sync role is configured.
+
+  An empty or malformed subscriber map is local-only: stores must start
+  without cluster subscriptions. A configured role still fails closed
+  if that owner cannot subscribe.
+  """
+  @spec security_sync_transport_configured?() :: boolean()
+  def security_sync_transport_configured? do
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
+
+    is_map(subscribers) and
+      Enum.any?(subscribers, fn {role, _entry} -> security_sync_role_configured?(role) end)
+  end
+
+  @doc false
+  @spec security_sync_role_configured?(atom()) :: boolean()
+  def security_sync_role_configured?(role)
+      when is_atom(role) and role not in [nil, true, false] do
+    subscribers = get(:security_sync_subscribers, @default_security_sync_subscribers)
+
+    with true <- is_map(subscribers),
+         %{owner: owner, events: events} <- Map.get(subscribers, role),
+         true <- is_atom(owner) and owner not in [nil, true, false],
+         true <- valid_security_sync_events?(events) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  def security_sync_role_configured?(_role), do: false
+
   defp valid_security_sync_events?(events) do
     is_list(events) and events != [] and Enum.all?(events, &valid_security_sync_event?/1) and
       length(events) == length(Enum.uniq(events))

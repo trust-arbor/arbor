@@ -1,0 +1,24 @@
+{
+  "domain": "arbor.extension.activation_authorization.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "audience_host_id": "host.local",
+    "audience_install_id": "install.local",
+    "boot_epoch": 1,
+    "boot_profile_sha256": "abababababababababababababababababababababababababababababababab",
+    "expires_at": "2026-08-17T00:00:00Z",
+    "issued_at": "2026-08-17T00:00:00Z",
+    "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+    "key_id": "abababababababababababababababababababababababababababababababab",
+    "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "schema": "arbor.extension.activation_authorization.v1",
+    "transaction_sha256": "abababababababababababababababababababababababababababababababab",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "07ca34ad8fe8318985581571bfce38d9e48e2a7060750f03e3ae9289da0f405d",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}

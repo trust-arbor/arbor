@@ -1,0 +1,28 @@
+{
+  "artifact_id": "artifact.vector",
+  "artifact_version": "1.0.0",
+  "author_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "compatibility": {
+    "max_host_version": "1",
+    "min_host_version": "1"
+  },
+  "contribution_set_sha256": "abababababababababababababababababababababababababababababababab",
+  "kind": "embedded",
+  "payload_set_sha256": "abababababababababababababababababababababababababababababababab",
+  "provenance_sha256": "abababababababababababababababababababababababababababababababab",
+  "provided_protocols": [
+    {
+      "id": "vector.store",
+      "version": "1"
+    }
+  ],
+  "requested_isolation": "in_vm",
+  "required_protocols": [
+    {
+      "id": "vector.store",
+      "version": "1"
+    }
+  ],
+  "schema": "arbor.extension.artifact_manifest.v1",
+  "version": 1
+}

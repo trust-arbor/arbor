@@ -482,11 +482,15 @@ defmodule Arbor.Security.Config do
   registered/deregistered. Peer nodes subscribe to these signals and
   invalidate their local caches.
 
-  Default: `true` when relay is enabled, `false` otherwise.
+  Default: `true` when the flag is unset. Effective enablement also
+  requires a usable Signals security-sync subscriber map. An empty or
+  missing map is local-only so a fresh VM can start without aborting
+  on `:unauthorized` cluster subscriptions.
   """
   @spec distributed_signals_enabled?() :: boolean()
   def distributed_signals_enabled? do
-    Application.get_env(@app, :distributed_signals, true)
+    Application.get_env(@app, :distributed_signals, true) and
+      Arbor.Signals.Config.security_sync_transport_configured?()
   end
 
   # ===========================================================================

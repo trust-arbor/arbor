@@ -51,13 +51,17 @@ defmodule Arbor.Security.DistributedTest do
       assert {:ok, ^cap} = CapabilityStore.get(cap.id)
 
       # Simulate a remote revocation signal
-      send(Process.whereis(CapabilityStore), {:signal_received, %{
-        type: :capability_revoked,
-        data: %{
-          capability_ids: [cap.id],
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(CapabilityStore),
+        {:signal_received,
+         %{
+           type: :capability_revoked,
+           data: %{
+             capability_ids: [cap.id],
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -81,13 +85,17 @@ defmodule Arbor.Security.DistributedTest do
       cap_ids = Enum.map(caps, & &1.id)
 
       # Simulate remote bulk revocation
-      send(Process.whereis(CapabilityStore), {:signal_received, %{
-        type: :capabilities_revoked_all,
-        data: %{
-          capability_ids: cap_ids,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(CapabilityStore),
+        {:signal_received,
+         %{
+           type: :capabilities_revoked_all,
+           data: %{
+             capability_ids: cap_ids,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -106,13 +114,17 @@ defmodule Arbor.Security.DistributedTest do
       CapabilityStore.put(cap)
 
       # Simulate a signal from THIS node — should be ignored
-      send(Process.whereis(CapabilityStore), {:signal_received, %{
-        type: :capability_revoked,
-        data: %{
-          capability_ids: [cap.id],
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(CapabilityStore),
+        {:signal_received,
+         %{
+           type: :capability_revoked,
+           data: %{
+             capability_ids: [cap.id],
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -122,10 +134,14 @@ defmodule Arbor.Security.DistributedTest do
 
     test "handles unknown message types gracefully" do
       # Should not crash
-      send(Process.whereis(CapabilityStore), {:signal_received, %{
-        type: :unknown_type,
-        data: %{origin_node: :remote@node}
-      }})
+      send(
+        Process.whereis(CapabilityStore),
+        {:signal_received,
+         %{
+           type: :unknown_type,
+           data: %{origin_node: :remote@node}
+         }}
+      )
 
       Process.sleep(10)
 
@@ -145,13 +161,17 @@ defmodule Arbor.Security.DistributedTest do
       assert {:ok, _pk} = Registry.lookup(identity.agent_id)
 
       # Simulate remote deregistration
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_deregistered,
-        data: %{
-          agent_id: identity.agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_deregistered,
+           data: %{
+             agent_id: identity.agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -162,13 +182,17 @@ defmodule Arbor.Security.DistributedTest do
       {:ok, identity} = Identity.generate(name: "suspend-test")
       :ok = Registry.register(Identity.public_only(identity))
 
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_suspended,
-        data: %{
-          agent_id: identity.agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_suspended,
+           data: %{
+             agent_id: identity.agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -183,13 +207,17 @@ defmodule Arbor.Security.DistributedTest do
       :ok = Registry.suspend(identity.agent_id, "test")
 
       # Resume via signal
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_resumed,
-        data: %{
-          agent_id: identity.agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_resumed,
+           data: %{
+             agent_id: identity.agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -200,13 +228,17 @@ defmodule Arbor.Security.DistributedTest do
       {:ok, identity} = Identity.generate(name: "revoke-test")
       :ok = Registry.register(Identity.public_only(identity))
 
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_revoked,
-        data: %{
-          agent_id: identity.agent_id,
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_revoked,
+           data: %{
+             agent_id: identity.agent_id,
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -217,13 +249,17 @@ defmodule Arbor.Security.DistributedTest do
       {:ok, identity} = Identity.generate(name: "self-signal-test")
       :ok = Registry.register(Identity.public_only(identity))
 
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_deregistered,
-        data: %{
-          agent_id: identity.agent_id,
-          origin_node: node()
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_deregistered,
+           data: %{
+             agent_id: identity.agent_id,
+             origin_node: node()
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -233,13 +269,17 @@ defmodule Arbor.Security.DistributedTest do
 
     test "ignores signals for unknown agents" do
       # Should not crash
-      send(Process.whereis(Registry), {:signal_received, %{
-        type: :identity_suspended,
-        data: %{
-          agent_id: "agent_does_not_exist",
-          origin_node: :remote@node
-        }
-      }})
+      send(
+        Process.whereis(Registry),
+        {:signal_received,
+         %{
+           type: :identity_suspended,
+           data: %{
+             agent_id: "agent_does_not_exist",
+             origin_node: :remote@node
+           }
+         }}
+      )
 
       Process.sleep(10)
 
@@ -251,10 +291,11 @@ defmodule Arbor.Security.DistributedTest do
   # ── Config ──────────────────────────────────────────────────────────
 
   describe "distributed config" do
-    test "distributed_signals defaults to true" do
+    test "distributed_signals defaults to true when a sync transport is configured" do
       original = Application.get_env(:arbor_security, :distributed_signals)
       Application.delete_env(:arbor_security, :distributed_signals)
 
+      assert Arbor.Signals.Config.security_sync_transport_configured?()
       assert Arbor.Security.Config.distributed_signals_enabled?() == true
 
       if original != nil do

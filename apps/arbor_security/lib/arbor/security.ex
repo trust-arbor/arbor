@@ -70,6 +70,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.DisclosureCapability
   alias Arbor.Security.EgressGate
   alias Arbor.Security.Events
+  alias Arbor.Security.ExtensionEnvelopes
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.Keychain
@@ -648,6 +649,24 @@ defmodule Arbor.Security do
     else
       {:error, {:egress_blocked, egress_tier, :invalid_options}}
     end
+  end
+
+  @doc """
+  Validate a closed E0C activation or invocation authorization envelope.
+
+  This is a shape/digest check. Signature and expiry verification use
+  `validate_signed_extension_envelope/2`.
+  """
+  @spec validate_extension_envelope(atom(), term()) :: {:ok, map()} | {:error, atom()}
+  def validate_extension_envelope(kind, document) do
+    ExtensionEnvelopes.validate(kind, document)
+  end
+
+  @doc "Validate a signed E0C authorization envelope."
+  @spec validate_signed_extension_envelope(term(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def validate_signed_extension_envelope(document, opts \\ []) do
+    ExtensionEnvelopes.validate_signed(document, opts)
   end
 
   defp do_authorize_egress(principal_id, egress_tier, opts) do

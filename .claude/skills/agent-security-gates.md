@@ -216,6 +216,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   verbosity, and keep `ExMCP.ACP.Client` at an `:info` module-level floor because
   its debug fallback includes complete unsupported notification payloads.
 
+## 13. Cluster security-sync is optional until subscribers are configured
+
+- **What:** Identity.Registry, NonceCache, and CapabilityStore call
+  `SignalSync.establish/3` at init. Cluster subscriptions are admitted only for
+  the configured registered owner and its fixed events. An empty or missing
+  `security_sync_subscribers` map is local-only. A configured role that cannot
+  subscribe still aborts the store.
+- **Symptom:** a fresh VM or Mix-release peer that never loaded `sys.config`
+  used to fail `arbor_security` with
+  `{:security_sync_subscription_failed, {:subscription_failed, _, :unauthorized}}`.
+- **Action:** leave subscribers unset for single-node/safe-recovery start. Load
+  the release `sys.config` when the node should join cluster sync. Do not treat
+  an unconfigured transport as a cluster, and do not fail-open a configured one.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -237,6 +251,9 @@ another one. It doubles as user documentation — anyone standing up agents need
     because template changes are not retroactive.
 11. For native ACP workers, isolate provider config and bind the session MCP list;
     `mcpServers: []` does not disable provider-global or project MCP servers.
+12. For a single-node or safe-recovery boot, omit `security_sync_subscribers`
+    so security stores start local-only; load release `sys.config` when cluster
+    sync is required.
 
 ## Applied Learning: Security Gates
 

@@ -1,0 +1,29 @@
+{
+  "domain": "arbor.extension.activation_receipt.v1",
+  "issuer_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+  "key_id": "abababababababababababababababababababababababababababababababab",
+  "payload": {
+    "artifact_sha256": "abababababababababababababababababababababababababababababababab",
+    "cleanup_disposition": "none",
+    "effects": [
+      {
+        "class": "reversible",
+        "id": "effect.register",
+        "state": "applied"
+      }
+    ],
+    "generation": 1,
+    "intent_sha256": "abababababababababababababababababababababababababababababababab",
+    "principal_id": "agent_1111111111111111111111111111111111111111111111111111111111111111",
+    "schema": "arbor.extension.activation_receipt.v1",
+    "state": "committed",
+    "transaction_id": "txn.vector.1",
+    "transaction_sha256": "abababababababababababababababababababababababababababababababab",
+    "version": 1
+  },
+  "payload_encoding": "canonical_json_v1",
+  "payload_sha256": "daa47cd0cbca8b4c561da8a71d3138a0f568ca6f7d02692d85b0b0a2b84282ee",
+  "schema": "arbor.extension.signed_envelope.v1",
+  "signature": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "version": 1
+}
