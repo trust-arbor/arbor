@@ -721,17 +721,27 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeTest do
         |> Enum.sort()
 
       assert exports == [
+               {:build_verify, 0},
+               {:build_verify, 1},
+               {:check, 0},
+               {:check, 1},
+               {:check_for_test, 1},
                {:compose, 0},
                {:compose, 1},
                {:compose_from_facts_for_test, 1},
                {:release_source, 1},
                {:release_source_for_test, 1},
                {:release_source_for_test, 2},
+               {:report, 0},
+               {:report, 1},
                {:retry_cleanup, 1},
                {:stage_source, 0},
                {:stage_source, 1},
                {:stage_source_for_test, 0},
-               {:stage_source_for_test, 1}
+               {:stage_source_for_test, 1},
+               {:write, 0},
+               {:write, 1},
+               {:write_from_manifest_for_test, 2}
              ]
     end
   end

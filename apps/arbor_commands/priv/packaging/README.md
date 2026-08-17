@@ -222,6 +222,83 @@ identity; E0B3 measures fresh-VM executable closure. This command does
 not implement either, and a passing E0B1 check is not an E0B2 or E0B3
 result.
 
+## Safe-recovery artifact evidence (E0B2C3c1)
+
+Committed two-build artifact evidence for the C3c0 child-project build.
+Exactly two committed paths carry it, and both are excluded from
+SourcePolicy selection so the artifact never becomes an input to its own
+build:
+
+- `apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json` —
+  a closed bounded envelope (schema
+  `arbor.packaging.safe_recovery_artifact.envelope.v1`) holding only the
+  payload file's schema, path, byte size, and plain SHA-256. It is a
+  descriptor plus digest, never a second unsigned payload.
+- `apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json` —
+  the canonical `arbor.packaging.safe_recovery_artifact.payload.v1`
+  manifest produced by the production two-build compose
+  (`Arbor.Commands.SafeRecoveryArtifact.compose/1`).
+
+The closed CLI (a thin Mix surface over the public facade, never a second
+builder) exposes four mutually exclusive modes:
+
+```bash
+./bin/mix arbor.packaging.safe_recovery_artifact            # report
+./bin/mix arbor.packaging.safe_recovery_artifact --check
+./bin/mix arbor.packaging.safe_recovery_artifact --build-verify
+./bin/mix arbor.packaging.safe_recovery_artifact --write
+```
+
+- **report** reads and admits only the two committed files (envelope
+  binding plus full payload validation). It never writes and never nests
+  a trusted-build.
+- **check** is the cheap, complete gate: report admission, a required
+  `identical` two-build reproducibility result, the frozen lock
+  cross-bindings, and an exact digest binding of EVERY fixed
+  first-party/config/build input consumed by the C3c0 child-project build —
+  every SourcePolicy-selected HEAD blob (the five child applications'
+  sources plus the required config/build files, including `mix.lock`,
+  `.tool-versions`, `bin/mix`, `config/*`, and
+  `build_support/mix_project_paths.exs`) plus the pinned sqlite_vec native
+  overlay. Nothing is downgraded to build-verify-only evidence: a missing,
+  extra, or digest-mismatched input fails check.
+  `architecture_status=blocked` passes check only because the recomputed
+  findings equal the unchanged reviewed blocker set; evidence
+  incompleteness or a reproducibility mismatch fails check rather than
+  being relabeled architecture debt. Check never compiles, never writes,
+  and never nests a trusted-build.
+- **build-verify** is the expensive manager-owned mode: it composes a
+  fresh production two-build via the public facade and requires the fresh
+  evidence to equal the committed evidence (only the Git provenance
+  pointers `source.commit`/`source.tree` are excluded from comparison).
+  It never writes and is never run by the root quality alias.
+- **write** is the only mutator, manager-owned: it composes a fresh
+  two-build, requires `identical` reproducibility, and creates or replaces
+  exactly the two committed paths above — payload first, then envelope,
+  then a full readback admission. There is no caller-selected destination,
+  executable, MFA, digest, sandbox rule, or hook anywhere on the surface;
+  every other destination, symlinked destination, symlinked parent, or
+  extra path fails closed.
+
+The root `quality` alias runs only the cheap check:
+
+```bash
+./bin/mix arbor.packaging.safe_recovery_artifact --check
+```
+
+`--build-verify` and `--write` are never invoked by quality; quality never
+composes and never nests a release build.
+
+**Interim fail-closed state:** until the manager runs the post-review
+live `--write` that produces them, the two committed artifact files are
+intentionally absent, so `--check` (and therefore `mix quality`) fails
+closed with `artifact_missing`. That is the deliberate posture — an
+admitted artifact or a failing gate, never a silently passing one.
+
+E0B3 (RELEASE_COOKIE injection and fresh-VM executable closure) remains
+blocked until the C3c1 receipt lands; nothing in this command implements
+or activates it, and a passing artifact check is not an E0B3 result.
+
 ## Retired K migration gates
 
 The PK-K0 migration census and K4 materialization plan were one-time proof
