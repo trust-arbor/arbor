@@ -360,12 +360,35 @@ defmodule Arbor.Shell.OwnedTree do
   end
 
   defp delete_dir_contents(path, budget, parent, parent_ref) do
-    with :ok <- check_worker_state(parent, parent_ref, budget) do
+    with :ok <- check_worker_state(parent, parent_ref, budget),
+         :ok <- restore_owner_dir_mode(path) do
       case File.ls(path) do
         {:ok, names} -> consume_directory_entries(names, path, budget, parent, parent_ref)
         {:error, :enoent} -> {:ok, budget}
         {:error, _reason} -> {:error, :cleanup_list_failed}
       end
+    end
+  end
+
+  # Trusted-build hex archives are finalized 0555/0444. Unlink needs a writable
+  # parent; the owner can chmod their own directory even when it is 0555.
+  defp restore_owner_dir_mode(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        case File.chmod(path, 0o700) do
+          :ok -> :ok
+          {:error, :enoent} -> :ok
+          {:error, _reason} -> {:error, :cleanup_chmod_failed}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :symlink_rejected}
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, _reason} ->
+        {:error, :cleanup_stat_failed}
     end
   end
 

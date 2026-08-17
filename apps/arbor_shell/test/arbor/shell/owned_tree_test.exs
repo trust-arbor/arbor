@@ -77,6 +77,23 @@ defmodule Arbor.Shell.OwnedTreeTest do
     assert :ok = Shell.remove_owned_tree(identity)
   end
 
+  test "cleanup removes owner-readonly hex-archive mode trees", %{test_root: root} do
+    owned_path = Path.join(root, "owned")
+    assert {:ok, identity} = Shell.create_private_owned_tree(owned_path)
+
+    archives = Path.join(owned_path, "archives/hex-2.5.1/hex-2.5.1")
+    File.mkdir_p!(archives)
+    beam = Path.join(archives, "hex.app")
+    File.write!(beam, "hex")
+    File.chmod!(beam, 0o444)
+    File.chmod!(archives, 0o555)
+    File.chmod!(Path.dirname(archives), 0o555)
+    File.chmod!(Path.dirname(Path.dirname(archives)), 0o555)
+
+    assert :ok = Shell.remove_owned_tree(identity)
+    refute File.exists?(owned_path)
+  end
+
   test "exclusive creation rejects an existing path", %{test_root: root} do
     owned_path = Path.join(root, "owned")
     File.mkdir!(owned_path)
