@@ -148,7 +148,16 @@ defmodule Arbor.Commands.SafeRecoveryClosure.Core do
         [finding("unbounded_shutdown", "shutdown")]
       end
 
-    (class_findings ++ facility_findings ++ module_findings ++ shutdown_findings)
+    start_findings =
+      candidate["selected_applications"]
+      |> Enum.reject(&(&1 in started))
+      |> Enum.map(&finding("selected_start_failed", &1))
+
+    (class_findings ++
+       facility_findings ++
+       module_findings ++
+       shutdown_findings ++
+       start_findings)
     |> Enum.sort_by(&{&1["id"], &1["subject"]})
   end
 

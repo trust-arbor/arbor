@@ -86,7 +86,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
       case Application.ensure_all_started(app) do
         {:ok, started} -> acc ++ started
         {:error, {:already_started, ^app}} -> acc
-        {:error, reason} -> raise "selected start failed: #{inspect(app)} #{inspect(reason)}"
+        {:error, _reason} -> acc
       end
     end)
     |> Enum.uniq()

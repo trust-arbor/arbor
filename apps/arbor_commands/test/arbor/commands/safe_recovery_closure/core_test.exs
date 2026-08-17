@@ -111,6 +111,19 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
       assert {"unbounded_shutdown", "shutdown"} in subjects
     end
 
+    test "reports selected applications that did not start" do
+      candidate = closed_candidate()
+      assert {:ok, evidence} = Core.project(candidate)
+      subjects = Enum.map(evidence["findings"], &{&1["id"], &1["subject"]})
+      refute {"selected_start_failed", "arbor_kernel"} in subjects
+
+      unstarted = put_in(candidate, ["post_start", "applications"], [])
+      assert {:ok, open} = Core.project(unstarted)
+      ids = Enum.map(open["findings"], &{&1["id"], &1["subject"]})
+      assert {"selected_start_failed", "arbor_security"} in ids
+      assert open["closure_status"] == "open"
+    end
+
     test "rejects extra, missing, and unknown fields" do
       assert {:error, :closed_keys} = Core.project(Map.put(closed_candidate(), "hook", true))
       assert {:error, :closed_keys} = Core.project(Map.delete(closed_candidate(), "shutdown"))
@@ -156,7 +169,13 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
       "pre_start" => snapshot([]),
       "post_start" =>
         snapshot(
-          [started("arbor_kernel"), started("kernel")],
+          [
+            started("arbor_kernel"),
+            started("arbor_kernel_runtime"),
+            started("arbor_security"),
+            started("arbor_trust"),
+            started("kernel")
+          ],
           modules: [
             %{"module" => "Elixir.Arbor.Kernel", "application" => "arbor_kernel"},
             %{"module" => "Elixir.Kernel", "application" => "elixir"}

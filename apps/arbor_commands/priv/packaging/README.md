@@ -306,10 +306,16 @@ separate proof from the artifact pair.
 Report and check read only
 `apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json`.
 They never start a peer, inject a cookie, or compose a release. Check
-fails closed on missing evidence, open findings, or unbounded
-shutdown. `architecture_status=blocked` is not architecture readiness.
-This command is not installed in the root `quality` alias; there is
-not yet a reviewed committed closure file.
+admits the committed document; a reviewed blocked-open finding set is
+not a check failure. `architecture_status=blocked` is not architecture
+readiness. The root `quality` alias runs only the cheap check.
+
+A live `--write` on 2026-08-17 from `217da8713` produced
+`closure_status=open` with digest
+`9af47b51246c98173cc66c7059399c40cabbf7366546501c47bf8f7a9fe3c9d1`.
+Selected `arbor_security` / `arbor_trust` failed to start in the fresh
+VM (`security_sync_subscription_failed`); third-party and forbidden
+facility growth is recorded.
 
 `--measure` and `--write` are manager-owned. They stage one trusted
 source lease, run one `arbor_trust` trusted-build, remove

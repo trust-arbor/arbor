@@ -79,6 +79,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.Encode do
   @severities MapSet.new(["blocker"])
   @finding_ids MapSet.new([
                  "forbidden_facility_present",
+                 "selected_start_failed",
                  "third_party_started",
                  "unbounded_shutdown",
                  "unexpected_first_party_started",

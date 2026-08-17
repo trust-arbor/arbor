@@ -15,10 +15,9 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosure do
   They never start a peer, inject a cookie, or compose a release.
   `--measure` and `--write` are manager-owned: they stage one
   trusted-build, hold `rel/arbor_trust`, probe it, and always clean
-  up. Write publishes exactly the committed evidence path. This
-  command is not installed in the root quality alias until a reviewed
-  evidence file exists. `architecture_status=blocked` is not
-  architecture readiness. A passing artifact check is not an E0B3
+  up. Write publishes exactly the committed evidence path. The root
+  quality alias runs only `--check`. `architecture_status=blocked` is
+  not architecture readiness. A passing artifact check is not an E0B3
   result.
   """
 

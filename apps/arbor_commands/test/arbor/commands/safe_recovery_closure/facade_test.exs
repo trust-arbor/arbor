@@ -146,7 +146,14 @@ defmodule Arbor.Commands.SafeRecoveryClosureFacadeTest do
         %{"name" => "kernel", "class" => "runtime"}
       ],
       "pre_start" => empty_snapshot(),
-      "post_start" => empty_snapshot(),
+      "post_start" =>
+        empty_snapshot()
+        |> Map.put("applications", [
+          %{"name" => "arbor_kernel", "state" => "started"},
+          %{"name" => "arbor_kernel_runtime", "state" => "started"},
+          %{"name" => "arbor_security", "state" => "started"},
+          %{"name" => "arbor_trust", "state" => "started"}
+        ]),
       "shutdown" => %{"status" => "bounded", "remaining_names" => []}
     }
   end

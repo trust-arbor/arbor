@@ -18,8 +18,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
     Core,
     Encode,
     EvidenceStore,
-    MeasureShell,
-    PeerRunner
+    MeasureShell
   }
 
   alias Arbor.Common.SafePath
@@ -131,22 +130,27 @@ defmodule Arbor.Commands.SafeRecoveryClosure do
 
   defp dispatch(:write, _admitted, _root, :test), do: {:error, :use_write_from_evidence_for_test}
 
-  defp dispatch(:measure, admitted, root, :test) do
-    cond do
-      is_function(Map.get(admitted, :run_peer), 0) ->
-        project_measurement(admitted.run_peer.(), root, admitted.json)
+  if Mix.env() == :test do
+    defp dispatch(:measure, admitted, root, :test) do
+      cond do
+        is_function(Map.get(admitted, :run_peer), 0) ->
+          project_measurement(admitted.run_peer.(), root, admitted.json)
 
-      is_binary(Map.get(admitted, :release_root)) ->
-        selected = Map.get(admitted, :selected, ["e0b3_fixture"])
+        is_binary(Map.get(admitted, :release_root)) ->
+          selected = Map.get(admitted, :selected, ["e0b3_fixture"])
 
-        project_measurement(
-          PeerRunner.__test_measure__(admitted.release_root, selected),
-          root,
-          admitted.json
-        )
+          project_measurement(
+            Arbor.Commands.SafeRecoveryClosure.PeerRunner.__test_measure__(
+              admitted.release_root,
+              selected
+            ),
+            root,
+            admitted.json
+          )
 
-      true ->
-        {:error, :held_release_unavailable}
+        true ->
+          {:error, :held_release_unavailable}
+      end
     end
   end
 

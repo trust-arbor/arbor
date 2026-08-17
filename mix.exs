@@ -77,7 +77,8 @@ defmodule Arbor.MixProject do
         "arbor.packaging.app_env_inventory --check",
         "arbor.packaging.platform_inventory --check",
         "arbor.packaging.safe_recovery_profile --check",
-        "arbor.packaging.safe_recovery_artifact --check"
+        "arbor.packaging.safe_recovery_artifact --check",
+        "arbor.packaging.safe_recovery_closure --check"
       ],
       security: ["hex.audit", "deps.audit", "sobelow.umbrella"],
       "test.fast": [

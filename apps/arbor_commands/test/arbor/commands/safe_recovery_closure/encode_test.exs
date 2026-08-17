@@ -62,7 +62,11 @@ defmodule Arbor.Commands.SafeRecoveryClosure.EncodeTest do
         %{"name" => "arbor_kernel", "class" => "selected_first_party"}
       ],
       "pre_start" => empty_snapshot(),
-      "post_start" => empty_snapshot(),
+      "post_start" =>
+        empty_snapshot()
+        |> Map.put("applications", [
+          %{"name" => "arbor_kernel", "state" => "started"}
+        ]),
       "shutdown" => %{"status" => "bounded", "remaining_names" => []}
     }
   end
