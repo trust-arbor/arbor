@@ -98,7 +98,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStaging do
 
   defp finish_staging(root, head, selected, blobs, admitted, timeout_ms, kind, identity) do
     with :ok <-
-           reconstruct_source(root, head, identity, admitted, timeout_ms, kind),
+           reconstruct_source(root, head, selected, identity, admitted, timeout_ms, kind),
          source_root = Path.join(identity.path, "source"),
          {:ok, facts} <-
            reconstructed_facts(source_root, selected, blobs, head.object_format),
@@ -152,7 +152,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStaging do
   defp wrap_reconstruct({:cleanup_retained, _, _} = reason), do: {:error, reason}
   defp wrap_reconstruct(reason), do: {:error, {:reconstruct, reason}}
 
-  defp reconstruct_source(root, head, identity, admitted, timeout_ms, :test) do
+  defp reconstruct_source(root, head, selected, identity, admitted, timeout_ms, :test) do
     limits =
       admitted
       |> Map.take([
@@ -170,13 +170,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStaging do
       head.commit,
       head.tree,
       identity,
-      [timeout_ms: timeout_ms] ++ limits
+      [timeout_ms: timeout_ms, materialize_paths: selected] ++ limits
     )
   end
 
-  defp reconstruct_source(root, head, identity, _admitted, timeout_ms, :production) do
+  defp reconstruct_source(root, head, selected, identity, _admitted, timeout_ms, :production) do
     ImmutableGitSource.reconstruct(root, "source", head.commit, head.tree, identity,
-      timeout_ms: timeout_ms
+      timeout_ms: timeout_ms,
+      materialize_paths: selected
     )
   end
 

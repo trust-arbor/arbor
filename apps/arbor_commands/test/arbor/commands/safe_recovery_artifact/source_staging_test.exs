@@ -144,6 +144,11 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
            )
 
     refute "unrelated.txt" in Enum.map(first["build_inputs"], & &1["path"])
+    refute "AGENTS.md" in Enum.map(first["build_inputs"], & &1["path"])
+    assert {:error, :enoent} = File.lstat(Path.join(first["source_root"], "AGENTS.md"))
+    assert {:error, :enoent} = File.lstat(Path.join(first["source_root"], ".agents/skills"))
+    assert File.regular?(Path.join(first["source_root"], "apps/arbor_kernel/lib/a.ex"))
+    assert {:ok, _inventory} = Arbor.Shell.inventory_regular_tree(first["identity"]["path"])
 
     File.write!(Path.join(root, "apps/arbor_kernel/lib/a.ex"), "dirty-not-read\n")
 
@@ -521,13 +526,21 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
   defp build_umbrella!(root) do
     File.mkdir_p!(root)
     files = write_umbrella_files!(root)
+    extra = write_unselected_factory_symlinks!(root)
 
     git_ok!(root, ["init", "--quiet", "--initial-branch=main"])
     git_ok!(root, ["config", "user.email", "e0b2c@example.com"])
     git_ok!(root, ["config", "user.name", "E0B2C"])
     git_ok!(root, ["config", "core.hooksPath", "/dev/null"])
-    git_ok!(root, ["add", "--"] ++ files)
+    git_ok!(root, ["add", "--"] ++ files ++ extra)
     git_ok!(root, ["commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", "base"])
+  end
+
+  defp write_unselected_factory_symlinks!(root) do
+    File.ln_s!("CLAUDE.md", Path.join(root, "AGENTS.md"))
+    File.mkdir_p!(Path.join(root, ".agents"))
+    File.ln_s!("../.claude/skills", Path.join(root, ".agents/skills"))
+    ["AGENTS.md", ".agents/skills"]
   end
 
   defp write_umbrella_files!(root) do

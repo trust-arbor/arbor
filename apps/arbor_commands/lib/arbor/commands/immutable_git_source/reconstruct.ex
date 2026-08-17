@@ -44,6 +44,7 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
          {:ok, timeout_ms} <- admit_timeout(timeout),
          {:ok, commit_oid} <- admit_oid(commit_oid),
          {:ok, expected_tree} <- admit_oid(expected_tree),
+         {:ok, filter} <- admit_materialize_filter(opts, limits),
          :ok <- admit_relative_dest(relative_dest),
          :ok <- Git.reject_object_alternates(source, timeout_ms),
          {:ok, dest} <-
@@ -56,6 +57,7 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
              expected_tree,
              limits,
              branch,
+             filter,
              Git.deadline(timeout_ms)
            ) do
       :ok
@@ -196,14 +198,24 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
     end
   end
 
-  defp reconstruct_into(source, destination, commit_oid, expected_tree, limits, branch, deadline) do
+  defp reconstruct_into(
+         source,
+         destination,
+         commit_oid,
+         expected_tree,
+         limits,
+         branch,
+         filter,
+         deadline
+       ) do
     with {:ok, entries} <-
            tree_entries(source, commit_oid, expected_tree, limits, deadline),
+         :ok <- admit_filter_against_tree(filter, entries),
          :ok <- initialize_repository(destination, commit_oid, branch, deadline),
          {:ok, objects} <-
            load_objects(source, commit_oid, expected_tree, entries, limits, deadline, branch),
          :ok <- import_objects(destination, objects),
-         :ok <- materialize_tree(destination, entries, objects, limits),
+         :ok <- materialize_tree(destination, entries, objects, limits, filter),
          :ok <- attach_commit(destination, commit_oid, branch, deadline),
          {:ok, head_commit} <-
            git_output(destination, ["rev-parse", "--verify", "HEAD^{commit}"], deadline),
@@ -211,19 +223,11 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
          {:ok, actual_tree} <-
            git_output(destination, ["rev-parse", "--verify", "HEAD^{tree}"], deadline),
          :ok <- matching_head_tree(actual_tree, expected_tree),
-         {:ok, ""} <-
-           git_output(
-             destination,
-             ["status", "--porcelain=v1", "--untracked-files=all"],
-             deadline
-           ) do
+         :ok <- attest_worktree(destination, filter, limits, deadline) do
       :ok
     else
       false ->
         {:error, "reconstruction_attestation_failed"}
-
-      {:ok, dirty} when is_binary(dirty) and dirty != "" ->
-        {:error, "repository_not_clean"}
 
       {:error, reason} when is_binary(reason) ->
         {:error, reason}
@@ -395,9 +399,10 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
     end
   end
 
-  defp materialize_tree(destination, entries, objects, limits) when is_map(objects) do
+  defp materialize_tree(destination, entries, objects, limits, filter) when is_map(objects) do
     entries
     |> Enum.filter(&(&1.type == "blob"))
+    |> Enum.filter(&materialize_blob?(&1, filter))
     |> Enum.reduce_while(:ok, fn entry, :ok ->
       with {:ok, path} <- SafePath.safe_join(destination, entry.path),
            {:ok, ^path} <- SafePath.resolve_within(path, destination),
@@ -488,6 +493,123 @@ defmodule Arbor.Commands.ImmutableGitSource.Reconstruct do
       [] -> false
     end
   end
+
+  defp admit_materialize_filter(opts, limits) when is_list(opts) and is_map(limits) do
+    case Keyword.get(opts, :materialize_paths, :all) do
+      :all ->
+        {:ok, :all}
+
+      paths when is_list(paths) ->
+        admit_materialize_paths(paths, limits)
+
+      _other ->
+        {:error, "invalid_reconstruct_request"}
+    end
+  end
+
+  defp admit_materialize_filter(_opts, _limits), do: {:error, "invalid_reconstruct_request"}
+
+  defp admit_materialize_paths(paths, limits) do
+    cond do
+      not Enum.all?(paths, &is_binary/1) ->
+        {:error, "invalid_reconstruct_request"}
+
+      length(paths) != length(Enum.uniq(paths)) ->
+        {:error, "invalid_reconstruct_request"}
+
+      length(paths) > limits.max_entries ->
+        {:error, "unsupported_or_oversized_tree"}
+
+      not Enum.all?(paths, &safe_path?/1) ->
+        {:error, "invalid_reconstruct_request"}
+
+      true ->
+        {:ok, MapSet.new(paths)}
+    end
+  end
+
+  defp admit_filter_against_tree(:all, _entries), do: :ok
+
+  defp admit_filter_against_tree(%MapSet{} = selected, entries) do
+    blobs =
+      entries
+      |> Enum.filter(&(&1.type == "blob"))
+      |> Map.new(&{&1.path, &1})
+
+    Enum.reduce_while(selected, :ok, fn path, :ok ->
+      case Map.fetch(blobs, path) do
+        {:ok, %{mode: mode}} when mode in ["100644", "100755"] ->
+          {:cont, :ok}
+
+        {:ok, %{mode: "120000"}} ->
+          {:halt, {:error, "materialize_symlink"}}
+
+        {:ok, _other} ->
+          {:halt, {:error, "unsupported_or_oversized_tree"}}
+
+        :error ->
+          {:halt, {:error, "materialize_path_missing"}}
+      end
+    end)
+  end
+
+  defp materialize_blob?(_entry, :all), do: true
+  defp materialize_blob?(%{path: path}, %MapSet{} = selected), do: MapSet.member?(selected, path)
+
+  defp attest_worktree(destination, :all, _limits, deadline) do
+    case git_output(
+           destination,
+           ["status", "--porcelain=v1", "--untracked-files=all"],
+           deadline
+         ) do
+      {:ok, ""} -> :ok
+      {:ok, _dirty} -> {:error, "repository_not_clean"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attest_worktree(destination, %MapSet{} = selected, limits, deadline) do
+    case Git.run(
+           destination,
+           ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+           deadline,
+           max_output_bytes: limits.max_listing_bytes
+         ) do
+      {:ok, output} -> classify_filtered_status(output, selected)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp classify_filtered_status(output, selected) do
+    output
+    |> :binary.split(<<0>>, [:global])
+    |> Enum.reject(&(&1 == ""))
+    |> consume_filtered_status(selected)
+  end
+
+  defp consume_filtered_status([], _selected), do: :ok
+
+  defp consume_filtered_status([<<x, y, 32, path::binary>> | rest], selected)
+       when path != "" do
+    cond do
+      rename_or_copy?(x) or rename_or_copy?(y) ->
+        {:error, "repository_not_clean"}
+
+      MapSet.member?(selected, path) ->
+        {:error, "repository_not_clean"}
+
+      x == ?\s and y == ?D ->
+        consume_filtered_status(rest, selected)
+
+      true ->
+        {:error, "repository_not_clean"}
+    end
+  end
+
+  defp consume_filtered_status(_records, _selected), do: {:error, "repository_not_clean"}
+
+  defp rename_or_copy?(code) when code in [?R, ?C], do: true
+  defp rename_or_copy?(_code), do: false
 
   defp matching_tree(actual, expected) do
     if String.downcase(actual) == expected, do: :ok, else: {:error, "invalid_tree"}

@@ -51,6 +51,60 @@ defmodule Arbor.Commands.ImmutableGitSourceTest do
     assert File.read_link!(Path.join(dest, "README.link")) == "README.md"
   end
 
+  test "materialize_paths writes only selected regular blobs and omits unselected symlinks",
+       context do
+    parent = Path.join(context.root, "owned-selected")
+    {:ok, identity} = Shell.create_private_owned_tree(parent)
+
+    assert :ok =
+             ImmutableGitSource.reconstruct(
+               context.source,
+               "source",
+               context.commit,
+               context.tree,
+               identity,
+               timeout_ms: 15_000,
+               materialize_paths: ["README.md"]
+             )
+
+    dest = Path.join(parent, "source")
+    assert git!(dest, ["rev-parse", "HEAD^{commit}"]) == context.commit
+    assert git!(dest, ["rev-parse", "HEAD^{tree}"]) == context.tree
+    assert File.read!(Path.join(dest, "README.md")) == "hello\n"
+    assert {:error, :enoent} = File.lstat(Path.join(dest, "README.link"))
+    assert {:error, :enoent} = File.lstat(Path.join(dest, "lib/a.ex"))
+  end
+
+  test "materialize_paths rejects a selected symlink and a missing path", context do
+    parent = Path.join(context.root, "owned-selected-symlink")
+    {:ok, identity} = Shell.create_private_owned_tree(parent)
+
+    assert {:error, "materialize_symlink"} =
+             ImmutableGitSource.reconstruct(
+               context.source,
+               "source",
+               context.commit,
+               context.tree,
+               identity,
+               timeout_ms: 15_000,
+               materialize_paths: ["README.md", "README.link"]
+             )
+
+    parent_missing = Path.join(context.root, "owned-selected-missing")
+    {:ok, missing_identity} = Shell.create_private_owned_tree(parent_missing)
+
+    assert {:error, "materialize_path_missing"} =
+             ImmutableGitSource.reconstruct(
+               context.source,
+               "source",
+               context.commit,
+               context.tree,
+               missing_identity,
+               timeout_ms: 15_000,
+               materialize_paths: ["README.md", "nope.ex"]
+             )
+  end
+
   test "reconstructs a SHA-256 commit", %{root: root} do
     source = Path.join(root, "source256")
 
@@ -83,6 +137,31 @@ defmodule Arbor.Commands.ImmutableGitSourceTest do
                context.commit,
                context.tree,
                %{path: context.root, type: :directory, device: 0, minor_device: 0, inode: 0}
+             )
+
+    parent = Path.join(context.root, "owned-bad-filter")
+    {:ok, identity} = Shell.create_private_owned_tree(parent)
+
+    assert {:error, :invalid_reconstruct_request} =
+             ImmutableGitSource.reconstruct(
+               context.source,
+               "source",
+               context.commit,
+               context.tree,
+               identity,
+               timeout_ms: 15_000,
+               materialize_paths: "README.md"
+             )
+
+    assert {:error, :invalid_reconstruct_request} =
+             ImmutableGitSource.reconstruct(
+               context.source,
+               "source",
+               context.commit,
+               context.tree,
+               identity,
+               timeout_ms: 15_000,
+               materialize_paths: ["README.md", "README.md"]
              )
 
     parent = Path.join(context.root, "owned-nested")

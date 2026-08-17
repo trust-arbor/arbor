@@ -9,7 +9,7 @@ defmodule Arbor.Commands.ImmutableGitSource do
 
   alias Arbor.Commands.ImmutableGitSource.Reconstruct
 
-  @production_opt_keys MapSet.new([:timeout_ms])
+  @production_opt_keys MapSet.new([:timeout_ms, :materialize_paths])
   @test_limit_keys [
     :max_entries,
     :max_listing_bytes,
@@ -38,7 +38,13 @@ defmodule Arbor.Commands.ImmutableGitSource do
   Reconstruct `commit_oid`/`expected_tree` into `relative_dest` under an
   owner-private parent identity.
 
-  Production options: `:timeout_ms` only.
+  Production options: `:timeout_ms` and `:materialize_paths`.
+
+  `:materialize_paths` is an optional closed list of regular blob paths.
+  When omitted, every supported tree entry is materialized, including
+  safe relative symlinks. When set, only those regular files are written;
+  unselected blobs, including Git mode `120000`, stay absent from the
+  worktree. The imported commit and tree identity is unchanged.
   """
   @spec reconstruct(String.t(), String.t(), String.t(), String.t(), identity(), keyword()) ::
           :ok | {:error, term()}
@@ -62,7 +68,8 @@ defmodule Arbor.Commands.ImmutableGitSource do
             identity,
             @production_limits,
             timeout_ms,
-            require_private: true
+            require_private: true,
+            materialize_paths: Keyword.get(opts, :materialize_paths, :all)
           )
 
         {:error, reason} ->
@@ -101,7 +108,8 @@ defmodule Arbor.Commands.ImmutableGitSource do
         identity,
         limits,
         timeout_ms,
-        require_private: require_private?
+        require_private: require_private?,
+        materialize_paths: Keyword.get(opts, :materialize_paths, :all)
       )
     end
   end
