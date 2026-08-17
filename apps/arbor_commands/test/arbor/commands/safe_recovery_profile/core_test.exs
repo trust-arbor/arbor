@@ -23,13 +23,13 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
 
       assert profile["source_inventory"] == %{
                "platform_inventory_schema" => "arbor.packaging.platform_inventory.v1",
-               "selected_file_count" => 303,
+               "selected_file_count" => 318,
                "selected_index_digest" =>
-                 "2232c36a5ed7c8f3e06e01fabb0fdb20e1579ee25dda2d9d8df34b5cc494afde",
+                 "1c55e299738edbbea68359f91332ad2420df679a0b7e8040b6ef53cbf8ed21a2",
                "entries_digest" =>
-                 "ec219b075dfb941f213df9feb46f248f05aa1f61259a402cde4250165bad0156",
+                 "75cd2f9aa708c68aa3c5981ce00c82a339ca40d3a351caf5a05a18f081943cb0",
                "review_digest" =>
-                 "f674935bc507568df3cb701f097becff7299287de13772b0d8fbd63e4aac2c7a"
+                 "dd307c2ab8365077471a9c2e4a62b79bb5869b0ff5b732ba30390b89e0394172"
              }
 
       assert Enum.map(profile["selected_applications"], & &1["name"]) == [
@@ -319,13 +319,13 @@ defmodule Arbor.Commands.SafeRecoveryProfile.CoreTest do
       assert {:error, {:invalid_field, "selected_file_count", :count_mismatch}} =
                Core.project(%{
                  candidate
-                 | "source_inventory" => %{inventory | "selected_file_count" => 304}
+                 | "source_inventory" => %{inventory | "selected_file_count" => 319}
                })
 
       assert {:error, {:invalid_field, "selected_file_count", :not_an_integer}} =
                Core.project(%{
                  candidate
-                 | "source_inventory" => %{inventory | "selected_file_count" => "303"}
+                 | "source_inventory" => %{inventory | "selected_file_count" => "318"}
                })
 
       assert {:error, {:invalid_field, "rationale", :blank}} =

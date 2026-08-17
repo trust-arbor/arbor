@@ -20,7 +20,7 @@ defmodule Arbor.Commands.SafeRecoveryProfile do
 
   @default_profile_rel "apps/arbor_commands/priv/packaging/safe_recovery_profile.v1.json"
   @max_profile_bytes 256 * 1024
-  @expected_profile_digest "55fda49eb5389dcb7acd8d90ccd3e20961cf5176a563eb75c32f6848e227d2d5"
+  @expected_profile_digest "4a377b057ac0ea05c5d97f19b07c6e4b421adbba66797efdc381066ec479dd94"
   @profile_io_timeout_ms 1_000
   @profile_opened_event [:arbor, :commands, :safe_recovery_profile, :opened]
 

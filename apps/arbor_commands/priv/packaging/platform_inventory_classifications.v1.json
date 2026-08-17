@@ -1117,7 +1117,7 @@
   },
   {
     "path": "apps/arbor_security/lib/arbor/security/capability_store.ex",
-    "blob_oid": "f197bc6a1bd9a255c3720b0dc57ec3ad8a9fd968",
+    "blob_oid": "67563169b81e77ee004846ca84b9cd8d69d6f705",
     "class": "trusted_host",
     "rationale": "This service is the authoritative live capability index and owns replacement, expiration, usage, cascading revocation, acknowledged mutation, and peer invalidation. Its configurable durable backend must split, but capability and revocation state must remain available to safe recovery."
   },
@@ -1375,7 +1375,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell.ex",
-    "blob_oid": "00ba8dc08a961619385fc0fe9110adca31a93ede",
+    "blob_oid": "d28e2e024c5a9d839412a025ac8c21406fefc708",
     "class": "trusted_host",
     "rationale": "Owns the public Shell facade, agent authorization, command disclosure boundary, and effect lifecycle entry points. Its trusted-system bypasses and native or Apple provider dispatch are mixed responsibilities that must split into narrow host bootstrap and authorized provider proxies."
   },
@@ -1525,7 +1525,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/application.ex",
-    "blob_oid": "22861d6ecde00779a74cec8640db41a9e6a77ceb",
+    "blob_oid": "0ec6dd80a97f3a44f4f65ac0801e24bbb5f461d4",
     "class": "trusted_host",
     "rationale": "Owns Shell's ordered supervision and the planned shutdown barrier that protects process ownership and recovery. It currently starts optional Apple and Linux provider children directly; profile activation must split those children from the minimal host tree."
   },
@@ -1543,9 +1543,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/config.ex",
-    "blob_oid": "e052c68e2ed5fbd24bc28e307dd12b74d3380290",
+    "blob_oid": "5c65b66ab292334d9fce94adbb5778f2b9a45bfa",
     "class": "optional_extension",
-    "rationale": "Validates only Apple Container locators, Linux baseline locators, Apple image policy, and Apple journal path. Its configuration surface belongs to that optional platform-specific provider family."
+    "rationale": "Validates Apple Container locators, Linux baseline locators, Apple image policy, Apple journal path, and the optional trusted-build Hex cache and archive locators. The provider-family configuration surface still belongs to that optional family and must split from the first-party build locators."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/executable_policy.ex",
@@ -1567,7 +1567,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/executor.ex",
-    "blob_oid": "0b5b10538196aeb6145849dafe4fdfc5f36e2e37",
+    "blob_oid": "df7a45d7c0f522d5c02b324066dd016737c1454d",
     "class": "system_extension",
     "rationale": "Implements bounded native direct-argv execution and maps native process-group terminals into Shell results. It is the first-party native executor required by the normal profile, while enforcement independent of backend choice must remain in the host."
   },
@@ -1579,7 +1579,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_builder.ex",
-    "blob_oid": "043eee2b6cccaa5763f8036e9c823ef9beae86f5",
+    "blob_oid": "30442e81be178f065e08f67b35099f35b290c0df",
     "class": "optional_extension",
     "rationale": "Builds bounded Linux arm64 dependency manifests from an explicit source tree, including ELF architecture checks. This operator tooling provisions an optional provider dependency set."
   },
@@ -1591,7 +1591,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_filesystem.ex",
-    "blob_oid": "d1f7a7a4eb83ca28d9ef57f827c2f10a78202f93",
+    "blob_oid": "df37e9891f05140e26b85e3876b787b42e433ff0",
     "class": "optional_extension",
     "rationale": "Provides symlink, device, identity, and bounded-file operations for building and verifying the Linux dependency baseline. Its responsibility is scoped to optional provider provisioning."
   },
@@ -1609,9 +1609,15 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/owned_tree.ex",
-    "blob_oid": "c0902da01c8d7afb6cc688f7cd6be1e2513ce993",
-    "class": "optional_extension",
-    "rationale": "Creates and identity-checks private temporary trees used by the Linux baseline materializer, with bounded no-symlink cleanup. As currently scoped and consumed, it is provider materialization support; a reusable host cleanup primitive would need extraction."
+    "blob_oid": "15437c62db77f0d947550291c5ce43d55a1c3b6e",
+    "class": "system_extension",
+    "rationale": "Creates, identity-checks, and budgetedly cleans up private temporary trees with absence proofs, consumed by both provider materialization and the trusted-build source and workspace lifecycle. It is a first-party tree primitive; purpose binding and ownership authority stay with the owned-tree registry."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/owned_tree_registry.ex",
+    "blob_oid": "e9f11a38395136d92b18e0f58f6677303d327b27",
+    "class": "trusted_host",
+    "rationale": "Owns registration, purpose binding, generation-checked checkout, and identity-verified transitions for private owned trees. These owner-only transitions are the fixed tree-ownership authority that both trusted-build and provider materialization must pass and cannot replace."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/port_session.ex",
@@ -1621,9 +1627,15 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/process_group.ex",
-    "blob_oid": "e82ed5628896f049cdb8d4bc4c4b0fa94178b29b",
+    "blob_oid": "35e35f289db82d886b3a6229ee6b1514f93611e6",
     "class": "system_extension",
     "rationale": "Owns the native port protocol and process-group launcher used by the host OS executor, including input framing and group termination. This is a normal-profile native backend; independent host verification must constrain its launch and terminal receipts."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/regular_tree_inventory.ex",
+    "blob_oid": "dfad9899947cd4b58a0b7b7ec340413e7f351648",
+    "class": "system_extension",
+    "rationale": "Implements the bounded regular-tree scan with per-file sha256, mode-exclusive digests, and entry, byte, depth, timeout, and heap ceilings. It is first-party build-evidence machinery; the verification policy over its documents stays in identity and post-phase checks."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/runtime_config_loader.ex",
@@ -1654,6 +1666,84 @@
     "blob_oid": "14277828d36342d64f041766e71033e7061eaded",
     "class": "optional_extension",
     "rationale": "Maintains fingerprint-only boot-epoch binding and poisoning for Apple control-plane, image, and Linux baseline authorities. Its current responsibility is internal consistency across the optional provider's restarts, not generic Platform activation."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build.ex",
+    "blob_oid": "14fa74b026074a8eba5129dcbdcf69b2d6a183fd",
+    "class": "trusted_host",
+    "rationale": "Owns the trusted-build admission facade: closed request admission, fixed project-root preflight pinning, Darwin-only availability, generation-checked authority and registry checkout, and lease-token phase execution. Any build provider must pass this policy; it is not a replaceable mechanism."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/fallback_owner.ex",
+    "blob_oid": "9a7eb9f3a3c3da3dc05f90926860738d712a7c16",
+    "class": "system_extension",
+    "rationale": "Runs the fallback owner that claims and executes the fallback descriptor only after a lease-issued permit, failing closed on timeout. It is first-party recovery mechanism; launch authorization remains with the lease."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/hex_seed.ex",
+    "blob_oid": "13b4322a56fcbb05694e2e24f6c7fdbd1915a262",
+    "class": "system_extension",
+    "rationale": "Seeds Hex cache and archive trees through a three-stage copy, verify, and finalize discipline under explicit mode policies. It is first-party supply-copying mechanism; the pinned identities it must reproduce stay with the toolchain authority."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/identity.ex",
+    "blob_oid": "df8dc9f44464ef3de2ae5f41d261baf0763765e3",
+    "class": "trusted_host",
+    "rationale": "Computes bounded file, directory, and mode-inclusive tree identities, verifies owned identities, and pins descendant directories. This generic pinning machinery constrains every source, workspace, and toolchain tree and is required host verification, not replaceable provider mechanism."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/inventory.ex",
+    "blob_oid": "a76ef05b05dc8345fb2c55cc5f36a7893efd77dd",
+    "class": "system_extension",
+    "rationale": "Snapshots deps and release trees into closed-schema inventory documents for build evidence. It is first-party evidence production; admission and comparison of that evidence remain host policy in the lease and post-phase verification."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/lease.ex",
+    "blob_oid": "8fdf086d3793f83bcf453b4c5c221328f046e2cf",
+    "class": "trusted_host",
+    "rationale": "Owns the unforgeable lease token, owner binding, phase admission and terminal commit, permit-gated fallback, bounded retrying cleanup with kill helper, and staged overlay and cookie operations. These owner-only transitions are the fixed ownership authority over build trees and workspaces."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/native_fs.ex",
+    "blob_oid": "11a9408c873aab5cbd2065ed7297e844eda57b31",
+    "class": "system_extension",
+    "rationale": "Performs bounded descriptor reads through the bundled first-party arbor_shell_launcher with exit-code-mapped failures and symlink, hardlink, and identity rejection. It is the native read backend; the policy constraining it stays in post-phase verification."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/native_overlay.ex",
+    "blob_oid": "3ad5231184c4402ea62418543879e2df44a6dcd5",
+    "class": "system_extension",
+    "rationale": "Defines the Arbor-authored pin and descriptor for the third-party sqlite_vec Hex overlay identity, package, versions, target, size, sha256, and logical and staging paths, placeable only after lease admission. The descriptor source is first-party build-path machinery; the pinned payload it names is a replaceable external artifact, and its verification stays with host post-phase checks."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/phase.ex",
+    "blob_oid": "b507776b3818e7c3fd1634a0b25a53bad1167bc5",
+    "class": "system_extension",
+    "rationale": "Runs one admitted phase as a permit-gated process that executes the pinned plan through the native Executor and commits the terminal result to the lease before replying. It is the first-party phase runner; permit issuance and launch authorization stay with the lease."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/plan.ex",
+    "blob_oid": "ecabc43a03b563e445a3242f54b1496e4d4652e2",
+    "class": "trusted_host",
+    "rationale": "Defines the closed phase set and order, the fixed argv per phase, bounded timeouts, the writable-name allowlist, and the pinned environment vocabulary for build execution. Build runners consume these ceilings but cannot choose or weaken them."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/post_phase.ex",
+    "blob_oid": "7d5545722f46adb145cfd7e2c455c3e6d390ffb7",
+    "class": "trusted_host",
+    "rationale": "Verifies after every phase that pinned source, project, wrapper, and overlay identities are unchanged, that overlay hardlinks appear only after admission, and that the release COOKIE is unlinked and not recreated. This post-effect drift verification is non-replaceable host enforcement."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/request.ex",
+    "blob_oid": "82e6a8f1fe2f54dbb17f192db7610a87e65a5b91",
+    "class": "trusted_host",
+    "rationale": "Defines the closed request and source-identity schema, exact keys, directory identity shape, and bounded path bytes, that fail-closes every acquire. This admission vocabulary is fixed build-path policy no provider may extend or bypass."
+  },
+  {
+    "path": "apps/arbor_shell/lib/arbor/shell/trusted_build_toolchain_authority.ex",
+    "blob_oid": "ba02e911b100411ca8e4870c60130479fec542f4",
+    "class": "trusted_host",
+    "rationale": "Pins and privately owns the Erlang, Elixir, and Hex toolchain tree identities bound to the boot epoch and serves them only through generation-checked checkout. Build code consumes this pinned binding; it cannot choose or replace toolchain identity."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_path.ex",
