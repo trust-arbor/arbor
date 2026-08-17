@@ -169,4 +169,101 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
   def extract_id(nil), do: nil
   def extract_id(%{"id" => id}) when is_integer(id) or is_binary(id), do: id
   def extract_id(_), do: nil
+
+  # ===========================================================================
+  # Convert: Streamable HTTP session headers for the stdio proxy
+  # ===========================================================================
+
+  @session_header "mcp-session-id"
+  @protocol_header "mcp-protocol-version"
+
+  @doc """
+  Read a server-issued `mcp-session-id` from HTTP response headers.
+
+  Header names are matched case-insensitively and may arrive as strings or
+  `:httpc` charlists.
+  """
+  @spec session_id_from_headers([{term(), term()}]) :: String.t() | nil
+  def session_id_from_headers(headers) when is_list(headers) do
+    fetch_header(headers, @session_header)
+  end
+
+  @doc """
+  Read `mcp-protocol-version` from HTTP response headers.
+  """
+  @spec protocol_version_from_headers([{term(), term()}]) :: String.t() | nil
+  def protocol_version_from_headers(headers) when is_list(headers) do
+    fetch_header(headers, @protocol_header)
+  end
+
+  @doc """
+  Read `params.protocolVersion` from an `initialize` JSON-RPC body.
+  """
+  @spec protocol_version_from_initialize_body(binary()) :: String.t() | nil
+  def protocol_version_from_initialize_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"method" => "initialize", "params" => %{"protocolVersion" => version}}}
+      when is_binary(version) and version != "" ->
+        version
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Adopt any session/protocol headers from an upstream HTTP response.
+
+  Missing headers leave the current values in place so a 202 notification
+  cannot wipe a session issued on `initialize`.
+  """
+  @spec adopt_http_session(map(), [{term(), term()}] | nil) :: map()
+  def adopt_http_session(session, headers) when is_map(session) do
+    session
+    |> maybe_put(:session_id, session_id_from_headers(List.wrap(headers)))
+    |> maybe_put(:protocol_version, protocol_version_from_headers(List.wrap(headers)))
+  end
+
+  @doc """
+  Extra headers the proxy must replay on later POSTs to the same session.
+  """
+  @spec extra_forward_headers(map()) :: [{String.t(), String.t()}]
+  def extra_forward_headers(session) when is_map(session) do
+    []
+    |> maybe_header(@session_header, Map.get(session, :session_id))
+    |> maybe_header(@protocol_header, Map.get(session, :protocol_version))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_header(headers, _name, value) when value in [nil, ""], do: headers
+  defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
+
+  defp fetch_header(headers, name) do
+    Enum.find_value(headers, fn
+      {key, value} ->
+        if header_name_eq?(key, name), do: nonempty_header_value(value)
+
+      _other ->
+        nil
+    end)
+  end
+
+  defp header_name_eq?(key, name) when is_list(key),
+    do: header_name_eq?(List.to_string(key), name)
+
+  defp header_name_eq?(key, name) when is_atom(key),
+    do: header_name_eq?(Atom.to_string(key), name)
+
+  defp header_name_eq?(key, name) when is_binary(key),
+    do: String.downcase(key) == name
+
+  defp header_name_eq?(_key, _name), do: false
+
+  defp nonempty_header_value(value) when is_list(value),
+    do: nonempty_header_value(List.to_string(value))
+
+  defp nonempty_header_value(value) when is_binary(value) and value != "", do: value
+  defp nonempty_header_value(_value), do: nil
 end

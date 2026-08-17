@@ -272,6 +272,43 @@ defmodule Arbor.Gateway.Signer.ProxyCoreTest do
     end
   end
 
+  describe "streamable HTTP session header helpers" do
+    test "reads mcp-session-id from mixed string and charlist headers" do
+      assert ProxyCore.session_id_from_headers([{~c"Mcp-Session-Id", ~c"sess-1"}]) == "sess-1"
+      assert ProxyCore.session_id_from_headers([{"mcp-session-id", "sess-2"}]) == "sess-2"
+      assert ProxyCore.session_id_from_headers([{"content-type", "application/json"}]) == nil
+    end
+
+    test "keeps an existing session when the later response omits the header" do
+      adopted =
+        %{session_id: "sess-1", protocol_version: "2025-03-26"}
+        |> ProxyCore.adopt_http_session([{"content-type", "application/json"}])
+
+      assert adopted.session_id == "sess-1"
+      assert adopted.protocol_version == "2025-03-26"
+    end
+
+    test "replays adopted session and protocol headers" do
+      assert ProxyCore.extra_forward_headers(%{
+               session_id: "sess-1",
+               protocol_version: "2025-03-26"
+             }) == [
+               {"mcp-session-id", "sess-1"},
+               {"mcp-protocol-version", "2025-03-26"}
+             ]
+
+      assert ProxyCore.extra_forward_headers(%{session_id: nil, protocol_version: nil}) == []
+    end
+
+    test "reads protocolVersion from an initialize body" do
+      body =
+        ~s({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}})
+
+      assert ProxyCore.protocol_version_from_initialize_body(body) == "2025-03-26"
+      assert ProxyCore.protocol_version_from_initialize_body(~s({"method":"tools/list"})) == nil
+    end
+  end
+
   describe "round-trip property: client signs, server can verify the canonical bytes" do
     test "the bytes the client signs match what the server would reconstruct" do
       # This is the property that the proxy's whole correctness depends on:

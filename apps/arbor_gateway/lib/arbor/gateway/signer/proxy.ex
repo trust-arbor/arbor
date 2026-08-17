@@ -52,7 +52,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
   @type config :: %{
           key_material: ProxyCore.key_material(),
           upstream_url: String.t(),
-          upstream_path: String.t()
+          upstream_path: String.t(),
+          session_id: String.t() | nil,
+          protocol_version: String.t() | nil
         }
 
   # ===========================================================================
@@ -97,7 +99,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
        %{
          key_material: key_material,
          upstream_url: upstream_url,
-         upstream_path: upstream_path
+         upstream_path: upstream_path,
+         session_id: nil,
+         protocol_version: nil
        }}
     end
   end
@@ -138,8 +142,7 @@ defmodule Arbor.Gateway.Signer.Proxy do
         :ok
 
       line when is_binary(line) ->
-        handle_line(line, config)
-        loop(config)
+        loop(handle_line(line, config))
     end
   end
 
@@ -147,10 +150,15 @@ defmodule Arbor.Gateway.Signer.Proxy do
     trimmed = String.trim_trailing(line, "\n")
 
     if trimmed == "" do
-      :ok
+      config
     else
-      response = sign_and_forward(trimmed, config)
+      log_stderr("[arbor.signer] -> #{summarize_request(trimmed)}")
+
+      {response, config} =
+        sign_and_forward(trimmed, maybe_remember_protocol_version(config, trimmed))
+
       write_response(response)
+      config
     end
   rescue
     e ->
@@ -161,7 +169,17 @@ defmodule Arbor.Gateway.Signer.Proxy do
       log_stderr("[arbor.signer] handle_line crashed: #{Exception.message(e)}")
       err = ProxyCore.jsonrpc_error_response(nil, -32_603, "internal proxy error")
       write_response(Jason.encode!(err))
+      config
   end
+
+  defp maybe_remember_protocol_version(%{protocol_version: nil} = config, body) do
+    case ProxyCore.protocol_version_from_initialize_body(body) do
+      nil -> config
+      version -> %{config | protocol_version: version}
+    end
+  end
+
+  defp maybe_remember_protocol_version(config, _body), do: config
 
   defp sign_and_forward(body, config) do
     case ProxyCore.sign_request(config.key_material, "POST", config.upstream_path, body) do
@@ -172,45 +190,64 @@ defmodule Arbor.Gateway.Signer.Proxy do
         log_stderr("[arbor.signer] signing failed: #{inspect(reason)}")
         id = parse_id_safely(body)
 
-        ProxyCore.jsonrpc_error_response(id, -32_603, "proxy signing error", %{
-          "reason" => inspect(reason)
-        })
-        |> Jason.encode!()
+        response =
+          ProxyCore.jsonrpc_error_response(id, -32_603, "proxy signing error", %{
+            "reason" => inspect(reason)
+          })
+          |> Jason.encode!()
+
+        {response, config}
     end
   end
 
   defp forward_signed(body, signed, config) do
     auth_header = ProxyCore.authorization_header_value(signed)
 
-    headers = [
-      {"authorization", auth_header},
-      {"content-type", "application/json"}
-    ]
+    headers =
+      [
+        {"authorization", auth_header},
+        {"content-type", "application/json"}
+      ] ++ ProxyCore.extra_forward_headers(config)
 
     case do_post(config.upstream_url, body, headers) do
-      {:ok, %{status: 200, body: resp_body}} when is_binary(resp_body) ->
-        resp_body
+      {:ok, %{status: 200, body: resp_body} = resp} when is_binary(resp_body) ->
+        {resp_body, adopt_upstream_session(config, resp)}
 
-      {:ok, %{status: status, body: resp_body}}
+      {:ok, %{status: status, body: resp_body} = resp}
       when status in [202, 204] and resp_body in ["", nil] ->
+        config = adopt_upstream_session(config, resp)
+
         if jsonrpc_notification?(body) do
-          :no_response
+          {:no_response, config}
         else
-          upstream_error_response(status, resp_body, body)
+          {upstream_error_response(status, resp_body, body), config}
         end
 
       {:ok, %{status: status, body: resp_body}} ->
-        upstream_error_response(status, resp_body, body)
+        {upstream_error_response(status, resp_body, body), config}
 
       {:error, reason} ->
         log_stderr("[arbor.signer] upstream request failed: #{inspect(reason)}")
         id = parse_id_safely(body)
 
-        ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable", %{
-          "reason" => inspect(reason)
-        })
-        |> Jason.encode!()
+        response =
+          ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable", %{
+            "reason" => inspect(reason)
+          })
+          |> Jason.encode!()
+
+        {response, config}
     end
+  end
+
+  defp adopt_upstream_session(config, resp) do
+    next = ProxyCore.adopt_http_session(config, Map.get(resp, :headers))
+
+    if next.session_id not in [nil, config.session_id] do
+      log_stderr("[arbor.signer] adopted mcp-session-id from upstream")
+    end
+
+    next
   end
 
   # Use OTP's built-in :httpc rather than Req. Two reasons:
@@ -252,8 +289,8 @@ defmodule Arbor.Gateway.Signer.Proxy do
     request = {url_chars, httpc_headers, content_type, body}
 
     case :httpc.request(:post, request, [], body_format: :binary) do
-      {:ok, {{_version, status, _reason}, _resp_headers, resp_body}} ->
-        {:ok, %{status: status, body: resp_body}}
+      {:ok, {{_version, status, _reason}, resp_headers, resp_body}} ->
+        {:ok, %{status: status, body: resp_body, headers: resp_headers}}
 
       {:error, reason} ->
         {:error, reason}
@@ -264,6 +301,19 @@ defmodule Arbor.Gateway.Signer.Proxy do
     case Jason.decode(body) do
       {:ok, parsed} -> ProxyCore.extract_id(parsed)
       _ -> nil
+    end
+  end
+
+  defp summarize_request(body) do
+    case Jason.decode(body) do
+      {:ok, %{} = request} ->
+        "method=#{inspect(Map.get(request, "method"))} id=#{inspect(Map.get(request, "id"))} bytes=#{byte_size(body)}"
+
+      {:ok, other} ->
+        "non-object #{inspect(other)} bytes=#{byte_size(body)}"
+
+      {:error, _} ->
+        "unparseable bytes=#{byte_size(body)} prefix=#{inspect(String.slice(body, 0, 80))}"
     end
   end
 
