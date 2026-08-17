@@ -20,7 +20,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryArtifact do
   no destination, executable, MFA, digest, or sandbox override, and forbids
   runtime hooks. `architecture_status=blocked` passes check only with the
   unchanged reviewed blocker set; it is not architecture readiness. E0B3
-  remains blocked until the C3c1 receipt.
+  is a separate fresh-VM closure proof and is not implemented here.
   """
 
   use Mix.Task

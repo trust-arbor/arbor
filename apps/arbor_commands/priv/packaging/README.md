@@ -289,15 +289,16 @@ The root `quality` alias runs only the cheap check:
 `--build-verify` and `--write` are never invoked by quality; quality never
 composes and never nests a release build.
 
-**Interim fail-closed state:** until the manager runs the post-review
-live `--write` that produces them, the two committed artifact files are
-intentionally absent, so `--check` (and therefore `mix quality`) fails
-closed with `artifact_missing`. That is the deliberate posture — an
-admitted artifact or a failing gate, never a silently passing one.
+The committed artifact pair landed on 2026-08-17 (`b1ed199a2`) after
+a live `--write` / `--build-verify` produced identical two-build
+payloads from `fe0ed0a9d`. `--check` now admits those files. It is
+still not an E0B3 result.
 
-E0B3 (RELEASE_COOKIE injection and fresh-VM executable closure) remains
-blocked until the C3c1 receipt lands; nothing in this command implements
-or activates it, and a passing artifact check is not an E0B3 result.
+E0B3 (ephemeral `RELEASE_COOKIE` and fresh-VM executable closure)
+starts with a pure CRC core (E0B3A:
+`Arbor.Commands.SafeRecoveryClosure`). Nothing in this command starts
+a peer or injects a cookie; a passing artifact check is not an E0B3
+result.
 
 ## Retired K migration gates
 
