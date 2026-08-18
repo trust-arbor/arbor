@@ -139,6 +139,82 @@ defmodule Arbor.Common.Extension.ProtectedRegistryTest do
              ProtectedRegistry.authorize(registry, token, signed, now: "2026-08-16T00:00:00Z")
   end
 
+  test "expired published handle disappears after cleanup" do
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    token = make_ref()
+    registry = start_registry!(token, public_key, allow_commit: true)
+    {transaction, handle, signed} = signed_activation(private_key)
+
+    assert :ok =
+             ProtectedRegistry.stage(registry, token, transaction, handle,
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert :ok =
+             ProtectedRegistry.authorize(registry, token, signed, now: "2026-08-16T00:00:00Z")
+
+    assert :ok = ProtectedRegistry.commit(registry, token, now: "2026-08-16T00:00:00Z")
+
+    assert :ok = ProtectedRegistry.cleanup(registry, token, now: "2026-08-16T00:00:00Z")
+
+    assert {:ok, _live} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-16T00:00:00Z")
+
+    assert {:error, "expired_lease"} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-18T00:00:00Z")
+
+    assert ProtectedRegistry.list(registry, now: "2026-08-18T00:00:00Z") == []
+
+    assert :ok = ProtectedRegistry.cleanup(registry, token, now: "2026-08-18T00:00:00Z")
+
+    assert {:error, "no_compatible_provider"} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-16T00:00:00Z")
+
+    assert ProtectedRegistry.list(registry, now: "2026-08-16T00:00:00Z") == []
+  end
+
+  test "public cleanup leaves staged unpublished work for a live owner" do
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    token = make_ref()
+    registry = start_registry!(token, public_key, allow_commit: false)
+    {transaction, handle, _signed} = signed_activation(private_key)
+
+    assert :ok =
+             ProtectedRegistry.stage(registry, token, transaction, handle,
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert :ok = ProtectedRegistry.cleanup(registry, token, now: "2026-08-18T00:00:00Z")
+
+    assert {:error, "no_compatible_provider"} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-16T00:00:00Z")
+
+    assert :ok = ProtectedRegistry.rollback(registry, token)
+  end
+
+  test "foreign token cannot cleanup" do
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    token = make_ref()
+    registry = start_registry!(token, public_key, allow_commit: true)
+    {transaction, handle, signed} = signed_activation(private_key)
+
+    assert :ok =
+             ProtectedRegistry.stage(registry, token, transaction, handle,
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert :ok =
+             ProtectedRegistry.authorize(registry, token, signed, now: "2026-08-16T00:00:00Z")
+
+    assert :ok = ProtectedRegistry.commit(registry, token, now: "2026-08-16T00:00:00Z")
+
+    assert {:error, "unauthorized"} =
+             ProtectedRegistry.cleanup(registry, make_ref(), now: "2026-08-18T00:00:00Z")
+
+    assert {:ok, _entry} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-16T00:00:00Z")
+  end
+
   test "owner death drops unpublished work" do
     {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
     token = make_ref()

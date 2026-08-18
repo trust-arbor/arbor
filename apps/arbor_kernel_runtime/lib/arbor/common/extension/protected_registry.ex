@@ -82,6 +82,12 @@ defmodule Arbor.Common.Extension.ProtectedRegistry do
     GenServer.call(server, {:lock_core, token})
   end
 
+  @doc "Drop expired published leases."
+  @spec cleanup(GenServer.server(), reference(), keyword()) :: :ok | {:error, String.t()}
+  def cleanup(server, token, opts \\ []) do
+    GenServer.call(server, {:cleanup, token, opts})
+  end
+
   @impl true
   def init(opts) do
     token = Keyword.get(opts, :owner_token)
@@ -190,6 +196,13 @@ defmodule Arbor.Common.Extension.ProtectedRegistry do
   def handle_call({:lock_core, token}, _from, state) do
     case owner_token(state, token) do
       :ok -> {:reply, :ok, %{state | core: RegistryCore.lock_core(state.core)}}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cleanup, token, opts}, _from, state) do
+    case owner_token(state, token) do
+      :ok -> {:reply, :ok, %{state | core: RegistryCore.cleanup(state.core, now(opts))}}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end

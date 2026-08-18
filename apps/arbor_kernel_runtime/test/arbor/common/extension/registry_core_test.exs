@@ -92,6 +92,78 @@ defmodule Arbor.Common.Extension.RegistryCoreTest do
              RegistryCore.resolve(cleaned, "vector.store", "2026-08-16T00:00:00Z")
   end
 
+  test "cleanup makes expired published names absent" do
+    transaction = Envelope.fixture(:activation_transaction)
+    handle = Envelope.fixture(:provider_handle)
+
+    receipt = %{
+      Envelope.fixture(:activation_receipt)
+      | "transaction_id" => transaction["transaction_id"]
+    }
+
+    {:ok, staged} =
+      RegistryCore.stage(
+        RegistryCore.new(),
+        transaction,
+        handle,
+        "owner.1",
+        "2026-08-16T00:00:00Z"
+      )
+
+    {:ok, published} = RegistryCore.publish(staged, receipt, "2026-08-16T00:00:00Z")
+
+    assert {:error, "expired_lease"} =
+             RegistryCore.resolve(published, "vector.store", "2026-08-18T00:00:00Z")
+
+    assert RegistryCore.list_published(published, "2026-08-18T00:00:00Z") == []
+
+    cleaned = RegistryCore.cleanup(published, "2026-08-18T00:00:00Z")
+
+    assert {:error, "no_compatible_provider"} =
+             RegistryCore.resolve(cleaned, "vector.store", "2026-08-16T00:00:00Z")
+
+    assert RegistryCore.list_published(cleaned, "2026-08-16T00:00:00Z") == []
+  end
+
+  test "cleanup drops staged unpublished work only for a dead owner" do
+    transaction = Envelope.fixture(:activation_transaction)
+    handle = Envelope.fixture(:provider_handle)
+
+    {:ok, staged} =
+      RegistryCore.stage(
+        RegistryCore.new(),
+        transaction,
+        handle,
+        "owner.1",
+        "2026-08-16T00:00:00Z"
+      )
+
+    cleaned = RegistryCore.cleanup(staged, "2026-08-18T00:00:00Z")
+
+    assert {:error, "commit_conflict"} =
+             RegistryCore.stage(
+               cleaned,
+               transaction,
+               handle,
+               "owner.1",
+               "2026-08-16T00:00:00Z"
+             )
+
+    dropped = RegistryCore.cleanup(staged, "2026-08-16T00:00:00Z", dead_owner_id: "owner.1")
+
+    assert {:error, "no_compatible_provider"} =
+             RegistryCore.resolve(dropped, "vector.store", "2026-08-16T00:00:00Z")
+
+    assert {:ok, _again} =
+             RegistryCore.stage(
+               dropped,
+               transaction,
+               handle,
+               "owner.1",
+               "2026-08-16T00:00:00Z"
+             )
+  end
+
   test "handles with executable identity are rejected" do
     transaction = Envelope.fixture(:activation_transaction)
     handle = Map.put(Envelope.fixture(:provider_handle), "module", "Elixir.Foo")
