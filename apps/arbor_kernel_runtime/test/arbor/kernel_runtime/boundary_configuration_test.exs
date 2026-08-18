@@ -4,7 +4,10 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
   @moduletag :fast
 
   @production_boundaries %{
-    Arbor.KernelRuntime => %{deps: [Arbor.Common, Arbor.Signals, Arbor.Monitor], exports: []},
+    Arbor.KernelRuntime => %{
+      deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor],
+      exports: []
+    },
     Arbor.Common => %{
       deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],
       exports: :all

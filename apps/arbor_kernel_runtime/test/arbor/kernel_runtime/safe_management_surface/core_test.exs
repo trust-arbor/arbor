@@ -178,7 +178,7 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.CoreTest do
       assert {:error, {:invalid_field, "receipt", :invalid_map}} =
                Core.project(Map.put(valid, "receipt", "nope"))
 
-      assert {:error, {:invalid_field, "receipt", :closed_keys}} =
+      assert {:error, {:invalid_field, "receipt", :invalid_envelope_shape}} =
                Core.project(Map.put(valid, "receipt", Map.put(valid["receipt"], "hook", true)))
 
       assert {:error, :non_string_keys} = Core.project(atom_candidate())
@@ -189,6 +189,29 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.CoreTest do
         |> Map.put(:schema, Core.schema())
 
       assert {:error, :mixed_keys} = Core.project(mixed)
+    end
+
+    test "security regression: contract-invalid receipts cannot admit mutations" do
+      receipt = Envelope.fixture(:activation_receipt)
+
+      malformed = [
+        {"transaction_sha256", "not-a-digest", :invalid_hash},
+        {"artifact_sha256", String.duplicate("zz", 32), :invalid_hash},
+        {"intent_sha256", String.duplicate("GG", 32), :invalid_hash},
+        {"principal_id", "not-an-agent", :invalid_principal},
+        {"generation", 0, :invalid_generation},
+        {"generation", -1, :invalid_generation}
+      ]
+
+      for {field, value, reason} <- malformed do
+        bad = Map.put(receipt, field, value)
+        assert {:error, ^reason} = Envelope.validate(:activation_receipt, bad)
+
+        for operation <- ["revoke", "disable", "rollback", "clean"] do
+          assert {:error, {:invalid_field, "receipt", ^reason}} =
+                   Core.project(candidate(operation, "verified", bad))
+        end
+      end
     end
   end
 

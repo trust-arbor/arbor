@@ -12,7 +12,13 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.Core do
   public error. `architecture_status` is always `"blocked"` in this
   packet because the surface stays unwired: production Application.start
   is unchanged.
+
+  Receipt admission delegates to `Envelope.validate/2` for the full
+  activation-receipt contract. This core does not accept a weaker
+  closed-key subset.
   """
+
+  alias Arbor.Contracts.Extension.Envelope
 
   @schema "arbor.kernel_runtime.safe_management_surface.v1"
   @version 1
@@ -40,21 +46,6 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.Core do
     "version"
   ]
 
-  @receipt_keys [
-    "artifact_sha256",
-    "cleanup_disposition",
-    "effects",
-    "generation",
-    "intent_sha256",
-    "principal_id",
-    "schema",
-    "state",
-    "transaction_id",
-    "transaction_sha256",
-    "version"
-  ]
-
-  @receipt_effect_keys ["class", "id", "state"]
   @mutation_keys ["kind", "transaction_id"]
 
   @operations MapSet.new(["clean", "disable", "list", "revoke", "rollback"])
@@ -74,13 +65,8 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.Core do
                      "not_ready"
                    ])
 
-  @cleanup MapSet.new(["none", "pending", "quarantined"])
-  @receipt_states MapSet.new(["committed", "quarantined", "rolled_back"])
-  @effect_classes MapSet.new(["compensable", "irreversible_audited", "reversible"])
-  @effect_states MapSet.new(["applied", "quarantined", "rolled_back"])
   @mutation_kinds MapSet.new(["clean", "disable", "revoke", "rollback"])
 
-  @receipt_schema "arbor.extension.activation_receipt.v1"
   @max_effects 32
   @max_string 256
 
@@ -209,58 +195,18 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.Core do
 
   defp consistent_decision(_document), do: {:error, :inconsistent_decision}
 
+  # Envelope.validate/2 is the activation-receipt contract. Every receipt
+  # field is checked there, including transaction_sha256, artifact_sha256,
+  # intent_sha256, principal_id, and generation. This function does not
+  # keep a weaker local subset.
   defp admit_receipt(receipt) when is_map(receipt) and not is_struct(receipt) do
-    with :ok <- exact_keys(receipt, @receipt_keys),
-         :ok <- exact(receipt["schema"], @receipt_schema),
-         :ok <- exact(receipt["version"], @version),
-         :ok <- token(receipt["transaction_id"]),
-         :ok <- member(receipt["cleanup_disposition"], @cleanup),
-         :ok <- member(receipt["state"], @receipt_states),
-         :ok <- validate_receipt_effects(receipt["effects"]) do
-      {:ok, receipt}
-    else
+    case Envelope.validate(:activation_receipt, receipt) do
+      {:ok, receipt} -> {:ok, receipt}
       {:error, reason} -> {:error, {:invalid_field, "receipt", reason}}
     end
   end
 
   defp admit_receipt(_), do: {:error, {:invalid_field, "receipt", :invalid_map}}
-
-  defp validate_receipt_effects(list) do
-    case take_proper_list(list, @max_effects) do
-      {:ok, []} ->
-        {:error, :empty_list}
-
-      {:ok, items} ->
-        Enum.reduce_while(items, {:ok, MapSet.new()}, fn item, {:ok, seen} ->
-          case admit_receipt_effect(item, seen) do
-            {:ok, next} -> {:cont, {:ok, next}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-        end)
-        |> case do
-          {:ok, _seen} -> :ok
-          {:error, _} = error -> error
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp admit_receipt_effect(effect, seen) when is_map(effect) and not is_struct(effect) do
-    with :ok <- exact_keys(effect, @receipt_effect_keys),
-         :ok <- token(effect["id"]),
-         :ok <- member(effect["class"], @effect_classes),
-         :ok <- member(effect["state"], @effect_states) do
-      if MapSet.member?(seen, effect["id"]) do
-        {:error, :duplicate}
-      else
-        {:ok, MapSet.put(seen, effect["id"])}
-      end
-    end
-  end
-
-  defp admit_receipt_effect(_effect, _seen), do: {:error, :invalid_map}
 
   defp validate_mutations(list) do
     case take_proper_list(list, @max_effects) do
