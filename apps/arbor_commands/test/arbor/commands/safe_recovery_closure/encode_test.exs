@@ -49,6 +49,39 @@ defmodule Arbor.Commands.SafeRecoveryClosure.EncodeTest do
     assert :ok = Encode.validate_candidate(closed_candidate())
   end
 
+  test "admits a projected document with more than 64 unexplained_module findings" do
+    candidate = put_in(closed_candidate(), ["post_start", "modules"], unexplained_modules(65))
+
+    assert {:ok, evidence} = Core.project(candidate)
+    assert length(evidence["findings"]) > 64
+    assert Enum.all?(evidence["findings"], &(&1["id"] == "unexplained_module"))
+    assert :ok = Encode.validate_evidence(evidence)
+  end
+
+  test "a 65-entry findings list is no longer unbounded" do
+    assert {:ok, evidence} = Core.project(closed_candidate())
+    document = Map.put(evidence, "findings", findings_list(65))
+
+    assert length(document["findings"]) == 65
+    assert :ok = Encode.validate_evidence(document)
+    refute match?(
+             {:error, {:invalid_field, "findings", :unbounded}},
+             Encode.validate_evidence(document)
+           )
+  end
+
+  test "admits a 117-finding live-shaped document" do
+    assert {:ok, evidence} = Core.project(closed_candidate())
+
+    live =
+      evidence
+      |> Map.put("closure_status", "open")
+      |> Map.put("findings", live_shaped_findings(117))
+
+    assert length(live["findings"]) == 117
+    assert :ok = Encode.validate_evidence(live)
+  end
+
   defp closed_candidate do
     digest = String.duplicate("cd", 32)
 
@@ -83,6 +116,44 @@ defmodule Arbor.Commands.SafeRecoveryClosure.EncodeTest do
       "logger_handlers" => [],
       "telemetry_handlers" => [],
       "listeners" => []
+    }
+  end
+
+  defp unexplained_modules(count) do
+    for i <- 1..count do
+      %{"module" => "Elixir.Unexplained#{i}", "application" => "mix"}
+    end
+  end
+
+  defp findings_list(count) do
+    for i <- 1..count do
+      finding("unexplained_module", "Elixir.Finding#{i}")
+    end
+  end
+
+  defp live_shaped_findings(count) do
+    prefix = [
+      finding("forbidden_facility_present", "full_signals_monitor_and_os_mon"),
+      finding("selected_start_failed", "arbor_security"),
+      finding("selected_start_failed", "arbor_trust"),
+      finding("third_party_started", "castore"),
+      finding("third_party_started", "finch")
+    ]
+
+    modules =
+      for i <- 1..(count - length(prefix)) do
+        finding("unexplained_module", "Elixir.LiveModule#{i}")
+      end
+
+    prefix ++ modules
+  end
+
+  defp finding(id, subject) do
+    %{
+      "id" => id,
+      "owner" => Encode.finding_owner(),
+      "severity" => "blocker",
+      "subject" => subject
     }
   end
 end

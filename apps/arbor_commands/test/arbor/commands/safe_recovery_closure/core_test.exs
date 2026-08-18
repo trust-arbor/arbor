@@ -111,6 +111,19 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
       assert {"unbounded_shutdown", "shutdown"} in subjects
     end
 
+    test "projects every unexplained_module finding above the retired 64 ceiling" do
+      candidate = put_in(closed_candidate(), ["post_start", "modules"], unexplained_modules(65))
+
+      assert {:ok, evidence} = Core.project(candidate)
+      assert evidence["closure_status"] == "open"
+      assert length(evidence["findings"]) == 65
+
+      assert Enum.all?(evidence["findings"], fn finding ->
+               finding["id"] == "unexplained_module" and
+                 finding["owner"] == Encode.finding_owner()
+             end)
+    end
+
     test "reports selected applications that did not start" do
       candidate = closed_candidate()
       assert {:ok, evidence} = Core.project(candidate)
@@ -201,4 +214,10 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
   end
 
   defp started(name), do: %{"name" => name, "state" => "started"}
+
+  defp unexplained_modules(count) do
+    for i <- 1..count do
+      %{"module" => "Elixir.Unexplained#{i}", "application" => "mix"}
+    end
+  end
 end

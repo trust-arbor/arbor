@@ -89,7 +89,11 @@ defmodule Arbor.Commands.SafeRecoveryClosure.Encode do
   @max_applications 128
   @max_modules 4_096
   @max_names 512
-  @max_findings 64
+  @unique_facility_ids 6
+  @max_shutdown_findings 1
+  @selected_first_party_count 4
+  @max_findings @max_applications + @unique_facility_ids + @max_modules +
+                  @max_shutdown_findings + @selected_first_party_count
   @max_string 256
 
   @type validation_error :: {:error, atom()} | {:error, {:invalid_field, String.t(), atom()}}
