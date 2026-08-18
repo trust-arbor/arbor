@@ -89,11 +89,14 @@ defmodule Arbor.Commands.SafeRecoveryClosure.Encode do
   @max_applications 128
   @max_modules 4_096
   @max_names 512
+  # Worst-case Core.derive_findings/1 sum: one class finding per admitted
+  # application, one unique Core @facility_apps subject, one
+  # unexplained_module per admitted module, one unbounded_shutdown, and
+  # one selected_start_failed per admitted selected application.
   @unique_facility_ids 6
   @max_shutdown_findings 1
-  @selected_first_party_count 4
   @max_findings @max_applications + @unique_facility_ids + @max_modules +
-                  @max_shutdown_findings + @selected_first_party_count
+                  @max_shutdown_findings + @max_applications
   @max_string 256
 
   @type validation_error :: {:error, atom()} | {:error, {:invalid_field, String.t(), atom()}}
@@ -112,6 +115,9 @@ defmodule Arbor.Commands.SafeRecoveryClosure.Encode do
 
   @spec finding_owner() :: String.t()
   def finding_owner, do: "e0b3_fresh_vm_executable_closure"
+
+  @spec max_findings() :: pos_integer()
+  def max_findings, do: @max_findings
 
   @spec validate_candidate(map()) :: :ok | validation_error()
   def validate_candidate(candidate) when is_map(candidate) and not is_struct(candidate) do

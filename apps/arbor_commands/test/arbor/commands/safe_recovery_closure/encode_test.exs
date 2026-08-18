@@ -58,16 +58,12 @@ defmodule Arbor.Commands.SafeRecoveryClosure.EncodeTest do
     assert :ok = Encode.validate_evidence(evidence)
   end
 
-  test "a 65-entry findings list is no longer unbounded" do
+  test "validate_evidence/1 admits a 65-entry findings list" do
     assert {:ok, evidence} = Core.project(closed_candidate())
     document = Map.put(evidence, "findings", findings_list(65))
 
     assert length(document["findings"]) == 65
     assert :ok = Encode.validate_evidence(document)
-    refute match?(
-             {:error, {:invalid_field, "findings", :unbounded}},
-             Encode.validate_evidence(document)
-           )
   end
 
   test "admits a 117-finding live-shaped document" do
@@ -80,6 +76,20 @@ defmodule Arbor.Commands.SafeRecoveryClosure.EncodeTest do
 
     assert length(live["findings"]) == 117
     assert :ok = Encode.validate_evidence(live)
+  end
+
+  test "validate_evidence/1 admits the findings ceiling and rejects one over" do
+    assert {:ok, evidence} = Core.project(closed_candidate())
+    ceiling = Encode.max_findings()
+
+    at_ceiling = Map.put(evidence, "findings", findings_list(ceiling))
+    assert length(at_ceiling["findings"]) == ceiling
+    assert :ok = Encode.validate_evidence(at_ceiling)
+
+    over = Map.put(evidence, "findings", findings_list(ceiling + 1))
+
+    assert {:error, {:invalid_field, "findings", :unbounded}} =
+             Encode.validate_evidence(over)
   end
 
   defp closed_candidate do

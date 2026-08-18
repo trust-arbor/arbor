@@ -7,6 +7,15 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
 
   @digest String.duplicate("ab", 32)
 
+  @facility_started [
+    "arbor_agent",
+    "arbor_llm",
+    "os_mon",
+    "arbor_sandbox",
+    "arbor_shell",
+    "postgrex"
+  ]
+
   describe "project/1" do
     test "admits a closed selected payload with bounded shutdown as closed" do
       assert {:ok, evidence} = Core.project(closed_candidate())
@@ -124,6 +133,20 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
              end)
     end
 
+    test "projects the independently coexisting finding-category maximum" do
+      assert {:ok, evidence} = Core.project(maximal_finding_candidate())
+      assert evidence["closure_status"] == "open"
+      assert length(evidence["findings"]) == Encode.max_findings()
+      assert :ok = Encode.validate_evidence(evidence)
+
+      by_id = Enum.group_by(evidence["findings"], & &1["id"])
+      assert length(by_id["third_party_started"]) == 128
+      assert length(by_id["forbidden_facility_present"]) == 6
+      assert length(by_id["unexplained_module"]) == 4_096
+      assert length(by_id["unbounded_shutdown"]) == 1
+      assert length(by_id["selected_start_failed"]) == 128
+    end
+
     test "reports selected applications that did not start" do
       candidate = closed_candidate()
       assert {:ok, evidence} = Core.project(candidate)
@@ -219,5 +242,28 @@ defmodule Arbor.Commands.SafeRecoveryClosure.CoreTest do
     for i <- 1..count do
       %{"module" => "Elixir.Unexplained#{i}", "application" => "mix"}
     end
+  end
+
+  defp maximal_finding_candidate do
+    selected = for i <- 1..128, do: padded("sel", i)
+    extra_started = for i <- 1..122, do: padded("tp", i)
+    started_names = @facility_started ++ extra_started
+
+    artifact_applications =
+      Enum.map(started_names, fn name ->
+        %{"name" => name, "class" => "third_party"}
+      end)
+
+    closed_candidate()
+    |> Map.put("selected_applications", selected)
+    |> Map.put("artifact_applications", artifact_applications)
+    |> put_in(["post_start", "applications"], Enum.map(started_names, &started/1))
+    |> put_in(["post_start", "modules"], unexplained_modules(4_096))
+    |> put_in(["shutdown", "status"], "failed")
+    |> put_in(["shutdown", "remaining_names"], [])
+  end
+
+  defp padded(prefix, i) do
+    prefix <> "_" <> String.pad_leading(Integer.to_string(i), 3, "0")
   end
 end
