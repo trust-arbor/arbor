@@ -317,6 +317,15 @@ Selected `arbor_security` / `arbor_trust` failed to start in the fresh
 VM (`security_sync_subscription_failed`); third-party and forbidden
 facility growth is recorded.
 
+A live `--write` on 2026-08-18 from `dbec397bc` produced
+`closure_status=open` with digest
+`27b9b4db7150f4a1128618980d12b7660489e1c58455ee2d3ba19229279e20ac`
+and 117 findings. Selected `arbor_kernel`, `arbor_kernel_runtime`,
+`arbor_security`, and `arbor_trust` started. `arbor_persistence`
+started as unexpected first-party. Remaining blockers are
+`os_mon`, the postgres/sqlite/vector stack, third-party starts, and
+unexplained modules. There is no `selected_start_failed` finding.
+
 `--measure` and `--write` are manager-owned. They stage one trusted
 source lease, run one `arbor_trust` trusted-build, remove
 `releases/COOKIE`, pin the lease-owned `rel/arbor_trust` directory,
