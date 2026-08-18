@@ -33,6 +33,15 @@ defmodule Arbor.Security.ExtensionEnvelopesTest do
              Security.validate_signed_extension_envelope(forged, public_key: public_key)
   end
 
+  test "security rejects a signed envelope whose payload digest was mutated" do
+    {public_key, private_key} = Crypto.generate_keypair()
+    signed = signed_authorization(private_key)
+    tampered = %{signed | "payload_sha256" => String.duplicate("00", 32)}
+
+    assert {:error, :digest_mismatch} =
+             Security.validate_signed_extension_envelope(tampered, public_key: public_key)
+  end
+
   test "security rejects a replayed authorization nonce" do
     {public_key, private_key} = Crypto.generate_keypair()
     signed = signed_authorization(private_key)

@@ -54,6 +54,34 @@ defmodule Arbor.Contracts.Extension.EnvelopeTest do
              )
   end
 
+  test "list and payload ceilings reject overflow" do
+    transaction = Envelope.fixture(:activation_transaction)
+    effect = hd(transaction["staged_effects"])
+
+    overflow_effects =
+      Enum.map(1..33, fn index ->
+        %{effect | "id" => "effect.#{index}"}
+      end)
+
+    assert {:error, :invalid_field} =
+             Envelope.validate(
+               :activation_transaction,
+               %{transaction | "staged_effects" => overflow_effects}
+             )
+
+    assert {:error, :invalid_id} =
+             Envelope.validate(
+               :provider_handle,
+               %{Envelope.fixture(:provider_handle) | "handle_id" => String.duplicate("a", 129)}
+             )
+
+    request = Envelope.fixture(:invocation_request)
+    overflow_payload = Map.new(1..257, &{"k#{&1}", 0})
+
+    assert {:error, :payload_object_limit} =
+             Envelope.validate(:invocation_request, %{request | "payload" => overflow_payload})
+  end
+
   test "invocation request payload digest is bound" do
     request = Envelope.fixture(:invocation_request)
     assert {:ok, ^request} = Envelope.validate(:invocation_request, request)

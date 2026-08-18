@@ -166,11 +166,11 @@ defmodule Arbor.Common.Extension.ProtectedRegistry do
     end
   end
 
-  def handle_call({:resolve, name, opts}, _from, state) do
-    if Keyword.get(opts, :node, :local) != :local do
-      {:reply, {:error, "unauthorized"}, state}
-    else
+  def handle_call({:resolve, name, opts}, {caller, _tag}, state) do
+    if local_resolve?(caller, opts) do
       {:reply, RegistryCore.resolve(state.core, name, now(opts)), state}
+    else
+      {:reply, {:error, "unauthorized"}, state}
     end
   end
 
@@ -219,7 +219,11 @@ defmodule Arbor.Common.Extension.ProtectedRegistry do
   end
 
   defp commit_opts(state, opts) do
-    [now: now(opts), allow_commit: state.allow_commit? or Keyword.get(opts, :allow_commit, false)]
+    [now: now(opts), allow_commit: state.allow_commit?]
+  end
+
+  defp local_resolve?(caller, opts) do
+    node(caller) == node() and Keyword.get(opts, :node, :local) == :local
   end
 
   defp apply_effects(core, effects) do

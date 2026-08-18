@@ -60,9 +60,49 @@ defmodule Arbor.Common.Extension.ProtectedRegistryTest do
     assert {:error, "not_ready"} =
              ProtectedRegistry.commit(registry, token, now: "2026-08-16T00:00:00Z")
 
+    assert {:error, "not_ready"} =
+             ProtectedRegistry.commit(registry, token,
+               allow_commit: true,
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert {:error, "no_compatible_provider"} =
+             ProtectedRegistry.resolve(registry, "vector.store", now: "2026-08-16T00:00:00Z")
+
     assert {:error, "unauthorized"} =
              ProtectedRegistry.resolve(registry, "vector.store",
                node: :any,
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert {:error, "unauthorized"} =
+             ProtectedRegistry.resolve(registry, "vector.store",
+               node: Node.self(),
+               now: "2026-08-16T00:00:00Z"
+             )
+  end
+
+  test "staged handles cannot carry module or pid identity" do
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    token = make_ref()
+    registry = start_registry!(token, public_key, allow_commit: true)
+    {transaction, handle, _signed} = signed_activation(private_key)
+
+    assert {:error, "malformed"} =
+             ProtectedRegistry.stage(
+               registry,
+               token,
+               transaction,
+               Map.put(handle, "module", __MODULE__),
+               now: "2026-08-16T00:00:00Z"
+             )
+
+    assert {:error, "malformed"} =
+             ProtectedRegistry.stage(
+               registry,
+               token,
+               transaction,
+               Map.put(handle, "pid", self()),
                now: "2026-08-16T00:00:00Z"
              )
   end

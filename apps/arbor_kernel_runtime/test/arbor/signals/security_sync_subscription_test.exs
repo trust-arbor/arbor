@@ -74,6 +74,10 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
     Arbor.Signals.Config.Testing.delete(:security_sync_subscribers)
     refute Arbor.Signals.Config.security_sync_transport_configured?()
     refute Arbor.Signals.Config.security_sync_role_configured?(:nonce_cache)
+
+    Arbor.Signals.Config.Testing.put(:security_sync_subscribers, %{})
+    refute Arbor.Signals.Config.security_sync_transport_configured?()
+    refute Arbor.Signals.Config.security_sync_role_configured?(:nonce_cache)
   end
 
   test "security regression: missing or malformed security-sync config fails closed" do

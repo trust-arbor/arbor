@@ -35,26 +35,32 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
   end
 
   test "security regression: stores start local-only when security-sync subscribers are empty" do
-    Config.Testing.delete(:security_sync_subscribers)
-    Application.put_env(:arbor_security, :distributed_signals, true)
+    for subscribers <- [:missing, %{}] do
+      case subscribers do
+        :missing -> Config.Testing.delete(:security_sync_subscribers)
+        map -> Config.Testing.put(:security_sync_subscribers, map)
+      end
 
-    refute Config.security_sync_transport_configured?()
-    refute Arbor.Security.Config.distributed_signals_enabled?()
+      Application.put_env(:arbor_security, :distributed_signals, true)
 
-    assert {:ok, _} = restart_security_stores()
+      refute Config.security_sync_transport_configured?()
+      refute Arbor.Security.Config.distributed_signals_enabled?()
 
-    for store <- @stores do
-      assert Process.whereis(store)
-      assert :sys.get_state(store).signal_sync == nil
+      assert {:ok, _} = restart_security_stores()
+
+      for store <- @stores do
+        assert Process.whereis(store)
+        assert :sys.get_state(store).signal_sync == nil
+      end
+
+      principal = "agent_local_sync_#{System.unique_integer([:positive])}"
+      resource = "arbor://test/unconfigured_sync/#{System.unique_integer([:positive])}"
+
+      assert {:ok, _capability} = Security.grant(principal: principal, resource: resource)
+
+      assert {:ok, :authorized} =
+               Security.authorize(principal, resource, nil, verify_identity: false)
     end
-
-    principal = "agent_local_sync_#{System.unique_integer([:positive])}"
-    resource = "arbor://test/unconfigured_sync/#{System.unique_integer([:positive])}"
-
-    assert {:ok, _capability} = Security.grant(principal: principal, resource: resource)
-
-    assert {:ok, :authorized} =
-             Security.authorize(principal, resource, nil, verify_identity: false)
   end
 
   test "security regression: configured sync still fails closed when the owner cannot subscribe" do
