@@ -26,9 +26,10 @@ defmodule Arbor.Security.Config do
   @max_signing_authority_broker_call_timeout_ms 30_000
   @enforcement_toggle_persistent_key {__MODULE__, :enforcement_toggles}
   @enforcement_toggle_claim_table __MODULE__.EnforcementToggleClaim
+  @enforcement_toggle_claim_key :claimed
   # :protected in non-test so only the Application owner can write. Test is
   # :public because ExUnit freeze/restore and the Task-exit regression run
-  # outside Application.start/2 and must insert_new/delete the claim.
+  # outside Application.start/2 and must insert_new/delete the snapshot.
   @enforcement_toggle_claim_table_access if(Mix.env() == :test, do: :public, else: :protected)
   @enforcement_toggle_defaults [
     identity_verification: true,
@@ -46,11 +47,14 @@ defmodule Arbor.Security.Config do
   @doc """
   Snapshot the closed fail-open-when-false enforcement toggles.
 
-  The first installer wins atomically. After `insert_new` wins, the snapshot
-  is persisted immediately if absent; an existing `persistent_term` map is
-  never overwritten. Later `Application.put_env/3` of a frozen key cannot
-  change the matching public reader. Recreating the claim table after
-  Application stop/start rehydrates the table as already claimed from that
+  The first installer wins atomically by `insert_new` of the snapshot
+  itself into the Application-owned ETS table. `persist_if_absent` to
+  `persistent_term` may follow that insert; an existing `persistent_term`
+  map is never overwritten. If `persistent_term` is absent, readers and
+  later freeze use or complete that exact ETS snapshot rather than
+  re-reading Application env. Later `Application.put_env/3` of a frozen
+  key cannot change the matching public reader. Recreating the claim
+  table after Application stop/start rehydrates the table from that
   snapshot and does not re-read Application env. Production application
   start installs the Application-owned claim table and calls
   `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
@@ -59,8 +63,22 @@ defmodule Arbor.Security.Config do
   """
   @spec freeze_enforcement_toggles() :: :ok
   def freeze_enforcement_toggles do
-    if claim_enforcement_toggle_freeze() do
-      persist_enforcement_toggle_snapshot_if_absent(snapshot_enforcement_toggles())
+    case installed_enforcement_toggle_snapshot() do
+      {:ok, snapshot} ->
+        complete_enforcement_toggle_snapshot(snapshot)
+
+      :absent ->
+        snapshot = snapshot_enforcement_toggles()
+
+        if insert_enforcement_toggle_snapshot_if_absent(snapshot) do
+          run_enforcement_toggle_freeze_after_ets_insert_test_seam()
+          persist_enforcement_toggle_snapshot_if_absent(snapshot)
+        else
+          case lookup_enforcement_toggle_ets_snapshot() do
+            {:ok, existing} -> persist_enforcement_toggle_snapshot_if_absent(existing)
+            :absent -> :ok
+          end
+        end
     end
 
     :ok
@@ -102,7 +120,7 @@ defmodule Arbor.Security.Config do
     defp release_enforcement_toggle_freeze_claim do
       case :ets.whereis(@enforcement_toggle_claim_table) do
         :undefined -> :ok
-        tid -> :ets.delete(tid, :claimed)
+        tid -> :ets.delete(tid, @enforcement_toggle_claim_key)
       end
     end
   end
@@ -240,6 +258,26 @@ defmodule Arbor.Security.Config do
     end
   else
     def run_signing_authority_persistent_finalize_test_seam(_request_id), do: :ok
+  end
+
+  @doc false
+  @spec run_enforcement_toggle_freeze_after_ets_insert_test_seam() :: :ok
+  if Mix.env() == :test do
+    def run_enforcement_toggle_freeze_after_ets_insert_test_seam do
+      case Application.get_env(@app, :enforcement_toggle_freeze_after_ets_insert_test_seam) do
+        %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
+        when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
+               is_pid(notify_pid) ->
+          send(notify_pid, :enforcement_toggle_ets_snapshot_inserted)
+          Process.sleep(delay_ms)
+          :ok
+
+        _disabled_or_invalid ->
+          :ok
+      end
+    end
+  else
+    def run_enforcement_toggle_freeze_after_ets_insert_test_seam, do: :ok
   end
 
   @doc """
@@ -656,8 +694,8 @@ defmodule Arbor.Security.Config do
   # an operator-configurable value.
 
   defp enforcement_toggle(key, default) do
-    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
-      %{^key => value} -> value
+    case installed_enforcement_toggle_snapshot() do
+      {:ok, %{^key => value}} -> value
       _not_frozen -> Application.get_env(@app, key, default)
     end
   end
@@ -668,21 +706,60 @@ defmodule Arbor.Security.Config do
     end)
   end
 
-  # ETS insert_new is the single-winner claim. persistent_term get-then-put
-  # alone lets a concurrent second freezer overwrite the first snapshot.
-  # The Application process owns the table; never create it here. A missing
-  # table fails closed so a later caller cannot reopen freeze.
-  defp claim_enforcement_toggle_freeze do
+  # ETS insert_new of the snapshot is the single-winner claim. A boolean
+  # :claimed followed by a later persistent_term.put leaves readers on
+  # mutable env if the winner dies in that window. persist_if_absent may
+  # follow the insert; if persistent_term is absent, readers and later
+  # freeze use that exact ETS snapshot. The Application process owns the
+  # table; never create it here. A missing table fails closed so a later
+  # caller cannot reopen freeze.
+  defp installed_enforcement_toggle_snapshot do
+    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+      snapshot when is_map(snapshot) ->
+        {:ok, snapshot}
+
+      _not_frozen ->
+        lookup_enforcement_toggle_ets_snapshot()
+    end
+  end
+
+  defp complete_enforcement_toggle_snapshot(snapshot) do
+    insert_enforcement_toggle_snapshot_if_absent(snapshot)
+    persist_enforcement_toggle_snapshot_if_absent(snapshot)
+  end
+
+  defp insert_enforcement_toggle_snapshot_if_absent(snapshot) do
     case :ets.whereis(@enforcement_toggle_claim_table) do
       :undefined ->
         false
 
       tid ->
         try do
-          :ets.insert_new(tid, {:claimed, true})
+          :ets.insert_new(tid, {@enforcement_toggle_claim_key, snapshot})
         rescue
           ArgumentError ->
             false
+        end
+    end
+  end
+
+  defp lookup_enforcement_toggle_ets_snapshot do
+    case :ets.whereis(@enforcement_toggle_claim_table) do
+      :undefined ->
+        :absent
+
+      tid ->
+        try do
+          case :ets.lookup(tid, @enforcement_toggle_claim_key) do
+            [{@enforcement_toggle_claim_key, snapshot}] when is_map(snapshot) ->
+              {:ok, snapshot}
+
+            _missing_or_invalid ->
+              :absent
+          end
+        rescue
+          ArgumentError ->
+            :absent
         end
     end
   end
@@ -701,13 +778,13 @@ defmodule Arbor.Security.Config do
     :ok
   end
 
-  # Recreated tables start empty. If a freeze snapshot already exists,
-  # mark the table claimed so a later freeze cannot insert_new and
-  # re-read Application env.
+  # Recreated tables start empty. If a freeze snapshot already exists in
+  # persistent_term, insert that exact snapshot so a later freeze cannot
+  # insert_new a re-read of Application env.
   defp rehydrate_enforcement_toggle_claim_from_snapshot do
     case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
       snapshot when is_map(snapshot) ->
-        claim_enforcement_toggle_freeze()
+        insert_enforcement_toggle_snapshot_if_absent(snapshot)
         :ok
 
       _not_frozen ->

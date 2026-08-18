@@ -140,6 +140,68 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     end
   end
 
+  test "security regression: winner death after ETS snapshot insert cannot unfreeze readers" do
+    set_enforcement_toggles(true)
+
+    previous_seam =
+      Application.get_env(:arbor_security, :enforcement_toggle_freeze_after_ets_insert_test_seam)
+
+    Application.put_env(:arbor_security, :enforcement_toggle_freeze_after_ets_insert_test_seam, %{
+      delay_ms: 500,
+      notify_pid: self()
+    })
+
+    winner =
+      spawn(fn ->
+        Config.freeze_enforcement_toggles()
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(winner), do: Process.exit(winner, :kill)
+
+      case previous_seam do
+        nil ->
+          Application.delete_env(
+            :arbor_security,
+            :enforcement_toggle_freeze_after_ets_insert_test_seam
+          )
+
+        value ->
+          Application.put_env(
+            :arbor_security,
+            :enforcement_toggle_freeze_after_ets_insert_test_seam,
+            value
+          )
+      end
+    end)
+
+    assert_receive :enforcement_toggle_ets_snapshot_inserted, 1_000
+    monitor = Process.monitor(winner)
+    Process.exit(winner, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^winner, :killed}, 1_000
+
+    assert :persistent_term.get({Config, :enforcement_toggles}, :not_frozen) == :not_frozen
+
+    table = claim_table()
+    assert [{:claimed, snapshot}] = :ets.lookup(table, :claimed)
+    assert %{identity_verification: true} = snapshot
+
+    set_enforcement_toggles(false)
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} followed mutable env after winner death"
+    end
+
+    assert :ok = Config.freeze_enforcement_toggles()
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} replaced by later freeze after winner death"
+    end
+
+    assert %{identity_verification: true} =
+             :persistent_term.get({Config, :enforcement_toggles}, :not_frozen)
+  end
+
   test "security regression: concurrent freezes cannot replace the winning snapshot after env is weakened" do
     set_enforcement_toggles(true)
 
