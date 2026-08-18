@@ -74,10 +74,18 @@ defmodule Arbor.Signals.SecuritySyncSubscriptionTest do
     Arbor.Signals.Config.Testing.delete(:security_sync_subscribers)
     refute Arbor.Signals.Config.security_sync_transport_configured?()
     refute Arbor.Signals.Config.security_sync_role_configured?(:nonce_cache)
+    refute Arbor.Signals.authenticated_security_sync_transport?()
 
     Arbor.Signals.Config.Testing.put(:security_sync_subscribers, %{})
     refute Arbor.Signals.Config.security_sync_transport_configured?()
     refute Arbor.Signals.Config.security_sync_role_configured?(:nonce_cache)
+    refute Arbor.Signals.authenticated_security_sync_transport?()
+  end
+
+  test "security regression: configured subscriber map is not authenticated transport" do
+    assert Arbor.Signals.Config.security_sync_transport_configured?()
+    refute Arbor.Signals.Config.authenticated_security_sync_transport?()
+    refute Arbor.Signals.authenticated_security_sync_transport?()
   end
 
   test "security regression: missing or malformed security-sync config fails closed" do

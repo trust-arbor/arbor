@@ -67,6 +67,23 @@ defmodule Arbor.Signals.ConfigTest do
     assert Config.start_children?() == false
   end
 
+  test "authenticated security-sync transport is false by default and ignores subscriber maps" do
+    Testing.delete(:security_sync_subscribers)
+    refute Config.authenticated_security_sync_transport?()
+    refute Arbor.Signals.authenticated_security_sync_transport?()
+
+    Testing.put(:security_sync_subscribers, %{
+      nonce_cache: %{
+        owner: Arbor.Security.Identity.NonceCache,
+        events: [:nonce_seen]
+      }
+    })
+
+    assert Config.security_sync_transport_configured?()
+    refute Config.authenticated_security_sync_transport?()
+    refute Arbor.Signals.authenticated_security_sync_transport?()
+  end
+
   test "configured nil is distinct from a missing start_children key" do
     Testing.put(:start_children, nil)
     assert Config.start_children?() == nil

@@ -109,6 +109,17 @@ defmodule Arbor.Signals.Config do
       Enum.any?(subscribers, fn {role, _entry} -> security_sync_role_configured?(role) end)
   end
 
+  @doc """
+  Whether remote-origin security-sync apply is admitted.
+
+  False by default. A configured `security_sync_subscribers` map is
+  owner-only local subscribe wiring, not authenticated cluster
+  transport. There is no production env flag that re-opens
+  unauthenticated apply.
+  """
+  @spec authenticated_security_sync_transport?() :: boolean()
+  def authenticated_security_sync_transport?, do: false
+
   @doc false
   @spec security_sync_role_configured?(atom()) :: boolean()
   def security_sync_role_configured?(role)

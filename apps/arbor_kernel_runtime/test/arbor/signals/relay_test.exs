@@ -1,6 +1,8 @@
 defmodule Arbor.Signals.RelayTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Signals.Bus
+  alias Arbor.Signals.Config
   alias Arbor.Signals.Config.Testing
   alias Arbor.Signals.Relay
   alias Arbor.Signals.Signal
@@ -269,8 +271,57 @@ defmodule Arbor.Signals.RelayTest do
       Process.sleep(100)
 
       stats = Relay.stats()
-      # In nonode@nohost mode, all peers are accepted
-      assert stats.relayed_in == 2
+      # In nonode@nohost mode, peers are accepted, but unauthenticated
+      # :security inject is rejected (P1B).
+      assert stats.relayed_in == 1
+      assert stats.signals_rejected == 1
+    end
+
+    test "security regression: remote restricted batch is not published locally without authenticated transport" do
+      Testing.put(:authorizer, Arbor.Signals.Adapters.OpenAuthorizer)
+      Testing.put(:allow_open_authorizer, true)
+
+      refute Config.authenticated_security_sync_transport?()
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
+      test_pid = self()
+      marker = System.unique_integer([:positive])
+
+      {:ok, sub_id} =
+        Bus.subscribe(
+          "*",
+          fn signal ->
+            send(test_pid, {:relay_injected, signal.category, signal.type, signal.data})
+            :ok
+          end,
+          principal_id: "agent_relay_p1b",
+          async: false
+        )
+
+      signals = [
+        Signal.new(:security, :capability_revoked, %{
+          capability_ids: ["cap_p1b_#{marker}"],
+          origin_node: :remote@node
+        }),
+        Signal.new(:identity, :identity_revoked, %{
+          agent_id: "agent_p1b_#{marker}",
+          origin_node: :remote@node
+        }),
+        Signal.new(:agent, :started, %{agent_id: "agent_ok_#{marker}"})
+      ]
+
+      GenServer.cast(Relay, {:receive_batch, signals, :peer@host})
+
+      assert_receive {:relay_injected, :agent, :started, %{agent_id: agent_id}}, 500
+      assert agent_id == "agent_ok_#{marker}"
+      refute_received {:relay_injected, :security, _, _}
+      refute_received {:relay_injected, :identity, _, _}
+
+      stats = Relay.stats()
+      assert stats.relayed_in == 1
+      assert stats.signals_rejected >= 2
+
+      Bus.unsubscribe(sub_id)
     end
   end
 

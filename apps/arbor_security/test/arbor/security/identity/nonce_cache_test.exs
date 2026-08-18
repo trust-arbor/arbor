@@ -42,11 +42,9 @@ defmodule Arbor.Security.Identity.NonceCacheTest do
   end
 
   describe "cluster distribution (C5 review fix)" do
-    test "a remote nonce_seen signal records the nonce so a local replay is rejected" do
-      # Security regression: in multi-node, a captured SignedRequest could be
-      # replayed against a DIFFERENT node within the drift window because the
-      # nonce was single-node. Now a peer's nonce_seen signal records the
-      # nonce locally, so the replay is rejected here too.
+    test "security regression: unauthenticated remote nonce_seen does not record the nonce" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       nonce = :crypto.strong_rand_bytes(16)
 
       signal = %{
@@ -58,9 +56,9 @@ defmodule Arbor.Security.Identity.NonceCacheTest do
       }
 
       send(Process.whereis(NonceCache), {:signal_received, signal})
-      Process.sleep(50)
+      _ = :sys.get_state(NonceCache)
 
-      assert {:error, :replayed_nonce} = NonceCache.check_and_record(nonce, 300)
+      assert :ok = NonceCache.check_and_record(nonce, 300)
     end
 
     test "our own echoed signal is ignored (nonce stays fresh)" do

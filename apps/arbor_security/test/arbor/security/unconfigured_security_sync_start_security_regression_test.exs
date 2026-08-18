@@ -44,6 +44,8 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
       Application.put_env(:arbor_security, :distributed_signals, true)
 
       refute Config.security_sync_transport_configured?()
+      refute Config.authenticated_security_sync_transport?()
+      refute Arbor.Signals.authenticated_security_sync_transport?()
       refute Arbor.Security.Config.distributed_signals_enabled?()
 
       assert {:ok, _} = restart_security_stores()
@@ -75,6 +77,8 @@ defmodule Arbor.Security.UnconfiguredSecuritySyncStartSecurityRegressionTest do
 
     Application.put_env(:arbor_security, :distributed_signals, true)
     assert Config.security_sync_transport_configured?()
+    refute Config.authenticated_security_sync_transport?()
+    refute Arbor.Signals.authenticated_security_sync_transport?()
     assert Arbor.Security.Config.distributed_signals_enabled?()
 
     :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, Registry)

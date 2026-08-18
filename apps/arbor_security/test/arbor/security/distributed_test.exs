@@ -2,8 +2,8 @@ defmodule Arbor.Security.DistributedTest do
   @moduledoc """
   Tests for distributed security features:
   - Persistent SystemAuthority keypair
-  - CapabilityStore signal handling from remote nodes
-  - Identity.Registry signal handling from remote nodes
+  - Unauthenticated remote security-sync apply fails closed
+  - Identity.Registry and CapabilityStore ignore own-node echoes
   """
   use ExUnit.Case, async: false
   @moduletag :fast
@@ -39,8 +39,10 @@ defmodule Arbor.Security.DistributedTest do
 
   # ── CapabilityStore Signal Handling ─────────────────────────────────
 
-  describe "CapabilityStore handles remote signals" do
-    test "handles :signal_received for revocation from remote node" do
+  describe "CapabilityStore rejects unauthenticated remote signals" do
+    test "security regression: remote :capability_revoked does not evict without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       {:ok, cap} =
         Capability.new(
           resource_uri: "arbor://test/remote_revoke",
@@ -63,13 +65,15 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(CapabilityStore)
 
-      # Should be revoked
-      assert {:error, :not_found} = CapabilityStore.get(cap.id)
+      # Unauthenticated remote apply fails closed — capability still exists
+      assert {:ok, ^cap} = CapabilityStore.get(cap.id)
     end
 
-    test "handles :signal_received for bulk revocation" do
+    test "security regression: remote bulk revocation does not evict without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       caps =
         for i <- 1..3 do
           {:ok, cap} =
@@ -97,10 +101,10 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(CapabilityStore)
 
       for cap <- caps do
-        assert {:error, :not_found} = CapabilityStore.get(cap.id)
+        assert {:ok, ^cap} = CapabilityStore.get(cap.id)
       end
     end
 
@@ -153,8 +157,10 @@ defmodule Arbor.Security.DistributedTest do
 
   # ── Identity Registry Signal Handling ───────────────────────────────
 
-  describe "Identity.Registry handles remote signals" do
-    test "handles remote deregistration signal" do
+  describe "Identity.Registry rejects unauthenticated remote signals" do
+    test "security regression: remote deregistration does not apply without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       {:ok, identity} = Identity.generate(name: "dist-test")
       :ok = Registry.register(Identity.public_only(identity))
 
@@ -173,12 +179,14 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(Registry)
 
-      assert {:error, :not_found} = Registry.lookup(identity.agent_id)
+      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
     end
 
-    test "handles remote suspension signal" do
+    test "security regression: remote suspension does not apply without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       {:ok, identity} = Identity.generate(name: "suspend-test")
       :ok = Registry.register(Identity.public_only(identity))
 
@@ -194,19 +202,21 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(Registry)
 
-      assert {:error, :identity_suspended} = Registry.lookup(identity.agent_id)
+      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
     end
 
-    test "handles remote resume signal" do
+    test "security regression: remote resume does not unsuspend without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       {:ok, identity} = Identity.generate(name: "resume-test")
       :ok = Registry.register(Identity.public_only(identity))
 
       # Suspend first
       :ok = Registry.suspend(identity.agent_id, "test")
 
-      # Resume via signal
+      # Resume via unauthenticated remote signal
       send(
         Process.whereis(Registry),
         {:signal_received,
@@ -219,12 +229,14 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(Registry)
 
-      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
+      assert {:error, :identity_suspended} = Registry.lookup(identity.agent_id)
     end
 
-    test "handles remote revocation signal" do
+    test "security regression: remote revocation does not apply without authenticated transport" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       {:ok, identity} = Identity.generate(name: "revoke-test")
       :ok = Registry.register(Identity.public_only(identity))
 
@@ -240,9 +252,9 @@ defmodule Arbor.Security.DistributedTest do
          }}
       )
 
-      Process.sleep(10)
+      _ = :sys.get_state(Registry)
 
-      assert {:error, :identity_revoked} = Registry.lookup(identity.agent_id)
+      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
     end
 
     test "ignores identity signals from own node" do
@@ -297,6 +309,7 @@ defmodule Arbor.Security.DistributedTest do
 
       assert Arbor.Signals.Config.security_sync_transport_configured?()
       assert Arbor.Security.Config.distributed_signals_enabled?() == true
+      refute Arbor.Signals.authenticated_security_sync_transport?()
 
       if original != nil do
         Application.put_env(:arbor_security, :distributed_signals, original)

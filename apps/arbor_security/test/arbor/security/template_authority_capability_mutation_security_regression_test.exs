@@ -1982,19 +1982,19 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   # ==========================================================================
-  # C4d — remote projection occupies by_resource and blocks a different
-  # acknowledged id for the same principal/resource without inventory scan.
-  # Coverage of existing distributed wiring (not a claimed base-red defect).
+  # C4d — unauthenticated remote capability_granted must not project a
+  # durable record into live indexes (P1B fail-closed apply).
   # ==========================================================================
-  test "security regression: remote projection occupies by_resource and blocks alternate acknowledged id without inventory scan" do
+  test "security regression: unauthenticated remote capability_granted does not project into live indexes" do
     fresh_isolated_store()
     principal = "agent_ack_c4d"
     resource = "arbor://fs/read/ack-c4d"
     remote_opts = det_grant_opts("c4d-remote", principal, resource)
-    local_opts = det_grant_opts("c4d-local", principal, resource)
     remote_id = remote_opts[:capability_id]
 
     if acknowledged_available?() do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+
       remote_cap = build_signed_cap(remote_opts)
 
       assert {:ok, %Record{}} =
@@ -2004,9 +2004,6 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                  name: @capability_store
                )
 
-      # Deliver a remote-origin capability_granted signal so the store loads
-      # the durable record and projects it through add_capability_to_indexes
-      # (which maintains by_resource).
       send(
         CapabilityStore,
         {:signal_received,
@@ -2019,32 +2016,16 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
          }}
       )
 
-      # Linearize on the store mailbox so the projection is applied.
       _ = :sys.get_state(CapabilityStore)
 
-      assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+      assert {:error, :not_found} = CapabilityStore.get(remote_id)
 
       state = :sys.get_state(CapabilityStore)
 
-      # Canonical form may differ from the raw URI; find the bucket that
-      # contains the remotely projected id for this principal.
-      occupied_key =
-        Enum.find_value(state.by_resource, fn
-          {{^principal, uri}, ids} ->
-            if MapSet.member?(ids, remote_id), do: {principal, uri}
-
-          _ ->
-            nil
-        end)
-
-      assert occupied_key != nil
-      assert MapSet.member?(Map.fetch!(state.by_resource, occupied_key), remote_id)
-
-      CASSandbox.reset_inventory_scan_count()
-      assert {:error, :resource_conflict} = Security.acknowledged_grant(local_opts)
-      assert CASSandbox.inventory_scan_count() == 0
-
-      assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+      refute Enum.any?(Map.get(state, :by_resource, %{}), fn
+               {{^principal, _uri}, ids} -> MapSet.member?(ids, remote_id)
+               _ -> false
+             end)
     else
       assert {:ok, _} = Security.grant(principal: principal, resource: resource)
     end
@@ -2278,8 +2259,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, %Capability{id: ^keep_id}} = CapabilityStore.get(keep_id)
   end
 
-  test "security regression: pre-C3A live state projects a real remote add and revoke signal after hot reload" do
+  test "security regression: pre-C3A live state does not apply unauthenticated remote add or revoke" do
     fresh_isolated_store()
+    refute Arbor.Signals.authenticated_security_sync_transport?()
 
     principal = "agent_upgrade_g5"
     resource = "arbor://fs/read/upgrade-g5"
@@ -2312,9 +2294,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     send(CapabilityStore, {:signal_received, add_signal})
     _ = :sys.get_state(CapabilityStore)
 
-    assert {:ok, %Capability{id: ^remote_id}} = CapabilityStore.get(remote_id)
+    assert {:error, :not_found} = CapabilityStore.get(remote_id)
 
-    assert resource_index_holds?(
+    refute resource_index_holds?(
              :sys.get_state(CapabilityStore).by_resource,
              principal,
              resource,

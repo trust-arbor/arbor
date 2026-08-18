@@ -167,6 +167,16 @@ defmodule Arbor.Signals do
   def subscribe_security_sync(role, event),
     do: Bus.subscribe_security_sync(role, event)
 
+  @doc """
+  Whether remote-origin security-sync mutations may be applied.
+
+  False until an authenticated cluster transport exists. A configured
+  `security_sync_subscribers` map is not authenticated transport.
+  """
+  @spec authenticated_security_sync_transport?() :: boolean()
+  def authenticated_security_sync_transport?,
+    do: Config.authenticated_security_sync_transport?()
+
   @doc "Unsubscribe from signals."
   @spec unsubscribe(String.t()) :: :ok | {:error, :not_found}
   def unsubscribe(subscription_id),

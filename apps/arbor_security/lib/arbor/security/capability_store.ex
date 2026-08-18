@@ -2797,10 +2797,15 @@ defmodule Arbor.Security.CapabilityStore do
     # Ignore signals originating from this node (we already have the state)
     origin_node = signal.data[:origin_node] || signal.data["origin_node"]
 
-    if origin_node in [node(), Atom.to_string(node())] do
-      state
-    else
-      handle_remote_signal(signal.type, signal.data, state)
+    cond do
+      origin_node in [node(), Atom.to_string(node())] ->
+        state
+
+      not Signals.authenticated_security_sync_transport?() ->
+        state
+
+      true ->
+        handle_remote_signal(signal.type, signal.data, state)
     end
   catch
     _, reason ->

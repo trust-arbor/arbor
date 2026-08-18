@@ -170,20 +170,25 @@ defmodule Arbor.Security.Identity.NonceCache do
     data = Map.get(signal, :data, %{})
     origin_node = data[:origin_node] || data["origin_node"]
 
-    if origin_node in [node(), Atom.to_string(node())] do
-      # Our own signal echoed back — ignore.
-      state
-    else
-      nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
+    cond do
+      origin_node in [node(), Atom.to_string(node())] ->
+        # Our own signal echoed back — ignore.
+        state
 
-      case Base.decode16(to_string(nonce_hex), case: :mixed) do
-        {:ok, nonce} when byte_size(nonce) > 0 ->
-          expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
-          put_in(state, [:nonces, nonce], expiry)
+      not Arbor.Signals.authenticated_security_sync_transport?() ->
+        state
 
-        _ ->
-          state
-      end
+      true ->
+        nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
+
+        case Base.decode16(to_string(nonce_hex), case: :mixed) do
+          {:ok, nonce} when byte_size(nonce) > 0 ->
+            expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
+            put_in(state, [:nonces, nonce], expiry)
+
+          _ ->
+            state
+        end
     end
   catch
     _, reason ->

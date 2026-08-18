@@ -184,6 +184,9 @@ defmodule Arbor.Signals.Relay do
           {Enum.take(signals, allowed_count), length(signals) - allowed_count}
         end
 
+      {accepted, restricted_rejected} = admit_remote_security_sync_signals(accepted)
+      rejected_count = rejected_count + restricted_rejected
+
       # Inject accepted signals into local Bus
       Enum.each(accepted, fn signal ->
         # Phase 6: Sanitize metadata from remote signals
@@ -201,8 +204,18 @@ defmodule Arbor.Signals.Relay do
         |> Map.update!(:signals_rejected, &(&1 + rejected_count))
         |> Map.put(:peers_seen, count_peers())
 
-      if rejected_count > 0 do
-        Logger.warning("[SignalRelay] Rate limited #{rejected_count} signals from #{from_node}")
+      if restricted_rejected > 0 do
+        Logger.warning(
+          "[SignalRelay] Rejected #{restricted_rejected} unauthenticated " <>
+            "security-sync signals from #{from_node}"
+        )
+      end
+
+      if rejected_count > restricted_rejected do
+        Logger.warning(
+          "[SignalRelay] Rate limited #{rejected_count - restricted_rejected} " <>
+            "signals from #{from_node}"
+        )
       end
 
       Logger.debug("[SignalRelay] Received #{count} signals from #{from_node}")
@@ -307,6 +320,25 @@ defmodule Arbor.Signals.Relay do
   end
 
   # ── Phase 6: Security Hardening ─────────────────────────────────────
+
+  # P1B: remote :security / :identity inject requires authenticated
+  # transport. A configured subscriber map is not that transport.
+  defp admit_remote_security_sync_signals(signals) do
+    if Config.authenticated_security_sync_transport?() do
+      {signals, 0}
+    else
+      {admitted, blocked} =
+        Enum.split_with(signals, &admitted_unauthenticated_remote_signal?/1)
+
+      {admitted, length(blocked)}
+    end
+  end
+
+  defp admitted_unauthenticated_remote_signal?(%Signal{category: category})
+       when category in [:security, :identity],
+       do: false
+
+  defp admitted_unauthenticated_remote_signal?(%Signal{}), do: true
 
   defp valid_peer?(from_node) do
     # In single-node mode (nonode@nohost), accept all — no peers exist
