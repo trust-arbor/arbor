@@ -154,6 +154,83 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
       assert {:error, {:invalid_field, "children", :improper_list}} =
                Core.project(Map.put(admitted_candidate(), "children", improper))
     end
+
+    test "projects the combined children and facilities maxima without overflowing findings" do
+      children = Enum.map(1..64, &"unexpected_child_#{&1}")
+      facilities = known_facilities()
+
+      assert {:ok, document} =
+               Core.project(%{
+                 admitted_candidate()
+                 | "children" => children,
+                   "facilities" => facilities
+               })
+
+      assert length(document["children"]) == 64
+      assert document["facilities"] == Enum.sort(facilities)
+      assert length(document["findings"]) == 64 + length(facilities)
+      assert document["architecture_status"] == "blocked"
+
+      one_facility = ["oauth_and_network_pools"]
+
+      assert {:ok, sixty_five} =
+               Core.project(%{
+                 admitted_candidate()
+                 | "children" => children,
+                   "facilities" => one_facility
+               })
+
+      assert length(sixty_five["findings"]) == 65
+    end
+
+    test "rejects list, token, key-style, and exact-value boundary failures" do
+      assert {:error, {:invalid_field, "children", :unbounded}} =
+               Core.project(%{
+                 admitted_candidate()
+                 | "children" => Enum.map(1..65, &"unexpected_child_#{&1}")
+               })
+
+      assert {:error, {:invalid_field, "facilities", :unbounded}} =
+               Core.project(%{
+                 admitted_candidate()
+                 | "facilities" => Enum.map(1..33, &"facility_#{&1}")
+               })
+
+      assert {:error, {:invalid_field, "children", :unbounded}} =
+               Core.project(%{
+                 admitted_candidate()
+                 | "children" => [String.duplicate("c", 257)]
+               })
+
+      assert {:error, {:invalid_field, "children", :empty_string}} =
+               Core.project(%{admitted_candidate() | "children" => [""]})
+
+      assert {:error, {:invalid_field, "children", :invalid_string}} =
+               Core.project(%{admitted_candidate() | "children" => ["has\0null"]})
+
+      assert {:error, {:invalid_field, "children", :invalid_utf8}} =
+               Core.project(%{admitted_candidate() | "children" => [<<0xFF>>]})
+
+      assert {:error, {:invalid_field, "children", :not_a_string}} =
+               Core.project(%{admitted_candidate() | "children" => [:not_a_string]})
+
+      assert {:error, :non_string_keys} = Core.project(atom_candidate())
+
+      mixed =
+        admitted_candidate()
+        |> Map.delete("schema")
+        |> Map.put(:schema, Core.schema())
+
+      assert {:error, :mixed_keys} = Core.project(mixed)
+
+      assert {:error, :exact_mismatch} =
+               Core.project(%{admitted_candidate() | "version" => 2})
+
+      assert {:error, :exact_mismatch} =
+               Core.project(%{admitted_candidate() | "profile" => "safe_recovery"})
+
+      assert {:error, :invalid_candidate} = Core.project(%Date{year: 2026, month: 8, day: 17})
+    end
   end
 
   test "the core source stays free of Process, IO, Application, and time" do
@@ -197,5 +274,31 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
       ],
       "facilities" => []
     }
+  end
+
+  defp atom_candidate do
+    %{
+      schema: Core.schema(),
+      version: 1,
+      profile: Core.profile_name(),
+      children: [],
+      facilities: []
+    }
+  end
+
+  defp known_facilities do
+    [
+      "dashboard_voice_gateway_and_cognition",
+      "dynamic_compile_eval_and_reload",
+      "full_signals_monitor_and_os_mon",
+      "llm_and_model_calls",
+      "oauth_and_network_pools",
+      "postgres_sqlite_and_vector_providers",
+      "public_ets_authority",
+      "remote_provider_rpc_before_authorization",
+      "shell_execution_backends",
+      "skill_plugin_scan_and_git_fetch",
+      "unverified_or_third_party_in_vm_code"
+    ]
   end
 end

@@ -5,7 +5,12 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.Core do
   `project/1` admits a closed in-memory candidate of Kernel Runtime
   children and facilities, derives findings, and returns a string-keyed
   canonical document. No Process, IO, Application, or time is consulted.
-  Production Application.start stays unwired.
+
+  `evidence_status` is always `"conformant"` and `architecture_status`
+  is always `"blocked"` in this packet, including the empty-findings
+  admitted set. Empty findings mean the candidate matches the profile,
+  not that the runtime is ready: production Application.start stays
+  unwired.
   """
 
   @schema "arbor.kernel_runtime.activation_only_profile.v1"
@@ -92,7 +97,8 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.Core do
 
   @max_children 64
   @max_facilities 32
-  @max_findings 64
+  # One unexpected-child finding plus one facility finding at the list maxima.
+  @max_findings 96
   @max_string 256
 
   @doc "Closed profile schema identifier."
@@ -151,6 +157,7 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.Core do
       "children" => children,
       "facilities" => facilities,
       "findings" => findings,
+      # Always conformant/blocked: empty findings are not a ready runtime.
       "evidence_status" => "conformant",
       "architecture_status" => "blocked"
     }
