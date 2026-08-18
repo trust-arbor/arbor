@@ -4,7 +4,7 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
   alias Arbor.Commands.SafeManagementSurface
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Extension.Envelope
-  alias Arbor.KernelRuntime.SafeManagementSurface.Core
+  alias Arbor.KernelRuntime.SafeManagementSurface, as: KernelSurface
 
   @moduletag :fast
 
@@ -68,7 +68,7 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
     assert {:ok, document} =
              SafeManagementSurface.run(root: root, operation: "list", receipt: rel)
 
-    assert document["schema"] == Core.schema()
+    assert document["schema"] == KernelSurface.schema()
     assert document["operation"] == "list"
     assert document["authorization_status"] == "absent"
     assert document["decision"] == "denied"
@@ -165,6 +165,11 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
 
     assert {:error, {:receipt_path, :null_byte}} =
              SafeManagementSurface.run(root: root, operation: "list", receipt: "ok\0bad.json")
+
+    invalid_utf8 = "apps/arbor_commands/priv/packaging/" <> <<0xFF, 0xFE>> <> ".json"
+
+    assert {:error, {:receipt_path, :invalid_encoding}} =
+             SafeManagementSurface.run(root: root, operation: "list", receipt: invalid_utf8)
 
     outside = Path.join(Path.dirname(root), "outside-receipt.json")
     on_exit(fn -> File.rm_rf(outside) end)
@@ -269,6 +274,7 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
       refute src =~ "Application.start"
       refute src =~ "Application.ensure_all_started"
       refute src =~ "Extension.Activation"
+      refute src =~ "SafeManagementSurface.Core"
     end)
 
     refute mix =~ "--authorization-status"

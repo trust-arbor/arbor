@@ -2,20 +2,20 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurface do
   @shortdoc "P1A safe-management surface decision (presentation only)"
 
   @moduledoc """
-  Closed Mix adapter over `Arbor.KernelRuntime.SafeManagementSurface.Core`.
+  Closed Mix CLI over `Arbor.Commands.SafeManagementSurface.run/1`.
 
       mix arbor.packaging.safe_management_surface --operation list --receipt path.json
       mix arbor.packaging.safe_management_surface --operation revoke --receipt path.json --json
 
-  The task gathers a closed operation (`list`, `revoke`, `disable`,
-  `rollback`, `clean`) and a size-bounded SafePath receipt JSON, then
-  emits the Core decision document. Production injects absent
-  authorization independently. A receipt is never bearer authority, and
-  this command cannot mark authorization verified.
+  This task only parses a closed argv and prints the returned document.
+  Absent-authorization injection and
+  `Arbor.KernelRuntime.SafeManagementSurface.project/1` live in that
+  shell. A receipt is never bearer authority, and this command cannot
+  mark authorization verified.
 
-  Denied decisions still emit the Core document. This adapter never
-  applies mutation effects and does not claim architecture readiness.
-  `architecture_status=blocked` is expected.
+  Denied decisions still emit the document, then exit nonzero. This
+  adapter never applies mutation effects and does not claim architecture
+  readiness. `architecture_status=blocked` is expected.
   """
 
   use Mix.Task
@@ -44,6 +44,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurface do
       {:ok, document, cli} ->
         case finish_report(document, cli) do
           :ok -> :ok
+          {:error, {:shutdown, 1}} -> exit({:shutdown, 1})
           {:error, error} -> fail(error)
         end
 
@@ -71,14 +72,17 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurface do
     with :ok <- emit(document, Map.get(cli, :json, false) == true) do
       case exit_reason(document) do
         :ok -> :ok
-        reason -> exit(reason)
+        {:shutdown, 1} = reason -> {:error, reason}
       end
     end
   end
 
   @doc false
   @spec exit_reason(term()) :: :ok | {:shutdown, 1}
-  def exit_reason(document) when is_map(document), do: :ok
+  def exit_reason(document) when is_map(document) do
+    if admitted_document?(document), do: :ok, else: {:shutdown, 1}
+  end
+
   def exit_reason(_document), do: {:shutdown, 1}
 
   @doc false
@@ -286,6 +290,13 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurface do
 
       {:ok, encoded}
     end
+  end
+
+  defp admitted_document?(document) do
+    require_document_keys(document) == :ok and
+      document["decision"] == "admitted" and
+      is_nil(document["error"]) and
+      is_list(document["effects"])
   end
 
   defp require_document_keys(document) when is_map(document) and not is_struct(document) do

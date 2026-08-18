@@ -4,8 +4,8 @@ defmodule Arbor.Commands.SafeManagementSurface do
 
   Production gathers a closed operation and a size-bounded SafePath receipt
   JSON, injects `authorization_status` independently as `"absent"`, calls
-  `Arbor.KernelRuntime.SafeManagementSurface.Core.project/1` once, and
-  returns that decision document. It never applies mutation effects.
+  `Arbor.KernelRuntime.SafeManagementSurface.project/1` once, and returns
+  that decision document. It never applies mutation effects.
 
   A receipt is never bearer authority. `run/1` cannot set authorization to
   verified. `run_for_test/1` is the only seam that may inject a closed
@@ -14,7 +14,7 @@ defmodule Arbor.Commands.SafeManagementSurface do
 
   alias Arbor.Commands.PackagingRoot
   alias Arbor.Common.SafePath
-  alias Arbor.KernelRuntime.SafeManagementSurface.Core
+  alias Arbor.KernelRuntime.SafeManagementSurface, as: KernelSurface
 
   @max_receipt_bytes 64 * 1024
   @operations MapSet.new(["clean", "disable", "list", "revoke", "rollback"])
@@ -58,8 +58,8 @@ defmodule Arbor.Commands.SafeManagementSurface do
   defp do_run(opts) do
     with {:ok, root} <- resolve_root(opts.root),
          {:ok, receipt} <- load_receipt(root, opts.receipt) do
-      Core.project(%{
-        "schema" => Core.schema(),
+      KernelSurface.project(%{
+        "schema" => KernelSurface.schema(),
         "version" => 1,
         "operation" => opts.operation,
         "authorization_status" => opts.authorization_status,
@@ -141,7 +141,7 @@ defmodule Arbor.Commands.SafeManagementSurface do
   defp require_unredirected(_lexical, _real), do: {:error, :receipt_symlink_redirection}
 
   defp read_receipt_bytes(path, root) do
-    case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
+    case :file.open(path, [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
           with {:ok, opened_identity} <- descriptor_regular_identity(io),
@@ -204,11 +204,12 @@ defmodule Arbor.Commands.SafeManagementSurface do
     with {:ok, real} <- resolve_receipt_real(path),
          :ok <- require_within(real, root),
          :ok <- require_unredirected(path, real),
-         {:ok, current_identity} <- path_regular_identity(path),
-         true <- current_identity == expected_identity do
-      :ok
-    else
-      _other -> {:error, :receipt_changed_during_read}
+         {:ok, current_identity} <- path_regular_identity(path) do
+      if current_identity == expected_identity do
+        :ok
+      else
+        {:error, :receipt_changed_during_read}
+      end
     end
   end
 

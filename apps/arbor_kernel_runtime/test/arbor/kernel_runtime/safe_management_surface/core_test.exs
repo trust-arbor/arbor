@@ -215,6 +215,18 @@ defmodule Arbor.KernelRuntime.SafeManagementSurface.CoreTest do
     end
   end
 
+  test "the public SafeManagementSurface facade delegates project/1 and schema/0" do
+    receipt = Envelope.fixture(:activation_receipt)
+    input = candidate("list", "absent", receipt)
+
+    assert Arbor.KernelRuntime.SafeManagementSurface.schema() == Core.schema()
+    assert {:ok, via_facade} = Arbor.KernelRuntime.SafeManagementSurface.project(input)
+    assert {:ok, via_core} = Core.project(input)
+    assert via_facade == via_core
+    assert via_facade["decision"] == "denied"
+    assert via_facade["error"] == "authorization_absent"
+  end
+
   test "the core source stays free of Process, IO, Application, and time" do
     path =
       Path.expand(

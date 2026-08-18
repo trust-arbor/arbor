@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurfaceTest do
   alias Arbor.Commands.SafeManagementSurface
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Extension.Envelope
-  alias Arbor.KernelRuntime.SafeManagementSurface.Core
+  alias Arbor.KernelRuntime.SafeManagementSurface, as: KernelSurface
   alias Mix.Tasks.Arbor.Packaging.SafeManagementSurface, as: Task
 
   @moduletag :fast
@@ -92,7 +92,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurfaceTest do
     assert {:ok, document} =
              Task.execute(["--root", root, "--operation", "list", "--receipt", rel])
 
-    assert document["schema"] == Core.schema()
+    assert document["schema"] == KernelSurface.schema()
     assert document["authorization_status"] == "absent"
     assert document["decision"] == "denied"
     assert document["error"] == "authorization_absent"
@@ -115,7 +115,7 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurfaceTest do
     try do
       output =
         capture_io(fn ->
-          assert :ok = Task.finish_report(document, %{json: false})
+          assert {:error, {:shutdown, 1}} = Task.finish_report(document, %{json: false})
         end)
 
       assert output =~ expected_human
@@ -123,7 +123,14 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeManagementSurfaceTest do
       Mix.shell(old)
     end
 
-    assert Task.exit_reason(document) == :ok
+    assert Task.exit_reason(document) == {:shutdown, 1}
+
+    admitted = %{document | "decision" => "admitted", "error" => nil}
+    assert Task.exit_reason(admitted) == :ok
+
+    inconsistent = %{document | "decision" => "admitted", "error" => "authorization_absent"}
+    assert Task.exit_reason(inconsistent) == {:shutdown, 1}
+    assert Task.exit_reason(%{"decision" => "denied"}) == {:shutdown, 1}
   end
 
   test "JSON output is the Core document and stays denied on the production path", %{
