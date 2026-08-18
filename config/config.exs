@@ -396,6 +396,14 @@ config :arbor_kernel,
     signal_module: Arbor.Signals
   ]
 
+# KernelRuntime owner-scoped config lives under :arbor_kernel, :kernel_runtime.
+# Missing or :full starts Common, Signals, and Monitor. :activation_only
+# starts none of those nested applications. See Arbor.KernelRuntime.Config.
+config :arbor_kernel,
+  kernel_runtime: [
+    start_profile: :full
+  ]
+
 # Dashboard chat model configuration
 config :arbor_dashboard,
   chat_models: [

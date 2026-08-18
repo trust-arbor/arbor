@@ -5,6 +5,10 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   in that order, without flattening or altering their own supervision
   strategies. This test proves the composed lifecycle in both the disabled
   (test-default) gate state, and hermetically flipped to enabled.
+
+  P1A: a closed start profile is read from `Arbor.KernelRuntime.Config`.
+  Missing or `:full` keeps those three nested applications. `:activation_only`
+  starts none of them. Unknown or malformed values fail closed at start.
   """
   use ExUnit.Case, async: false
 
@@ -27,7 +31,13 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     {Arbor.Signals.Bus, []},
     {Arbor.Signals.Relay, []}
   ]
-  @config_sections [:common, :signals, :monitor]
+  @config_sections [:common, :signals, :monitor, :kernel_runtime]
+  @full_child_ids MapSet.new([
+                    Arbor.Common.Application,
+                    Arbor.Signals.Application,
+                    Arbor.Monitor.Application
+                  ])
+  @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
 
   test "the runtime supervisor owns the three nested application supervisors" do
     assert Process.whereis(Arbor.KernelRuntime.Supervisor)
@@ -35,18 +45,69 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     assert Process.whereis(Arbor.Signals.Supervisor)
     assert Process.whereis(Arbor.Monitor.Supervisor)
 
-    child_ids =
-      Arbor.KernelRuntime.Supervisor
-      |> Supervisor.which_children()
-      |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
-      |> MapSet.new()
+    assert runtime_child_ids() == @full_child_ids
+  end
 
-    assert child_ids ==
-             MapSet.new([
-               Arbor.Common.Application,
-               Arbor.Signals.Application,
-               Arbor.Monitor.Application
-             ])
+  test "missing or :full start profile nests the three application supervisors" do
+    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
+    stop_runtime()
+    Application.delete_env(:arbor_kernel, :kernel_runtime)
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+    assert_nested_supervisors()
+    assert runtime_child_ids() == @full_child_ids
+    assert Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)
+
+    stop_runtime()
+    put_section(:kernel_runtime, start_profile: :full)
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+    assert_nested_supervisors()
+    assert runtime_child_ids() == @full_child_ids
+    assert Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)
+  end
+
+  test "activation_only starts none of Common, Signals, or Monitor" do
+    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
+    stop_runtime()
+    put_section(:kernel_runtime, start_profile: :activation_only)
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+    assert Process.whereis(Arbor.KernelRuntime.Supervisor)
+    assert runtime_child_ids() == MapSet.new()
+    refute Process.whereis(Arbor.Common.Supervisor)
+    refute Process.whereis(Arbor.Signals.Supervisor)
+    refute Process.whereis(Arbor.Monitor.Supervisor)
+    refute Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)
+    refute Process.whereis(Arbor.Signals.Bus)
+    refute Process.whereis(Arbor.Monitor.Poller)
+    refute Process.whereis(Arbor.Common.Extension.ProtectedRegistry)
+  end
+
+  test "unknown or malformed start profile fails closed" do
+    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
+    stop_runtime()
+
+    Enum.each(@invalid_start_profiles, fn value ->
+      put_section(:kernel_runtime, start_profile: value)
+
+      assert {:error, {:arbor_kernel_runtime, {:invalid_start_profile, ^value}}} =
+               Application.ensure_all_started(:arbor_kernel_runtime)
+
+      refute Process.whereis(Arbor.KernelRuntime.Supervisor)
+      refute Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)
+      refute Process.whereis(Arbor.Signals.Bus)
+      refute Process.whereis(Arbor.Monitor.Poller)
+    end)
   end
 
   test "nested applications honor disabled and enabled child gates" do
@@ -131,6 +192,13 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     assert Process.whereis(Arbor.Common.Supervisor)
     assert Process.whereis(Arbor.Signals.Supervisor)
     assert Process.whereis(Arbor.Monitor.Supervisor)
+  end
+
+  defp runtime_child_ids do
+    Arbor.KernelRuntime.Supervisor
+    |> Supervisor.which_children()
+    |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
+    |> MapSet.new()
   end
 
   defp put_section(section, updates) do
