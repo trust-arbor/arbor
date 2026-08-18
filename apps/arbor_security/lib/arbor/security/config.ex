@@ -25,6 +25,7 @@ defmodule Arbor.Security.Config do
   @default_signing_authority_broker_call_timeout_ms 5_000
   @max_signing_authority_broker_call_timeout_ms 30_000
   @enforcement_toggle_persistent_key {__MODULE__, :enforcement_toggles}
+  @enforcement_toggle_claim_table __MODULE__.EnforcementToggleClaim
   @enforcement_toggle_defaults [
     identity_verification: true,
     capability_signing_required: true,
@@ -33,29 +34,29 @@ defmodule Arbor.Security.Config do
     consensus_escalation_enabled: true,
     quota_enforcement_enabled: true,
     policy_enforcer_enabled: true,
-    delegation_chain_verification_enabled: true
+    delegation_chain_verification_enabled: true,
+    strict_identity_mode: false,
+    distributed_signals: true
   ]
 
   @doc """
   Snapshot the closed fail-open-when-false enforcement toggles.
 
-  The first call wins. Later `Application.put_env/3` of a frozen key cannot
-  change the matching public reader. Production application start calls
-  `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
-  this explicitly and restore afterward.
+  The first installer wins atomically. Later `Application.put_env/3` of a
+  frozen key cannot change the matching public reader, and a concurrent
+  second freeze cannot replace the winning snapshot. Production application
+  start calls `maybe_freeze_enforcement_toggles/1`; tests that need the pin
+  must call this explicitly and restore afterward.
   """
   @spec freeze_enforcement_toggles() :: :ok
   def freeze_enforcement_toggles do
-    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
-      :not_frozen ->
-        :persistent_term.put(
-          @enforcement_toggle_persistent_key,
-          snapshot_enforcement_toggles()
-        )
-
-      _already_frozen ->
-        :ok
+    if claim_enforcement_toggle_freeze() do
+      snapshot = snapshot_enforcement_toggles()
+      run_enforcement_toggle_freeze_test_seam()
+      persist_enforcement_toggle_snapshot(snapshot)
     end
+
+    :ok
   end
 
   @doc """
@@ -70,7 +71,15 @@ defmodule Arbor.Security.Config do
     @spec restore_enforcement_toggles() :: :ok
     def restore_enforcement_toggles do
       :persistent_term.erase(@enforcement_toggle_persistent_key)
+      release_enforcement_toggle_freeze_claim()
       :ok
+    end
+
+    defp release_enforcement_toggle_freeze_claim do
+      case :ets.whereis(@enforcement_toggle_claim_table) do
+        :undefined -> :ok
+        tid -> :ets.delete(tid, :claimed)
+      end
     end
   end
 
@@ -458,7 +467,7 @@ defmodule Arbor.Security.Config do
   """
   @spec strict_identity_mode?() :: boolean()
   def strict_identity_mode? do
-    Application.get_env(@app, :strict_identity_mode, false)
+    enforcement_toggle(:strict_identity_mode, false)
   end
 
   # ===========================================================================
@@ -543,7 +552,7 @@ defmodule Arbor.Security.Config do
   """
   @spec distributed_signals_enabled?() :: boolean()
   def distributed_signals_enabled? do
-    Application.get_env(@app, :distributed_signals, true) and
+    enforcement_toggle(:distributed_signals, true) and
       Arbor.Signals.Config.security_sync_transport_configured?()
   end
 
@@ -633,5 +642,64 @@ defmodule Arbor.Security.Config do
     Map.new(@enforcement_toggle_defaults, fn {key, default} ->
       {key, Application.get_env(@app, key, default)}
     end)
+  end
+
+  # ETS insert_new is the single-winner claim. persistent_term get-then-put
+  # alone lets a concurrent second freezer overwrite the first snapshot.
+  defp claim_enforcement_toggle_freeze do
+    :ets.insert_new(enforcement_toggle_claim_table(), {:claimed, true})
+  end
+
+  defp persist_enforcement_toggle_snapshot(snapshot) do
+    if enforcement_toggle_freeze_claimed?() do
+      :persistent_term.put(@enforcement_toggle_persistent_key, snapshot)
+    end
+
+    :ok
+  end
+
+  defp enforcement_toggle_freeze_claimed? do
+    case :ets.whereis(@enforcement_toggle_claim_table) do
+      :undefined -> false
+      tid -> :ets.member(tid, :claimed)
+    end
+  end
+
+  defp enforcement_toggle_claim_table do
+    case :ets.whereis(@enforcement_toggle_claim_table) do
+      :undefined ->
+        try do
+          :ets.new(@enforcement_toggle_claim_table, [
+            :named_table,
+            :set,
+            :public,
+            read_concurrency: true
+          ])
+        rescue
+          ArgumentError ->
+            @enforcement_toggle_claim_table
+        end
+
+      _tid ->
+        @enforcement_toggle_claim_table
+    end
+  end
+
+  if Mix.env() == :test do
+    defp run_enforcement_toggle_freeze_test_seam do
+      case Application.get_env(@app, :enforcement_toggle_freeze_test_seam) do
+        %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
+        when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
+               is_pid(notify_pid) ->
+          send(notify_pid, {:enforcement_toggle_freeze_claimed, self()})
+          Process.sleep(delay_ms)
+          :ok
+
+        _disabled_or_invalid ->
+          :ok
+      end
+    end
+  else
+    defp run_enforcement_toggle_freeze_test_seam, do: :ok
   end
 end

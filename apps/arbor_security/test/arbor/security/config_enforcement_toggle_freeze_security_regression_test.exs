@@ -19,7 +19,9 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     {:consensus_escalation_enabled, &Config.consensus_escalation_enabled?/0},
     {:quota_enforcement_enabled, &Config.quota_enforcement_enabled?/0},
     {:policy_enforcer_enabled, &Config.policy_enforcer_enabled?/0},
-    {:delegation_chain_verification_enabled, &Config.delegation_chain_verification_enabled?/0}
+    {:delegation_chain_verification_enabled, &Config.delegation_chain_verification_enabled?/0},
+    {:strict_identity_mode, &Config.strict_identity_mode?/0},
+    {:distributed_signals, &Config.distributed_signals_enabled?/0}
   ]
 
   setup do
@@ -81,6 +83,47 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
 
     assert Config.identity_verification_enabled?() == true
     assert Config.capability_signing_required?() == true
+    assert Config.strict_identity_mode?() == true
+    assert Config.distributed_signals_enabled?() == true
+  end
+
+  test "security regression: freeze snapshots the false default for strict identity" do
+    Application.delete_env(:arbor_security, :strict_identity_mode)
+    Application.put_env(:arbor_security, :distributed_signals, false)
+
+    assert Config.strict_identity_mode?() == false
+    assert Config.distributed_signals_enabled?() == false
+    assert :ok = Config.freeze_enforcement_toggles()
+
+    Application.put_env(:arbor_security, :strict_identity_mode, true)
+    Application.put_env(:arbor_security, :distributed_signals, true)
+
+    assert Config.strict_identity_mode?() == false
+    assert Config.distributed_signals_enabled?() == false
+  end
+
+  test "security regression: concurrent second freeze cannot replace the winning snapshot after env is weakened" do
+    set_enforcement_toggles(true)
+
+    Application.put_env(:arbor_security, :enforcement_toggle_freeze_test_seam, %{
+      delay_ms: 100,
+      notify_pid: self()
+    })
+
+    first = Task.async(fn -> Config.freeze_enforcement_toggles() end)
+
+    assert_receive {:enforcement_toggle_freeze_claimed, _winner_pid}, 1_000
+
+    set_enforcement_toggles(false)
+
+    second = Task.async(fn -> Config.freeze_enforcement_toggles() end)
+
+    assert Task.await(second, 5_000) == :ok
+    assert Task.await(first, 5_000) == :ok
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} overwritten by concurrent second freeze"
+    end
   end
 
   defp refute_frozen_readers do
@@ -104,7 +147,11 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
   end
 
   defp env_snapshot do
-    Map.new(@fail_open_when_false, fn {key, _reader} ->
+    keys =
+      Enum.map(@fail_open_when_false, fn {key, _reader} -> key end) ++
+        [:enforcement_toggle_freeze_test_seam]
+
+    Map.new(keys, fn key ->
       {key, Application.get_env(:arbor_security, key)}
     end)
   end
