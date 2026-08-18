@@ -5,9 +5,12 @@ defmodule Arbor.Security.Application do
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
+  @compile_env Mix.env()
 
   @impl true
   def start(_type, _args) do
+    Arbor.Security.Config.maybe_freeze_enforcement_toggles(@compile_env)
+
     signing_authority_owner_token = make_ref()
 
     children =

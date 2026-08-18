@@ -4,6 +4,11 @@ defmodule Arbor.Security.Config do
 
   Wraps `Application.get_env/3` with baked-in defaults.
 
+  A closed set of fail-open-when-false enforcement toggles can be frozen so
+  later `Application.put_env/3` cannot weaken the public readers. Production
+  `Arbor.Security.Application.start/2` freezes; the test env does not
+  auto-freeze.
+
   ## Configuration
 
       config :arbor_security,
@@ -19,6 +24,55 @@ defmodule Arbor.Security.Config do
   @max_signing_authority_bootstrap_grace_ms 3_600_000
   @default_signing_authority_broker_call_timeout_ms 5_000
   @max_signing_authority_broker_call_timeout_ms 30_000
+  @enforcement_toggle_persistent_key {__MODULE__, :enforcement_toggles}
+  @enforcement_toggle_defaults [
+    identity_verification: true,
+    capability_signing_required: true,
+    constraint_enforcement_enabled: true,
+    reflex_checking_enabled: true,
+    consensus_escalation_enabled: true,
+    quota_enforcement_enabled: true,
+    policy_enforcer_enabled: true,
+    delegation_chain_verification_enabled: true
+  ]
+
+  @doc """
+  Snapshot the closed fail-open-when-false enforcement toggles.
+
+  The first call wins. Later `Application.put_env/3` of a frozen key cannot
+  change the matching public reader. Production application start calls
+  `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
+  this explicitly and restore afterward.
+  """
+  @spec freeze_enforcement_toggles() :: :ok
+  def freeze_enforcement_toggles do
+    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+      :not_frozen ->
+        :persistent_term.put(
+          @enforcement_toggle_persistent_key,
+          snapshot_enforcement_toggles()
+        )
+
+      _already_frozen ->
+        :ok
+    end
+  end
+
+  @doc """
+  Freeze enforcement toggles on application start, except in `:test`.
+  """
+  @spec maybe_freeze_enforcement_toggles(atom()) :: :ok
+  def maybe_freeze_enforcement_toggles(:test), do: :ok
+  def maybe_freeze_enforcement_toggles(_env), do: freeze_enforcement_toggles()
+
+  if Mix.env() == :test do
+    @doc false
+    @spec restore_enforcement_toggles() :: :ok
+    def restore_enforcement_toggles do
+      :persistent_term.erase(@enforcement_toggle_persistent_key)
+      :ok
+    end
+  end
 
   @doc """
   Whether identity verification is enabled for authorization checks.
@@ -28,7 +82,7 @@ defmodule Arbor.Security.Config do
   """
   @spec identity_verification_enabled?() :: boolean()
   def identity_verification_enabled? do
-    Application.get_env(@app, :identity_verification, true)
+    enforcement_toggle(:identity_verification, true)
   end
 
   @doc """
@@ -163,7 +217,7 @@ defmodule Arbor.Security.Config do
   """
   @spec capability_signing_required?() :: boolean()
   def capability_signing_required? do
-    Application.get_env(@app, :capability_signing_required, true)
+    enforcement_toggle(:capability_signing_required, true)
   end
 
   @doc """
@@ -174,7 +228,7 @@ defmodule Arbor.Security.Config do
   """
   @spec constraint_enforcement_enabled?() :: boolean()
   def constraint_enforcement_enabled? do
-    Application.get_env(@app, :constraint_enforcement_enabled, true)
+    enforcement_toggle(:constraint_enforcement_enabled, true)
   end
 
   @doc """
@@ -186,7 +240,7 @@ defmodule Arbor.Security.Config do
   """
   @spec reflex_checking_enabled?() :: boolean()
   def reflex_checking_enabled? do
-    Application.get_env(@app, :reflex_checking_enabled, true)
+    enforcement_toggle(:reflex_checking_enabled, true)
   end
 
   @doc """
@@ -229,7 +283,7 @@ defmodule Arbor.Security.Config do
   """
   @spec consensus_escalation_enabled?() :: boolean()
   def consensus_escalation_enabled? do
-    Application.get_env(@app, :consensus_escalation_enabled, true)
+    enforcement_toggle(:consensus_escalation_enabled, true)
   end
 
   @doc """
@@ -307,7 +361,7 @@ defmodule Arbor.Security.Config do
   """
   @spec quota_enforcement_enabled?() :: boolean()
   def quota_enforcement_enabled? do
-    Application.get_env(@app, :quota_enforcement_enabled, true)
+    enforcement_toggle(:quota_enforcement_enabled, true)
   end
 
   @doc """
@@ -319,7 +373,7 @@ defmodule Arbor.Security.Config do
   """
   @spec policy_enforcer_enabled?() :: boolean()
   def policy_enforcer_enabled? do
-    Application.get_env(@app, :policy_enforcer_enabled, true)
+    enforcement_toggle(:policy_enforcer_enabled, true)
   end
 
   @doc """
@@ -436,7 +490,7 @@ defmodule Arbor.Security.Config do
   """
   @spec delegation_chain_verification_enabled?() :: boolean()
   def delegation_chain_verification_enabled? do
-    Application.get_env(@app, :delegation_chain_verification_enabled, true)
+    enforcement_toggle(:delegation_chain_verification_enabled, true)
   end
 
   # ===========================================================================
@@ -567,4 +621,17 @@ defmodule Arbor.Security.Config do
   # `Arbor.Security.DisclosureCapability` against Arbor's own source-owned
   # runtime axis (`"arbor"` / `"acp"`) as a hardcoded structural constant, not
   # an operator-configurable value.
+
+  defp enforcement_toggle(key, default) do
+    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+      %{^key => value} -> value
+      _not_frozen -> Application.get_env(@app, key, default)
+    end
+  end
+
+  defp snapshot_enforcement_toggles do
+    Map.new(@enforcement_toggle_defaults, fn {key, default} ->
+      {key, Application.get_env(@app, key, default)}
+    end)
+  end
 end
