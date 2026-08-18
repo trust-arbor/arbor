@@ -164,6 +164,53 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     end
   end
 
+  test "security regression: recreating the claim table does not overwrite an existing freeze snapshot" do
+    set_enforcement_toggles(true)
+    assert :ok = Config.freeze_enforcement_toggles()
+    set_enforcement_toggles(false)
+
+    table = claim_table()
+    assert :ok = Application.stop(:arbor_security)
+    assert :ets.whereis(table) == :undefined
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_security)
+    assert :ets.whereis(table) != :undefined
+    assert :ets.info(table, :owner) == Application.app_pid(:arbor_security)
+
+    assert :ok = Config.freeze_enforcement_toggles()
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} replaced after claim table recreate"
+    end
+  after
+    restore_security_app()
+  end
+
+  test "security regression: foreign named claim table fails Application start closed" do
+    table = claim_table()
+    set_enforcement_toggles(false)
+
+    assert :ok = Application.stop(:arbor_security)
+    assert :ets.whereis(table) == :undefined
+
+    ^table = :ets.new(table, [:named_table, :set, :public])
+    foreign_owner = self()
+    assert :ets.info(table, :owner) == foreign_owner
+
+    assert {:error, {:enforcement_toggle_claim_table_foreign_owner, ^foreign_owner}} =
+             Application.start(:arbor_security)
+
+    refute List.keymember?(Application.started_applications(), :arbor_security, 0)
+
+    set_enforcement_toggles(true)
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} frozen during failed foreign-table start"
+    end
+  after
+    restore_security_app()
+  end
+
   defp refute_frozen_readers do
     set_enforcement_toggles(true)
 
@@ -201,5 +248,65 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
       {key, nil} -> Application.delete_env(:arbor_security, key)
       {key, value} -> Application.put_env(:arbor_security, key, value)
     end)
+  end
+
+  defp restore_security_app do
+    table = claim_table()
+
+    if :ets.whereis(table) != :undefined and :ets.info(table, :owner) == self() do
+      :ets.delete(table)
+    end
+
+    _ = Application.stop(:arbor_security)
+
+    if :ets.whereis(table) != :undefined and :ets.info(table, :owner) == self() do
+      :ets.delete(table)
+    end
+
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    _ = Arbor.Security.TestBootstrap.start!()
+    restore_extra_security_test_children()
+    :ok
+  end
+
+  defp restore_extra_security_test_children do
+    backend =
+      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+
+    issuer =
+      Supervisor.child_spec(
+        {Arbor.Persistence.BufferedStore,
+         name: :arbor_security_issuers,
+         backend: backend,
+         write_mode: :sync,
+         collection: "issuers"},
+        id: :arbor_security_issuers
+      )
+
+    start_security_test_child(issuer)
+
+    signing_authority_owner_token = make_ref()
+
+    for child <- [
+          {Arbor.Security.IssuerRegistry, []},
+          {Arbor.Security.SigningAuthorityStateOwner,
+           broker_token: signing_authority_owner_token},
+          {Arbor.Security.SigningAuthorityBroker,
+           state_owner_token: signing_authority_owner_token},
+          {Arbor.Security.DeliveryReceiptBroker, []}
+        ] do
+      start_security_test_child(child)
+    end
+  end
+
+  defp start_security_test_child(spec) do
+    child_spec = Supervisor.child_spec(spec, [])
+
+    case Supervisor.start_child(Arbor.Security.Supervisor, child_spec) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+      {:error, :already_present} -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 end

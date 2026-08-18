@@ -11,7 +11,15 @@ defmodule Arbor.Security.Application do
   def start(_type, _args) do
     # Application owns the claim table for the VM lifetime. Creating it in a
     # freeze caller lets that process's exit drop the table and reopen insert_new.
-    Arbor.Security.Config.ensure_enforcement_toggle_claim_table()
+    # A pre-existing named table owned by anyone else is squatting: fail closed
+    # before freeze or supervision so startup cannot continue with a mutable
+    # foreign claim table.
+    with :ok <- Arbor.Security.Config.ensure_enforcement_toggle_claim_table() do
+      start_supervised_children()
+    end
+  end
+
+  defp start_supervised_children do
     Arbor.Security.Config.maybe_freeze_enforcement_toggles(@compile_env)
 
     signing_authority_owner_token = make_ref()

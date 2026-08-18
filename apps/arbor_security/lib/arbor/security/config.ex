@@ -48,11 +48,12 @@ defmodule Arbor.Security.Config do
 
   The first installer wins atomically. Later `Application.put_env/3` of a
   frozen key cannot change the matching public reader, and a concurrent
-  second freeze cannot replace the winning snapshot. Production application
-  start installs the Application-owned claim table and calls
-  `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
-  this explicitly and restore afterward. This function never creates the
-  claim table; a missing table fails closed.
+  second freeze cannot replace the winning snapshot. Recreating the claim
+  table after Application stop/start also leaves an existing snapshot in
+  effect. Production application start installs the Application-owned claim
+  table and calls `maybe_freeze_enforcement_toggles/1`; tests that need the
+  pin must call this explicitly and restore afterward. This function never
+  creates the claim table; a missing table fails closed.
   """
   @spec freeze_enforcement_toggles() :: :ok
   def freeze_enforcement_toggles do
@@ -66,21 +67,14 @@ defmodule Arbor.Security.Config do
   end
 
   @doc false
-  @spec ensure_enforcement_toggle_claim_table() :: :ok
+  @spec ensure_enforcement_toggle_claim_table() :: :ok | {:error, term()}
   def ensure_enforcement_toggle_claim_table do
     case :ets.whereis(@enforcement_toggle_claim_table) do
       :undefined ->
-        :ets.new(@enforcement_toggle_claim_table, [
-          :named_table,
-          :set,
-          @enforcement_toggle_claim_table_access,
-          read_concurrency: true
-        ])
-
-        :ok
+        create_enforcement_toggle_claim_table()
 
       _tid ->
-        :ok
+        accept_owned_enforcement_toggle_claim_table()
     end
   end
 
@@ -688,12 +682,52 @@ defmodule Arbor.Security.Config do
     end
   end
 
+  # First snapshot wins for the VM lifetime. A recreated claim table can
+  # win insert_new again after Application stop/start; do not put a later
+  # env snapshot over the already-frozen map (including extra keys).
   defp persist_enforcement_toggle_snapshot(snapshot) do
     if enforcement_toggle_freeze_claimed?() do
-      :persistent_term.put(@enforcement_toggle_persistent_key, snapshot)
+      case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+        existing when is_map(existing) ->
+          :ok
+
+        _not_frozen ->
+          :persistent_term.put(@enforcement_toggle_persistent_key, snapshot)
+      end
     end
 
     :ok
+  end
+
+  defp create_enforcement_toggle_claim_table do
+    try do
+      :ets.new(@enforcement_toggle_claim_table, [
+        :named_table,
+        :set,
+        @enforcement_toggle_claim_table_access,
+        read_concurrency: true
+      ])
+
+      :ok
+    rescue
+      ArgumentError ->
+        accept_owned_enforcement_toggle_claim_table()
+    end
+  end
+
+  # Application.start must not adopt a squat named table. Only the current
+  # Application process may own the claim table.
+  defp accept_owned_enforcement_toggle_claim_table do
+    case :ets.info(@enforcement_toggle_claim_table, :owner) do
+      owner when owner == self() ->
+        :ok
+
+      owner when is_pid(owner) ->
+        {:error, {:enforcement_toggle_claim_table_foreign_owner, owner}}
+
+      _unavailable ->
+        {:error, :enforcement_toggle_claim_table_unavailable}
+    end
   end
 
   defp enforcement_toggle_freeze_claimed? do
