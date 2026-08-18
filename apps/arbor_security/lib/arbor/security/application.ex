@@ -9,6 +9,9 @@ defmodule Arbor.Security.Application do
 
   @impl true
   def start(_type, _args) do
+    # Application owns the claim table for the VM lifetime. Creating it in a
+    # freeze caller lets that process's exit drop the table and reopen insert_new.
+    Arbor.Security.Config.ensure_enforcement_toggle_claim_table()
     Arbor.Security.Config.maybe_freeze_enforcement_toggles(@compile_env)
 
     signing_authority_owner_token = make_ref()

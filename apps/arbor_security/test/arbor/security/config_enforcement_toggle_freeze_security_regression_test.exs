@@ -102,6 +102,44 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     assert Config.distributed_signals_enabled?() == false
   end
 
+  test "security regression: Application start owns the claim table and freeze does not create it" do
+    table = claim_table()
+    assert :ets.whereis(table) != :undefined
+    owner = :ets.info(table, :owner)
+    assert owner == Application.app_pid(:arbor_security)
+    assert Process.alive?(owner)
+
+    set_enforcement_toggles(true)
+    assert :ok = Config.freeze_enforcement_toggles()
+    assert :ets.info(table, :owner) == owner
+  end
+
+  test "security regression: first freezer process exit does not reopen the claim for a later freeze" do
+    set_enforcement_toggles(true)
+
+    freezer =
+      Task.async(fn ->
+        assert :ok = Config.freeze_enforcement_toggles()
+        self()
+      end)
+
+    freezer_pid = Task.await(freezer, 5_000)
+    refute Process.alive?(freezer_pid)
+
+    table = claim_table()
+    assert :ets.whereis(table) != :undefined
+    owner = :ets.info(table, :owner)
+    assert owner == Application.app_pid(:arbor_security)
+    assert owner != freezer_pid
+
+    set_enforcement_toggles(false)
+    assert :ok = Config.freeze_enforcement_toggles()
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} replaced after first freezer exited"
+    end
+  end
+
   test "security regression: concurrent second freeze cannot replace the winning snapshot after env is weakened" do
     set_enforcement_toggles(true)
 
@@ -139,6 +177,8 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
       assert reader.() == false, "#{key} did not follow put_env while unfrozen"
     end
   end
+
+  defp claim_table, do: Module.concat(Config, EnforcementToggleClaim)
 
   defp set_enforcement_toggles(value) do
     for {key, _reader} <- @fail_open_when_false do

@@ -6,8 +6,8 @@ defmodule Arbor.Security.Config do
 
   A closed set of fail-open-when-false enforcement toggles can be frozen so
   later `Application.put_env/3` cannot weaken the public readers. Production
-  `Arbor.Security.Application.start/2` freezes; the test env does not
-  auto-freeze.
+  `Arbor.Security.Application.start/2` installs the claim table and freezes;
+  the test env installs the table but does not auto-freeze.
 
   ## Configuration
 
@@ -26,6 +26,10 @@ defmodule Arbor.Security.Config do
   @max_signing_authority_broker_call_timeout_ms 30_000
   @enforcement_toggle_persistent_key {__MODULE__, :enforcement_toggles}
   @enforcement_toggle_claim_table __MODULE__.EnforcementToggleClaim
+  # :protected in non-test so only the Application owner can write. Test is
+  # :public because ExUnit freeze/restore and the Task-exit regression run
+  # outside Application.start/2 and must insert_new/delete the claim.
+  @enforcement_toggle_claim_table_access if(Mix.env() == :test, do: :public, else: :protected)
   @enforcement_toggle_defaults [
     identity_verification: true,
     capability_signing_required: true,
@@ -45,8 +49,10 @@ defmodule Arbor.Security.Config do
   The first installer wins atomically. Later `Application.put_env/3` of a
   frozen key cannot change the matching public reader, and a concurrent
   second freeze cannot replace the winning snapshot. Production application
-  start calls `maybe_freeze_enforcement_toggles/1`; tests that need the pin
-  must call this explicitly and restore afterward.
+  start installs the Application-owned claim table and calls
+  `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
+  this explicitly and restore afterward. This function never creates the
+  claim table; a missing table fails closed.
   """
   @spec freeze_enforcement_toggles() :: :ok
   def freeze_enforcement_toggles do
@@ -57,6 +63,25 @@ defmodule Arbor.Security.Config do
     end
 
     :ok
+  end
+
+  @doc false
+  @spec ensure_enforcement_toggle_claim_table() :: :ok
+  def ensure_enforcement_toggle_claim_table do
+    case :ets.whereis(@enforcement_toggle_claim_table) do
+      :undefined ->
+        :ets.new(@enforcement_toggle_claim_table, [
+          :named_table,
+          :set,
+          @enforcement_toggle_claim_table_access,
+          read_concurrency: true
+        ])
+
+        :ok
+
+      _tid ->
+        :ok
+    end
   end
 
   @doc """
@@ -646,8 +671,21 @@ defmodule Arbor.Security.Config do
 
   # ETS insert_new is the single-winner claim. persistent_term get-then-put
   # alone lets a concurrent second freezer overwrite the first snapshot.
+  # The Application process owns the table; never create it here. A missing
+  # table fails closed so a later caller cannot reopen freeze.
   defp claim_enforcement_toggle_freeze do
-    :ets.insert_new(enforcement_toggle_claim_table(), {:claimed, true})
+    case :ets.whereis(@enforcement_toggle_claim_table) do
+      :undefined ->
+        false
+
+      tid ->
+        try do
+          :ets.insert_new(tid, {:claimed, true})
+        rescue
+          ArgumentError ->
+            false
+        end
+    end
   end
 
   defp persist_enforcement_toggle_snapshot(snapshot) do
@@ -662,26 +700,6 @@ defmodule Arbor.Security.Config do
     case :ets.whereis(@enforcement_toggle_claim_table) do
       :undefined -> false
       tid -> :ets.member(tid, :claimed)
-    end
-  end
-
-  defp enforcement_toggle_claim_table do
-    case :ets.whereis(@enforcement_toggle_claim_table) do
-      :undefined ->
-        try do
-          :ets.new(@enforcement_toggle_claim_table, [
-            :named_table,
-            :set,
-            :public,
-            read_concurrency: true
-          ])
-        rescue
-          ArgumentError ->
-            @enforcement_toggle_claim_table
-        end
-
-      _tid ->
-        @enforcement_toggle_claim_table
     end
   end
 
