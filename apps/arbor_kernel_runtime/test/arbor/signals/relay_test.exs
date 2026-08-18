@@ -271,13 +271,13 @@ defmodule Arbor.Signals.RelayTest do
       Process.sleep(100)
 
       stats = Relay.stats()
-      # In nonode@nohost mode, peers are accepted, but unauthenticated
-      # :security inject is rejected (P1B).
-      assert stats.relayed_in == 1
-      assert stats.signals_rejected == 1
+      # In nonode@nohost mode, peers are accepted. Non-mutation :security
+      # observability events are injected; only closed mutation types drop.
+      assert stats.relayed_in == 2
+      assert stats.signals_rejected == 0
     end
 
-    test "security regression: remote restricted batch is not published locally without authenticated transport" do
+    test "security regression: remote security-sync mutations drop; observability and nonce_seen inject" do
       Testing.put(:authorizer, Arbor.Signals.Adapters.OpenAuthorizer)
       Testing.put(:allow_open_authorizer, true)
 
@@ -298,6 +298,8 @@ defmodule Arbor.Signals.RelayTest do
           async: false
         )
 
+      nonce_hex = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
       signals = [
         Signal.new(:security, :capability_revoked, %{
           capability_ids: ["cap_p1b_#{marker}"],
@@ -307,6 +309,11 @@ defmodule Arbor.Signals.RelayTest do
           agent_id: "agent_p1b_#{marker}",
           origin_node: :remote@node
         }),
+        Signal.new(:security, :auth_ok, %{agent_id: "obs_#{marker}"}),
+        Signal.new(:security, :nonce_seen, %{
+          nonce_hex: nonce_hex,
+          origin_node: :remote@node
+        }),
         Signal.new(:agent, :started, %{agent_id: "agent_ok_#{marker}"})
       ]
 
@@ -314,11 +321,18 @@ defmodule Arbor.Signals.RelayTest do
 
       assert_receive {:relay_injected, :agent, :started, %{agent_id: agent_id}}, 500
       assert agent_id == "agent_ok_#{marker}"
-      refute_received {:relay_injected, :security, _, _}
-      refute_received {:relay_injected, :identity, _, _}
+
+      assert_receive {:relay_injected, :security, :auth_ok, %{agent_id: obs_id}}, 500
+      assert obs_id == "obs_#{marker}"
+
+      assert_receive {:relay_injected, :security, :nonce_seen, nonce_data}, 500
+      assert nonce_data.nonce_hex == nonce_hex
+
+      refute_received {:relay_injected, :security, :capability_revoked, _}
+      refute_received {:relay_injected, :identity, :identity_revoked, _}
 
       stats = Relay.stats()
-      assert stats.relayed_in == 1
+      assert stats.relayed_in == 3
       assert stats.signals_rejected >= 2
 
       Bus.unsubscribe(sub_id)

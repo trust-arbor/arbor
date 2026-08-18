@@ -35,6 +35,7 @@ defmodule Arbor.Contracts.API.Identity do
           | :identity_revoked
           | :verification_unavailable
           | :verification_failed
+          | :cluster_replay_protection_unavailable
 
   @type display_name_lookup_error :: :invalid_name | :not_found | :registry_unavailable
 
@@ -80,7 +81,9 @@ defmodule Arbor.Contracts.API.Identity do
   Verify the authenticity of a signed request.
 
   Checks timestamp freshness, signature validity, and nonce uniqueness.
-  Returns the verified agent ID on success.
+  Returns the verified agent ID on success. Multi-node VMs without
+  authenticated security-sync transport fail closed because unauthenticated
+  nonce sync is not an authoritative cluster replay defense.
   """
   @callback verify_signed_request_authenticity(Arbor.Contracts.Security.SignedRequest.t()) ::
               {:ok, String.t()} | {:error, verification_error()}

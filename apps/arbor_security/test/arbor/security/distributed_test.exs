@@ -2,16 +2,20 @@ defmodule Arbor.Security.DistributedTest do
   @moduledoc """
   Tests for distributed security features:
   - Persistent SystemAuthority keypair
-  - Unauthenticated remote security-sync apply fails closed
+  - Unauthenticated remote security-sync mutations fail closed
   - Identity.Registry and CapabilityStore ignore own-node echoes
+  - Multi-node signed-request acceptance fails closed without authenticated sync
   """
   use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.SystemAuthority
 
   # ── SystemAuthority Mode Config ─────────────────────────────────────
@@ -297,6 +301,43 @@ defmodule Arbor.Security.DistributedTest do
 
       stats = Registry.stats()
       assert is_map(stats)
+    end
+  end
+
+  # ── Signed-request cluster replay gate ──────────────────────────────
+
+  describe "signed-request acceptance fails closed on multi-node without authenticated transport" do
+    test "security regression: valid signed request is denied when peers are present" do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Node.list() == []
+      refute Arbor.Security.Config.cluster_peers_present?()
+
+      {:ok, identity} = Identity.generate(name: "cluster-replay-gate")
+      :ok = Registry.register(Identity.public_only(identity))
+
+      {:ok, single_node_signed} =
+        SignedRequest.sign("single-node", identity.agent_id, identity.private_key)
+
+      assert {:ok, agent_id} = Security.verify_signed_request_authenticity(single_node_signed)
+      assert agent_id == identity.agent_id
+
+      Arbor.Security.Config.inject_test_cluster_peers_present(true)
+
+      try do
+        {:ok, clustered_signed} =
+          SignedRequest.sign("clustered", identity.agent_id, identity.private_key)
+
+        assert {:error, :cluster_replay_protection_unavailable} =
+                 Security.verify_signed_request_authenticity(clustered_signed)
+
+        {:ok, clustered_signed_verifier} =
+          SignedRequest.sign("clustered-verifier", identity.agent_id, identity.private_key)
+
+        assert {:error, :cluster_replay_protection_unavailable} =
+                 Verifier.verify(clustered_signed_verifier)
+      after
+        Arbor.Security.Config.inject_test_cluster_peers_present(false)
+      end
     end
   end
 

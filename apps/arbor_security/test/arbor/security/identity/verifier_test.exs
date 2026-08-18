@@ -83,5 +83,22 @@ defmodule Arbor.Security.Identity.VerifierTest do
       assert {:error, :malformed_request} = Verifier.verify(%{signed | signature: <<1>>})
       assert {:error, :malformed_request} = Verifier.verify(%{})
     end
+
+    test "security regression: valid signed request is denied when peers are present", %{
+      identity: identity
+    } do
+      refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Node.list() == []
+
+      Arbor.Security.Config.inject_test_cluster_peers_present(true)
+
+      try do
+        {:ok, signed} = SignedRequest.sign("clustered", identity.agent_id, identity.private_key)
+
+        assert {:error, :cluster_replay_protection_unavailable} = Verifier.verify(signed)
+      after
+        Arbor.Security.Config.inject_test_cluster_peers_present(false)
+      end
+    end
   end
 end

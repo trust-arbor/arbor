@@ -5,20 +5,18 @@ defmodule Arbor.Security.Identity.NonceCache do
   Tracks recently seen nonces and rejects duplicates within the TTL window.
   Expired nonces are cleaned up periodically to prevent unbounded growth.
 
-  ## Cluster distribution (C5 review fix)
+  ## Cluster distribution
 
-  In a multi-node deployment a nonce recorded on one node is propagated to
-  the others via a cluster-scoped `security.nonce_seen` signal (the same
-  mechanism `Identity.Registry` and `CapabilityStore` use). Without this, a
-  captured SignedRequest could be replayed against a *different* node within
-  the timestamp-drift window because that node had never seen the nonce.
+  Remote `security.nonce_seen` apply is retained so a later authenticated
+  security-sync transport can reuse it. Unauthenticated `nonce_seen` is not
+  an authoritative cluster replay defense; multi-node signed-request
+  acceptance fails closed until authenticated transport exists (see
+  `Arbor.Security.Identity.Verifier`).
 
-  This closes the realistic capture-and-replay-later attack: by the time an
-  attacker replays a request to another node, the nonce has already
-  propagated and is rejected. A residual race remains for *simultaneous*
-  delivery of the same nonce to two nodes within signal-propagation latency
-  — closing that fully needs atomic cluster-wide check-and-record (consistent
-  hashing or a shared store), tracked as a follow-up.
+  A residual race remains for *simultaneous* delivery of the same nonce to
+  two nodes within signal-propagation latency — closing that fully needs
+  atomic cluster-wide check-and-record (consistent hashing or a shared
+  store), tracked as a follow-up.
 
   Follows the same GenServer pattern as `CapabilityStore`.
   """
@@ -170,25 +168,20 @@ defmodule Arbor.Security.Identity.NonceCache do
     data = Map.get(signal, :data, %{})
     origin_node = data[:origin_node] || data["origin_node"]
 
-    cond do
-      origin_node in [node(), Atom.to_string(node())] ->
-        # Our own signal echoed back — ignore.
-        state
+    if origin_node in [node(), Atom.to_string(node())] do
+      # Our own signal echoed back — ignore.
+      state
+    else
+      nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
 
-      not Arbor.Signals.authenticated_security_sync_transport?() ->
-        state
+      case Base.decode16(to_string(nonce_hex), case: :mixed) do
+        {:ok, nonce} when byte_size(nonce) > 0 ->
+          expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
+          put_in(state, [:nonces, nonce], expiry)
 
-      true ->
-        nonce_hex = data[:nonce_hex] || data["nonce_hex"] || ""
-
-        case Base.decode16(to_string(nonce_hex), case: :mixed) do
-          {:ok, nonce} when byte_size(nonce) > 0 ->
-            expiry = data[:expiry] || data["expiry"] || System.system_time(:second)
-            put_in(state, [:nonces, nonce], expiry)
-
-          _ ->
-            state
-        end
+        _ ->
+          state
+      end
     end
   catch
     _, reason ->

@@ -618,6 +618,40 @@ defmodule Arbor.Security.Config do
       Arbor.Signals.Config.security_sync_transport_configured?()
   end
 
+  # Production is Node.list() != []. The :test seam can only add presence
+  # and cannot hide connected peers or re-open multi-node acceptance.
+  @doc false
+  @spec cluster_peers_present?() :: boolean()
+  def cluster_peers_present? do
+    Node.list() != [] or test_injected_cluster_peers_present?()
+  end
+
+  @doc false
+  @spec admit_cluster_signed_request_replay_protection() ::
+          :ok | {:error, :cluster_replay_protection_unavailable}
+  def admit_cluster_signed_request_replay_protection do
+    if cluster_peers_present?() and not Arbor.Signals.authenticated_security_sync_transport?() do
+      {:error, :cluster_replay_protection_unavailable}
+    else
+      :ok
+    end
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    @spec inject_test_cluster_peers_present(boolean()) :: :ok
+    def inject_test_cluster_peers_present(present) when is_boolean(present) do
+      Process.put({__MODULE__, :test_inject_cluster_peers_present}, present)
+      :ok
+    end
+
+    defp test_injected_cluster_peers_present? do
+      Process.get({__MODULE__, :test_inject_cluster_peers_present}) == true
+    end
+  else
+    defp test_injected_cluster_peers_present?, do: false
+  end
+
   # ===========================================================================
   # OIDC Configuration
   # ===========================================================================

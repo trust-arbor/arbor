@@ -3,10 +3,12 @@ defmodule Arbor.Security.Identity.Verifier do
   Verification pipeline for signed requests.
 
   Verifies authenticity by checking (in order of cost):
-  1. Timestamp freshness (cheapest — pure computation)
-  2. Public key lookup from Registry (GenServer call)
-  3. Ed25519 signature verification (crypto operation)
-  4. Nonce uniqueness via NonceCache (GenServer call)
+  1. Cluster replay protection (deny when peers are present without
+     authenticated security-sync transport)
+  2. Timestamp freshness (cheapest — pure computation)
+  3. Public key lookup from Registry (GenServer call)
+  4. Ed25519 signature verification (crypto operation)
+  5. Nonce uniqueness via NonceCache (GenServer call)
   """
 
   alias Arbor.Contracts.Security.SignedRequest
@@ -23,7 +25,8 @@ defmodule Arbor.Security.Identity.Verifier do
   """
   @spec verify(term()) :: {:ok, String.t()} | {:error, atom()}
   def verify(request) do
-    with {:ok, request} <- canonicalize_request(request),
+    with :ok <- Config.admit_cluster_signed_request_replay_protection(),
+         {:ok, request} <- canonicalize_request(request),
          :ok <- check_timestamp_freshness(request),
          {:ok, public_key} <- lookup_agent_key(request.agent_id),
          :ok <- verify_signature(request, public_key),

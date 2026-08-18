@@ -66,6 +66,23 @@ defmodule Arbor.Signals.Relay do
   # Metadata keys that are safe to atomize from remote signals
   @safe_metadata_keys ~w(agent_id node pipeline_id run_id channel_id source)
 
+  # Closed security-sync mutation types. Without authenticated transport,
+  # only these remote types are dropped. Observability events and
+  # nonce_seen stay injectable; CapabilityStore / Identity.Registry remain
+  # fail-closed for remote mutations on apply.
+  @restricted_security_sync_mutations [
+    :capability_granted,
+    :capability_revoked,
+    :capabilities_revoked_all,
+    :capabilities_cascade_revoked,
+    :capabilities_scope_revoked,
+    :identity_registered,
+    :identity_deregistered,
+    :identity_suspended,
+    :identity_resumed,
+    :identity_revoked
+  ]
+
   # ── Client API ──────────────────────────────────────────────────────
 
   @doc "Start the relay process."
@@ -321,8 +338,6 @@ defmodule Arbor.Signals.Relay do
 
   # ── Phase 6: Security Hardening ─────────────────────────────────────
 
-  # P1B: remote :security / :identity inject requires authenticated
-  # transport. A configured subscriber map is not that transport.
   defp admit_remote_security_sync_signals(signals) do
     if Config.authenticated_security_sync_transport?() do
       {signals, 0}
@@ -334,8 +349,8 @@ defmodule Arbor.Signals.Relay do
     end
   end
 
-  defp admitted_unauthenticated_remote_signal?(%Signal{category: category})
-       when category in [:security, :identity],
+  defp admitted_unauthenticated_remote_signal?(%Signal{type: type})
+       when type in @restricted_security_sync_mutations,
        do: false
 
   defp admitted_unauthenticated_remote_signal?(%Signal{}), do: true
