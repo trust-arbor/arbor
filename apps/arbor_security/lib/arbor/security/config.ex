@@ -46,21 +46,21 @@ defmodule Arbor.Security.Config do
   @doc """
   Snapshot the closed fail-open-when-false enforcement toggles.
 
-  The first installer wins atomically. Later `Application.put_env/3` of a
-  frozen key cannot change the matching public reader, and a concurrent
-  second freeze cannot replace the winning snapshot. Recreating the claim
-  table after Application stop/start also leaves an existing snapshot in
-  effect. Production application start installs the Application-owned claim
-  table and calls `maybe_freeze_enforcement_toggles/1`; tests that need the
-  pin must call this explicitly and restore afterward. This function never
-  creates the claim table; a missing table fails closed.
+  The first installer wins atomically. After `insert_new` wins, the snapshot
+  is persisted immediately if absent; an existing `persistent_term` map is
+  never overwritten. Later `Application.put_env/3` of a frozen key cannot
+  change the matching public reader. Recreating the claim table after
+  Application stop/start rehydrates the table as already claimed from that
+  snapshot and does not re-read Application env. Production application
+  start installs the Application-owned claim table and calls
+  `maybe_freeze_enforcement_toggles/1`; tests that need the pin must call
+  this explicitly and restore afterward. This function never creates the
+  claim table; a missing table fails closed.
   """
   @spec freeze_enforcement_toggles() :: :ok
   def freeze_enforcement_toggles do
     if claim_enforcement_toggle_freeze() do
-      snapshot = snapshot_enforcement_toggles()
-      run_enforcement_toggle_freeze_test_seam()
-      persist_enforcement_toggle_snapshot(snapshot)
+      persist_enforcement_toggle_snapshot_if_absent(snapshot_enforcement_toggles())
     end
 
     :ok
@@ -69,12 +69,17 @@ defmodule Arbor.Security.Config do
   @doc false
   @spec ensure_enforcement_toggle_claim_table() :: :ok | {:error, term()}
   def ensure_enforcement_toggle_claim_table do
-    case :ets.whereis(@enforcement_toggle_claim_table) do
-      :undefined ->
-        create_enforcement_toggle_claim_table()
+    result =
+      case :ets.whereis(@enforcement_toggle_claim_table) do
+        :undefined ->
+          create_enforcement_toggle_claim_table()
 
-      _tid ->
-        accept_owned_enforcement_toggle_claim_table()
+        _tid ->
+          accept_owned_enforcement_toggle_claim_table()
+      end
+
+    with :ok <- result do
+      rehydrate_enforcement_toggle_claim_from_snapshot()
     end
   end
 
@@ -682,21 +687,32 @@ defmodule Arbor.Security.Config do
     end
   end
 
-  # First snapshot wins for the VM lifetime. A recreated claim table can
-  # win insert_new again after Application stop/start; do not put a later
-  # env snapshot over the already-frozen map (including extra keys).
-  defp persist_enforcement_toggle_snapshot(snapshot) do
-    if enforcement_toggle_freeze_claimed?() do
-      case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
-        existing when is_map(existing) ->
-          :ok
+  # First snapshot wins for the VM lifetime. persist_if_absent never
+  # overwrites an existing persistent_term map, including extra keys.
+  defp persist_enforcement_toggle_snapshot_if_absent(snapshot) do
+    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+      existing when is_map(existing) ->
+        :ok
 
-        _not_frozen ->
-          :persistent_term.put(@enforcement_toggle_persistent_key, snapshot)
-      end
+      _not_frozen ->
+        :persistent_term.put(@enforcement_toggle_persistent_key, snapshot)
     end
 
     :ok
+  end
+
+  # Recreated tables start empty. If a freeze snapshot already exists,
+  # mark the table claimed so a later freeze cannot insert_new and
+  # re-read Application env.
+  defp rehydrate_enforcement_toggle_claim_from_snapshot do
+    case :persistent_term.get(@enforcement_toggle_persistent_key, :not_frozen) do
+      snapshot when is_map(snapshot) ->
+        claim_enforcement_toggle_freeze()
+        :ok
+
+      _not_frozen ->
+        :ok
+    end
   end
 
   defp create_enforcement_toggle_claim_table do
@@ -730,28 +746,4 @@ defmodule Arbor.Security.Config do
     end
   end
 
-  defp enforcement_toggle_freeze_claimed? do
-    case :ets.whereis(@enforcement_toggle_claim_table) do
-      :undefined -> false
-      tid -> :ets.member(tid, :claimed)
-    end
-  end
-
-  if Mix.env() == :test do
-    defp run_enforcement_toggle_freeze_test_seam do
-      case Application.get_env(@app, :enforcement_toggle_freeze_test_seam) do
-        %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
-        when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
-               is_pid(notify_pid) ->
-          send(notify_pid, {:enforcement_toggle_freeze_claimed, self()})
-          Process.sleep(delay_ms)
-          :ok
-
-        _disabled_or_invalid ->
-          :ok
-      end
-    end
-  else
-    defp run_enforcement_toggle_freeze_test_seam, do: :ok
-  end
 end

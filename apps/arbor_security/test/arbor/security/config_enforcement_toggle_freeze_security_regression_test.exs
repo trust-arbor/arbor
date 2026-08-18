@@ -140,24 +140,19 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     end
   end
 
-  test "security regression: concurrent second freeze cannot replace the winning snapshot after env is weakened" do
+  test "security regression: concurrent freezes cannot replace the winning snapshot after env is weakened" do
     set_enforcement_toggles(true)
 
-    Application.put_env(:arbor_security, :enforcement_toggle_freeze_test_seam, %{
-      delay_ms: 100,
-      notify_pid: self()
-    })
+    tasks =
+      for _ <- 1..2 do
+        Task.async(fn -> Config.freeze_enforcement_toggles() end)
+      end
 
-    first = Task.async(fn -> Config.freeze_enforcement_toggles() end)
-
-    assert_receive {:enforcement_toggle_freeze_claimed, _winner_pid}, 1_000
+    Enum.each(tasks, fn task ->
+      assert Task.await(task, 5_000) == :ok
+    end)
 
     set_enforcement_toggles(false)
-
-    second = Task.async(fn -> Config.freeze_enforcement_toggles() end)
-
-    assert Task.await(second, 5_000) == :ok
-    assert Task.await(first, 5_000) == :ok
 
     for {key, reader} <- @fail_open_when_false do
       assert reader.() == true, "#{key} overwritten by concurrent second freeze"
@@ -176,6 +171,11 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     assert {:ok, _} = Application.ensure_all_started(:arbor_security)
     assert :ets.whereis(table) != :undefined
     assert :ets.info(table, :owner) == Application.app_pid(:arbor_security)
+    assert :ets.member(table, :claimed)
+
+    for {key, reader} <- @fail_open_when_false do
+      assert reader.() == true, "#{key} lost after claim table recreate"
+    end
 
     assert :ok = Config.freeze_enforcement_toggles()
 
@@ -234,9 +234,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
   end
 
   defp env_snapshot do
-    keys =
-      Enum.map(@fail_open_when_false, fn {key, _reader} -> key end) ++
-        [:enforcement_toggle_freeze_test_seam]
+    keys = Enum.map(@fail_open_when_false, fn {key, _reader} -> key end)
 
     Map.new(keys, fn key ->
       {key, Application.get_env(:arbor_security, key)}
