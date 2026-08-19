@@ -3053,8 +3053,13 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp restore_from_store(state) do
     case Process.whereis(@cap_store) do
-      pid when is_pid(pid) -> restore_from_available_store(state)
-      nil -> {:ok, state}
+      pid when is_pid(pid) ->
+        restore_from_available_store(state)
+
+      # Omitted-store path: :activation_only does not start the named
+      # :arbor_security_capabilities BufferedStore. Keep empty in-memory state.
+      nil ->
+        {:ok, state}
     end
   end
 

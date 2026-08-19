@@ -47,6 +47,11 @@ defmodule Arbor.Security.Application do
     core_security_children(signing_authority_owner_token)
   end
 
+  defp children_for_profile(:full, signing_authority_owner_token) do
+    buffered_store_children() ++ core_security_children(signing_authority_owner_token)
+  end
+
+  # Unknown profiles keep today's stores because KernelRuntime already fails closed.
   defp children_for_profile(_profile, signing_authority_owner_token) do
     buffered_store_children() ++ core_security_children(signing_authority_owner_token)
   end

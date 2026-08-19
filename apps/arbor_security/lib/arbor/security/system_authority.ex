@@ -213,17 +213,11 @@ defmodule Arbor.Security.SystemAuthority do
         {:ok, %{identity: identity}}
 
       :not_found ->
-        # First boot — generate and persist
+        # First boot only. metadata_load_failed and metadata_without_keypair
+        # stay on the {:error, _} path below so we never silently rotate.
         case Identity.generate() do
           {:ok, identity} ->
-            :ok = persist_keypair(identity)
-
-            Logger.info(
-              "[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}"
-            )
-
-            :ok = Registry.register(Identity.public_only(identity))
-            {:ok, %{identity: identity}}
+            adopt_first_boot_identity(identity)
 
           {:error, reason} ->
             {:stop, {:failed_to_generate_identity, reason}}
@@ -253,6 +247,34 @@ defmodule Arbor.Security.SystemAuthority do
       {:error, reason} ->
         {:stop, {:failed_to_generate_identity, reason}}
     end
+  end
+
+  # First boot without :arbor_security_signing_keys (activation_only) cannot
+  # persist. Keep the generated identity in memory instead of crashing.
+  defp adopt_first_boot_identity(identity) do
+    case persist_keypair(identity) do
+      :ok ->
+        Logger.info(
+          "[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}"
+        )
+
+        register_generated_identity(identity)
+
+      {:error, :store_unavailable} ->
+        Logger.info(
+          "[SystemAuthority] Generated in-memory keypair: #{identity.agent_id}"
+        )
+
+        register_generated_identity(identity)
+
+      {:error, reason} ->
+        {:stop, {:failed_to_persist_identity, reason}}
+    end
+  end
+
+  defp register_generated_identity(identity) do
+    :ok = Registry.register(Identity.public_only(identity))
+    {:ok, %{identity: identity}}
   end
 
   @impl true

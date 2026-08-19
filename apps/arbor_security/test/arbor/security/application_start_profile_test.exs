@@ -2,7 +2,8 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
   @moduledoc """
   P1C-A: KernelRuntime `:activation_only` omits Security's BufferedStore
   children. CapabilityStore still starts with empty in-memory state.
-  `:full` keeps today's named stores.
+  Persistent SystemAuthority first-boot without the signing-keys store
+  stays in memory. `:full` keeps today's named stores.
   """
 
   use ExUnit.Case, async: false
@@ -24,6 +25,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
   setup do
     originals = %{
       start_children: Application.get_env(:arbor_security, :start_children),
+      system_authority_mode: Application.get_env(:arbor_security, :system_authority_mode),
       kernel_runtime: Application.fetch_env(:arbor_kernel, :kernel_runtime)
     }
 
@@ -46,6 +48,21 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
 
     stats = CapabilityStore.stats()
     assert stats.active_capabilities == 0
+  end
+
+  test "activation_only with persistent system authority starts without named stores" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_security!(:activation_only)
+
+    Enum.each(@named_stores, fn name ->
+      assert Process.whereis(name) == nil
+    end)
+
+    refute_named_store_child_ids()
+
+    assert Process.whereis(SystemAuthority)
+    assert is_binary(SystemAuthority.agent_id())
+    assert is_binary(SystemAuthority.public_key())
   end
 
   test ":full still starts the named BufferedStore children" do
@@ -90,6 +107,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     _ = Application.stop(:arbor_security)
 
     restore_env(:arbor_security, :start_children, originals.start_children)
+    restore_env(:arbor_security, :system_authority_mode, originals.system_authority_mode)
 
     case originals.kernel_runtime do
       {:ok, value} -> Application.put_env(:arbor_kernel, :kernel_runtime, value)
@@ -142,7 +160,8 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
       {:error, :already_present} -> :ok
-      {:error, _reason} -> :ok
+      {:error, reason} ->
+        raise "unexpected start_security_test_child error: #{inspect(reason)}"
     end
   end
 end
