@@ -222,12 +222,17 @@ defmodule Arbor.Actions.BrowserPrincipalSecurityRegressionTest do
 
     {calls, result} =
       with_browser_io_trace(fn ->
-        Arbor.Actions.authorize_and_execute(
-          agent_id,
-          Browser.StartSession,
-          %{headless: true, timeout: 1, adapter: :not_a_real_adapter},
-          %{agent_id: agent_id}
-        )
+        try do
+          Arbor.Actions.authorize_and_execute(
+            agent_id,
+            Browser.StartSession,
+            %{headless: true, timeout: 1, adapter: :not_a_real_adapter},
+            %{agent_id: agent_id}
+          )
+        rescue
+          # Fake adapter is intentional so JidoBrowser cannot launch a browser.
+          UndefinedFunctionError -> :undefined_adapter
+        end
       end)
 
     refute result == {:error, "Unauthorized: :action_principal_authority_required"},
