@@ -1,5 +1,13 @@
 defmodule Arbor.Actions.Browser.ExtractContent do
-  @moduledoc "Extract page content as markdown or HTML."
+  @moduledoc """
+  Extract page content as markdown or HTML.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing ExtractContent implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_extract_content",
@@ -22,25 +30,35 @@ defmodule Arbor.Actions.Browser.ExtractContent do
 
   @impl true
   def run(params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: params[:selector]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: params[:selector]})
 
-      case JidoBrowser.Actions.ExtractContent.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          content_length = String.length(result[:content] || "")
-          Actions.emit_completed(__MODULE__, %{content_length: content_length})
-          {:ok, result}
+        case JidoBrowser.Actions.ExtractContent.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            content_length = String.length(result[:content] || "")
+            Actions.emit_completed(__MODULE__, %{content_length: content_length})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.Screenshot do
-  @moduledoc "Take a screenshot of the current page. Returns base64-encoded image."
+  @moduledoc """
+  Take a screenshot of the current page. Returns base64-encoded image.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Screenshot implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_screenshot",
@@ -62,18 +80,20 @@ defmodule Arbor.Actions.Browser.Screenshot do
 
   @impl true
   def run(params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{full_page: params[:full_page]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{full_page: params[:full_page]})
 
-      case JidoBrowser.Actions.Screenshot.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{format: params[:format] || :png})
-          {:ok, result}
+        case JidoBrowser.Actions.Screenshot.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{format: params[:format] || :png})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
@@ -84,6 +104,12 @@ defmodule Arbor.Actions.Browser.Snapshot do
 
   Returns structured data including content, links, forms, and headings.
   Unlike `Arbor.Actions.Web.Snapshot`, this operates on an existing session.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Snapshot implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
   """
 
   use Jido.Action,
@@ -104,19 +130,21 @@ defmodule Arbor.Actions.Browser.Snapshot do
 
   @impl true
   def run(params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: params[:selector]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: params[:selector]})
 
-      case JidoBrowser.Actions.Snapshot.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          content_length = String.length(result[:content] || "")
-          Actions.emit_completed(__MODULE__, %{content_length: content_length})
-          {:ok, result}
+        case JidoBrowser.Actions.Snapshot.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            content_length = String.length(result[:content] || "")
+            Actions.emit_completed(__MODULE__, %{content_length: content_length})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end

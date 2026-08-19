@@ -7,6 +7,13 @@ defmodule Arbor.Actions.Browser do
 
   For session-free web actions (read page, search, snapshot URL), see `Arbor.Actions.Web`.
 
+  Jido actions require `Arbor.Actions.authorized_principal/2`. Direct `run/2`
+  without the facade-issued envelope fails closed and never calls `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing session / SSRF / `jido_browser` implementation. These actions are
+  not sent through `Arbor.Shell.authorize_and_execute/3`. There is no host
+  Browser facade. Canonical URIs stay `arbor://action/browser/<op>` (derived).
+
   ## Action Categories
 
   | Category | Module | Actions |
@@ -21,12 +28,30 @@ defmodule Arbor.Actions.Browser do
 
   ## Session Threading
 
-  Session flows through context — no global state:
+  Session flows through context — no global state. Invoke through
+  `Arbor.Actions.authorize_and_execute/4` so the executor issues the
+  principal envelope:
 
-      {:ok, %{session: session}} = Browser.StartSession.run(%{headless: true}, %{})
-      {:ok, result} = Browser.Navigate.run(%{url: "https://example.com"}, %{browser_session: session})
+      {:ok, %{session: session}} =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Browser.StartSession,
+          %{headless: true},
+          %{agent_id: agent_id}
+        )
+
+      {:ok, result} =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Browser.Navigate,
+          %{url: "https://example.com"},
+          %{agent_id: agent_id, browser_session: session}
+        )
+
       session = result.session  # updated session for next call
   """
+
+  alias Arbor.Actions
 
   @doc """
   Extract browser session from context.
@@ -54,6 +79,16 @@ defmodule Arbor.Actions.Browser do
     case get_session(context) do
       {:ok, session} -> fun.(session)
       error -> error
+    end
+  end
+
+  @doc false
+  @spec with_authorized_principal(map(), module(), (-> term())) :: term()
+  def with_authorized_principal(context, action_module, fun)
+      when is_atom(action_module) and is_function(fun, 0) do
+    case Actions.authorized_principal(context, action_module) do
+      {:ok, _principal_id} -> fun.()
+      {:error, reason} -> {:error, Actions.unauthorized_message(reason)}
     end
   end
 

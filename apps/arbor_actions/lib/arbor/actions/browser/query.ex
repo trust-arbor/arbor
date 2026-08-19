@@ -1,5 +1,13 @@
 defmodule Arbor.Actions.Browser.Query do
-  @moduledoc "Query elements matching a CSS selector."
+  @moduledoc """
+  Query elements matching a CSS selector.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Query implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_query",
@@ -18,28 +26,38 @@ defmodule Arbor.Actions.Browser.Query do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.Query.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{
-            selector: selector,
-            count: length(result[:elements] || [])
-          })
+        case JidoBrowser.Actions.Query.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{
+              selector: selector,
+              count: length(result[:elements] || [])
+            })
 
-          {:ok, result}
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.GetText do
-  @moduledoc "Get text content of an element."
+  @moduledoc """
+  Get text content of an element.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing GetText implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_get_text",
@@ -58,24 +76,34 @@ defmodule Arbor.Actions.Browser.GetText do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.GetText.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.GetText.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.GetAttribute do
-  @moduledoc "Get an attribute value from an element."
+  @moduledoc """
+  Get an attribute value from an element.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing GetAttribute implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_get_attribute",
@@ -94,24 +122,34 @@ defmodule Arbor.Actions.Browser.GetAttribute do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector, attribute: params.attribute})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector, attribute: params.attribute})
 
-      case JidoBrowser.Actions.GetAttribute.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.GetAttribute.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.IsVisible do
-  @moduledoc "Check if an element is visible on the page."
+  @moduledoc """
+  Check if an element is visible on the page.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing IsVisible implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_is_visible",
@@ -129,18 +167,20 @@ defmodule Arbor.Actions.Browser.IsVisible do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.IsVisible.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector, visible: result[:visible]})
-          {:ok, result}
+        case JidoBrowser.Actions.IsVisible.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector, visible: result[:visible]})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end

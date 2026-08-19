@@ -1,5 +1,13 @@
 defmodule Arbor.Actions.Browser.Click do
-  @moduledoc "Click an element by CSS selector."
+  @moduledoc """
+  Click an element by CSS selector.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Click implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_click",
@@ -19,24 +27,34 @@ defmodule Arbor.Actions.Browser.Click do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.Click.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.Click.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.Type do
-  @moduledoc "Type text into an input element."
+  @moduledoc """
+  Type text into an input element.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Type implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_type",
@@ -57,24 +75,34 @@ defmodule Arbor.Actions.Browser.Type do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.Type.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.Type.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.Hover do
-  @moduledoc "Hover over an element (triggers mouse events)."
+  @moduledoc """
+  Hover over an element (triggers mouse events).
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Hover implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_hover",
@@ -93,24 +121,34 @@ defmodule Arbor.Actions.Browser.Hover do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.Hover.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.Hover.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.Focus do
-  @moduledoc "Focus on an element."
+  @moduledoc """
+  Focus on an element.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Focus implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_focus",
@@ -129,24 +167,34 @@ defmodule Arbor.Actions.Browser.Focus do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.Focus.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.Focus.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.Scroll do
-  @moduledoc "Scroll the page or scroll an element into view."
+  @moduledoc """
+  Scroll the page or scroll an element into view.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Scroll implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_scroll",
@@ -168,24 +216,34 @@ defmodule Arbor.Actions.Browser.Scroll do
 
   @impl true
   def run(params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{direction: params[:direction]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{direction: params[:direction]})
 
-      case JidoBrowser.Actions.Scroll.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{})
-          {:ok, result}
+        case JidoBrowser.Actions.Scroll.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.SelectOption do
-  @moduledoc "Select an option from a dropdown/select element."
+  @moduledoc """
+  Select an option from a dropdown/select element.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing SelectOption implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_select_option",
@@ -206,18 +264,20 @@ defmodule Arbor.Actions.Browser.SelectOption do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector})
 
-      case JidoBrowser.Actions.SelectOption.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.SelectOption.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end

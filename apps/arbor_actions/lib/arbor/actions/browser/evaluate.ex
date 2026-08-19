@@ -4,6 +4,12 @@ defmodule Arbor.Actions.Browser.Evaluate do
 
   This is a high-security action — the `script` parameter has taint role
   `{:control, requires: [:command_injection]}` since it executes code in the browser.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Evaluate implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
   """
 
   use Jido.Action,
@@ -23,18 +29,20 @@ defmodule Arbor.Actions.Browser.Evaluate do
 
   @impl true
   def run(%{script: _script} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{})
 
-      case JidoBrowser.Actions.Evaluate.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{})
-          {:ok, result}
+        case JidoBrowser.Actions.Evaluate.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end

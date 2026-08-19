@@ -1,5 +1,13 @@
 defmodule Arbor.Actions.Browser.Wait do
-  @moduledoc "Wait for a specified number of milliseconds. No session required."
+  @moduledoc """
+  Wait for a specified number of milliseconds. No session required.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing Wait implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_wait",
@@ -11,19 +19,30 @@ defmodule Arbor.Actions.Browser.Wait do
     ]
 
   alias Arbor.Actions
+  alias Arbor.Actions.Browser
 
   @impl true
-  def run(%{ms: ms} = params, _context) do
-    Actions.emit_started(__MODULE__, %{ms: ms})
+  def run(%{ms: ms} = params, context) do
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Actions.emit_started(__MODULE__, %{ms: ms})
 
-    result = JidoBrowser.Actions.Wait.run(params, %{})
-    Actions.emit_completed(__MODULE__, %{ms: ms})
-    result
+      result = JidoBrowser.Actions.Wait.run(params, %{})
+      Actions.emit_completed(__MODULE__, %{ms: ms})
+      result
+    end)
   end
 end
 
 defmodule Arbor.Actions.Browser.WaitForSelector do
-  @moduledoc "Wait for an element to reach a specified state (visible, hidden, attached, detached)."
+  @moduledoc """
+  Wait for an element to reach a specified state (visible, hidden, attached, detached).
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing WaitForSelector implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_wait_for_selector",
@@ -47,24 +66,34 @@ defmodule Arbor.Actions.Browser.WaitForSelector do
 
   @impl true
   def run(%{selector: selector} = params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{selector: selector, state: params[:state]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{selector: selector, state: params[:state]})
 
-      case JidoBrowser.Actions.WaitForSelector.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{selector: selector})
-          {:ok, result}
+        case JidoBrowser.Actions.WaitForSelector.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{selector: selector})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end
 
 defmodule Arbor.Actions.Browser.WaitForNavigation do
-  @moduledoc "Wait for a navigation event to complete."
+  @moduledoc """
+  Wait for a navigation event to complete.
+
+  Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+  the facade-issued envelope fails closed and does not call `jido_browser`.
+  The authorized path is `Arbor.Actions.authorize_and_execute/4`, then the
+  existing WaitForNavigation implementation. This surface never falls back to
+  `Arbor.Shell.authorize_and_execute/3`.
+  """
 
   use Jido.Action,
     name: "browser_wait_for_navigation",
@@ -81,18 +110,20 @@ defmodule Arbor.Actions.Browser.WaitForNavigation do
 
   @impl true
   def run(params, context) do
-    Browser.with_session(context, fn session ->
-      Actions.emit_started(__MODULE__, %{url: params[:url]})
+    Browser.with_authorized_principal(context, __MODULE__, fn ->
+      Browser.with_session(context, fn session ->
+        Actions.emit_started(__MODULE__, %{url: params[:url]})
 
-      case JidoBrowser.Actions.WaitForNavigation.run(Map.put(params, :session, session), %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{})
-          {:ok, result}
+        case JidoBrowser.Actions.WaitForNavigation.run(Map.put(params, :session, session), %{}) do
+          {:ok, result} ->
+            Actions.emit_completed(__MODULE__, %{})
+            {:ok, result}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, Browser.format_error(reason)}
-      end
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, Browser.format_error(reason)}
+        end
+      end)
     end)
   end
 end

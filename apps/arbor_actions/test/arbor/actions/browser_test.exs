@@ -1,9 +1,10 @@
 defmodule Arbor.Actions.BrowserTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Actions.Browser
+  alias Arbor.Actions.BrowserPrincipalHelpers
 
   # All 26 browser action modules
   @session_actions [
@@ -139,46 +140,93 @@ defmodule Arbor.Actions.BrowserTest do
   end
 
   describe "missing session error" do
-    # Actions that require a session should return the standard error
+    # Actions that require a session should return the standard error after
+    # the principal envelope. Direct run/2 without the envelope is unauthorized.
     @session_required_actions @all_actions -- [Browser.StartSession, Browser.Wait]
 
-    test "session-requiring actions return missing session error" do
+    setup do
+      BrowserPrincipalHelpers.install_agent()
+    end
+
+    test "session-requiring actions return missing session error after the envelope" do
       for mod <- @session_required_actions do
-        # Build minimal valid params for each action
         params = minimal_params(mod)
-        result = mod.run(params, %{})
+        result = BrowserPrincipalHelpers.run(mod, params, %{})
 
         assert result == {:error, "No browser session in context"},
                "#{inspect(mod)} should return missing session error, got: #{inspect(result)}"
       end
     end
+
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized even with a fake session" do
+      for mod <- @session_required_actions do
+        result = mod.run(minimal_params(mod), %{browser_session: :fake})
+
+        assert result == {:error, "Unauthorized: :action_principal_authority_required"},
+               "#{inspect(mod)} ungated run/2: #{inspect(result)}"
+      end
+    end
   end
 
   describe "SSRF validation on Navigate" do
-    test "blocks localhost" do
-      result = Browser.Navigate.run(%{url: "http://localhost:8080"}, %{browser_session: :fake})
+    setup do
+      BrowserPrincipalHelpers.install_agent()
+    end
+
+    test "blocks localhost after the principal gate" do
+      result =
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "http://localhost:8080"},
+          %{browser_session: :fake}
+        )
+
       assert {:error, msg} = result
       assert msg =~ "Blocked host"
     end
 
-    test "blocks private IPs" do
-      result = Browser.Navigate.run(%{url: "http://10.0.0.1/admin"}, %{browser_session: :fake})
+    test "blocks private IPs after the principal gate" do
+      result =
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "http://10.0.0.1/admin"},
+          %{browser_session: :fake}
+        )
+
       assert {:error, msg} = result
       assert msg =~ "Blocked private IP"
     end
 
-    test "blocks metadata endpoint" do
+    test "blocks metadata endpoint after the principal gate" do
       result =
-        Browser.Navigate.run(%{url: "http://169.254.169.254/latest"}, %{browser_session: :fake})
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "http://169.254.169.254/latest"},
+          %{browser_session: :fake}
+        )
 
       assert {:error, msg} = result
       assert msg =~ "Blocked host"
     end
 
-    test "blocks non-http schemes" do
-      result = Browser.Navigate.run(%{url: "file:///etc/passwd"}, %{browser_session: :fake})
+    test "blocks non-http schemes after the principal gate" do
+      result =
+        BrowserPrincipalHelpers.run(
+          Browser.Navigate,
+          %{url: "file:///etc/passwd"},
+          %{browser_session: :fake}
+        )
+
       assert {:error, msg} = result
       assert msg =~ "Blocked scheme"
+    end
+
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized before SSRF" do
+      result = Browser.Navigate.run(%{url: "http://localhost:8080"}, %{browser_session: :fake})
+
+      assert {:error, "Unauthorized: :action_principal_authority_required"} = result
     end
   end
 
@@ -218,6 +266,17 @@ defmodule Arbor.Actions.BrowserTest do
     test "WaitForSelector has control on selector" do
       roles = Browser.WaitForSelector.taint_roles()
       assert roles.selector == :control
+    end
+  end
+
+  describe "ungated StartSession and Wait" do
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               Browser.StartSession.run(%{headless: true}, %{})
+
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               Browser.Wait.run(%{ms: 1}, %{})
     end
   end
 

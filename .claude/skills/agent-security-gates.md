@@ -357,6 +357,37 @@ another one. It doubles as user documentation — anyone standing up agents need
   `arbor://net/search` (Search/ExaSearch/TinyfishSearch). Do not invent a
   host Web facade or send these through `Shell.authorize_and_execute`.
 
+## 20. Browser Jido actions require `authorized_principal` (no ungated jido_browser)
+
+- **What:** All 26 `Arbor.Actions.Browser.*` Jido actions
+  (`StartSession`, `EndSession`, `GetStatus`, `Navigate`, `Back`,
+  `Forward`, `Reload`, `GetUrl`, `GetTitle`, `Click`, `Type`, `Hover`,
+  `Focus`, `Scroll`, `SelectOption`, `Query`, `GetText`, `GetAttribute`,
+  `IsVisible`, `ExtractContent`, `Screenshot`, `Snapshot`, `Wait`,
+  `WaitForSelector`, `WaitForNavigation`, `Evaluate`) are the
+  agent/extension surface. They consume
+  `Arbor.Actions.authorized_principal(context, __MODULE__)`, then the
+  existing session / SSRF / `jido_browser` implementation. Direct `run/2`
+  without the envelope fails closed with
+  `Unauthorized: :action_principal_authority_required` and does not call
+  `JidoBrowser.Actions.*.run`. A spoofed `context[:agent_id]` or fake
+  `browser_session` without the envelope is not authority. Browser is not
+  an agent executable — these actions never call
+  `Arbor.Shell.authorize_and_execute/3`. There is no host Browser facade.
+  Canonical URIs stay `arbor://action/browser/<op>` (derived). Navigate
+  still runs `Web.validate_url/1` after the principal gate.
+- **Symptom:** `browser_start_session` / `browser_navigate` /
+  `browser_wait` / other `browser_*` actions return
+  `Unauthorized: :action_principal_authority_required` when the action
+  context has no facade-issued envelope, even if
+  `context[:agent_id]` names another principal or `browser_session` is
+  present.
+- **Action:** invoke Browser actions through `authorize_and_execute` so
+  the executor issues the principal envelope, and grant
+  `arbor://action/browser/<op>`. Session-required actions still need a
+  session after the envelope. Do not invent a host Browser facade or send
+  these through `Shell.authorize_and_execute`.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -408,6 +439,10 @@ another one. It doubles as user documentation — anyone standing up agents need
     envelope is issued; grant `arbor://net/http` or `arbor://net/search`.
     A spoofed `context[:agent_id]` without the envelope is not web
     authority. Do not invent a host Web facade.
+19. For `browser_*` actions, invoke `authorize_and_execute` so the caller
+    envelope is issued; grant `arbor://action/browser/<op>`. A spoofed
+    `context[:agent_id]` or fake `browser_session` without the envelope
+    is not browser authority. Do not invent a host Browser facade.
 
 ## Applied Learning: Security Gates
 
