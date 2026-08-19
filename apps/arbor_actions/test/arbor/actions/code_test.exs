@@ -37,7 +37,7 @@ defmodule Arbor.Actions.CodeTest do
     end
 
     test "returns error when worktree_path not provided" do
-      assert {:error, "Code compile requires a facade-issued authenticated principal envelope."} =
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
                Code.CompileAndTest.run(%{file: "lib/my_module.ex"}, %{})
     end
 
@@ -48,8 +48,7 @@ defmodule Arbor.Actions.CodeTest do
           %{worktree_path: "/nonexistent/path"}
         )
 
-      assert {:error, "Code compile requires a facade-issued authenticated principal envelope."} =
-               result
+      assert {:error, "Unauthorized: :action_principal_authority_required"} = result
     end
   end
 

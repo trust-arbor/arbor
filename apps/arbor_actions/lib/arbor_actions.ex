@@ -1102,6 +1102,10 @@ defmodule Arbor.Actions do
   def authorized_principal(_context, _action_module),
     do: {:error, :action_principal_authority_required}
 
+  @doc false
+  @spec unauthorized_message(term()) :: String.t()
+  def unauthorized_message(reason), do: "Unauthorized: #{inspect(reason)}"
+
   defp validate_authorization_principal(agent_id) do
     if String.trim(agent_id) == "",
       do: {:error, :invalid_authorization_principal},
@@ -1365,6 +1369,8 @@ defmodule Arbor.Actions do
   defp execute_authorized_action(agent_id, action_module, params, context) do
     # Issue the process-scoped principal envelope after Trust authorization so
     # actions can consume authorized_principal/2. Direct run/2 cannot forge it.
+    # authenticated_principal_required?/1 remains the SignedRequest gate for
+    # actions such as Shell.Execute; it does not opt out of this envelope.
     with_action_authorization(agent_id, action_module, context, fn authorized_context ->
       execute_action(action_module, params, authorized_context)
     end)

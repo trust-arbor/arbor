@@ -7,9 +7,10 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
   both actions call `Arbor.Shell.execute/2` without an authorized principal,
   so a direct `run/2` starts a host process.
 
-  Fixed behavior: they require `authorized_principal` and use
-  `Arbor.Shell.authorize_and_execute/3`. If that API cannot run mix/gh,
-  they return its error and never fall back to execute.
+  Fixed behavior: they require `authorized_principal`. CompileAndTest uses
+  the Mix.Compile/Test TCB. Github.PR uses `Arbor.Shell.authorize_and_execute/3`
+  and returns that API's error when `gh` is not an agent executable. Neither
+  falls back to execute.
   """
   use ExUnit.Case, async: false
 
@@ -84,9 +85,7 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
         )
       end)
 
-    assert {:error, "Code compile requires a facade-issued authenticated principal envelope."} =
-             result
-
+    assert {:error, "Unauthorized: :action_principal_authority_required"} = result
     assert calls == []
   end
 
@@ -99,13 +98,11 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
         )
       end)
 
-    assert {:error, "GitHub PR requires a facade-issued authenticated principal envelope."} =
-             result
-
+    assert {:error, "Unauthorized: :action_principal_authority_required"} = result
     assert calls == []
   end
 
-  test "security regression: authorized CompileAndTest returns the mix policy error and does not fall back to execute",
+  test "security regression: authorized CompileAndTest uses Mix.Compile and does not fall back to execute",
        %{agent_id: agent_id} do
     authorize_agent(agent_id, @code_resource)
 
@@ -119,7 +116,8 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
         )
       end)
 
-    assert {:error, {:agent_executable_not_allowed, "mix"}} = result
+    assert {:error, message} = result
+    assert message =~ "workspace_id_required" or message =~ "mix compile"
     assert calls == []
   end
 
@@ -137,7 +135,7 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
         )
       end)
 
-    assert {:error, "Failed to open PR: {:agent_executable_not_allowed, \"gh\"}"} = result
+    assert {:error, "Unauthorized: {:agent_executable_not_allowed, \"gh\"}"} = result
     assert calls == []
   end
 

@@ -22,9 +22,12 @@ defmodule Arbor.Actions.Github do
     @moduledoc """
     Open a pull request via the `gh` CLI.
 
-    Requires `Arbor.Actions.authorized_principal/2`. Uses
-    `Arbor.Shell.authorize_and_execute/3` and never falls back to
-    trusted-system `execute/2` or `execute_direct/3`.
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed. The authorized path is
+    `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Shell.authorize_and_execute/3`. If that API cannot run `gh`,
+    its error is returned — this surface never falls back to trusted-system
+    `execute/2` or `execute_direct/3`.
 
     ## Parameters
 
@@ -71,7 +74,7 @@ defmodule Arbor.Actions.Github do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | term()}
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, title: title} = params, context) do
       with {:ok, principal_id} <- Actions.authorized_principal(context, __MODULE__) do
         Actions.emit_started(__MODULE__, %{path: path, title: title})
@@ -138,10 +141,14 @@ defmodule Arbor.Actions.Github do
     end
 
     defp format_error(:action_principal_authority_required),
-      do: "GitHub PR requires a facade-issued authenticated principal envelope."
+      do: Actions.unauthorized_message(:action_principal_authority_required)
+
+    defp format_error({:unauthorized, reason}), do: Actions.unauthorized_message(reason)
+    defp format_error({:agent_executable_not_allowed, _} = reason),
+      do: Actions.unauthorized_message(reason)
 
     defp format_error(reason) when is_binary(reason), do: "Failed to open PR: #{reason}"
-    defp format_error(reason), do: "Failed to open PR: #{inspect(reason)}"
+    defp format_error(reason), do: Actions.unauthorized_message(reason)
 
     # `gh pr create` prints the URL on the last non-empty line. Extract it.
     defp extract_url(output) do
