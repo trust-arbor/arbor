@@ -274,6 +274,22 @@ another one. It doubles as user documentation — anyone standing up agents need
   `Arbor.Actions.Shell.authorize_and_execute_command/4`. Do not treat
   `Arbor.Shell.execute/2` as an action/extension API.
 
+## 16. Eval-session calls require `authorize_eval` (no host-eval fallback)
+
+- **What:** `Arbor.Sandbox.authorize_eval/4` is the agent/extension
+  surface for eval-session. It `Security.authorize/4`s
+  `arbor://sandbox/eval` then calls `ExecSession.eval/3`. Missing or
+  denied caller fails closed with `{:error, {:unauthorized, reason}}`
+  and does not evaluate. Host `eval_code/3` stays the trusted-system
+  API with no principal.
+- **Symptom:** `authorize_eval` returns `{:error, {:unauthorized, …}}`
+  when the caller has no grant. Session bindings are unchanged.
+  Calling `eval_code/3` from an extension bypasses the gate — that
+  path is host-only.
+- **Action:** grant `arbor://sandbox/eval` and call `authorize_eval/4`.
+  Host/unit tests with no principal keep using `eval_code/3`.
+  Do not treat `eval_code/3` as an action/extension API.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -306,6 +322,9 @@ another one. It doubles as user documentation — anyone standing up agents need
 14. For host `Shell.execute` / `execute_direct`, omit principal keys. A
     smuggled `:agent_id` / `:principal_id` is `:unauthorized` and does not
     launch. Agent callers use `authorize_and_execute`.
+15. For eval-session, grant `arbor://sandbox/eval` and call
+    `Arbor.Sandbox.authorize_eval/4`. Host `eval_code/3` has no principal
+    and is not an agent/extension API.
 
 ## Applied Learning: Security Gates
 

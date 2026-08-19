@@ -13,7 +13,7 @@ defmodule Arbor.Security.UriRegistry do
       ├── shell/exec/              ← Shell facade
       ├── historian/query/          ← Historian facade
       ├── persistence/{read|write}/ ← Persistence facade
-      ├── sandbox/{create|destroy}  ← Sandbox facade
+      ├── sandbox/{create|destroy|eval}  ← Sandbox facade
       ├── agent/{spawn|stop|...}    ← Agent facade
       ├── memory/{read|write|...}/  ← Memory facade
       ├── consensus/{propose|...}   ← Consensus facade
@@ -65,6 +65,7 @@ defmodule Arbor.Security.UriRegistry do
     # Sandbox facade
     "arbor://sandbox/create",
     "arbor://sandbox/destroy",
+    "arbor://sandbox/eval",
 
     # Agent facade
     "arbor://agent/spawn",

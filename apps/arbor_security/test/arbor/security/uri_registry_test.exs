@@ -92,6 +92,13 @@ defmodule Arbor.Security.UriRegistryTest do
       refute UriRegistry.registered?("arbor://voice/realtime/xai_attacker/session_abc")
       refute UriRegistry.registered?("arbor://voice/realtime/xaiplayer/session_abc")
     end
+
+    test "sandbox eval namespace is canonical and segment-aware" do
+      assert "arbor://sandbox/eval" in UriRegistry.canonical_prefixes()
+      assert UriRegistry.registered?("arbor://sandbox/eval")
+      refute UriRegistry.registered?("arbor://sandbox/evaluate")
+      refute UriRegistry.registered?("arbor://sandbox/eval_code")
+    end
   end
 
   describe "Arbor.Security.uri_registered?/1" do

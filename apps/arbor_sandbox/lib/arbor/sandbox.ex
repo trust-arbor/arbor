@@ -131,6 +131,52 @@ defmodule Arbor.Sandbox do
     end
   end
 
+  @doc """
+  Evaluate code in an exec session with authorization check.
+
+  Verifies the agent has the `arbor://sandbox/eval` capability before
+  evaluating. Use this for agent-initiated eval-session calls where
+  authorization should be enforced. Host/unit tests with no principal
+  keep using `eval_code/3`.
+
+  ## Parameters
+
+  - `caller_id` - The calling agent's ID for capability lookup
+  - `session` - The ExecSession pid (from `create_exec_session/2`)
+  - `code` - Elixir source to evaluate
+  - `opts` - Options passed to `ExecSession.eval/3`, plus optional `:trace_id`
+
+  ## Returns
+
+  - `{:ok, result_string}` or `{:ok, result_string, stdio}` on success
+  - `{:error, {:unauthorized, reason}}` if caller lacks the required capability
+  - `{:ok, :pending_approval, proposal_id}` if escalation needed
+  - `{:error, reason}` on other errors
+  """
+  @spec authorize_eval(String.t(), pid(), String.t(), keyword()) ::
+          {:ok, String.t()}
+          | {:ok, String.t(), String.t()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
+  def authorize_eval(caller_id, session, code, opts \\ []) do
+    resource = "arbor://sandbox/eval"
+    {trace_id, opts} = Keyword.pop(opts, :trace_id)
+
+    case Arbor.Security.authorize(caller_id, resource, :eval,
+           trace_id: trace_id,
+           verify_identity: false
+         ) do
+      {:ok, :authorized} ->
+        ExecSession.eval(session, code, opts)
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:ok, :pending_approval, proposal_id}
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
+    end
+  end
+
   # Sandbox Lifecycle
 
   @doc """
