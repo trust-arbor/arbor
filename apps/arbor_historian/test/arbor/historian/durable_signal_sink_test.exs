@@ -39,33 +39,61 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
     assert Arbor.Signals.Contracts.DurableSink in behaviours
   end
 
-  test "hot append is visible before durable_emit returns and durable runs asynchronously" do
+  test "persist_durable_event returns only after durable is readable and ready durable failure is persist_failed" do
     ctx = start_isolated_targets()
-    ensure_signals()
-    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
-    stream_id = "k1e_async_#{System.unique_integer([:positive])}"
-    type = :"async_probe_#{System.unique_integer([:positive])}"
-    test_pid = self()
-
-    Application.put_env(:arbor_historian, :durable_task_starter, fn fun ->
-      Task.start(fn ->
-        fun.()
-        send(test_pid, {:durable_appended, stream_id, self()})
-      end)
+    Application.put_env(:arbor_historian, :durable_task_starter, fn _fun ->
+      flunk("production persist must not consult :durable_task_starter")
     end)
 
-    assert :ok =
-             Arbor.Signals.durable_emit(:activity, type, %{probe: true}, stream_id: stream_id)
+    stream_id = "p1c_b_sync_#{System.unique_integer([:positive])}"
+    type = :"sync_probe_#{System.unique_integer([:positive])}"
 
-    event = read_event!(ctx.hot, stream_id, type)
+    assert :ok =
+             Arbor.Historian.persist_durable_event(stream_id, type, %{probe: true}, [])
+
+    event = read_event!(ctx.durable, stream_id, type)
     assert event.data["probe"] == true
     refute Map.has_key?(event.data, "permanent")
     refute Map.has_key?(event.data, :permanent)
+    assert read_event!(ctx.hot, stream_id, type)
 
-    assert_receive {:durable_appended, ^stream_id, worker}, 1_000
-    assert worker != self()
-    assert read_event!(ctx.durable, stream_id, type)
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: ctx.durable,
+      backend: __MODULE__.ErrorBackend,
+      opts: []
+    })
+
+    log =
+      capture_log(fn ->
+        assert {:error, :persist_failed} =
+                 Arbor.Historian.persist_durable_event(
+                   stream_id,
+                   :gap,
+                   %{secret: "payload"},
+                   []
+                 )
+      end)
+
+    assert log =~ "durable_append_failed"
+    refute log =~ "secret"
+    refute log =~ "payload"
+
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: ctx.durable,
+      backend: __MODULE__.RaisingBackend,
+      opts: []
+    })
+
+    log =
+      capture_log(fn ->
+        assert {:error, :persist_failed} =
+                 Arbor.Historian.persist_durable_event(stream_id, :gap, %{secret: "payload"}, [])
+      end)
+
+    assert log =~ "durable_append_failed" or log =~ "durable_append_raised"
+    refute log =~ "secret"
+    refute log =~ "durable boom"
   end
 
   test "security regression: durable_emit preserves lineage and caller metadata at EventLog boundary" do
@@ -152,10 +180,11 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
              Arbor.Historian.persist_durable_event(stream_id, type, %{isolated: true}, [])
 
     assert read_event!(ctx.hot, stream_id, type)
+    assert read_event!(ctx.durable, stream_id, type)
     refute ctx.hot == Arbor.Historian.EventLog.ETS
   end
 
-  test "invalid or unavailable targets and append failures log bounded gaps and stay :ok" do
+  test "invalid or unavailable targets log bounded gaps and stay :ok" do
     ensure_signals()
     Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
@@ -222,16 +251,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
       opts: []
     })
 
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: ctx.durable,
-      backend: __MODULE__.ErrorBackend,
-      opts: []
-    })
-
-    Application.put_env(:arbor_historian, :durable_task_starter, fn fun ->
-      fun.()
-      {:ok, self()}
-    end)
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{invalid: true})
 
     log =
       capture_log(fn ->
@@ -239,44 +259,8 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
       end)
 
     assert log =~ "hot_append_failed"
-    assert log =~ "durable_append_failed"
+    assert log =~ "durable_target_invalid"
     refute log =~ "secret"
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{
-      name: ctx.hot,
-      backend: ETS,
-      opts: []
-    })
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: ctx.durable,
-      backend: ETS,
-      opts: []
-    })
-
-    starters = [
-      fn _fun -> {:error, :too_many_children} end,
-      fn _fun -> :not_a_task end,
-      fn _fun -> {:ok, :not_a_pid} end,
-      fn _fun -> raise "starter boom" end,
-      fn _fun -> throw(:starter_throw) end,
-      fn _fun -> exit(:starter_exit) end
-    ]
-
-    Enum.each(starters, fn starter ->
-      Application.put_env(:arbor_historian, :durable_task_starter, starter)
-
-      log =
-        capture_log(fn ->
-          assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, payload, [])
-        end)
-
-      assert log =~ "durable_spawn_failed"
-      refute log =~ "too_many_children"
-      refute log =~ "starter boom"
-      refute log =~ "starter_throw"
-      refute log =~ "starter_exit"
-    end)
   end
 
   test "security regression: long stream_id is bounded and tail is absent from logs" do
@@ -385,5 +369,9 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   defmodule ErrorBackend do
     def append(_stream_id, _events, _opts), do: {:error, :boom}
+  end
+
+  defmodule RaisingBackend do
+    def append(_stream_id, _events, _opts), do: raise("durable boom")
   end
 end

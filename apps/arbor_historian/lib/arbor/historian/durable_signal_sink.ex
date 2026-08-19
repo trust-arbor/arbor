@@ -13,8 +13,7 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:ok, event} ->
         case append_hot(stream_id, event) do
           :ok ->
-            spawn_durable(stream_id, event)
-            :ok
+            persist_durable(stream_id, event)
 
           :raised ->
             {:error, :persist_failed}
@@ -112,18 +111,20 @@ defmodule Arbor.Historian.DurableSignalSink do
     :ok
   end
 
-  defp spawn_durable(stream_id, event) do
+  defp persist_durable(stream_id, event) do
     case Config.durable_event_log_target() do
       {:error, _} ->
         log_gap(stream_id, :durable_target_invalid)
+        :ok
 
       {:ok, target} ->
         case durable_ready?(target) do
           :ok ->
-            start_durable_task(stream_id, event, target)
+            append_durable(stream_id, event, target)
 
           {:gap, reason} ->
             log_gap(stream_id, reason)
+            :ok
         end
     end
   end
@@ -148,36 +149,23 @@ defmodule Arbor.Historian.DurableSignalSink do
     end
   end
 
-  defp start_durable_task(stream_id, event, target) do
-    starter = Application.get_env(:arbor_historian, :durable_task_starter, &Task.start/1)
-
-    result =
-      try do
-        starter.(fn -> durable_append(stream_id, event, target) end)
-      rescue
-        _ -> :spawn_failed
-      catch
-        :throw, _ -> :spawn_failed
-        :exit, _ -> :spawn_failed
-      end
-
-    case result do
-      {:ok, pid} when is_pid(pid) -> :ok
-      _ -> log_gap(stream_id, :durable_spawn_failed)
-    end
-  end
-
-  defp durable_append(stream_id, event, target) do
+  defp append_durable(stream_id, event, target) do
     case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
-      {:ok, _} -> :ok
-      _ -> log_gap(stream_id, :durable_append_failed)
+      {:ok, _} ->
+        :ok
+
+      _ ->
+        log_gap(stream_id, :durable_append_failed)
+        {:error, :persist_failed}
     end
   rescue
     _ ->
       log_gap(stream_id, :durable_append_raised)
+      {:error, :persist_failed}
   catch
     kind, _reason when kind in [:throw, :exit] ->
       log_gap(stream_id, :durable_append_raised)
+      {:error, :persist_failed}
   end
 
   defp loaded?(backend) when is_atom(backend) do

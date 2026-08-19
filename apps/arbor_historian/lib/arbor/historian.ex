@@ -738,6 +738,13 @@ defmodule Arbor.Historian do
   Implements `Arbor.Signals.Contracts.DurableSink`. Callers pass only
   Signals-shaped primitives. Event construction and Persistence backends
   stay behind this facade.
+
+  When the durable target is ready, this appends in-process and returns
+  only after that append is observed. `{:ok, _}` from the durable backend
+  means the event is already readable on that target. A ready durable
+  append that fails or raises returns `{:error, :persist_failed}`. Missing
+  or invalid durable targets log a bounded gap and still return `:ok`
+  after the hot append.
   """
   @impl Arbor.Signals.Contracts.DurableSink
   @spec persist_durable_event(String.t(), term(), map(), keyword()) ::
