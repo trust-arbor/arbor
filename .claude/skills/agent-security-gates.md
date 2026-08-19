@@ -335,6 +335,28 @@ another one. It doubles as user documentation — anyone standing up agents need
   `run_with_required_workspace/5`. Do not treat those TCB helpers as
   an action/extension API.
 
+## 19. Web Jido Browse/Search/Snapshot/ExaSearch/TinyfishSearch require `authorized_principal` (no ungated network)
+
+- **What:** `Arbor.Actions.Web.Browse` / `Search` / `Snapshot` /
+  `ExaSearch` / `TinyfishSearch` are the agent/extension surface. They
+  consume `Arbor.Actions.authorized_principal(context, __MODULE__)`, then
+  the existing network/credential implementation (`jido_browser` or `Req`
+  plus env API keys). Direct `run/2` without the envelope fails closed with
+  `Unauthorized: :action_principal_authority_required` and does not call
+  `Req.post`/`Req.get` or `jido_browser`. Web is not an agent executable —
+  these actions never call `Arbor.Shell.authorize_and_execute/3`. There is
+  no host Web facade.
+- **Symptom:** `web_browse` / `web_search` / `web_snapshot` /
+  `exa_search` / `tinyfish_search` returns
+  `Unauthorized: :action_principal_authority_required` when the action
+  context has no facade-issued envelope, even if
+  `context[:agent_id]` names another principal.
+- **Action:** invoke Web Browse/Search/Snapshot/ExaSearch/TinyfishSearch
+  through `authorize_and_execute` so the executor issues the principal
+  envelope, and grant `arbor://net/http` (Browse/Snapshot) or
+  `arbor://net/search` (Search/ExaSearch/TinyfishSearch). Do not invent a
+  host Web facade or send these through `Shell.authorize_and_execute`.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -381,6 +403,11 @@ another one. It doubles as user documentation — anyone standing up agents need
     without the envelope is not mix authority. Host `run_mix/3` /
     `run_with_required_workspace/5` have no principal and are not an
     action/extension API.
+18. For `web_browse` / `web_search` / `web_snapshot` / `exa_search` /
+    `tinyfish_search`, invoke `authorize_and_execute` so the caller
+    envelope is issued; grant `arbor://net/http` or `arbor://net/search`.
+    A spoofed `context[:agent_id]` without the envelope is not web
+    authority. Do not invent a host Web facade.
 
 ## Applied Learning: Security Gates
 

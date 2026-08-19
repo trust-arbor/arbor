@@ -4,8 +4,10 @@ defmodule Arbor.Actions.WebTest do
 
   alias Arbor.Actions.Web
   alias Arbor.Actions.Web.Browse
+  alias Arbor.Actions.Web.ExaSearch
   alias Arbor.Actions.Web.Search
   alias Arbor.Actions.Web.Snapshot
+  alias Arbor.Actions.Web.TinyfishSearch
 
   describe "validate_url/1" do
     test "allows https URLs" do
@@ -106,14 +108,13 @@ defmodule Arbor.Actions.WebTest do
       assert Map.has_key?(tool.parameters_schema["properties"], "format")
     end
 
-    test "rejects SSRF URLs" do
-      assert {:error, msg} =
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
                Browse.run(
                  %{url: "http://169.254.169.254/latest/meta-data/"},
                  %{}
                )
-
-      assert msg =~ "SSRF"
     end
   end
 
@@ -135,6 +136,12 @@ defmodule Arbor.Actions.WebTest do
       assert tool.parameters_schema["required"] == ["query"]
       assert Map.has_key?(tool.parameters_schema["properties"], "query")
       assert Map.has_key?(tool.parameters_schema["properties"], "max_results")
+    end
+
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               Search.run(%{query: "p1d-e"}, %{})
     end
   end
 
@@ -160,14 +167,29 @@ defmodule Arbor.Actions.WebTest do
       assert Map.has_key?(tool.parameters_schema["properties"], "max_content_length")
     end
 
-    test "rejects SSRF URLs" do
-      assert {:error, msg} =
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
                Snapshot.run(
                  %{url: "http://127.0.0.1:8080/admin"},
                  %{}
                )
+    end
+  end
 
-      assert msg =~ "SSRF"
+  describe "ExaSearch action" do
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               ExaSearch.run(%{query: "p1d-e"}, %{})
+    end
+  end
+
+  describe "TinyfishSearch action" do
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               TinyfishSearch.run(%{query: "p1d-e"}, %{})
     end
   end
 end

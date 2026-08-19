@@ -9,6 +9,14 @@ defmodule Arbor.Actions.Web do
   For interactive browser automation with persistent sessions (navigate, click, type,
   screenshot, etc.), see `Arbor.Actions.Browser`.
 
+  Jido actions (`Browse`, `Search`, `Snapshot`, `ExaSearch`, `TinyfishSearch`)
+  require `Arbor.Actions.authorized_principal/2`. Direct `run/2` without the
+  facade-issued envelope fails closed and never calls `jido_browser` or `Req`
+  (or reads provider API keys). The authorized path is
+  `Arbor.Actions.authorize_and_execute/4`, then the existing network/credential
+  implementation. These actions are not sent through
+  `Arbor.Shell.authorize_and_execute/3`. There is no host Web facade.
+
   ## Actions
 
   | Action | Description |
@@ -94,6 +102,12 @@ defmodule Arbor.Actions.Web do
     Manages browser session lifecycle automatically. Uses jido_browser's
     ReadPage action under the hood with Arbor security and observability.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not call `jido_browser`
+    or `Req`. The authorized path is `Arbor.Actions.authorize_and_execute/4`,
+    then the existing ReadPage implementation. This surface never falls back
+    to `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -167,29 +181,35 @@ defmodule Arbor.Actions.Web do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{url: url} = params, _context) do
-      with :ok <- Web.validate_url(url),
-           {:ok, format} <- normalize_format(params[:format]) do
-        Actions.emit_started(__MODULE__, %{url: url})
+    def run(%{url: url} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          with :ok <- Web.validate_url(url),
+               {:ok, format} <- normalize_format(params[:format]) do
+            Actions.emit_started(__MODULE__, %{url: url})
 
-        selector = Map.get(params, :selector, "body")
+            selector = Map.get(params, :selector, "body")
 
-        case ReadPage.run(
-               %{url: url, selector: selector, format: format},
-               %{}
-             ) do
-          {:ok, result} ->
-            Actions.emit_completed(__MODULE__, %{
-              url: url,
-              content_length: String.length(result[:content] || "")
-            })
+            case ReadPage.run(
+                   %{url: url, selector: selector, format: format},
+                   %{}
+                 ) do
+              {:ok, result} ->
+                Actions.emit_completed(__MODULE__, %{
+                  url: url,
+                  content_length: String.length(result[:content] || "")
+                })
 
-            {:ok, result}
+                {:ok, result}
 
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            {:error, format_error(reason)}
-        end
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+                {:error, format_error(reason)}
+            end
+          end
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -226,6 +246,12 @@ defmodule Arbor.Actions.Web do
     Returns structured results with titles, URLs, and snippets. Requires a
     Brave Search API key configured via `BRAVE_SEARCH_API_KEY` env var or
     `:jido_browser, :brave_api_key` application config.
+
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not call `jido_browser`
+    or `Req`. The authorized path is `Arbor.Actions.authorize_and_execute/4`,
+    then the existing SearchWeb implementation. This surface never falls back
+    to `Arbor.Shell.authorize_and_execute/3`.
 
     ## Parameters
 
@@ -283,21 +309,27 @@ defmodule Arbor.Actions.Web do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{query: query} = params, _context) do
-      Actions.emit_started(__MODULE__, %{query: query})
+    def run(%{query: query} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, %{query: query})
 
-      case SearchWeb.run(params, %{}) do
-        {:ok, result} ->
-          Actions.emit_completed(__MODULE__, %{
-            query: query,
-            result_count: result[:count] || 0
-          })
+          case SearchWeb.run(params, %{}) do
+            {:ok, result} ->
+              Actions.emit_completed(__MODULE__, %{
+                query: query,
+                result_count: result[:count] || 0
+              })
 
-          {:ok, result}
+              {:ok, result}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, format_error(reason)}
+          end
 
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, format_error(reason)}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -335,6 +367,12 @@ defmodule Arbor.Actions.Web do
     shape as `Web.Search` so DOT pipelines can swap providers via the DOT
     node's `action` attr without other plumbing changes.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not read `EXA_API_KEY`
+    or call `Req`. The authorized path is
+    `Arbor.Actions.authorize_and_execute/4`, then the existing Exa request.
+    This surface never falls back to `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -366,17 +404,23 @@ defmodule Arbor.Actions.Web do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{query: query} = params, _context) do
-      Actions.emit_started(__MODULE__, %{query: query})
+    def run(%{query: query} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, %{query: query})
 
-      case System.get_env("EXA_API_KEY") do
-        key when is_binary(key) and key != "" ->
-          do_search(key, query, params)
+          case System.get_env("EXA_API_KEY") do
+            key when is_binary(key) and key != "" ->
+              do_search(key, query, params)
 
-        _ ->
-          err = "EXA_API_KEY not set"
-          Actions.emit_failed(__MODULE__, err)
-          {:error, err}
+            _ ->
+              err = "EXA_API_KEY not set"
+              Actions.emit_failed(__MODULE__, err)
+              {:error, err}
+          end
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -481,6 +525,13 @@ defmodule Arbor.Actions.Web do
     `Web.Search` / `Web.ExaSearch` so DOT pipelines can swap
     providers via the `action` attr.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not read
+    `TINYFISH_API_KEY` or call `Req`. The authorized path is
+    `Arbor.Actions.authorize_and_execute/4`, then the existing Tinyfish
+    request. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -509,17 +560,23 @@ defmodule Arbor.Actions.Web do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{query: query} = params, _context) do
-      Actions.emit_started(__MODULE__, %{query: query})
+    def run(%{query: query} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, %{query: query})
 
-      case System.get_env("TINYFISH_API_KEY") do
-        key when is_binary(key) and key != "" ->
-          do_search(key, query, params)
+          case System.get_env("TINYFISH_API_KEY") do
+            key when is_binary(key) and key != "" ->
+              do_search(key, query, params)
 
-        _ ->
-          err = "TINYFISH_API_KEY not set"
-          Actions.emit_failed(__MODULE__, err)
-          {:error, err}
+            _ ->
+              err = "TINYFISH_API_KEY not set"
+              Actions.emit_failed(__MODULE__, err)
+              {:error, err}
+          end
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -605,6 +662,12 @@ defmodule Arbor.Actions.Web do
     Returns structured data including page content, extracted links, form fields,
     and heading structure — optimized for AI agent consumption. Falls back to
     markdown extraction if JavaScript evaluation is unavailable.
+
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not call `jido_browser`
+    or `Req`. The authorized path is `Arbor.Actions.authorize_and_execute/4`,
+    then the existing SnapshotUrl implementation. This surface never falls
+    back to `Arbor.Shell.authorize_and_execute/3`.
 
     ## Parameters
 
@@ -707,31 +770,37 @@ defmodule Arbor.Actions.Web do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{url: url} = params, _context) do
-      with :ok <- Web.validate_url(url) do
-        Actions.emit_started(__MODULE__, %{url: url})
+    def run(%{url: url} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          with :ok <- Web.validate_url(url) do
+            Actions.emit_started(__MODULE__, %{url: url})
 
-        case SnapshotUrl.run(params, %{}) do
-          {:ok, result} ->
-            content_length =
-              case result do
-                %{content: c} when is_binary(c) -> String.length(c)
-                _ -> 0
-              end
+            case SnapshotUrl.run(params, %{}) do
+              {:ok, result} ->
+                content_length =
+                  case result do
+                    %{content: c} when is_binary(c) -> String.length(c)
+                    _ -> 0
+                  end
 
-            Actions.emit_completed(__MODULE__, %{
-              url: url,
-              content_length: content_length,
-              has_links: is_list(result[:links]),
-              has_forms: is_list(result[:forms])
-            })
+                Actions.emit_completed(__MODULE__, %{
+                  url: url,
+                  content_length: content_length,
+                  has_links: is_list(result[:links]),
+                  has_forms: is_list(result[:forms])
+                })
 
-            {:ok, result}
+                {:ok, result}
 
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            {:error, format_error(reason)}
-        end
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+                {:error, format_error(reason)}
+            end
+          end
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
