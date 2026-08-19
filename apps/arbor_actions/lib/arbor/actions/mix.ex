@@ -14,7 +14,7 @@ defmodule Arbor.Actions.Mix do
   (`execute_spawn_capable/3`), which fails closed on pure preflight and
   host admission rather than a missing-backend gate.
 
-  Jido actions `Compile`, `Test`, and `Format` require
+  Jido actions `Compile`, `Test`, `Quality`, `Format`, and `Xref` require
   `Arbor.Actions.authorized_principal/2`. Direct `run/2` without the
   facade-issued envelope fails closed and never launches mix. The authorized
   path is `Arbor.Actions.authorize_and_execute/4`, then this module's Mix TCB
@@ -32,6 +32,7 @@ defmodule Arbor.Actions.Mix do
   | `Test` | Run `mix test` (optionally with paths/args) |
   | `Quality` | Run `mix quality` (format-check + credo) |
   | `Format` | Run `mix format` (write or check-only) |
+  | `Xref` | Run bounded `mix xref` (graph / stats) |
 
   ## Examples
 
@@ -45,7 +46,13 @@ defmodule Arbor.Actions.Mix do
       result.exit_code  # => 0
       result.passed    # => true
 
-      {:ok, result} = Arbor.Actions.Mix.Quality.run(%{path: "/path/to/project"}, %{})
+      {:ok, result} =
+        Arbor.Actions.authorize_and_execute(
+          "agent_caller",
+          Arbor.Actions.Mix.Quality,
+          %{path: "/path/to/project", workspace_id: "workspace_1"},
+          %{agent_id: "agent_caller"}
+        )
       result.passed    # => false (format issues found)
   """
 
@@ -3801,6 +3808,12 @@ defmodule Arbor.Actions.Mix do
     Run `mix quality` (the Arbor-wide format-check + credo --strict alias
     defined in the umbrella's mix.exs).
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch mix. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Mix.run_with_required_workspace/5`. This surface never
+    falls back to `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -3846,38 +3859,44 @@ defmodule Arbor.Actions.Mix do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
-      Actions.emit_started(__MODULE__, params)
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      opts = MixAction.timeout_opts(params) ++ [bind_committable_tree: true]
+          opts = MixAction.timeout_opts(params) ++ [bind_committable_tree: true]
 
-      case MixAction.run_with_required_workspace(
-             path,
-             ["quality"],
-             params,
-             context || %{},
-             opts
-           ) do
-        {:ok, result} ->
-          proj = MixAction.project_shell_validation(result)
+          case MixAction.run_with_required_workspace(
+                 path,
+                 ["quality"],
+                 params,
+                 context || %{},
+                 opts
+               ) do
+            {:ok, result} ->
+              proj = MixAction.project_shell_validation(result)
 
-          output = %{
-            path: path,
-            exit_code: proj.exit_code,
-            passed: proj.passed,
-            reason: proj.reason,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            validated_tree_oid: Map.get(result, :validated_tree_oid),
-            validated_head: Map.get(result, :validated_head),
-            termination: proj.termination
-          }
+              output = %{
+                path: path,
+                exit_code: proj.exit_code,
+                passed: proj.passed,
+                reason: proj.reason,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                validated_tree_oid: Map.get(result, :validated_tree_oid),
+                validated_head: Map.get(result, :validated_head),
+                termination: proj.termination
+              }
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
-          {:ok, output}
+              Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
+              {:ok, output}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              MixAction.public_action_error(reason, "mix quality failed to execute: ")
+          end
 
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          MixAction.public_action_error(reason, "mix quality failed to execute: ")
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
   end
@@ -4067,6 +4086,12 @@ defmodule Arbor.Actions.Mix do
     @moduledoc """
     Run bounded `mix xref` forms (graph / stats) under an owner-issued workspace.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch mix. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Mix.run_with_required_workspace/5`. This surface never
+    falls back to `Arbor.Shell.authorize_and_execute/3`.
+
     Unsupported xref flags fail closed at the action/parser boundary rather than
     falling through to raw Shell.Execute.
     """
@@ -4111,41 +4136,47 @@ defmodule Arbor.Actions.Mix do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | tuple()}
     def run(%{path: path} = params, context) do
-      Actions.emit_started(__MODULE__, params)
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      with {:ok, args} <- build_args(params) do
-        opts = MixAction.timeout_opts(params) ++ [bind_committable_tree: true]
+          with {:ok, args} <- build_args(params) do
+            opts = MixAction.timeout_opts(params) ++ [bind_committable_tree: true]
 
-        case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
-          {:ok, result} ->
-            proj = MixAction.project_shell_validation(result)
-            feedback = MixAction.compile_feedback(result)
+            case MixAction.run_with_required_workspace(path, args, params, context || %{}, opts) do
+              {:ok, result} ->
+                proj = MixAction.project_shell_validation(result)
+                feedback = MixAction.compile_feedback(result)
 
-            output = %{
-              path: path,
-              exit_code: proj.exit_code,
-              passed: proj.passed,
-              reason: proj.reason,
-              stdout: result.stdout,
-              stderr: result.stderr,
-              feedback: feedback,
-              feedback_json: Jason.encode!(feedback),
-              validated_tree_oid: Map.get(result, :validated_tree_oid),
-              validated_head: Map.get(result, :validated_head),
-              termination: proj.termination
-            }
+                output = %{
+                  path: path,
+                  exit_code: proj.exit_code,
+                  passed: proj.passed,
+                  reason: proj.reason,
+                  stdout: result.stdout,
+                  stderr: result.stderr,
+                  feedback: feedback,
+                  feedback_json: Jason.encode!(feedback),
+                  validated_tree_oid: Map.get(result, :validated_tree_oid),
+                  validated_head: Map.get(result, :validated_head),
+                  termination: proj.termination
+                }
 
-            Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
-            {:ok, output}
+                Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
+                {:ok, output}
 
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            MixAction.public_action_error(reason, "mix xref failed to execute: ")
-        end
-      else
+              {:error, reason} ->
+                Actions.emit_failed(__MODULE__, reason)
+                MixAction.public_action_error(reason, "mix xref failed to execute: ")
+            end
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "mix xref rejected invalid invocation: #{inspect(reason)}"}
+          end
+
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix xref rejected invalid invocation: #{inspect(reason)}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 

@@ -6,12 +6,14 @@ defmodule Arbor.Actions.MixPrincipalHelpers do
   @mix_resources [
     "arbor://action/mix/compile",
     "arbor://action/mix/test",
-    "arbor://action/mix/format"
+    "arbor://action/mix/format",
+    "arbor://action/mix/quality",
+    "arbor://action/mix/xref"
   ]
 
   @doc """
-  Start security/trust, grant Mix Compile/Test/Format URIs, and remember the
-  principal for `run/3` on this test process.
+  Start security/trust, grant Mix Compile/Test/Format/Quality/Xref URIs, and
+  remember the principal for `run/3` on this test process.
   """
   def install_agent(agent_id \\ nil) do
     {:ok, _} = Application.ensure_all_started(:arbor_security)

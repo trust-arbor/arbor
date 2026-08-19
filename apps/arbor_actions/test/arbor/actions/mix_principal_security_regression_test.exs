@@ -4,13 +4,14 @@ defmodule Arbor.Actions.MixPrincipalSecurityRegressionTest do
   authorized principal.
 
   Parent behavior (must fail on checkout of the exact parent):
-  Compile, Test, and Format call `run_with_required_workspace/5` (`run_mix/3`
+  Quality and Xref call `run_with_required_workspace/5` (`run_mix/3`
   → Shell execute_direct / execute_spawn_capable) while ignoring context, so a
   direct `run/2` that only supplies a path proceeds past the principal gate.
+  Compile, Test, and Format already require `authorized_principal`.
 
-  Fixed behavior: they require `authorized_principal`. The authorized path is
-  `Arbor.Actions.authorize_and_execute/4` then existing Mix TCB
-  (`run_with_required_workspace/5`). Missing envelope uses
+  Fixed behavior: Quality and Xref also require `authorized_principal`. The
+  authorized path is `Arbor.Actions.authorize_and_execute/4` then existing Mix
+  TCB (`run_with_required_workspace/5`). Missing envelope uses
   `Actions.unauthorized_message/1` and never falls back to execute_direct.
   Mix is not sent through `Shell.authorize_and_execute/3`. Host `run_mix/3`
   and `run_with_required_workspace/5` stay callable without a principal.
@@ -25,7 +26,9 @@ defmodule Arbor.Actions.MixPrincipalSecurityRegressionTest do
   @unauthorized_runs [
     {MixAction.Compile, %{path: "/nonexistent/project"}},
     {MixAction.Test, %{path: "/nonexistent/project"}},
-    {MixAction.Format, %{path: "/nonexistent/project", check_only: true}}
+    {MixAction.Format, %{path: "/nonexistent/project", check_only: true}},
+    {MixAction.Quality, %{path: "/nonexistent/project"}},
+    {MixAction.Xref, %{path: "/nonexistent/project"}}
   ]
 
   setup_all do
@@ -142,24 +145,38 @@ defmodule Arbor.Actions.MixPrincipalSecurityRegressionTest do
     refute :authorize_and_execute in tcb_calls
   end
 
-  test "security regression: authorized Compile uses Mix TCB and does not call Shell.authorize_and_execute",
+  test "security regression: authorized Mix actions use Mix TCB and do not call Shell.authorize_and_execute",
        %{agent_id: agent_id} do
-    authorize_agent(agent_id, "arbor://action/mix/compile")
+    authorized_runs = [
+      {MixAction.Compile, "arbor://action/mix/compile"},
+      {MixAction.Quality, "arbor://action/mix/quality"},
+      {MixAction.Xref, "arbor://action/mix/xref"}
+    ]
 
-    {calls, result} =
-      with_host_shell_trace(fn ->
-        Arbor.Actions.authorize_and_execute(
-          agent_id,
-          MixAction.Compile,
-          %{path: "/nonexistent/project"},
-          %{agent_id: agent_id}
-        )
-      end)
+    for {module, resource} <- authorized_runs do
+      authorize_agent(agent_id, resource)
 
-    assert {:error, message} = result
-    assert is_binary(message)
-    refute message == "Unauthorized: :action_principal_authority_required"
-    refute :authorize_and_execute in calls
+      {calls, result} =
+        with_host_shell_trace(fn ->
+          Arbor.Actions.authorize_and_execute(
+            agent_id,
+            module,
+            %{path: "/nonexistent/project"},
+            %{agent_id: agent_id}
+          )
+        end)
+
+      assert {:error, message} = result,
+             "#{inspect(module)} authorized path: #{inspect(result)}"
+
+      assert is_binary(message), "#{inspect(module)} authorized path: #{inspect(result)}"
+
+      refute message == "Unauthorized: :action_principal_authority_required",
+             "#{inspect(module)} authorized path stayed at principal gate: #{inspect(result)}"
+
+      refute :authorize_and_execute in calls,
+             "#{inspect(module)} called Shell.authorize_and_execute: #{inspect(calls)}"
+    end
   end
 
   defp authorize_agent(agent_id, resource) do

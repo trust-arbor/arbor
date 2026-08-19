@@ -792,13 +792,8 @@ defmodule Arbor.Actions.MixTest do
     end
   end
 
-  defp run_mix_action(module, params, context)
-       when module in [MixAction.Compile, MixAction.Test, MixAction.Format] do
-    MixPrincipalHelpers.run(module, params, context)
-  end
-
   defp run_mix_action(module, params, context) do
-    module.run(params, context)
+    MixPrincipalHelpers.run(module, params, context)
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)
