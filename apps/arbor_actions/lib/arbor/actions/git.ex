@@ -5,8 +5,14 @@ defmodule Arbor.Actions.Git do
   This module provides Jido-compatible actions for common Git operations
   with proper error handling and observability through Arbor.Signals.
 
-  All actions execute Git commands through Arbor.Shell with :basic sandboxing
-  to ensure safety while allowing necessary Git operations.
+  Jido actions (`Status`, `Diff`, `Commit`, `Log`, `Branch`, `PR`) require
+  `Arbor.Actions.authorized_principal/2`. Direct `run/2` without the
+  facade-issued envelope fails closed and never launches git. The authorized
+  path is `Arbor.Actions.authorize_and_execute/4`, then this module's Git TCB
+  (`Git.execute/2` / isolated git options). Git is not an agent executable;
+  these actions never call `Arbor.Shell.authorize_and_execute/3`.
+
+  Host `Git.execute/2` and factory helpers stay callable without a principal.
 
   ## Actions
 
@@ -21,26 +27,16 @@ defmodule Arbor.Actions.Git do
 
   ## Examples
 
-      # Get status
-      {:ok, result} = Arbor.Actions.Git.Status.run(%{path: "/path/to/repo"}, %{})
+      {:ok, result} =
+        Arbor.Actions.authorize_and_execute(
+          "agent_caller",
+          Arbor.Actions.Git.Status,
+          %{path: "/path/to/repo"},
+          %{agent_id: "agent_caller"}
+        )
+
       result.is_clean  # => false
       result.modified  # => ["file1.txt", "file2.txt"]
-
-      # Show diff
-      {:ok, result} = Arbor.Actions.Git.Diff.run(%{path: "/path/to/repo"}, %{})
-      result.diff  # => "diff --git a/file.txt..."
-
-      # Create commit
-      {:ok, result} = Arbor.Actions.Git.Commit.run(
-        %{path: "/path/to/repo", message: "Fix bug", files: ["file.txt"]},
-        %{}
-      )
-
-      # Show log
-      {:ok, result} = Arbor.Actions.Git.Log.run(
-        %{path: "/path/to/repo", limit: 5},
-        %{}
-      )
   """
 
   alias Arbor.Shell
@@ -2947,6 +2943,12 @@ defmodule Arbor.Actions.Git do
     @moduledoc """
     Get repository status.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2`. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -2987,20 +2989,26 @@ defmodule Arbor.Actions.Git do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      with {:ok, branch_result} <- git_command(path, ["branch", "--show-current"]),
-           {:ok, status_result} <- git_command(path, ["status", "--porcelain", "-b"]) do
-        status = parse_status(status_result.stdout, branch_result.stdout)
+          with {:ok, branch_result} <- git_command(path, ["branch", "--show-current"]),
+               {:ok, status_result} <- git_command(path, ["status", "--porcelain", "-b"]) do
+            status = parse_status(status_result.stdout, branch_result.stdout)
 
-        result = Map.put(status, :path, path)
-        Actions.emit_completed(__MODULE__, %{path: path, is_clean: status.is_clean})
-        {:ok, result}
-      else
+            result = Map.put(status, :path, path)
+            Actions.emit_completed(__MODULE__, %{path: path, is_clean: status.is_clean})
+            {:ok, result}
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to get git status: #{reason}"}
+          end
+
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to get git status: #{reason}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -3085,6 +3093,12 @@ defmodule Arbor.Actions.Git do
     @moduledoc """
     Show changes between commits, commit and working tree, etc.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2`. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -3150,16 +3164,22 @@ defmodule Arbor.Actions.Git do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      case build_diff_args(params) do
-        {:ok, args} ->
-          run_diff(path, params, args)
+          case build_diff_args(params) do
+            {:ok, args} ->
+              run_diff(path, params, args)
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to get git diff: #{inspect(reason)}"}
+          end
 
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to get git diff: #{inspect(reason)}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -3257,6 +3277,12 @@ defmodule Arbor.Actions.Git do
     @moduledoc """
     Create a new commit.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2`. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -3346,7 +3372,17 @@ defmodule Arbor.Actions.Git do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path, message: message} = params, _context) do
+    def run(%{path: path, message: message} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          commit_authorized(path, message, params)
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
+      end
+    end
+
+    defp commit_authorized(path, message, params) do
       Actions.emit_started(__MODULE__, %{path: path, message: message})
 
       # Stage files if specified
@@ -3537,6 +3573,12 @@ defmodule Arbor.Actions.Git do
     @moduledoc """
     Show commit history.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2`. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -3600,12 +3642,18 @@ defmodule Arbor.Actions.Git do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      case build_log_args(params) do
-        {:ok, args} -> run_log(path, params, args)
-        {:error, reason} -> {:error, "Failed to get git log: #{inspect(reason)}"}
+          case build_log_args(params) do
+            {:ok, args} -> run_log(path, params, args)
+            {:error, reason} -> {:error, "Failed to get git log: #{inspect(reason)}"}
+          end
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
@@ -3720,6 +3768,12 @@ defmodule Arbor.Actions.Git do
     @moduledoc """
     Create, switch, or list branches.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2`. This surface never falls back to
+    `Arbor.Shell.authorize_and_execute/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -3771,67 +3825,91 @@ defmodule Arbor.Actions.Git do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path, mode: :list} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path, mode: :list} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      with {:ok, branches_result} <- git_command(path, ["branch", "--list"]),
-           {:ok, current_result} <- git_command(path, ["branch", "--show-current"]) do
-        branches =
-          branches_result.stdout
-          |> String.split("\n", trim: true)
-          |> Enum.map(&(String.trim_leading(&1, "* ") |> String.trim()))
-          |> Enum.reject(&(&1 == ""))
+          with {:ok, branches_result} <- git_command(path, ["branch", "--list"]),
+               {:ok, current_result} <- git_command(path, ["branch", "--show-current"]) do
+            branches =
+              branches_result.stdout
+              |> String.split("\n", trim: true)
+              |> Enum.map(&(String.trim_leading(&1, "* ") |> String.trim()))
+              |> Enum.reject(&(&1 == ""))
 
-        result = %{
-          path: path,
-          mode: :list,
-          branches: branches,
-          current: String.trim(current_result.stdout)
-        }
+            result = %{
+              path: path,
+              mode: :list,
+              branches: branches,
+              current: String.trim(current_result.stdout)
+            }
 
-        Actions.emit_completed(__MODULE__, %{path: path, count: length(branches)})
-        {:ok, result}
-      else
+            Actions.emit_completed(__MODULE__, %{path: path, count: length(branches)})
+            {:ok, result}
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to list branches: #{reason}"}
+          end
+
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to list branches: #{reason}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
-    def run(%{path: path, mode: :create, name: name} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path, mode: :create, name: name} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      with :ok <- Git.validate_branch_name(name),
-           :ok <- validate_optional_ref(params[:from]),
-           args = ["switch", "-c", name, "--"] ++ List.wrap(params[:from]),
-           {:ok, _result} <- git_command(path, args) do
-        result = %{path: path, mode: :create, branch: name}
-        Actions.emit_completed(__MODULE__, %{path: path, branch: name})
-        {:ok, result}
-      else
+          with :ok <- Git.validate_branch_name(name),
+               :ok <- validate_optional_ref(params[:from]),
+               args = ["switch", "-c", name, "--"] ++ List.wrap(params[:from]),
+               {:ok, _result} <- git_command(path, args) do
+            result = %{path: path, mode: :create, branch: name}
+            Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+            {:ok, result}
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to create branch '#{name}': #{inspect(reason)}"}
+          end
+
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to create branch '#{name}': #{inspect(reason)}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
-    def run(%{path: path, mode: :switch, name: name} = params, _context) do
-      Actions.emit_started(__MODULE__, params)
+    def run(%{path: path, mode: :switch, name: name} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          Actions.emit_started(__MODULE__, params)
 
-      with :ok <- Git.validate_branch_name(name),
-           {:ok, _result} <- git_command(path, ["switch", "--", name]) do
-        result = %{path: path, mode: :switch, branch: name}
-        Actions.emit_completed(__MODULE__, %{path: path, branch: name})
-        {:ok, result}
-      else
+          with :ok <- Git.validate_branch_name(name),
+               {:ok, _result} <- git_command(path, ["switch", "--", name]) do
+            result = %{path: path, mode: :switch, branch: name}
+            Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+            {:ok, result}
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to switch to branch '#{name}': #{inspect(reason)}"}
+          end
+
         {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to switch to branch '#{name}': #{inspect(reason)}"}
+          {:error, Actions.unauthorized_message(reason)}
       end
     end
 
-    def run(%{mode: mode}, _context) when mode in [:create, :switch] do
-      {:error, "Branch mode :#{mode} requires a 'name' parameter"}
+    def run(%{mode: mode}, context) when mode in [:create, :switch] do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          {:error, "Branch mode :#{mode} requires a 'name' parameter"}
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
+      end
     end
 
     defp validate_optional_ref(nil), do: :ok
@@ -3859,6 +3937,12 @@ defmodule Arbor.Actions.Git do
     This is intentionally one platform-agnostic action. The caller supplies the
     review content and branch names; provider, endpoint, and token are resolved
     from action config or the selected git remote.
+
+    Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
+    the facade-issued envelope fails closed and does not launch git. The
+    authorized path is `Arbor.Actions.authorize_and_execute/4`, then
+    `Arbor.Actions.Git.execute/2` for isolated git options. This surface
+    never sends git through `Arbor.Shell.authorize_and_execute/3`.
     """
 
     use Jido.Action,
@@ -3933,6 +4017,26 @@ defmodule Arbor.Actions.Git do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, title: title} = params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          pr_authorized(path, title, params, context)
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
+      end
+    end
+
+    def run(_params, context) do
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, _principal_id} ->
+          {:error, "path and title are required"}
+
+        {:error, reason} ->
+          {:error, Actions.unauthorized_message(reason)}
+      end
+    end
+
+    defp pr_authorized(path, title, params, context) do
       Actions.emit_started(__MODULE__, %{
         path: path,
         title: title,
@@ -3963,8 +4067,6 @@ defmodule Arbor.Actions.Git do
           {:error, safe_reason}
       end
     end
-
-    def run(_params, _context), do: {:error, "path and title are required"}
 
     defp resolved_base_url(params, context) do
       remote_result = remote_info(params)

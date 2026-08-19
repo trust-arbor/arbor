@@ -290,6 +290,26 @@ another one. It doubles as user documentation — anyone standing up agents need
   Host/unit tests with no principal keep using `eval_code/3`.
   Do not treat `eval_code/3` as an action/extension API.
 
+## 17. Git Jido actions require `authorized_principal` (no execute_direct fallback)
+
+- **What:** `Arbor.Actions.Git.Status` / `Diff` / `Commit` / `Log` / `Branch` /
+  `PR` are the agent/extension surface. They consume
+  `Arbor.Actions.authorized_principal(context, __MODULE__)`, then the existing
+  Git TCB (`Git.execute/2`). Direct `run/2` that only supplies a path fails
+  closed with `Unauthorized: :action_principal_authority_required` and does
+  not launch git. Git is not an agent executable — these actions never call
+  `Arbor.Shell.authorize_and_execute/3`. Host `Git.execute/2` stays callable
+  without a principal.
+- **Symptom:** `git_status` / `git_diff` / `git_commit` / `git_log` /
+  `git_branch` / `git_pr` returns `Unauthorized: :action_principal_authority_required`
+  when the action context has no facade-issued envelope, even if
+  `context[:agent_id]` names another principal.
+- **Action:** invoke Git actions through `authorize_and_execute` so the
+  executor issues the principal envelope, and grant the matching
+  `arbor://action/git/<op>` capability. Host/unit tests with no principal
+  keep using `Arbor.Actions.Git.execute/2` directly. Do not treat
+  `Git.execute/2` as an action/extension API.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -324,6 +344,11 @@ another one. It doubles as user documentation — anyone standing up agents need
     launch. Agent callers use `authorize_and_execute`.
 15. For eval-session, grant `arbor://sandbox/eval` and call
     `Arbor.Sandbox.authorize_eval/4`. Host `eval_code/3` has no principal
+    and is not an agent/extension API.
+16. For `git_status` / `git_diff` / `git_commit` / `git_log` / `git_branch` /
+    `git_pr`, invoke `authorize_and_execute` so the caller envelope is issued;
+    grant `arbor://action/git/<op>`. A spoofed `context[:agent_id]` without
+    the envelope is not git authority. Host `Git.execute/2` has no principal
     and is not an agent/extension API.
 
 ## Applied Learning: Security Gates

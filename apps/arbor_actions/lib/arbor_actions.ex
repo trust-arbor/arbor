@@ -36,8 +36,14 @@ defmodule Arbor.Actions do
       # Read a file
       {:ok, result} = Arbor.Actions.File.Read.run(%{path: "/etc/hosts"}, %{})
 
-      # Get git status
-      {:ok, result} = Arbor.Actions.Git.Status.run(%{path: "/path/to/repo"}, %{})
+      # Get git status (requires authorized_principal)
+      {:ok, result} =
+        Arbor.Actions.authorize_and_execute(
+          "agent_caller",
+          Arbor.Actions.Git.Status,
+          %{path: "/path/to/repo"},
+          %{agent_id: "agent_caller"}
+        )
 
   ## LLM Tool Schemas
 

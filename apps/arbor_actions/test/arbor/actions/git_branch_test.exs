@@ -27,9 +27,17 @@ defmodule Arbor.Actions.GitBranchTest do
     {:ok, repo_path: repo_path}
   end
 
+  setup do
+    Arbor.Actions.GitPrincipalHelpers.install_agent()
+  end
+
+  defp run_git(module, params, context \\ %{}) do
+    Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
+  end
+
   describe "Branch :list" do
     test "lists branches with current marker", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Branch.run(%{path: repo_path, mode: :list}, %{})
+      assert {:ok, result} = run_git(Git.Branch, %{path: repo_path, mode: :list}, %{})
 
       assert result.mode == :list
       assert result.current in ["main", "master"]
@@ -39,7 +47,7 @@ defmodule Arbor.Actions.GitBranchTest do
     test "lists multiple branches after creating one", %{repo_path: repo_path} do
       System.cmd("git", ["branch", "feature-a"], cd: repo_path)
 
-      assert {:ok, result} = Git.Branch.run(%{path: repo_path, mode: :list}, %{})
+      assert {:ok, result} = run_git(Git.Branch, %{path: repo_path, mode: :list}, %{})
 
       assert "feature-a" in result.branches
       assert length(result.branches) >= 2
@@ -49,7 +57,7 @@ defmodule Arbor.Actions.GitBranchTest do
   describe "Branch :create" do
     test "creates a new branch from HEAD", %{repo_path: repo_path} do
       assert {:ok, result} =
-               Git.Branch.run(%{path: repo_path, mode: :create, name: "feature-x"}, %{})
+               run_git(Git.Branch, %{path: repo_path, mode: :create, name: "feature-x"}, %{})
 
       assert result.mode == :create
       assert result.branch == "feature-x"
@@ -69,7 +77,8 @@ defmodule Arbor.Actions.GitBranchTest do
       System.cmd("git", ["commit", "-m", "more"], cd: repo_path)
 
       assert {:ok, _result} =
-               Git.Branch.run(
+               run_git(
+                 Git.Branch,
                  %{path: repo_path, mode: :create, name: "from-initial", from: initial_sha},
                  %{}
                )
@@ -80,15 +89,15 @@ defmodule Arbor.Actions.GitBranchTest do
     end
 
     test "fails when name is missing" do
-      assert {:error, msg} = Git.Branch.run(%{path: "/tmp", mode: :create}, %{})
+      assert {:error, msg} = run_git(Git.Branch, %{path: "/tmp", mode: :create}, %{})
       assert msg =~ "requires a 'name'"
     end
 
     test "fails when branch already exists", %{repo_path: repo_path} do
-      assert {:ok, _} = Git.Branch.run(%{path: repo_path, mode: :create, name: "dup"}, %{})
+      assert {:ok, _} = run_git(Git.Branch, %{path: repo_path, mode: :create, name: "dup"}, %{})
 
       # Try to create again — git refuses.
-      assert {:error, msg} = Git.Branch.run(%{path: repo_path, mode: :create, name: "dup"}, %{})
+      assert {:error, msg} = run_git(Git.Branch, %{path: repo_path, mode: :create, name: "dup"}, %{})
       assert msg =~ "Failed to create branch"
     end
   end
@@ -98,7 +107,7 @@ defmodule Arbor.Actions.GitBranchTest do
       System.cmd("git", ["branch", "target"], cd: repo_path)
 
       assert {:ok, result} =
-               Git.Branch.run(%{path: repo_path, mode: :switch, name: "target"}, %{})
+               run_git(Git.Branch, %{path: repo_path, mode: :switch, name: "target"}, %{})
 
       assert result.mode == :switch
       assert result.branch == "target"
@@ -109,13 +118,13 @@ defmodule Arbor.Actions.GitBranchTest do
 
     test "fails when switching to non-existent branch", %{repo_path: repo_path} do
       assert {:error, msg} =
-               Git.Branch.run(%{path: repo_path, mode: :switch, name: "does-not-exist"}, %{})
+               run_git(Git.Branch, %{path: repo_path, mode: :switch, name: "does-not-exist"}, %{})
 
       assert msg =~ "Failed to switch"
     end
 
     test "fails when name is missing" do
-      assert {:error, msg} = Git.Branch.run(%{path: "/tmp", mode: :switch}, %{})
+      assert {:error, msg} = run_git(Git.Branch, %{path: "/tmp", mode: :switch}, %{})
       assert msg =~ "requires a 'name'"
     end
   end
@@ -131,6 +140,12 @@ defmodule Arbor.Actions.GitBranchTest do
     test "write-risk metadata security regression: branch is local_write via Egress" do
       # create/switch write; list is read-only. Static class must be max effect.
       assert Egress.effect_class_for(Git.Branch) == :local_write
+    end
+
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               Git.Branch.run(%{path: "/tmp", mode: :list}, %{})
     end
   end
 end

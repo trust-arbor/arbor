@@ -6,10 +6,27 @@ defmodule Arbor.Actions.GitPRTest do
 
   @token "test_scm_token"
 
+  setup_all do
+    case Process.whereis(Arbor.Shell.ExecutionRegistry) do
+      nil -> {:ok, _} = Application.ensure_all_started(:arbor_shell)
+      _pid -> :ok
+    end
+
+    :ok
+  end
+
   setup %{tmp_dir: tmp_dir} do
     repo_path = Path.join(tmp_dir, "repo")
     create_git_repo(repo_path)
     {:ok, repo_path: repo_path}
+  end
+
+  setup do
+    Arbor.Actions.GitPrincipalHelpers.install_agent()
+  end
+
+  defp run_git(module, params, context \\ %{}) do
+    Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
   end
 
   describe "PR.run/2" do
@@ -28,7 +45,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:ok, result} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    branch: "feature/pr-action",
@@ -69,7 +87,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:ok, result} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    remote: "forgejo",
@@ -109,7 +128,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:ok, result} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    branch: "feature/gitlab-mr",
@@ -151,7 +171,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:ok, result} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    provider: :github,
@@ -178,7 +199,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:error, reason} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    branch: "feature/no-token",
@@ -200,7 +222,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:error, remote_reason} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    remote: "--upload-pack=/tmp/helper",
@@ -215,7 +238,8 @@ defmodule Arbor.Actions.GitPRTest do
       add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
 
       assert {:error, branch_reason} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    branch: "--exec=/tmp/helper",
@@ -237,7 +261,8 @@ defmodule Arbor.Actions.GitPRTest do
       end
 
       assert {:error, reason} =
-               Git.PR.run(
+               run_git(
+                 Git.PR,
                  %{
                    path: repo_path,
                    branch: "feature/error",

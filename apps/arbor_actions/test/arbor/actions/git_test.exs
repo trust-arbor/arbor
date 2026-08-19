@@ -24,6 +24,14 @@ defmodule Arbor.Actions.GitTest do
     {:ok, repo_path: repo_path}
   end
 
+  setup do
+    Arbor.Actions.GitPrincipalHelpers.install_agent()
+  end
+
+  defp run_git(module, params, context \\ %{}) do
+    Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
+  end
+
   describe "read_bounded_blob_at_commit/4" do
     test "reads the blob content exactly matching git show at the exact commit", %{
       repo_path: repo_path
@@ -1176,7 +1184,7 @@ defmodule Arbor.Actions.GitTest do
 
   describe "Status" do
     test "returns clean status for clean repo", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
 
       assert result.path == repo_path
       assert result.is_clean == true
@@ -1188,7 +1196,7 @@ defmodule Arbor.Actions.GitTest do
     test "detects untracked files", %{repo_path: repo_path} do
       create_file(repo_path, "new_file.txt", "content")
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
 
       assert result.is_clean == false
       assert "new_file.txt" in result.untracked
@@ -1198,7 +1206,7 @@ defmodule Arbor.Actions.GitTest do
       readme_path = Path.join(repo_path, "README.md")
       File.write!(readme_path, "Modified content")
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
 
       assert result.is_clean == false
       assert "README.md" in result.modified
@@ -1209,22 +1217,28 @@ defmodule Arbor.Actions.GitTest do
       File.write!(readme_path, "Modified content")
       System.cmd("git", ["add", "README.md"], cd: repo_path)
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
 
       assert result.is_clean == false
       assert "README.md" in result.staged
     end
 
     test "reports current branch", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
 
       # Branch is either "master" or "main" depending on git config
       assert result.branch in ["master", "main"]
     end
 
     test "returns error for non-git directory" do
-      assert {:error, message} = Git.Status.run(%{path: "/tmp"}, %{})
+      assert {:error, message} = run_git(Git.Status, %{path: "/tmp"}, %{})
       assert message =~ "Failed to get git status" or message =~ "not a git repository"
+    end
+
+    @tag :security_regression
+    test "direct run/2 without the envelope is unauthorized" do
+      assert {:error, "Unauthorized: :action_principal_authority_required"} =
+               Git.Status.run(%{path: "/tmp"}, %{})
     end
 
     test "validates action metadata" do
@@ -1236,7 +1250,7 @@ defmodule Arbor.Actions.GitTest do
     test "detects deleted unstaged file", %{repo_path: repo_path} do
       File.rm!(Path.join(repo_path, "README.md"))
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
       assert result.is_clean == false
       assert "README.md" in result.modified
     end
@@ -1244,7 +1258,7 @@ defmodule Arbor.Actions.GitTest do
     test "detects staged deletion", %{repo_path: repo_path} do
       System.cmd("git", ["rm", "README.md"], cd: repo_path)
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
       assert result.is_clean == false
       assert "README.md" in result.staged
     end
@@ -1258,7 +1272,7 @@ defmodule Arbor.Actions.GitTest do
       # Rename via git
       System.cmd("git", ["mv", "original.txt", "renamed.txt"], cd: repo_path)
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
       assert result.is_clean == false
     end
 
@@ -1269,7 +1283,7 @@ defmodule Arbor.Actions.GitTest do
       System.cmd("git", ["add", "README.md"], cd: repo_path)
       File.write!(readme_path, "Modified after staging")
 
-      assert {:ok, result} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Status, %{path: repo_path}, %{})
       assert result.is_clean == false
       # File should appear in both staged and modified
       assert "README.md" in result.staged or "README.md" in result.modified
@@ -1284,7 +1298,7 @@ defmodule Arbor.Actions.GitTest do
 
   describe "Diff" do
     test "shows empty diff for clean repo", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path}, %{})
 
       assert result.path == repo_path
       assert result.diff == ""
@@ -1294,7 +1308,7 @@ defmodule Arbor.Actions.GitTest do
       readme_path = Path.join(repo_path, "README.md")
       File.write!(readme_path, "Modified content\n")
 
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path}, %{})
 
       assert result.diff =~ "Modified content"
       assert result.diff =~ "diff --git"
@@ -1305,7 +1319,7 @@ defmodule Arbor.Actions.GitTest do
       File.write!(readme_path, "Staged content\n")
       System.cmd("git", ["add", "README.md"], cd: repo_path)
 
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path, staged: true}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path, staged: true}, %{})
 
       assert result.diff =~ "Staged content"
     end
@@ -1314,7 +1328,7 @@ defmodule Arbor.Actions.GitTest do
       readme_path = Path.join(repo_path, "README.md")
       File.write!(readme_path, "New line 1\nNew line 2\n")
 
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path, stat_only: true}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path, stat_only: true}, %{})
 
       assert Map.has_key?(result, :files_changed)
       assert Map.has_key?(result, :insertions)
@@ -1329,7 +1343,7 @@ defmodule Arbor.Actions.GitTest do
       File.write!(other_path, "other content\n")
 
       # Diff only README
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path, file: "README.md"}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path, file: "README.md"}, %{})
 
       assert result.diff =~ "README modified"
       refute result.diff =~ "other content"
@@ -1347,7 +1361,7 @@ defmodule Arbor.Actions.GitTest do
       System.cmd("git", ["commit", "-m", "Change README"], cd: repo_path)
 
       # Diff against the previous commit
-      assert {:ok, result} = Git.Diff.run(%{path: repo_path, ref: hash}, %{})
+      assert {:ok, result} = run_git(Git.Diff, %{path: repo_path, ref: hash}, %{})
       assert result.diff =~ "Changed content"
     end
 
@@ -1357,7 +1371,7 @@ defmodule Arbor.Actions.GitTest do
       System.cmd("git", ["add", "newfile.txt"], cd: repo_path)
 
       assert {:ok, result} =
-               Git.Diff.run(%{path: repo_path, stat_only: true, staged: true}, %{})
+               run_git(Git.Diff, %{path: repo_path, stat_only: true, staged: true}, %{})
 
       assert result.files_changed >= 1
       assert result.insertions >= 1
@@ -1368,7 +1382,7 @@ defmodule Arbor.Actions.GitTest do
       File.mkdir_p!(non_git)
       on_exit(fn -> File.rm_rf!(non_git) end)
 
-      assert {:error, message} = Git.Diff.run(%{path: non_git}, %{})
+      assert {:error, message} = run_git(Git.Diff, %{path: non_git}, %{})
       assert message =~ "Failed to get git diff"
     end
 
@@ -1383,12 +1397,12 @@ defmodule Arbor.Actions.GitTest do
       {_output, 0} = System.cmd("git", ["-C", repo_path, "config", "diff.external", helper])
 
       assert {:error, injected_reason} =
-               Git.Diff.run(%{path: repo_path, ref: "--ext-diff"}, %{})
+               run_git(Git.Diff, %{path: repo_path, ref: "--ext-diff"}, %{})
 
       assert injected_reason =~ "invalid_git_ref"
 
       assert {:error, configured_reason} =
-               Git.Diff.run(%{path: repo_path, ref: "HEAD"}, %{})
+               run_git(Git.Diff, %{path: repo_path, ref: "HEAD"}, %{})
 
       assert configured_reason =~ "unsafe_git_configuration"
       Process.sleep(200)
@@ -1401,13 +1415,13 @@ defmodule Arbor.Actions.GitTest do
       {_out, 0} =
         System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null"])
 
-      assert {:ok, _result} = Git.Status.run(%{path: repo_path}, %{})
-      assert {:ok, _result} = Git.Diff.run(%{path: repo_path, ref: "HEAD"}, %{})
+      assert {:ok, _result} = run_git(Git.Status, %{path: repo_path}, %{})
+      assert {:ok, _result} = run_git(Git.Diff, %{path: repo_path, ref: "HEAD"}, %{})
 
       {_out, 0} =
         System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/tmp/hooks"])
 
-      assert {:error, hooks_reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:error, hooks_reason} = run_git(Git.Status, %{path: repo_path}, %{})
       assert hooks_reason =~ "unsafe_git_configuration"
       assert hooks_reason =~ "core.hookspath"
 
@@ -1421,7 +1435,7 @@ defmodule Arbor.Actions.GitTest do
       {_out, 0} =
         System.cmd("git", ["-C", repo_path, "config", "--local", "credential.helper", helper])
 
-      assert {:error, credential_reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:error, credential_reason} = run_git(Git.Status, %{path: repo_path}, %{})
       assert credential_reason =~ "unsafe_git_configuration"
     end
 
@@ -1442,7 +1456,7 @@ defmodule Arbor.Actions.GitTest do
           "/dev/null"
         ])
 
-      assert {:error, reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:error, reason} = run_git(Git.Status, %{path: repo_path}, %{})
       assert reason =~ "unsafe_git_configuration"
     end
 
@@ -1453,7 +1467,7 @@ defmodule Arbor.Actions.GitTest do
       {_out, 0} =
         System.cmd("git", ["-C", repo_path, "config", "--local", "core.hooksPath", "/dev/null\r"])
 
-      assert {:error, reason} = Git.Status.run(%{path: repo_path}, %{})
+      assert {:error, reason} = run_git(Git.Status, %{path: repo_path}, %{})
       assert reason =~ "unsafe_git_configuration"
       assert reason =~ "core.hookspath"
     end
@@ -1470,7 +1484,7 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "new_file.txt", "content")
       System.cmd("git", ["add", "new_file.txt"], cd: repo_path)
 
-      assert {:ok, result} = Git.Commit.run(%{path: repo_path, message: "Add new file"}, %{})
+      assert {:ok, result} = run_git(Git.Commit, %{path: repo_path, message: "Add new file"}, %{})
 
       assert result.path == repo_path
       assert String.length(result.commit_hash) >= 7
@@ -1481,7 +1495,7 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "new_file.txt", "content")
       System.cmd("git", ["add", "new_file.txt"], cd: repo_path)
 
-      assert {:error, message} = Git.Commit.run(%{path: repo_path, message: ""}, %{})
+      assert {:error, message} = run_git(Git.Commit, %{path: repo_path, message: ""}, %{})
       assert message =~ "commit message is required"
     end
 
@@ -1494,7 +1508,7 @@ defmodule Arbor.Actions.GitTest do
       message = "  Use `touch #{marker}` and $(touch #{marker}) safely  "
 
       assert {:ok, result} =
-               Git.Commit.run(%{path: repo_path, message: message}, %{})
+               run_git(Git.Commit, %{path: repo_path, message: message}, %{})
 
       assert result.message == message
       refute File.exists?(marker)
@@ -1509,7 +1523,8 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "file2.txt", "content2")
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: "Add files", files: ["file1.txt", "file2.txt"]},
                  %{}
                )
@@ -1522,7 +1537,8 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "file2.txt", "content2")
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: "Add all files", all: true},
                  %{}
                )
@@ -1534,7 +1550,8 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "dot_file.txt", "content")
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: "Add DOT file", all: "true"},
                  %{}
                )
@@ -1543,13 +1560,14 @@ defmodule Arbor.Actions.GitTest do
     end
 
     test "handles commit with no changes", %{repo_path: repo_path} do
-      assert {:error, message} = Git.Commit.run(%{path: repo_path, message: "Empty"}, %{})
+      assert {:error, message} = run_git(Git.Commit, %{path: repo_path, message: "Empty"}, %{})
       assert message =~ "nothing to commit" or message =~ "Failed to create commit"
     end
 
     test "allows empty commit when specified", %{repo_path: repo_path} do
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: "Empty commit", allow_empty: true},
                  %{}
                )
@@ -1561,7 +1579,8 @@ defmodule Arbor.Actions.GitTest do
       repo_path: repo_path
     } do
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: "Empty DOT commit", allow_empty: "true"},
                  %{}
                )
@@ -1575,7 +1594,8 @@ defmodule Arbor.Actions.GitTest do
       message = "Fix bug: \"quoted\" and 'apostrophe' and $special"
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: message, files: ["file.txt"]},
                  %{}
                )
@@ -1590,7 +1610,8 @@ defmodule Arbor.Actions.GitTest do
       message = "Fix A & B (safe)"
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{path: repo_path, message: message, files: ["structured.txt"]},
                  %{}
                )
@@ -1611,7 +1632,7 @@ defmodule Arbor.Actions.GitTest do
       File.chmod!(hook, 0o755)
 
       assert {:ok, result} =
-               Git.Commit.run(%{path: repo_path, message: "Hook-free commit"}, %{})
+               run_git(Git.Commit, %{path: repo_path, message: "Hook-free commit"}, %{})
 
       refute File.exists?(marker)
       assert String.length(result.commit_hash) >= 7
@@ -1638,7 +1659,8 @@ defmodule Arbor.Actions.GitTest do
       assert {:ok, binding} = Arbor.Actions.Mix.committable_tree_binding(repo_path)
 
       assert {:ok, result} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{
                    path: repo_path,
                    message: "bound commit",
@@ -1668,7 +1690,8 @@ defmodule Arbor.Actions.GitTest do
       assert {:ok, binding} = Arbor.Actions.Mix.committable_tree_binding(repo_path)
 
       assert {:error, message} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{
                    path: repo_path,
                    message: "must not commit",
@@ -1691,7 +1714,8 @@ defmodule Arbor.Actions.GitTest do
       fake_tree = String.duplicate("b", 40)
 
       assert {:error, message} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{
                    path: repo_path,
                    message: "must not commit",
@@ -1713,7 +1737,8 @@ defmodule Arbor.Actions.GitTest do
       snapshot = git_pre_mutation_snapshot!(repo_path)
 
       assert {:error, message} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{
                    path: repo_path,
                    message: "must not commit",
@@ -1727,7 +1752,8 @@ defmodule Arbor.Actions.GitTest do
       assert_git_unmutated!(repo_path, snapshot)
 
       assert {:error, tree_message} =
-               Git.Commit.run(
+               run_git(
+                 Git.Commit,
                  %{
                    path: repo_path,
                    message: "must not commit",
@@ -1747,7 +1773,7 @@ defmodule Arbor.Actions.GitTest do
       create_file(repo_path, "ordinary.txt", "content")
 
       assert {:ok, result} =
-               Git.Commit.run(%{path: repo_path, message: "ordinary", all: true}, %{})
+               run_git(Git.Commit, %{path: repo_path, message: "ordinary", all: true}, %{})
 
       assert String.length(result.commit_hash) >= 7
     end
@@ -1755,7 +1781,7 @@ defmodule Arbor.Actions.GitTest do
 
   describe "Log" do
     test "shows commit history", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Log.run(%{path: repo_path}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path}, %{})
 
       assert result.path == repo_path
       assert result.commits != []
@@ -1775,13 +1801,13 @@ defmodule Arbor.Actions.GitTest do
         System.cmd("git", ["commit", "-m", "Commit #{i}"], cd: repo_path)
       end
 
-      assert {:ok, result} = Git.Log.run(%{path: repo_path, limit: 3}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path, limit: 3}, %{})
 
       assert result.count == 3
     end
 
     test "shows oneline format", %{repo_path: repo_path} do
-      assert {:ok, result} = Git.Log.run(%{path: repo_path, oneline: true}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path, oneline: true}, %{})
 
       first_commit = hd(result.commits)
       assert Map.has_key?(first_commit, :hash)
@@ -1801,7 +1827,7 @@ defmodule Arbor.Actions.GitTest do
       System.cmd("git", ["commit", "-m", "Add file2"], cd: repo_path)
 
       # Filter to only file1
-      assert {:ok, result} = Git.Log.run(%{path: repo_path, file: "file1.txt"}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path, file: "file1.txt"}, %{})
 
       # Should only show commits affecting file1
       assert result.count == 1
@@ -1816,7 +1842,7 @@ defmodule Arbor.Actions.GitTest do
 
       on_exit(fn -> File.rm_rf!(non_git_path) end)
 
-      result = Git.Log.run(%{path: non_git_path}, %{})
+      result = run_git(Git.Log, %{path: non_git_path}, %{})
 
       case result do
         {:error, message} ->
@@ -1844,7 +1870,7 @@ defmodule Arbor.Actions.GitTest do
       hash = String.trim(hash)
 
       # Log with specific ref
-      assert {:ok, result} = Git.Log.run(%{path: repo_path, ref: hash, limit: 1}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path, ref: hash, limit: 1}, %{})
       assert result.count == 1
     end
 
@@ -1859,7 +1885,7 @@ defmodule Arbor.Actions.GitTest do
         cd: repo_path
       )
 
-      assert {:ok, result} = Git.Log.run(%{path: repo_path, limit: 1}, %{})
+      assert {:ok, result} = run_git(Git.Log, %{path: repo_path, limit: 1}, %{})
       assert result.count == 1
 
       commit = hd(result.commits)

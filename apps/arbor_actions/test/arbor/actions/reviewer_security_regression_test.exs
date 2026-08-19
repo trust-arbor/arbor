@@ -135,8 +135,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     File.write!(Path.join(outside, "outside.txt"), "must not be adopted")
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "git_worktree_outside_authorized_root"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "git_worktree_outside_authorized_root"
     after
       File.rm_rf!(root)
     end
@@ -156,9 +156,9 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
              )
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "git_storage_outside_authorized_root"
-      assert message =~ "git_dir"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "git_storage_outside_authorized_root"
+      assert inspect(error) =~ "git_dir"
     after
       File.rm_rf!(root)
     end
@@ -187,10 +187,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     refute File.exists?(external_index)
 
     try do
-      assert {:error, message} =
-               Git.Commit.run(%{path: repo, message: "forbidden", all: true}, %{})
-
-      assert message =~ "git_storage_outside_authorized_root"
+      assert {:error, error} = Git.execute(repo, ["add", "-A", "--"])
+      assert inspect(error) =~ "git_storage_outside_authorized_root"
       refute File.exists?(external_index)
 
       assert {_output, status} =
@@ -222,8 +220,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     assert {_output, 0} = System.cmd("git", ["worktree", "add", "-q", linked], cd: main)
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: linked}, %{})
-      assert message =~ "git_storage_outside_authorized_root"
+      assert {:error, error} = Git.execute(linked, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "git_storage_outside_authorized_root"
     after
       File.rm_rf!(root)
     end
@@ -241,8 +239,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     File.write!(alternates, alternate_objects <> "\n")
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "git_object_alternates_forbidden"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "git_object_alternates_forbidden"
     after
       File.rm_rf!(root)
     end
@@ -258,9 +256,9 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     File.ln_s!(external_objects, Path.join([repo, ".git", "objects"]))
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "git_storage_outside_authorized_root"
-      assert message =~ "object_dir"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "git_storage_outside_authorized_root"
+      assert inspect(error) =~ "object_dir"
     after
       File.rm_rf!(root)
     end
@@ -278,8 +276,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
              System.cmd("git", ["config", "include.path", external_config], cd: repo)
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "unsafe_git_configuration"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "unsafe_git_configuration"
     after
       File.rm_rf!(root)
     end
@@ -304,8 +302,8 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
              )
 
     try do
-      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
-      assert message =~ "unsafe_git_configuration"
+      assert {:error, error} = Git.execute(repo, ["status", "--porcelain", "-b"])
+      assert inspect(error) =~ "unsafe_git_configuration"
     after
       File.rm_rf!(root)
     end
