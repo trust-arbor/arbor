@@ -240,31 +240,36 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp maybe_auto_save_and_attach_config(view) do
-    saved_key_path =
-      case save_key_file(view) do
-        {:ok, path} ->
-          path
+    save_result = save_key_file(view)
 
-        {:error, :disabled} ->
-          nil
+    case save_result do
+      {:ok, _} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning(
-            "[ExternalAgentsComponent] Auto-save of key file failed: #{inspect(reason)}"
-          )
+      {:error, :disabled} ->
+        :ok
 
-          nil
-      end
+      {:error, reason} ->
+        Logger.warning(
+          "[ExternalAgentsComponent] Auto-save of key file failed: #{inspect(reason)}"
+        )
+    end
 
-    repo_root =
-      case File.cwd() do
-        {:ok, cwd} -> cwd
-        {:error, _} -> "/absolute/path/to/arbor"
-      end
+    cwd_result = File.cwd()
 
-    ExternalAgentsCore.attach_client_config(view,
-      repo_root: repo_root,
-      saved_key_path: saved_key_path
+    case cwd_result do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ExternalAgentsComponent] Could not determine repo root: #{inspect(reason)}"
+        )
+    end
+
+    ExternalAgentsCore.attach_client_config(
+      view,
+      ExternalAgentsCore.client_config_opts(save_result, cwd_result)
     )
   end
 
@@ -277,6 +282,17 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
 
   `Path.expand`, mkdir, write, and chmod failures return `{:error, reason}`
   rather than raising so registration can still fall back to download.
+
+  ## Options
+
+    * `:keys_dir` — destination directory. Defaults to expanding
+      `~/.arbor/keys` via `Path.expand/1`.
+    * `:local_dev` — override `Mix.env() == :dev`.
+    * `:enabled` — override the `:auto_save_external_agent_keys` flag.
+    * `:mkdir_p` — 1-arity substitute for `File.mkdir_p/1`, used by tests
+      to inject mkdir failures.
+    * `:chmod` — 2-arity substitute for `File.chmod/2`, used by tests to
+      inject chmod failures.
   """
   @spec save_key_file(map(), keyword()) :: {:ok, String.t()} | {:error, atom() | term()}
   def save_key_file(view, opts \\ []) when is_map(view) do

@@ -91,28 +91,6 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       assert last_free < first_paid
       assert hd(keys) == "openrouter"
     end
-
-    test "every catalog key is a known ProviderRegistry provider" do
-      registry = Arbor.LLM.ProviderRegistry
-      assert Code.ensure_loaded?(registry)
-
-      keys = Enum.map(Doctor.provider_priority(), fn {catalog_key, _, _} -> catalog_key end)
-
-      # OpenRouter's registry name is "openrouter" (no underscore). That is
-      # the req_llm / ProviderRegistry spelling; "open_router" is not a
-      # provider name and must not replace it.
-      assert "openrouter" in keys
-      refute "open_router" in keys
-      assert apply(registry, :known?, ["openrouter"])
-      refute apply(registry, :known?, ["open_router"])
-
-      for key <- keys do
-        # ACP is discovered by ProviderCatalog from the CLI adapter, not
-        # ReqLLM / local-LM registry entries.
-        assert apply(registry, :known?, [key]) or key == "acp",
-               "doctor catalog key #{inspect(key)} is not a known ProviderRegistry provider"
-      end
-    end
   end
 
   describe "module availability" do

@@ -169,5 +169,41 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponentTest do
 
       assert File.ls!(dir) == []
     end
+
+    test "returns {:error, _} when mkdir_p raises instead of crashing", %{dir: dir} do
+      view = %{
+        display_name: "Claude",
+        agent_id: "agent_abcdef12",
+        private_key_b64: "QQ=="
+      }
+
+      assert {:error, %RuntimeError{message: "mkdir boom"}} =
+               ExternalAgentsComponent.save_key_file(view,
+                 keys_dir: dir,
+                 local_dev: true,
+                 enabled: true,
+                 mkdir_p: fn _path -> raise "mkdir boom" end
+               )
+
+      assert File.ls!(dir) == []
+    end
+
+    test "returns {:error, _} when mkdir_p throws instead of crashing", %{dir: dir} do
+      view = %{
+        display_name: "Claude",
+        agent_id: "agent_abcdef12",
+        private_key_b64: "QQ=="
+      }
+
+      assert {:error, {:throw, :mkdir_boom}} =
+               ExternalAgentsComponent.save_key_file(view,
+                 keys_dir: dir,
+                 local_dev: true,
+                 enabled: true,
+                 mkdir_p: fn _path -> throw(:mkdir_boom) end
+               )
+
+      assert File.ls!(dir) == []
+    end
   end
 end

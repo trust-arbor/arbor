@@ -362,6 +362,29 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
     end
   end
 
+  describe "client_config_opts/2" do
+    test "disabled auto-save omits saved_key_path but keeps repo_root" do
+      opts = ExternalAgentsCore.client_config_opts({:error, :disabled}, {:ok, "/repo"})
+      assert opts[:saved_key_path] == nil
+      assert opts[:repo_root] == "/repo"
+    end
+
+    test "save failure omits saved_key_path" do
+      opts = ExternalAgentsCore.client_config_opts({:error, :enotdir}, {:ok, "/repo"})
+      assert opts[:saved_key_path] == nil
+      assert opts[:repo_root] == "/repo"
+    end
+
+    test "cwd failure omits repo_root rather than a placeholder path" do
+      opts =
+        ExternalAgentsCore.client_config_opts({:ok, "/keys/a.arbor.key"}, {:error, :enoent})
+
+      assert opts[:saved_key_path] == "/keys/a.arbor.key"
+      assert opts[:repo_root] == nil
+      refute opts[:repo_root] == "/absolute/path/to/arbor"
+    end
+  end
+
   describe "attach_client_config/2" do
     test "includes mcp_json and the saved key path when provided" do
       view = %{display_name: "Claude", agent_id: "agent_abcdef12", private_key_b64: "QQ=="}
@@ -375,6 +398,19 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       assert attached.saved_key_path == "/repo/keys/claude_abcdef12.arbor.key"
       assert attached.mcp_json =~ "mix arbor.signer"
       assert attached.mcp_json =~ "/repo/keys/claude_abcdef12.arbor.key"
+    end
+
+    test "omits mcp_json when repo_root is missing so a placeholder cannot leak" do
+      view = %{display_name: "Claude", agent_id: "agent_abcdef12", private_key_b64: "QQ=="}
+
+      attached =
+        ExternalAgentsCore.attach_client_config(view,
+          saved_key_path: "/keys/claude_abcdef12.arbor.key"
+        )
+
+      assert attached.saved_key_path == "/keys/claude_abcdef12.arbor.key"
+      assert attached.mcp_json == nil
+      refute inspect(attached) =~ "/absolute/path/to/arbor"
     end
   end
 

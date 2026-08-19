@@ -241,8 +241,8 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
   @spec build_mcp_servers_json(String.t(), String.t(), String.t()) :: String.t()
   def build_mcp_servers_json(repo_root, key_path, upstream \\ "http://localhost:4000/mcp") do
     command =
-      "cd #{shell_quote(repo_root)} && exec ./bin/mix arbor.signer " <>
-        "--key-file #{shell_quote(key_path)} --upstream #{shell_quote(upstream)}"
+      "cd #{posix_single_quote(repo_root)} && exec ./bin/mix arbor.signer " <>
+        "--key-file #{posix_single_quote(key_path)} --upstream #{posix_single_quote(upstream)}"
 
     Jason.encode!(
       %{
@@ -259,29 +259,62 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   # POSIX single-quote wrapping: the only special character inside single
   # quotes is the quote itself, rewritten as `'\''` (end, escaped quote, start).
-  defp shell_quote(value) when is_binary(value) do
+  defp posix_single_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
   @doc """
+  Build `attach_client_config/2` opts from auto-save and cwd results.
+
+  Save failures omit `saved_key_path`. Cwd failures omit `repo_root`
+  instead of inventing a placeholder path.
+  """
+  @spec client_config_opts(
+          {:ok, String.t()} | {:error, term()},
+          {:ok, String.t()} | {:error, term()}
+        ) :: keyword()
+  def client_config_opts(save_result, cwd_result) do
+    [
+      saved_key_path: saved_key_path_from(save_result),
+      repo_root: repo_root_from(cwd_result)
+    ]
+  end
+
+  defp saved_key_path_from({:ok, path}) when is_binary(path), do: path
+  defp saved_key_path_from(_), do: nil
+
+  defp repo_root_from({:ok, cwd}) when is_binary(cwd) and cwd != "", do: cwd
+  defp repo_root_from(_), do: nil
+
+  @doc """
   Attach local-dev client-config fields (saved key path + MCP JSON) to the
   one-time registration view. Pure: the caller supplies paths.
+
+  Omits `mcp_json` when `repo_root` is missing so a placeholder path cannot
+  reach the operator-facing MCP snippet.
   """
   @spec attach_client_config(map(), keyword()) :: map()
   def attach_client_config(view, opts) when is_map(view) and is_list(opts) do
-    repo_root = Keyword.get(opts, :repo_root, "/absolute/path/to/arbor")
+    repo_root = Keyword.get(opts, :repo_root)
     upstream = Keyword.get(opts, :upstream, "http://localhost:4000/mcp")
     saved_key_path = Keyword.get(opts, :saved_key_path)
 
+    Map.merge(view, %{
+      saved_key_path: saved_key_path,
+      mcp_json: mcp_json_for(view, repo_root, saved_key_path, upstream)
+    })
+  end
+
+  defp mcp_json_for(view, repo_root, saved_key_path, upstream)
+       when is_binary(repo_root) and repo_root != "" do
     key_path =
       saved_key_path ||
         Path.join(repo_root, key_filename(view.display_name || "external_agent", view.agent_id))
 
-    Map.merge(view, %{
-      saved_key_path: saved_key_path,
-      mcp_json: build_mcp_servers_json(repo_root, key_path, upstream)
-    })
+    build_mcp_servers_json(repo_root, key_path, upstream)
   end
+
+  defp mcp_json_for(_view, _repo_root, _saved_key_path, _upstream), do: nil
 
   # ===========================================================================
   # Convert — display formatting
