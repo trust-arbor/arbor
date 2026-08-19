@@ -230,6 +230,30 @@ another one. It doubles as user documentation — anyone standing up agents need
   the release `sys.config` when the node should join cluster sync. Do not treat
   an unconfigured transport as a cluster, and do not fail-open a configured one.
 
+## 14. Sandbox actions require `context[:agent_id]` (no host-create fallback)
+
+- **What:** `Arbor.Actions.Sandbox.Create` / `Destroy` are the agent/extension
+  surface. They never call unauthenticated `Arbor.Sandbox.create/destroy`.
+  Missing `context[:agent_id]` fails closed with the existing Unauthorized
+  vocabulary. The authorized path uses `authorize_create` /
+  `authorize_destroy` (`arbor://sandbox/create` / `arbor://sandbox/destroy`).
+  Host/unit tests with no principal keep using `Arbor.Sandbox.create/destroy`
+  directly. The same last-mile applies to trusted-system `Arbor.Shell.execute/2`
+  and `execute_direct/3`: those APIs reject `:agent_id` / `:principal_id`
+  (atom key first, then the string-key fallback) so an extension cannot
+  smuggle a principal onto the host path; agent callers stay on
+  `authorize_and_execute/3`.
+- **Symptom:** `sandbox_create` / `sandbox_destroy` returns
+  `Unauthorized: :missing_agent_id` when the action context has no caller
+  principal, even if params include an `agent_id`. `Shell.execute` /
+  `execute_direct` with a principal key returns `{:error, :unauthorized}`
+  and does not launch.
+- **Action:** invoke sandbox actions through `authorize_and_execute` so the
+  executor supplies `context[:agent_id]`, and grant the matching sandbox
+  capability. Params `agent_id` is the *target* the sandbox is created for,
+  not the caller. Do not treat `Arbor.Sandbox.create/2` or
+  `Arbor.Shell.execute/2` as an action/extension API.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -254,6 +278,9 @@ another one. It doubles as user documentation — anyone standing up agents need
 12. For a single-node or safe-recovery boot, omit `security_sync_subscribers`
     so security stores start local-only; load release `sys.config` when cluster
     sync is required.
+13. For `sandbox_create` / `sandbox_destroy`, the executor must supply
+    `context[:agent_id]`; grant `arbor://sandbox/create` or
+    `arbor://sandbox/destroy`. Params `agent_id` is the target, not the caller.
 
 ## Applied Learning: Security Gates
 

@@ -409,6 +409,10 @@ defmodule Arbor.Shell do
   which reject compound commands. Prefer those agent boundaries over this
   function for any principal-scoped work.
 
+  `:agent_id` and `:principal_id` (atom key first, then the string-key
+  fallback) are rejected so an extension cannot smuggle a principal onto
+  this host path.
+
   ## Options
 
   - `:timeout` - Absolute timeout in milliseconds measured from command start
@@ -439,15 +443,20 @@ defmodule Arbor.Shell do
   """
   @spec execute(String.t(), keyword()) ::
           {:ok, map()} | {:error, :timeout | :unauthorized | term()}
-  def execute(command, opts \\ []),
-    do: execute_shell_command_with_options(command, opts)
+  def execute(command, opts \\ []) do
+    with :ok <- reject_trusted_system_principal(opts) do
+      execute_shell_command_with_options(command, opts)
+    end
+  end
 
   @doc """
   Execute a bounded childless command with a pre-parsed executable and argv.
 
   **Trusted system API only.** This function performs no principal or Trust
   authorization. Agent-facing higher layers may call it only after binding and
-  authorizing the same executable and argv.
+  authorizing the same executable and argv. `:agent_id` and `:principal_id`
+  (atom key first, then the string-key fallback) are rejected so an extension
+  cannot smuggle a principal onto this host path.
 
   This is the generic structured-argv primitive for schema-specific actions
   such as Git. It resolves only startup-pinned executable identities, pins the
@@ -473,32 +482,34 @@ defmodule Arbor.Shell do
   @spec execute_direct(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
   def execute_direct(cmd, args, opts \\ []) do
-    sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
-    display_command = direct_command_for_display(cmd, args)
+    with :ok <- reject_trusted_system_principal(opts) do
+      sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
+      display_command = direct_command_for_display(cmd, args)
 
-    # Structured argv is already the security boundary. Do not serialize data
-    # arguments back through shell metacharacter scanning: a Git commit message
-    # such as "Fix A & B (safe)" is inert argv, not a shell compound.
-    with {:ok, :allowed} <- Sandbox.check_argv(cmd, args, sandbox, opts),
-         {:ok, execution_id} <- register_execution(display_command, opts),
-         :ok <- mark_execution_running(execution_id) do
-      emit_started(display_command, execution_id, opts)
+      # Structured argv is already the security boundary. Do not serialize data
+      # arguments back through shell metacharacter scanning: a Git commit message
+      # such as "Fix A & B (safe)" is inert argv, not a shell compound.
+      with {:ok, :allowed} <- Sandbox.check_argv(cmd, args, sandbox, opts),
+           {:ok, execution_id} <- register_execution(display_command, opts),
+           :ok <- mark_execution_running(execution_id) do
+        emit_started(display_command, execution_id, opts)
 
-      case Executor.run_direct(cmd, args, opts) do
-        {:ok, result} ->
-          complete_execution(execution_id, result)
-          emit_completed(execution_id, result)
-          {:ok, result}
+        case Executor.run_direct(cmd, args, opts) do
+          {:ok, result} ->
+            complete_execution(execution_id, result)
+            emit_completed(execution_id, result)
+            {:ok, result}
 
+          {:error, reason} ->
+            fail_execution(execution_id, reason)
+            emit_failed(execution_id, reason)
+            {:error, reason}
+        end
+      else
         {:error, reason} ->
-          fail_execution(execution_id, reason)
-          emit_failed(execution_id, reason)
+          emit_blocked(display_command, reason)
           {:error, reason}
       end
-    else
-      {:error, reason} ->
-        emit_blocked(display_command, reason)
-        {:error, reason}
     end
   end
 
@@ -1226,6 +1237,34 @@ defmodule Arbor.Shell do
   end
 
   # Private functions
+
+  # Trusted-system execute/execute_direct must not accept a smuggled principal.
+  # Keyword APIs only see atom keys; check those first, then the string-key
+  # fallback so an extension cannot hide agent_id/principal_id as "agent_id".
+  defp reject_trusted_system_principal(opts) when is_list(opts) do
+    if trusted_system_principal_present?(opts) do
+      {:error, :unauthorized}
+    else
+      :ok
+    end
+  end
+
+  defp reject_trusted_system_principal(_opts), do: :ok
+
+  defp trusted_system_principal_present?(opts) do
+    principal_opt_present?(opts, :agent_id) or principal_opt_present?(opts, :principal_id)
+  end
+
+  defp principal_opt_present?(opts, atom_key) do
+    case Keyword.fetch(opts, atom_key) do
+      {:ok, _value} ->
+        true
+
+      :error ->
+        string_key = Atom.to_string(atom_key)
+        match?({^string_key, _value}, List.keyfind(opts, string_key, 0))
+    end
+  end
 
   # Generic agent commands are already bound to a fixed executable + argv by
   # Sandbox.prepare_agent_command/2. Force the legacy sandbox marker to :basic

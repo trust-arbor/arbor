@@ -15,31 +15,34 @@ defmodule Arbor.Actions.Sandbox do
 
   ## Examples
 
-      # Create a sandbox
+      # Create a sandbox (caller principal is required on context)
       {:ok, result} = Arbor.Actions.Sandbox.Create.run(
         %{agent_id: "agent_001", level: "limited"},
-        %{}
+        %{agent_id: "agent_001"}
       )
       result.sandbox_id  # => "sbx_abc123..."
 
       # Destroy a sandbox
       {:ok, result} = Arbor.Actions.Sandbox.Destroy.run(
         %{sandbox_id: "sbx_abc123..."},
-        %{}
+        %{agent_id: "agent_001"}
       )
 
   ## Authorization
 
   When using `Arbor.Actions.authorize_and_execute/4`, the capability URI
-  is `arbor://sandbox/create` or `arbor://sandbox/destroy`.
+  is `arbor://sandbox/create` or `arbor://sandbox/destroy`. Direct `run/2`
+  still requires `context[:agent_id]` and never falls back to the
+  unauthenticated host `Arbor.Sandbox.create/destroy` APIs.
   """
 
   defmodule Create do
     @moduledoc """
     Create a Docker sandbox environment.
 
-    Wraps `Arbor.Sandbox.create/2` as a Jido action for consistent
-    execution and LLM tool schema generation.
+    Wraps `Arbor.Sandbox.authorize_create/3` as a Jido action. Missing
+    `context[:agent_id]` fails closed — this surface never calls the
+    unauthenticated host `Arbor.Sandbox.create/2`.
 
     ## Parameters
 
@@ -199,10 +202,11 @@ defmodule Arbor.Actions.Sandbox do
          "Invalid sandbox level '#{inspect(level)}'. Valid levels: pure, limited, full, container"}
 
     defp call_create(agent_id, opts, context) do
+      # Agent/extension surface: never fall back to unauthenticated create.
       if context[:agent_id] do
         Arbor.Sandbox.authorize_create(context[:agent_id], agent_id, opts)
       else
-        Arbor.Sandbox.create(agent_id, opts)
+        {:error, {:unauthorized, :missing_agent_id}}
       end
     end
 
@@ -218,8 +222,9 @@ defmodule Arbor.Actions.Sandbox do
     @moduledoc """
     Destroy a sandbox environment.
 
-    Wraps `Arbor.Sandbox.destroy/1` as a Jido action for consistent
-    execution and LLM tool schema generation.
+    Wraps `Arbor.Sandbox.authorize_destroy/2` as a Jido action. Missing
+    `context[:agent_id]` fails closed — this surface never calls the
+    unauthenticated host `Arbor.Sandbox.destroy/1`.
 
     ## Parameters
 
@@ -257,7 +262,7 @@ defmodule Arbor.Actions.Sandbox do
         if context[:agent_id] do
           Arbor.Sandbox.authorize_destroy(context[:agent_id], sandbox_id)
         else
-          Arbor.Sandbox.destroy(sandbox_id)
+          {:error, {:unauthorized, :missing_agent_id}}
         end
 
       case result do
