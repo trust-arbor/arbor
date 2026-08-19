@@ -11,8 +11,16 @@ defmodule Arbor.Signals.Contracts.DurableSink do
 
   Admitted callback results:
 
-  - `:ok` — the sink accepted the request
+  - `:ok` — the sink observed persist for this event. A ready durable
+    target has already accepted the append, so the event is readable
+    there. This is not fire-and-forget.
   - `{:error, :persist_failed}` — the sink could not persist
+
+  Callers, including `Arbor.Signals.durable_emit/4`, may block for the
+  sink's durable backend operation deadline. Implementations must not
+  return `:ok` from a ready durable target until they have observed the
+  append result. Missing or invalid durable targets may still return
+  `:ok` after a hot-path gap.
   """
 
   @type stream_id :: String.t()

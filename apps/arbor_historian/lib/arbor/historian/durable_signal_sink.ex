@@ -149,6 +149,8 @@ defmodule Arbor.Historian.DurableSignalSink do
     end
   end
 
+  # In-process observe-before-:ok (P1C-B). Persistence.append applies
+  # EventLog's operation deadline; do not wrap in Task.start.
   defp append_durable(stream_id, event, target) do
     case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
       {:ok, _} ->

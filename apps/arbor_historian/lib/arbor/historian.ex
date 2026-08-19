@@ -745,6 +745,11 @@ defmodule Arbor.Historian do
   append that fails or raises returns `{:error, :persist_failed}`. Missing
   or invalid durable targets log a bounded gap and still return `:ok`
   after the hot append.
+
+  The durable write is `Arbor.Persistence.append/5`, which applies the
+  EventLog operation deadline (default 5s). That wait is the back-pressure
+  seam. This path does not spawn a waiter or consult
+  `:durable_task_starter`.
   """
   @impl Arbor.Signals.Contracts.DurableSink
   @spec persist_durable_event(String.t(), term(), map(), keyword()) ::

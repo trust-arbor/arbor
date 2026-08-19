@@ -88,10 +88,11 @@ defmodule Arbor.Signals do
   LLM call traces, worker lifecycle, security audit events.
 
   Same API as `emit/4` but additionally dispatches the original data to
-  the configured durable sink (synchronous hot append, asynchronous
-  durable append when the sink provides them). Best-effort: the signal
-  always emits even if persistence fails. Standalone and test default
-  is no sink.
+  the configured durable sink. Dispatch waits for the sink callback; a
+  ready sink's `:ok` means persist was observed, not fire-and-forget.
+  Best-effort at this layer: this function still returns `:ok` after a
+  sink persist failure so the bus emit is not rolled back. Standalone
+  and test default is no sink.
 
   Lineage options are forwarded as Signals-shaped primitives:
   `:correlation_id`, `:agent_id`, `:metadata`, and `:cause_id`. Absent
