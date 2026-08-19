@@ -234,11 +234,15 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   @doc """
   Ready-to-paste `mcpServers` JSON for `mix arbor.signer`.
+
+  `repo_root`, `key_path`, and `upstream` are POSIX-single-quoted so a
+  path with spaces cannot split the `sh -c` command string.
   """
   @spec build_mcp_servers_json(String.t(), String.t(), String.t()) :: String.t()
   def build_mcp_servers_json(repo_root, key_path, upstream \\ "http://localhost:4000/mcp") do
     command =
-      "cd #{repo_root} && exec ./bin/mix arbor.signer --key-file #{key_path} --upstream #{upstream}"
+      "cd #{shell_quote(repo_root)} && exec ./bin/mix arbor.signer " <>
+        "--key-file #{shell_quote(key_path)} --upstream #{shell_quote(upstream)}"
 
     Jason.encode!(
       %{
@@ -251,6 +255,12 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
       },
       pretty: true
     )
+  end
+
+  # POSIX single-quote wrapping: the only special character inside single
+  # quotes is the quote itself, rewritten as `'\''` (end, escaped quote, start).
+  defp shell_quote(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
   @doc """

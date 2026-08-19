@@ -242,12 +242,28 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   defp maybe_auto_save_and_attach_config(view) do
     saved_key_path =
       case save_key_file(view) do
-        {:ok, path} -> path
-        {:error, _} -> nil
+        {:ok, path} ->
+          path
+
+        {:error, :disabled} ->
+          nil
+
+        {:error, reason} ->
+          Logger.warning(
+            "[ExternalAgentsComponent] Auto-save of key file failed: #{inspect(reason)}"
+          )
+
+          nil
+      end
+
+    repo_root =
+      case File.cwd() do
+        {:ok, cwd} -> cwd
+        {:error, _} -> "/absolute/path/to/arbor"
       end
 
     ExternalAgentsCore.attach_client_config(view,
-      repo_root: File.cwd!(),
+      repo_root: repo_root,
       saved_key_path: saved_key_path
     )
   end
@@ -258,6 +274,9 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   Writes `~/.arbor/keys/<name>_<id8>.arbor.key` at mode `0600` and never
   overwrites an existing file. Disabled unless both `local_dev` and
   `:auto_save_external_agent_keys` are true.
+
+  `Path.expand`, mkdir, write, and chmod failures return `{:error, reason}`
+  rather than raising so registration can still fall back to download.
   """
   @spec save_key_file(map(), keyword()) :: {:ok, String.t()} | {:error, atom() | term()}
   def save_key_file(view, opts \\ []) when is_map(view) do
@@ -270,35 +289,69 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
         Application.get_env(:arbor_dashboard, :auto_save_external_agent_keys, false)
       )
 
-    keys_dir = Keyword.get(opts, :keys_dir, Path.expand("~/.arbor/keys"))
-
     if ExternalAgentsCore.auto_save_allowed?(local_dev?, enabled?) do
-      write_key_file(view, keys_dir)
+      write_key_file(view, resolve_keys_dir(opts), opts)
     else
       {:error, :disabled}
     end
+  rescue
+    exception -> {:error, exception}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
-  defp write_key_file(view, keys_dir) do
+  defp resolve_keys_dir(opts) do
+    Keyword.get_lazy(opts, :keys_dir, fn -> Path.expand("~/.arbor/keys") end)
+  end
+
+  defp write_key_file(view, keys_dir, opts) do
+    mkdir_p = Keyword.get(opts, :mkdir_p, &File.mkdir_p/1)
+    chmod = Keyword.get(opts, :chmod, &File.chmod/2)
     filename = ExternalAgentsCore.key_filename(view.display_name, view.agent_id)
     path = Path.join(keys_dir, filename)
     contents = ExternalAgentsCore.build_key_file_contents(view.agent_id, view.private_key_b64)
 
-    File.mkdir_p!(keys_dir)
+    with :ok <- mkdir_p.(keys_dir),
+         :ok <- exclusive_write(path, contents),
+         :ok <- chmod_or_discard(path, chmod) do
+      {:ok, path}
+    else
+      {:error, :eexist} -> {:error, :collision}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-    case File.open(path, [:write, :exclusive]) do
+  defp chmod_or_discard(path, chmod) do
+    case chmod.(path, 0o600) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        _ = File.rm(path)
+        {:error, reason}
+    end
+  end
+
+  defp exclusive_write(path, contents) do
+    case File.open(path, [:write, :exclusive, :raw, :binary]) do
       {:ok, io} ->
-        try do
-          IO.write(io, contents)
-        after
-          File.close(io)
+        write_result =
+          try do
+            :file.write(io, contents)
+          rescue
+            exception -> {:error, exception}
+          after
+            _ = :file.close(io)
+          end
+
+        case write_result do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            _ = File.rm(path)
+            {:error, reason}
         end
-
-        File.chmod!(path, 0o600)
-        {:ok, path}
-
-      {:error, :eexist} ->
-        {:error, :collision}
 
       {:error, reason} ->
         {:error, reason}

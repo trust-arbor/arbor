@@ -324,9 +324,41 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       assert decoded["mcpServers"]["arbor"]["command"] == "sh"
       assert hd(args) == "-c"
       command = Enum.at(args, 1)
-      assert command =~ "cd /abs/arbor && exec ./bin/mix arbor.signer"
-      assert command =~ "--key-file /abs/arbor/.arbor/keys/claude_abcdef12.arbor.key"
-      assert command =~ "--upstream http://localhost:4000/mcp"
+      assert command =~ "cd '/abs/arbor' && exec ./bin/mix arbor.signer"
+      assert command =~ "--key-file '/abs/arbor/.arbor/keys/claude_abcdef12.arbor.key'"
+      assert command =~ "--upstream 'http://localhost:4000/mcp'"
+    end
+
+    test "quotes repo_root, key_path, and upstream so spaces cannot split sh -c" do
+      repo_root = "/Users/Ada Lovelace/arbor repo"
+      key_path = "/Users/Ada Lovelace/.arbor/keys/claude on phone_abcdef12.arbor.key"
+      upstream = "http://localhost:4000/custom mcp"
+
+      json = ExternalAgentsCore.build_mcp_servers_json(repo_root, key_path, upstream)
+      command = mcp_sh_c(json)
+
+      assert command =~ "cd '/Users/Ada Lovelace/arbor repo'"
+
+      assert command =~
+               "--key-file '/Users/Ada Lovelace/.arbor/keys/claude on phone_abcdef12.arbor.key'"
+
+      assert command =~ "--upstream 'http://localhost:4000/custom mcp'"
+
+      refute command =~ ~r/cd \/Users\/Ada Lovelace/
+      refute command =~ ~r/--key-file \/Users\/Ada Lovelace/
+      refute command =~ ~r/--upstream http:\/\/localhost:4000\/custom mcp/
+    end
+
+    test "escapes embedded single quotes inside quoted paths" do
+      json =
+        ExternalAgentsCore.build_mcp_servers_json(
+          "/tmp/Ada's arbor",
+          "/tmp/Ada's arbor/key.arbor.key"
+        )
+
+      command = mcp_sh_c(json)
+      assert command =~ "cd '/tmp/Ada'\\''s arbor'"
+      assert command =~ "--key-file '/tmp/Ada'\\''s arbor/key.arbor.key'"
     end
   end
 
@@ -390,6 +422,13 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
   # ---------------------------------------------------------------------------
   # Test fixtures
   # ---------------------------------------------------------------------------
+
+  defp mcp_sh_c(json) do
+    json
+    |> Jason.decode!()
+    |> get_in(["mcpServers", "arbor", "args"])
+    |> Enum.at(1)
+  end
 
   defp external_profile(owner_id, agent_id, opts \\ []) do
     %{

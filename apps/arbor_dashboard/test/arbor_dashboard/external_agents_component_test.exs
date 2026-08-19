@@ -113,5 +113,61 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponentTest do
 
       assert File.ls!(dir) == []
     end
+
+    test "returns {:error, _} when the keys dir cannot be created", %{dir: dir} do
+      blocker = Path.join(dir, "not-a-directory")
+      File.write!(blocker, "file")
+
+      view = %{
+        display_name: "Claude",
+        agent_id: "agent_abcdef12",
+        private_key_b64: "QQ=="
+      }
+
+      assert {:error, reason} =
+               ExternalAgentsComponent.save_key_file(view,
+                 keys_dir: Path.join(blocker, "keys"),
+                 local_dev: true,
+                 enabled: true
+               )
+
+      assert reason not in [:disabled, :collision]
+    end
+
+    test "returns {:error, _} when chmod fails and does not leave the key file", %{dir: dir} do
+      view = %{
+        display_name: "Claude",
+        agent_id: "agent_abcdef12",
+        private_key_b64: "QQ=="
+      }
+
+      assert {:error, :eperm} =
+               ExternalAgentsComponent.save_key_file(view,
+                 keys_dir: dir,
+                 local_dev: true,
+                 enabled: true,
+                 chmod: fn _path, _mode -> {:error, :eperm} end
+               )
+
+      assert File.ls!(dir) == []
+    end
+
+    test "returns {:error, _} when mkdir_p fails without raising", %{dir: dir} do
+      view = %{
+        display_name: "Claude",
+        agent_id: "agent_abcdef12",
+        private_key_b64: "QQ=="
+      }
+
+      assert {:error, :enotdir} =
+               ExternalAgentsComponent.save_key_file(view,
+                 keys_dir: dir,
+                 local_dev: true,
+                 enabled: true,
+                 mkdir_p: fn _path -> {:error, :enotdir} end
+               )
+
+      assert File.ls!(dir) == []
+    end
   end
 end
