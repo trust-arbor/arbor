@@ -22,6 +22,10 @@ defmodule Arbor.Actions.Github do
     @moduledoc """
     Open a pull request via the `gh` CLI.
 
+    Requires `Arbor.Actions.authorized_principal/2`. Uses
+    `Arbor.Shell.authorize_and_execute/3` and never falls back to
+    trusted-system `execute/2` or `execute_direct/3`.
+
     ## Parameters
 
     | Name | Type | Required | Description |
@@ -67,29 +71,33 @@ defmodule Arbor.Actions.Github do
     end
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path, title: title} = params, _context) do
-      Actions.emit_started(__MODULE__, %{path: path, title: title})
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t() | term()}
+    def run(%{path: path, title: title} = params, context) do
+      with {:ok, principal_id} <- Actions.authorized_principal(context, __MODULE__) do
+        Actions.emit_started(__MODULE__, %{path: path, title: title})
 
-      args = build_args(params)
+        args = build_args(params)
 
-      case gh_command(path, args) do
-        {:ok, result} ->
-          url = String.trim(result.stdout) |> extract_url()
+        case gh_command(principal_id, path, args) do
+          {:ok, result} ->
+            url = String.trim(result.stdout) |> extract_url()
 
-          output = %{
-            path: path,
-            url: url,
-            title: title,
-            draft?: params[:draft] == true
-          }
+            output = %{
+              path: path,
+              url: url,
+              title: title,
+              draft?: params[:draft] == true
+            }
 
-          Actions.emit_completed(__MODULE__, %{path: path, url: url})
-          {:ok, output}
+            Actions.emit_completed(__MODULE__, %{path: path, url: url})
+            {:ok, output}
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to open PR: #{reason}"}
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, format_error(reason)}
+        end
+      else
+        {:error, reason} -> {:error, format_error(reason)}
       end
     end
 
@@ -101,18 +109,18 @@ defmodule Arbor.Actions.Github do
       args
     end
 
-    defp gh_command(path, args) do
+    defp gh_command(principal_id, path, args) do
       command =
         args
         |> Enum.map(&ShellEscape.escape_arg/1)
         |> then(&["gh" | &1])
         |> Enum.join(" ")
 
-      case Arbor.Shell.execute(command,
+      # Never fall back to trusted-system execute/execute_direct.
+      case Arbor.Shell.authorize_and_execute(principal_id, command,
              cwd: path,
              # gh can prompt for browser auth on long network ops
-             timeout: 60_000,
-             sandbox: :basic
+             timeout: 60_000
            ) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
@@ -121,10 +129,19 @@ defmodule Arbor.Actions.Github do
           error = if stderr != "", do: stderr, else: stdout
           {:error, String.trim(error)}
 
+        {:ok, :pending_approval, proposal_id} ->
+          {:error, {:pending_approval, proposal_id}}
+
         {:error, reason} ->
-          {:error, inspect(reason)}
+          {:error, reason}
       end
     end
+
+    defp format_error(:action_principal_authority_required),
+      do: "GitHub PR requires a facade-issued authenticated principal envelope."
+
+    defp format_error(reason) when is_binary(reason), do: "Failed to open PR: #{reason}"
+    defp format_error(reason), do: "Failed to open PR: #{inspect(reason)}"
 
     # `gh pr create` prints the URL on the last non-empty line. Extract it.
     defp extract_url(output) do

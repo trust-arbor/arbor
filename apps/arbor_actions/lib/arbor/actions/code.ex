@@ -19,10 +19,12 @@ defmodule Arbor.Actions.Code do
 
   ## Examples
 
-      # Safe: compile and test in worktree
-      {:ok, result} = Arbor.Actions.Code.CompileAndTest.run(
+      # Safe: compile and test in worktree (requires authorized_principal)
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_caller",
+        Arbor.Actions.Code.CompileAndTest,
         %{file: "lib/my_module.ex", test_files: ["test/my_module_test.exs"]},
-        %{worktree_path: "/path/to/agent/worktree"}
+        %{agent_id: "agent_caller", worktree_path: "/path/to/agent/worktree"}
       )
 
       # Powerful: hot-load with rollback
@@ -98,16 +100,20 @@ defmodule Arbor.Actions.Code do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(%{file: file} = params, context) do
-      worktree = params[:worktree_path] || Map.get(context, :worktree_path)
+      with {:ok, principal_id} <- Actions.authorized_principal(context, __MODULE__) do
+        worktree = params[:worktree_path] || Map.get(context, :worktree_path)
 
-      if is_nil(worktree) do
-        {:error, "worktree_path required in params or context"}
+        if is_nil(worktree) do
+          {:error, "worktree_path required in params or context"}
+        else
+          do_run(file, params, worktree, principal_id)
+        end
       else
-        do_run(file, params, worktree)
+        {:error, reason} -> {:error, format_error(reason)}
       end
     end
 
-    defp do_run(file, params, worktree) do
+    defp do_run(file, params, worktree, principal_id) do
       compile_only = params[:compile_only] || false
       test_files = params[:test_files] || []
 
@@ -122,7 +128,7 @@ defmodule Arbor.Actions.Code do
       Actions.emit_started(__MODULE__, %{file: file, worktree: worktree})
 
       # First, compile the project
-      compile_result = run_compile(worktree)
+      compile_result = run_compile(worktree, principal_id)
 
       case compile_result do
         {:ok, warnings} ->
@@ -139,10 +145,10 @@ defmodule Arbor.Actions.Code do
             {:ok, result}
           else
             # Run tests
-            run_tests(worktree, test_files, warnings)
+            run_tests(worktree, test_files, warnings, principal_id)
           end
 
-        {:error, errors, warnings} ->
+        {:compile_failed, errors, warnings} ->
           result = %{
             compiled: false,
             tests_passed: nil,
@@ -153,16 +159,22 @@ defmodule Arbor.Actions.Code do
 
           Actions.emit_failed(__MODULE__, "Compilation failed")
           {:ok, result}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, format_error(reason)}
       end
     catch
       {:invalid_test_files, reason} ->
         {:error, reason}
     end
 
-    defp run_compile(worktree) do
-      case Arbor.Shell.execute("mix compile --warnings-as-errors",
+    defp run_compile(worktree, principal_id) do
+      # Never fall back to trusted-system execute/execute_direct.
+      case Arbor.Shell.authorize_and_execute(
+             principal_id,
+             "mix compile --warnings-as-errors",
              cwd: worktree,
-             sandbox: :none,
              timeout: 120_000
            ) do
         {:ok, %{exit_code: 0, stdout: output}} ->
@@ -172,14 +184,17 @@ defmodule Arbor.Actions.Code do
         {:ok, %{stdout: output}} ->
           errors = extract_errors(output)
           warnings = extract_warnings(output)
-          {:error, errors, warnings}
+          {:compile_failed, errors, warnings}
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:error, {:pending_approval, proposal_id}}
 
         {:error, reason} ->
-          {:error, [inspect(reason)], []}
+          {:error, reason}
       end
     end
 
-    defp run_tests(worktree, test_files, warnings) do
+    defp run_tests(worktree, test_files, warnings, principal_id) do
       # Build test command (test_files already validated in do_run)
       test_cmd =
         case test_files do
@@ -187,7 +202,10 @@ defmodule Arbor.Actions.Code do
           files -> "mix test #{Enum.join(files, " ")}"
         end
 
-      case Arbor.Shell.execute(test_cmd, cwd: worktree, sandbox: :none, timeout: 300_000) do
+      case Arbor.Shell.authorize_and_execute(principal_id, test_cmd,
+             cwd: worktree,
+             timeout: 300_000
+           ) do
         {:ok, %{exit_code: 0, stdout: output}} ->
           result = %{
             compiled: true,
@@ -212,18 +230,13 @@ defmodule Arbor.Actions.Code do
           Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
           {:ok, result}
 
-        {:error, reason} ->
-          result = %{
-            compiled: true,
-            tests_passed: false,
-            test_output: inspect(reason),
-            warnings: warnings,
-            errors: [inspect(reason)],
-            execution_failed: true
-          }
+        {:ok, :pending_approval, proposal_id} ->
+          Actions.emit_failed(__MODULE__, {:pending_approval, proposal_id})
+          {:error, format_error({:pending_approval, proposal_id})}
 
+        {:error, reason} ->
           Actions.emit_failed(__MODULE__, "Test execution failed: #{inspect(reason)}")
-          {:ok, result}
+          {:error, format_error(reason)}
       end
     end
 
@@ -267,6 +280,12 @@ defmodule Arbor.Actions.Code do
     end
 
     defp truncate(str, _max), do: str
+
+    defp format_error(:action_principal_authority_required),
+      do: "Code compile requires a facade-issued authenticated principal envelope."
+
+    defp format_error(reason) when is_binary(reason), do: reason
+    defp format_error(reason), do: reason
   end
 
   defmodule HotLoad do

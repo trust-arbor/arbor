@@ -37,20 +37,19 @@ defmodule Arbor.Actions.CodeTest do
     end
 
     test "returns error when worktree_path not provided" do
-      assert {:error, "worktree_path required in params or context"} =
+      assert {:error, "Code compile requires a facade-issued authenticated principal envelope."} =
                Code.CompileAndTest.run(%{file: "lib/my_module.ex"}, %{})
     end
 
-    test "accepts worktree_path from context" do
-      # This will fail since the path doesn't exist, but it should get past validation
+    test "does not start compile without a principal envelope" do
       result =
         Code.CompileAndTest.run(
           %{file: "lib/my_module.ex", compile_only: true},
           %{worktree_path: "/nonexistent/path"}
         )
 
-      # Should fail at compilation, not at validation
-      assert {:ok, %{compiled: false}} = result
+      assert {:error, "Code compile requires a facade-issued authenticated principal envelope."} =
+               result
     end
   end
 

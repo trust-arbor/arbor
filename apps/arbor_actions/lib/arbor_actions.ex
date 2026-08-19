@@ -1363,13 +1363,11 @@ defmodule Arbor.Actions do
   end
 
   defp execute_authorized_action(agent_id, action_module, params, context) do
-    if authenticated_principal_required?(action_module) do
-      with_action_authorization(agent_id, action_module, context, fn authorized_context ->
-        execute_action(action_module, params, authorized_context)
-      end)
-    else
-      execute_action(action_module, params, context)
-    end
+    # Issue the process-scoped principal envelope after Trust authorization so
+    # actions can consume authorized_principal/2. Direct run/2 cannot forge it.
+    with_action_authorization(agent_id, action_module, context, fn authorized_context ->
+      execute_action(action_module, params, authorized_context)
+    end)
   end
 
   defp bind_authenticated_principal(context, agent_id) do

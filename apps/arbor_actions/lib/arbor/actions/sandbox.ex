@@ -15,25 +15,31 @@ defmodule Arbor.Actions.Sandbox do
 
   ## Examples
 
-      # Create a sandbox (caller principal is required on context)
-      {:ok, result} = Arbor.Actions.Sandbox.Create.run(
-        %{agent_id: "agent_001", level: "limited"},
-        %{agent_id: "agent_001"}
+      # Create a sandbox (caller principal is the authorize_and_execute envelope)
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_caller",
+        Arbor.Actions.Sandbox.Create,
+        %{agent_id: "agent_target", level: "limited"},
+        %{agent_id: "agent_caller"}
       )
       result.sandbox_id  # => "sbx_abc123..."
 
       # Destroy a sandbox
-      {:ok, result} = Arbor.Actions.Sandbox.Destroy.run(
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_caller",
+        Arbor.Actions.Sandbox.Destroy,
         %{sandbox_id: "sbx_abc123..."},
-        %{agent_id: "agent_001"}
+        %{agent_id: "agent_caller"}
       )
 
   ## Authorization
 
   When using `Arbor.Actions.authorize_and_execute/4`, the capability URI
   is `arbor://sandbox/create` or `arbor://sandbox/destroy`. Direct `run/2`
-  still requires `context[:agent_id]` and never falls back to the
-  unauthenticated host `Arbor.Sandbox.create/destroy` APIs.
+  requires `Arbor.Actions.authorized_principal/2` and never falls back to a
+  truthy `context[:agent_id]` or the unauthenticated host
+  `Arbor.Sandbox.create/destroy` APIs. Params `agent_id` is the *target*
+  the sandbox is created for, not the caller.
   """
 
   defmodule Create do
@@ -41,8 +47,9 @@ defmodule Arbor.Actions.Sandbox do
     Create a Docker sandbox environment.
 
     Wraps `Arbor.Sandbox.authorize_create/3` as a Jido action. Missing
-    `context[:agent_id]` fails closed — this surface never calls the
-    unauthenticated host `Arbor.Sandbox.create/2`.
+    `Arbor.Actions.authorized_principal/2` fails closed — this surface
+    never treats a truthy `context[:agent_id]` as caller authority and
+    never calls the unauthenticated host `Arbor.Sandbox.create/2`.
 
     ## Parameters
 
@@ -202,11 +209,14 @@ defmodule Arbor.Actions.Sandbox do
          "Invalid sandbox level '#{inspect(level)}'. Valid levels: pure, limited, full, container"}
 
     defp call_create(agent_id, opts, context) do
-      # Agent/extension surface: never fall back to unauthenticated create.
-      if context[:agent_id] do
-        Arbor.Sandbox.authorize_create(context[:agent_id], agent_id, opts)
-      else
-        {:error, {:unauthorized, :missing_agent_id}}
+      # Agent/extension surface: never fall back to unauthenticated create
+      # or treat a caller-supplied context[:agent_id] as authority.
+      case Actions.authorized_principal(context, __MODULE__) do
+        {:ok, caller_id} ->
+          Arbor.Sandbox.authorize_create(caller_id, agent_id, opts)
+
+        {:error, reason} ->
+          {:error, {:unauthorized, reason}}
       end
     end
 
@@ -223,8 +233,9 @@ defmodule Arbor.Actions.Sandbox do
     Destroy a sandbox environment.
 
     Wraps `Arbor.Sandbox.authorize_destroy/2` as a Jido action. Missing
-    `context[:agent_id]` fails closed — this surface never calls the
-    unauthenticated host `Arbor.Sandbox.destroy/1`.
+    `Arbor.Actions.authorized_principal/2` fails closed — this surface
+    never treats a truthy `context[:agent_id]` as caller authority and
+    never calls the unauthenticated host `Arbor.Sandbox.destroy/1`.
 
     ## Parameters
 
@@ -259,10 +270,12 @@ defmodule Arbor.Actions.Sandbox do
       Actions.emit_started(__MODULE__, %{sandbox_id: sandbox_id})
 
       result =
-        if context[:agent_id] do
-          Arbor.Sandbox.authorize_destroy(context[:agent_id], sandbox_id)
-        else
-          {:error, {:unauthorized, :missing_agent_id}}
+        case Actions.authorized_principal(context, __MODULE__) do
+          {:ok, caller_id} ->
+            Arbor.Sandbox.authorize_destroy(caller_id, sandbox_id)
+
+          {:error, reason} ->
+            {:error, {:unauthorized, reason}}
         end
 
       case result do

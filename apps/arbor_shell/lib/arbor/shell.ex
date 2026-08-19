@@ -480,7 +480,7 @@ defmodule Arbor.Shell do
       result.stdout  # => "hello world\\n"
   """
   @spec execute_direct(String.t(), [String.t()], keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()} | {:error, :unauthorized | term()}
   def execute_direct(cmd, args, opts \\ []) do
     with :ok <- reject_trusted_system_principal(opts) do
       sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
