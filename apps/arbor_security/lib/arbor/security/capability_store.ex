@@ -3052,8 +3052,14 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp restore_from_store(state) do
-    with :ok <- ensure_cap_store_available(),
-         :ok <- ensure_hydration_ready(),
+    case Process.whereis(@cap_store) do
+      pid when is_pid(pid) -> restore_from_available_store(state)
+      nil -> {:ok, state}
+    end
+  end
+
+  defp restore_from_available_store(state) do
+    with :ok <- ensure_hydration_ready(),
          {:ok, keys} <- list_restored_keys(),
          {:ok, candidates, counters} <- load_restore_candidates(keys),
          {:ok, winners, counters} <- select_restore_winners(candidates, counters),
@@ -3067,14 +3073,6 @@ defmodule Arbor.Security.CapabilityStore do
   catch
     _, _ ->
       {:error, :restore_error}
-  end
-
-  defp ensure_cap_store_available do
-    if Process.whereis(@cap_store) do
-      :ok
-    else
-      {:error, :capability_store_unavailable}
-    end
   end
 
   defp ensure_hydration_ready do
