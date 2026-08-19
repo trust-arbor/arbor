@@ -66,6 +66,33 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
   # the same module name shadowed each other (one file's tests silently didn't
   # run). Consolidated here under the canonical path.
 
+  describe "configure priority" do
+    test "prefers OpenRouter, local, and ACP before paid APIs" do
+      keys = Enum.map(Doctor.provider_priority(), fn {catalog_key, _, _} -> catalog_key end)
+      free_or_local = ["openrouter", "ollama", "lm_studio", "acp"]
+      paid = ["anthropic", "openai", "google", "xai"]
+
+      assert keys -- paid == free_or_local
+
+      last_free =
+        keys
+        |> Enum.with_index()
+        |> Enum.filter(fn {key, _} -> key in free_or_local end)
+        |> Enum.map(&elem(&1, 1))
+        |> Enum.max()
+
+      first_paid =
+        keys
+        |> Enum.with_index()
+        |> Enum.filter(fn {key, _} -> key in paid end)
+        |> Enum.map(&elem(&1, 1))
+        |> Enum.min()
+
+      assert last_free < first_paid
+      assert hd(keys) == "openrouter"
+    end
+  end
+
   describe "module availability" do
     test "task module is loaded" do
       assert {:module, Mix.Tasks.Arbor.Doctor} = Code.ensure_loaded(Mix.Tasks.Arbor.Doctor)

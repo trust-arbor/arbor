@@ -44,6 +44,10 @@ if System.get_env("ARBOR_DB") == "postgres" do
     start_repo: true,
     stores: []
 
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Basic,
+    notifier: Oban.Notifiers.Postgres
+
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
     embedding_dedup_enabled: true
@@ -53,6 +57,10 @@ else
     repo_adapter: Ecto.Adapters.SQLite3,
     start_repo: true,
     stores: []
+
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Lite,
+    notifier: Oban.Notifiers.PG
 
   config :arbor_persistence, Arbor.Persistence.Repo,
     database:
@@ -81,6 +89,12 @@ config :arbor_memory,
   # VP-05D2C3I1A — durable mutation admission (QueryableStore Record authority)
   mutation_admission_backend: Arbor.Persistence.QueryableStore.Postgres,
   mutation_admission_backend_opts: [repo: Arbor.Persistence.Repo]
+
+# Local-dev dashboard: no OIDC required. A stable operator session lets
+# Settings → External Agents register. Auto-save private keys only here.
+config :arbor_dashboard,
+  local_dev_operator: true,
+  auto_save_external_agent_keys: true
 
 # Dashboard — local dev server on port 4001
 # LiveView debug annotations for Tidewave AI integration

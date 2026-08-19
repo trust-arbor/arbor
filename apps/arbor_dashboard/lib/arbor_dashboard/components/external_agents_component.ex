@@ -64,7 +64,10 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
       ) do
     case do_register(name, type, socket) do
       {:ok, profile, identity} ->
-        view = ExternalAgentsCore.build_just_registered_view(profile, identity, type)
+        view =
+          profile
+          |> ExternalAgentsCore.build_just_registered_view(identity, type)
+          |> maybe_auto_save_and_attach_config()
 
         socket
         |> assign(:just_registered, view)
@@ -209,6 +212,12 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp do_register(display_name, agent_type, socket) do
+    with :ok <- ExternalAgentsCore.require_principal(socket.assigns[:current_agent_id]) do
+      do_register_as(display_name, agent_type, socket)
+    end
+  end
+
+  defp do_register_as(display_name, agent_type, socket) do
     character = Character.new(name: display_name, tone: "external")
 
     opts =
@@ -227,6 +236,72 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
       end
     catch
       :exit, _ -> {:error, :security_unavailable}
+    end
+  end
+
+  defp maybe_auto_save_and_attach_config(view) do
+    saved_key_path =
+      case save_key_file(view) do
+        {:ok, path} -> path
+        {:error, _} -> nil
+      end
+
+    ExternalAgentsCore.attach_client_config(view,
+      repo_root: File.cwd!(),
+      saved_key_path: saved_key_path
+    )
+  end
+
+  @doc """
+  Local-dev auto-save of a just-registered `.arbor.key`.
+
+  Writes `~/.arbor/keys/<name>_<id8>.arbor.key` at mode `0600` and never
+  overwrites an existing file. Disabled unless both `local_dev` and
+  `:auto_save_external_agent_keys` are true.
+  """
+  @spec save_key_file(map(), keyword()) :: {:ok, String.t()} | {:error, atom() | term()}
+  def save_key_file(view, opts \\ []) when is_map(view) do
+    local_dev? = Keyword.get(opts, :local_dev, Mix.env() == :dev)
+
+    enabled? =
+      Keyword.get(
+        opts,
+        :enabled,
+        Application.get_env(:arbor_dashboard, :auto_save_external_agent_keys, false)
+      )
+
+    keys_dir = Keyword.get(opts, :keys_dir, Path.expand("~/.arbor/keys"))
+
+    if ExternalAgentsCore.auto_save_allowed?(local_dev?, enabled?) do
+      write_key_file(view, keys_dir)
+    else
+      {:error, :disabled}
+    end
+  end
+
+  defp write_key_file(view, keys_dir) do
+    filename = ExternalAgentsCore.key_filename(view.display_name, view.agent_id)
+    path = Path.join(keys_dir, filename)
+    contents = ExternalAgentsCore.build_key_file_contents(view.agent_id, view.private_key_b64)
+
+    File.mkdir_p!(keys_dir)
+
+    case File.open(path, [:write, :exclusive]) do
+      {:ok, io} ->
+        try do
+          IO.write(io, contents)
+        after
+          File.close(io)
+        end
+
+        File.chmod!(path, 0o600)
+        {:ok, path}
+
+      {:error, :eexist} ->
+        {:error, :collision}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -526,6 +601,30 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
             style="width: 100%; font-family: monospace; font-size: 0.8em; margin-top: 0.25rem; padding: 0.5rem; border: 1px solid var(--aw-border, #ddd); border-radius: 0.25rem;"
           >{@just_registered.private_key_b64}</textarea>
         </div>
+
+        <%= if @just_registered[:saved_key_path] do %>
+          <div style="margin-bottom: 1rem;">
+            <strong>Saved to:</strong>
+            <code style="font-family: monospace; font-size: 0.85em;">
+              {@just_registered.saved_key_path}
+            </code>
+          </div>
+        <% end %>
+
+        <%= if @just_registered[:mcp_json] do %>
+          <div style="margin-bottom: 1rem;">
+            <strong>MCP client config</strong>
+            <span style="color: var(--aw-text-muted, #888); font-size: 0.85em;">
+              (paste into your MCP host for <code>mix arbor.signer</code>)
+            </span>
+            <textarea
+              id="just-registered-mcp-json"
+              readonly
+              rows="10"
+              style="width: 100%; font-family: monospace; font-size: 0.8em; margin-top: 0.25rem; padding: 0.5rem; border: 1px solid var(--aw-border, #ddd); border-radius: 0.25rem;"
+            >{@just_registered.mcp_json}</textarea>
+          </div>
+        <% end %>
 
         <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
           <button

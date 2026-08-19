@@ -465,8 +465,17 @@ config :arbor_scheduler,
     "scheduler_priv" => Path.expand("../apps/arbor_scheduler/priv/pipelines", __DIR__)
   }
 
+# Follow ARBOR_DB so SQLite boot does not start Oban.Notifiers.Postgres.
+{oban_engine, oban_notifier} =
+  case System.get_env("ARBOR_DB", "sqlite") do
+    "postgres" -> {Oban.Engines.Basic, Oban.Notifiers.Postgres}
+    _ -> {Oban.Engines.Lite, Oban.Notifiers.PG}
+  end
+
 config :arbor_scheduler, Oban,
   repo: Arbor.Persistence.Repo,
+  engine: oban_engine,
+  notifier: oban_notifier,
   queues: [default: 10, pipelines: 5, maintenance: 2],
   plugins: [
     Oban.Plugins.Pruner,

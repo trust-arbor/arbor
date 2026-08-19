@@ -404,15 +404,18 @@ defmodule Mix.Tasks.Arbor.Setup do
       Database: #{adapter_name}#{if opts[:skip_db], do: " (skipped)", else: ""}
 
       Next steps:
+        See docs/QUICKSTART.md for clone-to-first-reply (SQLite, free LLM,
+        arbor.start, conversationalist).
+
         mix arbor.start       # Start the Arbor server
         mix phx.server        # Or start interactively
         open http://localhost:4001  # Dashboard
 
       Configure LLM:
-        mix arbor.doctor --configure  # Auto-detect and set default LLM
+        mix arbor.doctor --configure  # Prefers OpenRouter / local / ACP
 
       Optional:
-        Add API keys to .env for LLM access
+        Add OPENROUTER_API_KEY (or start Ollama/LM Studio) in .env
         See .env.example for all available settings
     """)
 

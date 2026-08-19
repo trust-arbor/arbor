@@ -284,9 +284,72 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
     end
   end
 
+  describe "require_principal/1" do
+    test "fails closed without an authenticated principal" do
+      assert ExternalAgentsCore.require_principal(nil) == {:error, :unauthenticated}
+      assert ExternalAgentsCore.require_principal("") == {:error, :unauthenticated}
+    end
+
+    test "allows a binary principal" do
+      assert ExternalAgentsCore.require_principal("human_dashboard") == :ok
+    end
+  end
+
+  describe "auto_save_allowed?/2" do
+    test "requires both local-dev and the auto-save flag" do
+      assert ExternalAgentsCore.auto_save_allowed?(true, true) == true
+      assert ExternalAgentsCore.auto_save_allowed?(true, false) == false
+      assert ExternalAgentsCore.auto_save_allowed?(false, true) == false
+      assert ExternalAgentsCore.auto_save_allowed?(false, false) == false
+    end
+  end
+
+  describe "key_filename/2" do
+    test "uses sanitized name plus first 8 id chars" do
+      assert ExternalAgentsCore.key_filename("Claude On Phone", "agent_abcdef123456") ==
+               "claude_on_phone_abcdef12.arbor.key"
+    end
+  end
+
+  describe "build_mcp_servers_json/3" do
+    test "emits ready-to-paste mcpServers JSON for mix arbor.signer" do
+      json =
+        ExternalAgentsCore.build_mcp_servers_json(
+          "/abs/arbor",
+          "/abs/arbor/.arbor/keys/claude_abcdef12.arbor.key"
+        )
+
+      decoded = Jason.decode!(json)
+      args = get_in(decoded, ["mcpServers", "arbor", "args"])
+      assert decoded["mcpServers"]["arbor"]["command"] == "sh"
+      assert hd(args) == "-c"
+      command = Enum.at(args, 1)
+      assert command =~ "cd /abs/arbor && exec ./bin/mix arbor.signer"
+      assert command =~ "--key-file /abs/arbor/.arbor/keys/claude_abcdef12.arbor.key"
+      assert command =~ "--upstream http://localhost:4000/mcp"
+    end
+  end
+
+  describe "attach_client_config/2" do
+    test "includes mcp_json and the saved key path when provided" do
+      view = %{display_name: "Claude", agent_id: "agent_abcdef12", private_key_b64: "QQ=="}
+
+      attached =
+        ExternalAgentsCore.attach_client_config(view,
+          repo_root: "/repo",
+          saved_key_path: "/repo/keys/claude_abcdef12.arbor.key"
+        )
+
+      assert attached.saved_key_path == "/repo/keys/claude_abcdef12.arbor.key"
+      assert attached.mcp_json =~ "mix arbor.signer"
+      assert attached.mcp_json =~ "/repo/keys/claude_abcdef12.arbor.key"
+    end
+  end
+
   describe "format_error/1" do
     test "translates known reasons to user-friendly messages" do
       assert ExternalAgentsCore.format_error(:not_owner) =~ "only modify agents you registered"
+      assert ExternalAgentsCore.format_error(:unauthenticated) =~ "Sign in"
       assert ExternalAgentsCore.format_error(:security_unavailable) =~ "Security subsystem"
       assert ExternalAgentsCore.format_error(:return_identity_not_honored) =~ "Internal error"
     end

@@ -120,6 +120,8 @@ config :arbor_memory,
 
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
+config :arbor_dashboard, local_dev_operator: true
+config :arbor_dashboard, auto_save_external_agent_keys: false
 
 config :arbor_kernel,
   monitor: [
@@ -163,6 +165,10 @@ config :arbor_comms, :durable_interaction_store, backend: nil
 # Note: The Ecto SQLite3 adapter does not support async tests
 # when used with Ecto.Adapters.SQL.Sandbox
 if System.get_env("ARBOR_DB") == "postgres" do
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Basic,
+    notifier: Oban.Notifiers.Postgres
+
   config :arbor_persistence,
     repo_adapter: Ecto.Adapters.Postgres
 
@@ -173,6 +179,10 @@ if System.get_env("ARBOR_DB") == "postgres" do
     pool: Ecto.Adapters.SQL.Sandbox,
     types: Arbor.Persistence.PostgrexTypes
 else
+  config :arbor_scheduler, Oban,
+    engine: Oban.Engines.Lite,
+    notifier: Oban.Notifiers.PG
+
   config :arbor_persistence,
     repo_adapter: Ecto.Adapters.SQLite3
 

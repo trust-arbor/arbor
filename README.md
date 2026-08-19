@@ -30,25 +30,30 @@ Arbor is built on the [BEAM](https://www.erlang.org/) — the same runtime that 
 
 ## Prerequisites
 
-- Elixir 1.18+
-- Erlang/OTP 27+
-- PostgreSQL (for persistence backends)
+- [mise](https://mise.jdx.dev/) (installs the Erlang/Elixir versions in `.tool-versions`)
+- SQLite is the default database (`ARBOR_DB=sqlite`). PostgreSQL is optional.
 
 ## Getting Started
 
+Clone-to-first-reply (mise, SQLite, free OpenRouter, `arbor.start`,
+conversationalist) is in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
+
 ```bash
-# Clone the repository
 git clone https://github.com/trust-arbor/arbor.git
 cd arbor
+mise install
+./bin/mix arbor.setup
+# add OPENROUTER_API_KEY to .env, then:
+./bin/mix arbor.doctor --configure
+./bin/mix arbor.start
+```
 
-# Install dependencies
-mix deps.get
+Use `./bin/mix` so Mix runs under the pinned toolchain. `ARBOR_DB=postgres` is
+opt-in, not the getting-started path.
 
-# Run tests
-mix test
-
-# Run quality checks (format + credo)
-mix quality
+```bash
+./bin/mix test
+./bin/mix quality
 ```
 
 ## License

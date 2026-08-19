@@ -197,6 +197,82 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   def owns?(_profile, _), do: false
 
+  @doc """
+  Registration requires an authenticated principal. Fail closed when the
+  session has no owner — the UI hiding Register New is not an authz gate.
+  """
+  @spec require_principal(String.t() | nil) :: :ok | {:error, :unauthenticated}
+  def require_principal(owner_agent_id) when is_binary(owner_agent_id) and owner_agent_id != "",
+    do: :ok
+
+  def require_principal(_), do: {:error, :unauthenticated}
+
+  @doc """
+  Auto-save of private keys is local-dev only and must be explicitly enabled.
+  """
+  @spec auto_save_allowed?(boolean(), boolean()) :: boolean()
+  def auto_save_allowed?(true, true), do: true
+  def auto_save_allowed?(_, _), do: false
+
+  @doc """
+  Filename for a dashboard-issued `.arbor.key`: `<name>_<id8>.arbor.key`.
+  """
+  @spec key_filename(String.t(), String.t()) :: String.t()
+  def key_filename(display_name, agent_id) do
+    sanitize_filename(display_name) <> "_" <> agent_id8(agent_id) <> ".arbor.key"
+  end
+
+  defp agent_id8(agent_id) when is_binary(agent_id) do
+    agent_id
+    |> String.replace_prefix("agent_", "")
+    |> String.slice(0, 8)
+    |> case do
+      "" -> "agent"
+      id8 -> id8
+    end
+  end
+
+  @doc """
+  Ready-to-paste `mcpServers` JSON for `mix arbor.signer`.
+  """
+  @spec build_mcp_servers_json(String.t(), String.t(), String.t()) :: String.t()
+  def build_mcp_servers_json(repo_root, key_path, upstream \\ "http://localhost:4000/mcp") do
+    command =
+      "cd #{repo_root} && exec ./bin/mix arbor.signer --key-file #{key_path} --upstream #{upstream}"
+
+    Jason.encode!(
+      %{
+        "mcpServers" => %{
+          "arbor" => %{
+            "command" => "sh",
+            "args" => ["-c", command]
+          }
+        }
+      },
+      pretty: true
+    )
+  end
+
+  @doc """
+  Attach local-dev client-config fields (saved key path + MCP JSON) to the
+  one-time registration view. Pure: the caller supplies paths.
+  """
+  @spec attach_client_config(map(), keyword()) :: map()
+  def attach_client_config(view, opts) when is_map(view) and is_list(opts) do
+    repo_root = Keyword.get(opts, :repo_root, "/absolute/path/to/arbor")
+    upstream = Keyword.get(opts, :upstream, "http://localhost:4000/mcp")
+    saved_key_path = Keyword.get(opts, :saved_key_path)
+
+    key_path =
+      saved_key_path ||
+        Path.join(repo_root, key_filename(view.display_name || "external_agent", view.agent_id))
+
+    Map.merge(view, %{
+      saved_key_path: saved_key_path,
+      mcp_json: build_mcp_servers_json(repo_root, key_path, upstream)
+    })
+  end
+
   # ===========================================================================
   # Convert — display formatting
   # ===========================================================================
@@ -249,6 +325,7 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
   @doc "Translate an internal error reason into a user-friendly message."
   @spec format_error(any()) :: String.t()
   def format_error(:not_owner), do: "You can only modify agents you registered."
+  def format_error(:unauthenticated), do: "Sign in to register external agents."
   def format_error(:security_unavailable), do: "Security subsystem unavailable. Try again later."
 
   def format_error(:return_identity_not_honored),

@@ -48,7 +48,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   `mix arbor.doctor --configure` picks the best available provider and writes
   `ARBOR_DEFAULT_PROVIDER` and `ARBOR_DEFAULT_MODEL` to your `.env` file.
 
-  Priority: Anthropic > OpenAI > Gemini > xAI > OpenRouter > ACP > Ollama > LM Studio
+  Priority: OpenRouter > Ollama > LM Studio > ACP > Anthropic > OpenAI > Gemini > xAI
 
   Model selection uses LLMDB to find the best available model for the chosen
   provider (requires chat capability). Falls back to hardcoded defaults if
@@ -56,19 +56,22 @@ defmodule Mix.Tasks.Arbor.Doctor do
   """
   use Mix.Task
 
-  # Provider priority order (highest quality first).
+  # Provider priority order for --configure: free / local / ACP before paid APIs.
   # Catalog key = ProviderCatalog string, config atom = what goes in .env/config,
   # LLMDB atom = what LLMDB uses for model lookup.
   @provider_priority [
+    {"openrouter", :openrouter, :openrouter},
+    {"ollama", :ollama, :ollama_cloud},
+    {"lm_studio", :lmstudio, :lmstudio},
+    {"acp", :acp, :acp},
     {"anthropic", :anthropic, :anthropic},
     {"openai", :openai, :openai},
     {"google", :gemini, :google},
-    {"xai", :xai, :xai},
-    {"open_router", :openrouter, :openrouter},
-    {"acp", :acp, :acp},
-    {"ollama", :ollama, :ollama_cloud},
-    {"lm_studio", :lmstudio, :lmstudio}
+    {"xai", :xai, :xai}
   ]
+
+  @doc false
+  def provider_priority, do: @provider_priority
 
   # NOTE: there is intentionally NO hard-coded per-provider model map here.
   # Hard-coded model ids go stale (cf. the retired trinity-large-preview) and bake in

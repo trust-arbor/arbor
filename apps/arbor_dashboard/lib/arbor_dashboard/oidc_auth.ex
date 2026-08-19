@@ -14,7 +14,9 @@ defmodule Arbor.Dashboard.OidcAuth do
 
   - If OIDC is configured and user has no session → redirect to `/auth/login`
   - If OIDC is configured and user has session → pass through with `current_agent_id` assign
-  - If OIDC is not configured → open access (dev/test), same as previous Basic Auth behavior
+  - If OIDC is not configured and `require_auth` is false → establish a stable
+    local-dev operator session so External Agents registration has a principal
+  - If OIDC is not configured and `require_auth` is true → fail closed (503)
   """
 
   import Plug.Conn
@@ -24,6 +26,11 @@ defmodule Arbor.Dashboard.OidcAuth do
   require Logger
 
   @behaviour Plug
+
+  # Reuse ChatLive's existing no-OIDC principal. The `human_` prefix is
+  # load-bearing for AuthDecision identity checks; do not invent a second id.
+  @local_dev_operator_id "human_dashboard"
+  @local_dev_operator_name "Local operator"
 
   @impl true
   def init(opts), do: opts
@@ -60,8 +67,10 @@ defmodule Arbor.Dashboard.OidcAuth do
           )
           |> halt()
         else
-          # OIDC not configured — open access (dev/test)
-          conn
+          # OIDC not configured and auth is not required — local-dev operator
+          # session so dashboard actions that need a principal (External Agents)
+          # work without inventing a second identity facade.
+          maybe_establish_local_dev_operator(conn, opts)
         end
 
       _provider ->
@@ -301,6 +310,40 @@ defmodule Arbor.Dashboard.OidcAuth do
     case Keyword.fetch(opts, :require_auth) do
       {:ok, value} -> value
       :error -> Application.get_env(:arbor_dashboard, :require_auth, false)
+    end
+  end
+
+  @doc """
+  Stable principal used when OIDC is unset and `require_auth` is false.
+
+  Exposed so dashboard tests can assert the same id the plug writes.
+  """
+  @spec local_dev_operator_id() :: String.t()
+  def local_dev_operator_id, do: @local_dev_operator_id
+
+  defp local_dev_operator?(opts) do
+    case Keyword.fetch(opts, :local_dev_operator) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        Application.get_env(:arbor_dashboard, :local_dev_operator, false)
+    end
+  end
+
+  defp maybe_establish_local_dev_operator(conn, opts) do
+    if local_dev_operator?(opts) do
+      conn = fetch_session(conn)
+      agent_id = get_session(conn, "agent_id") || @local_dev_operator_id
+      display_name = get_session(conn, "user_display_name") || @local_dev_operator_name
+
+      conn
+      |> put_session("agent_id", agent_id)
+      |> put_session("user_display_name", display_name)
+      |> assign(:current_agent_id, agent_id)
+      |> assign(:current_user_display_name, display_name)
+    else
+      conn
     end
   end
 

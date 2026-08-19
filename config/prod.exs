@@ -30,9 +30,19 @@ prod_repo_adapter =
 
 # Runtime credentials and paths are configured in runtime.exs so release builds
 # never capture the build host's home directory or database credentials.
+{prod_oban_engine, prod_oban_notifier} =
+  case prod_repo_adapter do
+    Ecto.Adapters.Postgres -> {Oban.Engines.Basic, Oban.Notifiers.Postgres}
+    _ -> {Oban.Engines.Lite, Oban.Notifiers.PG}
+  end
+
 config :arbor_persistence,
   start_repo: true,
   repo_adapter: prod_repo_adapter
+
+config :arbor_scheduler, Oban,
+  engine: prod_oban_engine,
+  notifier: prod_oban_notifier
 
 config :arbor_memory,
   embedding_dedup_enabled: true,

@@ -17,11 +17,11 @@ defmodule Arbor.Dashboard.Live.SettingsLiveTest do
       assert html =~ "shown"
     end
 
-    test "unauthenticated user sees sign-in prompt instead of register button", %{conn: conn} do
+    test "local-dev operator session can open Register New", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/settings")
 
-      assert html =~ "Sign in to register external agents"
-      refute html =~ "Register New"
+      assert html =~ "Register New"
+      refute html =~ "Sign in to register external agents"
     end
 
     test "settings link is present in nav", %{conn: conn} do

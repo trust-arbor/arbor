@@ -20,8 +20,10 @@ signing proxy for those tools.
 
 ## Signing proxy (required for principal-scoped tools)
 
-1. Register an external agent in the Arbor dashboard and save the one-time
-   `.arbor.key` file the UI returns.
+1. Register an external agent in the Arbor dashboard (**Settings → External
+   Agents**). Local-dev auto-saves `~/.arbor/keys/<name>_<id8>.arbor.key` at
+   mode `0600` (no overwrite) and shows ready-to-paste `mcpServers` JSON.
+   Download remains the fallback. See [QUICKSTART.md](../QUICKSTART.md).
 2. Ensure the Arbor Gateway is running and serving MCP at
    `http://localhost:4000/mcp` (or your deployed upstream URL).
 3. From the Arbor repository root, verify the **stdio** signer command:

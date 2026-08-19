@@ -8,11 +8,15 @@ worker, validates the candidate, optionally runs a binding council, and
 returns a reviewable change. It does **not** merge, and it does **not**
 unattended-authorize.
 
-This document is the first-run path. The payload contract, authority
-horizon, budgets, resume rules, and terminal evidence live in
-[CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md). MCP identity wiring
-lives in [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md). Checkpoint
-HMAC identity lives in [IDENTITY.md](./IDENTITY.md). Binding council
+This document is the factory first-run path. For a fresh clone (mise, SQLite,
+free OpenRouter, `arbor.start`, conversationalist) see
+[QUICKSTART.md](../QUICKSTART.md). Cloud/onboarding caveats live there — keep
+`AGENTS.md` as the `CLAUDE.md` symlink.
+
+The payload contract, authority horizon, budgets, resume rules, and
+terminal evidence live in [CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md).
+MCP identity wiring lives in [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
+Checkpoint HMAC identity lives in [IDENTITY.md](./IDENTITY.md). Binding council
 seats and provider remaps live in [COUNCIL_SETUP.md](./COUNCIL_SETUP.md).
 
 ## What the factory is

@@ -25,15 +25,39 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   end
 
   describe "when OIDC is not configured" do
-    test "passes through all requests (open access) when require_auth is false" do
-      # With no OIDC providers configured and require_auth: false (dev/test default),
-      # all requests pass through
+    test "establishes a stable local-dev operator session when require_auth is false" do
       conn =
         conn(:get, "/")
         |> init_test_session(%{})
         |> OidcAuth.call(@opts)
 
       refute conn.halted
+      assert conn.assigns.current_agent_id == OidcAuth.local_dev_operator_id()
+      assert get_session(conn, "agent_id") == OidcAuth.local_dev_operator_id()
+      assert conn.assigns.current_user_display_name == "Local operator"
+    end
+
+    test "reuses an existing session principal instead of replacing it" do
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{"agent_id" => "human_existing", "user_display_name" => "Ada"})
+        |> OidcAuth.call(@opts)
+
+      refute conn.halted
+      assert conn.assigns.current_agent_id == "human_existing"
+      assert get_session(conn, "agent_id") == "human_existing"
+      assert conn.assigns.current_user_display_name == "Ada"
+    end
+
+    test "does not invent a principal when local_dev_operator is disabled" do
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{})
+        |> OidcAuth.call(OidcAuth.init(local_dev_operator: false))
+
+      refute conn.halted
+      refute Map.get(conn.assigns, :current_agent_id)
+      refute get_session(conn, "agent_id")
     end
 
     test "security regression (P0-1): denies access when OIDC missing and require_auth: true" do
@@ -98,18 +122,14 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   end
 
   describe "session-based auth pass-through" do
-    test "assigns current_agent_id when session has agent_id (with OIDC configured)" do
-      # We test the session check path by verifying the plug's behavior
-      # when there IS a session. Since OIDC isn't configured in test env,
-      # requests pass through without session check.
+    test "assigns current_agent_id from the local-dev operator when OIDC is unset" do
       conn =
         conn(:get, "/")
         |> init_test_session(%{})
         |> OidcAuth.call(@opts)
 
       refute conn.halted
-      # In dev mode (no OIDC), no current_agent_id is assigned
-      refute Map.has_key?(conn.assigns, :current_agent_id)
+      assert conn.assigns.current_agent_id == OidcAuth.local_dev_operator_id()
     end
   end
 
