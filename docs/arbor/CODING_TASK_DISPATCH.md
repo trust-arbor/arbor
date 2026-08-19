@@ -4,6 +4,12 @@ Operator guide for the stable structured coding path via signed MCP
 `arbor_dispatch_task`. Coding work is reviewable-change production, not
 automatic merge or unattended authorization.
 
+**First-run setup** (what the factory is, host/runtime/identity/worker
+prerequisites, and a first packet): [SOFTWARE_FACTORY.md](./SOFTWARE_FACTORY.md).
+
+**Council setup** (10 binding review seats, stock provider/model pairs,
+and remapping for a new host): [COUNCIL_SETUP.md](./COUNCIL_SETUP.md).
+
 **External MCP client setup:** principal-scoped tools (including this dispatch
 path) require the stdio signing proxy, not bare HTTP/Bearer. See
 [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
@@ -596,7 +602,8 @@ committed. Valid values are exactly:
 | `human_required` | A human approval is required |
 | `none` | No review stage |
 
-`binding` is the normal choice for reviewable change production.
+`binding` is the normal choice for reviewable change production. Seat
+providers and how to remap them: [COUNCIL_SETUP.md](./COUNCIL_SETUP.md).
 
 ### Binding review needs its own capabilities
 

@@ -78,5 +78,7 @@ private key stays in that subprocess and signs each upstream HTTP request.
 - `mix arbor.signer` — `apps/arbor_gateway/lib/mix/tasks/arbor.signer.ex`
 - `Arbor.Gateway.Signer.Proxy` — stdio signing proxy implementation
 - `Arbor.Gateway.SignedRequestAuth` — HTTP signature verification
+- [SOFTWARE_FACTORY.md](./SOFTWARE_FACTORY.md) — what the factory is,
+  prerequisites, and first-run setup
 - [CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md) — signed dispatch of
   structured coding tasks after the proxy is configured
