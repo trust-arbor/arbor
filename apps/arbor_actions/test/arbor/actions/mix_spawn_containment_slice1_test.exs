@@ -136,10 +136,8 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
                []
              )
 
-    assert {:error, reason} =
+    assert {:error, "Unauthorized: :action_principal_authority_required"} =
              MixAction.Compile.run(%{path: project, warnings_as_errors: true}, %{})
-
-    assert reason =~ "workspace_id_required"
   end
 
   test "validation infrastructure: matching candidate and base lock digests reach the shell", %{

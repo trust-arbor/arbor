@@ -310,6 +310,30 @@ another one. It doubles as user documentation — anyone standing up agents need
   keep using `Arbor.Actions.Git.execute/2` directly. Do not treat
   `Git.execute/2` as an action/extension API.
 
+## 18. Mix Jido Compile/Test/Format require `authorized_principal` (no run_mix fallback)
+
+- **What:** `Arbor.Actions.Mix.Compile` / `Test` / `Format` are the
+  agent/extension surface. They consume
+  `Arbor.Actions.authorized_principal(context, __MODULE__)`, then the
+  existing Mix TCB (`run_with_required_workspace/5`). Direct `run/2`
+  without the envelope fails closed with
+  `Unauthorized: :action_principal_authority_required` and does not
+  launch mix. Mix is not an agent executable — these actions never call
+  `Arbor.Shell.authorize_and_execute/3`. Host `run_mix/3` and
+  `run_with_required_workspace/5` stay callable without a principal.
+  `Code.CompileAndTest` uses the Mix TCB after its own envelope, never
+  nested `Mix.Compile.run` / `Mix.Test.run`.
+- **Symptom:** `mix_compile` / `mix_test` / `mix_format` returns
+  `Unauthorized: :action_principal_authority_required` when the action
+  context has no facade-issued envelope, even if `context[:agent_id]`
+  names another principal.
+- **Action:** invoke Mix Compile/Test/Format through
+  `authorize_and_execute` so the executor issues the principal envelope,
+  and grant `arbor://action/mix/<op>`. Host/unit tests with no principal
+  keep using `Arbor.Actions.Mix.run_mix/3` or
+  `run_with_required_workspace/5`. Do not treat those TCB helpers as
+  an action/extension API.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
@@ -350,6 +374,12 @@ another one. It doubles as user documentation — anyone standing up agents need
     grant `arbor://action/git/<op>`. A spoofed `context[:agent_id]` without
     the envelope is not git authority. Host `Git.execute/2` has no principal
     and is not an agent/extension API.
+17. For `mix_compile` / `mix_test` / `mix_format`, invoke
+    `authorize_and_execute` so the caller envelope is issued; grant
+    `arbor://action/mix/<op>`. A spoofed `context[:agent_id]` without
+    the envelope is not mix authority. Host `run_mix/3` /
+    `run_with_required_workspace/5` have no principal and are not an
+    action/extension API.
 
 ## Applied Learning: Security Gates
 

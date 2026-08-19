@@ -3,6 +3,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
 
   alias Arbor.Actions.Git
   alias Arbor.Actions.Mix.Format, as: MixFormat
+  alias Arbor.Actions.MixPrincipalHelpers
   alias Arbor.Actions.Shell.Execute
 
   @moduletag :fast
@@ -310,13 +311,15 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: Mix Format rejects --no-exit file option injection" do
+    MixPrincipalHelpers.install_agent()
     root = format_fixture("option-injection")
     source = Path.join(root, "bad.ex")
     before = File.read!(source)
 
     try do
       assert {:error, message} =
-               MixFormat.run(
+               MixPrincipalHelpers.run(
+                 MixFormat,
                  %{path: root, check_only: true, files: ["--no-exit", "bad.ex"]},
                  %{}
                )
@@ -329,11 +332,16 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: Mix Format rejects unknown option keys" do
+    MixPrincipalHelpers.install_agent()
     root = format_fixture("unknown-option")
 
     try do
       assert {:error, message} =
-               MixFormat.run(%{path: root, files: ["bad.ex"], no_exit: true}, %{})
+               MixPrincipalHelpers.run(
+                 MixFormat,
+                 %{path: root, files: ["bad.ex"], no_exit: true},
+                 %{}
+               )
 
       assert message =~ "unsupported_format_option"
     after
@@ -342,11 +350,16 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: Mix Format rejects non-boolean check mode" do
+    MixPrincipalHelpers.install_agent()
     root = format_fixture("check-mode")
 
     try do
       assert {:error, message} =
-               MixFormat.run(%{path: root, check_only: "false", files: ["bad.ex"]}, %{})
+               MixPrincipalHelpers.run(
+                 MixFormat,
+                 %{path: root, check_only: "false", files: ["bad.ex"]},
+                 %{}
+               )
 
       assert message =~ "invalid_check_only"
     after
@@ -355,10 +368,12 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: Mix Format rejects glob expansion" do
+    MixPrincipalHelpers.install_agent()
     root = format_fixture("glob")
 
     try do
-      assert {:error, message} = MixFormat.run(%{path: root, files: ["*.ex"]}, %{})
+      assert {:error, message} =
+               MixPrincipalHelpers.run(MixFormat, %{path: root, files: ["*.ex"]}, %{})
       assert message =~ "invalid_format_file"
     after
       File.rm_rf!(root)
@@ -366,6 +381,7 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
   end
 
   test "security regression: Mix Format cannot rewrite a path outside its root" do
+    MixPrincipalHelpers.install_agent()
     root = format_fixture("path-escape")
     outside = Path.join(Path.dirname(root), "outside_#{System.unique_integer([:positive])}.ex")
     File.write!(outside, "defmodule Outside do\n def value,do: 1\nend\n")
@@ -373,7 +389,11 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
 
     try do
       assert {:error, message} =
-               MixFormat.run(%{path: root, files: ["../#{Path.basename(outside)}"]}, %{})
+               MixPrincipalHelpers.run(
+                 MixFormat,
+                 %{path: root, files: ["../#{Path.basename(outside)}"]},
+                 %{}
+               )
 
       assert message =~ "invalid_format_file"
       assert File.read!(outside) == before

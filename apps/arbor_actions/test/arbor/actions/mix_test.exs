@@ -14,6 +14,7 @@ defmodule Arbor.Actions.MixTest do
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Config
   alias Arbor.Actions.Mix, as: MixAction
+  alias Arbor.Actions.MixPrincipalHelpers
 
   defmodule WrongCallbackMixShell do
     def execute_spawn_capable(_tool, _args), do: {:error, :wrong_arity}
@@ -43,7 +44,8 @@ defmodule Arbor.Actions.MixTest do
   describe "Mix.Compile" do
     test "passes for a compiling project", %{project_path: project_path, fixture: fixture} do
       assert {:ok, result} =
-               MixAction.Compile.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Compile,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -69,7 +71,8 @@ defmodule Arbor.Actions.MixTest do
       Arbor.Actions.TestMixShell.clear_last_invocation()
 
       assert {:ok, _result} =
-               MixAction.Compile.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Compile,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -89,22 +92,19 @@ defmodule Arbor.Actions.MixTest do
       File.write!(Path.join(project_path, "mix.lock"), "%{stale: true}\n")
 
       actions = [
-        {&MixAction.Compile.run/2,
-         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
-        {&MixAction.Test.run/2, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
-        {&MixAction.Quality.run/2,
-         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
-        {&MixAction.Format.run/2,
-         %{path: project_path, workspace_id: fixture.lease.workspace_id}},
-        {&MixAction.Xref.run/2, %{path: project_path, workspace_id: fixture.lease.workspace_id}}
+        {MixAction.Compile, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {MixAction.Test, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {MixAction.Quality, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {MixAction.Format, %{path: project_path, workspace_id: fixture.lease.workspace_id}},
+        {MixAction.Xref, %{path: project_path, workspace_id: fixture.lease.workspace_id}}
       ]
 
-      for {run, params} <- actions do
+      for {module, params} <- actions do
         Arbor.Actions.TestMixShell.clear_last_invocation()
 
         assert {:error,
                 {:validation_infrastructure_error, :dependency_baseline_mix_lock_mismatch}} =
-                 run.(params, fixture.context)
+                 run_mix_action(module, params, fixture.context)
 
         assert is_nil(Arbor.Actions.TestMixShell.last_invocation())
       end
@@ -133,7 +133,8 @@ defmodule Arbor.Actions.MixTest do
 
       try do
         assert {:ok, result} =
-                 MixAction.Compile.run(
+                 MixPrincipalHelpers.run(
+                   MixAction.Compile,
                    %{
                      path: project_path,
                      workspace_id: fixture.lease.workspace_id,
@@ -189,7 +190,8 @@ defmodule Arbor.Actions.MixTest do
 
       try do
         assert {:ok, result} =
-                 MixAction.Compile.run(
+                 MixPrincipalHelpers.run(
+                   MixAction.Compile,
                    %{
                      path: project_path,
                      workspace_id: fixture.lease.workspace_id,
@@ -315,7 +317,8 @@ defmodule Arbor.Actions.MixTest do
   describe "Mix.Test" do
     test "passes for a passing project", %{project_path: project_path, fixture: fixture} do
       assert {:ok, result} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{path: project_path, workspace_id: fixture.lease.workspace_id},
                  fixture.context
                )
@@ -336,7 +339,8 @@ defmodule Arbor.Actions.MixTest do
       commit_worktree!(fixture)
 
       assert {:ok, result} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{path: project_path, workspace_id: fixture.lease.workspace_id},
                  fixture.context
                )
@@ -348,7 +352,8 @@ defmodule Arbor.Actions.MixTest do
 
     test "respects tag filter via --only", %{project_path: project_path, fixture: fixture} do
       assert {:ok, result} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -504,7 +509,8 @@ defmodule Arbor.Actions.MixTest do
       commit_worktree!(fixture)
 
       assert {:ok, result} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -523,7 +529,8 @@ defmodule Arbor.Actions.MixTest do
       fixture: fixture
     } do
       assert {:error, reason} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -553,7 +560,8 @@ defmodule Arbor.Actions.MixTest do
       on_exit(fn -> File.rm(external) end)
 
       assert {:error, reason} =
-               MixAction.Test.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Test,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -573,7 +581,8 @@ defmodule Arbor.Actions.MixTest do
       fixture: fixture
     } do
       assert {:ok, result} =
-               MixAction.Format.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Format,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -596,7 +605,8 @@ defmodule Arbor.Actions.MixTest do
       File.write!(lib_path, "defmodule    Tiny do\n  def hi,    do:     :hi\nend\n")
 
       assert {:ok, result} =
-               MixAction.Format.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Format,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -616,7 +626,8 @@ defmodule Arbor.Actions.MixTest do
       File.write!(lib_path, "defmodule    Tiny do\ndef hi,do: :hi\nend\n")
 
       assert {:ok, result} =
-               MixAction.Format.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Format,
                  %{path: project_path, workspace_id: fixture.lease.workspace_id},
                  fixture.context
                )
@@ -666,6 +677,7 @@ defmodule Arbor.Actions.MixTest do
     git!(project_path, ["commit", "-m", "tiny project"])
 
     context = %{task_id: task_id, principal_id: principal_id, agent_id: principal_id}
+    {:ok, _} = MixPrincipalHelpers.install_agent(principal_id)
 
     on_exit(fn ->
       _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, context)
@@ -778,6 +790,15 @@ defmodule Arbor.Actions.MixTest do
     after
       restore_env(:arbor_actions, :mix_shell_module, previous)
     end
+  end
+
+  defp run_mix_action(module, params, context)
+       when module in [MixAction.Compile, MixAction.Test, MixAction.Format] do
+    MixPrincipalHelpers.run(module, params, context)
+  end
+
+  defp run_mix_action(module, params, context) do
+    module.run(params, context)
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)

@@ -1,28 +1,41 @@
-defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
+defmodule Arbor.Actions.MixPrincipalSecurityRegressionTest do
   @moduledoc """
-  Security regression: Code.CompileAndTest and Github.PR must not launch
-  through trusted-system Shell.execute/execute_direct.
+  Security regression: Mix Jido actions must not launch mix without an
+  authorized principal.
 
   Parent behavior (must fail on checkout of the exact parent):
-  both actions call `Arbor.Shell.execute/2` without an authorized principal,
-  so a direct `run/2` starts a host process.
+  Compile, Test, and Format call `run_with_required_workspace/5` (`run_mix/3`
+  → Shell execute_direct / execute_spawn_capable) while ignoring context, so a
+  direct `run/2` that only supplies a path proceeds past the principal gate.
 
-  Fixed behavior: they require `authorized_principal`. CompileAndTest uses
-  the Mix TCB (`Mix.run_with_required_workspace/5`), never Mix.Compile.run
-  or Mix.Test.run. Github.PR uses `Arbor.Shell.authorize_and_execute/3`
-  and returns that API's error when `gh` is not an agent executable. Neither
-  falls back to execute.
+  Fixed behavior: they require `authorized_principal`. The authorized path is
+  `Arbor.Actions.authorize_and_execute/4` then existing Mix TCB
+  (`run_with_required_workspace/5`). Missing envelope uses
+  `Actions.unauthorized_message/1` and never falls back to execute_direct.
+  Mix is not sent through `Shell.authorize_and_execute/3`. Host `run_mix/3`
+  and `run_with_required_workspace/5` stay callable without a principal.
   """
-  use ExUnit.Case, async: false
+  use Arbor.Actions.ActionCase, async: false
 
   @moduletag :fast
   @moduletag :security_regression
 
-  alias Arbor.Actions.Code
-  alias Arbor.Actions.Github
+  alias Arbor.Actions.Mix, as: MixAction
 
-  @code_resource "arbor://code/compile"
-  @github_resource "arbor://action/github/pr"
+  @unauthorized_runs [
+    {MixAction.Compile, %{path: "/nonexistent/project"}},
+    {MixAction.Test, %{path: "/nonexistent/project"}},
+    {MixAction.Format, %{path: "/nonexistent/project", check_only: true}}
+  ]
+
+  setup_all do
+    case Process.whereis(Arbor.Shell.ExecutionRegistry) do
+      nil -> {:ok, _} = Application.ensure_all_started(:arbor_shell)
+      _pid -> :ok
+    end
+
+    :ok
+  end
 
   setup do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
@@ -52,7 +65,7 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
     Application.put_env(:arbor_trust, :approval_guard_enabled, false)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
 
-    agent_id = "agent_p1b_code_github_#{System.unique_integer([:positive])}"
+    agent_id = "agent_p1d_mix_#{System.unique_integer([:positive])}"
 
     on_exit(fn ->
       if Process.whereis(Arbor.Security.CapabilityStore) do
@@ -77,68 +90,76 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
     {:ok, agent_id: agent_id}
   end
 
-  test "security regression: CompileAndTest.run/2 without the envelope does not call Shell.execute/execute_direct" do
-    {calls, result} =
+  test "security regression: Mix action run/2 without the envelope does not call Shell.execute_direct" do
+    for {module, params} <- @unauthorized_runs do
+      {calls, result} =
+        with_host_shell_trace(fn ->
+          module.run(params, %{})
+        end)
+
+      assert {:error, "Unauthorized: :action_principal_authority_required"} = result,
+             "#{inspect(module)} direct path-only run/2: #{inspect(result)}"
+
+      assert calls == [], "#{inspect(module)} launched host shell: #{inspect(calls)}"
+    end
+  end
+
+  test "security regression: Mix action run/2 with a spoofed agent_id does not call Shell.execute_direct" do
+    for {module, params} <- @unauthorized_runs do
+      {calls, result} =
+        with_host_shell_trace(fn ->
+          module.run(params, %{agent_id: "agent_spoof"})
+        end)
+
+      assert {:error, "Unauthorized: :action_principal_authority_required"} = result,
+             "#{inspect(module)} spoofed agent_id run/2: #{inspect(result)}"
+
+      assert calls == [], "#{inspect(module)} launched host shell: #{inspect(calls)}"
+    end
+  end
+
+  test "security regression: host run_mix/run_with_required_workspace with no principal still run" do
+    {calls, run_mix_result} =
       with_host_shell_trace(fn ->
-        Code.CompileAndTest.run(
-          %{file: "lib/my_module.ex", compile_only: true},
-          %{worktree_path: "/nonexistent/path", agent_id: "agent_spoof"}
+        MixAction.run_mix("/nonexistent/project", ["compile"])
+      end)
+
+    assert {:error, :validation_resource_required} = run_mix_result
+    refute :authorize_and_execute in calls
+
+    {tcb_calls, tcb_result} =
+      with_host_shell_trace(fn ->
+        MixAction.run_with_required_workspace(
+          "/nonexistent/project",
+          ["compile"],
+          %{path: "/nonexistent/project"},
+          %{},
+          []
         )
       end)
 
-    assert {:error, "Unauthorized: :action_principal_authority_required"} = result
-    assert calls == []
+    assert {:error, :workspace_id_required} = tcb_result
+    refute :authorize_and_execute in tcb_calls
   end
 
-  test "security regression: Github.PR.run/2 without the envelope does not call Shell.execute/execute_direct" do
-    {calls, result} =
-      with_host_shell_trace(fn ->
-        Github.PR.run(
-          %{path: "/nonexistent/repo", title: "Spoofed PR"},
-          %{agent_id: "agent_spoof"}
-        )
-      end)
-
-    assert {:error, "Unauthorized: :action_principal_authority_required"} = result
-    assert calls == []
-  end
-
-  test "security regression: authorized CompileAndTest uses Mix TCB and does not fall back to execute",
+  test "security regression: authorized Compile uses Mix TCB and does not call Shell.authorize_and_execute",
        %{agent_id: agent_id} do
-    authorize_agent(agent_id, @code_resource)
+    authorize_agent(agent_id, "arbor://action/mix/compile")
 
     {calls, result} =
       with_host_shell_trace(fn ->
         Arbor.Actions.authorize_and_execute(
           agent_id,
-          Code.CompileAndTest,
-          %{file: "lib/my_module.ex", compile_only: true},
-          %{agent_id: agent_id, worktree_path: "/nonexistent/path"}
-        )
-      end)
-
-    assert {:error, message} = result
-    assert message =~ "workspace_id_required"
-    refute message =~ "Unauthorized: :action_principal_authority_required"
-    assert calls == []
-  end
-
-  test "security regression: authorized Github.PR returns the gh policy error and does not fall back to execute",
-       %{agent_id: agent_id} do
-    authorize_agent(agent_id, @github_resource)
-
-    {calls, result} =
-      with_host_shell_trace(fn ->
-        Arbor.Actions.authorize_and_execute(
-          agent_id,
-          Github.PR,
-          %{path: "/nonexistent/repo", title: "Authorized PR"},
+          MixAction.Compile,
+          %{path: "/nonexistent/project"},
           %{agent_id: agent_id}
         )
       end)
 
-    assert {:error, "Unauthorized: {:agent_executable_not_allowed, \"gh\"}"} = result
-    assert calls == []
+    assert {:error, message} = result
+    assert is_binary(message)
+    refute message == "Unauthorized: :action_principal_authority_required"
+    refute :authorize_and_execute in calls
   end
 
   defp authorize_agent(agent_id, resource) do
@@ -160,6 +181,8 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
 
     :erlang.trace_pattern({Arbor.Shell, :execute, 2}, true, [])
     :erlang.trace_pattern({Arbor.Shell, :execute_direct, 3}, true, [])
+    :erlang.trace_pattern({Arbor.Shell, :execute_spawn_capable, 3}, true, [])
+    :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, true, [])
     :erlang.trace(self(), true, [:call, {:tracer, tracer}])
 
     try do
@@ -175,13 +198,15 @@ defmodule Arbor.Actions.CodeGithubPrincipalSecurityRegressionTest do
       :erlang.trace(self(), false, [:call])
       :erlang.trace_pattern({Arbor.Shell, :execute, 2}, false, [])
       :erlang.trace_pattern({Arbor.Shell, :execute_direct, 3}, false, [])
+      :erlang.trace_pattern({Arbor.Shell, :execute_spawn_capable, 3}, false, [])
+      :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, false, [])
     end
   end
 
   defp tracer_loop(parent, acc) do
     receive do
       {:trace, _pid, :call, {Arbor.Shell, fun, _args}}
-      when fun in [:execute, :execute_direct] ->
+      when fun in [:execute, :execute_direct, :execute_spawn_capable, :authorize_and_execute] ->
         tracer_loop(parent, [fun | acc])
 
       :done ->

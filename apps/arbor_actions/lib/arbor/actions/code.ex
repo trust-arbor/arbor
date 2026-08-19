@@ -42,8 +42,9 @@ defmodule Arbor.Actions.Code do
   - CompileAndTest: `arbor://code/compile`. `run/2` requires
     `Arbor.Actions.authorized_principal/2` and must go through
     `Arbor.Actions.authorize_and_execute/4`. Compilation and tests use
-    `Arbor.Actions.Mix.Compile` / `Mix.Test` and never trusted-system
-    `Shell.execute/2` or `execute_direct/3`.
+    the Mix TCB (`Arbor.Actions.Mix.run_with_required_workspace/5`) after
+    this action's envelope, never `Mix.Compile.run` / `Mix.Test.run`, and
+    never trusted-system `Shell.execute/2` or `execute_direct/3`.
   - HotLoad: `arbor://code/hot_load/{module}` (requires Trusted tier or above)
   """
 
@@ -56,9 +57,10 @@ defmodule Arbor.Actions.Code do
 
     Requires `Arbor.Actions.authorized_principal/2`. Direct `run/2` without
     the facade-issued envelope fails closed. The authorized path is
-    `Arbor.Actions.authorize_and_execute/4`, then `Arbor.Actions.Mix.Compile`
-    / `Mix.Test`. This surface never calls trusted-system `Shell.execute/2`
-    or `execute_direct/3`.
+    `Arbor.Actions.authorize_and_execute/4`, then the Mix TCB
+    (`Arbor.Actions.Mix.run_with_required_workspace/5`). This surface never
+    calls `Mix.Compile.run` / `Mix.Test.run` or trusted-system
+    `Shell.execute/2` or `execute_direct/3`.
 
     ## Parameters
 
@@ -106,6 +108,7 @@ defmodule Arbor.Actions.Code do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Mix, as: MixAction
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -180,18 +183,31 @@ defmodule Arbor.Actions.Code do
     end
 
     defp run_compile(worktree, context) do
-      # Action-specific Mix TCB — never trusted-system execute/execute_direct.
+      # Host Mix TCB after this action's envelope — never Mix.Compile.run.
       mix_params =
         %{path: worktree, warnings_as_errors: true, timeout: 120_000}
         |> maybe_put_workspace(context)
 
-      case Arbor.Actions.Mix.Compile.run(mix_params, context) do
-        {:ok, %{passed: true} = result} ->
-          {:ok, extract_warnings(Map.get(result, :stdout, ""))}
+      opts =
+        MixAction.timeout_opts(mix_params) ++
+          [bind_committable_tree: true, resource_profile: :intensive]
 
+      case MixAction.run_with_required_workspace(
+             worktree,
+             ["compile", "--warnings-as-errors"],
+             mix_params,
+             context || %{},
+             opts
+           ) do
         {:ok, result} ->
+          proj = MixAction.project_shell_validation(result)
           output = Map.get(result, :stdout, "")
-          {:compile_failed, extract_errors(output), extract_warnings(output)}
+
+          if proj.passed do
+            {:ok, extract_warnings(output)}
+          else
+            {:compile_failed, extract_errors(output), extract_warnings(output)}
+          end
 
         {:error, reason} ->
           {:error, reason}
@@ -204,32 +220,42 @@ defmodule Arbor.Actions.Code do
         |> maybe_put_workspace(context)
         |> maybe_put_test_paths(test_files)
 
-      case Arbor.Actions.Mix.Test.run(mix_params, context) do
-        {:ok, %{passed: true, stdout: output}} ->
-          result = %{
-            compiled: true,
-            tests_passed: true,
-            test_output: truncate(output || "", 5000),
-            warnings: warnings,
-            errors: []
-          }
+      opts = MixAction.timeout_opts(mix_params) ++ [bind_committable_tree: true]
 
-          Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: true})
-          {:ok, result}
-
+      case MixAction.run_with_required_workspace(
+             worktree,
+             test_args(test_files),
+             mix_params,
+             context || %{},
+             opts
+           ) do
         {:ok, result} ->
+          proj = MixAction.project_shell_validation(result)
           output = Map.get(result, :stdout, "")
 
-          mapped = %{
-            compiled: true,
-            tests_passed: false,
-            test_output: truncate(output, 5000),
-            warnings: warnings,
-            errors: []
-          }
+          if proj.passed do
+            mapped = %{
+              compiled: true,
+              tests_passed: true,
+              test_output: truncate(output || "", 5000),
+              warnings: warnings,
+              errors: []
+            }
 
-          Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
-          {:ok, mapped}
+            Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: true})
+            {:ok, mapped}
+          else
+            mapped = %{
+              compiled: true,
+              tests_passed: false,
+              test_output: truncate(output, 5000),
+              warnings: warnings,
+              errors: []
+            }
+
+            Actions.emit_completed(__MODULE__, %{compiled: true, tests_passed: false})
+            {:ok, mapped}
+          end
 
         {:error, reason} ->
           mapped = %{
@@ -245,6 +271,9 @@ defmodule Arbor.Actions.Code do
           {:ok, mapped}
       end
     end
+
+    defp test_args([]), do: ["test"]
+    defp test_args(test_files), do: ["test", "--" | test_files]
 
     defp maybe_put_workspace(params, context) do
       case context[:workspace_id] || context["workspace_id"] do
@@ -302,7 +331,8 @@ defmodule Arbor.Actions.Code do
 
     defp format_error({:unauthorized, reason}), do: Actions.unauthorized_message(reason)
     defp format_error(reason) when is_binary(reason), do: reason
-    defp format_error(reason), do: Actions.unauthorized_message(reason)
+    defp format_error(reason) when is_atom(reason), do: inspect(reason)
+    defp format_error(reason), do: inspect(reason)
   end
 
   defmodule HotLoad do

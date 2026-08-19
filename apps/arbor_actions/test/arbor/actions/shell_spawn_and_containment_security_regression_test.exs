@@ -16,6 +16,7 @@ defmodule Arbor.Actions.ShellSpawnAndContainmentSecurityRegressionTest do
 
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Mix, as: MixAction
+  alias Arbor.Actions.MixPrincipalHelpers
   alias Arbor.Actions.TestMixShell
 
   @expected_containment_termination %{
@@ -98,7 +99,7 @@ defmodule Arbor.Actions.ShellSpawnAndContainmentSecurityRegressionTest do
       })
 
       try do
-        assert {:ok, result} = action_mod.run(params, fixture.context),
+        assert {:ok, result} = run_mix_action(action_mod, params, fixture.context),
                "#{inspect(action_mod)} must return {:ok, result}"
 
         assert result.exit_code == 0,
@@ -147,7 +148,8 @@ defmodule Arbor.Actions.ShellSpawnAndContainmentSecurityRegressionTest do
 
     try do
       assert {:ok, result} =
-               MixAction.Compile.run(
+               MixPrincipalHelpers.run(
+                 MixAction.Compile,
                  %{
                    path: project_path,
                    workspace_id: fixture.lease.workspace_id,
@@ -196,6 +198,7 @@ defmodule Arbor.Actions.ShellSpawnAndContainmentSecurityRegressionTest do
     git!(project_path, ["commit", "-m", "tiny project"])
 
     context = %{task_id: task_id, principal_id: principal_id, agent_id: principal_id}
+    {:ok, _} = MixPrincipalHelpers.install_agent(principal_id)
 
     on_exit(fn ->
       _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, context)
@@ -247,5 +250,14 @@ defmodule Arbor.Actions.ShellSpawnAndContainmentSecurityRegressionTest do
 
     File.write!(Path.join(path, "mix.lock"), "%{}\n")
     path
+  end
+
+  defp run_mix_action(module, params, context)
+       when module in [MixAction.Compile, MixAction.Test, MixAction.Format] do
+    MixPrincipalHelpers.run(module, params, context)
+  end
+
+  defp run_mix_action(module, params, context) do
+    module.run(params, context)
   end
 end
