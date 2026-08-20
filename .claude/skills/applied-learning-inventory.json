@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 652,
+  "entry_count": 653,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8020,8 +8020,21 @@
       "source_incident": "found 2026-08-20 when a live Codex postcheck stayed permanently transport-closed after the signer exited).",
       "content_sha256": "a20fd838b725f27f246eaf22a7d51753407d5c9ab3fd22e7a9bdfc677a457c2a",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 653,
+      "source_kind": "post-migration",
+      "slug": "derive-coding-commit-subjects-from-reviewed-plan-data",
+      "title": "Derive coding commit subjects from reviewed plan data.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-derive-coding-commit-subjects-from-reviewed-plan-data",
+      "source_date": "2026-08-20",
+      "source_incident": "found 2026-08-20 after hundreds of generic coding commits and a focused post-council test run).",
+      "content_sha256": "ca7a486b503b1d328f316c3526ba544e2be2e22e197a754757bdbf4158da682b",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 191
+  "post_migration_entry_count": 192
 }

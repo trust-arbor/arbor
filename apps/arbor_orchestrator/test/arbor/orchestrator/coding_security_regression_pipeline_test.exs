@@ -242,7 +242,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
          note: "",
          path: "/tmp/ws_security_fixture",
          commit_hash: commit_hash,
-         message: "Coding agent change",
+         message: args["message"],
          output: "committed",
          adopted: not dirty?
        }}

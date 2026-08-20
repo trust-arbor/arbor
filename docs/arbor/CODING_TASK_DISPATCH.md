@@ -60,7 +60,15 @@ closed if the file, content, mode, command, or isolated home does not match.
 
 The plan's `repo_root`, workspace policy, and worker `cwd` are explicit
 bindings. They are checked as canonical paths before launch and must remain
-consistent through implementation, validation, review, and release. A provider
+consistent through implementation, validation, review, and release.
+
+The compiled graph derives the Git commit subject from the reviewed
+`plan.task` at compile time. The subject is one line, valid UTF-8,
+whitespace-normalized, and bounded to 72 bytes without splitting a
+codepoint, preferring a word boundary when possible. The full Unicode C
+category is stripped, including bidi and zero-width format controls.
+Worker prose does not author the message. Archived or unrewritten graphs
+keep the template fallback `Reviewed coding change`. A provider
 conversation can continue only when the plan explicitly supplies
 `resume_provider` and `resume_session_id`; provider-session continuity does
 not imply workspace continuity. A resumed provider session in a new worktree

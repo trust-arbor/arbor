@@ -1145,10 +1145,12 @@ digraph CodingChangeV1 {
     output_key="path"
   ]
 
+  // Fallback subject for archived or unrewritten graphs. The compiler
+  // rewrites this constant from the reviewed plan task before execution.
   prep_commit_message [
     type="transform",
     transform="constant",
-    expression="Coding agent change",
+    expression="Reviewed coding change",
     output_key="message"
   ]
 

@@ -980,3 +980,15 @@ keep stdio open. Never retry arbitrary upstream errors. A client-driven second
 `initialize` must likewise discard the old HTTP session before forwarding it (found
 2026-08-20 when a live Codex postcheck stayed permanently transport-closed after the
 signer exited).
+
+<!-- applied-learning: derive-coding-commit-subjects-from-reviewed-plan-data -->
+<a id="applied-learning-derive-coding-commit-subjects-from-reviewed-plan-data"></a>
+**Derive coding commit subjects from reviewed plan data.** A fixed subject such as
+`Coding agent change` destroys traceability across retained branches, evidence refs,
+and the main history. Compile a one-line, bounded, valid-UTF-8 subject from the
+reviewed `Plan.task`; strip the full Unicode control/format category and keep worker
+prose unable to override it. Give archived or uncompiled graphs a descriptive stable
+fallback. When changing the canonical DOT template, also update its exact source-size
+regression and run the compiler plus pipeline tests, because compile-only validation
+will not catch that drift (found 2026-08-20 after hundreds of generic coding commits
+and a focused post-council test run).

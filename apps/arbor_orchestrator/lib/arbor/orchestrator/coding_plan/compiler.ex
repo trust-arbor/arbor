@@ -29,6 +29,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   alias Arbor.Orchestrator.Viz.DotSerializer
 
   @compiler_version "coding-plan-1"
+  @commit_subject_max_bytes 72
+  @commit_subject_min_word_bytes 40
+  @commit_subject_fallback "Reviewed coding change"
   @security_dormant_nodes ~w[
     check_security_rework_fresh
     compare_security_rework_commit
@@ -450,6 +453,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          action_catalog
        ) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
+         {:ok, graph} <- rewrite_commit_message(graph, plan),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
          {:ok, graph} <-
            rewrite_worker_recovery_open(graph, plan.worker, checkpoint_policy(plan)),
@@ -473,6 +477,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         {:ok, Map.put(attrs, "expression", task_class)}
       end
     end)
+  end
+
+  defp rewrite_commit_message(graph, %Plan{task: task}) do
+    rewrite_constant_node(graph, "prep_commit_message", "message", commit_subject(task))
   end
 
   defp rewrite_worker_open(graph, worker) do
@@ -917,6 +925,89 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         {:ok, Map.put(attrs, "expression", expression)}
       end
     end)
+  end
+
+  # One-line Git subject from the reviewed plan task. Worker output is not
+  # consulted. The full Unicode C category is stripped so bidi and zero-width
+  # format controls cannot enter the subject. Invalid UTF-8, empty, or
+  # control-only input uses the stable DOT fallback.
+  defp commit_subject(task) when is_binary(task) do
+    if String.valid?(task) do
+      case normalize_commit_subject(task) do
+        "" ->
+          @commit_subject_fallback
+
+        normalized when byte_size(normalized) <= @commit_subject_max_bytes ->
+          normalized
+
+        normalized ->
+          truncate_commit_subject(normalized, @commit_subject_max_bytes)
+      end
+    else
+      @commit_subject_fallback
+    end
+  end
+
+  defp commit_subject(_task), do: @commit_subject_fallback
+
+  defp normalize_commit_subject(task) do
+    task
+    |> String.replace(~r/[\p{C}\p{Z}]+/u, " ")
+    |> String.trim()
+  end
+
+  defp truncate_commit_subject(text, max_bytes) do
+    prefix = utf8_byte_prefix(text, max_bytes)
+
+    case last_ascii_space(prefix) do
+      offset when is_integer(offset) and offset >= @commit_subject_min_word_bytes ->
+        prefix
+        |> binary_part(0, offset)
+        |> String.trim()
+        |> nonempty_commit_subject(prefix)
+
+      _ ->
+        nonempty_commit_subject(String.trim(prefix), prefix)
+    end
+  end
+
+  defp nonempty_commit_subject("", prefix) do
+    case String.trim(prefix) do
+      "" -> @commit_subject_fallback
+      trimmed -> trimmed
+    end
+  end
+
+  defp nonempty_commit_subject(subject, _prefix), do: subject
+
+  defp last_ascii_space(binary) when is_binary(binary) do
+    case List.last(:binary.matches(binary, " ")) do
+      {offset, 1} -> offset
+      _ -> nil
+    end
+  end
+
+  defp utf8_byte_prefix(text, max_bytes) when is_binary(text) and max_bytes > 0 do
+    do_utf8_byte_prefix(text, max_bytes, [])
+  end
+
+  defp do_utf8_byte_prefix(<<>>, _remaining, acc) do
+    acc |> Enum.reverse() |> :erlang.iolist_to_binary()
+  end
+
+  defp do_utf8_byte_prefix(<<cp::utf8, rest::binary>>, remaining, acc) do
+    encoded = <<cp::utf8>>
+    size = byte_size(encoded)
+
+    if size <= remaining do
+      do_utf8_byte_prefix(rest, remaining - size, [encoded | acc])
+    else
+      acc |> Enum.reverse() |> :erlang.iolist_to_binary()
+    end
+  end
+
+  defp do_utf8_byte_prefix(_invalid, _remaining, acc) do
+    acc |> Enum.reverse() |> :erlang.iolist_to_binary()
   end
 
   defp rewrite_template_node(graph, node_id, expression) do

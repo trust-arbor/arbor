@@ -79,6 +79,72 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert compilation.manifest["template_version"] == template_version
   end
 
+  test "canonical template keeps a descriptive commit-subject fallback", ctx do
+    attrs = node_attrs(parse!(ctx.template_source), "prep_commit_message")
+
+    assert attrs["type"] == "transform"
+    assert attrs["transform"] == "constant"
+    assert attrs["output_key"] == "message"
+    assert attrs["expression"] == "Reviewed coding change"
+    refute ctx.template_source =~ "Coding agent change"
+  end
+
+  test "compiler derives a bounded commit subject from the reviewed plan task", ctx do
+    long_task = String.duplicate("reviewed task word ", 10)
+
+    long_expected =
+      String.duplicate("reviewed task word ", 3) <> "reviewed task"
+
+    cafe_task = "café " <> String.duplicate("é", 40)
+    cafe_expected = "café " <> String.duplicate("é", 33)
+    rtl_override = "\u202E"
+    zero_width_space = "\u200B"
+
+    long_with_format_controls =
+      String.duplicate("reviewed task word ", 5) <>
+        rtl_override <>
+        zero_width_space <>
+        String.duplicate("reviewed task word ", 5)
+
+    cases = [
+      {"Implement a focused reviewed change", "Implement a focused reviewed change"},
+      {"Fix the pipeline\n\nwith extra detail\tnow", "Fix the pipeline with extra detail now"},
+      {"Fix\u0001the\u0007pipeline\u001b now", "Fix the pipeline now"},
+      {<<1, 2, 7>>, "Reviewed coding change"},
+      {long_task, long_expected},
+      {"Réparer le pipeline de commit 日本語", "Réparer le pipeline de commit 日本語"},
+      {cafe_task, cafe_expected},
+      {"Do {value} and {ctx.task} without interpolating",
+       "Do {value} and {ctx.task} without interpolating"},
+      {"Fix the pipeline" <> rtl_override <> "now", "Fix the pipeline now"},
+      {"Fix" <> zero_width_space <> "the pipeline", "Fix the pipeline"},
+      {rtl_override <> zero_width_space, "Reviewed coding change"},
+      {long_with_format_controls, long_expected}
+    ]
+
+    for {task, expected} <- cases do
+      assert {:ok, compilation} = compile(plan!(%{"task" => task}), ctx)
+      graph = parse!(compilation.dot_source)
+      expression = node_attrs(graph, "prep_commit_message")["expression"]
+
+      assert expression == expected
+      assert String.valid?(expression)
+      assert byte_size(expression) <= 72
+      refute String.contains?(expression, "\n")
+      refute String.contains?(expression, rtl_override)
+      refute String.contains?(expression, zero_width_space)
+      refute expression =~ ~r/[\p{C}]/u
+      refute compilation.dot_source =~ "Coding agent change"
+
+      assert run_transform(graph, "prep_commit_message", %{"task" => "HACKED from context"}) ==
+               expected
+    end
+
+    assert byte_size(long_expected) == 70
+    assert byte_size(cafe_expected) == 72
+    assert String.valid?(cafe_expected)
+  end
+
   test "compiler validate nodes equal the canonical validation program projection", ctx do
     template_validate = node_attrs(parse!(ctx.template_source), "validate")
 
@@ -261,7 +327,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 89_061
+    assert byte_size(ctx.template_source) == 89_209
     assert map_size(graph.nodes) == 253
     assert length(graph.edges) == 367
     assert byte_size(ctx.template_source) <= 262_144

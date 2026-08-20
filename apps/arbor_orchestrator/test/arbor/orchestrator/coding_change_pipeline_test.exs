@@ -2046,6 +2046,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["commit_change"]
       refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
       assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
+      assert graph.nodes["prep_commit_message"].attrs["transform"] == "constant"
+      assert graph.nodes["prep_commit_message"].attrs["expression"] == "Reviewed coding change"
+      refute graph.nodes["prep_commit_message"].attrs["expression"] == "Coding agent change"
 
       assert graph.nodes["commit_change"].attrs["context_keys"] ==
                "path,message,workspace_dirty,head_commit,workspace_id,expected_workspace_fingerprint,expected_tree_oid,prior_commit"
@@ -3053,7 +3056,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_opaque_handles(result.context)
     end
 
-    test "security regression: task text is never interpolated into the git commit message" do
+    test "uncompiled graphs keep a constant commit subject and ignore runtime task text" do
       hostile_task = "docs; rm -rf /tmp/example `touch /tmp/example`"
 
       assert {{:ok, result}, calls} =
@@ -3064,10 +3067,57 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {"coding_reviewed_commit", commit_args} =
                Enum.find(calls, fn {name, _args} -> name == "coding_reviewed_commit" end)
 
-      assert commit_args["message"] == "Coding agent change"
+      assert commit_args["message"] == "Reviewed coding change"
       assert commit_args["workspace_id"] == "ws_fixture_1"
       refute commit_args["message"] =~ hostile_task
       assert_closed_and_released(calls)
+    end
+
+    test "compiled coding_reviewed_commit receives the derived reviewed-task subject" do
+      long_task = String.duplicate("reviewed task word ", 10)
+
+      long_expected =
+        String.duplicate("reviewed task word ", 3) <> "reviewed task"
+
+      rtl_override = "\u202E"
+      zero_width_space = "\u200B"
+
+      long_with_format_controls =
+        String.duplicate("reviewed task word ", 5) <>
+          rtl_override <>
+          zero_width_space <>
+          String.duplicate("reviewed task word ", 5)
+
+      cases = [
+        {"Implement the compiled v2 fixture change", "Implement the compiled v2 fixture change"},
+        {"Fix the pipeline\n\nwith extra detail\tnow", "Fix the pipeline with extra detail now"},
+        {long_task, long_expected},
+        {"Réparer le pipeline de commit 日本語", "Réparer le pipeline de commit 日本語"},
+        {"Fix the pipeline" <> rtl_override <> "now", "Fix the pipeline now"},
+        {"Fix" <> zero_width_space <> "the pipeline", "Fix the pipeline"},
+        {long_with_format_controls, long_expected}
+      ]
+
+      for {task, expected} <- cases do
+        assert {{:ok, result}, calls, plan, compilation} =
+                 run_compiled_v2_fixture(:change_committed, "direct", %{"task" => task})
+
+        assert plan.task == task
+        assert result.context["status"] == "change_committed"
+
+        assert {"coding_reviewed_commit", commit_args} =
+                 Enum.find(calls, fn {name, _args} -> name == "coding_reviewed_commit" end)
+
+        assert commit_args["message"] == expected
+        assert String.valid?(commit_args["message"])
+        assert byte_size(commit_args["message"]) <= 72
+        refute String.contains?(commit_args["message"], "\n")
+        refute String.contains?(commit_args["message"], "\u202E")
+        refute String.contains?(commit_args["message"], "\u200B")
+        refute commit_args["message"] =~ ~r/[\p{C}]/u
+        refute compilation.dot_source =~ "Coding agent change"
+        assert_closed_and_released(calls)
+      end
     end
 
     test "clean self-commit adopts HEAD and still goes through coding_reviewed_commit gate" do
