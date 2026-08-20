@@ -805,3 +805,14 @@ observer, while dedicated production tests cover resolver success and failure;
 otherwise root-wide validation reports `toolchain_identity_unavailable` before
 exercising the intended canary behavior (found 2026-08-14 during K2 app-env
 validation).
+
+<!-- applied-learning: prove-app-boundaries-by-running-from-the-child-project-with-a-fresh-build -->
+<a id="applied-learning-prove-app-boundaries-by-running-from-the-child-project-with-a-fresh-build"></a>
+**Prove app boundaries by running from the child project with a fresh build.**
+`mix test apps/some_app/test` from the umbrella root still compiles the umbrella
+and can make undeclared higher-level modules available, so a green result does
+not prove the app-local dependency boundary. Run `mix test` with the working
+directory set to `apps/some_app` and a fresh isolated `MIX_BUILD_PATH`; inspect
+the compiled app list as well as the test result. This exposed 15 Security test
+failures hidden by the umbrella build because fixtures still called Persistence,
+Historian, Comms, and Phoenix modules (found 2026-08-20 during P1C acceptance).
