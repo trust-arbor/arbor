@@ -7,22 +7,43 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
 
   @moduletag :fast
 
+  defmodule Actions.File.Read do
+    @moduledoc false
+
+    def description, do: "Read a file"
+    def tags, do: [:file, :read]
+  end
+
+  defmodule Actions.Shell.Execute do
+    @moduledoc false
+
+    def description, do: "Execute a shell command"
+    def tags, do: [:shell]
+  end
+
+  defmodule Actions.Git.Status do
+    @moduledoc false
+
+    def description, do: "Show repository status"
+    def tags, do: [:git]
+  end
+
   setup do
-    # Ensure ActionRegistry is started and has actions registered
-    case :ets.info(:action_registry) do
-      :undefined ->
-        start_supervised!(ActionRegistry)
-
-      _ ->
-        :ok
+    unless Process.whereis(ActionRegistry) do
+      start_supervised!(ActionRegistry)
     end
 
-    # Register core actions if the table is empty
-    if ActionRegistry.list_all() == [] do
-      for {category, modules} <- Arbor.Actions.list_actions(), module <- modules do
-        ActionRegistry.register_action(module, %{category: category})
+    snapshot = ActionRegistry.snapshot()
+
+    on_exit(fn ->
+      if Process.whereis(ActionRegistry) do
+        ActionRegistry.restore(snapshot)
       end
-    end
+    end)
+
+    :ok = ActionRegistry.reset()
+    :ok = ActionRegistry.register_action(Actions.File.Read, %{category: :file})
+    :ok = ActionRegistry.register_action(Actions.Shell.Execute, %{category: :shell})
 
     :ok
   end
@@ -31,7 +52,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
     test "returns descriptors for registered actions" do
       capabilities = ActionProvider.list_capabilities()
       assert is_list(capabilities)
-      assert length(capabilities) > 0
+      assert length(capabilities) == 2
       assert Enum.all?(capabilities, &match?(%CapabilityDescriptor{kind: :action}, &1))
     end
 
@@ -40,7 +61,17 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       assert Enum.all?(capabilities, &String.starts_with?(&1.id, "action:"))
     end
 
-    test "no duplicate modules in results" do
+    test "deduplicates canonical and Jido aliases" do
+      registered_modules =
+        ActionRegistry.list_all()
+        |> Enum.map(&elem(&1, 1))
+        |> Enum.frequencies()
+
+      assert registered_modules == %{
+               Actions.File.Read => 2,
+               Actions.Shell.Execute => 2
+             }
+
       capabilities = ActionProvider.list_capabilities()
 
       modules =
@@ -52,7 +83,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       assert duplicates == [], "Found duplicate modules: #{inspect(duplicates)}"
     end
 
-    test "known actions are present" do
+    test "test-local actions are present" do
       capabilities = ActionProvider.list_capabilities()
       ids = Enum.map(capabilities, & &1.id)
       assert "action:file.read" in ids
@@ -91,7 +122,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       desc =
         ActionProvider.module_to_descriptor(
           "file.read",
-          Arbor.Actions.File.Read,
+          Actions.File.Read,
           %{category: :file}
         )
 
@@ -99,7 +130,9 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       assert desc.id == "action:file.read"
       assert desc.name == "File Read"
       assert desc.kind == :action
-      assert desc.metadata.module == Arbor.Actions.File.Read
+      assert desc.description == "Read a file"
+      assert desc.tags == [:file, :read]
+      assert desc.metadata.module == Actions.File.Read
       assert desc.metadata.category == :file
     end
 
@@ -107,7 +140,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       desc =
         ActionProvider.module_to_descriptor(
           "git.status",
-          Arbor.Actions.Git.Status,
+          Actions.Git.Status,
           %{}
         )
 
