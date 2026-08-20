@@ -124,8 +124,11 @@ defmodule Arbor.Security.Escalation do
         # Prefer the non-blocking InteractionRouter path when configured
         # AND the configured router is loadable at runtime. Fall back to
         # the legacy blocking consensus path otherwise.
-        if Config.use_interaction_router_for_approval?() and interaction_router_available?() do
-          submit_via_router(capability, principal_id, resource_uri, opts)
+        router = Config.interaction_router()
+
+        if Config.use_interaction_router_for_approval?() and
+             interaction_router_available?(router) do
+          do_submit_via_router(router, capability, principal_id, resource_uri, opts)
         else
           submit_for_approval(consensus_module, capability, principal_id, resource_uri, opts)
         end
@@ -148,38 +151,42 @@ defmodule Arbor.Security.Escalation do
   def submit_via_router(capability, principal_id, resource_uri, opts \\ []) do
     router = Config.interaction_router()
 
-    if interaction_router_available?() do
-      # Route to the human operator's user_id (the same identifier
-      # Signal.PresenceKeeper registers with PresenceTracker). Without
-      # this lookup, user_id == agent_id silently maps to a presence
-      # nobody is registered for, the router queues with no adapter, and
-      # the operator never sees the prompt.
-      user_id = resolve_operator(principal_id)
-      context = approval_context(capability, principal_id, resource_uri, opts)
-      metadata = approval_metadata(capability, principal_id, resource_uri, context)
-
-      attrs = %{
-        kind: :approval,
-        agent_id: principal_id,
-        user_id: user_id,
-        description: approval_description(resource_uri, context),
-        resource_uri: resource_uri,
-        metadata: metadata
-      }
-
-      case router.request(attrs, []) do
-        {:ok, request_id} ->
-          {:ok, :pending_approval, request_id}
-
-        {:error, reason} = err ->
-          Logger.warning(
-            "Escalation: InteractionRouter.request failed for #{resource_uri}: #{inspect(reason)}"
-          )
-
-          err
-      end
+    if interaction_router_available?(router) do
+      do_submit_via_router(router, capability, principal_id, resource_uri, opts)
     else
       {:error, :interaction_router_unavailable}
+    end
+  end
+
+  defp do_submit_via_router(router, capability, principal_id, resource_uri, opts) do
+    # Route to the human operator's user_id (the same identifier
+    # Signal.PresenceKeeper registers with PresenceTracker). Without
+    # this lookup, user_id == agent_id silently maps to a presence
+    # nobody is registered for, the router queues with no adapter, and
+    # the operator never sees the prompt.
+    user_id = resolve_operator(principal_id)
+    context = approval_context(capability, principal_id, resource_uri, opts)
+    metadata = approval_metadata(capability, principal_id, resource_uri, context)
+
+    attrs = %{
+      kind: :approval,
+      agent_id: principal_id,
+      user_id: user_id,
+      description: approval_description(resource_uri, context),
+      resource_uri: resource_uri,
+      metadata: metadata
+    }
+
+    case router.request(attrs, []) do
+      {:ok, request_id} ->
+        {:ok, :pending_approval, request_id}
+
+      {:error, reason} = err ->
+        Logger.warning(
+          "Escalation: InteractionRouter.request failed for #{resource_uri}: #{inspect(reason)}"
+        )
+
+        err
     end
   rescue
     e ->
@@ -192,9 +199,7 @@ defmodule Arbor.Security.Escalation do
   end
 
   # Cheap availability check used to gate the new path on each call.
-  defp interaction_router_available? do
-    router = Config.interaction_router()
-
+  defp interaction_router_available?(router) do
     is_atom(router) and not is_nil(router) and Code.ensure_loaded?(router) and
       function_exported?(router, :request, 2)
   end
