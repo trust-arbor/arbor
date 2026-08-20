@@ -10,6 +10,7 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
   @moduletag :fast
   @moduletag security: :regression
 
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.AuditJournalCore, as: Core
   alias Arbor.Security.Contracts.AuditJournal
 
@@ -38,16 +39,32 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
   end
 
   test "security regression: Capability struct and nested capability/metadata/bearer are rejected" do
-    assert {:error, :struct_not_allowed} = AuditJournal.admit_intent(%URI{})
+    capability =
+      struct!(Capability,
+        id: @cap_id,
+        resource_uri: "arbor://fs/read/x",
+        principal_id: "agent_a",
+        granted_at: ~U[2026-08-20 12:00:00Z]
+      )
+
+    assert {:error, :struct_not_allowed} = AuditJournal.admit_intent(capability)
 
     assert {:error, :forbidden_content} =
-             AuditJournal.admit_intent(Map.put(grant_absent(), "capability", %{"id" => @cap_id}))
+             AuditJournal.admit_intent(
+               put_in(grant_absent(), ["audit", "data", "capability"], %{"id" => @cap_id})
+             )
 
     assert {:error, :forbidden_content} =
-             AuditJournal.admit_intent(Map.put(grant_absent(), "metadata", %{"note" => "x"}))
+             AuditJournal.admit_intent(
+               put_in(grant_absent(), ["before_fence", "metadata"], %{"note" => "x"})
+             )
 
     assert {:error, :forbidden_content} =
-             AuditJournal.admit_intent(Map.put(grant_absent(), "bearer", "secret-token"))
+             grant_absent()
+             |> pop_in(["after_fingerprint", "capability_digest"])
+             |> elem(1)
+             |> put_in(["after_fingerprint", "bearer"], "secret-token")
+             |> AuditJournal.admit_intent()
   end
 
   test "security regression: unavailable observation never invents a transition" do
@@ -113,6 +130,50 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
     assert {:ok, empty} = Core.new()
     assert {:error, :cross_operation} = Core.append(empty, prepared)
     refute match?({:error, :malformed}, Core.append(empty, prepared))
+  end
+
+  test "security regression: cross-operation identity wins when occurred_at also mismatches" do
+    {:ok, intent} = AuditJournal.admit_intent(grant_absent())
+
+    prepared =
+      intent
+      |> prepared_record()
+      |> Map.put("operation_id", String.duplicate("c", 64))
+      |> Map.put("occurred_at", "2026-08-20T12:00:01Z")
+
+    assert {:error, :cross_operation} = AuditJournal.admit_record(prepared)
+
+    assert {:ok, empty} = Core.new()
+    assert {:error, :cross_operation} = Core.append(empty, prepared)
+  end
+
+  test "security regression: malformed collection work respects frozen structural bounds" do
+    max_nodes = AuditJournal.limits().max_nodes
+    exact_nested = %{"x" => List.duplicate("x", max_nodes - 2)}
+    over_nested = %{"x" => List.duplicate("x", max_nodes - 1)}
+
+    assert {:error, :invalid_field} = AuditJournal.admit_intent(exact_nested)
+    assert {:error, :malformed} = AuditJournal.admit_intent(over_nested)
+  end
+
+  test "security regression: raw record batches stop at the hard entry cap" do
+    {:ok, intent} = AuditJournal.admit_intent(grant_absent())
+    prepared = prepared_record(intent)
+    max_records = AuditJournal.limits().hard_entry_cap
+
+    assert {:ok, _state} = Core.fold(List.duplicate(prepared, max_records))
+    assert {:error, :malformed} = Core.fold(List.duplicate(prepared, max_records + 1))
+  end
+
+  test "security regression: byte caps precede UTF-8 and grammar scans" do
+    assert {:ok, _intent} = AuditJournal.admit_intent(grant_absent())
+
+    oversized_invalid_utf8 = String.duplicate("x", 36) <> <<0xFF>>
+
+    assert {:error, :invalid_field} =
+             grant_absent()
+             |> Map.put("authority_key", oversized_invalid_utf8)
+             |> AuditJournal.admit_intent()
   end
 
   defp grant_absent do

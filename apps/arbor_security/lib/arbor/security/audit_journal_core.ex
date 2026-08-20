@@ -50,30 +50,30 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   @spec fold(term()) :: {:ok, state()} | {:error, fold_error()}
-  def fold(records) when is_list(records), do: fold(empty_state(), records)
-  def fold(_records), do: {:error, :malformed}
+  def fold(records), do: fold(empty_state(), records)
 
   @spec fold(term(), term()) :: {:ok, state()} | {:error, fold_error()}
-  def fold(state, records) when is_list(records) do
-    cond do
-      not match?(:ok, valid_state(state)) ->
-        {:error, :malformed}
-
-      improper_list?(records) ->
-        {:error, :malformed}
-
-      true ->
-        Enum.reduce_while(records, {:ok, state}, fn record, {:ok, acc} ->
-          case append(acc, record) do
-            {:ok, next} -> {:cont, {:ok, next}}
-            {:ok, next, :idempotent} -> {:cont, {:ok, next}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
+  def fold(state, records) do
+    with :ok <- valid_state(state) do
+      fold_records(state, records, 0, AuditJournal.limits().max_fold_records)
     end
   end
 
-  def fold(_state, _records), do: {:error, :malformed}
+  defp fold_records(state, [], _count, _max_records), do: {:ok, state}
+
+  defp fold_records(_state, [_record | _tail], count, max_records)
+       when count >= max_records,
+       do: {:error, :malformed}
+
+  defp fold_records(state, [record | tail], count, max_records) do
+    case append(state, record) do
+      {:ok, next} -> fold_records(next, tail, count + 1, max_records)
+      {:ok, next, :idempotent} -> fold_records(next, tail, count + 1, max_records)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp fold_records(_state, _improper_tail, _count, _max_records), do: {:error, :malformed}
 
   @spec show(state()) :: map()
   def show(state) when is_map(state) do
@@ -296,9 +296,4 @@ defmodule Arbor.Security.AuditJournalCore do
         String.duplicate("0", 64)
     end
   end
-
-  defp improper_list?([]), do: false
-  defp improper_list?([_head | tail]) when is_list(tail), do: improper_list?(tail)
-  defp improper_list?([_head | _tail]), do: true
-  defp improper_list?(_), do: false
 end

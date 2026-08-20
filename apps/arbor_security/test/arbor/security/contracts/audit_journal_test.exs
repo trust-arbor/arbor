@@ -29,6 +29,7 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
       limits = AuditJournal.limits()
       assert limits.max_record_bytes == 32_768
       assert limits.hard_entry_cap == 48
+      assert limits.max_fold_records == 48
       assert limits.reserve_entries == 16
       assert limits.soft_entry_cap == 32
       assert limits.max_keys.intent == 16
@@ -245,6 +246,76 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
       assert {:error, {:invalid_field, "kind"}} = AuditJournal.admit_intent(at_cap)
       assert {:error, :malformed} = AuditJournal.admit_intent(over_cap)
+    end
+
+    test "bounds proper and improper list classification within max_nodes" do
+      max_nodes = AuditJournal.limits().max_nodes
+
+      exact_top_level = List.duplicate("x", max_nodes - 1)
+      over_top_level = List.duplicate("x", max_nodes)
+      assert {:error, :invalid_object} = AuditJournal.admit_intent(exact_top_level)
+      assert {:error, :malformed} = AuditJournal.admit_intent(over_top_level)
+
+      exact_nested = %{"x" => List.duplicate("x", max_nodes - 2)}
+      over_nested = %{"x" => List.duplicate("x", max_nodes - 1)}
+      assert {:error, :invalid_field} = AuditJournal.admit_intent(exact_nested)
+      assert {:error, :malformed} = AuditJournal.admit_intent(over_nested)
+
+      assert {:error, :improper_list} = AuditJournal.admit_intent(%{"x" => ["x" | :tail]})
+    end
+
+    test "checks byte caps before UTF-8 and grammar scans" do
+      exact =
+        grant_facts()
+        |> put_in(["after_fingerprint", "record_id"], String.duplicate("r", 128))
+        |> put_in(["after_fingerprint", "capability_digest"], String.duplicate("a", 64))
+        |> put_in(["audit", "data", "principal_id"], String.duplicate("p", 256))
+        |> put_in(["audit", "data", "resource_uri"], String.duplicate("r", 2_048))
+        |> put_in(["audit", "data", "expires_at"], "2026-12-31T23:59:59Z")
+        |> Map.merge(%{
+          "actor_id" => String.duplicate("a", 256),
+          "task_id" => String.duplicate("t", 256),
+          "session_id" => String.duplicate("s", 256),
+          "correlation_id" => String.duplicate("c", 128),
+          "causation_id" => String.duplicate("d", 128)
+        })
+
+      assert {:ok, _intent} = AuditJournal.admit_intent(exact)
+
+      oversized = fn max, byte -> String.duplicate("x", max) <> <<byte>> end
+
+      cases = [
+        {:invalid_field, Map.put(grant_facts(), "authority_key", oversized.(36, 0xFF))},
+        {:invalid_field,
+         put_in(grant_facts(), ["after_fingerprint", "record_id"], oversized.(128, 0xFF))},
+        {:invalid_field,
+         put_in(
+           grant_facts(),
+           ["after_fingerprint", "capability_digest"],
+           oversized.(64, 0xFF)
+         )},
+        {:invalid_field,
+         put_in(grant_facts(), ["audit", "data", "principal_id"], oversized.(256, 0xFF))},
+        {:invalid_field,
+         put_in(grant_facts(), ["audit", "data", "resource_uri"], oversized.(2_048, 0xFF))},
+        {:invalid_field, Map.put(grant_facts(), "actor_id", oversized.(256, 0xFF))},
+        {:invalid_field, Map.put(grant_facts(), "correlation_id", oversized.(128, 0xFF))},
+        {{:invalid_field, "prepared_at"},
+         Map.put(grant_facts(), "prepared_at", oversized.(20, 0xFF))},
+        {{:invalid_field, "expires_at"},
+         put_in(grant_facts(), ["audit", "data", "expires_at"], oversized.(20, 0xFF))},
+        {{:invalid_field, "capability_id"},
+         put_in(grant_facts(), ["audit", "data", "capability_id"], oversized.(36, 0xFF))}
+      ]
+
+      for {reason, facts} <- cases do
+        assert {:error, ^reason} = AuditJournal.admit_intent(facts)
+      end
+
+      oversized_key = String.duplicate("k", 19) <> <<0xFF>>
+
+      assert {:error, :unknown_field} =
+               AuditJournal.admit_intent(Map.put(grant_facts(), oversized_key, "x"))
     end
 
     test "rejects non-canonical timestamps" do

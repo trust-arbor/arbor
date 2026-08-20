@@ -26,6 +26,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @max_intent_bytes 16_384
   @max_record_bytes 32_768
   @hard_entry_cap 48
+  # Raw replay inputs may be chunked through fold/2. One call never needs more
+  # records than the journal can uniquely admit, even when the input has duplicates.
+  @max_fold_records @hard_entry_cap
   @reserve_entries 16
   @soft_entry_cap 32
   @hard_byte_cap 131_072
@@ -38,6 +41,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @max_actor_bytes 256
   @max_correlation_bytes 128
   @max_json_safe_int 9_007_199_254_740_991
+  @hex64_bytes 64
+  @timestamp_bytes 20
   @max_depth 4
   @max_nodes 64
 
@@ -84,6 +89,22 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     bearer credentials callback metadata terms prose note reason_text
     constraints delegation_chain
   ))
+
+  @wire_key_names Enum.uniq(
+                    @intent_keys ++
+                      @prepared_keys ++
+                      @applied_keys ++
+                      @delivered_keys ++
+                      @absent_keys ++
+                      @live_keys ++
+                      @tombstone_keys ++
+                      @audit_keys ++
+                      @grant_data_keys ++
+                      @revoke_data_keys ++
+                      @applied_observation_keys ++
+                      @rejected_observation_keys ++ MapSet.to_list(@forbidden_names)
+                  )
+  @max_wire_key_bytes @wire_key_names |> Enum.map(&byte_size/1) |> Enum.max()
 
   @capability_id_re ~r/\Acap_[0-9a-f]{32}\z/
   @hex64_re ~r/\A[0-9a-f]{64}\z/
@@ -162,6 +183,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
       max_intent_bytes: @max_intent_bytes,
       max_record_bytes: @max_record_bytes,
       hard_entry_cap: @hard_entry_cap,
+      max_fold_records: @max_fold_records,
       reserve_entries: @reserve_entries,
       soft_entry_cap: @soft_entry_cap,
       hard_byte_cap: @hard_byte_cap,
@@ -320,8 +342,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp admit_authority_key(value) when is_binary(value) do
     cond do
-      not String.valid?(value) -> {:error, :invalid_utf8}
       byte_size(value) > @max_authority_key_bytes -> {:error, :invalid_field}
+      not String.valid?(value) -> {:error, :invalid_utf8}
       not Regex.match?(@capability_id_re, value) -> {:error, {:invalid_field, "authority_key"}}
       true -> {:ok, value}
     end
@@ -398,8 +420,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp admit_record_by_type(attrs, version, kind, "prepared", operation_id, occurred_at) do
     with {:ok, intent, derived, supplied} <- admit_intent_core(Map.fetch!(attrs, "intent")),
-         :ok <- occurred_at_matches_prepared(occurred_at, intent["prepared_at"]),
-         :ok <- cross_operation_check(operation_id, derived, supplied) do
+         :ok <- cross_operation_check(operation_id, derived, supplied),
+         :ok <- occurred_at_matches_prepared(occurred_at, intent["prepared_at"]) do
       {:ok,
        %{
          "version" => version,
@@ -669,9 +691,19 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   end
 
   defp admit_capability_id(value) when is_binary(value) do
-    if Regex.match?(@capability_id_re, value),
-      do: {:ok, value},
-      else: {:error, {:invalid_field, "capability_id"}}
+    cond do
+      byte_size(value) != @max_authority_key_bytes ->
+        {:error, {:invalid_field, "capability_id"}}
+
+      not String.valid?(value) ->
+        {:error, :invalid_utf8}
+
+      not Regex.match?(@capability_id_re, value) ->
+        {:error, {:invalid_field, "capability_id"}}
+
+      true ->
+        {:ok, value}
+    end
   end
 
   defp admit_capability_id(_value), do: {:error, {:invalid_field, "capability_id"}}
@@ -763,7 +795,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
       else: admit_object_keys(value, allowed)
   end
 
-  defp admit_object(value, _allowed, _max) when is_list(value), do: {:error, :invalid_object}
+  defp admit_object([], _allowed, _max), do: {:error, :invalid_object}
+  defp admit_object([_head | _tail], _allowed, _max), do: {:error, :invalid_object}
 
   defp admit_object(_value, _allowed, _max), do: {:error, :invalid_object}
 
@@ -776,6 +809,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
       not Enum.all?(keys, &is_binary/1) ->
         {:error, :invalid_object}
+
+      Enum.any?(keys, &(byte_size(&1) > @max_wire_key_bytes)) ->
+        {:error, :unknown_field}
 
       not Enum.all?(keys, &String.valid?/1) ->
         {:error, :invalid_utf8}
@@ -845,15 +881,19 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   defp admit_positive_int(_value, field), do: {:error, {:invalid_field, field}}
 
   defp admit_hex64(value, _field) when is_binary(value) do
-    if String.valid?(value) and Regex.match?(@hex64_re, value),
-      do: {:ok, value},
-      else: {:error, :invalid_field}
+    cond do
+      byte_size(value) != @hex64_bytes -> {:error, :invalid_field}
+      not String.valid?(value) -> {:error, :invalid_field}
+      not Regex.match?(@hex64_re, value) -> {:error, :invalid_field}
+      true -> {:ok, value}
+    end
   end
 
   defp admit_hex64(_value, field), do: {:error, {:invalid_field, field}}
 
   defp admit_timestamp(value, field) when is_binary(value) do
-    with true <- String.valid?(value),
+    with true <- byte_size(value) == @timestamp_bytes,
+         true <- String.valid?(value),
          true <- Regex.match?(@timestamp_re, value),
          true <- strict_utc_timestamp?(value) do
       {:ok, value}
@@ -899,14 +939,14 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp admit_bounded_id(value, max, field) when is_binary(value) do
     cond do
-      not String.valid?(value) ->
-        {:error, :invalid_utf8}
-
       byte_size(value) == 0 ->
         {:error, :invalid_field}
 
       byte_size(value) > max ->
         {:error, :invalid_field}
+
+      not String.valid?(value) ->
+        {:error, :invalid_utf8}
 
       String.match?(value, @control_re) ->
         {:error, {:invalid_field, field}}
@@ -943,11 +983,10 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end
   end
 
-  defp budget_count(list, 0, _nodes) when is_list(list), do: {:error, :invalid_object}
+  defp budget_count([], depth, nodes), do: reject_list([], depth, nodes)
 
-  defp budget_count(list, _depth, _nodes) when is_list(list) do
-    if improper_list?(list), do: {:error, :improper_list}, else: {:error, :invalid_field}
-  end
+  defp budget_count([_head | _tail] = list, depth, nodes),
+    do: reject_list(list, depth, nodes)
 
   defp budget_count(_value, _depth, nodes) do
     used = nodes + 1
@@ -972,8 +1011,30 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end
   end
 
-  defp improper_list?([]), do: false
-  defp improper_list?([_head | tail]) when is_list(tail), do: improper_list?(tail)
-  defp improper_list?([_head | _tail]), do: true
-  defp improper_list?(_), do: false
+  # Arrays are outside the v1 schema. Count only list cells while classifying
+  # properness so malformed terms cannot bypass the frozen structural budget.
+  defp reject_list(list, depth, nodes) do
+    with used when used <= @max_nodes <- nodes + 1,
+         {:ok, shape} <- bounded_list_shape(list, used) do
+      case {depth, shape} do
+        {_depth, :improper} -> {:error, :improper_list}
+        {0, :proper} -> {:error, :invalid_object}
+        {_depth, :proper} -> {:error, :invalid_field}
+      end
+    else
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp bounded_list_shape([], _used), do: {:ok, :proper}
+
+  defp bounded_list_shape([_head | tail], used) when used < @max_nodes,
+    do: bounded_list_shape(tail, used + 1)
+
+  defp bounded_list_shape([_head | _tail], _used), do: {:error, :malformed}
+
+  defp bounded_list_shape(_improper_tail, used) when used < @max_nodes,
+    do: {:ok, :improper}
+
+  defp bounded_list_shape(_improper_tail, _used), do: {:error, :malformed}
 end

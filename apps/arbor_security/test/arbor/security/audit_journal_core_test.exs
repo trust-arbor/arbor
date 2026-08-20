@@ -153,6 +153,21 @@ defmodule Arbor.Security.AuditJournalCoreTest do
       assert {:error, :malformed} = Core.fold([prepared, %{"nope" => true}, applied])
       assert {:error, :malformed} = Core.fold([prepared | :tail])
     end
+
+    test "fold is single-pass and bounded at the raw record-batch limit" do
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      max_records = AuditJournal.limits().max_fold_records
+
+      assert max_records == AuditJournal.limits().hard_entry_cap
+      assert {:ok, exact} = Core.fold(List.duplicate(prepared, max_records))
+      assert Core.capacity(exact)["used_entries"] == 1
+
+      assert {:error, :malformed} =
+               Core.fold(List.duplicate(prepared, max_records + 1))
+
+      malformed_head = [%{"nope" => true} | List.duplicate(prepared, max_records + 1)]
+      assert {:error, :malformed} = Core.fold(malformed_head)
+    end
   end
 
   describe "capacity static floor" do
