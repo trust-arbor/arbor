@@ -9,7 +9,6 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Store.JSONFile
-  alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
 
   defmodule ControlledBackend do

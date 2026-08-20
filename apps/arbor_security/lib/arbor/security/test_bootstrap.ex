@@ -32,41 +32,55 @@ defmodule Arbor.Security.TestBootstrap do
   apps need this. It is only operational in a test build; release and
   activation-only builds return `:skipped` without starting applications or
   repopulating deliberately omitted stores.
+
+  ## Scope
+
+  Deliberately omits `Arbor.Security.UriRegistry`. The canonical test-only tree
+  mirrors the prior `test_helper` topology, not Application's production
+  children; tests that need runtime registry state start UriRegistry explicitly.
   """
 
-  require Logger
-
-  @supervisor Arbor.Security.Supervisor
-  @restart_attempts 256
-
-  # Forward rest_for_one startup order (capabilities first). On this OTP,
-  # Supervisor.which_children/1 lists the same children in reverse, so order
-  # proofs compare observed ids to Enum.reverse/1 of this list — never to the
-  # forward list itself.
-  @canonical_start_ids [
-    :arbor_security_capabilities,
-    :arbor_security_identities,
-    :arbor_security_signing_keys,
-    :arbor_security_issuers,
-    Arbor.Security.Identity.Registry,
-    Arbor.Security.IssuerRegistry,
-    Arbor.Security.Identity.NonceCache,
-    Arbor.Security.Identity.ReplayPeers,
-    Arbor.Security.SystemAuthority,
-    Arbor.Security.SigningAuthorityStateOwner,
-    Arbor.Security.SigningAuthorityBroker,
-    Arbor.Security.Constraint.RateLimiter,
-    Arbor.Security.CapabilityStore,
-    Arbor.Security.Reflex.Registry,
-    Arbor.Security.DeliveryReceiptBroker
-  ]
-
-  @signing_authority_pair [
-    Arbor.Security.SigningAuthorityStateOwner,
-    Arbor.Security.SigningAuthorityBroker
-  ]
-
   if Mix.env() == :test do
+    require Logger
+
+    @supervisor Arbor.Security.Supervisor
+    @restart_attempts 256
+
+    # Forward rest_for_one startup order (capabilities first). On this OTP,
+    # Supervisor.which_children/1 lists the same children in reverse, so order
+    # proofs compare observed ids to Enum.reverse/1 of this list — never to the
+    # forward list itself.
+    #
+    # UriRegistry is omitted on purpose: this list is the prior test_helper
+    # topology, not a copy of the production Application child list.
+    @canonical_start_ids [
+      :arbor_security_capabilities,
+      :arbor_security_identities,
+      :arbor_security_signing_keys,
+      :arbor_security_issuers,
+      Arbor.Security.Identity.Registry,
+      Arbor.Security.IssuerRegistry,
+      Arbor.Security.Identity.NonceCache,
+      Arbor.Security.Identity.ReplayPeers,
+      Arbor.Security.SystemAuthority,
+      Arbor.Security.SigningAuthorityStateOwner,
+      Arbor.Security.SigningAuthorityBroker,
+      Arbor.Security.Constraint.RateLimiter,
+      Arbor.Security.CapabilityStore,
+      Arbor.Security.Reflex.Registry,
+      Arbor.Security.DeliveryReceiptBroker
+    ]
+
+    # StateOwner and Broker share one token. Restarting only one half would
+    # desync that coupling; if either child is down, both are driven through
+    # restart so the surviving half is proven owned and the terminated half
+    # reuses the existing spec (token intact). A new token is minted only on
+    # empty-tree rebuild, and then given to both halves together.
+    @signing_authority_pair [
+      Arbor.Security.SigningAuthorityStateOwner,
+      Arbor.Security.SigningAuthorityBroker
+    ]
+
     @doc """
     Start the security stores and supporting processes.
 
@@ -95,6 +109,9 @@ defmodule Arbor.Security.TestBootstrap do
 
     defp start_test_tree! do
       _ = Application.ensure_all_started(:arbor_security)
+      # Classify/order proofs use @canonical_start_ids; rebuild uses generated
+      # specs. Assert they stay in lockstep even on the :ok path.
+      _ = canonical_child_specs(make_ref())
 
       if Process.whereis(@supervisor) do
         reconcile_tree!()
@@ -166,6 +183,8 @@ defmodule Arbor.Security.TestBootstrap do
 
     defp restart_terminated_children! do
       entries = child_entries()
+      # Shared-token pair: see @signing_authority_pair. The running half is
+      # proven owned; the terminated half restarts from the existing spec.
       pair_down? = Enum.any?(@signing_authority_pair, &(child_pid_for(entries, &1) == :undefined))
 
       Enum.each(@canonical_start_ids, fn id ->
@@ -216,6 +235,7 @@ defmodule Arbor.Security.TestBootstrap do
     end
 
     defp start_canonical_children! do
+      # One token for both SigningAuthority halves, matching Application.start/2.
       token = make_ref()
 
       Enum.each(canonical_child_specs(token), fn spec ->
@@ -229,6 +249,10 @@ defmodule Arbor.Security.TestBootstrap do
           {:error, {:already_started, pid}} ->
             raise "TestBootstrap: #{inspect(spec.id)} name occupied by #{inspect(pid)} " <>
                     "which is not a supervisor child"
+
+          {:error, :already_present} ->
+            raise "TestBootstrap: empty rebuild found stale spec #{inspect(spec.id)} " <>
+                    "(:already_present); refusing to recover it"
 
           {:error, reason} ->
             raise "TestBootstrap: start #{inspect(spec.id)} failed: #{inspect(reason)}"
@@ -271,7 +295,15 @@ defmodule Arbor.Security.TestBootstrap do
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))
 
-      store_specs ++ core_specs
+      specs = store_specs ++ core_specs
+      spec_ids = Enum.map(specs, & &1.id)
+
+      unless spec_ids == @canonical_start_ids do
+        raise "TestBootstrap: canonical start ids and generated specs drifted: " <>
+                "ids=#{inspect(@canonical_start_ids)} spec_ids=#{inspect(spec_ids)}"
+      end
+
+      specs
     end
 
     defp restart_present_child!(child_id, attempt \\ 0)
@@ -302,6 +334,10 @@ defmodule Arbor.Security.TestBootstrap do
             :undefined -> restart_present_child!(child_id, attempt + 1)
             :missing -> raise "TestBootstrap: restart #{inspect(child_id)} spec missing"
           end
+
+        {:error, :not_found} ->
+          raise "TestBootstrap: restart #{inspect(child_id)} :not_found " <>
+                  "(reconciliation drift: spec vanished between classify and restart)"
 
         {:error, reason} ->
           raise "TestBootstrap: restart #{inspect(child_id)} failed: #{inspect(reason)}"
@@ -340,9 +376,15 @@ defmodule Arbor.Security.TestBootstrap do
         GenServer.stop(pid)
         :ok
       catch
-        :exit, {:noproc, _} -> :ok
-        :exit, :noproc -> :ok
-        :exit, {:normal, _} -> :ok
+        :exit, reason ->
+          # Swallow an exit only once the target is confirmed dead. A live pid
+          # after stop is an invariant violation; fail closed.
+          if Process.alive?(pid) do
+            raise "TestBootstrap: foreign pid #{inspect(pid)} still alive after " <>
+                    "stop exit #{inspect(reason)}"
+          else
+            :ok
+          end
       end
     end
 
