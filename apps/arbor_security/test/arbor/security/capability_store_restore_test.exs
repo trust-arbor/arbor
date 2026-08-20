@@ -6,23 +6,6 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   @security_supervisor Arbor.Security.Supervisor
   @capability_store :arbor_security_capabilities
 
-  @security_children [
-    :arbor_security_capabilities,
-    :arbor_security_identities,
-    :arbor_security_signing_keys,
-    :arbor_security_issuers,
-    Arbor.Security.Identity.Registry,
-    Arbor.Security.IssuerRegistry,
-    Arbor.Security.Identity.NonceCache,
-    Arbor.Security.SystemAuthority,
-    Arbor.Security.SigningAuthorityStateOwner,
-    Arbor.Security.SigningAuthorityBroker,
-    Arbor.Security.Constraint.RateLimiter,
-    Arbor.Security.CapabilityStore,
-    Arbor.Security.Reflex.Registry,
-    Arbor.Security.DeliveryReceiptBroker
-  ]
-
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.AuthorityStore
@@ -751,46 +734,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
 
   defp restore_security_children do
-    stop_named_process(CapabilityStore)
-    stop_named_process(@capability_store)
-
-    Enum.each(@security_children, &restart_security_child!/1)
-    assert_security_children_alive!()
-  end
-
-  defp restart_security_child!(child_id) do
-    case Supervisor.restart_child(@security_supervisor, child_id) do
-      {:ok, _pid} -> :ok
-      {:ok, _pid, _info} -> :ok
-      {:error, :running} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, :not_found} -> :ok
-      {:error, reason} -> raise "failed to restore #{inspect(child_id)}: #{inspect(reason)}"
-    end
-  end
-
-  defp assert_security_children_alive! do
-    dead =
-      Enum.filter(@security_children, fn child_id ->
-        case Process.whereis(child_id) do
-          nil -> child_id not in optional_children()
-          pid -> not Process.alive?(pid)
-        end
-      end)
-
-    if dead != [] do
-      raise "security children left dead after this module: #{inspect(dead)}"
-    end
-  end
-
-  defp optional_children do
-    [
-      :arbor_security_issuers,
-      Arbor.Security.IssuerRegistry,
-      Arbor.Security.SigningAuthorityStateOwner,
-      Arbor.Security.SigningAuthorityBroker,
-      Arbor.Security.DeliveryReceiptBroker
-    ]
+    TestBootstrap.restore_supervised_tree!()
   end
 
   defp stop_named_process(name) do

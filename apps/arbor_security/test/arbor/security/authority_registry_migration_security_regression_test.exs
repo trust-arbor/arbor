@@ -10,6 +10,7 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Security.TestBootstrap
 
   defmodule ControlledBackend do
     @moduledoc false
@@ -254,34 +255,7 @@ defmodule Arbor.Security.AuthorityRegistryMigrationSecurityRegressionTest do
   end
 
   defp restore_default_topology do
-    backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-    for {name, namespace} <- [
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_issuers, "issuers"}
-        ] do
-      spec =
-        Supervisor.child_spec(
-          {AuthorityStore, name: name, namespace: namespace, backend: backend},
-          id: name
-        )
-
-      start_child!(spec, name)
-    end
-
-    start_child!({Registry, []}, Registry)
-    restore_system_authority_identity()
-    start_child!({IssuerRegistry, []}, IssuerRegistry)
-  end
-
-  defp restore_system_authority_identity do
-    {:ok, identity} = Identity.new(public_key: SystemAuthority.public_key())
-
-    case Registry.register(identity) do
-      :ok -> :ok
-      {:error, :already_registered} -> :ok
-    end
+    TestBootstrap.restore_supervised_tree!()
   end
 
   defp start_child!(spec, id) do

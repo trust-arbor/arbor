@@ -40,7 +40,7 @@ defmodule Arbor.Security.AuthorityStore do
     name = Keyword.get(opts, :name, __MODULE__)
 
     %{
-      id: {__MODULE__, name},
+      id: name,
       start: {__MODULE__, :start_link, [opts]},
       type: :worker,
       restart: :permanent,
