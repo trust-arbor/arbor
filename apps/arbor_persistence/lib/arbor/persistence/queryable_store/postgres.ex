@@ -495,22 +495,62 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     end
   end
 
+  # Positional, NOT name-based.
+  #
+  # `ecto_sqlite3` returns `columns: []` for a RETURNING query even though the
+  # row itself is complete. Zipping against an empty column list yielded an
+  # EMPTY map, so every field read as nil and `inserted_at` — the first one
+  # validated strictly — raised `invalid persisted record inserted_at: nil`.
+  # The record was written correctly; only the read-back was broken, which is
+  # why the row is present in the table after the failure.
+  #
+  # On a clean SQLite install this took down `Scheduler.Identity` and with it
+  # the whole boot, so the default onboarding path could not start Arbor at
+  # all (found 2026-08-19 on a fresh Debian 13 box).
+  #
+  # All three RETURNING clauses in this module pin the same explicit column
+  # order, so position is authoritative for both adapters and does not depend
+  # on the driver reporting names. Keep them in sync with @returning_columns.
+  @returning_columns [
+    :id,
+    :namespace,
+    :key,
+    :data,
+    :metadata,
+    :generation,
+    :revision,
+    :deleted_at,
+    :inserted_at,
+    :updated_at
+  ]
+
   defp row_to_record(columns, row) do
-    map =
-      columns
-      |> Enum.zip(row)
-      |> Map.new(fn {col, val} -> {to_string(col), val} end)
+    map = zip_returning(columns, row)
 
     %Record{
-      id: map["id"],
-      key: map["key"],
-      data: decode_map(map["data"]),
-      metadata: decode_map(map["metadata"]),
-      generation: map["generation"] || 0,
-      revision: map["revision"] || 0,
-      inserted_at: utc_datetime!(map["inserted_at"], :inserted_at),
-      updated_at: utc_datetime!(map["updated_at"], :updated_at)
+      id: map[:id],
+      key: map[:key],
+      data: decode_map(map[:data]),
+      metadata: decode_map(map[:metadata]),
+      generation: map[:generation] || 0,
+      revision: map[:revision] || 0,
+      inserted_at: utc_datetime!(map[:inserted_at], :inserted_at),
+      updated_at: utc_datetime!(map[:updated_at], :updated_at)
     }
+  end
+
+  defp zip_returning(columns, row) when length(row) == length(@returning_columns) do
+    _ = columns
+    @returning_columns |> Enum.zip(row) |> Map.new()
+  end
+
+  # A row that does not match the pinned arity means the SQL and
+  # @returning_columns have drifted apart. Fail loudly rather than silently
+  # mapping fields onto the wrong values.
+  defp zip_returning(_columns, row) do
+    raise ArgumentError,
+          "RETURNING row has #{length(row)} values, expected " <>
+            "#{length(@returning_columns)} (#{inspect(@returning_columns)})"
   end
 
   defp utc_datetime!(%DateTime{} = datetime, _field),
@@ -693,13 +733,21 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
         where(query, [r], fragment("CAST(json_extract(?, ?) AS REAL) > ?", r.data, ^path, ^value))
 
       :gte ->
-        where(query, [r], fragment("CAST(json_extract(?, ?) AS REAL) >= ?", r.data, ^path, ^value))
+        where(
+          query,
+          [r],
+          fragment("CAST(json_extract(?, ?) AS REAL) >= ?", r.data, ^path, ^value)
+        )
 
       :lt ->
         where(query, [r], fragment("CAST(json_extract(?, ?) AS REAL) < ?", r.data, ^path, ^value))
 
       :lte ->
-        where(query, [r], fragment("CAST(json_extract(?, ?) AS REAL) <= ?", r.data, ^path, ^value))
+        where(
+          query,
+          [r],
+          fragment("CAST(json_extract(?, ?) AS REAL) <= ?", r.data, ^path, ^value)
+        )
     end
   end
 
@@ -792,33 +840,25 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   defp execute_aggregate(repo, query, field_str, :sum, _adapter) do
     path = json_field_path(field_str)
 
-    repo.one(
-      select(query, [r], fragment("SUM(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
-    )
+    repo.one(select(query, [r], fragment("SUM(CAST(json_extract(?, ?) AS REAL))", r.data, ^path)))
   end
 
   defp execute_aggregate(repo, query, field_str, :avg, _adapter) do
     path = json_field_path(field_str)
 
-    repo.one(
-      select(query, [r], fragment("AVG(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
-    )
+    repo.one(select(query, [r], fragment("AVG(CAST(json_extract(?, ?) AS REAL))", r.data, ^path)))
   end
 
   defp execute_aggregate(repo, query, field_str, :min, _adapter) do
     path = json_field_path(field_str)
 
-    repo.one(
-      select(query, [r], fragment("MIN(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
-    )
+    repo.one(select(query, [r], fragment("MIN(CAST(json_extract(?, ?) AS REAL))", r.data, ^path)))
   end
 
   defp execute_aggregate(repo, query, field_str, :max, _adapter) do
     path = json_field_path(field_str)
 
-    repo.one(
-      select(query, [r], fragment("MAX(CAST(json_extract(?, ?) AS REAL))", r.data, ^path))
-    )
+    repo.one(select(query, [r], fragment("MAX(CAST(json_extract(?, ?) AS REAL))", r.data, ^path)))
   end
 
   # ---------------------------------------------------------------------------
