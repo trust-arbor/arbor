@@ -388,6 +388,65 @@ another one. It doubles as user documentation — anyone standing up agents need
   session after the envelope. Do not invent a host Browser facade or send
   these through `Shell.authorize_and_execute`.
 
+## 21. SignedRequest auth fails closed when a peer could serve the same request
+
+- **What:** `Arbor.Gateway.SignedRequestAuth` calls `Arbor.Security.verify_request/1`,
+  whose first step is `Config.admit_cluster_signed_request_replay_protection/0`. Nonces
+  are node-local, and cross-node `nonce_seen` propagation is not authoritative without
+  an authenticated security-sync transport — and
+  `Arbor.Signals.Config.authenticated_security_sync_transport?/0` is **hardcoded
+  `false`** by design ("There is no production env flag that re-opens unauthenticated
+  apply"). So when another node could accept the same captured `SignedRequest`, this
+  node refuses rather than accept a replayable signature.
+- **Symptom:** an external agent (`mix arbor.signer` → gateway `/mcp`) gets
+  **HTTP 401 `"Missing API key. Provide via Authorization: Bearer <key> or x-api-key
+  header"`** — misleading, because the plug chain is *non-destructive passthrough*:
+  signed-request auth silently failed, then JWT, then API key produced the visible
+  error. The MCP client sees the server fail `initialize` and drops it, so the tools
+  simply never appear — no "server failed" banner in some hosts. The real reason is
+  only in the gateway log at `[debug]`:
+  `[SignedRequestAuth] Verification failed: :cluster_replay_protection_unavailable`.
+  The agent identity is fine — `lookup_public_key_for_agent/1` and `identity_active?/1`
+  both succeed, which is what makes this look like a config or key problem.
+- **Action:** ask *which* peer is responsible, not whether any peer exists.
+  `Arbor.Security.Identity.ReplayPeers` classifies each connected node: a peer running
+  `:arbor_security` is a replay target, one that isn't (an SDR recorder, a build box, an
+  attached `iex`) is foreign and does not trip the gate. Everything not positively
+  foreign counts as a peer, so an outstanding probe, an unreachable node, or a tracker
+  that isn't running all fail closed.
+  ```elixir
+  # triage on the running node (tidewave / iex) — names the actual blocker
+  {Arbor.Security.Identity.ReplayPeers.list(),
+   Arbor.Security.Config.admit_cluster_signed_request_replay_protection()}
+  ```
+  If the blocker is a real Arbor node, that is a true positive: signed external-agent
+  MCP is unavailable while a dev box shares a mesh with another gateway that could
+  accept the replay. Drop the peer, or use a non-signed credential path. Do **not** try
+  to flip the transport flag; it is deliberately unflippable.
+- **Disconnecting a peer is two-sided, and transitive.** `Node.disconnect/1` alone
+  never holds: `Arbor.Cartographer.ClusterKeeper` runs on *both* ends and redials
+  every 30s, so forgetting locally just means the peer redials you. Use
+  `mix arbor.cluster disconnect node@host`, which asks the remote keeper to forget
+  this server first. Even that is not enough when a third node bridges them: Erlang
+  keeps a **fully-connected mesh**, so any non-hidden node connected to both will
+  force them back together no matter how often you disconnect. Check with
+  `:erpc.call(bridge, Node, :list, [])`. Foreign nodes that only need to talk to one
+  Arbor node should launch `-hidden` (or `-connect_all false`) so they never bridge.
+  Verified 2026-08-19: an SDR recorder on a BeagleBone, started plain
+  `--name sdr_node@…`, silently re-meshed a dev box with the prod gateway within
+  30s of every disconnect.
+- **The gate counts `Node.list(:connected)`, not `Node.list()`.** The default is
+  `:visible`, which omits hidden nodes — and a hidden node can still run
+  `:arbor_security` and accept a replay. Counting only visible nodes would let one
+  launch flag silence the gate. `ReplayPeers` uses `:connected` and
+  `monitor_nodes(true, node_type: :all)` for the same reason.
+- **History:** the gate landed in `4bda3a047` (2026-08-18) keyed on bare
+  `Node.list() != []`, which refused *every* signed request on any clustered node —
+  the normal state of a dev machine. It broke Claude Code, Codex, Grok and Hermes
+  simultaneously and silently, and was only visible as that 401. Narrowed to
+  replay-relevant peers on 2026-08-19; regression tests in
+  `apps/arbor_security/test/arbor/security/distributed_test.exs`.
+
 ---
 
 ## Quick checklist for "make an autonomous agent actually run a tool"
