@@ -163,6 +163,17 @@ defmodule Arbor.Contracts.Session.UserMessage do
   the call. The `sender` parameter is the display name (e.g. `"User"`,
   `"Hysun"`, or whatever the CLI passes).
 
+  `sender` and `sender_id` are NOT the same thing and the difference is
+  load-bearing. `sender` is a label for signals; `sender_id` is the PRINCIPAL,
+  matched against `TurnAuthority.authenticated_principal_id` by
+  `Session.authenticated_message_owner?/2` and required (with a `human_`
+  prefix) by anything that needs an authenticated human — including an egress
+  disclosure capability's `principal_scope`.
+
+  `from_dashboard/2` sets `sender_id`; this function historically did not, so a
+  CLI turn had no principal at all and could not satisfy those checks. Pass one
+  with `sender_id:` when the caller can establish who the human is.
+
   ## Examples
 
       iex> msg = UserMessage.from_cli("hello", "Hysun")
@@ -171,12 +182,13 @@ defmodule Arbor.Contracts.Session.UserMessage do
       iex> msg.sender
       "Hysun"
   """
-  @spec from_cli(String.t(), String.t() | nil) :: t()
-  def from_cli(content, sender \\ nil) when is_binary(content) do
+  @spec from_cli(String.t(), String.t() | nil, keyword()) :: t()
+  def from_cli(content, sender \\ nil, opts \\ []) when is_binary(content) do
     %__MODULE__{
       content: content,
       sent_at: DateTime.utc_now(),
       sender: sender,
+      sender_id: Keyword.get(opts, :sender_id),
       transport: :cli
     }
   end

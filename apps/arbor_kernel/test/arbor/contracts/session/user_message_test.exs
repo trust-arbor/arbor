@@ -26,6 +26,26 @@ defmodule Arbor.Contracts.Session.UserMessageTest do
     end
   end
 
+  describe "from_cli/3 principal" do
+    test "carries a principal distinct from the display label" do
+      # sender is a signal label; sender_id is the PRINCIPAL, matched against
+      # TurnAuthority.authenticated_principal_id. A CLI turn previously had no
+      # sender_id at all, so it could not satisfy any authenticated-human check.
+      msg = UserMessage.from_cli("hi", "Hysun", sender_id: "human_dashboard")
+
+      assert msg.sender == "Hysun"
+      assert msg.sender_id == "human_dashboard"
+      assert msg.transport == :cli
+    end
+
+    test "omitting it stays nil rather than forging one from the label" do
+      plain = UserMessage.from_cli("hi", "Hysun")
+
+      assert plain.sender == "Hysun"
+      assert plain.sender_id == nil
+    end
+  end
+
   describe "from_dashboard/2" do
     test "tags transport as :dashboard and sets sender_id" do
       msg = UserMessage.from_dashboard("hi", "human_alice")
