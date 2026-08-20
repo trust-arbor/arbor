@@ -603,7 +603,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     env_path = Path.join(File.cwd!(), ".env")
 
     unless File.exists?(env_path) do
-      Mix.shell().error("  No .env file found. Run mix arbor.setup first.")
+      Mix.shell().error("  No .env file found. Run ./bin/mix arbor.setup first.")
       return()
     end
 

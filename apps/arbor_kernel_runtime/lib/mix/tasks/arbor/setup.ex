@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Arbor.Setup do
   @moduledoc """
   Sets up Arbor for development from a fresh clone.
 
-      $ mix arbor.setup
+      $ ./bin/mix arbor.setup
 
   This task is idempotent — safe to run multiple times.
 
@@ -40,8 +40,8 @@ defmodule Mix.Tasks.Arbor.Setup do
 
   Example:
 
-      $ mix arbor.setup --node-host 10.42.42.101
-      $ ARBOR_DB=postgres mix arbor.setup --node-host myhost.tailnet.ts.net
+      $ ./bin/mix arbor.setup --node-host 10.42.42.101
+      $ ARBOR_DB=postgres ./bin/mix arbor.setup --node-host myhost.tailnet.ts.net
 
   """
   use Mix.Task
@@ -125,18 +125,78 @@ defmodule Mix.Tasks.Arbor.Setup do
   # This is invisible on a developer machine that already has a fully loaded
   # Hex, which is how it survived to a first-run onboarding path.
   defp fetch_deps do
-    case System.cmd(mix_executable(), ["deps.get"], stderr_to_stdout: true) do
+    with {:ok, project_root} <- project_root() do
+      fetch_deps(project_root)
+    end
+  end
+
+  @doc false
+  @spec fetch_deps(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def fetch_deps(project_root) when is_binary(project_root) do
+    project_root = Path.expand(project_root)
+
+    with {:ok, mix_wrapper} <- resolve_mix_wrapper(project_root) do
+      run_deps_fetch(mix_wrapper, project_root)
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  def fetch_deps(_project_root), do: {:error, "could not determine the Arbor project root"}
+
+  @doc false
+  @spec resolve_mix_wrapper(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def resolve_mix_wrapper(project_root) when is_binary(project_root) do
+    project_root = Path.expand(project_root)
+    mix_wrapper = Path.join(project_root, "bin/mix")
+
+    case File.stat(mix_wrapper) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        if Bitwise.band(mode, 0o111) != 0 do
+          {:ok, mix_wrapper}
+        else
+          {:error, mix_wrapper_error(mix_wrapper, "is not executable")}
+        end
+
+      {:ok, _stat} ->
+        {:error, mix_wrapper_error(mix_wrapper, "is not a regular file")}
+
+      {:error, :enoent} ->
+        {:error, mix_wrapper_error(mix_wrapper, "does not exist")}
+
+      {:error, reason} ->
+        detail = reason |> :file.format_error() |> to_string()
+        {:error, mix_wrapper_error(mix_wrapper, "could not be inspected (#{detail})")}
+    end
+  end
+
+  def resolve_mix_wrapper(_project_root),
+    do: {:error, "could not determine the Arbor project root"}
+
+  defp run_deps_fetch(mix_wrapper, project_root) do
+    case System.cmd(mix_wrapper, ["deps.get"],
+           cd: project_root,
+           stderr_to_stdout: true
+         ) do
       {_output, 0} ->
         {:ok, "done"}
 
       {output, status} ->
         {:error, "mix deps.get exited #{status}\n#{String.trim(output)}"}
     end
-  rescue
-    e -> {:error, Exception.message(e)}
   end
 
-  defp mix_executable, do: System.find_executable("mix") || "mix"
+  defp project_root do
+    case Mix.Project.project_file() do
+      nil -> {:error, "could not determine the Arbor project root"}
+      project_file -> {:ok, project_file |> Path.expand() |> Path.dirname()}
+    end
+  end
+
+  defp mix_wrapper_error(path, problem) do
+    "reviewed Mix wrapper #{problem} at #{path}; " <>
+      "restore bin/mix with executable mode in the Arbor project root"
+  end
 
   defp setup_env do
     env_path = Path.join(File.cwd!(), ".env")
