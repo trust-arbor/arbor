@@ -28,6 +28,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     * `--auto-start` — set auto-start on creation (with start)
     * `--timeout` — response timeout in seconds (default: 60, with chat)
     * `--all` — show both running and stopped agents (with list)
+    * `--yes` — skip the destroy confirmation (required when stdin is not a
+      TTY, e.g. scripted or non-interactive ssh runs)
   """
 
   use Mix.Task
@@ -42,7 +44,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     provider: :string,
     auto_start: :boolean,
     timeout: :integer,
-    all: :boolean
+    all: :boolean,
+    yes: :boolean
   ]
 
   @aliases [
@@ -62,7 +65,7 @@ defmodule Mix.Tasks.Arbor.Agent do
       ["start", template | _] -> do_start(template, opts)
       ["resume", ref | _] -> do_resume(ref, opts)
       ["stop", ref | _] -> do_stop(ref)
-      ["destroy", ref | _] -> do_destroy(ref)
+      ["destroy", ref | _] -> do_destroy(ref, opts)
       ["status", ref | _] -> do_status(ref)
       ["summary", ref | _] -> do_summary(ref)
       ["chat", ref, message | _] -> do_chat(ref, message, opts)
@@ -292,14 +295,15 @@ defmodule Mix.Tasks.Arbor.Agent do
 
   # ── Destroy ───────────────────────────────────────────────────────────
 
-  defp do_destroy(ref) do
+  defp do_destroy(ref, opts) do
     ensure_server!()
 
     case find_profile(ref) do
       {:ok, profile} ->
-        if confirm_destructive?(
-             "Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data. [yN] "
-           ) do
+        if opts[:yes] ||
+             confirm_destructive?(
+               "Destroy agent '#{profile.display_name}' (#{profile.agent_id})? This deletes all data. [yN] "
+             ) do
           # Stop first if running
           remote(Arbor.Agent.Manager, :stop_agent, [profile.agent_id])
           remote(Arbor.Agent.Lifecycle, :destroy, [profile.agent_id])
@@ -593,9 +597,24 @@ defmodule Mix.Tasks.Arbor.Agent do
     end
   end
 
-  # Like Mix.shell().yes?/1 but defaults to No (safer for destructive ops)
+  # Like Mix.shell().yes?/1 but defaults to No (safer for destructive ops).
+  #
+  # `IO.gets/1` returns `:eof` when stdin is not a TTY — a non-interactive ssh
+  # session, CI, or any scripted run. Passing that to `String.trim/1` raised a
+  # raw FunctionClauseError, so a destructive command crashed with a stacktrace
+  # instead of declining. Treat anything that is not a real answer as "no", and
+  # point at the flag that makes scripted use possible.
   defp confirm_destructive?(prompt) do
-    answer = IO.gets(prompt) |> String.trim() |> String.downcase()
-    answer in ["y", "yes"]
+    case IO.gets(prompt) do
+      answer when is_binary(answer) ->
+        String.downcase(String.trim(answer)) in ["y", "yes"]
+
+      _eof_or_error ->
+        Mix.shell().error(
+          "Cannot confirm: stdin is not interactive. Re-run with --yes to skip this prompt."
+        )
+
+        false
+    end
   end
 end
