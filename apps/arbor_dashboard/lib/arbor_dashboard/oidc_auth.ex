@@ -29,7 +29,11 @@ defmodule Arbor.Dashboard.OidcAuth do
 
   # Reuse ChatLive's existing no-OIDC principal. The `human_` prefix is
   # load-bearing for AuthDecision identity checks; do not invent a second id.
-  @local_dev_operator_id "human_dashboard"
+  #
+  # The literal now lives in `Arbor.Contracts.Security.Identity` (L0) because
+  # CLI Mix tasks in arbor_agent (L7) need the same principal and cannot depend
+  # on this app (L9). Delegate rather than duplicate.
+  @local_dev_operator_id Arbor.Contracts.Security.Identity.local_operator_id()
   @local_dev_operator_name "Local operator"
 
   @impl true

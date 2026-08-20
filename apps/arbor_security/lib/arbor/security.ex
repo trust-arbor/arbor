@@ -1682,6 +1682,17 @@ defmodule Arbor.Security do
     do: register_agent_identity_with_public_key(identity)
 
   @doc """
+  Whether OIDC is configured with at least one provider or a device flow.
+
+  Exposed so callers outside this library can tell "no authenticated login is
+  possible here" from "a login exists and simply has not happened". Notably CLI
+  Mix tasks use it to decide whether resolving a local-operator principal is
+  legitimate — it never is once a real login path exists.
+  """
+  @spec oidc_enabled?() :: boolean()
+  def oidc_enabled?, do: Arbor.Security.OIDC.Config.enabled?()
+
+  @doc """
   Register a human identity from cryptographically verified OIDC provenance.
 
   The identity registry re-verifies the original signed ID token against the

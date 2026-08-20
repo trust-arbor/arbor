@@ -438,8 +438,19 @@ defmodule Mix.Tasks.Arbor.Agent do
 
     case find_running(ref) do
       {:ok, agent_id, _name} ->
+        # Carry a PRINCIPAL, not just the "CLI" display label. `sender` is a
+        # signal label; `sender_id` is what `Session.authenticated_message_owner?/2`
+        # matches against `TurnAuthority.authenticated_principal_id`, and what a
+        # `human_` scoped check (e.g. an egress disclosure capability) requires.
+        # Without it a terminal turn had no principal at all while the same
+        # conversation through the dashboard did.
+        envelope =
+          Arbor.Contracts.Session.UserMessage.from_cli(message, "CLI",
+            sender_id: local_operator_principal()
+          )
+
         case remote(Arbor.Agent.Manager, :chat, [
-               message,
+               envelope,
                "CLI",
                [agent_id: agent_id, timeout: timeout]
              ]) do
@@ -506,6 +517,27 @@ defmodule Mix.Tasks.Arbor.Agent do
       exit({:shutdown, 1})
     end
   end
+
+  # The local-operator principal, or nil.
+  #
+  # Deliberately conservative: this is a principal asserted by local config, not
+  # one proved by a login, so it resolves ONLY in :dev and ONLY when no OIDC
+  # provider is configured and auth is not required. Anywhere else the turn
+  # carries no principal, exactly as before — a missing principal fails a
+  # `human_` check closed, while a forged one would pass it.
+  defp local_operator_principal do
+    if Mix.env() == :dev and not auth_required?() and not oidc_configured?() do
+      Arbor.Contracts.Security.Identity.local_operator_id()
+    end
+  end
+
+  defp auth_required? do
+    Application.get_env(:arbor_dashboard, :require_auth, false) == true
+  end
+
+  # Through the facade, never `OIDC.Config` directly — that is another
+  # library's internal.
+  defp oidc_configured?, do: Arbor.Security.oidc_enabled?()
 
   defp remote(mod, fun, args) do
     Config.rpc!(Config.full_node_name(), mod, fun, args)
