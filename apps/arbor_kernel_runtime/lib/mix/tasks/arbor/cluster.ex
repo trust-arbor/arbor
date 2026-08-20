@@ -6,6 +6,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
 
       $ mix arbor.cluster status
       $ mix arbor.cluster connect node@host
+      $ mix arbor.cluster disconnect node@host
       $ mix arbor.cluster capabilities
       $ mix arbor.cluster sync
 
@@ -13,11 +14,29 @@ defmodule Mix.Tasks.Arbor.Cluster do
 
     - `status` — Show all connected nodes with capabilities
     - `connect` — Connect to a remote node
+    - `disconnect` — Drop a remote node and stop reconnecting to it
     - `capabilities` — Show detailed capability tags for all nodes
     - `sync` — Force capability sync across all nodes
+
+  ## Disconnecting
+
+  `Node.disconnect/1` on its own does not stick: `Arbor.Cartographer.ClusterKeeper`
+  remembers every node it has seen and redials it every 30 seconds. Both ends run
+  one, so forgetting locally is not enough either — the peer redials us instead,
+  which reads as the disconnect silently failing. `disconnect` asks the remote
+  keeper to forget this server, forgets the remote locally, and only then drops
+  the link.
+
+  This matters beyond tidiness. Signed-request auth refuses whenever a peer
+  running `:arbor_security` could accept the same captured request
+  (`Arbor.Security.Identity.ReplayPeers`), so a dev box left meshed with another
+  Arbor gateway cannot use signed external-agent MCP at all. Disconnecting is
+  the fix; note it only lasts until someone runs `connect` again or the node
+  restarts into a configured cluster.
   """
   use Mix.Task
 
+  alias Arbor.Cartographer.ClusterKeeper
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @impl Mix.Task
@@ -27,6 +46,8 @@ defmodule Mix.Tasks.Arbor.Cluster do
     case args do
       ["status" | _] -> status()
       ["connect", node_str | _] -> connect(parse_node(node_str))
+      ["disconnect", node_str | _] -> disconnect(parse_node(node_str))
+      ["disconnect" | _] -> Mix.shell().error("Usage: mix arbor.cluster disconnect node@host")
       ["capabilities" | _] -> capabilities()
       ["sync" | _] -> sync()
       _ -> status()
@@ -97,6 +118,74 @@ defmodule Mix.Tasks.Arbor.Cluster do
       nil ->
         Mix.shell().error("Cannot reach Arbor server at #{server}")
     end
+  end
+
+  defp disconnect(node) do
+    server = Config.full_node_name()
+
+    if node == server do
+      Mix.shell().error("Refusing to disconnect #{node} from itself")
+    else
+      do_disconnect(server, node)
+    end
+  end
+
+  defp do_disconnect(server, node) do
+    # Both keepers redial every 30s, so BOTH must forget before the link
+    # drops. Forgetting only locally leaves the remote to redial us within
+    # one interval — which looks like the disconnect silently failed.
+    # The remote call has to happen first: once disconnected we cannot
+    # reach it to ask.
+    remote_forgot = ask_remote_to_forget(server, node)
+    local_forgot = Config.rpc(server, ClusterKeeper, :forget_node, [node]) == :ok
+
+    case Config.rpc(server, Node, :disconnect, [node]) do
+      result when result in [true, false] ->
+        if result,
+          do: Mix.shell().info("Disconnected #{node}"),
+          else: Mix.shell().info("#{node} was not connected")
+
+        report_keeper_state(local_forgot, remote_forgot, server, node)
+
+      :ignored ->
+        Mix.shell().error("Arbor server #{server} is not running distributed")
+
+      nil ->
+        Mix.shell().error("Cannot reach Arbor server at #{server}")
+    end
+  end
+
+  # Best-effort: the peer may not run Arbor at all (an SDR box, a build
+  # node), in which case there is no keeper there to redial us and nothing
+  # to do. Distinguish that from a peer that has a keeper we failed to reach.
+  defp ask_remote_to_forget(server, node) do
+    case Config.rpc(server, :erpc, :call, [node, ClusterKeeper, :forget_node, [server], 5_000]) do
+      :ok -> :forgot
+      _ -> :no_keeper
+    end
+  catch
+    _, _ -> :no_keeper
+  end
+
+  defp report_keeper_state(local_forgot, remote_forgot, server, node) do
+    unless local_forgot do
+      Mix.shell().error(
+        "Warning: could not tell the local ClusterKeeper to forget #{node} — " <>
+          "it will be redialed within ~30s"
+      )
+    end
+
+    if remote_forgot == :no_keeper do
+      Mix.shell().info(
+        "  Note: could not confirm #{node} forgot #{server}. If it runs Arbor, " <>
+          "its ClusterKeeper may redial within ~30s; re-run this after checking " <>
+          "`Arbor.Cartographer.ClusterKeeper.known_nodes()` there."
+      )
+    end
+
+    Mix.shell().info(
+      "  Both sides forget in memory only — `connect` or a node restart brings it back."
+    )
   end
 
   defp capabilities do
