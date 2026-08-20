@@ -146,3 +146,15 @@ Run the repository formatter in check mode against the immutable candidate under
 the same dependency environment used for validation, and bind that result to the
 candidate tree OID before accepting it (found 2026-07-28 while reviewing the
 pending-approval reconciliation candidate).
+
+<!-- applied-learning: council-reviewchange-must-preflight-a-bound-review-launch-mode -->
+<a id="applied-learning-council-reviewchange-must-preflight-a-bound-review-launch-mode"></a>
+**`Council.ReviewChange` must preflight a bound review launch mode.** Calling the
+composite action without inherited `run_authorization` or a live lease-bound
+`signing_authority` launches an `:unbound` council whose reviewers cannot use the
+scoped tree-search or terminal report tools. The models may reason over prompt
+material, but report submission fails unauthorized, so the run is not review
+evidence. Before launching, require inherited authority or an exact active
+task/workspace lease; after lease teardown, recover the immutable commit through a
+new authorized review owner rather than invoking the action with an empty context
+(found 2026-08-20 while recovering P1C-B1 after its outer coding task failed).
