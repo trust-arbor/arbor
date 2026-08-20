@@ -28,6 +28,32 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponentTest do
       assert updated.assigns.just_registered == nil
       assert updated.assigns.external_agents_error =~ "Sign in"
     end
+
+    test "security regression: an authenticated viewer cannot register an external agent" do
+      socket =
+        %Socket{}
+        |> Phoenix.Component.assign(:current_agent_id, "human_unprivileged_viewer")
+        |> Phoenix.Component.assign(:session_token, nil)
+        |> Phoenix.Component.assign(:local_dev_operator?, false)
+        |> Phoenix.Component.assign(:external_agents_error, nil)
+        |> Phoenix.Component.assign(:just_registered, nil)
+        |> Phoenix.Component.assign(:show_register_form, false)
+        |> Phoenix.Component.assign(:agent_types, [])
+        |> Phoenix.Component.assign(:editing_agent_id, nil)
+        |> Phoenix.Component.assign(:external_agents_state, %{
+          owner_agent_id: "human_unprivileged_viewer",
+          rows: []
+        })
+
+      updated =
+        ExternalAgentsComponent.update_external_agents(socket, "submit_registration", %{
+          "display_name" => "Must Not Exist",
+          "agent_type" => "external"
+        })
+
+      assert updated.assigns.just_registered == nil
+      assert updated.assigns.external_agents_error =~ "not authorized"
+    end
   end
 
   describe "save_key_file/2" do

@@ -3,9 +3,9 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   Socket-first delegate component for the External Agents section of the
   Settings page.
 
-  Owns the side effects (`Arbor.Agent.Lifecycle.create/2`,
-  `Arbor.Agent.Lifecycle.list_agents/0`, `Arbor.Security.revoke_identity/2`)
-  and delegates pure logic to `Arbor.Dashboard.Cores.ExternalAgentsCore`.
+  Owns presentation-side effects through the public `Arbor.Agent` and
+  `Arbor.Security` facades and delegates pure shaping logic to
+  `Arbor.Dashboard.Cores.ExternalAgentsCore`.
 
   Events are namespaced as `"external_agents:<action>"`.
 
@@ -23,7 +23,6 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
 
   import Arbor.Web.Components
 
-  alias Arbor.Agent.{Character, Lifecycle}
   alias Arbor.Dashboard.Cores.ExternalAgentsCore
 
   require Logger
@@ -37,11 +36,11 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
 
   Pulls the current owner's `agent_id` from `socket.assigns.current_agent_id`
   (set by `Arbor.Dashboard.Nav` on_mount). Loads the initial agent list from
-  `Lifecycle.list_agents/0` filtered by ownership.
+  `Arbor.Agent.list_agents/0` filtered by ownership.
   """
   def mount(socket, _opts) do
     socket
-    |> assign(:agent_types, ExternalAgentsCore.agent_types())
+    |> assign(:agent_types, Arbor.Agent.external_agent_types())
     |> assign(:show_register_form, false)
     |> assign(:just_registered, nil)
     |> assign(:external_agents_error, nil)
@@ -157,7 +156,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp safe_list_agents do
-    Lifecycle.list_agents()
+    Arbor.Agent.list_agents()
     |> Enum.map(&normalize_profile_metadata/1)
     |> Enum.filter(&external_and_active?/1)
   rescue
@@ -213,29 +212,25 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
 
   defp do_register(display_name, agent_type, socket) do
     with :ok <- ExternalAgentsCore.require_principal(socket.assigns[:current_agent_id]) do
-      do_register_as(display_name, agent_type, socket)
+      Arbor.Agent.register_external_agent(
+        socket.assigns.current_agent_id,
+        display_name,
+        agent_type,
+        registration_auth_opts(socket)
+      )
     end
   end
 
-  defp do_register_as(display_name, agent_type, socket) do
-    character = Character.new(name: display_name, tone: "external")
+  defp registration_auth_opts(socket) do
+    cond do
+      is_binary(socket.assigns[:session_token]) and socket.assigns.session_token != "" ->
+        [session_token: socket.assigns.session_token]
 
-    opts =
-      ExternalAgentsCore.build_registration_opts(
-        display_name,
-        agent_type,
-        socket.assigns[:tenant_context]
-      )
-      |> Keyword.put(:character, character)
+      socket.assigns[:local_dev_operator?] == true ->
+        [identity_verified: true]
 
-    try do
-      case Lifecycle.create(display_name, opts) do
-        {:ok, profile, identity} -> {:ok, profile, identity}
-        {:ok, _profile} -> {:error, :return_identity_not_honored}
-        {:error, reason} -> {:error, reason}
-      end
-    catch
-      :exit, _ -> {:error, :security_unavailable}
+      true ->
+        []
     end
   end
 
@@ -388,7 +383,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp safe_restore(agent_id) do
-    case Lifecycle.restore(agent_id) do
+    case Arbor.Agent.restore_agent(agent_id) do
       {:ok, profile} -> {:ok, normalize_profile_metadata(profile)}
       {:error, _} = err -> err
     end
@@ -420,7 +415,7 @@ defmodule Arbor.Dashboard.Components.ExternalAgentsComponent do
   end
 
   defp safe_rename(agent_id, new_name) do
-    Lifecycle.rename(agent_id, new_name)
+    Arbor.Agent.rename_agent(agent_id, new_name)
   rescue
     _ -> {:error, :security_unavailable}
   catch

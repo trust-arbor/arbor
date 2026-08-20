@@ -48,7 +48,7 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry}
+  alias Arbor.Agent.{ExternalRegistration, Lifecycle, ProfileStore, Registry}
 
   require Logger
 
@@ -68,6 +68,18 @@ defmodule Arbor.Agent do
         character: Character.new(name: "My Agent"))
   """
   defdelegate create_agent(agent_id, opts \\ []), to: Lifecycle, as: :create
+
+  @doc "Return the fixed external-agent registration profiles."
+  @spec external_agent_types() :: [map()]
+  defdelegate external_agent_types(), to: ExternalRegistration, as: :types
+
+  @doc "Register a fixed-policy external agent after caller authorization."
+  @spec register_external_agent(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Arbor.Agent.Profile.t(), Arbor.Contracts.Security.Identity.t()}
+          | {:error, term()}
+  defdelegate register_external_agent(caller_id, display_name, type, opts \\ []),
+    to: ExternalRegistration,
+    as: :register
 
   @doc "Restore an agent from a persisted profile."
   defdelegate restore_agent(agent_id), to: Lifecycle, as: :restore
@@ -119,6 +131,9 @@ defmodule Arbor.Agent do
 
   @doc "Load a single agent profile by ID."
   defdelegate load_profile(agent_id), to: ProfileStore
+
+  @doc "Rename a persisted agent profile."
+  defdelegate rename_agent(agent_id, display_name), to: Lifecycle, as: :rename
 
   @doc "Store an agent profile."
   defdelegate store_profile(profile), to: ProfileStore

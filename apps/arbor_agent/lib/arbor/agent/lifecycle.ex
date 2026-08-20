@@ -1811,9 +1811,13 @@ defmodule Arbor.Agent.Lifecycle do
        when uri in ["arbor://fs/list", "arbor://fs/list/repo"],
        do: repo_scoped_fs_uris(:list)
 
+  defp expand_runtime_capability_uris(uri, _template_metadata)
+       when uri in ["arbor://fs/write", "arbor://fs/write/repo"],
+       do: repo_scoped_fs_uris(:write)
+
   defp expand_runtime_capability_uris(uri, _template_metadata), do: [uri]
 
-  defp repo_scoped_fs_uris(operation) when operation in [:read, :list] do
+  defp repo_scoped_fs_uris(operation) when operation in [:read, :list, :write] do
     op = Atom.to_string(operation)
 
     repo_root =

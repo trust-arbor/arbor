@@ -34,7 +34,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   use ExUnit.Case, async: false
   @moduletag :integration
 
-  alias Arbor.Agent.{BranchSupervisor, Lifecycle}
+  alias Arbor.Agent.{BranchSupervisor, Character, Lifecycle}
   alias Arbor.Agent.Test.{RuntimeAdmissionTopology, TrustTopology}
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.TenantContext
@@ -262,6 +262,59 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert "arbor://fs/list/#{repo_root}/**" in uris
       refute "arbor://fs/read/**" in uris
       refute "arbor://fs/list/**" in uris
+    end
+
+    test "security regression: repo write shorthand mints only concrete repository scope" do
+      character = Character.new(name: "Scoped Writer", tone: "external")
+
+      assert {:ok, profile} =
+               Lifecycle.create("Scoped Repo Writer",
+                 character: character,
+                 capabilities: [%{resource: "arbor://fs/write/repo"}]
+               )
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      repo_root = repo_root() |> String.trim_leading("/")
+
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      uris = Enum.map(caps, & &1.resource_uri)
+
+      assert "arbor://fs/write" in uris
+      assert "arbor://fs/write/#{repo_root}/**" in uris
+      refute "arbor://fs/write/**" in uris
+    end
+
+    test "authorized external registrar creates only the reviewed repo-scoped profile" do
+      caller_id = "human_registrar_#{System.unique_integer([:positive])}"
+
+      assert {:ok, _capabilities} =
+               Arbor.Security.assign_role(caller_id, :external_agent_registrar)
+
+      assert {:ok, profile, identity} =
+               Arbor.Agent.register_external_agent(
+                 caller_id,
+                 "Scoped External Agent",
+                 "external",
+                 identity_verified: true
+               )
+
+      cleanup(profile.agent_id)
+
+      assert identity.agent_id == profile.agent_id
+      assert profile.metadata.created_by == caller_id
+      assert profile.metadata.agent_type == "external"
+
+      repo_root = repo_root() |> String.trim_leading("/")
+
+      assert {:ok, capabilities} = Arbor.Security.list_capabilities(profile.agent_id)
+      uris = Enum.map(capabilities, & &1.resource_uri)
+
+      assert "arbor://fs/read" in uris
+      assert "arbor://fs/read/#{repo_root}/**" in uris
+      refute "arbor://fs/read/**" in uris
+      refute "arbor://fs/write/**" in uris
     end
 
     test "security regression: read-only specialized templates with tenant_context do not receive workspace write grants" do

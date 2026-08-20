@@ -8,7 +8,8 @@ defmodule Arbor.Dashboard.Router do
     %{
       "agent_id" => Plug.Conn.get_session(conn, "agent_id"),
       "user_display_name" => Plug.Conn.get_session(conn, "user_display_name"),
-      "session_token" => Plug.Conn.get_session(conn, "session_token")
+      "session_token" => Plug.Conn.get_session(conn, "session_token"),
+      "local_dev_operator" => Plug.Conn.get_session(conn, "local_dev_operator") == true
     }
   end
 

@@ -26,6 +26,11 @@ defmodule Arbor.Security.RoleTest do
     test "returns error for unknown role" do
       assert {:error, :unknown_role} = Role.get(:nonexistent)
     end
+
+    test "external registrar role is limited to fixed external profiles" do
+      assert {:ok, [resource]} = Role.get(:external_agent_registrar)
+      assert resource == "arbor://agent/lifecycle/create/external/**"
+    end
   end
 
   describe "Role.list/0" do
@@ -107,6 +112,28 @@ defmodule Arbor.Security.RoleTest do
 
       assert length(delegated) == 1
       assert hd(delegated).principal_id == agent.agent_id
+    end
+
+    test "external registrar authorizes a fixed profile but not generic creation", %{
+      agent_id: agent_id
+    } do
+      {:ok, _caps} = Security.assign_role(agent_id, :external_agent_registrar)
+
+      assert {:ok, :authorized} =
+               Security.authorize(
+                 agent_id,
+                 "arbor://agent/lifecycle/create/external/claude_code",
+                 :create,
+                 verify_identity: false
+               )
+
+      assert {:error, _reason} =
+               Security.authorize(
+                 agent_id,
+                 "arbor://agent/lifecycle/create",
+                 :create,
+                 verify_identity: false
+               )
     end
   end
 

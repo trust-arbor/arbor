@@ -35,6 +35,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
       assert conn.assigns.current_agent_id == OidcAuth.local_dev_operator_id()
       assert get_session(conn, "agent_id") == OidcAuth.local_dev_operator_id()
       assert conn.assigns.current_user_display_name == "Local operator"
+      assert get_session(conn, "local_dev_operator") == true
     end
 
     test "reuses an existing session principal instead of replacing it" do
@@ -47,6 +48,7 @@ defmodule Arbor.Dashboard.OidcAuthTest do
       assert conn.assigns.current_agent_id == "human_existing"
       assert get_session(conn, "agent_id") == "human_existing"
       assert conn.assigns.current_user_display_name == "Ada"
+      assert get_session(conn, "local_dev_operator") == false
     end
 
     test "does not invent a principal when local_dev_operator is disabled" do
@@ -130,6 +132,27 @@ defmodule Arbor.Dashboard.OidcAuthTest do
 
       refute conn.halted
       assert conn.assigns.current_agent_id == OidcAuth.local_dev_operator_id()
+    end
+
+    test "security regression: a stale local-dev session is not accepted as OIDC proof" do
+      Application.put_env(:arbor_security, :oidc,
+        providers: [%{issuer: "https://issuer.invalid", client_id: "test"}]
+      )
+
+      conn =
+        conn(:get, "/settings")
+        |> init_test_session(%{
+          "agent_id" => OidcAuth.local_dev_operator_id(),
+          "user_display_name" => "Local operator",
+          "local_dev_operator" => true
+        })
+        |> OidcAuth.call(@opts)
+
+      assert conn.halted
+      assert conn.status == 302
+      assert get_resp_header(conn, "location") == ["/auth/login"]
+      refute get_session(conn, "agent_id")
+      refute get_session(conn, "local_dev_operator")
     end
   end
 

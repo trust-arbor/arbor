@@ -76,21 +76,28 @@ defmodule Arbor.Dashboard.OidcAuth do
       _provider ->
         conn = fetch_session(conn)
 
-        case get_session(conn, "agent_id") do
-          nil ->
-            return_to = conn.request_path <> encode_query_string(conn)
-
-            conn
-            |> put_session("return_to", return_to)
-            |> redirect_to("/auth/login")
-            |> halt()
-
-          agent_id ->
+        case {get_session(conn, "agent_id"), get_session(conn, "session_token")} do
+          {agent_id, session_token}
+          when is_binary(agent_id) and agent_id != "" and is_binary(session_token) and
+                 session_token != "" ->
             display_name = get_session(conn, "user_display_name")
 
             conn
+            |> put_session("local_dev_operator", false)
             |> assign(:current_agent_id, agent_id)
             |> assign(:current_user_display_name, display_name)
+
+          _missing_oidc_proof ->
+            return_to = conn.request_path <> encode_query_string(conn)
+
+            conn
+            |> delete_session("agent_id")
+            |> delete_session("user_display_name")
+            |> delete_session("session_token")
+            |> delete_session("local_dev_operator")
+            |> put_session("return_to", return_to)
+            |> redirect_to("/auth/login")
+            |> halt()
         end
     end
   end
@@ -176,6 +183,7 @@ defmodule Arbor.Dashboard.OidcAuth do
           |> put_session("agent_id", agent_id)
           |> put_session("user_display_name", display_name)
           |> put_session("session_token", session_token)
+          |> put_session("local_dev_operator", false)
           |> redirect_to(return_to)
           |> halt()
         else
@@ -336,15 +344,35 @@ defmodule Arbor.Dashboard.OidcAuth do
       conn = fetch_session(conn)
       agent_id = get_session(conn, "agent_id") || @local_dev_operator_id
       display_name = get_session(conn, "user_display_name") || @local_dev_operator_name
+      local_dev_operator? = agent_id == @local_dev_operator_id
+
+      if local_dev_operator? do
+        ensure_local_dev_operator_authority(agent_id)
+      end
 
       conn
       |> put_session("agent_id", agent_id)
       |> put_session("user_display_name", display_name)
+      |> put_session("local_dev_operator", local_dev_operator?)
       |> assign(:current_agent_id, agent_id)
       |> assign(:current_user_display_name, display_name)
     else
       conn
     end
+  end
+
+  defp ensure_local_dev_operator_authority(agent_id) do
+    case Arbor.Security.assign_role(agent_id, :external_agent_registrar) do
+      {:ok, _capabilities} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[OidcAuth] Local registrar setup failed: #{inspect(reason)}")
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """

@@ -5,53 +5,6 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
 
   @moduletag :fast
 
-  describe "agent_types/0" do
-    test "returns at least one template" do
-      types = ExternalAgentsCore.agent_types()
-      assert is_list(types)
-      assert length(types) > 0
-    end
-
-    test "every template has the required fields" do
-      for t <- ExternalAgentsCore.agent_types() do
-        assert is_binary(t.type)
-        assert is_binary(t.label)
-        assert is_binary(t.description)
-        assert is_list(t.capabilities)
-        assert Enum.all?(t.capabilities, &is_map/1)
-        assert Enum.all?(t.capabilities, fn c -> is_binary(c.resource) end)
-      end
-    end
-
-    test "claude_code template is present and has the expected baseline caps" do
-      template = ExternalAgentsCore.find_agent_type("claude_code")
-      assert template.type == "claude_code"
-      assert template.label == "Claude Code"
-      resources = Enum.map(template.capabilities, & &1.resource)
-      assert "arbor://fs/read/**" in resources
-      assert "arbor://fs/write/**" in resources
-      assert "arbor://shell/exec/git" in resources
-    end
-  end
-
-  describe "find_agent_type/1" do
-    test "returns the matching template by string type" do
-      template = ExternalAgentsCore.find_agent_type("codex")
-      assert template.type == "codex"
-    end
-
-    test "falls back to the last (generic) template for unknown types" do
-      template = ExternalAgentsCore.find_agent_type("nonexistent_type_xyz")
-      assert template.type == "external"
-    end
-
-    test "fallback is the same instance regardless of unknown input" do
-      a = ExternalAgentsCore.find_agent_type("foo")
-      b = ExternalAgentsCore.find_agent_type("bar")
-      assert a == b
-    end
-  end
-
   describe "new/2 — filtering" do
     test "returns empty rows when owner_agent_id is nil" do
       profiles = [external_profile("owner_a", "agent_1")]
@@ -157,43 +110,6 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
 
       state = ExternalAgentsCore.new(profiles, "owner_a")
       assert length(state.rows) == 2
-    end
-  end
-
-  describe "build_registration_opts/3" do
-    test "produces a keyword list with the expected keys" do
-      opts = ExternalAgentsCore.build_registration_opts("My Agent", "claude_code", nil)
-
-      assert Keyword.has_key?(opts, :capabilities)
-      assert Keyword.has_key?(opts, :tenant_context)
-      assert Keyword.has_key?(opts, :metadata)
-      assert Keyword.get(opts, :return_identity) == true
-    end
-
-    test "selects capabilities matching the requested agent type" do
-      claude_opts = ExternalAgentsCore.build_registration_opts("My Agent", "claude_code", nil)
-      generic_opts = ExternalAgentsCore.build_registration_opts("My Agent", "external", nil)
-
-      claude_resources = Enum.map(claude_opts[:capabilities], & &1.resource)
-      generic_resources = Enum.map(generic_opts[:capabilities], & &1.resource)
-
-      assert "arbor://fs/write/**" in claude_resources
-      refute "arbor://fs/write/**" in generic_resources
-    end
-
-    test "metadata includes external_agent flag and registered_via marker" do
-      opts = ExternalAgentsCore.build_registration_opts("My Agent", "claude_code", nil)
-      meta = Keyword.fetch!(opts, :metadata)
-
-      assert meta.external_agent == true
-      assert meta.agent_type == "claude_code"
-      assert meta.registered_via == "dashboard"
-    end
-
-    test "passes through tenant_context unchanged" do
-      ctx = %{some: :tenant, context: 42}
-      opts = ExternalAgentsCore.build_registration_opts("My Agent", "claude_code", ctx)
-      assert Keyword.get(opts, :tenant_context) == ctx
     end
   end
 

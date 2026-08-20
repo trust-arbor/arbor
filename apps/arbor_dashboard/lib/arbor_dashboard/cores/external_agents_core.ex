@@ -13,79 +13,13 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
 
   ## Responsibilities
 
-  - Static template definitions for known agent types
   - Filtering profiles to "external agents owned by this user"
   - Formatting profiles for display in the table
-  - Building option lists for `Arbor.Agent.Lifecycle.create/2`
   - Display formatting (timestamps, error messages, filenames)
 
-  Side effects (calling `Lifecycle.create`, `Security.revoke_identity`,
-  `Lifecycle.list_agents`) live in `Arbor.Dashboard.Components.ExternalAgentsComponent`.
+  Registration policy and all side effects live behind public Agent/Security
+  facades in `Arbor.Dashboard.Components.ExternalAgentsComponent`.
   """
-
-  # ===========================================================================
-  # Static configuration — agent type templates
-  # ===========================================================================
-
-  @agent_types [
-    %{
-      type: "claude_code",
-      label: "Claude Code",
-      description:
-        "Anthropic's Claude Code CLI / desktop client. Default capabilities mirror the legacy ClaudeSession bridge: filesystem read/write, safe shell commands, web fetch, and limited agent spawning.",
-      capabilities: [
-        %{resource: "arbor://fs/read/**"},
-        %{resource: "arbor://fs/write/**"},
-        %{resource: "arbor://shell/exec/git"},
-        %{resource: "arbor://shell/exec/mix"},
-        %{resource: "arbor://shell/exec/elixir"},
-        %{resource: "arbor://shell/exec/iex"},
-        %{resource: "arbor://shell/exec/ls"},
-        %{resource: "arbor://shell/exec/grep"},
-        %{resource: "arbor://shell/exec/find"},
-        %{resource: "arbor://shell/exec/curl"},
-        %{resource: "arbor://agent/spawn"},
-        %{resource: "arbor://net/http/"},
-        %{resource: "arbor://tool/use/"}
-      ]
-    },
-    %{
-      type: "codex",
-      label: "OpenAI Codex CLI",
-      description: "Reserved for future use. Same default cap set as Claude Code.",
-      capabilities: [
-        %{resource: "arbor://fs/read/**"},
-        %{resource: "arbor://shell/exec/git"},
-        %{resource: "arbor://tool/use/"}
-      ]
-    },
-    %{
-      type: "external",
-      label: "Generic External Agent",
-      description:
-        "Minimal cap set: read-only filesystem and tool use. Grant more after registration if needed.",
-      capabilities: [
-        %{resource: "arbor://fs/read/**"},
-        %{resource: "arbor://tool/use/"}
-      ]
-    }
-  ]
-
-  @doc "Return the static list of available agent type templates."
-  @spec agent_types() :: [map()]
-  def agent_types, do: @agent_types
-
-  @doc """
-  Look up an agent type template by its `type` string.
-
-  Falls back to the last entry (the generic `external` template) when the
-  requested type is unknown, so the registration handler always has a usable
-  template even for typos or removed types.
-  """
-  @spec find_agent_type(String.t()) :: map()
-  def find_agent_type(type) when is_binary(type) do
-    Enum.find(@agent_types, List.last(@agent_types), fn t -> t.type == type end)
-  end
 
   # ===========================================================================
   # Construct
@@ -148,41 +82,6 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
   defp compare_datetime_desc(%DateTime{} = a, %DateTime{} = b) do
     DateTime.compare(a, b) != :lt
   end
-
-  # ===========================================================================
-  # Reduce — pure builders for downstream side-effect callers
-  # ===========================================================================
-
-  @doc """
-  Build the keyword list of options for `Arbor.Agent.Lifecycle.create/2` to
-  register a new external agent.
-
-  Pure: takes the display name, agent type string, and tenant context, returns
-  the opts. The caller is responsible for actually invoking Lifecycle.
-
-  Always sets `return_identity: true` so the caller can hand the freshly-generated
-  private key to the human operator exactly once.
-  """
-  @spec build_registration_opts(String.t(), String.t(), any()) :: keyword()
-  def build_registration_opts(display_name, agent_type, tenant_context) do
-    template = find_agent_type(agent_type)
-
-    [
-      capabilities: template.capabilities,
-      tenant_context: tenant_context,
-      metadata: %{
-        external_agent: true,
-        agent_type: agent_type,
-        registered_via: "dashboard"
-      },
-      return_identity: true
-    ]
-    |> maybe_add_display_name(display_name)
-  end
-
-  defp maybe_add_display_name(opts, nil), do: opts
-  defp maybe_add_display_name(opts, ""), do: opts
-  defp maybe_add_display_name(opts, _name), do: opts
 
   @doc """
   Check whether a given owner is the registered owner of a given profile.
@@ -369,6 +268,9 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
   @spec format_error(any()) :: String.t()
   def format_error(:not_owner), do: "You can only modify agents you registered."
   def format_error(:unauthenticated), do: "Sign in to register external agents."
+  def format_error(:unauthorized), do: "You are not authorized to register external agents."
+  def format_error(:unsupported_agent_type), do: "That external agent type is not supported."
+  def format_error({:approval_required, _id}), do: "Registration requires operator approval."
   def format_error(:security_unavailable), do: "Security subsystem unavailable. Try again later."
 
   def format_error(:return_identity_not_honored),

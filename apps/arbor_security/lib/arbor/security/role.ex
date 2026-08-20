@@ -18,6 +18,8 @@ defmodule Arbor.Security.Role do
   - `:admin` — full access to all resources (`arbor://**`)
   - `:viewer` — least-privilege default for OIDC-authenticated humans;
     only ambient signal subscription
+  - `:external_agent_registrar` — may create only the fixed external-agent
+    profiles owned by `arbor_agent`; not assigned to OIDC users by default
   - `:dev_admin` — only available when
     `config :arbor_security, :enable_dev_admin_role, true`. Bundles the
     capabilities that were previously auto-granted in dev (consensus admin
@@ -40,6 +42,9 @@ defmodule Arbor.Security.Role do
     ],
     viewer: [
       "arbor://signals/subscribe/security"
+    ],
+    external_agent_registrar: [
+      "arbor://agent/lifecycle/create/external/**"
     ]
   }
 

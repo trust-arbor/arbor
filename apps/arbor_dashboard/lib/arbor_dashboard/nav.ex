@@ -62,6 +62,7 @@ defmodule Arbor.Dashboard.Nav do
       |> assign(:current_agent_id, agent_id)
       |> assign(:current_user_display_name, display_name)
       |> assign(:session_token, session["session_token"])
+      |> assign(:local_dev_operator?, session["local_dev_operator"] == true)
       |> assign(:tenant_context, tenant_context)
       |> assign(:authenticated?, agent_id != nil)
 
