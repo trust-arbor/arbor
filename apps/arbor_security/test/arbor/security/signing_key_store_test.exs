@@ -6,11 +6,13 @@ defmodule Arbor.Security.SigningKeyStoreTest do
   alias Arbor.Security
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.SigningKeyStore
+  alias Arbor.Security.TestBootstrap
 
   @test_agent_id "agent_test_signing_key_store_#{:erlang.unique_integer([:positive])}"
 
   setup_all do
     replace_signing_store!()
+    on_exit(&TestBootstrap.restore_supervised_tree!/0)
     :ok
   end
 

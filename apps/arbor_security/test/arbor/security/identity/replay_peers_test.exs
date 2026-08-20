@@ -2,6 +2,7 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Security.Identity.ReplayPeers
+  alias Arbor.Security.TestBootstrap
 
   @moduletag :integration
   @moduletag :slow
@@ -29,7 +30,7 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
     end
 
     tracker = restart_replay_peers(probe_fun: probe_fun)
-    on_exit(fn -> restart_replay_peers([]) end)
+    on_exit(fn -> TestBootstrap.restore_supervised_tree!() end)
 
     assert_receive {:probe_started, first_worker, ^peer_node, first_generation}, 1_000
 
@@ -72,7 +73,7 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
 
   test "security regression: expired foreign classification detects app start without reconnect" do
     restart_replay_peers(foreign_ttl_ms: 100)
-    on_exit(fn -> restart_replay_peers([]) end)
+    on_exit(fn -> TestBootstrap.restore_supervised_tree!() end)
 
     {peer, peer_node} = start_foreign_peer("replay_revalidation")
     on_exit(fn -> safely_stop_peer(peer) end)

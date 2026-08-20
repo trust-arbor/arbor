@@ -129,43 +129,9 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
 
     {:ok, _} = Application.ensure_all_started(:arbor_security)
     _ = TestBootstrap.start!()
-    restore_extra_security_test_children()
     :ok
   end
 
   defp restore_env(_app, key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_env(_app, key, value), do: Application.put_env(:arbor_security, key, value)
-
-  defp restore_extra_security_test_children do
-    signing_authority_owner_token = make_ref()
-
-    for child <- [
-          {Arbor.Security.IssuerRegistry, []},
-          {Arbor.Security.SigningAuthorityStateOwner,
-           broker_token: signing_authority_owner_token},
-          {Arbor.Security.SigningAuthorityBroker,
-           state_owner_token: signing_authority_owner_token},
-          {Arbor.Security.DeliveryReceiptBroker, []}
-        ] do
-      start_security_test_child(child)
-    end
-  end
-
-  defp start_security_test_child(spec) do
-    child_spec = Supervisor.child_spec(spec, [])
-
-    case Supervisor.start_child(Arbor.Security.Supervisor, child_spec) do
-      {:ok, _} ->
-        :ok
-
-      {:error, {:already_started, _}} ->
-        :ok
-
-      {:error, :already_present} ->
-        :ok
-
-      {:error, reason} ->
-        raise "unexpected start_security_test_child error: #{inspect(reason)}"
-    end
-  end
 end

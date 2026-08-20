@@ -37,10 +37,13 @@ defmodule Arbor.Security.AuthorityStore do
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
+    # Child id is the registered name, not the module. Several stores run under
+    # one supervisor; a module id would collide. Ownership proofs equate
+    # Process.whereis(name) with the child pid listed under that same id.
     name = Keyword.get(opts, :name, __MODULE__)
 
     %{
-      id: {__MODULE__, name},
+      id: name,
       start: {__MODULE__, :start_link, [opts]},
       type: :worker,
       restart: :permanent,

@@ -6,6 +6,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Security.TestBootstrap
 
   @moduletag :fast
   @store_name :arbor_security_signing_keys
@@ -95,7 +96,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
       restore_env(:system_authority_mode, previous_mode)
       restore_env(:master_key_path, previous_master_key_path)
       stop_signing_store!()
-      start_ephemeral_signing_store!()
+      TestBootstrap.restore_supervised_tree!()
       remove_fixture!(fixture_root)
     end)
 
@@ -408,25 +409,6 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   end
 
   defp restart_signing_store!(table), do: replace_signing_store!(table)
-
-  defp start_ephemeral_signing_store! do
-    case AuthorityStore.start_link(
-           name: @store_name,
-           backend: nil,
-           namespace: "signing_keys",
-           hydration_limit: 100
-         ) do
-      {:ok, pid} ->
-        Process.unlink(pid)
-        :ok
-
-      {:error, {:already_started, _pid}} ->
-        :ok
-
-      {:error, reason} ->
-        raise "failed to restore signing store: #{inspect(reason)}"
-    end
-  end
 
   defp stop_signing_store! do
     case Supervisor.terminate_child(Arbor.Security.Supervisor, @store_name) do
