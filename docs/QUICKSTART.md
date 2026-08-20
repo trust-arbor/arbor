@@ -27,9 +27,15 @@ PostgreSQL is **not** required. The default is `ARBOR_DB=sqlite`.
 git clone https://github.com/trust-arbor/arbor.git
 cd arbor
 mise install
+./bin/mix deps.get
 ```
 
 Use `./bin/mix` for every Mix command so the pinned Erlang/Elixir versions run.
+
+`deps.get` is a separate step because `arbor.setup` is itself a Mix task in this
+umbrella — Mix must resolve and compile the project before it can run it, so the
+dependencies have to exist first. Skipping it fails with
+`Can't continue due to errors on dependencies`.
 
 ## 2. SQLite setup
 
@@ -103,6 +109,14 @@ Or open `http://localhost:4001/chat` and talk to the agent there.
 - **Multi-node / durability.** SQLite is the clone-laptop default. Use
   `ARBOR_DB=postgres` when you need concurrent writers or a shared cluster
   database.
+- **Stay single-node while onboarding.** Signed MCP refuses whenever this node
+  is connected to a peer that also runs `:arbor_security`, because nonces are
+  node-local and a captured request could be replayed against that peer. If
+  `mix arbor.signer` returns 401, the response now names the reason
+  (`cluster_replay_protection_unavailable`); disconnect with
+  `mix arbor.cluster disconnect <node>`. Note both ends redial every 30s, and a
+  third non-hidden node connected to both will re-mesh them regardless — see
+  `mix help arbor.cluster`.
 - **Paid APIs** (Anthropic, OpenAI, Gemini, xAI) work, but
   `mix arbor.doctor --configure` will not pick them while OpenRouter, a local
   server, or ACP is available.

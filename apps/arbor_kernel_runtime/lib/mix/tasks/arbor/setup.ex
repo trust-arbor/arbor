@@ -100,25 +100,43 @@ defmodule Mix.Tasks.Arbor.Setup do
   end
 
   defp ensure_hex_and_rebar do
-    # Install Hex if not available
-    unless Code.ensure_loaded?(Hex) do
-      Mix.Task.run("local.hex", ["--force", "--if-missing"])
-    end
-
-    # Install rebar3 if not available
+    # `--if-missing` is already a no-op when the archive is installed, so do
+    # not gate on `Code.ensure_loaded?(Hex)`. That guard produced a FALSE
+    # POSITIVE on a clean machine: `Hex` was loadable while `Hex.Stdlib` was
+    # not, so the install was skipped and the next step failed inside a
+    # half-loaded Hex.
+    Mix.Task.run("local.hex", ["--force", "--if-missing"])
     Mix.Task.run("local.rebar", ["--force", "--if-missing"])
     {:ok, "hex + rebar ready"}
   rescue
     e -> {:error, Exception.message(e)}
   end
 
+  # Runs in a FRESH VM, never `Mix.Task.run("deps.get")`.
+  #
+  # Hex is only partially usable in the VM that is running this task: on a
+  # clean Debian 13 box `Code.ensure_loaded?(Hex)` was true while
+  # `Code.ensure_loaded?(Hex.Stdlib)` was false, and in-process `deps.get`
+  # died with `function Hex.Stdlib.ensure_application!/1 is undefined` — an
+  # error that reads like a corrupt Hex install rather than a VM-state
+  # problem. A subprocess loads the archive normally at boot, which is why
+  # running `./bin/mix deps.get` by hand always worked.
+  #
+  # This is invisible on a developer machine that already has a fully loaded
+  # Hex, which is how it survived to a first-run onboarding path.
   defp fetch_deps do
-    case Mix.Task.run("deps.get") do
-      _ -> {:ok, "done"}
+    case System.cmd(mix_executable(), ["deps.get"], stderr_to_stdout: true) do
+      {_output, 0} ->
+        {:ok, "done"}
+
+      {output, status} ->
+        {:error, "mix deps.get exited #{status}\n#{String.trim(output)}"}
     end
   rescue
     e -> {:error, Exception.message(e)}
   end
+
+  defp mix_executable, do: System.find_executable("mix") || "mix"
 
   defp setup_env do
     env_path = Path.join(File.cwd!(), ".env")
