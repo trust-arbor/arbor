@@ -186,6 +186,13 @@ defmodule Arbor.Security.UriRegistry do
     # Agent identity and profile
     "arbor://agent/identity",
     "arbor://agent/profile",
+    # Identity-alias management (arbor://identity/alias/manage) — authorized by
+    # `Arbor.Agent.IdentityAliases.link/3` and `unlink/2`, which redirect a
+    # principal's future OIDC logins onto a primary account. It was gated but
+    # never registered, so the check could not pass for ANY caller and
+    # `mix arbor.user.link` was dead on arrival. Same class as the
+    # auto_promote/map entries above.
+    "arbor://identity/alias",
 
     # ACP handler
     "arbor://acp/tool",

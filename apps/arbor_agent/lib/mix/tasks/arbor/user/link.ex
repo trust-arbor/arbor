@@ -8,6 +8,14 @@ defmodule Mix.Tasks.Arbor.User.Link do
       mix arbor.user.link --unlink <id>                       # remove a link
       mix arbor.user.link --list <id>                         # list linked identities
 
+  ## Options
+
+    * `--as <principal>` — the identity performing the link. Linking redirects
+      a principal's future logins, so it is capability-gated on
+      `arbor://identity/alias/manage`. Defaults to the local-operator
+      principal, which is enough on a single-operator dev box; the capability
+      check is the real control, so this default cannot grant anything.
+
   ## Examples
 
       # You have an existing account (human_def456) with agents and data.
@@ -31,7 +39,8 @@ defmodule Mix.Tasks.Arbor.User.Link do
   @switches [
     to: :string,
     unlink: :string,
-    list: :string
+    list: :string,
+    as: :string
   ]
 
   @impl Mix.Task
@@ -50,11 +59,11 @@ defmodule Mix.Tasks.Arbor.User.Link do
         list_aliases(opts[:list])
 
       opts[:unlink] ->
-        unlink(opts[:unlink])
+        unlink(opts[:unlink], caller_id(opts))
 
       length(args) == 1 and opts[:to] ->
         [new_login_id] = args
-        link(new_login_id, opts[:to])
+        link(new_login_id, opts[:to], caller_id(opts))
 
       true ->
         Mix.shell().error("""
@@ -69,14 +78,25 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  defp link(secondary_id, primary_id) do
-    # Show what we're about to do
-    Mix.shell().info("Linking #{secondary_id} → #{primary_id}")
-    Mix.shell().info("  All logins producing #{secondary_id} will resolve to #{primary_id}")
+  defp link(secondary_id, primary_id, caller_id) do
+    # Announce the INTENT only. This previously printed "Linking X → Y / All
+    # logins producing X will resolve to Y" before the call, so a failure read
+    # as though the link had happened.
+    Mix.shell().info("Linking #{secondary_id} → #{primary_id} (as #{caller_id})")
 
-    case rpc!(Arbor.Agent.IdentityAliases, :link, [secondary_id, primary_id]) do
+    case rpc!(Arbor.Agent.IdentityAliases, :link, [caller_id, secondary_id, primary_id]) do
       :ok ->
         Mix.shell().info("Linked successfully.")
+        Mix.shell().info("  All logins producing #{secondary_id} now resolve to #{primary_id}")
+
+      {:error, {:unauthorized_alias_management, reason}} ->
+        Mix.shell().error("""
+        #{caller_id} may not manage identity aliases (#{inspect(reason)}).
+
+        Linking redirects a principal's future logins, so it requires
+        arbor://identity/alias/manage. Grant it to the caller, or re-run with
+        --as <principal> for an identity that holds it.
+        """)
 
       {:error, :cannot_alias_self} ->
         Mix.shell().error("Cannot link an identity to itself.")
@@ -91,15 +111,38 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  defp unlink(secondary_id) do
+  defp unlink(secondary_id, caller_id) do
     resolved = rpc!(Arbor.Agent.IdentityAliases, :resolve, [secondary_id])
 
     if resolved == secondary_id do
       Mix.shell().info("#{secondary_id} is not an alias — nothing to unlink.")
     else
-      rpc!(Arbor.Agent.IdentityAliases, :unlink, [secondary_id])
-      Mix.shell().info("Unlinked #{secondary_id} (was → #{resolved})")
+      case rpc!(Arbor.Agent.IdentityAliases, :unlink, [caller_id, secondary_id]) do
+        :ok ->
+          Mix.shell().info("Unlinked #{secondary_id} (was → #{resolved})")
+
+        {:error, {:unauthorized_alias_management, reason}} ->
+          Mix.shell().error(
+            "#{caller_id} may not manage identity aliases (#{inspect(reason)}). " <>
+              "Re-run with --as <principal> for an identity holding " <>
+              "arbor://identity/alias/manage."
+          )
+
+        {:error, reason} ->
+          Mix.shell().error("Failed: #{inspect(reason)}")
+      end
     end
+  end
+
+  # The principal performing the link. `IdentityAliases.link/3` authorizes it
+  # against `arbor://identity/alias/manage` — without a caller the whole
+  # surface is an account-takeover vector (M5), which is why the arity is 3.
+  #
+  # Defaults to the local-operator principal so a single-operator dev box needs
+  # no flag; the capability check remains the real control, so defaulting here
+  # cannot grant anything.
+  defp caller_id(opts) do
+    opts[:as] || Arbor.Contracts.Security.Identity.local_operator_id()
   end
 
   defp list_aliases(primary_id) do

@@ -157,6 +157,37 @@ defmodule Arbor.Contracts.Security.Identity do
   end
 
   @doc """
+  The stable local-operator principal used when no OIDC provider is configured.
+
+  ONE definition, in the lowest layer, because more than one surface needs it
+  and they cannot depend on each other: `ArborDashboard.OidcAuth` writes it into
+  the session on the no-OIDC path, and CLI Mix tasks (`arbor_agent`, L7) need
+  the same id to give a terminal turn a principal. The dashboard is L9, so the
+  CLI cannot read it from there.
+
+  The `human_` prefix is load-bearing — `AuthDecision` identity checks and
+  `Capability.validate_principal_id/1` both key off it, and an egress
+  disclosure capability's `principal_scope` requires it.
+
+  DEV-ONLY convenience; callers must gate on that themselves. This is a
+  principal asserted by local configuration, not one proved by an
+  authenticated login. Never resolve to it when `require_auth` is true or an
+  OIDC provider is configured.
+
+  Real OIDC logins derive their own `human_<hash>` from `iss:sub`
+  (`Arbor.Security.OIDC.IdentityStore.derive_agent_id/1`) and are folded onto a
+  primary account with `mix arbor.user.link`, so this id can serve as the
+  primary a first-time operator accumulates grants under.
+
+  ## Examples
+
+      iex> Identity.local_operator_id()
+      "human_dashboard"
+  """
+  @spec local_operator_id() :: String.t()
+  def local_operator_id, do: "human_dashboard"
+
+  @doc """
   Check if a value is a valid identity status.
 
   Valid statuses are `:active`, `:suspended`, and `:revoked`.
