@@ -72,7 +72,10 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
 
       case previous_seam do
         nil ->
-          Application.delete_env(:arbor_security, :authority_root_freeze_after_ets_insert_test_seam)
+          Application.delete_env(
+            :arbor_security,
+            :authority_root_freeze_after_ets_insert_test_seam
+          )
 
         value ->
           Application.put_env(
@@ -148,6 +151,10 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
   end
 
   test "foreign named claim table fails Application start closed" do
+    restore_root = unique_abs_root("foreign-table-restore")
+    Application.put_env(:arbor_security, :authority_state_root, restore_root)
+    Application.delete_env(:arbor_security, JSONFile)
+
     table = claim_table()
     assert :ok = Application.stop(:arbor_security)
     assert :ets.whereis(table) == :undefined
@@ -258,6 +265,7 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
 
     Application.put_env(:arbor_security, :start_children, true)
     put_kernel_runtime(start_profile: :activation_only)
+
     assert {:ok, %{root: nil, start_profile: :activation_only}} =
              Config.startup_store_snapshot(:application)
 
