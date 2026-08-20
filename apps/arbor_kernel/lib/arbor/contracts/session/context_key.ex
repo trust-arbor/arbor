@@ -46,6 +46,19 @@ defmodule Arbor.Contracts.Session.ContextKey do
   @spec session_id() :: String.t()
   def session_id, do: "#{@session_ns}.id"
 
+  @doc """
+  Alias of `session_id/0` whose LEAF segment is `session_id`.
+
+  `ExecHandler` derives an action's flat parameter name from the last
+  dot-separated segment of a `context_keys` entry, so `session.id` arrives at
+  the action as `id` — which matches no declared schema key. Actions whose
+  Jido schema requires `session_id` must bind THIS key instead.
+
+  Same value as `session_id/0`; it exists only so the leaf matches.
+  """
+  @spec session_id_param() :: String.t()
+  def session_id_param, do: "#{@session_ns}.session_id"
+
   @doc "Agent identifier owning this session."
   @spec agent_id() :: String.t()
   def agent_id, do: "#{@session_ns}.agent_id"
@@ -188,6 +201,7 @@ defmodule Arbor.Contracts.Session.ContextKey do
 
   @all_keys [
     "session.id",
+    "session.session_id",
     "session.agent_id",
     "session.input",
     "session.input_type",

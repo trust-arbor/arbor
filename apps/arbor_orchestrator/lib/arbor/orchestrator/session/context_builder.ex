@@ -63,6 +63,10 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   def session_base_values(state) do
     base = %{
       "session.id" => state.session_id,
+      # Same value, leaf-matched. ExecHandler names an action parameter after
+      # the LAST segment of a context key, so `session.id` reaches an action as
+      # `id`. Actions declaring `session_id` must bind `session.session_id`.
+      "session.session_id" => state.session_id,
       "session.agent_id" => state.agent_id,
       "session.trust_baseline" => to_string(Map.get(state, :trust_baseline, :ask)),
       "session.turn_count" => get_turn_count(state),

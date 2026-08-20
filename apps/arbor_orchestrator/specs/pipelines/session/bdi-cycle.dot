@@ -296,7 +296,7 @@ digraph BDICycle {
     type="exec",
     target="action",
     action="session_memory.checkpoint",
-    context_keys="session.id,session.turn_count,session.agent_id",
+    context_keys="session.session_id,session.turn_count,session.agent_id",
     output_prefix="session"
   ]
 
