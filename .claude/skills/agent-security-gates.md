@@ -530,6 +530,54 @@ another one. It doubles as user documentation — anyone standing up agents need
     `context[:agent_id]` or fake `browser_session` without the envelope
     is not browser authority. Do not invent a host Browser facade.
 
+## 22. Taint LEVEL is provenance — a classifier may only escalate it
+
+- **What:** `Arbor.Contracts.Security.Taint` is four-dimensional, and `level`
+  (`:trusted | :derived | :untrusted | :hostile`) tracks **provenance**, not
+  safety — "where did this come from", which is a historical fact. `join/2` uses
+  `max_by(levels(), …)`, so level is monotonically non-decreasing under
+  composition, and nothing in the tree ever raises content TO `:trusted`.
+- **Symptom:** a proposal to "reclassify `:untrusted` → `:trusted` once the
+  injection classifier passes it", or code that reads a scan result and lowers
+  `level`.
+- **Action:** never downgrade `level` on a detector result. A classifier can only
+  *fail to find* something; "Prompt Guard 2 didn't flag this" is not "this is
+  safe", and treating the first as the second is exactly what the H4 section of
+  `.arbor/roadmap/2-planned/prompt-injection-defense-plan.md` refuses ("assume it
+  fails against a motivated attacker — that's why it's telemetry, not boundary").
+  Classifiers move taint UP only (`:untrusted → :hostile`).
+- **Record a clean scan in the dimensions built for it, not in `level`:** the
+  `sanitizations` bitmask has a `prompt_injection` bit (`0b00010000`), and
+  `confidence` runs `:unverified → :plausible → :corroborated → :verified`.
+  "Untrusted, injection-screened, corroborated" is more useful and more honest
+  than a laundered `:trusted`.
+- **The only legitimate downgrade is STRUCTURAL, and it stops at `:derived`.**
+  Quarantined extraction reduces `:untrusted`/`:hostile` → `:derived` when a value
+  passes a strict mechanically-checkable schema (`enum` / `int` / `match`), because
+  an integer *cannot carry* a payload — a structural guarantee, not an opinion.
+  `Outcome.taint_reductions` is the other path (e.g. human review). Neither ever
+  reaches `:trusted`. That is why there are four levels and not three: `:derived`
+  distinguishes *foreign but structurally constrained* from *born inside the TCB*.
+- **`:trusted` is real and still reachable — just never by derivation.** It is for
+  values Arbor authored that never touched a model or an external source: identity
+  data (`Signals.Taint.identity_taint`), explicit `TaintedValue` trusted wraps,
+  operator-authored config and graphs. Note `SignalTaint.for_llm_output/1` joins
+  every LLM output against a `:derived` floor, so **even perfectly trusted input
+  yields `:derived` output** — the model is not in the TCB either.
+- **Taint is NOT only for LLM-bound data.** `arbor_actions` threads
+  `operation_taint` into `Arbor.Security.Escalation` risk hints and into
+  `egress_taint`, and `ExecHandler` computes `Context.worst_taint/2` over an exec
+  node's `context_keys` to carry per-parameter taint to the action enforcement
+  boundary. So `:trusted` vs `:derived` already decides whether a capability-gated
+  action runs or escalates to human approval — not a future concern. For values
+  crossing a process or node boundary, bind them through
+  `Arbor.Contracts.Security.TaintEnvelope` (versioned, payload-digest-bound,
+  deliberately separate from the process-local `%Taint{}`) so provenance cannot be
+  stripped or swapped in transit.
+- **Useful test when assigning a level:** not "did an LLM see it?" but *"could an
+  adversary have influenced this byte?"* No → `:trusted`. Came out of a model →
+  `:derived` floor. Came from outside → `:untrusted`.
+
 ## Applied Learning: Security Gates
 
 Read this when changing capabilities, trust, authorization, identity, URI matching, taint, egress, or proof boundaries.
