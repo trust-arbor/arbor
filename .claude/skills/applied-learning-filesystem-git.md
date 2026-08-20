@@ -420,3 +420,7 @@ during PK-K0 acceptance).
 `apps/arbor_kernel/priv/.../mix.exs`. When a guard means exactly
 `apps/<app>/mix.exs`, filter tracked results by parsed path segments before
 treating them as package roots (found 2026-08-14 during K2 app-env validation).
+
+<!-- applied-learning: git-checkout-double-dash-restores-from-the-index-not-head -->
+<a id="applied-learning-git-checkout-double-dash-restores-from-the-index-not-head"></a>
+**`git checkout -- <file>` restores from the INDEX, not HEAD — which un-does nothing after a blocked commit.** When a pre-commit hook rejects a commit, the changes are still staged. Reaching for `git checkout -- <file>` then faithfully restores the exact content you are trying to discard, and a second edit lands on top of the first: on 2026-08-20 this produced two copies of one skills section and a corrupted applied-learning ownership range (the validator caught it, twice). Use `git restore --source=HEAD --staged --worktree <file>` to actually reset, and verify with a count (`grep -c` for a unique heading) before re-applying rather than assuming the revert worked.

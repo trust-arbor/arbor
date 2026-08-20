@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 654,
+  "entry_count": 655,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8046,8 +8046,21 @@
       "source_incident": "found 2026-08-20 during P1C acceptance when a fresh child-project run exposed 15 upward-dependency failures hidden by the umbrella build).",
       "content_sha256": "d8df6329bfbd791e509ea3e23f28cba8e60797128e306937bb6b136122d006e4",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 655,
+      "source_kind": "post-migration",
+      "slug": "git-checkout-double-dash-restores-from-the-index-not-head",
+      "title": "git checkout -- restores from the index, not HEAD.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-git-checkout-double-dash-restores-from-the-index-not-head",
+      "source_date": "2026-08-20",
+      "source_incident": "found 2026-08-20 when a pre-commit hook blocked a skills edit and `git checkout --` restored the still-staged bad copy, duplicating a section",
+      "always_loaded": false,
+      "content_sha256": "f4e854f17d35d98263fd241f82551f945a60cc7696fb46c2e70667b34dd07fa2"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 193
+  "post_migration_entry_count": 194
 }
