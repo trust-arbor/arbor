@@ -113,3 +113,9 @@ docs/blog/
 docs/specs/
 # Test workspace artifacts (ToolLoop file ops use these as workdirs)
 apps/arbor_llm/tmp/
+
+# Test workspace artifacts — capability-store persistence tests build their
+# backend dir from a RELATIVE Path.join("var", ...), so it lands under
+# whichever app's cwd the test ran in. Any app can grow one; nothing under
+# var/ is tracked.
+apps/*/var/
