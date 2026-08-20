@@ -14,7 +14,12 @@ def fail_validation(message)
 end
 
 def read_required(path)
-  File.read(path)
+  # Read as UTF-8 explicitly. Ruby otherwise uses the locale default, and the
+  # pre-commit hook runs without one — so every regexp against this corpus
+  # raised `invalid byte sequence in US-ASCII` on the first em dash, blocking
+  # any commit that touches .claude/. It only surfaced when those files
+  # changed, which is why it went unnoticed.
+  File.read(path, encoding: "UTF-8")
 rescue Errno::ENOENT
   fail_validation("missing file #{path.delete_prefix(ROOT + "/")}")
 end
