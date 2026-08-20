@@ -8,6 +8,9 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   """
 
   use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   @moduletag :fast
   @moduletag voice_id: "VOICE-17"
   @moduletag spec: "VOICE-17"
@@ -1786,11 +1789,28 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       refute term_contains_forbidden?(fail_logs, fail_forbidden, allow_turn_authority?: false)
 
       # Session admission rejects before apply/checkpoint/success signal.
-      assert {:noreply, after_fail} =
-               Session.handle_info(
-                 {:turn_result, fail_token, fail_msg, fail_outcome},
-                 started_fail
-               )
+      {admission_result, admission_log} =
+        with_log(fn ->
+          Session.handle_info(
+            {:turn_result, fail_token, fail_msg, fail_outcome},
+            started_fail
+          )
+        end)
+
+      assert {:noreply, after_fail} = admission_result
+
+      # The rejection must be DIAGNOSABLE to an operator. The returned atom is
+      # deliberately closed (asserted below), which previously meant the log
+      # said only ":turn_failed" for a graph that had run every node — leaving
+      # no way to tell an LLM refusal from a failed apply node.
+      assert admission_log =~ "Engine envelope rejected"
+      assert admission_log =~ "status=:fail"
+      assert admission_log =~ "last_node="
+
+      # ...but that diagnostic must not become a leak channel. failure_reason
+      # is free-form and may echo prompt or tool output, so it is bounded and
+      # must never carry bearer material.
+      refute term_contains_forbidden?(admission_log, fail_forbidden, allow_turn_authority?: false)
 
       assert after_fail.turn_count == 0
       assert after_fail.messages == []

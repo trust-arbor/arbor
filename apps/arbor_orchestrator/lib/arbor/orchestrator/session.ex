@@ -1874,7 +1874,51 @@ defmodule Arbor.Orchestrator.Session do
        when status in @admitted_final_statuses,
        do: :ok
 
-  defp admit_engine_run_result(_), do: {:error, :turn_failed}
+  # The RETURNED atom stays closed: callers, partial persistence, and the reply
+  # path all contract on exactly `:turn_failed`, and widening it would leak
+  # engine internals to the session's caller.
+  #
+  # But discarding the envelope left the OPERATOR with nothing either. A turn
+  # that ran every node to completion logged only ":turn_failed", so there was
+  # no way to tell an LLM refusal from a failed apply node without
+  # reconstructing the run from the pipeline journal. Log what the envelope
+  # actually said; keep the return value bounded.
+  defp admit_engine_run_result(result) do
+    Logger.warning("[Session] Engine envelope rejected: #{describe_rejected_outcome(result)}")
+
+    {:error, :turn_failed}
+  end
+
+  defp describe_rejected_outcome(%{final_outcome: %{} = outcome} = result) do
+    last_node =
+      result
+      |> Map.get(:context, %{})
+      |> Map.get("__completed_nodes__", [])
+      |> List.last()
+
+    "status=#{inspect(Map.get(outcome, :status))} " <>
+      "last_node=#{inspect(last_node)} " <>
+      "failure_reason=#{truncate_failure_reason(Map.get(outcome, :failure_reason))}"
+  end
+
+  defp describe_rejected_outcome(%{final_outcome: nil}),
+    do: "final_outcome=nil (the graph produced no terminal outcome)"
+
+  defp describe_rejected_outcome(_), do: "malformed engine envelope"
+
+  # Bounded: failure_reason is free-form and may echo prompt or tool output, so
+  # it is truncated rather than logged whole.
+  defp truncate_failure_reason(nil), do: "nil"
+
+  defp truncate_failure_reason(reason) when is_binary(reason) do
+    if String.length(reason) > 300 do
+      inspect(String.slice(reason, 0, 300) <> "...")
+    else
+      inspect(reason)
+    end
+  end
+
+  defp truncate_failure_reason(other), do: inspect(other)
 
   defp complete_turn_success(user_message, result, state) do
     completed = Map.get(result.context, "__completed_nodes__", [])
