@@ -538,7 +538,12 @@ defmodule Arbor.Security.IssuerRegistry do
        do: :inventory_limit_exceeded
 
   defp issuer_hydration_error(reason)
-       when reason in [:backend_unavailable, :outcome_unknown, :not_hydrated],
+       when reason in [
+              :backend_unavailable,
+              :outcome_unknown,
+              :not_hydrated,
+              :hydration_unavailable
+            ],
        do: :inventory_unavailable
 
   defp issuer_hydration_error(_reason), do: :malformed_inventory

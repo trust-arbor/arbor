@@ -33,11 +33,20 @@ defmodule Arbor.Security.Store.JSONFile do
 
   ## Configuration
 
+  Application-owned AuthorityStore identity is `config :arbor_security,
+  :authority_state_root` (absolute). This module's Application env `base_dir`
+  is a legacy alias of that key: Config canonicalizes both without `File.cwd!/0`
+  and fails closed on conflict. A default durable AuthorityStore with no
+  `base_dir` injects the frozen root; only an explicit absolute test root
+  bypasses it.
+
+      config :arbor_security, authority_state_root: "/var/lib/arbor/security"
       config :arbor_security, Arbor.Security.Store.JSONFile,
         base_dir: ".arbor/security"
 
   Pass `name: "capabilities"` (or another collection) and optional `base_dir:`
-  in opts. New objects use digest-only paths under `ns_<ns_digest>/`.
+  in opts. Isolated tests may pass an explicit absolute `base_dir`. New objects
+  use digest-only paths under `ns_<ns_digest>/`.
   """
 
   @behaviour Arbor.Contracts.Persistence.Store

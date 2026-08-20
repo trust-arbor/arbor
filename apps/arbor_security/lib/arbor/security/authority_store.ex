@@ -18,6 +18,7 @@ defmodule Arbor.Security.AuthorityStore do
   use GenServer
 
   alias Arbor.Contracts.Persistence.{Record, Revision}
+  alias Arbor.Security.Config
   alias Arbor.Security.Store.JSONFile
 
   @default_hydration_limit 10_000
@@ -120,19 +121,35 @@ defmodule Arbor.Security.AuthorityStore do
   end
 
   @impl GenServer
-  def handle_call({:authoritative_get, key}, _from, state) do
+  def handle_call(:hydration_status, _from, state) do
+    {:reply, {:ok, state.hydration_status}, state}
+  end
+
+  def handle_call(:durability_class, _from, state) do
+    {:reply, state.durability_class, state}
+  end
+
+  def handle_call(request, from, state) do
+    if poisoned?(state) do
+      {:reply, {:error, :hydration_unavailable}, state}
+    else
+      handle_authoritative_call(request, from, state)
+    end
+  end
+
+  defp handle_authoritative_call({:authoritative_get, key}, _from, state) do
     {:reply, get_record(state, key), state}
   end
 
-  def handle_call({:authoritative_list, nil}, _from, state) do
+  defp handle_authoritative_call({:authoritative_list, nil}, _from, state) do
     {:reply, list_records(state), state}
   end
 
-  def handle_call(:authoritative_entries, _from, state) do
+  defp handle_authoritative_call(:authoritative_entries, _from, state) do
     {:reply, list_entries(state), state}
   end
 
-  def handle_call(:take_hydrated_entries, _from, state) do
+  defp handle_authoritative_call(:take_hydrated_entries, _from, state) do
     case state.startup_entries do
       {:ready, entries} ->
         {:reply, {:ok, entries}, %{state | startup_entries: :refresh_required}}
@@ -145,52 +162,44 @@ defmodule Arbor.Security.AuthorityStore do
     end
   end
 
-  def handle_call({:put, key, value}, _from, state) do
+  defp handle_authoritative_call({:put, key, value}, _from, state) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_put(state, key, value, false)
     {:reply, reply, state}
   end
 
-  def handle_call({:delete, key}, _from, state) do
+  defp handle_authoritative_call({:delete, key}, _from, state) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_delete(state, key, false)
     {:reply, reply, state}
   end
 
-  def handle_call({:acknowledged_put, key, value}, _from, state) do
+  defp handle_authoritative_call({:acknowledged_put, key, value}, _from, state) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_put(state, key, value, true)
     {:reply, reply, state}
   end
 
-  def handle_call({:acknowledged_delete, key}, _from, state) do
+  defp handle_authoritative_call({:acknowledged_delete, key}, _from, state) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_delete(state, key, true)
     {:reply, reply, state}
   end
 
-  def handle_call(
-        {:acknowledged_compare_and_swap, key, expected, replacement},
-        _from,
-        state
-      ) do
+  defp handle_authoritative_call(
+         {:acknowledged_compare_and_swap, key, expected, replacement},
+         _from,
+         state
+       ) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_compare_and_swap(state, key, expected, replacement)
     {:reply, reply, state}
   end
 
-  def handle_call({:acknowledged_compare_and_delete, key, expected}, _from, state) do
+  defp handle_authoritative_call({:acknowledged_compare_and_delete, key, expected}, _from, state) do
     state = invalidate_startup_entries(state)
     {reply, state} = do_compare_and_delete(state, key, expected)
     {:reply, reply, state}
-  end
-
-  def handle_call(:hydration_status, _from, state) do
-    {:reply, {:ok, state.hydration_status}, state}
-  end
-
-  def handle_call(:durability_class, _from, state) do
-    {:reply, state.durability_class, state}
   end
 
   defp fetch_name(opts) do
@@ -216,6 +225,7 @@ defmodule Arbor.Security.AuthorityStore do
          {:ok, backend} <- fetch_backend(opts),
          :ok <- validate_backend(backend),
          {:ok, backend_opts} <- fetch_backend_opts(opts),
+         {:ok, backend_opts} <- inject_jsonfile_root(backend, backend_opts),
          {:ok, hydration_limit} <- fetch_hydration_limit(opts),
          {:ok, durability_class} <- resolve_durability(backend, backend_opts, namespace) do
       {:ok,
@@ -268,6 +278,35 @@ defmodule Arbor.Security.AuthorityStore do
   rescue
     _ -> {:error, :invalid_backend_opts}
   end
+
+  defp inject_jsonfile_root(nil, backend_opts), do: {:ok, backend_opts}
+
+  defp inject_jsonfile_root(backend, backend_opts) when backend != JSONFile,
+    do: {:ok, backend_opts}
+
+  defp inject_jsonfile_root(JSONFile, backend_opts) do
+    case Keyword.get(backend_opts, :base_dir) do
+      dir when is_binary(dir) and byte_size(dir) > 0 ->
+        if Path.type(dir) == :absolute do
+          {:ok, backend_opts}
+        else
+          put_frozen_jsonfile_root(backend_opts)
+        end
+
+      _missing ->
+        put_frozen_jsonfile_root(backend_opts)
+    end
+  end
+
+  defp put_frozen_jsonfile_root(backend_opts) do
+    case Config.authority_root() do
+      {:ok, root} -> {:ok, Keyword.put(backend_opts, :base_dir, root)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp poisoned?(%{persistence_mode: :durable, hydration_status: %{status: :failed}}), do: true
+  defp poisoned?(_state), do: false
 
   defp fetch_hydration_limit(opts) do
     case Keyword.get(opts, :hydration_limit, @default_hydration_limit) do

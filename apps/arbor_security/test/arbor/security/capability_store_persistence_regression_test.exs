@@ -583,7 +583,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       AuthorityStore.start_link(
         name: @capability_store,
         backend: backend,
-        backend_opts: [base_dir: tmp_dir],
+        backend_opts: [base_dir: absolute_test_root(tmp_dir)],
         namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
@@ -614,10 +614,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
-        backend_opts: [base_dir: backend_dir],
+        backend_opts: [base_dir: absolute_test_root(backend_dir)],
         namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
+  end
+
+  defp absolute_test_root(dir) when is_binary(dir) do
+    if Path.type(dir) == :absolute, do: dir, else: Path.expand(dir)
   end
 
   defp seed_durable_capabilities!(backend_dir, target_cap, total_count)

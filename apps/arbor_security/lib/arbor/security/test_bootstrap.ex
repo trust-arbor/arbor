@@ -262,20 +262,30 @@ defmodule Arbor.Security.TestBootstrap do
     end
 
     defp canonical_child_specs(token) do
-      backend =
-        Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
+      snapshot =
+        case Arbor.Security.Config.startup_store_snapshot(:test_bootstrap) do
+          {:ok, snapshot} ->
+            snapshot
+
+          {:error, reason} ->
+            raise "TestBootstrap: authority store snapshot failed: #{inspect(reason)}"
+        end
 
       store_specs =
         for {name, namespace, extra_opts} <- [
               {:arbor_security_capabilities, "capabilities",
-               [hydration_limit: Arbor.Security.Config.max_global_capabilities()]},
+               [hydration_limit: snapshot.capabilities_hydration_limit]},
               {:arbor_security_identities, "identities", []},
               {:arbor_security_signing_keys, "signing_keys", []},
               {:arbor_security_issuers, "issuers", []}
             ] do
           store_opts =
-            [name: name, backend: backend, namespace: namespace]
-            |> Keyword.merge(extra_opts)
+            Arbor.Security.Config.authority_store_start_opts(
+              name,
+              namespace,
+              snapshot,
+              extra_opts
+            )
 
           Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name)
         end

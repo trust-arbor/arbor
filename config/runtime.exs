@@ -34,6 +34,24 @@ if File.exists?(dotenv_path) do
 end
 
 # ============================================================================
+# Production security authority state root
+# ============================================================================
+# Explicit absolute path only. Full durable Security boots fail closed at
+# freeze if this is unset. :activation_only boots do not freeze and do not
+# require it. Do not default to cwd, ~, or ARBOR_DATA_DIR — that would
+# silently choose a second root. Migration to a new directory is a separate
+# operator action with a receipt.
+if config_env() == :prod do
+  case System.get_env("ARBOR_SECURITY_STATE_DIR") do
+    dir when is_binary(dir) and dir != "" ->
+      config :arbor_security, authority_state_root: dir
+
+    _unset ->
+      :ok
+  end
+end
+
+# ============================================================================
 # Production persistence
 # ============================================================================
 

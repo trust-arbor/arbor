@@ -562,7 +562,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     assert {:ok, %{status: :failed, reason: :hydration_limit_exceeded}} =
              AuthorityStore.hydration_status(name: @capability_store)
 
-    assert {:error, {:capability_restore_failed, :inventory_limit_exceeded}} =
+    assert {:error, {:capability_restore_failed, :hydration_unavailable}} =
              CapabilityStore.start_link([])
 
     # Availability probes only check whereis — process must not remain registered.
@@ -723,11 +723,15 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   end
 
   defp unique_dir(label) do
-    rel = Path.join("var", "capability-store-#{label}-#{:erlang.unique_integer([:positive])}")
-    abs = Path.expand(rel, File.cwd!())
+    abs =
+      Path.join(
+        System.tmp_dir!(),
+        "capability-store-#{label}-#{:erlang.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(abs)
     on_exit(fn -> File.rm_rf!(abs) end)
-    rel
+    abs
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)

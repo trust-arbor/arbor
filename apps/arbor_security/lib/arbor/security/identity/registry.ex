@@ -974,7 +974,12 @@ defmodule Arbor.Security.Identity.Registry do
        do: :inventory_limit_exceeded
 
   defp bounded_hydration_error(reason)
-       when reason in [:backend_unavailable, :outcome_unknown, :not_hydrated],
+       when reason in [
+              :backend_unavailable,
+              :outcome_unknown,
+              :not_hydrated,
+              :hydration_unavailable
+            ],
        do: :inventory_unavailable
 
   defp bounded_hydration_error(_reason), do: :malformed_inventory

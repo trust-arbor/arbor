@@ -634,7 +634,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
-        backend_opts: [base_dir: backend_dir],
+        backend_opts: [base_dir: absolute_test_root(backend_dir)],
         namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
@@ -650,7 +650,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
-        backend_opts: [base_dir: backend_dir],
+        backend_opts: [base_dir: absolute_test_root(backend_dir)],
         namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
@@ -673,6 +673,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   defp unique_integer, do: :erlang.unique_integer([:positive])
+
+  defp absolute_test_root(dir) when is_binary(dir) do
+    if Path.type(dir) == :absolute, do: dir, else: Path.expand(dir)
+  end
 
   # ==========================================================================
   # G1 — preserved same-resource grant is not replaced.

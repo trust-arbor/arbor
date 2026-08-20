@@ -9,6 +9,12 @@ defmodule Arbor.Security.Config do
   `Arbor.Security.Application.start/2` installs the claim table and freezes;
   the test env installs the table but does not auto-freeze.
 
+  Durable AuthorityStore identity is a config-owned absolute state root, frozen
+  through an Application-owned ETS claim. `:authority_state_root` is canonical;
+  `config :arbor_security, Arbor.Security.Store.JSONFile, base_dir: ...` is a
+  legacy alias. Equal canonical paths are one root; unequal paths fail closed.
+  Freeze runs only when startup will start durable (non-nil backend) stores.
+
   ## Configuration
 
       config :arbor_security,
@@ -32,6 +38,15 @@ defmodule Arbor.Security.Config do
   # :public because ExUnit freeze/restore and the Task-exit regression run
   # outside Application.start/2 and must insert_new/delete the snapshot.
   @enforcement_toggle_claim_table_access if(Mix.env() == :test, do: :public, else: :protected)
+  @authority_root_persistent_key {__MODULE__, :authority_root}
+  @authority_root_claim_table __MODULE__.AuthorityRootClaim
+  @authority_root_claim_key :claimed
+  @authority_root_claim_table_access if(Mix.env() == :test, do: :public, else: :protected)
+  @json_file_env Arbor.Security.Store.JSONFile
+  @config_env Mix.env()
+  @repo_root Path.expand("../../../../..", __DIR__)
+  @development_authority_root Path.expand(".arbor/security", @repo_root)
+  @authority_root_sources [:configured, :legacy_jsonfile_base_dir, :development_default]
   @enforcement_toggle_defaults [
     identity_verification: true,
     capability_signing_required: true,
@@ -118,10 +133,25 @@ defmodule Arbor.Security.Config do
       :ok
     end
 
+    @doc false
+    @spec restore_authority_root() :: :ok
+    def restore_authority_root do
+      :persistent_term.erase(@authority_root_persistent_key)
+      release_authority_root_freeze_claim()
+      :ok
+    end
+
     defp release_enforcement_toggle_freeze_claim do
       case :ets.whereis(@enforcement_toggle_claim_table) do
         :undefined -> :ok
         tid -> :ets.delete(tid, @enforcement_toggle_claim_key)
+      end
+    end
+
+    defp release_authority_root_freeze_claim do
+      case :ets.whereis(@authority_root_claim_table) do
+        :undefined -> :ok
+        tid -> :ets.delete(tid, @authority_root_claim_key)
       end
     end
   end
@@ -279,6 +309,26 @@ defmodule Arbor.Security.Config do
     end
   else
     def run_enforcement_toggle_freeze_after_ets_insert_test_seam, do: :ok
+  end
+
+  @doc false
+  @spec run_authority_root_freeze_after_ets_insert_test_seam() :: :ok
+  if Mix.env() == :test do
+    def run_authority_root_freeze_after_ets_insert_test_seam do
+      case Application.get_env(@app, :authority_root_freeze_after_ets_insert_test_seam) do
+        %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
+        when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
+               is_pid(notify_pid) ->
+          send(notify_pid, :authority_root_ets_snapshot_inserted)
+          Process.sleep(delay_ms)
+          :ok
+
+        _disabled_or_invalid ->
+          :ok
+      end
+    end
+  else
+    def run_authority_root_freeze_after_ets_insert_test_seam, do: :ok
   end
 
   @doc """
@@ -773,6 +823,143 @@ defmodule Arbor.Security.Config do
     Application.get_env(@app, :event_log_adapter, nil)
   end
 
+  # ===========================================================================
+  # Authority state root freeze
+  # ===========================================================================
+
+  @doc """
+  Configured storage backend for Application-owned AuthorityStore children.
+
+  Defaults to `Arbor.Security.Store.JSONFile`. `nil` selects ephemeral stores.
+  """
+  @spec storage_backend() :: module() | nil
+  def storage_backend do
+    Application.get_env(@app, :storage_backend, @json_file_env)
+  end
+
+  @doc false
+  @spec development_authority_root() :: String.t()
+  def development_authority_root, do: @development_authority_root
+
+  @doc """
+  Snapshot start_children, start_profile, backend, and hydration limit once.
+
+  Does not freeze or read the authority root.
+  """
+  @spec snapshot_startup_inputs() :: map()
+  def snapshot_startup_inputs do
+    %{
+      start_children: Application.get_env(@app, :start_children, true),
+      start_profile: Arbor.KernelRuntime.Config.start_profile(),
+      backend: storage_backend(),
+      capabilities_hydration_limit: max_global_capabilities()
+    }
+  end
+
+  @doc """
+  Compute the durable child-spec snapshot, freezing the authority root when needed.
+
+  `context` is `:application` or `:test_bootstrap`. Freeze runs only when that
+  context will start durable (non-nil backend) AuthorityStore children.
+  """
+  @spec startup_store_snapshot(:application | :test_bootstrap) ::
+          {:ok, map()} | {:error, term()}
+  def startup_store_snapshot(context) when context in [:application, :test_bootstrap] do
+    inputs = snapshot_startup_inputs()
+
+    if needs_durable_root?(inputs, context) do
+      with :ok <- freeze_authority_root(),
+           {:ok, root} <- authority_root() do
+        {:ok, Map.put(inputs, :root, root)}
+      end
+    else
+      {:ok, Map.put(inputs, :root, nil)}
+    end
+  end
+
+  @doc """
+  Frozen absolute authority state root, or `{:error, :authority_root_not_frozen}`.
+  """
+  @spec authority_root() :: {:ok, String.t()} | {:error, :authority_root_not_frozen}
+  def authority_root do
+    case installed_authority_root_snapshot() do
+      {:ok, %{root: root}} when is_binary(root) and byte_size(root) > 0 ->
+        {:ok, root}
+
+      _not_frozen ->
+        {:error, :authority_root_not_frozen}
+    end
+  end
+
+  @doc """
+  Freeze the canonical absolute authority root.
+
+  ETS `insert_new` of the snapshot map is the atomic claim. `persistent_term`
+  persist-if-absent may follow; it is not the claim. A missing claim table
+  fails closed. An already-installed snapshot is completed, never replaced.
+  """
+  @spec freeze_authority_root() :: :ok | {:error, term()}
+  def freeze_authority_root do
+    case installed_authority_root_snapshot() do
+      {:ok, snapshot} ->
+        complete_authority_root_snapshot(snapshot)
+        :ok
+
+      :absent ->
+        case compute_authority_root_candidate() do
+          {:ok, snapshot} -> claim_authority_root_snapshot(snapshot)
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  @doc false
+  @spec ensure_authority_root_claim_table() :: :ok | {:error, term()}
+  def ensure_authority_root_claim_table do
+    result =
+      case :ets.whereis(@authority_root_claim_table) do
+        :undefined ->
+          create_authority_root_claim_table()
+
+        _tid ->
+          accept_owned_authority_root_claim_table()
+      end
+
+    with :ok <- result do
+      rehydrate_authority_root_claim_from_snapshot()
+    end
+  end
+
+  @doc """
+  Keyword options for one Application/TestBootstrap AuthorityStore child.
+
+  `snapshot.backend` and, when the backend is a module, `snapshot.root` as
+  `base_dir` are the final overrides. Extra `:backend`, `:backend_opts`,
+  `:name`, and `:namespace` cannot replace them.
+  """
+  @spec authority_store_start_opts(atom(), String.t(), map(), keyword()) :: keyword()
+  def authority_store_start_opts(name, namespace, snapshot, extra \\ [])
+      when is_atom(name) and is_map(snapshot) and is_list(extra) do
+    dropped = Keyword.drop(extra, [:backend, :backend_opts, :name, :namespace])
+
+    backend_opts0 =
+      case Keyword.get(extra, :backend_opts, []) do
+        opts when is_list(opts) -> opts
+        _invalid -> []
+      end
+
+    backend_opts =
+      if is_nil(snapshot.backend) do
+        backend_opts0
+      else
+        Keyword.put(backend_opts0, :base_dir, snapshot.root)
+      end
+
+    dropped
+    |> Keyword.merge(name: name, namespace: namespace, backend: snapshot.backend)
+    |> Keyword.put(:backend_opts, backend_opts)
+  end
+
   defp enforcement_toggle(key, default) do
     case installed_enforcement_toggle_snapshot() do
       {:ok, %{^key => value}} -> value
@@ -900,6 +1087,223 @@ defmodule Arbor.Security.Config do
 
       _unavailable ->
         {:error, :enforcement_toggle_claim_table_unavailable}
+    end
+  end
+
+  defp needs_durable_root?(inputs, :application) do
+    start_children?(inputs.start_children) and stores_included?(inputs.start_profile) and
+      not is_nil(inputs.backend)
+  end
+
+  defp needs_durable_root?(inputs, :test_bootstrap) do
+    stores_included?(inputs.start_profile) and not is_nil(inputs.backend)
+  end
+
+  defp start_children?(false), do: false
+  defp start_children?(nil), do: false
+  defp start_children?(_value), do: true
+
+  defp stores_included?(:activation_only), do: false
+  defp stores_included?(_profile), do: true
+
+  defp compute_authority_root_candidate do
+    with {:ok, primary} <- fetch_primary_authority_root(),
+         {:ok, legacy} <- fetch_legacy_jsonfile_base_dir() do
+      combine_authority_root_candidates(primary, legacy)
+    end
+  end
+
+  defp fetch_primary_authority_root do
+    case Application.fetch_env(@app, :authority_state_root) do
+      :error -> {:ok, :absent}
+      {:ok, value} -> canonicalize_authority_root_value(value)
+    end
+  end
+
+  defp fetch_legacy_jsonfile_base_dir do
+    case Application.get_env(@app, @json_file_env, []) do
+      env when is_list(env) ->
+        if Keyword.keyword?(env) do
+          case Keyword.fetch(env, :base_dir) do
+            :error -> {:ok, :absent}
+            {:ok, value} -> canonicalize_authority_root_value(value)
+          end
+        else
+          {:error, :authority_root_invalid_legacy}
+        end
+
+      _invalid ->
+        {:error, :authority_root_invalid_legacy}
+    end
+  end
+
+  defp canonicalize_authority_root_value(value) when is_binary(value) and byte_size(value) > 0 do
+    case Path.type(value) do
+      :absolute ->
+        {:ok, Path.expand(value)}
+
+      _relative when @config_env == :dev ->
+        {:ok, Path.expand(value, @repo_root)}
+
+      _relative ->
+        {:error, :authority_root_not_absolute}
+    end
+  end
+
+  defp canonicalize_authority_root_value(_invalid), do: {:error, :authority_root_not_absolute}
+
+  defp combine_authority_root_candidates(:absent, :absent) do
+    if @config_env == :dev do
+      {:ok, %{root: @development_authority_root, source: :development_default}}
+    else
+      {:error, :authority_root_unconfigured}
+    end
+  end
+
+  defp combine_authority_root_candidates(primary, :absent) when is_binary(primary) do
+    {:ok, %{root: primary, source: :configured}}
+  end
+
+  defp combine_authority_root_candidates(:absent, legacy) when is_binary(legacy) do
+    {:ok, %{root: legacy, source: :legacy_jsonfile_base_dir}}
+  end
+
+  defp combine_authority_root_candidates(primary, legacy)
+       when is_binary(primary) and is_binary(legacy) and primary == legacy do
+    {:ok, %{root: primary, source: :configured}}
+  end
+
+  defp combine_authority_root_candidates(_primary, _legacy), do: {:error, :authority_root_conflict}
+
+  defp claim_authority_root_snapshot(snapshot) do
+    if insert_authority_root_snapshot_if_absent(snapshot) do
+      run_authority_root_freeze_after_ets_insert_test_seam()
+      persist_authority_root_snapshot_if_absent(snapshot)
+      :ok
+    else
+      case lookup_authority_root_ets_snapshot() do
+        {:ok, existing} ->
+          persist_authority_root_snapshot_if_absent(existing)
+          :ok
+
+        :absent ->
+          {:error, :authority_root_claim_table_unavailable}
+      end
+    end
+  end
+
+  defp installed_authority_root_snapshot do
+    case :persistent_term.get(@authority_root_persistent_key, :not_frozen) do
+      snapshot when is_map(snapshot) ->
+        case validate_authority_root_snapshot(snapshot) do
+          {:ok, valid} -> {:ok, valid}
+          :absent -> lookup_authority_root_ets_snapshot()
+        end
+
+      _not_frozen ->
+        lookup_authority_root_ets_snapshot()
+    end
+  end
+
+  defp validate_authority_root_snapshot(
+         %{root: root, source: source} = snapshot
+       )
+       when is_binary(root) and byte_size(root) > 0 and source in @authority_root_sources do
+    {:ok, snapshot}
+  end
+
+  defp validate_authority_root_snapshot(_invalid), do: :absent
+
+  defp complete_authority_root_snapshot(snapshot) do
+    insert_authority_root_snapshot_if_absent(snapshot)
+    persist_authority_root_snapshot_if_absent(snapshot)
+  end
+
+  defp insert_authority_root_snapshot_if_absent(snapshot) do
+    case :ets.whereis(@authority_root_claim_table) do
+      :undefined ->
+        false
+
+      tid ->
+        try do
+          :ets.insert_new(tid, {@authority_root_claim_key, snapshot})
+        rescue
+          ArgumentError ->
+            false
+        end
+    end
+  end
+
+  defp lookup_authority_root_ets_snapshot do
+    case :ets.whereis(@authority_root_claim_table) do
+      :undefined ->
+        :absent
+
+      tid ->
+        try do
+          case :ets.lookup(tid, @authority_root_claim_key) do
+            [{@authority_root_claim_key, snapshot}] when is_map(snapshot) ->
+              validate_authority_root_snapshot(snapshot)
+
+            _missing_or_invalid ->
+              :absent
+          end
+        rescue
+          ArgumentError ->
+            :absent
+        end
+    end
+  end
+
+  defp persist_authority_root_snapshot_if_absent(snapshot) do
+    case :persistent_term.get(@authority_root_persistent_key, :not_frozen) do
+      existing when is_map(existing) ->
+        :ok
+
+      _not_frozen ->
+        :persistent_term.put(@authority_root_persistent_key, snapshot)
+    end
+
+    :ok
+  end
+
+  defp rehydrate_authority_root_claim_from_snapshot do
+    case :persistent_term.get(@authority_root_persistent_key, :not_frozen) do
+      snapshot when is_map(snapshot) ->
+        insert_authority_root_snapshot_if_absent(snapshot)
+        :ok
+
+      _not_frozen ->
+        :ok
+    end
+  end
+
+  defp create_authority_root_claim_table do
+    try do
+      :ets.new(@authority_root_claim_table, [
+        :named_table,
+        :set,
+        @authority_root_claim_table_access,
+        read_concurrency: true
+      ])
+
+      :ok
+    rescue
+      ArgumentError ->
+        accept_owned_authority_root_claim_table()
+    end
+  end
+
+  defp accept_owned_authority_root_claim_table do
+    case :ets.info(@authority_root_claim_table, :owner) do
+      owner when owner == self() ->
+        :ok
+
+      owner when is_pid(owner) ->
+        {:error, {:authority_root_claim_table_foreign_owner, owner}}
+
+      _unavailable ->
+        {:error, :authority_root_claim_table_unavailable}
     end
   end
 end

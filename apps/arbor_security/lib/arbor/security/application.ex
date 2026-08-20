@@ -12,7 +12,8 @@ defmodule Arbor.Security.Application do
     # A pre-existing named table owned by anyone else is squatting: fail closed
     # before freeze or supervision so startup cannot continue with a mutable
     # foreign claim table.
-    with :ok <- Arbor.Security.Config.ensure_enforcement_toggle_claim_table() do
+    with :ok <- Arbor.Security.Config.ensure_enforcement_toggle_claim_table(),
+         :ok <- Arbor.Security.Config.ensure_authority_root_claim_table() do
       start_supervised_children()
     end
   end
@@ -22,53 +23,49 @@ defmodule Arbor.Security.Application do
 
     signing_authority_owner_token = make_ref()
 
-    children =
-      if Application.get_env(:arbor_security, :start_children, true) do
-        children_for_profile(
-          Arbor.KernelRuntime.Config.start_profile(),
-          signing_authority_owner_token
-        )
-      else
-        []
-      end
+    with {:ok, snapshot} <- Arbor.Security.Config.startup_store_snapshot(:application) do
+      children = children_from_snapshot(snapshot, signing_authority_owner_token)
 
-    # StateOwner and the broker are an ordered fail-closed pair. If the owner
-    # loses its in-memory snapshot, the broker must be stopped before the owner
-    # is restarted and then rebuilt only after the fresh owner is available.
-    opts = [strategy: :rest_for_one, name: Arbor.Security.Supervisor]
-    Supervisor.start_link(children, opts)
+      # StateOwner and the broker are an ordered fail-closed pair. If the owner
+      # loses its in-memory snapshot, the broker must be stopped before the owner
+      # is restarted and then rebuilt only after the fresh owner is available.
+      opts = [strategy: :rest_for_one, name: Arbor.Security.Supervisor]
+      Supervisor.start_link(children, opts)
+    end
   end
 
-  defp children_for_profile(:activation_only, signing_authority_owner_token) do
+  defp children_from_snapshot(%{start_children: false}, _signing_authority_owner_token), do: []
+  defp children_from_snapshot(%{start_children: nil}, _signing_authority_owner_token), do: []
+
+  defp children_from_snapshot(snapshot, signing_authority_owner_token) do
+    children_for_profile(snapshot, signing_authority_owner_token)
+  end
+
+  defp children_for_profile(%{start_profile: :activation_only}, signing_authority_owner_token) do
     core_security_children(signing_authority_owner_token)
   end
 
-  defp children_for_profile(:full, signing_authority_owner_token) do
-    security_store_children() ++ core_security_children(signing_authority_owner_token)
+  defp children_for_profile(snapshot, signing_authority_owner_token) do
+    security_store_children(snapshot) ++ core_security_children(signing_authority_owner_token)
   end
 
-  # Unknown profiles keep today's stores because KernelRuntime already fails closed.
-  defp children_for_profile(_profile, signing_authority_owner_token) do
-    security_store_children() ++ core_security_children(signing_authority_owner_token)
-  end
-
-  defp security_store_children do
+  defp security_store_children(snapshot) do
     [
       authority_store_child(
+        snapshot,
         :arbor_security_capabilities,
         "capabilities",
-        hydration_limit: Arbor.Security.Config.max_global_capabilities()
+        hydration_limit: snapshot.capabilities_hydration_limit
       ),
-      authority_store_child(:arbor_security_identities, "identities"),
-      authority_store_child(:arbor_security_signing_keys, "signing_keys"),
-      authority_store_child(:arbor_security_issuers, "issuers")
+      authority_store_child(snapshot, :arbor_security_identities, "identities"),
+      authority_store_child(snapshot, :arbor_security_signing_keys, "signing_keys"),
+      authority_store_child(snapshot, :arbor_security_issuers, "issuers")
     ]
   end
 
-  defp authority_store_child(name, namespace, opts \\ []) do
+  defp authority_store_child(snapshot, name, namespace, extra \\ []) do
     store_opts =
-      [name: name, backend: security_backend(), namespace: namespace]
-      |> Keyword.merge(opts)
+      Arbor.Security.Config.authority_store_start_opts(name, namespace, snapshot, extra)
 
     Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name)
   end
@@ -95,9 +92,5 @@ defmodule Arbor.Security.Application do
       # loses outstanding receipts fail-closed without cascading earlier children.
       {Arbor.Security.DeliveryReceiptBroker, []}
     ]
-  end
-
-  defp security_backend do
-    Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
   end
 end

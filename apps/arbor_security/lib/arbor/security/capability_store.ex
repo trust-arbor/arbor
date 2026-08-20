@@ -3109,6 +3109,8 @@ defmodule Arbor.Security.CapabilityStore do
   defp map_hydration_failure_reason(:hydration_limit_exceeded),
     do: :inventory_limit_exceeded
 
+  defp map_hydration_failure_reason(:hydration_unavailable), do: :hydration_unavailable
+
   defp map_hydration_failure_reason(_), do: :hydration_failed
 
   defp load_restore_candidates(entries) do

@@ -52,6 +52,18 @@ defmodule Arbor.Security.AuthorityStoreTest do
     def durability_class(_opts), do: :process_lifetime
   end
 
+  defmodule HydratedMalformedBackend do
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    def put(_key, _value, _opts), do: :not_ok
+    def get(_key, _opts), do: {:ok, :not_a_record}
+    def delete(_key, _opts), do: {:ok, :not_deleted}
+    def list(_opts), do: {:ok, []}
+    def compare_and_swap(_key, _expected, _replacement, _opts), do: {:ok, :not_a_record}
+    def compare_and_delete(_key, _expected, _opts), do: {:ok, :not_deleted}
+    def durability_class(_opts), do: :process_lifetime
+  end
+
   defmodule MissingDeleteBackend do
     def put(_key, _value, _opts), do: :ok
     def get(_key, _opts), do: {:error, :not_found}
@@ -364,7 +376,7 @@ defmodule Arbor.Security.AuthorityStoreTest do
               reason: :bounded_inventory_unsupported
             }} = AuthorityStore.hydration_status(name: name)
 
-    assert {:error, :bounded_inventory_unsupported} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.take_hydrated_entries(name: name)
   end
 
@@ -451,8 +463,11 @@ defmodule Arbor.Security.AuthorityStoreTest do
               reason: :hydration_limit_exceeded
             }} = AuthorityStore.hydration_status(name: name)
 
-    assert {:error, :hydration_limit_exceeded} = AuthorityStore.authoritative_list(name: name)
-    assert {:error, :hydration_limit_exceeded} = AuthorityStore.authoritative_entries(name: name)
+    assert {:error, :hydration_unavailable} = AuthorityStore.authoritative_list(name: name)
+    assert {:error, :hydration_unavailable} = AuthorityStore.authoritative_entries(name: name)
+    assert {:error, :hydration_unavailable} =
+             AuthorityStore.put("k", Record.new("k"), name: name)
+
     refute_received :overflow_get
   end
 
@@ -460,26 +475,31 @@ defmodule Arbor.Security.AuthorityStoreTest do
     malformed = unique_name(:authority_malformed)
     raising = unique_name(:authority_raising)
     missing_cas = unique_name(:authority_missing_cas)
+    hydrated_malformed = unique_name(:authority_hydrated_malformed)
 
     start_supervised!({AuthorityStore, name: malformed, backend: MalformedBackend})
     start_supervised!({AuthorityStore, name: raising, backend: RaisingBackend})
     start_supervised!({AuthorityStore, name: missing_cas, backend: MissingCasBackend})
+    start_supervised!(
+      {AuthorityStore, name: hydrated_malformed, backend: HydratedMalformedBackend}
+    )
 
     assert {:ok, %{status: :failed, reason: :invalid_backend_response}} =
              AuthorityStore.hydration_status(name: malformed)
 
-    assert {:error, :invalid_backend_response} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.authoritative_get("k", name: malformed)
 
-    assert {:error, :invalid_backend_response} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.put("k", Record.new("k"), name: malformed)
 
-    assert {:error, :outcome_unknown} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_put("k", Record.new("k"), name: malformed)
 
-    assert {:error, :outcome_unknown} = AuthorityStore.acknowledged_delete("k", name: malformed)
+    assert {:error, :hydration_unavailable} =
+             AuthorityStore.acknowledged_delete("k", name: malformed)
 
-    assert {:error, :outcome_unknown} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_compare_and_swap(
                "k",
                :not_found,
@@ -487,7 +507,7 @@ defmodule Arbor.Security.AuthorityStoreTest do
                name: malformed
              )
 
-    assert {:error, :outcome_unknown} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_compare_and_delete(
                "k",
                Record.new("k"),
@@ -497,14 +517,14 @@ defmodule Arbor.Security.AuthorityStoreTest do
     assert {:ok, %{status: :failed, reason: :backend_unavailable}} =
              AuthorityStore.hydration_status(name: raising)
 
-    assert {:error, :backend_unavailable} = AuthorityStore.authoritative_get("k", name: raising)
+    assert {:error, :hydration_unavailable} = AuthorityStore.authoritative_get("k", name: raising)
 
-    assert {:error, :backend_unavailable} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.put("k", Record.new("k"), name: raising)
 
-    assert {:error, :outcome_unknown} = AuthorityStore.acknowledged_delete("k", name: raising)
+    assert {:error, :hydration_unavailable} = AuthorityStore.acknowledged_delete("k", name: raising)
 
-    assert {:error, :outcome_unknown} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_compare_and_swap(
                "k",
                :not_found,
@@ -512,10 +532,12 @@ defmodule Arbor.Security.AuthorityStoreTest do
                name: raising
              )
 
-    assert {:error, :outcome_unknown} =
+    assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_compare_and_delete("k", Record.new("k"), name: raising)
 
     assert Process.alive?(Process.whereis(raising))
+
+    assert {:ok, %{status: :ready}} = AuthorityStore.hydration_status(name: missing_cas)
 
     assert {:error, :unsupported} =
              AuthorityStore.acknowledged_compare_and_swap(
@@ -530,6 +552,35 @@ defmodule Arbor.Security.AuthorityStoreTest do
                "k",
                Record.new("k"),
                name: missing_cas
+             )
+
+    assert {:ok, %{status: :ready}} = AuthorityStore.hydration_status(name: hydrated_malformed)
+
+    assert {:error, :invalid_backend_response} =
+             AuthorityStore.authoritative_get("k", name: hydrated_malformed)
+
+    assert {:error, :invalid_backend_response} =
+             AuthorityStore.put("k", Record.new("k"), name: hydrated_malformed)
+
+    assert {:error, :outcome_unknown} =
+             AuthorityStore.acknowledged_put("k", Record.new("k"), name: hydrated_malformed)
+
+    assert {:error, :outcome_unknown} =
+             AuthorityStore.acknowledged_delete("k", name: hydrated_malformed)
+
+    assert {:error, :outcome_unknown} =
+             AuthorityStore.acknowledged_compare_and_swap(
+               "k",
+               :not_found,
+               Record.new("k"),
+               name: hydrated_malformed
+             )
+
+    assert {:error, :outcome_unknown} =
+             AuthorityStore.acknowledged_compare_and_delete(
+               "k",
+               Record.new("k"),
+               name: hydrated_malformed
              )
   end
 
