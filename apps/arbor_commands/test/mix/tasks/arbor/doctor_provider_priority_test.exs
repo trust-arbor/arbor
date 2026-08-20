@@ -1,11 +1,11 @@
-defmodule Arbor.LLM.DoctorProviderPriorityTest do
+defmodule Mix.Tasks.Arbor.DoctorProviderPriorityTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
   alias Arbor.LLM.ProviderRegistry
 
-  # Lives here (L2) rather than in arbor_kernel_runtime (L1) so the membership
-  # check can call ProviderRegistry without an upward L1 -> L2 dependency.
+  # This command-layer test can call both Doctor and ProviderRegistry without
+  # making either lower-level application depend upward on arbor_commands.
   test "every doctor catalog key is a known ProviderRegistry provider" do
     keys =
       Enum.map(Mix.Tasks.Arbor.Doctor.provider_priority(), fn {catalog_key, _, _} ->

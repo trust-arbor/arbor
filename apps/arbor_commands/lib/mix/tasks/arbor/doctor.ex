@@ -1,5 +1,4 @@
 defmodule Mix.Tasks.Arbor.Doctor do
-  use Boundary, classify_to: Arbor.KernelRuntime.DevTools
   @shortdoc "Provider health + runtime axis introspection"
   @moduledoc """
   Multi-mode triage tool. With no flags, runs the LLM provider health
@@ -734,16 +733,19 @@ defmodule Mix.Tasks.Arbor.Doctor do
           Mix.shell().info("    #{check}: #{inspect(result)}")
         end
 
-      {:error, failures} ->
+      {:error, failures} when is_list(failures) ->
         for {check, reason} <- failures do
           Mix.shell().info("    #{check}: FAILED — #{inspect(reason)}")
         end
+
+      {:error, reason} ->
+        Mix.shell().info("    availability: FAILED — #{Arbor.LLM.ExternalTerm.inspect(reason)}")
     end
   end
 
   defp install_hint(entry) do
     case entry.check_result do
-      {:error, failures} ->
+      {:error, failures} when is_list(failures) ->
         failures
         |> Enum.map(fn
           {:cli_tools, {:missing, tools, _}} when is_list(tools) ->
@@ -778,6 +780,43 @@ defmodule Mix.Tasks.Arbor.Doctor do
         end)
         |> Enum.reject(&is_nil/1)
         |> Enum.join("; ")
+        |> presence()
+
+      # Local providers (:ollama, :lm_studio) report a SINGLE sanitized reason
+      # from `ProviderCatalog.bounded_local_check/2`, not a keyword list of
+      # {check, reason}. That fell into the list mapper above, matched no
+      # clause, and produced an empty string — and `""` is truthy, so the
+      # caller printed a bare "LM Studio: " with no advice at all.
+      {:error, _sanitized_reason} ->
+        local_start_hint(entry)
+
+      _ ->
+        nil
+    end
+  end
+
+  # `Enum.join([])` is `""`, which is truthy — an unhandled failure shape would
+  # otherwise print a dangling "<provider>: " label. Collapse empty to nil so
+  # the caller skips the line entirely.
+  defp presence(""), do: nil
+  defp presence(hint) when is_binary(hint), do: hint
+
+  defp local_start_hint(%{type: :local} = entry) do
+    case local_probe_base(entry) do
+      nil -> "Start the local server, then re-run mix arbor.doctor"
+      base -> "Start the local server at #{base}"
+    end
+  end
+
+  defp local_start_hint(_entry), do: nil
+
+  # The contract probes the model-list endpoint; show the server root instead,
+  # which is what the operator actually starts and what the *_BASE_URL env vars
+  # take.
+  defp local_probe_base(entry) do
+    case Map.get(entry, :contract) do
+      %{probes: [%{url: url} | _]} when is_binary(url) ->
+        String.replace_suffix(url, "/models", "")
 
       _ ->
         nil

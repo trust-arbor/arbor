@@ -35,6 +35,8 @@ defmodule ArborCommands.MixProject do
   defp deps do
     [
       {:arbor_kernel_runtime, in_umbrella: true},
+      # L2 LLM diagnostics used directly by Mix.Tasks.Arbor.Doctor.
+      {:arbor_llm, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
       {:arbor_shell, in_umbrella: true},
