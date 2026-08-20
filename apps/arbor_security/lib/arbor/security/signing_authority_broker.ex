@@ -1699,8 +1699,12 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   defp canonicalize_proof(_), do: {:error, :invalid_acquisition_proof}
 
+  # Local proof: minted in-process and bound to a purpose + owner pid on this
+  # node, so it is not replayable against a peer. See
+  # `Verifier.verify_local_possession_proof/1` — using the inbound `verify/1`
+  # here made a connected peer (even an ephemeral mix node) fail startup.
   defp safe_verify(proof) do
-    Verifier.verify(proof)
+    Verifier.verify_local_possession_proof(proof)
   rescue
     _ -> {:error, :verification_failed}
   catch

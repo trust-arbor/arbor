@@ -53,6 +53,7 @@ for child <- [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.IssuerRegistry, []},
       {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.Identity.ReplayPeers, []},
       {Arbor.Security.SystemAuthority, []},
       {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
       # After identity registry + signing-key store (started above).

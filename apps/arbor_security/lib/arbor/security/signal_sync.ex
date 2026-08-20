@@ -27,6 +27,12 @@ defmodule Arbor.Security.SignalSync do
         }
 
   @spec establish(atom(), [atom()], boolean()) :: {:ok, t() | nil} | {:error, term()}
+  # Config asks through here rather than reaching Arbor.Signals.Config
+  # directly: the extraction-boundary guard keeps Arbor.Signals references
+  # inside the distributed-sync surface, and this module is that surface.
+  @spec transport_configured?() :: boolean()
+  def transport_configured?, do: Arbor.Signals.Config.security_sync_transport_configured?()
+
   def establish(_role, _events, false), do: {:ok, nil}
 
   def establish(role, events, true) when is_atom(role) and is_list(events) do

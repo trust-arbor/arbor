@@ -108,6 +108,7 @@ end
 for child <- [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.Identity.ReplayPeers, []},
       {Arbor.Security.SystemAuthority, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []},

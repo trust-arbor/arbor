@@ -99,6 +99,10 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.IssuerRegistry, []},
       {Arbor.Security.Identity.NonceCache, []},
+      # Classifies connected nodes for the signed-request replay gate. Before
+      # NonceCache's consumers so the gate reads a live table; absent, every
+      # peer counts as a replay peer (fail closed).
+      {Arbor.Security.Identity.ReplayPeers, []},
       {Arbor.Security.SystemAuthority, []},
       # Persistent metadata outlives broker-only restarts; keys remain in SigningKeyStore.
       {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},

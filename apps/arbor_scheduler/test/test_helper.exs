@@ -40,6 +40,7 @@ for child <- [
       # CapabilityStore persists, RateLimiter is referenced by constraint
       # checks). Mirror what arbor_security's own test_helper starts.
       {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.Identity.ReplayPeers, []},
       {Arbor.Security.SystemAuthority, []},
       {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
       {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},

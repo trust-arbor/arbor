@@ -24,8 +24,34 @@ defmodule Arbor.Security.Identity.Verifier do
   verification error.
   """
   @spec verify(term()) :: {:ok, String.t()} | {:error, atom()}
-  def verify(request) do
-    with :ok <- Config.admit_cluster_signed_request_replay_protection(),
+  def verify(request), do: do_verify(request, true)
+
+  @doc """
+  Verify a proof that was minted by THIS node and never transmitted.
+
+  Identical to `verify/1` — timestamp freshness, key lookup, signature, and
+  single-use nonce all still apply — except that it does not consult the
+  cluster replay gate.
+
+  That gate exists because a `SignedRequest` captured *in transit* could be
+  replayed against a peer whose nonce cache has not seen it. A local
+  possession proof never crosses the network: it is built in-process by
+  `build_signing_authority_acquisition_proof/3` and bound to a `purpose` and
+  an `owner` pid on this node, so no peer could act on a copy of it.
+
+  Applying the inbound gate here deadlocked startup. `Scheduler.Identity`
+  opens its signing authority during `init/1`, and while any peer was
+  connected — including the ephemeral `mix` node that `mix arbor.start` uses
+  to observe readiness — the gate refused, `arbor_scheduler` failed to start,
+  and the whole boot cascaded down with
+  `{:signing_authority_open_failed, :cluster_replay_protection_unavailable}`.
+  Found 2026-08-19 on a fresh Debian 13 box.
+  """
+  @spec verify_local_possession_proof(term()) :: {:ok, String.t()} | {:error, atom()}
+  def verify_local_possession_proof(request), do: do_verify(request, false)
+
+  defp do_verify(request, gate_cluster_replay?) do
+    with :ok <- maybe_admit_cluster_replay(gate_cluster_replay?),
          {:ok, request} <- canonicalize_request(request),
          :ok <- check_timestamp_freshness(request),
          {:ok, public_key} <- lookup_agent_key(request.agent_id),
@@ -38,6 +64,11 @@ defmodule Arbor.Security.Identity.Verifier do
   catch
     :exit, _ -> {:error, :verification_unavailable}
   end
+
+  defp maybe_admit_cluster_replay(true),
+    do: Config.admit_cluster_signed_request_replay_protection()
+
+  defp maybe_admit_cluster_replay(false), do: :ok
 
   defp canonicalize_request(request) do
     case SignedRequest.canonicalize(request) do

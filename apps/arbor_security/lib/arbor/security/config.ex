@@ -615,22 +615,43 @@ defmodule Arbor.Security.Config do
   @spec distributed_signals_enabled?() :: boolean()
   def distributed_signals_enabled? do
     enforcement_toggle(:distributed_signals, true) and
-      Arbor.Signals.Config.security_sync_transport_configured?()
+      Arbor.Security.SignalSync.transport_configured?()
   end
 
-  # Production is Node.list() != []. The :test seam can only add presence
-  # and cannot hide connected peers or re-open multi-node acceptance.
+  # Production is "a connected node could accept a replayed signed request",
+  # which `ReplayPeers` narrows from bare `Node.list() != []` to peers that
+  # actually run :arbor_security — see that module for why, and for the
+  # fail-closed rules (anything not positively foreign counts as a peer).
+  # The :test seam can only add presence and cannot hide connected peers or
+  # re-open multi-node acceptance.
   @doc false
   @spec cluster_peers_present?() :: boolean()
   def cluster_peers_present? do
-    Node.list() != [] or test_injected_cluster_peers_present?()
+    Arbor.Security.Identity.ReplayPeers.peers_present?() or
+      test_injected_cluster_peers_present?()
   end
 
-  @doc false
+  @doc """
+  Whether signed-request replay protection holds well enough to accept one.
+
+  Refuses when a connected node could accept the same `SignedRequest`
+  replayed against it — that is, a peer running `:arbor_security`. Peers
+  that cannot verify the signature at all are not replay targets and do not
+  refuse the request; see `Arbor.Security.Identity.ReplayPeers`.
+
+  Deliberately does NOT consult `authenticated_security_sync_transport?`.
+  That flag governs whether remote *capability and identity* mutations may
+  be applied; it says nothing about nonce propagation, which no transport
+  currently performs. Reading it here implied that enabling security sync
+  would make multi-node signed requests safe, which is false. The real
+  successor is per-nonce ownership within the zone — see the 2026-08-19
+  section of `.arbor/roadmap/1-brainstorming/`
+  `trust-zone-segmentation-architecture.md`.
+  """
   @spec admit_cluster_signed_request_replay_protection() ::
           :ok | {:error, :cluster_replay_protection_unavailable}
   def admit_cluster_signed_request_replay_protection do
-    if cluster_peers_present?() and not Arbor.Signals.authenticated_security_sync_transport?() do
+    if cluster_peers_present?() do
       {:error, :cluster_replay_protection_unavailable}
     else
       :ok
@@ -856,5 +877,4 @@ defmodule Arbor.Security.Config do
         {:error, :enforcement_toggle_claim_table_unavailable}
     end
   end
-
 end
