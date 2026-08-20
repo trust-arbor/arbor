@@ -3231,7 +3231,7 @@
       "anchor": "applied-learning-an-immutable-apple-container-image-reference-is-not-a-no-pull-guarantee",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 auditing Apple Container 1.1.0 and containerization 0.35.0).",
-      "content_sha256": "ce99a12d8f3bcf95f825bf5c4f62ff0683c0a8b606bc3c4e37bf4fe835e2292b",
+      "content_sha256": "0fdfc33950583a7892255c40743214968589c8c54d0fb1c2ac60ab44b7ea3323",
       "always_loaded": false
     },
     {
