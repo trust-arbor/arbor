@@ -523,6 +523,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
+  alias Arbor.Security.TestSupport.RecordingEventLogAdapter
 
   alias __MODULE__.CASSandbox
 
@@ -2905,15 +2906,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   end
 
   defp ensure_event_log do
-    name = Arbor.Historian.EventLog.ETS
-    backend = Arbor.Persistence.EventLog.ETS
-
-    case apply(backend, :start_link, [[name: name]]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _}} -> :ok
-    end
+    previous = Application.get_env(:arbor_security, :event_log_adapter, :unset)
+    RecordingEventLogAdapter.setup()
+    Application.put_env(:arbor_security, :event_log_adapter, RecordingEventLogAdapter)
+    on_exit(fn -> restore_application_env(:event_log_adapter, previous) end)
+    :ok
   end
 
+  defp restore_application_env(key, :unset), do: Application.delete_env(:arbor_security, key)
   defp restore_application_env(key, nil), do: Application.delete_env(:arbor_security, key)
 
   defp restore_application_env(key, value),

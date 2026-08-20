@@ -1,4 +1,3 @@
-# credo:disable-for-this-file Credo.Check.Refactor.Apply
 defmodule Arbor.Security.AuditChainTest do
   @moduledoc """
   Tests for the cryptographic audit chain — delegation chain verification,
@@ -12,17 +11,12 @@ defmodule Arbor.Security.AuditChainTest do
   alias Arbor.Security
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.TestSupport.RecordingEventLogAdapter
 
   setup do
-    # Start EventLog ETS backend for event queries
-    # Must match @event_log_name in Events module (Arbor.Historian.EventLog.ETS)
-    name = Arbor.Historian.EventLog.ETS
-    backend = Arbor.Persistence.EventLog.ETS
-
-    case apply(backend, :start_link, [[name: name]]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _}} -> :ok
-    end
+    previous = Application.get_env(:arbor_security, :event_log_adapter, :unset)
+    RecordingEventLogAdapter.setup()
+    Application.put_env(:arbor_security, :event_log_adapter, RecordingEventLogAdapter)
 
     # Generate identities
     {:ok, parent} = Identity.generate(name: "human-parent")
@@ -31,13 +25,7 @@ defmodule Arbor.Security.AuditChainTest do
     :ok = Registry.register(parent)
     :ok = Registry.register(agent)
 
-    on_exit(fn ->
-      try do
-        if Process.whereis(name), do: GenServer.stop(name)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
+    on_exit(fn -> restore_env(:event_log_adapter, previous) end)
 
     {:ok, parent: parent, agent: agent}
   end
@@ -273,4 +261,7 @@ defmodule Arbor.Security.AuditChainTest do
       assert is_binary(matching.data["signed_at"])
     end
   end
+
+  defp restore_env(key, :unset), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
 end

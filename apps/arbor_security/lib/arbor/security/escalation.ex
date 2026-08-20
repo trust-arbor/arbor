@@ -122,8 +122,8 @@ defmodule Arbor.Security.Escalation do
 
       true ->
         # Prefer the non-blocking InteractionRouter path when configured
-        # AND the router is loadable at runtime. Fall back to the legacy
-        # blocking consensus path otherwise.
+        # AND the configured router is loadable at runtime. Fall back to
+        # the legacy blocking consensus path otherwise.
         if Config.use_interaction_router_for_approval?() and interaction_router_available?() do
           submit_via_router(capability, principal_id, resource_uri, opts)
         else
@@ -133,24 +133,22 @@ defmodule Arbor.Security.Escalation do
   end
 
   @doc """
-  Submit an authorization request via `Arbor.Comms.InteractionRouter`.
+  Submit an authorization request via `Config.interaction_router/0`.
 
   Non-blocking. Returns `{:ok, :pending_approval, request_id}`
   immediately. The agent's session/executor subscribes to
   `Arbor.Contracts.Comms.Interaction.response_topic_for_agent(principal_id)`
   and receives `{:interaction_response, %{...}}` when the human responds.
 
-  Uses runtime bridges so `arbor_security` (Level 1) doesn't get a
-  hierarchy-violating dep on `arbor_comms` (also Level 1).
+  The production default is `Arbor.Comms.InteractionRouter`, injected
+  through Config so `arbor_security` does not compile against arbor_comms.
   """
   @spec submit_via_router(map(), String.t(), String.t(), keyword() | map()) ::
           {:ok, :pending_approval, String.t()} | {:error, term()}
   def submit_via_router(capability, principal_id, resource_uri, opts \\ []) do
-    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
-    interaction_mod = Module.concat([:Arbor, :Contracts, :Comms, :Interaction])
+    router = Config.interaction_router()
 
-    if Code.ensure_loaded?(router) and Code.ensure_loaded?(interaction_mod) and
-         function_exported?(router, :request, 2) do
+    if interaction_router_available?() do
       # Route to the human operator's user_id (the same identifier
       # Signal.PresenceKeeper registers with PresenceTracker). Without
       # this lookup, user_id == agent_id silently maps to a presence
@@ -169,7 +167,7 @@ defmodule Arbor.Security.Escalation do
         metadata: metadata
       }
 
-      case apply(router, :request, [attrs, []]) do
+      case router.request(attrs, []) do
         {:ok, request_id} ->
           {:ok, :pending_approval, request_id}
 
@@ -195,8 +193,10 @@ defmodule Arbor.Security.Escalation do
 
   # Cheap availability check used to gate the new path on each call.
   defp interaction_router_available? do
-    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
-    Code.ensure_loaded?(router) and function_exported?(router, :request, 2)
+    router = Config.interaction_router()
+
+    is_atom(router) and not is_nil(router) and Code.ensure_loaded?(router) and
+      function_exported?(router, :request, 2)
   end
 
   # Resolve the human operator's user_id for routing. Uses
