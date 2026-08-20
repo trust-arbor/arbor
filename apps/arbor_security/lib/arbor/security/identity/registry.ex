@@ -40,6 +40,10 @@ defmodule Arbor.Security.Identity.Registry do
 
   require Logger
 
+  # Issuer stamped on identities minted by `mix arbor.user.init`. Must match
+  # `Arbor.Security.local_human_claims/1`.
+  @local_pseudo_issuer "arbor://local"
+
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Security.AuthorityStore
@@ -125,6 +129,36 @@ defmodule Arbor.Security.Identity.Registry do
 
   def register_oidc(_identity, _id_token, _provider_config),
     do: {:error, :invalid_oidc_registration}
+
+  @doc """
+  Register a LOCAL human identity — development installs only.
+
+  `register/2` refuses `human_` identities with `:oidc_proof_required` so a
+  human principal cannot be minted without an authenticated login. This is the
+  third and last piece of the deliberate dev carve-out behind
+  `mix arbor.user.init`: without registration the identity exists and holds
+  capabilities it can never exercise, because `AuthDecision` resolves every
+  principal through `identity_status/1`.
+
+  It preserves the invariant `register_oidc/3` actually enforces — that
+  `agent_id` equals the derivation from its claims — which IS checkable here.
+  What cannot be checked is the issuer, because the issuer is this machine.
+  That is precisely what the gates authorize, so they are re-checked at this
+  boundary rather than trusted from the caller:
+
+    * `config :arbor_security, :allow_local_human_identity` must be `true`
+    * the identity's issuer must be exactly `"arbor://local"`
+
+  A local-issuer identity registered here is still refused by
+  `identity_status/1` in any environment where that flag is not set, so even a
+  copied authority store cannot make it authenticate in production.
+  """
+  @spec register_local_human(Identity.t()) :: :ok | {:error, term()}
+  def register_local_human(%Identity{} = identity) do
+    GenServer.call(__MODULE__, {:register_local_human, identity})
+  end
+
+  def register_local_human(_identity), do: {:error, :invalid_local_registration}
 
   @doc """
   Look up the public key for an agent.
@@ -377,6 +411,19 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @impl true
+  def handle_call({:register_local_human, %Identity{} = identity}, _from, state) do
+    with :ok <- admit_local_human_registration(identity),
+         true <- human_identity?(identity),
+         {:ok, expected_id} <- derive_local_human_id(identity),
+         :ok <- match_human_identity(identity.agent_id, expected_id) do
+      register_validated_identity(state, identity, oidc_issuer: @local_pseudo_issuer)
+    else
+      false -> {:reply, {:error, :invalid_human_identity}, state}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  @impl true
   def handle_call({:lookup, agent_id}, _from, state) do
     result =
       case Map.get(state.by_agent_id, agent_id) do
@@ -537,16 +584,60 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def handle_call({:get_status, agent_id}, _from, state) do
+    entry = Map.get(state.by_agent_id, agent_id)
+
     result =
-      case Map.get(state.by_agent_id, agent_id) do
-        nil -> {:error, :not_found}
-        %{status: status} -> {:ok, status}
-        # Old entries without status field default to :unknown
-        _entry -> {:ok, :unknown}
+      cond do
+        is_nil(entry) ->
+          {:error, :not_found}
+
+        local_identity_rejected?(entry) ->
+          Logger.error(
+            "[IdentityRegistry] REFUSING local-issuer human principal #{agent_id} " <>
+              "in a non-dev environment. Its recorded oidc_issuer is " <>
+              "#{inspect(@local_pseudo_issuer)}, meaning it was minted by " <>
+              "mix arbor.user.init on a development install and must never " <>
+              "authenticate here. This should be unreachable — the security " <>
+              "state root is environment-specific — so a shared or copied " <>
+              "authority store is the likely cause."
+          )
+
+          {:error, :not_found}
+
+        true ->
+          case entry do
+            %{status: status} -> {:ok, status}
+            # Old entries without status field default to :unknown
+            _ -> {:ok, :unknown}
+          end
       end
 
     {:reply, result, state}
   end
+
+  # DETECTIVE control, complementing the preventive ones.
+  #
+  # `mix arbor.user.init` can only MINT a local-issuer human identity under
+  # three dev gates, and prod uses a different `authority_state_root` (it fails
+  # closed at freeze without an explicit one), so such a record should never be
+  # visible here. Those are both preventive: if the roots are ever merged — a
+  # copied store, a restored backup, an operator pointing
+  # ARBOR_SECURITY_STATE_DIR at the dev directory — nothing would notice.
+  #
+  # The provenance is recorded on the identity, so notice. Refuse to resolve
+  # any human principal whose issuer is the local pseudo-issuer unless this
+  # really is a dev install. Returning `:not_found` is the honest answer for
+  # authorization purposes — as far as this environment is concerned, that
+  # principal does not exist — and `AuthDecision` already fails it closed as
+  # `:unknown_identity` under strict identity mode.
+  defp local_identity_rejected?(%{metadata: metadata}) when is_map(metadata) do
+    issuer = Map.get(metadata, "oidc_issuer") || Map.get(metadata, :oidc_issuer)
+
+    issuer == @local_pseudo_issuer and
+      Application.get_env(:arbor_security, :allow_local_human_identity, false) != true
+  end
+
+  defp local_identity_rejected?(_entry), do: false
 
   # ===========================================================================
   # Private helpers
@@ -675,6 +766,41 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp match_human_identity(actual_id, expected_id),
     do: {:error, {:oidc_identity_mismatch, actual_id, :expected, expected_id}}
+
+  # Re-check the gate at this boundary. The facade checks it too; a security
+  # kernel should not rely on its caller having done so.
+  defp admit_local_human_registration(identity) do
+    issuer = identity_issuer(identity)
+
+    cond do
+      Application.get_env(:arbor_security, :allow_local_human_identity, false) != true ->
+        {:error, :local_human_identity_disabled}
+
+      issuer != @local_pseudo_issuer ->
+        {:error, {:not_a_local_identity, issuer}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp identity_issuer(%Identity{metadata: metadata}) when is_map(metadata) do
+    Map.get(metadata, "oidc_issuer") || Map.get(metadata, :oidc_issuer)
+  end
+
+  defp identity_issuer(_identity), do: nil
+
+  # The same derivation `register_oidc/3` verifies, over the identity's own
+  # recorded claims. This proves the id was not hand-chosen; it does not prove
+  # the issuer, which is the part the dev gates deliberately stand in for.
+  defp derive_local_human_id(%Identity{metadata: metadata}) when is_map(metadata) do
+    issuer = Map.get(metadata, "oidc_issuer") || Map.get(metadata, :oidc_issuer)
+    subject = Map.get(metadata, "oidc_sub") || Map.get(metadata, :oidc_sub)
+
+    derive_verified_human_id(%{"iss" => issuer, "sub" => subject})
+  end
+
+  defp derive_local_human_id(_identity), do: {:error, :invalid_oidc_claims}
 
   defp human_identity?(identity) do
     case Map.get(identity, :agent_id) do

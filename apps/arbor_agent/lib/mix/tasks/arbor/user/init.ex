@@ -145,13 +145,21 @@ defmodule Mix.Tasks.Arbor.User.Init do
       {:error, {:unauthorized, :unknown_identity}} ->
         Mix.shell().error("""
 
-          NOT YET USABLE: #{agent_id} is not registered in Identity.Registry,
-          so authorization fails with :unknown_identity and mix arbor.user.link
-          will still refuse.
+          NOT REGISTERED: #{agent_id} is not in Identity.Registry, so
+          authorization fails closed with :unknown_identity.
+        """)
 
-          Identity.Registry.register/2 rejects human_ ids with
-          :oidc_proof_required, and the local registration path does not exist
-          yet. The keypair and grant above are real and will work once it does.
+      {:error, :missing_signed_request} ->
+        Mix.shell().info("""
+          Registered, and holds the capability.
+
+          Commands acting AS this principal additionally need a signed request
+          proving possession of its private key — Arbor does not authorize a
+          principal on a caller's say-so. The keypair is in SigningKeyStore;
+          what is missing is a CLI path that opens a signing authority with it,
+          the way Scheduler.Identity does for itself.
+
+          Until then `mix arbor.user.link` will report :missing_signed_request.
         """)
 
       other ->

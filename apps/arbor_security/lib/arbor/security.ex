@@ -1724,8 +1724,23 @@ defmodule Arbor.Security do
   @spec create_local_human_identity(keyword()) ::
           {:ok, Identity.t(), :created | :existing} | {:error, atom()}
   def create_local_human_identity(opts \\ []) do
-    with :ok <- admit_local_human_identity() do
-      Arbor.Security.OIDC.IdentityStore.load_or_create(local_human_claims(opts))
+    with :ok <- admit_local_human_identity(),
+         {:ok, identity, status} <-
+           Arbor.Security.OIDC.IdentityStore.load_or_create(local_human_claims(opts)),
+         :ok <- ensure_local_human_registered(identity) do
+      {:ok, identity, status}
+    end
+  end
+
+  # `load_or_create/1` stores the keypair but never registers the identity —
+  # `AuthDecision` resolves every principal through `identity_status/1`, so an
+  # unregistered identity holds capabilities it can never exercise. Registering
+  # is idempotent here: an already-registered identity is success, not an error.
+  defp ensure_local_human_registered(identity) do
+    case Registry.register_local_human(Identity.public_only(identity)) do
+      :ok -> :ok
+      {:error, {:already_registered, _id}} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
