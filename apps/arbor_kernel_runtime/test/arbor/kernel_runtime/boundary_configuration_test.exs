@@ -4,9 +4,16 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
   @moduletag :fast
 
   @production_boundaries %{
+    # SafeManagementSurface is the ONE deliberate export: `arbor_commands`
+    # aliases it for `mix arbor.packaging.safe_management_surface`, so dropping
+    # it breaks the Boundary check rather than tightening anything. Added by
+    # d7370af8d (P1A, 2026-08-18); this table was not updated with it, leaving
+    # the guard red on main. Keep this list exact — it is a least-privilege
+    # declaration, so a new entry should be a deliberate edit, never a fix-up
+    # to make the suite pass.
     Arbor.KernelRuntime => %{
       deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor],
-      exports: []
+      exports: [SafeManagementSurface]
     },
     Arbor.Common => %{
       deps: [Arbor.Contracts, Finch, Jason, Logger, Req, Zoi],

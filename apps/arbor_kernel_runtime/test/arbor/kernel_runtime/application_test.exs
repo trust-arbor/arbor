@@ -100,8 +100,12 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     Enum.each(@invalid_start_profiles, fn value ->
       put_section(:kernel_runtime, start_profile: value)
 
-      assert {:error, {:arbor_kernel_runtime, {:invalid_start_profile, ^value}}} =
+      # ensure_all_started/1 nests the reason with the MFA that produced it.
+      assert {:error,
+              {:arbor_kernel_runtime, {reason, {Arbor.KernelRuntime.Application, :start, _}}}} =
                Application.ensure_all_started(:arbor_kernel_runtime)
+
+      assert reason == {:invalid_start_profile, value}
 
       refute Process.whereis(Arbor.KernelRuntime.Supervisor)
       refute Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)

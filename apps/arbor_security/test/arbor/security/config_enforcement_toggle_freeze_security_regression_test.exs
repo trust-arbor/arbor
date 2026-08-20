@@ -106,7 +106,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     table = claim_table()
     assert :ets.whereis(table) != :undefined
     owner = :ets.info(table, :owner)
-    assert owner == Application.app_pid(:arbor_security)
+    assert owner == application_start_pid(:arbor_security)
     assert Process.alive?(owner)
 
     set_enforcement_toggles(true)
@@ -129,7 +129,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     table = claim_table()
     assert :ets.whereis(table) != :undefined
     owner = :ets.info(table, :owner)
-    assert owner == Application.app_pid(:arbor_security)
+    assert owner == application_start_pid(:arbor_security)
     assert owner != freezer_pid
 
     set_enforcement_toggles(false)
@@ -232,7 +232,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
 
     assert {:ok, _} = Application.ensure_all_started(:arbor_security)
     assert :ets.whereis(table) != :undefined
-    assert :ets.info(table, :owner) == Application.app_pid(:arbor_security)
+    assert :ets.info(table, :owner) == application_start_pid(:arbor_security)
     assert :ets.member(table, :claimed)
 
     for {key, reader} <- @fail_open_when_false do
@@ -259,8 +259,10 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     foreign_owner = self()
     assert :ets.info(table, :owner) == foreign_owner
 
-    assert {:error, {:enforcement_toggle_claim_table_foreign_owner, ^foreign_owner}} =
+    assert {:error, {reason, {Arbor.Security.Application, :start, _args}}} =
              Application.start(:arbor_security)
+
+    assert reason == {:enforcement_toggle_claim_table_foreign_owner, foreign_owner}
 
     refute List.keymember?(Application.started_applications(), :arbor_security, 0)
 
@@ -287,7 +289,54 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     end
   end
 
+  defp ensure_signals_children do
+    {:ok, _started} = Application.ensure_all_started(:arbor_kernel_runtime)
+
+    for child <- [
+          {Arbor.Signals.Store, []},
+          {Arbor.Signals.TopicKeys, []},
+          {Arbor.Signals.Channels, []},
+          {Arbor.Signals.Bus, []},
+          {Arbor.Signals.Relay, []}
+        ] do
+      case Supervisor.start_child(Arbor.Signals.Supervisor, child) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, :already_present} ->
+          {module, _opts} = child
+          :ok = Supervisor.delete_child(Arbor.Signals.Supervisor, module)
+          {:ok, _pid} = Supervisor.start_child(Arbor.Signals.Supervisor, child)
+      end
+    end
+  end
+
   defp claim_table, do: Module.concat(Config, EnforcementToggleClaim)
+
+  # The claim table is created inside `Arbor.Security.Application.start/2`, so
+  # its owner is the process OTP uses to run `Mod.start/2` — which sits between
+  # the application master and the root supervisor and has no public accessor.
+  # (`Application.app_pid/1` does not exist; this test shipped calling it.)
+  # The root supervisor is started from that process, so it is the head of the
+  # supervisor's `$ancestors`.
+  #
+  # Asserting the exact pid is the point: it proves the table belongs to the
+  # application itself and not to whichever process happened to call
+  # `freeze_enforcement_toggles/0` first — a freezer-owned table would die with
+  # that process and reopen the claim.
+  defp application_start_pid(app) do
+    master = :application_controller.get_master(app)
+    {root_sup, _module} = :application_master.get_child(master)
+
+    root_sup
+    |> Process.info(:dictionary)
+    |> elem(1)
+    |> Keyword.fetch!(:"$ancestors")
+    |> hd()
+  end
 
   defp set_enforcement_toggles(value) do
     for {key, _reader} <- @fail_open_when_false do
@@ -324,6 +373,14 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     end
 
     {:ok, _} = Application.ensure_all_started(:arbor_security)
+
+    # Restarting :arbor_security brings Identity.Registry back, and with
+    # distributed signals enabled it subscribes to Arbor.Signals.Bus during
+    # init. The two tests that fully stop the app leave the Bus down, so
+    # without this the restore crashes with :noproc and the test reports a
+    # teardown failure rather than its actual result.
+    ensure_signals_children()
+
     _ = Arbor.Security.TestBootstrap.start!()
     restore_extra_security_test_children()
     :ok
@@ -336,10 +393,7 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
     issuer =
       Supervisor.child_spec(
         {Arbor.Persistence.BufferedStore,
-         name: :arbor_security_issuers,
-         backend: backend,
-         write_mode: :sync,
-         collection: "issuers"},
+         name: :arbor_security_issuers, backend: backend, write_mode: :sync, collection: "issuers"},
         id: :arbor_security_issuers
       )
 
