@@ -296,6 +296,18 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
     assert String.ends_with?(root, Path.join(".arbor", "security"))
   end
 
+  test "security regression: env restoration preserves an explicitly nil storage backend" do
+    Application.put_env(:arbor_security, :storage_backend, nil)
+    snapshot = env_snapshot()
+
+    Application.put_env(:arbor_security, :storage_backend, JSONFile)
+    restore_env(snapshot)
+
+    assert {:ok, nil} = Application.fetch_env(:arbor_security, :storage_backend)
+    assert Config.storage_backend() == nil
+    assert {:ok, %{backend: nil, root: nil}} = Config.startup_store_snapshot(:test_bootstrap)
+  end
+
   defp claim_table, do: Module.concat(Config, AuthorityRootClaim)
 
   defp application_start_pid(app) do
@@ -330,10 +342,10 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
 
   defp env_snapshot do
     %{
-      authority_state_root: Application.get_env(:arbor_security, :authority_state_root),
-      json_file: Application.get_env(:arbor_security, JSONFile),
-      storage_backend: Application.get_env(:arbor_security, :storage_backend),
-      start_children: Application.get_env(:arbor_security, :start_children),
+      authority_state_root: Application.fetch_env(:arbor_security, :authority_state_root),
+      json_file: Application.fetch_env(:arbor_security, JSONFile),
+      storage_backend: Application.fetch_env(:arbor_security, :storage_backend),
+      start_children: Application.fetch_env(:arbor_security, :start_children),
       kernel_runtime: Application.fetch_env(:arbor_kernel, :kernel_runtime)
     }
   end
@@ -350,11 +362,15 @@ defmodule Arbor.Security.ConfigAuthorityRootFreezeTest do
     end
   end
 
-  defp restore_security_env(key, nil), do: Application.delete_env(:arbor_security, key)
-  defp restore_security_env(key, value), do: Application.put_env(:arbor_security, key, value)
+  defp restore_security_env(key, :error), do: Application.delete_env(:arbor_security, key)
 
-  defp restore_json_file_env(nil), do: Application.delete_env(:arbor_security, JSONFile)
-  defp restore_json_file_env(value), do: Application.put_env(:arbor_security, JSONFile, value)
+  defp restore_security_env(key, {:ok, value}),
+    do: Application.put_env(:arbor_security, key, value)
+
+  defp restore_json_file_env(:error), do: Application.delete_env(:arbor_security, JSONFile)
+
+  defp restore_json_file_env({:ok, value}),
+    do: Application.put_env(:arbor_security, JSONFile, value)
 
   defp restore_security_app do
     table = claim_table()

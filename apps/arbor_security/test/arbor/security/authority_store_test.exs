@@ -465,6 +465,7 @@ defmodule Arbor.Security.AuthorityStoreTest do
 
     assert {:error, :hydration_unavailable} = AuthorityStore.authoritative_list(name: name)
     assert {:error, :hydration_unavailable} = AuthorityStore.authoritative_entries(name: name)
+
     assert {:error, :hydration_unavailable} =
              AuthorityStore.put("k", Record.new("k"), name: name)
 
@@ -480,6 +481,7 @@ defmodule Arbor.Security.AuthorityStoreTest do
     start_supervised!({AuthorityStore, name: malformed, backend: MalformedBackend})
     start_supervised!({AuthorityStore, name: raising, backend: RaisingBackend})
     start_supervised!({AuthorityStore, name: missing_cas, backend: MissingCasBackend})
+
     start_supervised!(
       {AuthorityStore, name: hydrated_malformed, backend: HydratedMalformedBackend}
     )
@@ -522,7 +524,8 @@ defmodule Arbor.Security.AuthorityStoreTest do
     assert {:error, :hydration_unavailable} =
              AuthorityStore.put("k", Record.new("k"), name: raising)
 
-    assert {:error, :hydration_unavailable} = AuthorityStore.acknowledged_delete("k", name: raising)
+    assert {:error, :hydration_unavailable} =
+             AuthorityStore.acknowledged_delete("k", name: raising)
 
     assert {:error, :hydration_unavailable} =
              AuthorityStore.acknowledged_compare_and_swap(
@@ -596,13 +599,12 @@ defmodule Arbor.Security.AuthorityStoreTest do
 
   test "backend, namespace, options, limit, and mode are frozen after init" do
     name = unique_name(:authority_frozen)
-    original = Application.get_env(:arbor_security, :storage_backend)
+    original = Application.fetch_env(:arbor_security, :storage_backend)
 
     on_exit(fn ->
-      if is_nil(original) do
-        Application.delete_env(:arbor_security, :storage_backend)
-      else
-        Application.put_env(:arbor_security, :storage_backend, original)
+      case original do
+        {:ok, value} -> Application.put_env(:arbor_security, :storage_backend, value)
+        :error -> Application.delete_env(:arbor_security, :storage_backend)
       end
     end)
 
