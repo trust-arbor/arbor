@@ -820,3 +820,12 @@ Historian, Comms, and Phoenix modules (found 2026-08-20 during P1C acceptance).
 <!-- applied-learning: in-zsh-harness-scripts-never-use-status-as-a-scratch-variable -->
 <a id="applied-learning-in-zsh-harness-scripts-never-use-status-as-a-scratch-variable"></a>
 **In zsh harness scripts, never use `status` as a scratch variable.** `status` is a read-only special parameter, so `status=$?` aborts cleanup exactly when a validation command fails. Use `exit_code`, capture it immediately, and install an `EXIT` trap before commands that create worktrees or build roots so cleanup runs on both success and failure (found 2026-08-20 while independently validating P1C-A).
+
+<!-- applied-learning: application-env-snapshots-must-preserve-key-presence-separately-from-nil -->
+<a id="applied-learning-application-env-snapshots-must-preserve-key-presence-separately-from-nil"></a>
+**Application environment snapshots must preserve key presence separately from
+`nil`.** `Application.get_env/3` collapses an explicitly configured `nil` and an
+absent key, so teardown can delete a deliberate override and silently reactivate a
+default backend. Snapshot with `Application.fetch_env/2` and restore `{:ok, value}`
+versus `:error` exactly (found 2026-08-20 when Security teardown re-enabled JSONFile
+and cascaded into 220 `:authority_root_unconfigured` failures).

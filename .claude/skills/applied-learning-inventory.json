@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 657,
+  "entry_count": 658,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8085,8 +8085,21 @@
       "source_incident": "found 2026-08-20 while recovering P1C-B1 after its outer coding task failed).",
       "content_sha256": "785d3a4ce6ceb189147e0fcd95bedc61d1772aba44164c3d3a5ca23321a999f7",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 658,
+      "source_kind": "post-migration",
+      "slug": "application-env-snapshots-must-preserve-key-presence-separately-from-nil",
+      "title": "Application environment snapshots must preserve key presence separately from nil.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-application-env-snapshots-must-preserve-key-presence-separately-from-nil",
+      "source_date": "2026-08-20",
+      "source_incident": "found 2026-08-20 when Security teardown re-enabled JSONFile and cascaded into 220 :authority_root_unconfigured failures).",
+      "content_sha256": "18302d820dc9a3309787fba3ed2c0b52051fa1418913d1ee7b817a3c8380190b",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 196
+  "post_migration_entry_count": 197
 }
