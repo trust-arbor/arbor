@@ -2801,7 +2801,10 @@ defmodule Arbor.Security.CapabilityStore do
       origin_node in [node(), Atom.to_string(node())] ->
         state
 
-      not Signals.authenticated_security_sync_transport?() ->
+      # Per-type, not wholesale: revocation must apply even without an
+      # authenticated transport, or a capability revoked on another node
+      # stays live here. Grants remain gated.
+      not Signals.admit_remote_security_mutation?(signal.type) ->
         state
 
       true ->

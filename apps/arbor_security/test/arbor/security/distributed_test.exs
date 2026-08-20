@@ -44,9 +44,15 @@ defmodule Arbor.Security.DistributedTest do
 
   # ── CapabilityStore Signal Handling ─────────────────────────────────
 
-  describe "CapabilityStore rejects unauthenticated remote signals" do
-    test "security regression: remote :capability_revoked does not evict without authenticated transport" do
+  describe "CapabilityStore admits remote security mutations by authority direction" do
+    test "security regression: remote :capability_revoked evicts without authenticated transport" do
+      # Revocation REMOVES authority, so it applies with no authenticated
+      # transport. Blocking it is not fail-closed: the capability another
+      # node revoked would keep authorizing here. Anyone able to inject this
+      # signal is already a cluster member with full :erpc, so refusing it
+      # buys nothing and costs the revocation.
       refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Arbor.Signals.admit_remote_security_mutation?(:capability_revoked)
 
       {:ok, cap} =
         Capability.new(
@@ -72,12 +78,12 @@ defmodule Arbor.Security.DistributedTest do
 
       _ = :sys.get_state(CapabilityStore)
 
-      # Unauthenticated remote apply fails closed — capability still exists
-      assert {:ok, ^cap} = CapabilityStore.get(cap.id)
+      assert {:error, :not_found} = CapabilityStore.get(cap.id)
     end
 
-    test "security regression: remote bulk revocation does not evict without authenticated transport" do
+    test "security regression: remote bulk revocation evicts without authenticated transport" do
       refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Arbor.Signals.admit_remote_security_mutation?(:capabilities_revoked_all)
 
       caps =
         for i <- 1..3 do
@@ -109,7 +115,7 @@ defmodule Arbor.Security.DistributedTest do
       _ = :sys.get_state(CapabilityStore)
 
       for cap <- caps do
-        assert {:ok, ^cap} = CapabilityStore.get(cap.id)
+        assert {:error, :not_found} = CapabilityStore.get(cap.id)
       end
     end
 
@@ -162,9 +168,10 @@ defmodule Arbor.Security.DistributedTest do
 
   # ── Identity Registry Signal Handling ───────────────────────────────
 
-  describe "Identity.Registry rejects unauthenticated remote signals" do
-    test "security regression: remote deregistration does not apply without authenticated transport" do
+  describe "Identity.Registry admits remote security mutations by authority direction" do
+    test "security regression: remote deregistration applies without authenticated transport" do
       refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Arbor.Signals.admit_remote_security_mutation?(:identity_deregistered)
 
       {:ok, identity} = Identity.generate(name: "dist-test")
       :ok = Registry.register(Identity.public_only(identity))
@@ -186,11 +193,12 @@ defmodule Arbor.Security.DistributedTest do
 
       _ = :sys.get_state(Registry)
 
-      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
+      assert {:error, :not_found} = Registry.lookup(identity.agent_id)
     end
 
-    test "security regression: remote suspension does not apply without authenticated transport" do
+    test "security regression: remote suspension applies without authenticated transport" do
       refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Arbor.Signals.admit_remote_security_mutation?(:identity_suspended)
 
       {:ok, identity} = Identity.generate(name: "suspend-test")
       :ok = Registry.register(Identity.public_only(identity))
@@ -209,7 +217,7 @@ defmodule Arbor.Security.DistributedTest do
 
       _ = :sys.get_state(Registry)
 
-      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
+      assert {:error, :identity_suspended} = Registry.lookup(identity.agent_id)
     end
 
     test "security regression: remote resume does not unsuspend without authenticated transport" do
@@ -239,8 +247,9 @@ defmodule Arbor.Security.DistributedTest do
       assert {:error, :identity_suspended} = Registry.lookup(identity.agent_id)
     end
 
-    test "security regression: remote revocation does not apply without authenticated transport" do
+    test "security regression: remote revocation applies without authenticated transport" do
       refute Arbor.Signals.authenticated_security_sync_transport?()
+      assert Arbor.Signals.admit_remote_security_mutation?(:identity_revoked)
 
       {:ok, identity} = Identity.generate(name: "revoke-test")
       :ok = Registry.register(Identity.public_only(identity))
@@ -259,7 +268,7 @@ defmodule Arbor.Security.DistributedTest do
 
       _ = :sys.get_state(Registry)
 
-      assert {:ok, _pk} = Registry.lookup(identity.agent_id)
+      assert {:error, :identity_revoked} = Registry.lookup(identity.agent_id)
     end
 
     test "ignores identity signals from own node" do

@@ -751,7 +751,11 @@ defmodule Arbor.Security.Identity.Registry do
       origin_node in [node(), Atom.to_string(node())] ->
         state
 
-      not Signals.authenticated_security_sync_transport?() ->
+      # Per-type. Suspension/revocation/deregistration apply unconditionally;
+      # :identity_registered and :identity_resumed stay gated because they
+      # restore authority (note :identity_resumed shares an apply clause with
+      # suspend/revoke — the split has to happen here, before dispatch).
+      not Signals.admit_remote_security_mutation?(signal.type) ->
         state
 
       true ->

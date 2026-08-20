@@ -120,6 +120,53 @@ defmodule Arbor.Signals.Config do
   @spec authenticated_security_sync_transport?() :: boolean()
   def authenticated_security_sync_transport?, do: false
 
+  # Remote security mutations split by the DIRECTION they move authority.
+  #
+  # Blocking unauthenticated remote apply symmetrically is not fail-closed —
+  # it is fail-closed for grants and fail-OPEN for revocations. Dropping a
+  # remote `:capability_revoked` means this node keeps honoring a capability
+  # another node already revoked, which is the exact hole the gate was meant
+  # to prevent (found 2026-08-19; four security regression tests had been red
+  # on main since 4bda3a047 for this reason).
+  #
+  # Authority-reducing mutations are monotonic and safe to accept from any
+  # peer: the worst a hostile origin achieves is denying service, which any
+  # mesh member can already do directly — Erlang distribution has no
+  # intra-cluster authorization. Authority-granting mutations stay gated,
+  # because those are the ones a forged signal could use to widen access.
+  @authority_reducing_security_mutations [
+    :capability_revoked,
+    :capabilities_revoked_all,
+    :capabilities_cascade_revoked,
+    :capabilities_scope_revoked,
+    :identity_deregistered,
+    :identity_suspended,
+    :identity_revoked
+  ]
+
+  @doc """
+  Whether a remote-origin security mutation of `type` may be applied.
+
+  Authority-reducing types are always admitted. Everything else requires an
+  authenticated sync transport, which does not yet exist — so
+  `:capability_granted`, `:identity_registered`, and `:identity_resumed`
+  stay blocked.
+
+  Note `:identity_resumed` is authority-*restoring* and therefore gated,
+  even though it travels with suspend/revoke in the apply path.
+  """
+  @spec admit_remote_security_mutation?(atom()) :: boolean()
+  def admit_remote_security_mutation?(type) when is_atom(type) do
+    type in @authority_reducing_security_mutations or
+      authenticated_security_sync_transport?()
+  end
+
+  def admit_remote_security_mutation?(_type), do: false
+
+  @doc false
+  @spec authority_reducing_security_mutations() :: [atom()]
+  def authority_reducing_security_mutations, do: @authority_reducing_security_mutations
+
   @doc false
   @spec security_sync_role_configured?(atom()) :: boolean()
   def security_sync_role_configured?(role)

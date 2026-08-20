@@ -112,6 +112,65 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
     assert {:error, :replayed_nonce} = NonceCache.check_and_record(nonce, 300)
   end
 
+  test "security regression: remote identity resume does NOT lift a local suspension" do
+    # The asymmetry this whole gate rests on. Authority-REDUCING remote
+    # mutations apply without an authenticated transport (the two tests
+    # below/above); authority-RESTORING ones must not, or a forged signal
+    # could un-suspend an identity this node deliberately suspended.
+    #
+    # :identity_resumed is the easy one to get wrong: it shares an apply
+    # clause with :identity_suspended and :identity_revoked, so the split
+    # has to happen before dispatch.
+    assert {:ok, identity} =
+             Security.generate_identity(name: "resume-gate-#{System.unique_integer([:positive])}")
+
+    assert :ok = Security.register_identity(identity)
+    assert :ok = Security.suspend_identity(identity.agent_id)
+    assert {:ok, :suspended} = Security.identity_status(identity.agent_id)
+
+    assert :ok =
+             Signals.emit(
+               :security,
+               :identity_resumed,
+               %{
+                 agent_id: identity.agent_id,
+                 origin_node: "peer@security-regression"
+               },
+               scope: :local
+             )
+
+    # Negative assertion, so give the signal a real chance to be applied
+    # before concluding it was not.
+    refute eventually(fn -> Security.identity_status(identity.agent_id) == {:ok, :active} end)
+    assert {:ok, :suspended} = Security.identity_status(identity.agent_id)
+  end
+
+  test "security regression: remote security mutations are admitted by authority direction" do
+    # Pins the classification itself. If someone adds a new remote mutation
+    # type, it must be placed deliberately on one side or the other — the
+    # default (`false`) denies, which is the safe direction for a grant and
+    # the WRONG one for a revocation, so an omission here is a silent hole.
+    for reducing <- [
+          :capability_revoked,
+          :capabilities_revoked_all,
+          :capabilities_cascade_revoked,
+          :capabilities_scope_revoked,
+          :identity_deregistered,
+          :identity_suspended,
+          :identity_revoked
+        ] do
+      assert Signals.admit_remote_security_mutation?(reducing),
+             "#{reducing} removes authority and must apply without an authenticated transport"
+    end
+
+    for restoring <- [:capability_granted, :identity_registered, :identity_resumed] do
+      refute Signals.admit_remote_security_mutation?(restoring),
+             "#{restoring} adds authority and must stay gated"
+    end
+
+    refute Signals.admit_remote_security_mutation?(:not_a_security_mutation)
+  end
+
   test "security regression: remote capability revocation reaches public authorization" do
     principal = "agent_remote_sync_#{System.unique_integer([:positive])}"
     resource = "arbor://test/security_sync/#{System.unique_integer([:positive])}"

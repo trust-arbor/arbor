@@ -178,6 +178,17 @@ defmodule Arbor.Signals do
   def authenticated_security_sync_transport?,
     do: Config.authenticated_security_sync_transport?()
 
+  @doc """
+  Whether a remote-origin security mutation of `type` may be applied.
+
+  Authority-reducing mutations (revocation, suspension, deregistration) are
+  always admitted; authority-granting ones require an authenticated sync
+  transport. See `Arbor.Signals.Config.admit_remote_security_mutation?/1`.
+  """
+  @spec admit_remote_security_mutation?(atom()) :: boolean()
+  def admit_remote_security_mutation?(type),
+    do: Config.admit_remote_security_mutation?(type)
+
   @doc "Unsubscribe from signals."
   @spec unsubscribe(String.t()) :: :ok | {:error, :not_found}
   def unsubscribe(subscription_id),

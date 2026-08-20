@@ -349,9 +349,12 @@ defmodule Arbor.Signals.Relay do
     end
   end
 
+  # Authority-REDUCING mutations must reach their consumers even without an
+  # authenticated transport. Dropping them here is what silently kept revoked
+  # capabilities live on peer nodes — the relay never delivered the eviction.
   defp admitted_unauthenticated_remote_signal?(%Signal{type: type})
        when type in @restricted_security_sync_mutations,
-       do: false
+       do: Config.admit_remote_security_mutation?(type)
 
   defp admitted_unauthenticated_remote_signal?(%Signal{}), do: true
 

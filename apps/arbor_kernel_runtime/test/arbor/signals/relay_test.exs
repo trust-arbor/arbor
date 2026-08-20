@@ -277,9 +277,15 @@ defmodule Arbor.Signals.RelayTest do
       assert stats.signals_rejected == 0
     end
 
-    test "security regression: remote security-sync mutations drop; observability and nonce_seen inject" do
+    test "security regression: authority-granting mutations drop; revocations, observability and nonce_seen inject" do
       Testing.put(:authorizer, Arbor.Signals.Adapters.OpenAuthorizer)
       Testing.put(:allow_open_authorizer, true)
+
+      # This test is about the authorization decision, not throttling. The
+      # batch carries four :security signals; leaving the shared per-category
+      # bucket at its default let rate limiting silently eat one and read as
+      # an authorization failure.
+      Testing.put(:relay_category_rate_limit, 1000)
 
       refute Config.authenticated_security_sync_transport?()
       refute Arbor.Signals.authenticated_security_sync_transport?()
@@ -309,6 +315,14 @@ defmodule Arbor.Signals.RelayTest do
           agent_id: "agent_p1b_#{marker}",
           origin_node: :remote@node
         }),
+        Signal.new(:security, :capability_granted, %{
+          capability_id: "cap_grant_p1b_#{marker}",
+          origin_node: :remote@node
+        }),
+        Signal.new(:identity, :identity_resumed, %{
+          agent_id: "agent_resume_p1b_#{marker}",
+          origin_node: :remote@node
+        }),
         Signal.new(:security, :auth_ok, %{agent_id: "obs_#{marker}"}),
         Signal.new(:security, :nonce_seen, %{
           nonce_hex: nonce_hex,
@@ -319,20 +333,34 @@ defmodule Arbor.Signals.RelayTest do
 
       GenServer.cast(Relay, {:receive_batch, signals, :peer@host})
 
+      # Only the security-sync path JSON-normalizes, so :security and
+      # :identity data arrive with STRING keys while :agent keeps atoms.
+      # The atom-key pattern this test shipped with for :auth_ok could never
+      # match — it was red on main before the directional change.
       assert_receive {:relay_injected, :agent, :started, %{agent_id: agent_id}}, 500
       assert agent_id == "agent_ok_#{marker}"
 
-      assert_receive {:relay_injected, :security, :auth_ok, %{agent_id: obs_id}}, 500
+      assert_receive {:relay_injected, :security, :auth_ok, %{"agent_id" => obs_id}}, 500
       assert obs_id == "obs_#{marker}"
 
       assert_receive {:relay_injected, :security, :nonce_seen, nonce_data}, 500
-      assert nonce_data.nonce_hex == nonce_hex
+      assert nonce_data["nonce_hex"] == nonce_hex
 
-      refute_received {:relay_injected, :security, :capability_revoked, _}
-      refute_received {:relay_injected, :identity, :identity_revoked, _}
+      # Authority-REDUCING mutations must reach their consumers even with no
+      # authenticated transport — dropping them here is what left revoked
+      # capabilities live on peer nodes.
+      assert_receive {:relay_injected, :security, :capability_revoked, revoked_data}, 500
+      assert revoked_data["capability_ids"] == ["cap_p1b_#{marker}"]
+      assert_receive {:relay_injected, :identity, :identity_revoked, id_revoked_data}, 500
+      assert id_revoked_data["agent_id"] == "agent_p1b_#{marker}"
+
+      # Authority-GRANTING mutations stay dropped: those are the ones a
+      # forged signal could use to widen access.
+      refute_received {:relay_injected, :security, :capability_granted, _}
+      refute_received {:relay_injected, :identity, :identity_resumed, _}
 
       stats = Relay.stats()
-      assert stats.relayed_in == 3
+      assert stats.relayed_in == 5
       assert stats.signals_rejected >= 2
 
       Bus.unsubscribe(sub_id)
