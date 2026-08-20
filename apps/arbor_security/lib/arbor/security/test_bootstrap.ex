@@ -13,6 +13,11 @@ defmodule Arbor.Security.TestBootstrap do
   suite cannot collide with a running dev server, leaving its supervisor empty.
   `Application.ensure_all_started/1` is therefore not enough.
 
+  Before rebuilding that test tree, `start!/1` captures one startup-store
+  snapshot and freezes the canonical authority root whenever the selected
+  backend is durable. Test helpers therefore use the same root identity as the
+  Application-owned stores instead of resolving paths from the caller's cwd.
+
   Since capability replacement was made durable (`206d06b5d`, 2026-08-06),
   `Arbor.Security.grant/1` fails without the durable capability store — and
   fails with a compound error that names replacement bookkeeping rather than the

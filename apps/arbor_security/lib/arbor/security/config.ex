@@ -18,6 +18,7 @@ defmodule Arbor.Security.Config do
   ## Configuration
 
       config :arbor_security,
+        authority_state_root: "/var/lib/arbor/security", # canonical durable store root
         identity_verification: true,           # require signed requests for authorization
         nonce_ttl_seconds: 300,                 # nonces expire after 5 minutes
         timestamp_max_drift_seconds: 60,        # accept timestamps within ±60s of now
@@ -47,6 +48,19 @@ defmodule Arbor.Security.Config do
   @repo_root Path.expand("../../../../..", __DIR__)
   @development_authority_root Path.expand(".arbor/security", @repo_root)
   @authority_root_sources [:configured, :legacy_jsonfile_base_dir, :development_default]
+  @type startup_inputs :: %{
+          start_children: term(),
+          start_profile: atom(),
+          backend: module() | nil,
+          capabilities_hydration_limit: pos_integer()
+        }
+  @type startup_store_snapshot :: %{
+          start_children: term(),
+          start_profile: atom(),
+          backend: module() | nil,
+          capabilities_hydration_limit: pos_integer(),
+          root: String.t() | nil
+        }
   @enforcement_toggle_defaults [
     identity_verification: true,
     capability_signing_required: true,
@@ -828,7 +842,7 @@ defmodule Arbor.Security.Config do
   # ===========================================================================
 
   @doc """
-  Configured storage backend for Application-owned AuthorityStore children.
+  Canonical accessor for the configured Application-owned AuthorityStore backend.
 
   Defaults to `Arbor.Security.Store.JSONFile`. `nil` selects ephemeral stores.
   """
@@ -846,7 +860,7 @@ defmodule Arbor.Security.Config do
 
   Does not freeze or read the authority root.
   """
-  @spec snapshot_startup_inputs() :: map()
+  @spec snapshot_startup_inputs() :: startup_inputs()
   def snapshot_startup_inputs do
     %{
       start_children: Application.get_env(@app, :start_children, true),
@@ -863,7 +877,7 @@ defmodule Arbor.Security.Config do
   context will start durable (non-nil backend) AuthorityStore children.
   """
   @spec startup_store_snapshot(:application | :test_bootstrap) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, startup_store_snapshot()} | {:error, term()}
   def startup_store_snapshot(context) when context in [:application, :test_bootstrap] do
     inputs = snapshot_startup_inputs()
 
@@ -1173,7 +1187,8 @@ defmodule Arbor.Security.Config do
     {:ok, %{root: primary, source: :configured}}
   end
 
-  defp combine_authority_root_candidates(_primary, _legacy), do: {:error, :authority_root_conflict}
+  defp combine_authority_root_candidates(_primary, _legacy),
+    do: {:error, :authority_root_conflict}
 
   defp claim_authority_root_snapshot(snapshot) do
     if insert_authority_root_snapshot_if_absent(snapshot) do
@@ -1205,9 +1220,7 @@ defmodule Arbor.Security.Config do
     end
   end
 
-  defp validate_authority_root_snapshot(
-         %{root: root, source: source} = snapshot
-       )
+  defp validate_authority_root_snapshot(%{root: root, source: source} = snapshot)
        when is_binary(root) and byte_size(root) > 0 and source in @authority_root_sources do
     {:ok, snapshot}
   end

@@ -129,6 +129,8 @@ defmodule Arbor.Security.AuthorityStore do
     {:reply, state.durability_class, state}
   end
 
+  # Hydration diagnostics remain readable after failure, but every authoritative
+  # read and mutation below is poison-gated so partial inventory cannot escape.
   def handle_call(request, from, state) do
     if poisoned?(state) do
       {:reply, {:error, :hydration_unavailable}, state}
@@ -290,6 +292,7 @@ defmodule Arbor.Security.AuthorityStore do
         if Path.type(dir) == :absolute do
           {:ok, backend_opts}
         else
+          # Relative legacy values are config aliases, not per-store roots.
           put_frozen_jsonfile_root(backend_opts)
         end
 
