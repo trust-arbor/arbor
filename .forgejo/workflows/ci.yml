@@ -48,6 +48,55 @@ jobs:
       - name: Install dependencies
         run: mix deps.get
 
+      # App-local Security suite against a fresh MIX_BUILD_PATH. Must run
+      # before the umbrella compile below, which would populate shared
+      # `_build/test` (and the cache of that tree) with arbor_persistence,
+      # arbor_historian, arbor_comms, and Phoenix and mask upward deps.
+      - name: Security app-local suite (isolated fresh build)
+        run: |
+          set -euo pipefail
+          REPO_ROOT="$(pwd -P)"
+          BUILD_PATH="$(mktemp -d "${TMPDIR:-/tmp}/arbor-security-app-local.XXXXXX")"
+          BUILD_PATH="$(cd "$BUILD_PATH" && pwd -P)"
+          DEPS_PATH="$(cd "$REPO_ROOT/deps" && pwd -P)"
+          ERLANG_ROOT="$(mise where erlang)"
+          ELIXIR_ROOT="$(mise where elixir)"
+          cleanup() { rm -rf "$BUILD_PATH"; }
+          trap cleanup EXIT
+
+          set +e
+          (
+            cd apps/arbor_security
+            ARBOR_MIX_CONTAINED=1 \
+              ARBOR_ERLANG_ROOT="$ERLANG_ROOT" \
+              ARBOR_ELIXIR_ROOT="$ELIXIR_ROOT" \
+              MIX_ENV=test \
+              MIX_BUILD_PATH="$BUILD_PATH" \
+              MIX_DEPS_PATH="$DEPS_PATH" \
+              ../../bin/mix test --timeout 120000
+          )
+          status=$?
+          set -e
+
+          compiled=""
+          for lib_dir in "$BUILD_PATH/test/lib" "$BUILD_PATH/lib"; do
+            if [ -d "$lib_dir" ]; then
+              names="$(find "$lib_dir" -maxdepth 1 -mindepth 1 -type d -exec basename {} \;)"
+              echo "Compiled applications under $lib_dir:"
+              echo "$names"
+              compiled="$(printf '%s\n%s\n' "$compiled" "$names" | sed '/^$/d' | sort -u)"
+            fi
+          done
+
+          for forbidden in arbor_persistence arbor_historian arbor_comms phoenix phoenix_pubsub; do
+            if echo "$compiled" | grep -qx "$forbidden"; then
+              echo "forbidden application compiled in app-local Security suite: $forbidden" >&2
+              exit 1
+            fi
+          done
+
+          exit $status
+
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 

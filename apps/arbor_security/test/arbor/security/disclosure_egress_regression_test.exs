@@ -23,6 +23,8 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
     SystemAuthority
   }
 
+  alias Arbor.Security.TestSupport.RecordingEventLogAdapter
+
   @resource "arbor://ai/generate"
 
   setup do
@@ -402,22 +404,10 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
 
   describe "durable audit event" do
     setup do
-      name = Arbor.Historian.EventLog.ETS
-      backend = Arbor.Persistence.EventLog.ETS
-
-      case apply(backend, :start_link, [[name: name]]) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _}} -> :ok
-      end
-
-      on_exit(fn ->
-        try do
-          if Process.whereis(name), do: GenServer.stop(name)
-        catch
-          :exit, _ -> :ok
-        end
-      end)
-
+      previous = Application.get_env(:arbor_security, :event_log_adapter, :unset)
+      RecordingEventLogAdapter.setup()
+      Application.put_env(:arbor_security, :event_log_adapter, RecordingEventLogAdapter)
+      on_exit(fn -> restore(:event_log_adapter, previous) end)
       :ok
     end
 
@@ -503,6 +493,7 @@ defmodule Arbor.Security.DisclosureEgressRegressionTest do
              Arbor.Security.authorize_egress(ctx.agent_id, :external_provider, opts)
   end
 
+  defp restore(key, :unset), do: Application.delete_env(:arbor_security, key)
   defp restore(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore(key, val), do: Application.put_env(:arbor_security, key, val)
 

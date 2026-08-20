@@ -20,6 +20,7 @@ defmodule Arbor.Security.Config do
 
   @app :arbor_security
   @default_consensus_module Module.concat(["Arbor", "Consensus"])
+  @default_interaction_router Module.concat(["Arbor", "Comms", "InteractionRouter"])
   @default_signing_authority_bootstrap_grace_ms 60_000
   @max_signing_authority_bootstrap_grace_ms 3_600_000
   @default_signing_authority_broker_call_timeout_ms 5_000
@@ -371,20 +372,33 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
-  Whether `Escalation.maybe_escalate/3` should route through the
-  `Arbor.Comms.InteractionRouter` (non-blocking) instead of the
-  legacy `Consensus.Coordinator.submit` path (blocking 30s GenServer
-  call).
+  Whether `Escalation.maybe_escalate/3` should route through
+  `interaction_router/0` (non-blocking) instead of the legacy
+  `Consensus.Coordinator.submit` path (blocking 30s GenServer call).
 
   Default `false` for backward compatibility. When the InteractionRouter
   + at least one channel adapter is wired and operators have verified
-  the new approval UX, flip to `true`. Setting to `true` requires
-  `Arbor.Comms.InteractionRouter` to be loaded at runtime; if it isn't
-  the code falls back to the consensus path automatically.
+  the new approval UX, flip to `true`. Setting to `true` requires the
+  configured router (default `Arbor.Comms.InteractionRouter`) to be
+  loaded at runtime; if it isn't the code falls back to the consensus
+  path automatically.
   """
   @spec use_interaction_router_for_approval?() :: boolean()
   def use_interaction_router_for_approval? do
     Application.get_env(@app, :use_interaction_router_for_approval, false)
+  end
+
+  @doc """
+  Module implementing `Arbor.Security.Contracts.InteractionRouter`.
+
+  Default: `Arbor.Comms.InteractionRouter`, resolved at runtime via
+  `Module.concat/1` so this library does not compile against arbor_comms.
+  Tests inject a local fake. When the configured module is not loaded or
+  does not export `request/2`, escalation falls back to the consensus path.
+  """
+  @spec interaction_router() :: module()
+  def interaction_router do
+    Application.get_env(@app, :interaction_router, @default_interaction_router)
   end
 
   # ===========================================================================

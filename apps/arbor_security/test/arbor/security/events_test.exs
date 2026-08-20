@@ -1,53 +1,3 @@
-defmodule Arbor.Security.EventsRecordingAdapter do
-  @moduledoc false
-  @behaviour Arbor.Security.Contracts.EventLogAdapter
-
-  @table __MODULE__
-
-  def setup do
-    case :ets.whereis(@table) do
-      :undefined ->
-        :ets.new(@table, [:named_table, :public, :ordered_set])
-
-      _tid ->
-        :ok
-    end
-
-    reset()
-  end
-
-  def reset do
-    :ets.delete_all_objects(@table)
-    :ok
-  end
-
-  def invocations do
-    @table
-    |> :ets.tab2list()
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.map(&elem(&1, 1))
-  end
-
-  @impl true
-  def persist_security_event(event_type, data) do
-    seq = System.unique_integer([:monotonic, :positive])
-    event = %{type: event_type, data: data}
-    :ets.insert(@table, {seq, {:persist_security_event, event_type, data}, event})
-    :ok
-  end
-
-  @impl true
-  def read_security_events(_opts) do
-    events =
-      @table
-      |> :ets.tab2list()
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map(&elem(&1, 2))
-
-    {:ok, events}
-  end
-end
-
 defmodule Arbor.Security.EventsAtomKeyAdapterFixture do
   @moduledoc false
   @behaviour Arbor.Security.Contracts.EventLogAdapter
@@ -74,12 +24,12 @@ defmodule Arbor.Security.EventsTest do
   alias Arbor.Security.Events
   alias Arbor.Security.EventsAtomKeyAdapterFixture
   alias Arbor.Security.EventsRaisingAdapter
-  alias Arbor.Security.EventsRecordingAdapter
+  alias Arbor.Security.TestSupport.RecordingEventLogAdapter
 
   setup do
-    previous = Application.get_env(:arbor_security, :event_log_adapter)
-    EventsRecordingAdapter.setup()
-    Application.put_env(:arbor_security, :event_log_adapter, EventsRecordingAdapter)
+    previous = Application.get_env(:arbor_security, :event_log_adapter, :unset)
+    RecordingEventLogAdapter.setup()
+    Application.put_env(:arbor_security, :event_log_adapter, RecordingEventLogAdapter)
 
     on_exit(fn -> restore_adapter(previous) end)
 
@@ -99,8 +49,8 @@ defmodule Arbor.Security.EventsTest do
              ]
 
       {:ok, [event]} = Events.get_by_type(:authorization_granted)
-      assert event.data.principal_id == "agent_001"
-      assert event.data.resource_uri == "arbor://fs/read/docs"
+      assert event.data["principal_id"] == "agent_001"
+      assert event.data["resource_uri"] == "arbor://fs/read/docs"
     end
 
     test "records authorization_denied with reason" do
@@ -282,7 +232,7 @@ defmodule Arbor.Security.EventsTest do
       assert :ok = Events.record_authorization_granted("agent_A", "arbor://fs/write")
 
       {:ok, events} = Events.get_for_principal("agent_A")
-      assert Enum.all?(events, fn e -> e.data.principal_id == "agent_A" end)
+      assert Enum.all?(events, fn e -> e.data["principal_id"] == "agent_A" end)
       assert length(events) == 2
     end
 
@@ -374,10 +324,11 @@ defmodule Arbor.Security.EventsTest do
     end
   end
 
-  defp invocations, do: EventsRecordingAdapter.invocations()
+  defp invocations, do: RecordingEventLogAdapter.invocations()
 
   defp persist(type, data), do: {:persist_security_event, type, data}
 
+  defp restore_adapter(:unset), do: Application.delete_env(:arbor_security, :event_log_adapter)
   defp restore_adapter(nil), do: Application.delete_env(:arbor_security, :event_log_adapter)
 
   defp restore_adapter(adapter),
