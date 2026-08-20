@@ -40,7 +40,13 @@ Lines that don't match `key=value` are ignored. Extra fields are tolerated.
 
 ## Generating a new identity
 
-There's no dedicated CLI task yet; generate via the Elixir API. From `iex -S mix` or a one-off script:
+`mix arbor.setup` generates one automatically when `~/.arbor/identity.key` does
+not exist, at mode `0600`. It **never overwrites an existing key** — the
+checkpoint HMAC secret is derived from it, so replacing it would orphan every
+existing checkpoint.
+
+To generate one by hand (a second identity, or a non-default path), use the
+Elixir API. From `iex -S mix` or a one-off script:
 
 ```elixir
 alias Arbor.Contracts.Security.Identity

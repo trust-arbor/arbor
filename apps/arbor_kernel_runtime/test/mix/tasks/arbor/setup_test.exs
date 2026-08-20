@@ -18,6 +18,37 @@ defmodule Mix.Tasks.Arbor.SetupTest do
     {:ok, tmp: tmp}
   end
 
+  test "ensure_operator_identity generates a 0600 key with a valid agent id", %{tmp: tmp} do
+    path = Path.join(tmp, "identity.key")
+
+    assert {:ok, message} = Setup.ensure_operator_identity(path)
+    assert message =~ "generated agent_"
+
+    contents = File.read!(path)
+    assert [_, agent_id] = Regex.run(~r/^agent_id=(agent_[0-9a-f]{64})$/m, contents)
+    assert [_, key_b64] = Regex.run(~r/^private_key_b64=(.+)$/m, contents)
+    assert {:ok, raw} = Base.decode64(String.trim(key_b64))
+    assert byte_size(raw) in [32, 64]
+    assert message =~ agent_id
+
+    # Mode matters: the key is readable by other unix users otherwise.
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
+  test "ensure_operator_identity NEVER overwrites an existing key", %{tmp: tmp} do
+    # The checkpoint HMAC secret is derived from this key. Regenerating it would
+    # silently orphan every existing checkpoint, so an existing file must win
+    # even when it is not a well-formed key.
+    path = Path.join(tmp, "identity.key")
+    sentinel = "agent_id=agent_preexisting\nprivate_key_b64=DO_NOT_TOUCH\n"
+    File.write!(path, sentinel)
+
+    assert {:skip, message} = Setup.ensure_operator_identity(path)
+    assert message =~ "already exists"
+    assert File.read!(path) == sentinel
+  end
+
   test "fetch_deps uses the absolute reviewed wrapper with exact argv in a fresh process", %{
     tmp: tmp
   } do

@@ -69,6 +69,7 @@ defmodule Mix.Tasks.Arbor.Setup do
     end
 
     step("Ensuring directories", &ensure_directories/0)
+    step("Ensuring operator identity", &ensure_operator_identity/0)
 
     unless opts[:skip_db] do
       step("Creating database", &create_db/0)
@@ -271,6 +272,62 @@ defmodule Mix.Tasks.Arbor.Setup do
     File.mkdir_p!(logs_dir)
 
     {:ok, "~/.arbor/ ready (including logs/)"}
+  end
+
+  # The operator's Ed25519 key. Needed by `mix arbor.signer` (signed MCP), the
+  # software factory, and the checkpoint HMAC that makes
+  # `arbor.pipeline.run/resume` resumable. IDENTITY.md previously said "there's
+  # no dedicated CLI task yet; generate via the Elixir API" and gave a 12-line
+  # iex snippet — so a fresh install simply had none, and the quickstart could
+  # not honestly tell anyone how to get one.
+  #
+  # NOTE this is the AGENT identity (`agent_<hex>`), not an operator *principal*.
+  # It does not satisfy the `human_` `principal_scope` an egress-disclosure
+  # capability requires. See
+  # `.arbor/roadmap/0-inbox/cli-operator-principal-and-identity.md`.
+  defp ensure_operator_identity do
+    ensure_operator_identity(Path.expand("~/.arbor/identity.key"))
+  end
+
+  @doc false
+  @spec ensure_operator_identity(String.t()) ::
+          {:ok, String.t()} | {:skip, String.t()} | {:error, String.t()}
+  def ensure_operator_identity(path) when is_binary(path) do
+    # NEVER overwrite. The checkpoint HMAC secret is derived from this key, so
+    # replacing it silently orphans every existing checkpoint.
+    if File.exists?(path) do
+      {:skip, "#{path} already exists"}
+    else
+      write_operator_identity(path)
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp write_operator_identity(path) do
+    case Arbor.Contracts.Security.Identity.generate(name: operator_identity_name()) do
+      {:ok, identity} ->
+        contents = """
+        agent_id=#{identity.agent_id}
+        private_key_b64=#{Base.encode64(identity.private_key)}
+        """
+
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, contents)
+        File.chmod!(path, 0o600)
+
+        {:ok, "generated #{identity.agent_id} at #{path} (mode 600)"}
+
+      {:error, reason} ->
+        {:error, "could not generate operator identity: #{inspect(reason)}"}
+    end
+  end
+
+  defp operator_identity_name do
+    case System.get_env("USER") || System.get_env("USERNAME") do
+      name when is_binary(name) and name != "" -> "#{name}-operator"
+      _ -> "arbor-operator"
+    end
   end
 
   defp create_db do

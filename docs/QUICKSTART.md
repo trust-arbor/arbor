@@ -44,7 +44,14 @@ dependencies have to exist first. Skipping it fails with
 ```
 
 This copies `.env.example` → `.env`, generates `ARBOR_COOKIE`, creates
-`~/.arbor/arbor_dev.db`, and migrates. To use PostgreSQL instead:
+`~/.arbor/arbor_dev.db`, migrates, and generates your operator key at
+`~/.arbor/identity.key` (mode `0600`, never overwritten if one already exists).
+
+That key is your **agent** identity — `agent_<hex>` — used by
+`mix arbor.signer` for signed MCP, by the software factory, and by the
+checkpoint HMAC that makes `mix arbor.pipeline.resume` work. It is not an
+operator *principal*; approval flows that need an authenticated human use a
+separate `human_` id. To use PostgreSQL instead:
 
 ```bash
 ARBOR_DB=postgres ./bin/mix arbor.setup
