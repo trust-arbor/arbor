@@ -108,7 +108,12 @@ defmodule Arbor.Gateway.SignedRequestAuth do
         Logger.debug("[SignedRequestAuth] Verification failed: #{inspect(reason)}")
         # Non-destructive passthrough — let downstream auth try.
         # Body, if read, is already in assigns[:raw_body] for ExMCP.
-        conn
+        #
+        # Record the reason. Without it the API-key plug runs next, finds no
+        # Bearer/x-api-key header (this request carried `Authorization:
+        # Signature ...`), and answers "Missing API key" — which sends the
+        # operator hunting for a credential they already supplied correctly.
+        assign(conn, :signed_request_auth_error, reason)
     end
   end
 

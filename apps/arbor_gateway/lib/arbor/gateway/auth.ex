@@ -44,10 +44,7 @@ defmodule Arbor.Gateway.Auth do
             end
 
           :error ->
-            reject(
-              conn,
-              "Missing API key. Provide via Authorization: Bearer <key> or x-api-key header"
-            )
+            reject(conn, no_key_message(conn))
         end
     end
   end
@@ -81,6 +78,31 @@ defmodule Arbor.Gateway.Auth do
         end
     end
   end
+
+  # A request that presented a signature and failed verification is NOT a
+  # request that forgot its credentials. Saying "Missing API key" there is
+  # actively misleading — it hides a real, actionable server-side reason
+  # behind advice to add a header the caller does not need.
+  defp no_key_message(conn) do
+    case conn.assigns[:signed_request_auth_error] do
+      nil ->
+        "Missing API key. Provide via Authorization: Bearer <key> or x-api-key header"
+
+      reason ->
+        "Signed request verification failed: #{describe_signature_failure(reason)}"
+    end
+  end
+
+  # Only reasons that are properties of THIS NODE's state are spelled out.
+  # Per-principal outcomes (unknown agent, bad signature, replayed nonce) stay
+  # generic so this cannot be used to enumerate or probe identities.
+  defp describe_signature_failure(:cluster_replay_protection_unavailable) do
+    "cluster_replay_protection_unavailable — this node is connected to a peer " <>
+      "running :arbor_security, so a captured request could be replayed there. " <>
+      "Disconnect the peer (mix arbor.cluster disconnect <node>) or run single-node."
+  end
+
+  defp describe_signature_failure(_reason), do: "signature rejected"
 
   defp reject(conn, message) do
     conn

@@ -10,6 +10,65 @@ defmodule Arbor.Gateway.AuthTest do
   @opts Auth.init([])
 
   # ===========================================================================
+  # Signed-request failures must not masquerade as a missing API key
+  # ===========================================================================
+
+  describe "when an upstream signed request failed verification" do
+    setup do
+      previous = Application.get_env(:arbor_gateway, :api_key)
+      Application.put_env(:arbor_gateway, :api_key, "test-secret-key-123")
+      on_exit(fn -> Application.put_env(:arbor_gateway, :api_key, previous) end)
+      :ok
+    end
+
+    test "reports the node-state reason instead of \"Missing API key\"" do
+      # A signed request carries `Authorization: Signature ...`, so the API-key
+      # plug finds no Bearer/x-api-key and used to answer "Missing API key" —
+      # advice to supply a credential the caller never needed. That cost a full
+      # debugging session on 2026-08-18: signed MCP was returning 401 "Missing
+      # API key" while the real cause was a connected cluster peer.
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Signature abc123")
+        |> assign(:signed_request_auth_error, :cluster_replay_protection_unavailable)
+        |> Auth.call(@opts)
+
+      assert conn.halted
+      assert conn.status == 401
+      body = Jason.decode!(conn.resp_body)
+
+      assert body["detail"] =~ "cluster_replay_protection_unavailable"
+      assert body["detail"] =~ "mix arbor.cluster disconnect"
+      refute body["detail"] =~ "Missing API key"
+    end
+
+    test "security regression: per-principal failures stay generic" do
+      # Spelling these out would turn the endpoint into an oracle for probing
+      # which agent ids exist or whether a nonce was already spent. Only
+      # properties of this node's own state are described.
+      for reason <- [:unknown_agent, :invalid_signature, :replayed_nonce, :expired] do
+        conn =
+          conn(:get, "/")
+          |> put_req_header("authorization", "Signature abc123")
+          |> assign(:signed_request_auth_error, reason)
+          |> Auth.call(@opts)
+
+        body = Jason.decode!(conn.resp_body)
+
+        assert body["detail"] == "Signed request verification failed: signature rejected"
+        refute body["detail"] =~ to_string(reason)
+      end
+    end
+
+    test "a request with no signature attempt still gets the API-key message" do
+      conn = conn(:get, "/") |> Auth.call(@opts)
+
+      body = Jason.decode!(conn.resp_body)
+      assert body["detail"] =~ "Missing API key"
+    end
+  end
+
+  # ===========================================================================
   # API key configured — valid key
   # ===========================================================================
 
