@@ -4,9 +4,15 @@ defmodule Arbor.Security.SigningKeyStoreTest do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Security
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.SigningKeyStore
 
   @test_agent_id "agent_test_signing_key_store_#{:erlang.unique_integer([:positive])}"
+
+  setup_all do
+    replace_signing_store!()
+    :ok
+  end
 
   setup do
     # Clean up after test
@@ -76,8 +82,8 @@ defmodule Arbor.Security.SigningKeyStoreTest do
         metadata: %{}
       }
 
-      assert :ok =
-               Arbor.Persistence.BufferedStore.put(@test_agent_id, malformed,
+      assert {:ok, _stored} =
+               AuthorityStore.acknowledged_put(@test_agent_id, malformed,
                  name: :arbor_security_signing_keys
                )
 
@@ -135,8 +141,8 @@ defmodule Arbor.Security.SigningKeyStoreTest do
 
       assert :ok = SigningKeyStore.put(@test_agent_id, priv)
 
-      # Read raw record from BufferedStore — should NOT contain the raw private key
-      case Arbor.Persistence.BufferedStore.get(@test_agent_id,
+      # Read the authoritative raw record — it must not contain the private key.
+      case AuthorityStore.authoritative_get(@test_agent_id,
              name: :arbor_security_signing_keys
            ) do
         {:ok, record} ->
@@ -200,6 +206,44 @@ defmodule Arbor.Security.SigningKeyStoreTest do
              "key file must have no group/other access, got 0o#{Integer.to_string(file_stat.mode &&& 0o777, 8)}"
 
       refute File.exists?(keypath <> ".tmp"), "temp file must be renamed away, not left behind"
+    end
+  end
+
+  defp replace_signing_store! do
+    supervisor = Arbor.Security.Supervisor
+    child_id = :arbor_security_signing_keys
+
+    case Supervisor.terminate_child(supervisor, child_id) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+
+    case Supervisor.delete_child(supervisor, child_id) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+      {:error, :running} -> raise "signing-key store child remained running"
+    end
+
+    case Process.whereis(child_id) do
+      pid when is_pid(pid) -> GenServer.stop(pid, :normal, 5_000)
+      nil -> :ok
+    end
+
+    case AuthorityStore.start_link(
+           name: child_id,
+           backend: nil,
+           namespace: "signing_keys",
+           hydration_limit: 100
+         ) do
+      {:ok, pid} ->
+        Process.unlink(pid)
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        :ok
+
+      {:error, reason} ->
+        raise "failed to start signing-key AuthorityStore: #{inspect(reason)}"
     end
   end
 end

@@ -25,7 +25,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
@@ -123,13 +123,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         # Hydration must succeed so restore can fail on quota, not inventory.
         hydration_limit: 100
       )
@@ -165,13 +163,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -205,13 +201,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -245,7 +239,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     assert selected_before.id == "cap_broad_new"
     assert selected_before.constraints["mode"] == "newer_constraints"
 
-    # Full BufferedStore + CapabilityStore recreate (no residual ETS).
+    # Full AuthorityStore + CapabilityStore recreate (no residual ETS).
     # release_capability_stack_for_isolation!/0 stops test-owned instances when
     # supervisor children are already terminated.
     start_isolated_stack!(dir)
@@ -288,13 +282,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -333,13 +325,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -380,13 +370,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -426,13 +414,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -469,13 +455,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -511,13 +495,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -554,13 +536,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -589,17 +569,15 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
     # Default hydration_limit 10_000 overflows.
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities"
+        namespace: "capabilities"
       )
 
-    assert {:ok, %{status: :failed, reason: :inventory_limit_exceeded}} =
-             BufferedStore.hydration_status(name: @capability_store)
+    assert {:ok, %{status: :failed, reason: :hydration_limit_exceeded}} =
+             AuthorityStore.hydration_status(name: @capability_store)
 
     assert {:error, {:capability_restore_failed, :inventory_limit_exceeded}} =
              CapabilityStore.start_link([])
@@ -617,6 +595,43 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
                )
              )
            )
+  end
+
+  test "CapabilityStore-only restart takes a fresh complete authority handoff" do
+    dir = unique_dir("restore-second-handoff")
+
+    first =
+      build_cap(
+        "cap_handoff_first",
+        "agent_handoff_first",
+        "arbor://fs/read/handoff-first",
+        -60
+      )
+
+    second =
+      build_cap(
+        "cap_handoff_second",
+        "agent_handoff_second",
+        "arbor://fs/read/handoff-second",
+        -30
+      )
+
+    seed_caps!(dir, [first])
+    start_isolated_stack!(dir)
+    assert {:ok, %{id: "cap_handoff_first"}} = CapabilityStore.get(first.id)
+
+    assert {:ok, %Record{}} =
+             AuthorityStore.acknowledged_put(
+               second.id,
+               Record.new(second.id, Serializer.serialize(second)),
+               name: @capability_store
+             )
+
+    stop_named_process(CapabilityStore)
+    assert {:ok, _pid} = CapabilityStore.start_link([])
+
+    assert {:ok, %{id: "cap_handoff_first"}} = CapabilityStore.get(first.id)
+    assert {:ok, %{id: "cap_handoff_second"}} = CapabilityStore.get(second.id)
   end
 
   test "test bootstrap restarts an already-present terminated security child" do
@@ -666,13 +681,11 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
     release_capability_stack_for_isolation!()
 
     {:ok, _} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 

@@ -2,7 +2,8 @@ defmodule Arbor.Security.SigningKeyStore do
   @moduledoc """
   Encrypted storage for agent signing private keys.
 
-  Wraps BufferedStore with AES-256-GCM encryption at the application layer.
+  Wraps `Arbor.Security.AuthorityStore` with AES-256-GCM encryption at the
+  application layer.
   Private keys are encrypted before storage and decrypted on retrieval.
 
   ## Encryption
@@ -14,22 +15,22 @@ defmodule Arbor.Security.SigningKeyStore do
 
   ## Storage
 
-  Backed by the `:arbor_security_signing_keys` BufferedStore instance,
-  which provides ETS caching for fast reads and durable persistence via
-  the configured security backend (JSONFile by default).
+  Backed by the `:arbor_security_signing_keys` AuthorityStore instance.
+  Reads always consult its authoritative backend and mutations use its
+  acknowledged API so callers never confuse an attempted write with a
+  durably acknowledged write.
   """
 
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority.Validator, as: SigningAuthorityValidator
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Crypto
 
   require Logger
 
   @store_name :arbor_security_signing_keys
   @key_derivation_info "arbor-signing-key-encryption-v1"
-
-  # Runtime bridge — arbor_persistence is Level 1 peer
-  @buffered_store Arbor.Persistence.BufferedStore
 
   @doc """
   Store an agent's signing private key (encrypted at rest).
@@ -52,12 +53,9 @@ defmodule Arbor.Security.SigningKeyStore do
       # Wrap in Record so JSONFile backend can persist (it pattern-matches on %Record{})
       record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
 
-      if available?() do
-        apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])
-        :ok
-      else
-        {:error, :store_unavailable}
-      end
+      acknowledged_put(agent_id, record)
+    else
+      {:error, _reason} -> {:error, :key_encryption_unavailable}
     end
   end
 
@@ -77,6 +75,11 @@ defmodule Arbor.Security.SigningKeyStore do
           # v2 keypair — extract the signing key
           with {:ok, keypair} <- decrypt_keypair(data, enc_key) do
             {:ok, keypair.signing}
+          end
+
+        %{"format" => "authority_bundle", "v" => 3} ->
+          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+            {:ok, identity.private_key}
           end
 
         _ ->
@@ -142,12 +145,85 @@ defmodule Arbor.Security.SigningKeyStore do
 
       record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
 
-      if available?() do
-        apply(@buffered_store, :put, [agent_id, record, [name: @store_name]])
-        :ok
-      else
-        {:error, :store_unavailable}
+      acknowledged_put(agent_id, record)
+    else
+      {:error, _reason} -> {:error, :key_encryption_unavailable}
+    end
+  end
+
+  @doc """
+  Durably store one atomic system-authority bundle.
+
+  The private Ed25519 and X25519 keys are serialized only inside the existing
+  AES-GCM ciphertext envelope. Public identity metadata remains readable in
+  the same `Record`, making the root an indivisible authority mutation.
+  """
+  @spec put_authority_bundle(String.t(), Identity.t()) :: :ok | {:error, atom()}
+  def put_authority_bundle(agent_id, %Identity{} = identity) when is_binary(agent_id) do
+    with :ok <- validate_identity_keypairs(identity),
+         {:ok, enc_key} <- get_encryption_key(),
+         {:ok, encrypted} <-
+           encrypt_keypair(identity.private_key, identity.encryption_private_key, enc_key) do
+      data = %{
+        "v" => 3,
+        "format" => "authority_bundle",
+        "ct" => encrypted.ct,
+        "iv" => encrypted.iv,
+        "tag" => encrypted.tag,
+        "public" => %{
+          "agent_id" => identity.agent_id,
+          "public_key" => Base.encode64(identity.public_key),
+          "encryption_public_key" => Base.encode64(identity.encryption_public_key),
+          "name" => identity.name,
+          "created_at" => DateTime.to_iso8601(identity.created_at)
+        }
+      }
+
+      record = Record.new(agent_id, data, id: "signing_key:#{agent_id}")
+      acknowledged_put(agent_id, record)
+    else
+      {:error, reason} when reason in [:invalid_key_material, :invalid_authority_identity] ->
+        {:error, reason}
+
+      {:error, _reason} ->
+        {:error, :key_encryption_unavailable}
+    end
+  end
+
+  def put_authority_bundle(_agent_id, _identity), do: {:error, :invalid_authority_identity}
+
+  @doc """
+  Load and validate a v3 atomic system-authority bundle.
+
+  A legacy v2 keypair is reported distinctly so `SystemAuthority` can require,
+  validate, and migrate its matching legacy public metadata. Malformed v3 data
+  never falls back to legacy state.
+  """
+  @spec get_authority_bundle(String.t()) ::
+          {:ok, Identity.t()}
+          | {:error,
+             :legacy_keypair
+             | :no_signing_key
+             | :invalid_authority_bundle
+             | :store_unavailable
+             | :key_encryption_unavailable}
+  def get_authority_bundle(agent_id) when is_binary(agent_id) do
+    with {:ok, enc_key} <- get_encryption_key(),
+         {:ok, raw} <- get_record(agent_id) do
+      case unwrap_record(raw) do
+        %{"format" => "authority_bundle", "v" => 3} = data ->
+          decrypt_authority_bundle(data, enc_key)
+
+        %{"format" => "keypair", "v" => 2} ->
+          {:error, :legacy_keypair}
+
+        _other ->
+          {:error, :invalid_authority_bundle}
       end
+    else
+      {:error, :not_found} -> {:error, :no_signing_key}
+      {:error, :store_unavailable} = error -> error
+      {:error, _reason} -> {:error, :key_encryption_unavailable}
     end
   end
 
@@ -166,6 +242,11 @@ defmodule Arbor.Security.SigningKeyStore do
       case data do
         %{"format" => "keypair", "v" => 2} ->
           decrypt_keypair(data, enc_key)
+
+        %{"format" => "authority_bundle", "v" => 3} ->
+          with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+            {:ok, %{signing: identity.private_key, encryption: identity.encryption_private_key}}
+          end
 
         %{"v" => 1} ->
           # Legacy single signing key — decrypt and wrap
@@ -188,13 +269,15 @@ defmodule Arbor.Security.SigningKeyStore do
   @doc """
   Delete an agent's signing key.
   """
-  @spec delete(String.t()) :: :ok
+  @spec delete(String.t()) ::
+          :ok
+          | {:error,
+             :store_unavailable
+             | :outcome_unknown
+             | :invalid_store_record
+             | :store_capacity_exceeded}
   def delete(agent_id) when is_binary(agent_id) do
-    if available?() do
-      apply(@buffered_store, :delete, [agent_id, [name: @store_name]])
-    end
-
-    :ok
+    acknowledged_delete(agent_id)
   end
 
   @doc """
@@ -202,8 +285,7 @@ defmodule Arbor.Security.SigningKeyStore do
   """
   @spec available?() :: boolean()
   def available? do
-    Code.ensure_loaded?(@buffered_store) and
-      Process.whereis(@store_name) != nil
+    Process.whereis(@store_name) != nil
   end
 
   @doc """
@@ -217,18 +299,73 @@ defmodule Arbor.Security.SigningKeyStore do
 
   # -- Private --
 
-  # Record struct from JSONFile backend (loaded from disk after restart)
   defp unwrap_record(%Record{data: data}), do: data
-  # Plain map from ETS (stored during current session)
-  defp unwrap_record(%{"ct" => _} = data), do: data
 
   defp get_record(agent_id) do
     if available?() do
-      apply(@buffered_store, :get, [agent_id, [name: @store_name]])
+      try do
+        AuthorityStore.authoritative_get(agent_id, name: @store_name)
+      rescue
+        _ -> {:error, :store_unavailable}
+      catch
+        :exit, _ -> {:error, :store_unavailable}
+        _, _ -> {:error, :store_unavailable}
+      end
     else
       {:error, :store_unavailable}
     end
   end
+
+  defp acknowledged_put(key, %Record{} = record) do
+    if available?() do
+      try do
+        case AuthorityStore.acknowledged_put(key, record, name: @store_name) do
+          {:ok, %Record{}} -> :ok
+          {:error, :outcome_unknown} -> {:error, :outcome_unknown}
+          {:error, reason} -> normalize_known_mutation_error(reason)
+          _other -> {:error, :outcome_unknown}
+        end
+      rescue
+        _ -> {:error, :outcome_unknown}
+      catch
+        _, _ -> {:error, :outcome_unknown}
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  end
+
+  defp acknowledged_delete(key) do
+    if available?() do
+      try do
+        case AuthorityStore.acknowledged_delete(key, name: @store_name) do
+          :ok -> :ok
+          {:error, :outcome_unknown} -> {:error, :outcome_unknown}
+          {:error, reason} -> normalize_known_mutation_error(reason)
+          _other -> {:error, :outcome_unknown}
+        end
+      rescue
+        _ -> {:error, :outcome_unknown}
+      catch
+        _, _ -> {:error, :outcome_unknown}
+      end
+    else
+      {:error, :store_unavailable}
+    end
+  end
+
+  defp normalize_known_mutation_error(reason)
+       when reason in [:backend_unavailable, :invalid_backend_response],
+       do: {:error, :store_unavailable}
+
+  defp normalize_known_mutation_error(reason)
+       when reason in [:key_mismatch, :invalid_key, :unsupported_value],
+       do: {:error, :invalid_store_record}
+
+  defp normalize_known_mutation_error(:inventory_limit_exceeded),
+    do: {:error, :store_capacity_exceeded}
+
+  defp normalize_known_mutation_error(_reason), do: {:error, :store_unavailable}
 
   defp get_encryption_key do
     with {:ok, master_key} <- ensure_master_key() do
@@ -352,6 +489,139 @@ defmodule Arbor.Security.SigningKeyStore do
     end
   end
 
+  defp encrypt_keypair(signing_key, encryption_key, enc_key)
+       when is_binary(signing_key) and is_binary(encryption_key) do
+    plaintext =
+      Jason.encode!(%{
+        "signing" => Base.encode64(signing_key),
+        "encryption" => Base.encode64(encryption_key)
+      })
+
+    {ciphertext, iv, tag} = Crypto.encrypt(plaintext, enc_key)
+
+    {:ok,
+     %{
+       ct: Base.encode64(ciphertext),
+       iv: Base.encode64(iv),
+       tag: Base.encode64(tag)
+     }}
+  rescue
+    _ -> {:error, :key_encryption_failed}
+  catch
+    _, _ -> {:error, :key_encryption_failed}
+  end
+
+  defp encrypt_keypair(_signing_key, _encryption_key, _enc_key),
+    do: {:error, :invalid_key_material}
+
+  defp decrypt_authority_bundle(%{"public" => public} = data, enc_key)
+       when is_map(public) do
+    with true <-
+           exact_string_keys?(data, ["ct", "format", "iv", "public", "tag", "v"]),
+         true <-
+           exact_string_keys?(public, [
+             "agent_id",
+             "created_at",
+             "encryption_public_key",
+             "name",
+             "public_key"
+           ]),
+         {:ok, %{signing: signing, encryption: encryption}} <-
+           decrypt_required_keypair(data, enc_key),
+         {:ok, public_key} <- decode_required_base64(public["public_key"]),
+         {:ok, encryption_public_key} <-
+           decode_required_base64(public["encryption_public_key"]),
+         {:ok, created_at} <- decode_required_datetime(public["created_at"]),
+         :ok <- validate_bundle_name(public["name"]),
+         {:ok, identity} <-
+           Identity.new(
+             public_key: public_key,
+             private_key: signing,
+             encryption_public_key: encryption_public_key,
+             encryption_private_key: encryption,
+             name: public["name"],
+             created_at: created_at
+           ),
+         true <- public["agent_id"] == identity.agent_id,
+         :ok <- validate_identity_keypairs(identity) do
+      {:ok, identity}
+    else
+      _ -> {:error, :invalid_authority_bundle}
+    end
+  rescue
+    _ -> {:error, :invalid_authority_bundle}
+  catch
+    _, _ -> {:error, :invalid_authority_bundle}
+  end
+
+  defp decrypt_authority_bundle(_data, _enc_key), do: {:error, :invalid_authority_bundle}
+
+  defp decrypt_required_keypair(data, enc_key) do
+    with {:ok, ciphertext} <- decode_required_base64(data["ct"]),
+         {:ok, iv} <- decode_required_base64(data["iv"]),
+         {:ok, tag} <- decode_required_base64(data["tag"]),
+         {:ok, plaintext} <- Crypto.decrypt(ciphertext, enc_key, iv, tag),
+         {:ok, %{"signing" => signing_b64, "encryption" => encryption_b64} = keypair} <-
+           Jason.decode(plaintext),
+         true <- exact_string_keys?(keypair, ["encryption", "signing"]),
+         {:ok, signing} <- decode_required_base64(signing_b64),
+         {:ok, encryption} <- decode_required_base64(encryption_b64) do
+      {:ok, %{signing: signing, encryption: encryption}}
+    else
+      _ -> {:error, :invalid_authority_bundle}
+    end
+  end
+
+  defp validate_identity_keypairs(%Identity{} = identity) do
+    with true <- is_binary(identity.private_key),
+         true <- is_binary(identity.public_key),
+         true <- is_binary(identity.encryption_private_key),
+         true <- is_binary(identity.encryption_public_key),
+         {signing_public, _} <-
+           :crypto.generate_key(:eddsa, :ed25519, identity.private_key),
+         {encryption_public, _} <-
+           :crypto.generate_key(:ecdh, :x25519, identity.encryption_private_key),
+         true <- signing_public == identity.public_key,
+         true <- encryption_public == identity.encryption_public_key do
+      :ok
+    else
+      _ -> {:error, :invalid_authority_identity}
+    end
+  rescue
+    _ -> {:error, :invalid_authority_identity}
+  catch
+    _, _ -> {:error, :invalid_authority_identity}
+  end
+
+  defp decode_required_base64(value) when is_binary(value) and byte_size(value) > 0 do
+    case Base.decode64(value) do
+      {:ok, decoded} when byte_size(decoded) > 0 -> {:ok, decoded}
+      _ -> {:error, :invalid_base64}
+    end
+  end
+
+  defp decode_required_base64(_value), do: {:error, :invalid_base64}
+
+  defp decode_required_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, 0} -> {:ok, datetime}
+      _ -> {:error, :invalid_datetime}
+    end
+  end
+
+  defp decode_required_datetime(_value), do: {:error, :invalid_datetime}
+
+  defp validate_bundle_name(nil), do: :ok
+  defp validate_bundle_name(name) when is_binary(name) and byte_size(name) > 0, do: :ok
+  defp validate_bundle_name(_name), do: {:error, :invalid_name}
+
+  defp exact_string_keys?(map, expected) when is_map(map) do
+    map
+    |> Map.keys()
+    |> Enum.sort()
+    |> Kernel.==(expected)
+  end
+
   defp read_status(agent_id) do
     try do
       with {:ok, raw} <- get_record(agent_id),
@@ -377,6 +647,11 @@ defmodule Arbor.Security.SigningKeyStore do
       %{"format" => "keypair", "v" => 2} = data ->
         with {:ok, %{signing: signing_key}} <- decrypt_keypair(data, enc_key) do
           validate_signing_key(signing_key)
+        end
+
+      %{"format" => "authority_bundle", "v" => 3} = data ->
+        with {:ok, identity} <- decrypt_authority_bundle(data, enc_key) do
+          validate_signing_key(identity.private_key)
         end
 
       data ->

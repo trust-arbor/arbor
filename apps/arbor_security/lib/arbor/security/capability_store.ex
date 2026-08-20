@@ -24,15 +24,13 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore.Serializer
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Config
   alias Arbor.Security.RevocationFence
   alias Arbor.Security.SignalSync
   alias Arbor.Security.SystemAuthority
   alias Arbor.Signals
 
-  # Runtime bridges — arbor_persistence is above Security, so avoid a compile-time dep.
-  @persistence Arbor.Persistence
-  @buffered_store Arbor.Persistence.BufferedStore
   @cap_store :arbor_security_capabilities
 
   # VP-05D2A0 — interactive-disclosure capability namespace, kept distinct
@@ -2706,7 +2704,7 @@ defmodule Arbor.Security.CapabilityStore do
   # Redacting authoritative-read wrappers (never surface id/metadata/signature/record).
   defp acknowledged_authoritative_get(capability_id) do
     if Process.whereis(@cap_store) do
-      apply(@buffered_store, :authoritative_get, [capability_id, [name: @cap_store]])
+      AuthorityStore.authoritative_get(capability_id, name: @cap_store)
     else
       {:error, :acknowledged_read_failed}
     end
@@ -2721,12 +2719,12 @@ defmodule Arbor.Security.CapabilityStore do
       data = Serializer.serialize(cap)
       record = Record.new(cap.id, data)
 
-      case apply(@buffered_store, :acknowledged_compare_and_swap, [
+      case AuthorityStore.acknowledged_compare_and_swap(
              cap.id,
              :not_found,
              record,
-             [name: @cap_store]
-           ]) do
+             name: @cap_store
+           ) do
         {:ok, _stored} -> {:ok, :inserted}
         {:error, :conflict} -> {:error, :conflict}
         {:error, _reason} -> {:error, :cas_failed}
@@ -2742,11 +2740,11 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp acknowledged_cas_delete(capability_id, %Record{} = observed) do
     if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :acknowledged_compare_and_delete, [
+      case AuthorityStore.acknowledged_compare_and_delete(
              capability_id,
              observed,
-             [name: @cap_store]
-           ]) do
+             name: @cap_store
+           ) do
         :ok -> :ok
         {:error, :conflict} -> {:error, :conflict}
         {:error, _reason} -> {:error, :cas_delete_failed}
@@ -2868,7 +2866,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp load_capability_from_backend(cap_id) do
     if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :get, [cap_id, [name: @cap_store]]) do
+      case AuthorityStore.authoritative_get(cap_id, name: @cap_store) do
         {:ok, %Record{data: data}} ->
           Serializer.deserialize(data)
 
@@ -2922,7 +2920,7 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   # ===========================================================================
-  # Persistence via BufferedStore
+  # Persistence via AuthorityStore
   # ===========================================================================
 
   @cap_store :arbor_security_capabilities
@@ -2972,7 +2970,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp authoritative_delete_persisted_capability(capability_id) do
     if Process.whereis(@cap_store) do
-      case apply(@buffered_store, :acknowledged_delete, [capability_id, [name: @cap_store]]) do
+      case AuthorityStore.acknowledged_delete(capability_id, name: @cap_store) do
         :ok ->
           :ok
 
@@ -3011,9 +3009,9 @@ defmodule Arbor.Security.CapabilityStore do
 
       result =
         if Keyword.get(opts, :acknowledged, false) do
-          apply(@buffered_store, :acknowledged_put, [cap.id, record, [name: @cap_store]])
+          AuthorityStore.acknowledged_put(cap.id, record, name: @cap_store)
         else
-          apply(@buffered_store, :put, [cap.id, record, [name: @cap_store]])
+          AuthorityStore.put(cap.id, record, name: @cap_store)
         end
 
       case result do
@@ -3044,7 +3042,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp delete_persisted_capability(cap_id) do
     if Process.whereis(@cap_store) do
-      apply(@buffered_store, :delete, [cap_id, [name: @cap_store]])
+      AuthorityStore.delete(cap_id, name: @cap_store)
     end
 
     :ok
@@ -3060,16 +3058,15 @@ defmodule Arbor.Security.CapabilityStore do
         restore_from_available_store(state)
 
       # Omitted-store path: :activation_only does not start the named
-      # :arbor_security_capabilities BufferedStore. Keep empty in-memory state.
+      # :arbor_security_capabilities AuthorityStore. Keep empty in-memory state.
       nil ->
         {:ok, state}
     end
   end
 
   defp restore_from_available_store(state) do
-    with :ok <- ensure_hydration_ready(),
-         {:ok, keys} <- list_restored_keys(),
-         {:ok, candidates, counters} <- load_restore_candidates(keys),
+    with {:ok, entries} <- take_restore_entries(),
+         {:ok, candidates, counters} <- load_restore_candidates(entries),
          {:ok, winners, counters} <- select_restore_winners(candidates, counters),
          :ok <- enforce_restored_quotas(winners) do
       state = rebuild_restore_indexes(state, winners, counters)
@@ -3083,22 +3080,13 @@ defmodule Arbor.Security.CapabilityStore do
       {:error, :restore_error}
   end
 
-  defp ensure_hydration_ready do
-    case apply(@persistence, :buffered_store_hydration_status, [@cap_store]) do
-      {:ok, %{status: :ready}} ->
-        :ok
+  defp take_restore_entries do
+    case AuthorityStore.take_hydrated_entries(name: @cap_store) do
+      {:ok, entries} when is_list(entries) ->
+        {:ok, entries}
 
-      {:ok, %{status: :failed, reason: reason}} when is_atom(reason) ->
+      {:error, reason} when is_atom(reason) ->
         {:error, map_hydration_failure_reason(reason)}
-
-      {:ok, %{status: :failed}} ->
-        {:error, :hydration_failed}
-
-      {:ok, %{status: :unavailable}} ->
-        {:error, :hydration_unavailable}
-
-      {:error, _} ->
-        {:error, :hydration_failed}
 
       _other ->
         {:error, :hydration_failed}
@@ -3110,22 +3098,20 @@ defmodule Arbor.Security.CapabilityStore do
               :inventory_limit_exceeded,
               :incomplete_inventory,
               :invalid_backend_response,
-              :backend_unavailable
+              :backend_unavailable,
+              :bounded_inventory_unsupported
             ],
        do: reason
 
   defp map_hydration_failure_reason(:invalid_backend_record), do: :invalid_capability_record
+  defp map_hydration_failure_reason(:key_mismatch), do: :invalid_capability_record
+
+  defp map_hydration_failure_reason(:hydration_limit_exceeded),
+    do: :inventory_limit_exceeded
+
   defp map_hydration_failure_reason(_), do: :hydration_failed
 
-  defp list_restored_keys do
-    case apply(@buffered_store, :list, [[name: @cap_store]]) do
-      {:ok, keys} when is_list(keys) -> {:ok, keys}
-      {:error, _} -> {:error, :incomplete_inventory}
-      _ -> {:error, :incomplete_inventory}
-    end
-  end
-
-  defp load_restore_candidates(keys) do
+  defp load_restore_candidates(entries) do
     counters = %{
       restore_scanned: 0,
       restore_active: 0,
@@ -3134,8 +3120,8 @@ defmodule Arbor.Security.CapabilityStore do
       restore_rejected: 0
     }
 
-    Enum.reduce_while(keys, {:ok, [], counters}, fn key, {:ok, acc, counters} ->
-      case load_restore_candidate(key) do
+    Enum.reduce_while(entries, {:ok, [], counters}, fn entry, {:ok, acc, counters} ->
+      case load_restore_candidate(entry) do
         {:ok, cap} ->
           counters = Map.update!(counters, :restore_scanned, &(&1 + 1))
           {:cont, {:ok, [cap | acc], counters}}
@@ -3146,32 +3132,20 @@ defmodule Arbor.Security.CapabilityStore do
     end)
   end
 
-  defp load_restore_candidate(key) when is_binary(key) do
-    case apply(@buffered_store, :get, [key, [name: @cap_store]]) do
-      {:ok, value} ->
-        with {:ok, data} <- extract_capability_payload(value),
-             :ok <- validate_capability_source(key, data),
-             {:ok, cap} <- deserialize_restore_capability(data),
-             :ok <- validate_deserialized_capability(key, cap) do
-          {:ok, cap}
-        else
-          {:error, reason} when is_atom(reason) -> {:error, reason}
-          {:error, _} -> {:error, :invalid_capability_record}
-          _ -> {:error, :invalid_capability_record}
-        end
-
-      {:error, :not_found} ->
-        {:error, :incomplete_inventory}
-
-      {:error, _} ->
-        {:error, :incomplete_inventory}
-
-      _ ->
-        {:error, :incomplete_inventory}
+  defp load_restore_candidate({key, %Record{} = value}) when is_binary(key) do
+    with {:ok, data} <- extract_capability_payload(value),
+         :ok <- validate_capability_source(key, data),
+         {:ok, cap} <- deserialize_restore_capability(data),
+         :ok <- validate_deserialized_capability(key, cap) do
+      {:ok, cap}
+    else
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      {:error, _} -> {:error, :invalid_capability_record}
+      _ -> {:error, :invalid_capability_record}
     end
   end
 
-  defp load_restore_candidate(_key), do: {:error, :invalid_capability_record}
+  defp load_restore_candidate(_entry), do: {:error, :invalid_capability_record}
 
   # Every Serializer failure is a closed invalid record — never surface exception
   # terms or admit lossy defaults (signature nil, empty chain, depth 3, etc.).
