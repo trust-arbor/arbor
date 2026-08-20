@@ -94,7 +94,33 @@ success UI also shows ready-to-paste `mcpServers` JSON for `mix arbor.signer`.
 Download remains the fallback. Disable auto-save with
 `auto_save_external_agent_keys: false`.
 
-## 5. First reply (conversationalist)
+## 5. Local operator identity (development only)
+
+```bash
+./bin/mix arbor.user.init
+```
+
+Creates your **human** principal — the account agents and grants belong to —
+with a real Ed25519 + X25519 keypair. Deterministic and idempotent: re-running
+loads the existing one.
+
+> **This is a development-only path.** Arbor normally derives a human principal
+> from an authenticated OIDC login, and `Identity.Registry` refuses to register
+> a `human_` identity any other way. A single-operator laptop has no identity
+> provider and cannot obtain that proof, so this task mints one from local
+> claims as an explicit, gated exception. **Production expects a working OIDC
+> provider.** Three independent gates keep this out of it:
+> `allow_local_human_identity` must be `true` (default `false`, set only in
+> `dev.exs`), no OIDC provider may be configured, and `MIX_ENV` must be `dev`.
+
+This is your primary account. When you later add a real OIDC login it derives
+its own id, and you fold it onto this one so your grants and agents carry over:
+
+```bash
+./bin/mix arbor.user.link <new_oidc_id> --to <your_primary_id>
+```
+
+## 6. First reply (conversationalist)
 
 ```bash
 ./bin/mix arbor.agent start conversationalist --name river

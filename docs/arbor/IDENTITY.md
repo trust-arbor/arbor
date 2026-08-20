@@ -1,5 +1,14 @@
 # Operator Identity & Checkpoint Integrity
 
+> **Two different identities live in this system; do not conflate them.**
+> `~/.arbor/identity.key` (below) is the **agent** identity — `agent_<hex>` —
+> used for signed MCP, the software factory, and the checkpoint HMAC. Your
+> **human** principal (`human_<hex>`) is separate: it is what agents and
+> capability grants belong to, it normally comes from an authenticated OIDC
+> login, and on a development box `mix arbor.user.init` mints one from local
+> claims as a gated exception. Production expects OIDC. See
+> `docs/QUICKSTART.md` step 5.
+
 This document covers the operator identity key used by `mix arbor.pipeline.run` and `mix arbor.pipeline.resume`, why it's required, and how to generate / install one.
 
 ## Why an identity key

@@ -237,6 +237,13 @@ config :arbor_ai, :acp_pool_config,
 # egress_modes (:block/:ask) are the active protections.
 config :arbor_security, egress_gate_enforcing: true
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
+
+# DEV ONLY. Permits `mix arbor.user.init` to mint a human identity from local
+# claims instead of an authenticated OIDC login — a deliberate carve-out from
+# the `:oidc_proof_required` rule that `Identity.Registry.register/2` enforces.
+# Production expects a working OIDC provider and must NEVER set this; the
+# facade additionally refuses whenever any OIDC provider is configured.
+config :arbor_security, allow_local_human_identity: true
 # To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
 
 # SpawnWorker capability intersection fails CLOSED by default — if a parent's permissions

@@ -1693,6 +1693,73 @@ defmodule Arbor.Security do
   def oidc_enabled?, do: Arbor.Security.OIDC.Config.enabled?()
 
   @doc """
+  Create (or load) the LOCAL human identity for a single-operator dev install.
+
+  **This is a deliberate, gated carve-out from `:oidc_proof_required`.**
+  `Identity.Registry.register/2` refuses `human_` identities precisely so a
+  human principal cannot be minted without an authenticated login. That is the
+  right rule for production, and this function does not change it — it exists
+  because a laptop with no identity provider has no way to obtain that proof,
+  and is otherwise unable to complete a first turn.
+
+  Production expects a working OIDC provider. This path must never be reachable
+  there, and refuses on its own rather than trusting callers:
+
+    * `config :arbor_security, :allow_local_human_identity` must be `true`
+      (default `false`; set only in `dev.exs`)
+    * no OIDC provider may be configured — once a real login exists, use it
+
+  The identity is derived from local claims (`iss: "arbor://local"`), so it is
+  deterministic and idempotent: the same host+user always yields the same
+  `human_<hash>`, and re-running loads the existing keypair rather than
+  minting a second one. It gets a real Ed25519 + X25519 keypair stored
+  encrypted through `SigningKeyStore`, exactly like an OIDC-derived human.
+
+  It is intended as the PRIMARY account a first-time operator accumulates
+  grants under; later OIDC logins derive their own id and are folded onto it
+  with `mix arbor.user.link`.
+
+  Returns `{:ok, identity, :created | :existing}`.
+  """
+  @spec create_local_human_identity(keyword()) ::
+          {:ok, Identity.t(), :created | :existing} | {:error, atom()}
+  def create_local_human_identity(opts \\ []) do
+    with :ok <- admit_local_human_identity() do
+      Arbor.Security.OIDC.IdentityStore.load_or_create(local_human_claims(opts))
+    end
+  end
+
+  defp admit_local_human_identity do
+    cond do
+      Application.get_env(:arbor_security, :allow_local_human_identity, false) != true ->
+        {:error, :local_human_identity_disabled}
+
+      oidc_enabled?() ->
+        {:error, :oidc_configured}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Stable per host+user so the derived id is idempotent across runs. Not a
+  # secret and not a proof of anything — it is a local namespace, which is
+  # exactly why this path is gated rather than general.
+  defp local_human_claims(opts) do
+    user =
+      Keyword.get(opts, :user) || System.get_env("USER") || System.get_env("USERNAME") ||
+        "operator"
+
+    host = Keyword.get(opts, :host) || elem(:inet.gethostname(), 1) |> to_string()
+
+    %{
+      iss: "arbor://local",
+      sub: "#{user}@#{host}",
+      name: Keyword.get(opts, :name, "#{user} (local operator)")
+    }
+  end
+
+  @doc """
   Register a human identity from cryptographically verified OIDC provenance.
 
   The identity registry re-verifies the original signed ID token against the
