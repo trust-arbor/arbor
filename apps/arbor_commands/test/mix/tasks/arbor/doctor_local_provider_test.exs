@@ -41,7 +41,10 @@ defmodule Mix.Tasks.Arbor.DoctorLocalProviderTest do
   test "unavailable local provider prints an actionable server hint" do
     output = capture_io(fn -> Doctor.run([]) end)
 
-    assert output =~ "LM Studio: Start the local server at http://localhost:1234/v1"
+    # The hint names the SERVER ROOT, not the probe's API path — an operator
+    # starts LM Studio at :1234, and "/v1/models" is the endpoint we probe.
+    assert output =~ "LM Studio: Start the local server at http://localhost:1234"
+    refute output =~ "http://localhost:1234/v1"
     refute output =~ "LM Studio: \n"
   end
 
@@ -49,7 +52,10 @@ defmodule Mix.Tasks.Arbor.DoctorLocalProviderTest do
     output = capture_io(fn -> Doctor.run(["--verbose"]) end)
 
     assert output =~ "availability: FAILED"
-    assert output =~ "LM Studio: Start the local server at http://localhost:1234/v1"
+    # The hint names the SERVER ROOT, not the probe's API path — an operator
+    # starts LM Studio at :1234, and "/v1/models" is the endpoint we probe.
+    assert output =~ "LM Studio: Start the local server at http://localhost:1234"
+    refute output =~ "http://localhost:1234/v1"
   end
 
   defp local_failure_catalog do

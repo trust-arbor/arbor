@@ -810,13 +810,17 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   defp local_start_hint(_entry), do: nil
 
-  # The contract probes the model-list endpoint; show the server root instead,
-  # which is what the operator actually starts and what the *_BASE_URL env vars
-  # take.
+  # The contract probes an OpenAI-compatible model-list endpoint
+  # (`<base>/v1/models`). Show the SERVER ROOT instead — that is what the
+  # operator actually starts and what the *_BASE_URL env vars take. Printing
+  # the probe path told users to "start the local server at
+  # http://localhost:11434/v1", which is an API route, not an address.
   defp local_probe_base(entry) do
     case Map.get(entry, :contract) do
       %{probes: [%{url: url} | _]} when is_binary(url) ->
-        String.replace_suffix(url, "/models", "")
+        url
+        |> String.replace_suffix("/models", "")
+        |> String.replace_suffix("/v1", "")
 
       _ ->
         nil
