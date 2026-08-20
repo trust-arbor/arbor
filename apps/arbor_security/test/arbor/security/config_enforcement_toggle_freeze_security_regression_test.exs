@@ -392,8 +392,8 @@ defmodule Arbor.Security.ConfigEnforcementToggleFreezeSecurityRegressionTest do
 
     issuer =
       Supervisor.child_spec(
-        {Arbor.Persistence.BufferedStore,
-         name: :arbor_security_issuers, backend: backend, write_mode: :sync, collection: "issuers"},
+        {Arbor.Security.AuthorityStore,
+         name: :arbor_security_issuers, backend: backend, namespace: "issuers"},
         id: :arbor_security_issuers
       )
 

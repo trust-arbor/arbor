@@ -1,6 +1,6 @@
 defmodule Arbor.Security.ApplicationStartProfileTest do
   @moduledoc """
-  P1C-A: KernelRuntime `:activation_only` omits Security's BufferedStore
+  P1C-A: KernelRuntime `:activation_only` omits Security's authority-store
   children. CapabilityStore still starts with empty in-memory state.
   Persistent SystemAuthority first-boot without the signing-keys store
   stays in memory. `:full` keeps today's named stores.
@@ -33,7 +33,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     :ok
   end
 
-  test "activation_only omits named BufferedStore children and still starts CapabilityStore" do
+  test "activation_only omits named authority children and still starts CapabilityStore" do
     restart_security!(:activation_only)
 
     Enum.each(@named_stores, fn name ->
@@ -48,6 +48,12 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
 
     stats = CapabilityStore.stats()
     assert stats.active_capabilities == 0
+
+    assert :skipped = TestBootstrap.start!()
+
+    Enum.each(@named_stores, fn name ->
+      assert Process.whereis(name) == nil
+    end)
   end
 
   test "activation_only with persistent system authority starts without named stores" do
@@ -65,7 +71,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     assert is_binary(SystemAuthority.public_key())
   end
 
-  test ":full still starts the named BufferedStore children" do
+  test ":full starts all named AuthorityStores" do
     restart_security!(:full)
 
     Enum.each(@named_stores, fn name ->
@@ -75,6 +81,13 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     assert Process.whereis(CapabilityStore)
     assert Process.whereis(Registry)
     assert Process.whereis(SystemAuthority)
+
+    children = Supervisor.which_children(Arbor.Security.Supervisor)
+
+    Enum.each(@named_stores, fn name ->
+      assert {^name, _pid, :worker, [Arbor.Security.AuthorityStore]} =
+               Enum.find(children, fn {id, _pid, _type, _modules} -> id == name end)
+    end)
   end
 
   defp restart_security!(profile) do
@@ -124,21 +137,6 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
   defp restore_env(_app, key, value), do: Application.put_env(:arbor_security, key, value)
 
   defp restore_extra_security_test_children do
-    backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-    issuer =
-      Supervisor.child_spec(
-        {Arbor.Persistence.BufferedStore,
-         name: :arbor_security_issuers,
-         backend: backend,
-         write_mode: :sync,
-         collection: "issuers"},
-        id: :arbor_security_issuers
-      )
-
-    start_security_test_child(issuer)
-
     signing_authority_owner_token = make_ref()
 
     for child <- [
@@ -157,9 +155,15 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     child_spec = Supervisor.child_spec(spec, [])
 
     case Supervisor.start_child(Arbor.Security.Supervisor, child_spec) do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
-      {:error, :already_present} -> :ok
+      {:ok, _} ->
+        :ok
+
+      {:error, {:already_started, _}} ->
+        :ok
+
+      {:error, :already_present} ->
+        :ok
+
       {:error, reason} ->
         raise "unexpected start_security_test_child error: #{inspect(reason)}"
     end

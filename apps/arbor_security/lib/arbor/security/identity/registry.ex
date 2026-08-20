@@ -1,19 +1,14 @@
 defmodule Arbor.Security.Identity.Registry do
   @moduledoc """
-  Registry for agent identities with pluggable persistence.
+  Registry for public agent identities backed by Security-owned authority.
 
   Stores public keys indexed by agent ID for fast lookup during signature
   verification. Private keys are never stored — only the public portion
   of an identity is retained.
 
-  Identity entries are persisted via a configurable storage backend
-  (implementing `Arbor.Contracts.Persistence.Store`) and restored on startup.
-
-  ## Configuration
-
-      config :arbor_security, :storage_backend, Arbor.Security.Store.JSONFile
-
-  Set to `nil` to disable persistence (in-memory only).
+  In the full start profile, `Arbor.Security.AuthorityStore` owns the complete
+  durable identity inventory. In the activation-only profile that named store
+  is intentionally absent and this process is an explicit hot-only owner.
 
   ## Trust model (C10)
 
@@ -47,6 +42,7 @@ defmodule Arbor.Security.Identity.Registry do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Crypto
@@ -55,8 +51,6 @@ defmodule Arbor.Security.Identity.Registry do
   alias Arbor.Security.SignalSync
   alias Arbor.Signals
 
-  # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
-  @buffered_store Arbor.Persistence.BufferedStore
   @id_store :arbor_security_identities
   @signal_events [
     :identity_registered,
@@ -162,8 +156,17 @@ defmodule Arbor.Security.Identity.Registry do
 
   @doc """
   Remove a registered identity.
+
+  Durable mode may also return a bounded identity-store error when the exact
+  delete cannot be acknowledged. In that case the hot identity is unchanged.
   """
-  @spec deregister(String.t()) :: :ok | {:error, :not_found}
+  @spec deregister(String.t()) ::
+          :ok
+          | {:error,
+             :not_found
+             | :identity_store_conflict
+             | :identity_store_outcome_unknown
+             | :identity_store_unavailable}
   def deregister(agent_id) when is_binary(agent_id) do
     GenServer.call(__MODULE__, {:deregister, agent_id})
   end
@@ -295,17 +298,22 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def init(_opts) do
-    case subscribe_to_distributed_signals() do
-      {:ok, signal_sync} ->
-        state = %{
-          by_agent_id: %{},
-          by_public_key_hash: %{},
-          by_name: %{},
-          signal_sync: signal_sync,
-          stats: %{total_registered: 0, total_deregistered: 0}
-        }
+    state = %{
+      by_agent_id: %{},
+      by_public_key_hash: %{},
+      by_name: %{},
+      authority_records: %{},
+      authority_mode: :hot_only,
+      signal_sync: nil,
+      stats: %{total_registered: 0, total_deregistered: 0}
+    }
 
-        {:ok, restore_from_store(state)}
+    with {:ok, state} <- restore_authority(state),
+         {:ok, signal_sync} <- subscribe_to_distributed_signals() do
+      {:ok, %{state | signal_sync: signal_sync}}
+    else
+      {:error, {:identity_authority, _reason} = reason} ->
+        {:stop, reason}
 
       {:error, reason} ->
         {:stop, {:security_sync_subscription_failed, reason}}
@@ -344,6 +352,22 @@ defmodule Arbor.Security.Identity.Registry do
          {:ok, claims} <- verify_oidc_token(id_token, provider_config),
          {:ok, expected_id} <- derive_verified_human_id(claims),
          :ok <- match_human_identity(identity.agent_id, expected_id) do
+      metadata =
+        if is_map(identity.metadata) do
+          identity.metadata
+          |> Map.put("oidc_issuer", claims["iss"])
+          |> Map.put("oidc_sub", claims["sub"])
+          |> Map.put("identity_type", "human")
+        else
+          identity.metadata
+        end
+
+      identity =
+        %{
+          identity
+          | metadata: metadata
+        }
+
       registration_opts = [oidc_issuer: Map.get(claims, "iss")]
       register_validated_identity(state, identity, registration_opts)
     else
@@ -391,18 +415,24 @@ defmodule Arbor.Security.Identity.Registry do
         {:reply, {:error, :not_found}, state}
 
       %{public_key: pk, name: name} ->
-        pk_hash = Crypto.hash(pk)
+        case commit_identity_delete(state, agent_id) do
+          {:ok, state} ->
+            pk_hash = Crypto.hash(pk)
 
-        state =
-          state
-          |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
-          |> update_in([:by_public_key_hash], &Map.delete(&1, pk_hash))
-          |> deindex_by_name(name, agent_id)
-          |> update_in([:stats, :total_deregistered], &(&1 + 1))
+            state =
+              state
+              |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
+              |> update_in([:by_public_key_hash], &Map.delete(&1, pk_hash))
+              |> deindex_by_name(name, agent_id)
+              |> update_in([:authority_records], &Map.delete(&1, agent_id))
+              |> update_in([:stats, :total_deregistered], &(&1 + 1))
 
-        delete_from_store(agent_id)
-        emit_identity_signal(:identity_deregistered, agent_id)
-        {:reply, :ok, state}
+            emit_identity_signal(:identity_deregistered, agent_id)
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -447,10 +477,7 @@ defmodule Arbor.Security.Identity.Registry do
             status_reason: reason
         }
 
-        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist_to_store(agent_id, updated_entry)
-        emit_identity_signal(:identity_suspended, agent_id)
-        {:reply, :ok, state}
+        commit_identity_status(state, agent_id, updated_entry, :identity_suspended)
     end
   end
 
@@ -471,10 +498,7 @@ defmodule Arbor.Security.Identity.Registry do
             status_reason: nil
         }
 
-        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist_to_store(agent_id, updated_entry)
-        emit_identity_signal(:identity_resumed, agent_id)
-        {:reply, :ok, state}
+        commit_identity_status(state, agent_id, updated_entry, :identity_resumed)
     end
   end
 
@@ -492,14 +516,22 @@ defmodule Arbor.Security.Identity.Registry do
             status_reason: reason
         }
 
-        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
-        persist_to_store(agent_id, updated_entry)
+        case commit_identity_update(state, agent_id, updated_entry) do
+          {:ok, state} ->
+            state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+            emit_identity_signal(:identity_revoked, agent_id)
 
-        # Revoke all capabilities for this agent
-        {:ok, revoked_count} = CapabilityStore.revoke_all(agent_id)
+            case CapabilityStore.revoke_all(agent_id) do
+              {:ok, revoked_count} ->
+                {:reply, {:ok, revoked_count}, state}
 
-        emit_identity_signal(:identity_revoked, agent_id)
-        {:reply, {:ok, revoked_count}, state}
+              {:error, reason} ->
+                {:reply, {:error, {:capability_revocation_failed, reason}}, state}
+            end
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -540,16 +572,21 @@ defmodule Arbor.Security.Identity.Registry do
           status_reason: Map.get(identity, :status_reason)
         }
 
-        state =
-          state
-          |> put_in([:by_agent_id, identity.agent_id], entry)
-          |> put_in([:by_public_key_hash, pk_hash], identity.agent_id)
-          |> index_by_name(identity.name, identity.agent_id)
-          |> update_in([:stats, :total_registered], &(&1 + 1))
+        case commit_new_identity(state, identity.agent_id, entry) do
+          {:ok, state} ->
+            state =
+              state
+              |> put_in([:by_agent_id, identity.agent_id], entry)
+              |> put_in([:by_public_key_hash, pk_hash], identity.agent_id)
+              |> index_by_name(identity.name, identity.agent_id)
+              |> update_in([:stats, :total_registered], &(&1 + 1))
 
-        persist_to_store(identity.agent_id, entry)
-        emit_identity_signal(:identity_registered, identity.agent_id)
-        {:reply, :ok, state}
+            emit_identity_signal(:identity_registered, identity.agent_id)
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
       end
     else
       {:error, _} = error -> {:reply, error, state}
@@ -561,14 +598,49 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp validate_public_identity(%Identity{} = identity) do
-    cond do
-      not is_binary(Map.get(identity, :agent_id)) -> {:error, :invalid_identity}
-      not is_binary(Map.get(identity, :public_key)) -> {:error, :invalid_identity}
-      byte_size(identity.public_key) != 32 -> {:error, :invalid_identity}
-      not is_map(Map.get(identity, :metadata)) -> {:error, :invalid_identity}
-      true -> :ok
+    with true <- is_binary(identity.agent_id),
+         true <- is_binary(identity.public_key) and byte_size(identity.public_key) == 32,
+         true <-
+           is_nil(identity.encryption_public_key) or
+             valid_public_key?(identity.encryption_public_key),
+         true <- is_nil(identity.name) or is_binary(identity.name),
+         true <- is_integer(identity.key_version) and identity.key_version > 0,
+         true <- match?(%DateTime{}, identity.created_at),
+         true <- is_map(identity.metadata),
+         true <- Identity.valid_status?(identity.status),
+         true <-
+           is_nil(identity.status_changed_at) or match?(%DateTime{}, identity.status_changed_at),
+         true <- is_nil(identity.status_reason) or is_binary(identity.status_reason),
+         :ok <-
+           validate_identity_binding(identity.agent_id, identity.public_key, identity.metadata) do
+      :ok
+    else
+      _ -> {:error, :invalid_identity}
     end
   end
+
+  defp valid_public_key?(key), do: is_binary(key) and byte_size(key) == 32
+
+  defp validate_identity_binding("agent_" <> _rest = agent_id, public_key, _metadata) do
+    if Crypto.derive_agent_id(public_key) == agent_id, do: :ok, else: {:error, :invalid_identity}
+  end
+
+  defp validate_identity_binding("human_" <> _rest = agent_id, _public_key, metadata) do
+    issuer = metadata["oidc_issuer"] || metadata[:oidc_issuer]
+    subject = metadata["oidc_sub"] || metadata[:oidc_sub]
+
+    if is_binary(issuer) and issuer != "" and is_binary(subject) and subject != "" and
+         IdentityStore.derive_agent_id(%{iss: issuer, sub: subject}) == agent_id do
+      :ok
+    else
+      {:error, :invalid_identity}
+    end
+  rescue
+    _ -> {:error, :invalid_identity}
+  end
+
+  defp validate_identity_binding(_agent_id, _public_key, _metadata),
+    do: {:error, :invalid_identity}
 
   defp authorize_registration(identity, opts) do
     case registration_authorized(identity, opts) do
@@ -767,173 +839,328 @@ defmodule Arbor.Security.Identity.Registry do
       state
   end
 
-  defp handle_remote_identity_signal(:identity_registered, data, state) do
-    agent_id = data[:agent_id] || data["agent_id"]
-
-    if agent_id && not Map.has_key?(state.by_agent_id, agent_id) do
-      # Load from shared backend
-      case load_identity_from_backend(agent_id) do
-        {:ok, entry} ->
-          pk_hash = Crypto.hash(entry.public_key)
-
-          Logger.debug("[IdentityRegistry] Synced remote identity #{agent_id}")
-
-          state
-          |> put_in([:by_agent_id, agent_id], entry)
-          |> put_in([:by_public_key_hash, pk_hash], agent_id)
-          |> index_by_name(entry[:name], agent_id)
-
-        {:error, _} ->
-          state
-      end
-    else
-      state
-    end
-  end
-
   defp handle_remote_identity_signal(type, data, state)
-       when type in [
-              :identity_deregistered,
-              :identity_suspended,
-              :identity_resumed,
-              :identity_revoked
-            ] do
-    agent_id = data[:agent_id] || data["agent_id"]
-
-    if agent_id && Map.has_key?(state.by_agent_id, agent_id) do
-      case type do
-        :identity_deregistered ->
-          case Map.get(state.by_agent_id, agent_id) do
-            %{public_key: pk, name: name} ->
-              pk_hash = Crypto.hash(pk)
-
-              state
-              |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
-              |> update_in([:by_public_key_hash], &Map.delete(&1, pk_hash))
-              |> deindex_by_name(name, agent_id)
-
-            _ ->
-              update_in(state, [:by_agent_id], &Map.delete(&1, agent_id))
-          end
-
-        :identity_suspended ->
-          update_in(state, [:by_agent_id, agent_id], fn entry ->
-            %{entry | status: :suspended, status_changed_at: DateTime.utc_now()}
-          end)
-
-        :identity_resumed ->
-          update_in(state, [:by_agent_id, agent_id], fn entry ->
-            %{entry | status: :active, status_changed_at: DateTime.utc_now(), status_reason: nil}
-          end)
-
-        :identity_revoked ->
-          update_in(state, [:by_agent_id, agent_id], fn entry ->
-            %{entry | status: :revoked, status_changed_at: DateTime.utc_now()}
-          end)
-      end
-    else
-      state
+       when type in @signal_events do
+    case data[:agent_id] || data["agent_id"] do
+      agent_id when is_binary(agent_id) -> reconcile_remote_identity(type, agent_id, state)
+      _invalid -> state
     end
   end
 
   defp handle_remote_identity_signal(_type, _data, state), do: state
 
-  defp load_identity_from_backend(agent_id) do
-    if Process.whereis(@id_store) do
-      case apply(@buffered_store, :get, [agent_id, [name: @id_store]]) do
-        {:ok, %Record{data: data}} ->
-          {:ok, deserialize_entry(data)}
+  defp reconcile_remote_identity(type, agent_id, %{authority_mode: :durable} = state) do
+    case authority_get(agent_id) do
+      {:ok, record, entry} ->
+        case remote_entry_for_event(type, entry) do
+          {:ok, event_entry} ->
+            if remote_public_key_available?(state, agent_id, event_entry) do
+              replace_hot_identity(state, agent_id, event_entry, record)
+            else
+              fail_closed_remote(type, agent_id, state)
+            end
 
-        error ->
-          error
-      end
-    else
-      {:error, :store_unavailable}
+          :remove ->
+            remove_hot_identity(state, agent_id)
+
+          :reject ->
+            fail_closed_remote(type, agent_id, state)
+        end
+
+      {:error, :not_found} ->
+        if type == :identity_deregistered,
+          do: remove_hot_identity(state, agent_id),
+          else: fail_closed_remote(type, agent_id, state)
+
+      {:error, _reason} ->
+        fail_closed_remote(type, agent_id, state)
     end
-  catch
-    _, reason -> {:error, reason}
+  end
+
+  defp reconcile_remote_identity(type, agent_id, %{authority_mode: :hot_only} = state) do
+    case type do
+      :identity_deregistered -> remove_hot_identity(state, agent_id)
+      :identity_suspended -> reduce_hot_identity(state, agent_id, :suspended)
+      :identity_revoked -> reduce_hot_identity(state, agent_id, :revoked)
+      _authority_restoring -> state
+    end
+  end
+
+  defp remote_entry_for_event(:identity_registered, entry), do: {:ok, entry}
+  defp remote_entry_for_event(:identity_resumed, %{status: :active} = entry), do: {:ok, entry}
+
+  defp remote_entry_for_event(:identity_suspended, entry) do
+    {:ok, %{entry | status: :suspended, status_changed_at: DateTime.utc_now()}}
+  end
+
+  defp remote_entry_for_event(:identity_revoked, entry) do
+    {:ok, %{entry | status: :revoked, status_changed_at: DateTime.utc_now()}}
+  end
+
+  defp remote_entry_for_event(:identity_deregistered, _entry), do: :remove
+  defp remote_entry_for_event(_type, _entry), do: :reject
+
+  defp remote_public_key_available?(state, agent_id, entry) do
+    case Map.get(state.by_public_key_hash, Crypto.hash(entry.public_key)) do
+      nil -> true
+      ^agent_id -> true
+      _other_agent -> false
+    end
+  end
+
+  defp fail_closed_remote(type, agent_id, state)
+       when type in [:identity_deregistered, :identity_suspended, :identity_revoked],
+       do: remove_hot_identity(state, agent_id)
+
+  defp fail_closed_remote(_authority_restoring, _agent_id, state), do: state
+
+  defp reduce_hot_identity(state, agent_id, status) do
+    case Map.get(state.by_agent_id, agent_id) do
+      nil -> state
+      entry -> put_in(state, [:by_agent_id, agent_id], %{entry | status: status})
+    end
   end
 
   # ===========================================================================
-  # Persistence via BufferedStore
+  # Security-owned authority
   # ===========================================================================
 
-  @id_store :arbor_security_identities
-
-  defp persist_to_store(agent_id, entry) do
+  defp restore_authority(state) do
     if Process.whereis(@id_store) do
-      data = serialize_entry(agent_id, entry)
-      record = Record.new(agent_id, data)
-      apply(@buffered_store, :put, [agent_id, record, [name: @id_store]])
-    end
-
-    :ok
-  catch
-    _, reason ->
-      Logger.warning("Failed to persist identity #{agent_id}: #{inspect(reason)}")
-      :ok
-  end
-
-  defp delete_from_store(agent_id) do
-    if Process.whereis(@id_store) do
-      apply(@buffered_store, :delete, [agent_id, [name: @id_store]])
-    end
-
-    :ok
-  catch
-    _, reason ->
-      Logger.warning("Failed to delete persisted identity #{agent_id}: #{inspect(reason)}")
-      :ok
-  end
-
-  defp restore_from_store(state) do
-    if Process.whereis(@id_store) do
-      case apply(@buffered_store, :list, [[name: @id_store]]) do
-        {:ok, keys} ->
-          Enum.reduce(keys, state, &restore_key_from_store/2)
-
-        {:error, _reason} ->
-          state
+      case safe_authority_call(fn -> AuthorityStore.take_hydrated_entries(name: @id_store) end) do
+        {:ok, entries} -> build_authoritative_state(state, entries)
+        {:error, reason} -> {:error, {:identity_authority, bounded_hydration_error(reason)}}
+        _invalid -> {:error, {:identity_authority, :malformed_inventory}}
       end
     else
-      state
-    end
-  catch
-    _, reason ->
-      Logger.warning("Failed to restore identities: #{inspect(reason)}")
-      state
-  end
-
-  defp restore_key_from_store(key, acc) do
-    case apply(@buffered_store, :get, [key, [name: @id_store]]) do
-      {:ok, %Record{data: data}} ->
-        restore_entry(acc, data)
-
-      {:error, reason} ->
-        Logger.warning("Failed to restore identity #{key}: #{inspect(reason)}")
-        acc
+      {:ok, %{state | authority_mode: :hot_only}}
     end
   end
 
-  defp restore_entry(state, data) do
-    case deserialize_entry(data) do
-      {:ok, agent_id, entry} ->
-        pk_hash = Crypto.hash(entry.public_key)
+  defp build_authoritative_state(state, entries) when is_list(entries) do
+    Enum.reduce_while(entries, {:ok, %{state | authority_mode: :durable}, MapSet.new()}, fn
+      {key, %Record{} = record}, {:ok, acc, public_keys} when is_binary(key) ->
+        with {:ok, ^key, entry} <- deserialize_identity_record(key, record),
+             public_key_hash <- Crypto.hash(entry.public_key),
+             false <- MapSet.member?(public_keys, public_key_hash) do
+          acc =
+            acc
+            |> admit_hot_identity(key, entry, record)
+            |> update_in([:stats, :total_registered], &(&1 + 1))
 
-        state
-        |> put_in([:by_agent_id, agent_id], entry)
-        |> put_in([:by_public_key_hash, pk_hash], agent_id)
-        |> index_by_name(entry.name, agent_id)
-        |> update_in([:stats, :total_registered], &(&1 + 1))
+          {:cont, {:ok, acc, MapSet.put(public_keys, public_key_hash)}}
+        else
+          _ -> {:halt, {:error, {:identity_authority, :malformed_inventory}}}
+        end
+
+      _malformed, _acc ->
+        {:halt, {:error, {:identity_authority, :malformed_inventory}}}
+    end)
+    |> case do
+      {:ok, restored, _public_keys} -> {:ok, restored}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp build_authoritative_state(_state, _entries),
+    do: {:error, {:identity_authority, :malformed_inventory}}
+
+  defp bounded_hydration_error(reason)
+       when reason in [
+              :hydration_limit_exceeded,
+              :inventory_limit_exceeded,
+              :bounded_inventory_unsupported
+            ],
+       do: :inventory_limit_exceeded
+
+  defp bounded_hydration_error(reason)
+       when reason in [:backend_unavailable, :outcome_unknown, :not_hydrated],
+       do: :inventory_unavailable
+
+  defp bounded_hydration_error(_reason), do: :malformed_inventory
+
+  defp commit_new_identity(%{authority_mode: :hot_only} = state, _agent_id, _entry),
+    do: {:ok, state}
+
+  defp commit_new_identity(state, agent_id, entry) do
+    replacement = Record.new(agent_id, serialize_entry(agent_id, entry))
+
+    case safe_authority_call(fn ->
+           AuthorityStore.acknowledged_compare_and_swap(
+             agent_id,
+             :not_found,
+             replacement,
+             name: @id_store
+           )
+         end) do
+      {:ok, %Record{} = stored} ->
+        {:ok, put_in(state, [:authority_records, agent_id], stored)}
 
       {:error, reason} ->
-        Logger.warning("Failed to deserialize identity: #{inspect(reason)}")
-        state
+        {:error, identity_store_error(reason)}
+
+      _invalid ->
+        {:error, :identity_store_outcome_unknown}
     end
+  end
+
+  defp commit_identity_update(%{authority_mode: :hot_only} = state, _agent_id, _entry),
+    do: {:ok, state}
+
+  defp commit_identity_update(state, agent_id, entry) do
+    with {:ok, current} <- Map.fetch(state.authority_records, agent_id) do
+      replacement = Record.new(agent_id, serialize_entry(agent_id, entry))
+
+      case safe_authority_call(fn ->
+             AuthorityStore.acknowledged_compare_and_swap(
+               agent_id,
+               {:value, current},
+               replacement,
+               name: @id_store
+             )
+           end) do
+        {:ok, %Record{} = stored} ->
+          {:ok, put_in(state, [:authority_records, agent_id], stored)}
+
+        {:error, reason} ->
+          {:error, identity_store_error(reason)}
+
+        _invalid ->
+          {:error, :identity_store_outcome_unknown}
+      end
+    else
+      :error -> {:error, :identity_store_conflict}
+    end
+  end
+
+  defp commit_identity_delete(%{authority_mode: :hot_only} = state, _agent_id),
+    do: {:ok, state}
+
+  defp commit_identity_delete(state, agent_id) do
+    with {:ok, current} <- Map.fetch(state.authority_records, agent_id) do
+      case safe_authority_call(fn ->
+             AuthorityStore.acknowledged_compare_and_delete(
+               agent_id,
+               current,
+               name: @id_store
+             )
+           end) do
+        :ok -> {:ok, state}
+        {:error, reason} -> {:error, identity_store_error(reason)}
+        _invalid -> {:error, :identity_store_outcome_unknown}
+      end
+    else
+      :error -> {:error, :identity_store_conflict}
+    end
+  end
+
+  defp commit_identity_status(state, agent_id, updated_entry, signal_type) do
+    case commit_identity_update(state, agent_id, updated_entry) do
+      {:ok, state} ->
+        state = put_in(state, [:by_agent_id, agent_id], updated_entry)
+        emit_identity_signal(signal_type, agent_id)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp identity_store_error(:conflict), do: :identity_store_conflict
+  defp identity_store_error(:outcome_unknown), do: :identity_store_outcome_unknown
+  defp identity_store_error(:key_mismatch), do: :identity_store_malformed
+  defp identity_store_error(_reason), do: :identity_store_unavailable
+
+  defp authority_get(agent_id) do
+    case safe_authority_call(fn ->
+           AuthorityStore.authoritative_get(agent_id, name: @id_store)
+         end) do
+      {:ok, %Record{} = record} ->
+        case deserialize_identity_record(agent_id, record) do
+          {:ok, ^agent_id, entry} -> {:ok, record, entry}
+          {:error, _reason} -> {:error, :malformed_identity}
+        end
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, _reason} ->
+        {:error, :store_unavailable}
+
+      _invalid ->
+        {:error, :malformed_identity}
+    end
+  end
+
+  defp safe_authority_call(fun) do
+    fun.()
   rescue
-    e ->
-      Logger.warning("Failed to restore identity entry: #{inspect(e)}")
-      state
+    _ -> {:error, :backend_unavailable}
+  catch
+    _, _ -> {:error, :backend_unavailable}
+  end
+
+  defp admit_hot_identity(state, agent_id, entry, record) do
+    pk_hash = Crypto.hash(entry.public_key)
+
+    state
+    |> put_in([:by_agent_id, agent_id], entry)
+    |> put_in([:by_public_key_hash, pk_hash], agent_id)
+    |> put_in([:authority_records, agent_id], record)
+    |> index_by_name(entry.name, agent_id)
+  end
+
+  defp replace_hot_identity(state, agent_id, entry, record) do
+    state
+    |> remove_hot_identity(agent_id)
+    |> admit_hot_identity(agent_id, entry, record)
+  end
+
+  defp remove_hot_identity(state, agent_id) do
+    case Map.get(state.by_agent_id, agent_id) do
+      %{public_key: public_key, name: name} ->
+        state
+        |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
+        |> update_in([:by_public_key_hash], &Map.delete(&1, Crypto.hash(public_key)))
+        |> update_in([:authority_records], &Map.delete(&1, agent_id))
+        |> deindex_by_name(name, agent_id)
+
+      _missing ->
+        state
+        |> update_in([:by_agent_id], &Map.delete(&1, agent_id))
+        |> update_in([:authority_records], &Map.delete(&1, agent_id))
+    end
+  end
+
+  defp deserialize_identity_record(key, %Record{key: key, data: data}) when is_map(data) do
+    with {:ok, agent_id, entry} <- deserialize_entry(data),
+         true <- agent_id == key,
+         :ok <- validate_restored_entry(agent_id, entry) do
+      {:ok, agent_id, entry}
+    else
+      _ -> {:error, :malformed_identity}
+    end
+  end
+
+  defp deserialize_identity_record(_key, _record), do: {:error, :malformed_identity}
+
+  defp validate_restored_entry(agent_id, entry) do
+    identity = %Identity{
+      agent_id: agent_id,
+      public_key: entry.public_key,
+      private_key: nil,
+      encryption_public_key: entry.encryption_public_key,
+      encryption_private_key: nil,
+      name: entry.name,
+      key_version: entry.key_version,
+      created_at: entry.created_at,
+      metadata: entry.metadata,
+      status: entry.status,
+      status_changed_at: entry.status_changed_at,
+      status_reason: entry.status_reason
+    }
+
+    validate_public_identity(identity)
   end
 
   # ===========================================================================
@@ -956,47 +1183,116 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp deserialize_entry(data) when is_map(data) do
-    entry = %{
-      public_key: Base.decode16!(data["public_key"], case: :mixed),
-      encryption_public_key: decode_optional_key(data["encryption_public_key"]),
-      name: data["name"],
-      key_version: data["key_version"] || 1,
-      created_at: parse_datetime(data["created_at"]),
-      metadata: data["metadata"] || %{},
-      status: String.to_existing_atom(data["status"] || "active"),
-      status_changed_at: parse_optional_datetime(data["status_changed_at"]),
-      status_reason: data["status_reason"]
-    }
+    with {:ok, agent_id} <- required_binary(data, "agent_id"),
+         {:ok, public_key_hex} <- required_binary(data, "public_key"),
+         {:ok, public_key} <- decode_key(public_key_hex),
+         {:ok, encryption_public_key} <- decode_optional_key(data["encryption_public_key"]),
+         {:ok, created_at} <- parse_datetime(data["created_at"]),
+         {:ok, status} <- parse_status(data["status"]),
+         {:ok, status_changed_at} <- parse_optional_datetime(data["status_changed_at"]),
+         :ok <- validate_serialized_fields(data) do
+      entry = %{
+        public_key: public_key,
+        encryption_public_key: encryption_public_key,
+        name: data["name"],
+        key_version: data["key_version"],
+        created_at: created_at,
+        metadata: data["metadata"],
+        status: status,
+        status_changed_at: status_changed_at,
+        status_reason: data["status_reason"]
+      }
 
-    {:ok, data["agent_id"], entry}
-  rescue
-    e -> {:error, e}
+      {:ok, agent_id, entry}
+    else
+      _ -> {:error, :malformed_identity}
+    end
+  end
+
+  defp deserialize_entry(_data), do: {:error, :malformed_identity}
+
+  defp required_binary(data, key) do
+    case Map.fetch(data, key) do
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, :malformed_identity}
+    end
+  end
+
+  defp validate_serialized_fields(data) do
+    cond do
+      not Map.has_key?(data, "encryption_public_key") ->
+        {:error, :malformed_identity}
+
+      not Map.has_key?(data, "name") ->
+        {:error, :malformed_identity}
+
+      not is_nil(data["name"]) and not is_binary(data["name"]) ->
+        {:error, :malformed_identity}
+
+      not is_integer(data["key_version"]) or data["key_version"] <= 0 ->
+        {:error, :malformed_identity}
+
+      not is_map(data["metadata"]) ->
+        {:error, :malformed_identity}
+
+      not Map.has_key?(data, "status_changed_at") ->
+        {:error, :malformed_identity}
+
+      not Map.has_key?(data, "status_reason") ->
+        {:error, :malformed_identity}
+
+      not is_nil(data["status_reason"]) and not is_binary(data["status_reason"]) ->
+        {:error, :malformed_identity}
+
+      Map.has_key?(data, "private_key") or Map.has_key?(data, "encryption_private_key") ->
+        {:error, :malformed_identity}
+
+      true ->
+        :ok
+    end
   end
 
   defp encode_optional_key(nil), do: nil
   defp encode_optional_key(key) when is_binary(key), do: Base.encode16(key, case: :lower)
 
-  defp decode_optional_key(nil), do: nil
-  defp decode_optional_key(hex) when is_binary(hex), do: Base.decode16!(hex, case: :mixed)
+  defp decode_key(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :mixed) do
+      {:ok, key} when byte_size(key) == 32 -> {:ok, key}
+      _ -> {:error, :malformed_identity}
+    end
+  end
+
+  defp decode_key(_hex), do: {:error, :malformed_identity}
+
+  defp decode_optional_key(nil), do: {:ok, nil}
+  defp decode_optional_key(hex) when is_binary(hex), do: decode_key(hex)
+  defp decode_optional_key(_hex), do: {:error, :malformed_identity}
 
   defp encode_optional_datetime(nil), do: nil
   defp encode_optional_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
-  defp parse_datetime(nil), do: DateTime.utc_now()
-
   defp parse_datetime(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
-      {:ok, dt, _offset} -> dt
-      _ -> DateTime.utc_now()
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> {:error, :malformed_identity}
     end
   end
 
-  defp parse_optional_datetime(nil), do: nil
+  defp parse_datetime(_iso), do: {:error, :malformed_identity}
+
+  defp parse_optional_datetime(nil), do: {:ok, nil}
 
   defp parse_optional_datetime(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
-      {:ok, dt, _offset} -> dt
-      _ -> nil
+      {:ok, dt, _offset} -> {:ok, dt}
+      _ -> {:error, :malformed_identity}
     end
   end
+
+  defp parse_optional_datetime(_iso), do: {:error, :malformed_identity}
+
+  defp parse_status("active"), do: {:ok, :active}
+  defp parse_status("suspended"), do: {:ok, :suspended}
+  defp parse_status("revoked"), do: {:ok, :revoked}
+  defp parse_status(_status), do: {:error, :malformed_identity}
 end

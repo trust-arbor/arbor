@@ -3,10 +3,6 @@ defmodule Arbor.Security.Application do
 
   use Application
 
-  # Runtime bridge — arbor_persistence is above Security, no compile-time dep.
-  # Named BufferedStore child specs are built only when the KernelRuntime
-  # start profile is not :activation_only.
-  @buffered_store Arbor.Persistence.BufferedStore
   @compile_env Mix.env()
 
   @impl true
@@ -48,50 +44,33 @@ defmodule Arbor.Security.Application do
   end
 
   defp children_for_profile(:full, signing_authority_owner_token) do
-    buffered_store_children() ++ core_security_children(signing_authority_owner_token)
+    security_store_children() ++ core_security_children(signing_authority_owner_token)
   end
 
   # Unknown profiles keep today's stores because KernelRuntime already fails closed.
   defp children_for_profile(_profile, signing_authority_owner_token) do
-    buffered_store_children() ++ core_security_children(signing_authority_owner_token)
+    security_store_children() ++ core_security_children(signing_authority_owner_token)
   end
 
-  defp buffered_store_children do
+  defp security_store_children do
     [
-      Supervisor.child_spec(
-        {@buffered_store,
-         name: :arbor_security_capabilities,
-         backend: security_backend(),
-         write_mode: :sync,
-         collection: "capabilities",
-         hydration_limit: Arbor.Security.Config.max_global_capabilities()},
-        id: :arbor_security_capabilities
+      authority_store_child(
+        :arbor_security_capabilities,
+        "capabilities",
+        hydration_limit: Arbor.Security.Config.max_global_capabilities()
       ),
-      Supervisor.child_spec(
-        {@buffered_store,
-         name: :arbor_security_identities,
-         backend: security_backend(),
-         write_mode: :sync,
-         collection: "identities"},
-        id: :arbor_security_identities
-      ),
-      Supervisor.child_spec(
-        {@buffered_store,
-         name: :arbor_security_signing_keys,
-         backend: security_backend(),
-         write_mode: :sync,
-         collection: "signing_keys"},
-        id: :arbor_security_signing_keys
-      ),
-      Supervisor.child_spec(
-        {@buffered_store,
-         name: :arbor_security_issuers,
-         backend: security_backend(),
-         write_mode: :sync,
-         collection: "issuers"},
-        id: :arbor_security_issuers
-      )
+      authority_store_child(:arbor_security_identities, "identities"),
+      authority_store_child(:arbor_security_signing_keys, "signing_keys"),
+      authority_store_child(:arbor_security_issuers, "issuers")
     ]
+  end
+
+  defp authority_store_child(name, namespace, opts \\ []) do
+    store_opts =
+      [name: name, backend: security_backend(), namespace: namespace]
+      |> Keyword.merge(opts)
+
+    Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name)
   end
 
   defp core_security_children(signing_authority_owner_token) do

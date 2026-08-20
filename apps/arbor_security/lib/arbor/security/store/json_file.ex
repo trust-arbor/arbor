@@ -27,6 +27,9 @@ defmodule Arbor.Security.Store.JSONFile do
   - No host power-loss durability when directory sync is unavailable.
   - No fencing for unmigrated legacy files until the first successful Revision
     transition and version-2 publication.
+  - Inventory bounds apply to logical records before hydration or migration;
+    `File.ls/1` still materializes directory names and does not bound same-UID
+    filesystem resource consumption.
 
   ## Configuration
 
@@ -38,6 +41,7 @@ defmodule Arbor.Security.Store.JSONFile do
   """
 
   @behaviour Arbor.Contracts.Persistence.Store
+  @behaviour Arbor.Security.Store.BoundedInventory
 
   require Logger
 
@@ -103,6 +107,17 @@ defmodule Arbor.Security.Store.JSONFile do
       with_ns_lock(ctx, fn -> inventory_list(ctx, limit) end)
     end
   end
+
+  @impl Arbor.Security.Store.BoundedInventory
+  def bounded_list(limit, opts \\ [])
+
+  def bounded_list(limit, opts) when is_integer(limit) and limit > 0 and is_list(opts) do
+    with {:ok, ctx} <- namespace_context(opts) do
+      with_ns_lock(ctx, fn -> inventory_list(ctx, limit) end)
+    end
+  end
+
+  def bounded_list(_limit, _opts), do: {:error, :invalid_inventory_limit}
 
   @impl true
   def exists?(key, opts \\ []) do

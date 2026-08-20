@@ -34,8 +34,7 @@ defmodule Arbor.Security.SignalsSubscriptionSessionTokenSecurityRegressionTest d
         ] do
       child =
         Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: backend, write_mode: :sync, collection: collection},
+          {Arbor.Security.AuthorityStore, name: name, backend: backend, namespace: collection},
           id: name
         )
 

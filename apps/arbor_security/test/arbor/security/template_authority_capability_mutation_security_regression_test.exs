@@ -1,17 +1,18 @@
 defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTest.CASSandbox do
   @moduledoc false
+  use GenServer
+
   @behaviour Arbor.Contracts.Persistence.Store
 
-  alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Persistence.Store.ETS
+  alias Arbor.Contracts.Persistence.{Record, Revision}
 
-  # A thin failure-injection wrapper around the EXISTING genuinely-linearizable
-  # Arbor.Persistence.Store.ETS CAS backend (structured Record
-  # generation+revision fencing + delete tombstones, GenServer-serialized). All
-  # real CAS semantics come from ETS; this module only injects bounded failures
-  # for the ambiguous/conflict regression paths. Process-lifetime durable: it
-  # persists across a CapabilityStore restart because the test keeps this
-  # backend + the BufferedStore alive (only CapabilityStore is restarted).
+  # Security-owned, test-only process-lifetime backend. Its owner serializes
+  # structured Record generation/revision fencing and delete tombstones; the
+  # fault controls exercise ambiguous/conflict regression paths around those
+  # real transitions. It survives a CapabilityStore restart because the test
+  # keeps this backend + the AuthorityStore alive.
+
+  @default_max_entries 100_000
 
   @puts_key {__MODULE__, :puts}
   @deletes_key {__MODULE__, :deletes}
@@ -80,11 +81,23 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     :persistent_term.erase(@cad_replacement_key)
   end
 
-  def start_link(opts), do: ETS.start_link(opts)
+  def start_link(opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
 
   @impl true
   def put(key, record, opts) do
-    if inject?(@puts_key), do: {:error, :injected_put_failure}, else: ETS.put(key, record, opts)
+    cond do
+      Revision.key_mismatch?(key, record) ->
+        {:error, :key_mismatch}
+
+      inject?(@puts_key) ->
+        {:error, :injected_put_failure}
+
+      true ->
+        GenServer.call(store_name!(opts), {:put, key, record})
+    end
   end
 
   @impl true
@@ -94,7 +107,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # (the first read AFTER admission) exits to force :outcome_unknown.
       exit({:post_admission, :timeout})
     else
-      case ETS.get(key, opts) do
+      case GenServer.call(store_name!(opts), {:get, key}) do
         {:ok, %Record{} = rec} = ok ->
           if consume_wrong_key_get?() do
             {:ok, %{rec | key: rec.key <> "_wrong"}}
@@ -110,17 +123,24 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   @impl true
   def delete(key, opts) do
-    if inject?(@deletes_key), do: {:error, :injected_delete_failure}, else: ETS.delete(key, opts)
+    if inject?(@deletes_key) do
+      {:error, :injected_delete_failure}
+    else
+      GenServer.call(store_name!(opts), {:delete, key})
+    end
   end
 
   @impl true
   def list(opts) do
     :persistent_term.put(@list_calls_key, :persistent_term.get(@list_calls_key, 0) + 1)
-    ETS.list(opts)
+    GenServer.call(store_name!(opts), {:list, opts})
   end
 
   @impl true
-  def exists?(key, opts), do: ETS.exists?(key, opts)
+  def exists?(key, opts), do: GenServer.call(store_name!(opts), {:exists?, key})
+
+  @impl true
+  def durability_class(_opts), do: :process_lifetime
 
   @impl true
   def compare_and_swap(key, expected, replacement, opts) do
@@ -130,24 +150,30 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         # before our CAS, then reported conflict. The acknowledged path
         # reobserves the mismatched record and must classify :id_conflict
         # without overwriting it.
-        _ = ETS.put(key, mismatch, opts)
+        _ = put_without_faults(key, mismatch, opts)
         {:error, :conflict}
 
       :none ->
         cond do
+          Revision.cas_operands_key_mismatch?(key, expected, replacement) ->
+            {:error, :key_mismatch}
+
           inject?(@cas_conflict_key) ->
             # Simulate a concurrent writer that admitted the record just before
             # our CAS, then reported conflict. The acknowledged path reobserves
             # and classifies the now-present record (a REAL conflict
             # reobservation).
-            _ = ETS.put(key, replacement, opts)
+            _ = put_without_faults(key, replacement, opts)
             {:error, :conflict}
 
           inject?(@puts_key) ->
             {:error, :injected_put_failure}
 
           true ->
-            case ETS.compare_and_swap(key, expected, replacement, opts) do
+            case GenServer.call(
+                   store_name!(opts),
+                   {:compare_and_swap, key, expected, replacement}
+                 ) do
               {:ok, _stored} = ok ->
                 # Genuine admission succeeded: arm the post-admission poison so
                 # the immediately-following reobserve get can be made to crash
@@ -195,23 +221,27 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         other -> other
       end
 
-    case ETS.put(key, put_record, opts) do
+    case put_without_faults(key, put_record, opts) do
       :ok -> {:error, :conflict}
       {:error, _reason} = error -> error
     end
   end
 
   defp cad_genuine_compare_and_delete(key, expected, opts) do
-    case ETS.compare_and_delete(key, expected, opts) do
-      :ok ->
-        # Genuine durable delete committed. If armed, exit to simulate a crash
-        # at or after the durable revoke boundary so the caller cannot confirm
-        # whether live eviction + signal completed.
-        if inject?(@post_delete_key), do: exit({:post_delete, :timeout})
-        :ok
+    if Revision.key_mismatch?(key, expected) do
+      {:error, :key_mismatch}
+    else
+      case GenServer.call(store_name!(opts), {:compare_and_delete, key, expected}) do
+        :ok ->
+          # Genuine durable delete committed. If armed, exit to simulate a crash
+          # at or after the durable revoke boundary so the caller cannot confirm
+          # whether live eviction + signal completed.
+          if inject?(@post_delete_key), do: exit({:post_delete, :timeout})
+          :ok
 
-      other ->
-        other
+        other ->
+          other
+      end
     end
   end
 
@@ -289,6 +319,174 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         {:replacement, record}
     end
   end
+
+  defp put_without_faults(key, value, opts) do
+    if Revision.key_mismatch?(key, value) do
+      {:error, :key_mismatch}
+    else
+      GenServer.call(store_name!(opts), {:put, key, value})
+    end
+  end
+
+  defp store_name!(opts), do: Keyword.fetch!(opts, :name)
+
+  @impl GenServer
+  def init(opts) do
+    {:ok, %{entries: %{}, max_entries: Keyword.get(opts, :max_entries, @default_max_entries)}}
+  end
+
+  @impl GenServer
+  def handle_call({:get, key}, _from, state) do
+    reply =
+      state.entries
+      |> Map.get(key, :absent)
+      |> Revision.live_value()
+      |> case do
+        {:ok, value} -> {:ok, value}
+        :not_found -> {:error, :not_found}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:put, key, value}, _from, state) do
+    if at_capacity?(state, key) do
+      {:reply, {:error, :store_full}, state}
+    else
+      current = Map.get(state.entries, key, :absent)
+
+      case Revision.apply_put(current, value) do
+        {:ok, stored} ->
+          {:reply, :ok, put_in(state.entries[key], stored)}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    end
+  end
+
+  def handle_call({:delete, key}, _from, state) do
+    entries =
+      case Map.fetch(state.entries, key) do
+        {:ok, entry} ->
+          case Revision.to_tombstone(entry) do
+            :absent -> Map.delete(state.entries, key)
+            tombstone -> Map.put(state.entries, key, tombstone)
+          end
+
+        :error ->
+          state.entries
+      end
+
+    {:reply, :ok, %{state | entries: entries}}
+  end
+
+  def handle_call({:list, opts}, _from, state) do
+    reply =
+      with {:ok, limit} <- Revision.authoritative_list_limit(opts) do
+        keys =
+          for {key, entry} <- state.entries,
+              match?({:ok, _value}, Revision.live_value(entry)),
+              do: key
+
+        if is_integer(limit) and length(keys) > limit,
+          do: {:error, :inventory_limit_exceeded},
+          else: {:ok, keys}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:exists?, key}, _from, state) do
+    live_value =
+      state.entries
+      |> Map.get(key, :absent)
+      |> Revision.live_value()
+
+    {:reply, match?({:ok, _value}, live_value), state}
+  end
+
+  def handle_call({:compare_and_swap, key, expected, replacement}, _from, state) do
+    case apply_compare_and_swap(state, key, expected, replacement) do
+      {:ok, stored, new_state} -> {:reply, {:ok, stored}, new_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:compare_and_delete, key, expected}, _from, state) do
+    case Map.fetch(state.entries, key) do
+      {:ok, current} ->
+        if Revision.cas_matches?(current, expected) do
+          entries =
+            case Revision.to_tombstone(current) do
+              :absent -> Map.delete(state.entries, key)
+              tombstone -> Map.put(state.entries, key, tombstone)
+            end
+
+          {:reply, :ok, %{state | entries: entries}}
+        else
+          {:reply, {:error, :conflict}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :conflict}, state}
+    end
+  end
+
+  defp apply_compare_and_swap(state, key, :not_found, replacement) do
+    current = Map.get(state.entries, key, :absent)
+
+    cond do
+      not Revision.absent_for_cas?(current) ->
+        {:error, :conflict}
+
+      current == :absent and at_capacity?(state, key) ->
+        {:error, :store_full}
+
+      match?({:tombstone, _generation}, current) ->
+        {:tombstone, generation} = current
+
+        store_cas_result(
+          state,
+          key,
+          Revision.advance_cas_insert_from_tombstone(generation, replacement)
+        )
+
+      true ->
+        store_cas_result(state, key, Revision.advance_cas_insert(replacement))
+    end
+  end
+
+  defp apply_compare_and_swap(state, key, {:value, expected}, replacement) do
+    current = Map.get(state.entries, key, :absent)
+
+    if Revision.cas_matches?(current, expected) do
+      case {current, replacement} do
+        {%Record{} = current_record, %Record{}} ->
+          case Revision.advance_cas_update(current_record, replacement) do
+            {:ok, stored} -> store_cas_result(state, key, stored)
+            {:error, reason} -> {:error, reason}
+          end
+
+        {%Record{}, _other} ->
+          {:error, :conflict}
+
+        {_plain, %Record{}} ->
+          {:error, :conflict}
+
+        {_plain, _other} ->
+          store_cas_result(state, key, replacement)
+      end
+    else
+      {:error, :conflict}
+    end
+  end
+
+  defp store_cas_result(state, key, stored),
+    do: {:ok, stored, put_in(state.entries[key], stored)}
+
+  defp at_capacity?(state, key),
+    do: map_size(state.entries) >= state.max_entries and not Map.has_key?(state.entries, key)
 end
 
 defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTest do
@@ -303,8 +501,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   The regression file is RUNNABLE on the immediate parent (HEAD~1): each test
   branches on `acknowledged_available?/0`. On the candidate it exercises the
-  acknowledged API against a TRUTHFUL CAS backend (CASSandbox, mirroring
-  Store.ETS gen/rev/tombstone fencing); on the parent it exercises the ORDINARY
+  acknowledged API against a TRUTHFUL CAS backend (CASSandbox, using shared
+  Record generation/revision/tombstone fencing); on the parent it exercises the ORDINARY
   grant/revoke API on the SAME retained topology and asserts the SAME
   invariant, which the ordinary API violates, so the assertion fails
   behaviorally (never via UndefinedFunctionError).
@@ -316,8 +514,8 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Persistence.BufferedStore
   alias Arbor.Security
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.CapabilityStore.Serializer
   alias Arbor.Security.Config
@@ -400,9 +598,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     signed
   end
 
-  # Retained topology: a truthful in-memory CAS backend + named BufferedStore +
+  # Retained topology: a truthful in-memory CAS backend + named AuthorityStore +
   # CapabilityStore. Persists across a CapabilityStore restart (only
-  # CapabilityStore is restarted; the backend + BufferedStore stay alive).
+  # CapabilityStore is restarted; the backend + AuthorityStore stay alive).
   defp fresh_isolated_store do
     start_isolated_store(:"cas_sandbox_#{unique_integer()}")
   end
@@ -422,13 +620,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     on_exit(fn -> stop_named_process(backend_name) end)
 
     {:ok, _pid} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: CASSandbox,
-        collection: backend_name,
-        write_mode: :sync,
-        ack_mode: :backend,
-        hydration_limit: 1_000_000
+        namespace: backend_name,
+        hydration_limit: 10_000
       )
 
     {:ok, _pid} = CapabilityStore.start_link([])
@@ -440,7 +636,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     {:ok, _pid} = CapabilityStore.start_link([])
   end
 
-  # Real JSONFile dual-process topology (BufferedStore + CapabilityStore) for
+  # Real JSONFile dual-process topology (AuthorityStore + CapabilityStore) for
   # the C3B4a persistence-restart proof. Mirrors capability_store_persistence
   # regression helpers; not a CASSandbox projection-only restart.
   defp configure_isolated_json_store(backend_dir) do
@@ -450,13 +646,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
 
     {:ok, _pid} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: backend_dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -468,18 +662,16 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     stop_named_process(@capability_store)
 
     {:ok, _pid} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: backend_dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
     assert {:ok, %{status: :ready}} =
-             BufferedStore.hydration_status(name: @capability_store)
+             AuthorityStore.hydration_status(name: @capability_store)
 
     assert {:ok, _pid} = CapabilityStore.start_link([])
   end
@@ -659,7 +851,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
 
       assert {:error, :not_found} = CapabilityStore.get(opts[:capability_id])
-      assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+      assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       refute opts[:capability_id] in durable_ids
 
       assert {:error, :unauthorized} =
@@ -683,7 +875,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     # Seed a malformed record under the deterministic id (passes the Record
     # shape + map data, but fails capability validation + authority verify).
     assert {:ok, _} =
-             BufferedStore.acknowledged_put(
+             AuthorityStore.acknowledged_put(
                target_id,
                Record.new(target_id, %{"garbage" => true}),
                name: @capability_store
@@ -700,7 +892,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :outcome_unknown} = Security.acknowledged_grant(opts)
 
       assert {:error, :not_found} = CapabilityStore.get(target_id)
-      assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+      assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert target_id in durable_ids
     else
       assert {:error, :not_found} = CapabilityStore.get(target_id)
@@ -725,7 +917,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       assert {:error, :not_found} = CapabilityStore.get(unknown_id)
-      assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+      assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert unknown_id not in durable_ids
     else
       assert :ok = Security.revoke(unknown_id)
@@ -747,7 +939,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
 
       assert {:error, :not_found} = CapabilityStore.get(id)
-      assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+      assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert id not in durable_ids
     else
       assert {:ok, %Capability{id: id}} = Security.grant(principal: principal, resource: resource)
@@ -772,7 +964,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       restart_capability_store()
 
       assert {:error, :not_found} = CapabilityStore.get(id)
-      assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+      assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
       assert id not in durable_ids
 
       assert {:error, :unauthorized} =
@@ -879,7 +1071,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       # projection) and other ids are untouched.
       refute Map.has_key?(state.by_usage, id)
 
-      assert {:ok, %Record{}} = BufferedStore.authoritative_get(id, name: @capability_store)
+      assert {:ok, %Record{}} = AuthorityStore.authoritative_get(id, name: @capability_store)
     else
       seeded =
         build_signed_cap(
@@ -919,7 +1111,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       seeded = build_signed_cap(opts)
       assert {:ok, :stored} = CapabilityStore.put(seeded)
-      :ok = BufferedStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
+      :ok = AuthorityStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
 
       granted_before = CapabilityStore.stats().total_granted
       revoked_before = CapabilityStore.stats().total_revoked
@@ -928,7 +1120,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert id == opts[:capability_id]
 
       assert {:ok, %Record{}} =
-               BufferedStore.authoritative_get(opts[:capability_id], name: @capability_store)
+               AuthorityStore.authoritative_get(opts[:capability_id], name: @capability_store)
 
       assert CapabilityStore.stats().total_granted == granted_before
       assert CapabilityStore.stats().total_revoked == revoked_before
@@ -968,7 +1160,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # The reobserved record is durable and live; no duplicate grant stat.
       assert {:ok, %Record{}} =
-               BufferedStore.authoritative_get(opts[:capability_id], name: @capability_store)
+               AuthorityStore.authoritative_get(opts[:capability_id], name: @capability_store)
 
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
       assert CapabilityStore.stats().total_granted == granted_before
@@ -1465,7 +1657,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # Live unprojected (incoming state retained) but durable admitted.
       assert {:error, :not_found} = CapabilityStore.get(id)
-      assert {:ok, %Record{}} = BufferedStore.authoritative_get(id, name: @capability_store)
+      assert {:ok, %Record{}} = AuthorityStore.authoritative_get(id, name: @capability_store)
 
       # Retry converges idempotently and projects live.
       assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
@@ -1510,7 +1702,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
       # The mismatched occupant is durable and NOT overwritten.
       assert {:ok, %Record{} = durable} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       # The backend owns generation/revision/timestamps, so compare the logical
       # record that the conflicting writer admitted. None of our requested
@@ -1543,15 +1735,15 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :not_found} = CapabilityStore.get(first[:capability_id])
 
       assert {:ok, %Record{} = first_record} =
-               BufferedStore.authoritative_get(first[:capability_id], name: @capability_store)
+               AuthorityStore.authoritative_get(first[:capability_id], name: @capability_store)
 
       assert {:error, :resource_conflict} = Security.acknowledged_grant(second)
 
       assert {:error, :not_found} =
-               BufferedStore.authoritative_get(second[:capability_id], name: @capability_store)
+               AuthorityStore.authoritative_get(second[:capability_id], name: @capability_store)
 
       assert {:ok, ^first_record} =
-               BufferedStore.authoritative_get(first[:capability_id], name: @capability_store)
+               AuthorityStore.authoritative_get(first[:capability_id], name: @capability_store)
 
       assert {:ok, :idempotent, first_id} = Security.acknowledged_grant(first)
       assert first_id == first[:capability_id]
@@ -1579,7 +1771,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     if acknowledged_available?() do
       seeded = build_signed_cap(opts)
       assert {:ok, :stored} = CapabilityStore.put(seeded)
-      :ok = BufferedStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
+      :ok = AuthorityStore.acknowledged_delete(opts[:capability_id], name: @capability_store)
 
       # JSON persistence normalizes object keys to strings. The signature and
       # grant identity remain exact because the canonical payload stringifies
@@ -1594,7 +1786,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :idempotent, id} = Security.acknowledged_grant(opts)
       assert id == seeded.id
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
-      assert {:ok, %Record{}} = BufferedStore.authoritative_get(id, name: @capability_store)
+      assert {:ok, %Record{}} = AuthorityStore.authoritative_get(id, name: @capability_store)
     else
       assert {:ok, original} = Security.grant(principal: principal, resource: resource)
       assert {:ok, replacement} = Security.grant(principal: principal, resource: resource)
@@ -1796,7 +1988,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :not_found} = CapabilityStore.get(x_id)
 
       assert {:ok, %Record{} = first_record} =
-               BufferedStore.authoritative_get(x_id, name: @capability_store)
+               AuthorityStore.authoritative_get(x_id, name: @capability_store)
 
       # The retained uncertainty intent is identity-safe: canonical
       # principal/resource key plus the exact signed grant payload. On the
@@ -1815,7 +2007,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                intent_after_unknown
 
       assert {:ok, ^first_record} =
-               BufferedStore.authoritative_get(x_id, name: @capability_store)
+               AuthorityStore.authoritative_get(x_id, name: @capability_store)
 
       # A different-resource same-id retry is rejected on the same full-identity
       # rule, also without touching durable state or entering the finalizer.
@@ -1824,7 +2016,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :not_found} = CapabilityStore.get(x_id)
 
       assert {:ok, ^first_record} =
-               BufferedStore.authoritative_get(x_id, name: @capability_store)
+               AuthorityStore.authoritative_get(x_id, name: @capability_store)
 
       # Prior pending intent is byte-for-byte intact (never re-armed/finalized).
       state_after_mismatch = :sys.get_state(CapabilityStore)
@@ -1837,10 +2029,10 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :not_found} = CapabilityStore.get(y_id)
 
       assert {:error, :not_found} =
-               BufferedStore.authoritative_get(y_id, name: @capability_store)
+               AuthorityStore.authoritative_get(y_id, name: @capability_store)
 
       assert {:ok, ^first_record} =
-               BufferedStore.authoritative_get(x_id, name: @capability_store)
+               AuthorityStore.authoritative_get(x_id, name: @capability_store)
 
       # 4. The original X/R1 still converges on an exact retry, no inventory scan.
       CASSandbox.reset_inventory_scan_count()
@@ -1998,7 +2190,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       remote_cap = build_signed_cap(remote_opts)
 
       assert {:ok, %Record{}} =
-               BufferedStore.acknowledged_put(
+               AuthorityStore.acknowledged_put(
                  remote_id,
                  Record.new(remote_id, Serializer.serialize(remote_cap)),
                  name: @capability_store
@@ -2140,7 +2332,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
   # C8 — a CapabilityStore restart rebuilds the canonical by_resource occupancy
   # from the complete restored durable projection, so a post-restart same-
   # resource grant conflicts without any full-inventory scan. (The CASSandbox
-  # backend + BufferedStore stay alive across the restart; only CapabilityStore
+  # backend + AuthorityStore stay alive across the restart; only CapabilityStore
   # is restarted, so restore reads the retained durable set.)
   # ==========================================================================
   test "security regression: restart rebuilds by_resource occupancy without scanning" do
@@ -2270,7 +2462,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     remote_cap = build_signed_cap(remote_opts)
 
     assert {:ok, %Record{}} =
-             BufferedStore.acknowledged_put(
+             AuthorityStore.acknowledged_put(
                remote_id,
                Record.new(remote_id, Serializer.serialize(remote_cap)),
                name: @capability_store
@@ -2381,7 +2573,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     intent = Map.get(:sys.get_state(CapabilityStore).pending_intents, x_id)
     assert intent == {principal, canon, :legacy_uncertain_identity}
 
-    assert {:ok, durable_ids} = BufferedStore.authoritative_list(name: @capability_store)
+    assert {:ok, durable_ids} = AuthorityStore.authoritative_list(name: @capability_store)
     refute x_id in durable_ids
     refute y_id in durable_ids
   end
@@ -2591,7 +2783,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
 
     # No mutation occurred: the grant id was never durably admitted.
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(opts[:capability_id], name: @capability_store)
+             AuthorityStore.authoritative_get(opts[:capability_id], name: @capability_store)
   end
 
   # Pure-OTP regressions: exercise code_change/3 directly with crafted states
@@ -2981,7 +3173,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :not_found} = CapabilityStore.get(id)
 
       assert {:error, :not_found} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert {:error, :unauthorized} =
                Security.authorize(principal, resource, nil, verify_identity: false)
@@ -3005,7 +3197,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
 
     assert {:ok, %Record{generation: g1}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     if fenced_revoke_available?() do
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
@@ -3013,7 +3205,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
 
       assert {:ok, %Record{generation: g2}} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert g2 > g1
 
@@ -3023,7 +3215,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                Security.authorize(principal, resource, nil, verify_identity: false)
 
       assert {:ok, %Record{generation: ^g2}} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
     else
       # Parent: simulate stale occupancy revoke after same-id re-grant via the
       # real legacy public acknowledged_revoke/1 (never UndefinedFunctionError).
@@ -3086,7 +3278,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:error, :identity_conflict} = Security.acknowledged_revoke(id, fence)
 
       assert {:ok, %Record{} = durable} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert durable.revision > stale_rev
       assert {:ok, %Capability{} = durable_cap} = Serializer.deserialize(durable.data)
@@ -3124,7 +3316,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       assert {:error, :not_found} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
     else
       assert {:ok, _} = Security.grant(principal: principal, resource: resource)
     end
@@ -3191,7 +3383,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
 
         assert {:ok, %Record{}} =
-                 BufferedStore.authoritative_get(id, name: @capability_store)
+                 AuthorityStore.authoritative_get(id, name: @capability_store)
 
         assert CapabilityStore.stats().total_revoked == revoked_before
       end
@@ -3216,7 +3408,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
         assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
 
         assert {:ok, %Record{}} =
-                 BufferedStore.authoritative_get(id, name: @capability_store)
+                 AuthorityStore.authoritative_get(id, name: @capability_store)
 
         assert CapabilityStore.stats().total_revoked == revoked_before
       end
@@ -3247,7 +3439,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert CapabilityStore.stats().total_revoked == revoked_before
 
       assert {:ok, %Record{key: ^id} = durable} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert durable.key == id
       assert {:ok, %Capability{id: ^id}} = CapabilityStore.get(id)
@@ -3275,14 +3467,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, :applied, id} = Security.acknowledged_grant(opts)
 
       assert {:ok, %Record{generation: g1}} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert {:ok, fence} = Security.prepare_acknowledged_revoke(id)
       assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
       assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
 
       assert {:ok, %Record{generation: g2}} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert g2 > g1
 
@@ -3294,7 +3486,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
                Security.authorize(principal, resource, nil, verify_identity: false)
 
       assert {:ok, %Record{generation: ^g2}} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
     else
       fresh_isolated_store()
 
@@ -3357,14 +3549,14 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     end
 
     assert {:ok, %Record{generation: g0, revision: r0}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Same-payload re-grant: bound prepare returns a fresh fence on advanced tokens.
     assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
     assert {:ok, :applied, ^id} = Security.acknowledged_grant(opts)
 
     assert {:ok, %Record{generation: g1}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert g1 > g0
 
@@ -3393,7 +3585,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, %Capability{} = live_before_conflict} = CapabilityStore.get(id)
 
     assert {:ok, %Record{} = durable_before_conflict} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     stats_before_conflict = CapabilityStore.stats()
 
@@ -3402,7 +3594,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, ^live_before_conflict} = CapabilityStore.get(id)
 
     assert {:ok, ^durable_before_conflict} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert CapabilityStore.stats() == stats_before_conflict
 
@@ -3414,7 +3606,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, %Capability{} = live} = CapabilityStore.get(id)
 
     assert {:ok, %Record{} = durable_live} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     stats_before_bad = CapabilityStore.stats()
     deep = nest_map(8, "x")
@@ -3432,7 +3624,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, ^live} = CapabilityStore.get(id)
 
     assert {:ok, ^durable_live} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert CapabilityStore.stats() == stats_before_bad
 
@@ -3457,7 +3649,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, ^live} = CapabilityStore.get(id)
 
       assert {:ok, ^durable_live} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert CapabilityStore.stats() == stats_before_bad
     end
@@ -3476,7 +3668,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     assert {:ok, ^live} = CapabilityStore.get(id)
 
     assert {:ok, ^durable_live} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert CapabilityStore.stats() == stats_before_bad
 
@@ -3502,7 +3694,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, ^live} = CapabilityStore.get(id)
 
       assert {:ok, ^durable_live} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert CapabilityStore.stats() == stats_before_bad
     end
@@ -3530,7 +3722,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       assert {:ok, ^live} = CapabilityStore.get(id)
 
       assert {:ok, ^durable_live} =
-               BufferedStore.authoritative_get(id, name: @capability_store)
+               AuthorityStore.authoritative_get(id, name: @capability_store)
 
       assert CapabilityStore.stats() == stats_before_bad
     end
@@ -3578,7 +3770,7 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
              Security.authorize(principal, resource, nil, verify_identity: false)
 
     assert {:ok, %Record{}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Fresh bound fence still applies.
     assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id, fence_b)

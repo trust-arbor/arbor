@@ -1,5 +1,6 @@
 defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJSONFile do
   @behaviour Arbor.Contracts.Persistence.Store
+  @behaviour Arbor.Security.Store.BoundedInventory
 
   alias Arbor.Security.Store.JSONFile
 
@@ -49,6 +50,9 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJ
   @impl true
   def list(opts \\ []), do: JSONFile.list(opts)
 
+  @impl Arbor.Security.Store.BoundedInventory
+  def bounded_list(limit, opts \\ []), do: JSONFile.bounded_list(limit, opts)
+
   @impl true
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
 end
@@ -58,6 +62,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupported
   # CRUD-only double: deliberately does not export compare_and_swap/compare_and_delete
   # so acknowledged CAS admission remains fail-closed on unsupported backends.
   @behaviour Arbor.Contracts.Persistence.Store
+  @behaviour Arbor.Security.Store.BoundedInventory
 
   alias Arbor.Security.Store.JSONFile
 
@@ -72,6 +77,9 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupported
 
   @impl true
   def list(opts \\ []), do: JSONFile.list(opts)
+
+  @impl Arbor.Security.Store.BoundedInventory
+  def bounded_list(limit, opts \\ []), do: JSONFile.bounded_list(limit, opts)
 
   @impl true
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
@@ -104,7 +112,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
-  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Security.AuthorityStore
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.CapabilityStore.Serializer
@@ -134,7 +142,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
 
     assert {:ok, %Record{}} =
-             BufferedStore.authoritative_get(original.id, name: @capability_store)
+             AuthorityStore.authoritative_get(original.id, name: @capability_store)
 
     assert {:ok, replacement} = Security.grant(principal: principal_id, resource: resource_uri)
     assert original.id != replacement.id
@@ -152,10 +160,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(original.id, name: @capability_store)
+             AuthorityStore.authoritative_get(original.id, name: @capability_store)
 
     assert {:ok, %Record{}} =
-             BufferedStore.authoritative_get(replacement.id, name: @capability_store)
+             AuthorityStore.authoritative_get(replacement.id, name: @capability_store)
 
     restart_capability_store()
 
@@ -165,10 +173,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(original.id, name: @capability_store)
+             AuthorityStore.authoritative_get(original.id, name: @capability_store)
 
     assert {:ok, %Record{}} =
-             BufferedStore.authoritative_get(replacement.id, name: @capability_store)
+             AuthorityStore.authoritative_get(replacement.id, name: @capability_store)
   end
 
   test "security regression: failed replacement compensates durable state" do
@@ -194,7 +202,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
 
     assert {:ok, [^original_id]} =
-             BufferedStore.authoritative_list(name: @capability_store)
+             AuthorityStore.authoritative_list(name: @capability_store)
   end
 
   test "security regression: same-id replacement compensation retains restored record" do
@@ -219,7 +227,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
 
     assert {:ok, %Record{}} =
-             BufferedStore.authoritative_get(original_id, name: @capability_store)
+             AuthorityStore.authoritative_get(original_id, name: @capability_store)
   end
 
   test "security regression: unknown replacement compensation never reports success" do
@@ -243,7 +251,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:error, {:capability_replacement_outcome_unknown, details}} = result
     assert details.original == :outcome_unknown
 
-    assert {:ok, persisted_ids} = BufferedStore.authoritative_list(name: @capability_store)
+    assert {:ok, persisted_ids} = AuthorityStore.authoritative_list(name: @capability_store)
     assert original_id in persisted_ids
     assert length(persisted_ids) == 2
   end
@@ -285,14 +293,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal_id, resource_uri, nil, verify_identity: false)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(original.id, name: @capability_store)
+             AuthorityStore.authoritative_get(original.id, name: @capability_store)
 
     restart_capability_store()
 
     assert {:ok, []} = Security.list_capabilities(principal_id)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(original.id, name: @capability_store)
+             AuthorityStore.authoritative_get(original.id, name: @capability_store)
   end
 
   test "security regression: delegated capability remains authorized after persistence restart" do
@@ -354,7 +362,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert %{restore_rejected: 1, restore_active: 0} = CapabilityStore.stats()
   end
 
-  test "security regression: authorize survives full BufferedStore+CapabilityStore restart above 10_000 durable records" do
+  test "security regression: authorize survives full AuthorityStore+CapabilityStore restart above 10_000 durable records" do
     backend_dir = Path.join("var", "capability-store-hydrate-10k-#{unique_integer()}")
     tmp_dir = Path.expand(backend_dir, File.cwd!())
     File.mkdir_p!(tmp_dir)
@@ -382,7 +390,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     :ok = Supervisor.terminate_child(@security_supervisor, CapabilityStore)
     :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
 
-    start_capability_buffered_store!(backend_dir)
+    start_capability_authority_store!(backend_dir)
     assert {:ok, _pid} = CapabilityStore.start_link([])
 
     assert {:ok, :authorized} =
@@ -393,7 +401,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
               status: :ready,
               loaded_count: loaded,
               configured_limit: limit
-            }} = BufferedStore.hydration_status(name: @capability_store)
+            }} = AuthorityStore.hydration_status(name: @capability_store)
 
     assert loaded == seed_count
     assert limit >= seed_count
@@ -402,10 +410,10 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     stop_named_process(CapabilityStore)
     stop_named_process(@capability_store)
 
-    start_capability_buffered_store!(backend_dir)
+    start_capability_authority_store!(backend_dir)
 
     assert {:ok, %{status: :ready, loaded_count: loaded_after}} =
-             BufferedStore.hydration_status(name: @capability_store)
+             AuthorityStore.hydration_status(name: @capability_store)
 
     assert loaded_after == seed_count
 
@@ -447,7 +455,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
       # No durable mutation either: the CAS-unsupported backend never admitted.
       assert {:error, :not_found} =
-               BufferedStore.authoritative_get(det_id, name: @capability_store)
+               AuthorityStore.authoritative_get(det_id, name: @capability_store)
 
       # An ordinary (non-CAS) cap seeds live + durable; its acknowledged revoke
       # also fails closed on the CAS-unsupported backend without evicting live.
@@ -460,14 +468,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       # The seeded cap remains durable (the failed acknowledged revoke mutated
       # nothing on the CAS-unsupported backend).
       assert {:ok, %Record{}} =
-               BufferedStore.authoritative_get(seeded.id, name: @capability_store)
+               AuthorityStore.authoritative_get(seeded.id, name: @capability_store)
     end
   end
 
   # P3 public admission proof on the default durable JSONFile backend.
   # Store-layer causal ABA evidence: JSONFileDurableCasTest (P2) and pre-P2
   # baseline 4582ec8de9acb2280109b76c6d797d8872240a2d. This test adds the
-  # public facade + BufferedStore + CapabilityStore dual-restart path.
+  # public facade + AuthorityStore + CapabilityStore dual-restart path.
   test "security regression: public acknowledged grant/revoke on JSONFile survives full two-process restart with generation fence (ABA)" do
     principal = "agent_ack_jsonfile_public"
     resource = "arbor://fs/read/ack-jsonfile-public"
@@ -501,7 +509,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal, resource, nil, verify_identity: false)
 
     assert {:ok, %Record{generation: g1, revision: r1} = pre_revoke} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert is_integer(g1) and g1 >= 1
     assert is_integer(r1) and r1 >= 1
@@ -515,7 +523,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, :idempotent, ^id} = Security.acknowledged_grant(opts)
 
     assert {:ok, %Record{generation: ^g1, revision: ^r1}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Phase C — public revoke + idempotency + no live auth
     assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
@@ -525,7 +533,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal, resource, nil, verify_identity: false)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Phase D — restart #2: revocation must not resurrect
     full_restart_capability_stack!(backend_dir)
@@ -536,7 +544,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert {:ok, []} = Security.list_capabilities(principal)
 
     assert {:error, :not_found} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
 
@@ -547,7 +555,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(principal, resource, nil, verify_identity: false)
 
     assert {:ok, %Record{generation: g2, revision: r2}} =
-             BufferedStore.authoritative_get(id, name: @capability_store)
+             AuthorityStore.authoritative_get(id, name: @capability_store)
 
     # Tombstone + reinsert must strictly advance the Record generation fence.
     assert g2 > g1
@@ -588,13 +596,11 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     :ok = Supervisor.terminate_child(@security_supervisor, @capability_store)
 
     {:ok, _pid} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: backend,
         backend_opts: [base_dir: tmp_dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
 
@@ -611,23 +617,21 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   defp full_restart_capability_stack!(backend_dir) do
     stop_named_process(CapabilityStore)
     stop_named_process(@capability_store)
-    start_capability_buffered_store!(backend_dir)
+    start_capability_authority_store!(backend_dir)
 
     assert {:ok, %{status: :ready}} =
-             BufferedStore.hydration_status(name: @capability_store)
+             AuthorityStore.hydration_status(name: @capability_store)
 
     assert {:ok, _pid} = CapabilityStore.start_link([])
   end
 
-  defp start_capability_buffered_store!(backend_dir) do
+  defp start_capability_authority_store!(backend_dir) do
     {:ok, _pid} =
-      BufferedStore.start_link(
+      AuthorityStore.start_link(
         name: @capability_store,
         backend: JSONFile,
         backend_opts: [base_dir: backend_dir],
-        write_mode: :sync,
-        ack_mode: :backend,
-        collection: "capabilities",
+        namespace: "capabilities",
         hydration_limit: Config.max_global_capabilities()
       )
   end

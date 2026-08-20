@@ -21,26 +21,22 @@ defmodule Arbor.Security.TestBootstrap do
       {:error, {:capability_replacement_outcome_unknown,
                 %{original: :capability_store_unavailable, ...}}}
 
-  Six apps' test_helpers start `CapabilityStore`, but only four also start the
-  `BufferedStore`s behind it, so `arbor_consensus` and `arbor_orchestrator`
-  carry the same latent gap. That divergence is the defect this prevents; the
-  gateway breakage was just what made it visible.
+  Six apps' test_helpers start `CapabilityStore`, but only four also start its
+  authority store, so `arbor_consensus` and `arbor_orchestrator` carry the same
+  latent gap. That divergence is the defect this prevents; the gateway
+  breakage was just what made it visible.
 
   ## Why this lives in `lib/` (not `test/support`)
 
   Umbrella apps don't share each other's `test/support` paths, and at least six
-  apps need this. Same reasoning and same precedent as
-  `Arbor.Persistence.DatabaseCase` and `Arbor.Memory.TestBootstrap`. It is only
-  ever exercised under ExUnit; in a release it is an inert module.
+  apps need this. It is only operational in a test build; release and
+  activation-only builds return `:skipped` without starting applications or
+  repopulating deliberately omitted stores.
   """
 
   require Logger
 
-  @stores [
-    {:arbor_security_capabilities, "capabilities"},
-    {:arbor_security_identities, "identities"},
-    {:arbor_security_signing_keys, "signing_keys"}
-  ]
+  @test_build Mix.env() == :test
 
   @doc """
   Start the security stores and supporting processes.
@@ -52,6 +48,19 @@ defmodule Arbor.Security.TestBootstrap do
   """
   @spec start!(keyword()) :: :ok | :skipped
   def start!(_opts \\ []) do
+    cond do
+      not @test_build ->
+        :skipped
+
+      Arbor.KernelRuntime.Config.start_profile() == :activation_only ->
+        :skipped
+
+      true ->
+        start_test_tree!()
+    end
+  end
+
+  defp start_test_tree! do
     _ = Application.ensure_all_started(:arbor_security)
 
     if Process.whereis(Arbor.Security.Supervisor) do
@@ -72,23 +81,18 @@ defmodule Arbor.Security.TestBootstrap do
     backend =
       Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
 
-    for {name, collection} <- @stores do
+    for {name, namespace, extra_opts} <- [
+          {:arbor_security_capabilities, "capabilities",
+           hydration_limit: Arbor.Security.Config.max_global_capabilities()},
+          {:arbor_security_identities, "identities", []},
+          {:arbor_security_signing_keys, "signing_keys", []},
+          {:arbor_security_issuers, "issuers", []}
+        ] do
       store_opts =
-        [
-          name: name,
-          backend: backend,
-          write_mode: :sync,
-          collection: collection
-        ]
-        |> maybe_capability_hydration_limit(name)
+        [name: name, backend: backend, namespace: namespace]
+        |> Keyword.merge(extra_opts)
 
-      spec =
-        Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore, store_opts},
-          id: name
-        )
-
-      start_child!(spec)
+      start_child!(Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name))
     end
 
     :ok
@@ -97,6 +101,7 @@ defmodule Arbor.Security.TestBootstrap do
   defp ensure_children! do
     for spec <- [
           {Arbor.Security.Identity.Registry, []},
+          {Arbor.Security.IssuerRegistry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
           {Arbor.Security.Constraint.RateLimiter, []},
@@ -108,12 +113,6 @@ defmodule Arbor.Security.TestBootstrap do
 
     :ok
   end
-
-  defp maybe_capability_hydration_limit(opts, :arbor_security_capabilities) do
-    Keyword.put(opts, :hydration_limit, Arbor.Security.Config.max_global_capabilities())
-  end
-
-  defp maybe_capability_hydration_limit(opts, _name), do: opts
 
   defp start_child!(spec) do
     child_spec = Supervisor.child_spec(spec, [])
