@@ -748,6 +748,17 @@ defmodule Arbor.Security.Config do
   # runtime axis (`"arbor"` / `"acp"`) as a hardcoded structural constant, not
   # an operator-configurable value.
 
+  @doc """
+  Module implementing `Arbor.Security.Contracts.EventLogAdapter`, or `nil`.
+
+  Unset by default. The host composes an implementation; persist failures
+  remain best-effort in `Arbor.Security.Events`.
+  """
+  @spec event_log_adapter() :: module() | nil
+  def event_log_adapter do
+    Application.get_env(@app, :event_log_adapter, nil)
+  end
+
   defp enforcement_toggle(key, default) do
     case installed_enforcement_toggle_snapshot() do
       {:ok, %{^key => value}} -> value

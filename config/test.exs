@@ -57,7 +57,11 @@ config :arbor_security,
   # change can't silently enforce egress across the whole suite.
   egress_gate_enforcing: false,
   # Use ephemeral keypair in tests — no persistence side effects
-  system_authority_mode: :ephemeral
+  system_authority_mode: :ephemeral,
+  # Historian-owned adapter preserves security:events EventLog behavior for
+  # audit tests that start the live EventLog. Focused Events tests override
+  # this with a Security-owned recording adapter.
+  event_log_adapter: Arbor.Historian.Adapters.SecurityEventLog
 
 config :arbor_kernel, common: [start_children: false]
 config :arbor_persistence, start_children: false

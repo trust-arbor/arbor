@@ -2,12 +2,12 @@ defmodule Arbor.Security.Events do
   @moduledoc """
   Permanent event logging for security operations.
 
-  Writes durable events to EventLog via arbor_persistence AND emits telemetry.
-  The `arbor_signals` application may bridge selected telemetry events onto the
-  signal bus for real-time notification.
+  Persists through a host-injected `Arbor.Security.Contracts.EventLogAdapter`
+  AND emits telemetry. The `arbor_signals` application may bridge selected
+  telemetry events onto the signal bus for real-time notification.
 
-  Uses `apply/3` for runtime module resolution since arbor_persistence
-  depends on arbor_security (adding the reverse would create a cycle).
+  Adapter failures are best-effort: `record_*` still returns `:ok` and
+  telemetry still emits when the log is unavailable.
 
   ## Event Types
 
@@ -33,15 +33,6 @@ defmodule Arbor.Security.Events do
       {:ok, denied} = Arbor.Security.Events.get_by_type(:authorization_denied)
   """
 
-  # Write to the Historian's EventLog inside Arbor so security events are
-  # queryable via Arbor.Historian.for_category(:security), etc. These defaults
-  # are module atoms built without aliases so a standalone kernel package can
-  # inject its own reader/backend without compiling against Arbor.Historian or
-  # Arbor.Persistence.
-  @default_event_log_name Module.concat(["Arbor", "Historian", "EventLog", "ETS"])
-  @default_event_log_backend Module.concat(["Arbor", "Persistence", "EventLog", "ETS"])
-  @default_event_log_reader Module.concat(["Arbor", "Persistence"])
-  @default_event_module Module.concat(["Arbor", "Persistence", "Event"])
   @stream_id "security:events"
 
   # ============================================================================
@@ -290,18 +281,9 @@ defmodule Arbor.Security.Events do
   """
   @spec get_history(keyword()) :: {:ok, list()} | {:error, term()}
   def get_history(opts \\ []) do
-    reader = event_log_reader()
-
-    if Code.ensure_loaded?(reader) and function_exported?(reader, :read_stream, 4) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(reader, :read_stream, [
-        event_log_name(),
-        event_log_backend(),
-        @stream_id,
-        opts
-      ])
-    else
-      {:error, :event_log_unavailable}
+    case event_log_adapter() do
+      {:ok, adapter} -> adapter.read_security_events(opts)
+      :error -> {:error, :event_log_unavailable}
     end
   end
 
@@ -380,23 +362,9 @@ defmodule Arbor.Security.Events do
   end
 
   defp persist_event(event_type, data) do
-    event_module = event_module()
-    persistence = event_log_reader()
-
-    if Code.ensure_loaded?(event_module) &&
-         Code.ensure_loaded?(persistence) &&
-         function_exported?(persistence, :append, 4) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      event =
-        apply(event_module, :new, [
-          @stream_id,
-          to_string(event_type),
-          Map.put(data, :timestamp, DateTime.utc_now()),
-          [metadata: %{source_node: node()}]
-        ])
-
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(persistence, :append, [event_log_name(), event_log_backend(), @stream_id, event])
+    case event_log_adapter() do
+      {:ok, adapter} -> adapter.persist_security_event(event_type, data)
+      :error -> :ok
     end
   rescue
     _ -> :ok
@@ -404,20 +372,16 @@ defmodule Arbor.Security.Events do
     :exit, _ -> :ok
   end
 
-  defp event_log_name do
-    Application.get_env(:arbor_security, :event_log_name, @default_event_log_name)
-  end
+  defp event_log_adapter do
+    adapter = Arbor.Security.Config.event_log_adapter()
 
-  defp event_log_backend do
-    Application.get_env(:arbor_security, :event_log_backend, @default_event_log_backend)
-  end
-
-  defp event_log_reader do
-    Application.get_env(:arbor_security, :event_log_reader, @default_event_log_reader)
-  end
-
-  defp event_module do
-    Application.get_env(:arbor_security, :event_module, @default_event_module)
+    if is_atom(adapter) and not is_nil(adapter) and Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, :persist_security_event, 2) and
+         function_exported?(adapter, :read_security_events, 1) do
+      {:ok, adapter}
+    else
+      :error
+    end
   end
 
   # EventLog data is canonical JSON and therefore uses string keys. Keep the

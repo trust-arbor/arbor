@@ -34,6 +34,8 @@ defmodule Arbor.Historian.Application do
 
   alias Arbor.Signals
 
+  # Host-injected Arbor.Historian.Adapters.SecurityEventLog persists Security
+  # events onto this same EventLog stream (`security:events`).
   @event_log_name Arbor.Historian.EventLog.ETS
   @identity_replay_page_size 1_000
 

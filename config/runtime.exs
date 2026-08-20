@@ -462,6 +462,13 @@ if config_env() != :test do
 end
 
 # ============================================================================
+# Security event log adapter (injected into arbor_security; nil by default in lib)
+# ============================================================================
+if config_env() != :test do
+  config :arbor_security, event_log_adapter: Arbor.Historian.Adapters.SecurityEventLog
+end
+
+# ============================================================================
 # Ollama base URL (local-LM provider)
 # ============================================================================
 # Single env var controlling where BOTH the embedding path and the
