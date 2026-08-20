@@ -69,6 +69,11 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   # Allowlist pattern in comments
   @allowlist_pattern ~r/#\s*arbor:allow\s+pii/i
 
+  # Content digests commonly contain phone-shaped decimal runs. Blank only
+  # complete hex tokens before phone matching so a real phone elsewhere on the
+  # same line remains visible to the detector.
+  @hex_digest_pattern ~r/(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])/
+
   # Regex patterns that indicate a timestamp context rather than a phone number
   defp timestamp_regexes do
     [
@@ -244,11 +249,16 @@ defmodule Arbor.Eval.Checks.PIIDetection do
     if looks_like_timestamp_context?(line, timestamp_regexes) do
       []
     else
+      phone_candidate =
+        Regex.replace(@hex_digest_pattern, line, fn digest ->
+          String.duplicate(" ", byte_size(digest))
+        end)
+
       phone_patterns
-      |> Enum.filter(&Regex.match?(&1, line))
+      |> Enum.filter(&Regex.match?(&1, phone_candidate))
       |> Enum.take(1)
       |> Enum.map(fn pattern ->
-        phone = extract_match(pattern, line)
+        phone = extract_match(pattern, phone_candidate)
 
         %{
           type: :phone_number,

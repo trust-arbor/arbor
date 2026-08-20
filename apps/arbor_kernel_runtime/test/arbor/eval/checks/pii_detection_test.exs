@@ -61,6 +61,24 @@ defmodule Arbor.Eval.Checks.PIIDetectionTest do
 
       assert Enum.any?(result.violations, &(&1.type == :phone_number))
     end
+
+    test "ignores phone-shaped runs inside content digests" do
+      code =
+        ~s|@review_digest "dd307c2ab8365077471a9c2e4a62b79bb5869b0ff5b732ba30390b89e0394172"|
+
+      result = PIIDetection.run(%{code: code})
+
+      refute Enum.any?(result.violations, &(&1.type == :phone_number))
+    end
+
+    test "still detects a phone beside a content digest" do
+      code =
+        ~s|@evidence "dd307c2ab8365077471a9c2e4a62b79bb5869b0ff5b732ba30390b89e0394172 555-123-4567"|
+
+      result = PIIDetection.run(%{code: code})
+
+      assert Enum.any?(result.violations, &(&1.type == :phone_number))
+    end
   end
 
   describe "secrets and API keys" do
