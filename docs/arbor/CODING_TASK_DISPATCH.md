@@ -255,10 +255,13 @@ bytes hashed if you need to verify externally. `sha256/1` is an alias.
 ## Pre-dispatch readiness
 
 Call `arbor_coding_dispatch_readiness` **before** `arbor_dispatch_task` with the
-**exact same** `agent_id`, structured `task` object, and optional positive
-`timeout` you will later send to dispatch. The tool returns a point-in-time
-readiness snapshot; it never creates a task, auto-grants capabilities, or
-reserves task/workspace/lease state. Dispatch rechecks every authoritative gate.
+**exact same** `agent_id` and structured `task` object you will later send to
+dispatch. Omit the outer MCP `timeout` by default. Supply it only as an
+intentional shorter kill switch than `budgets.wall_clock_ms`, and then pass
+the exact same positive value to both readiness and dispatch. The tool returns
+a point-in-time readiness snapshot; it never creates a task, auto-grants
+capabilities, or reserves task/workspace/lease state. Dispatch rechecks every
+authoritative gate.
 
 ```json
 {
@@ -281,8 +284,7 @@ reserves task/workspace/lease state. Dispatch rechecks every authoritative gate.
       },
       "work_packet_digest": "sha256:15070222bcf40d76aecc100d459df6f873178037400e5dfe9e2f9802833ebdae"
     }
-  },
-  "timeout": 900000
+  }
 }
 ```
 
@@ -305,8 +307,10 @@ changed, and treat dispatch as the authoritative recheck.
 
 ## Canonical payload
 
-Dispatch with a signed MCP request using the **same** `task` (and `timeout`,
-when present) already checked for readiness. The stable coding envelope is:
+Dispatch with a signed MCP request using the **same** `task` already checked
+for readiness. Omit the outer MCP `timeout` unless it is an intentional shorter
+kill switch; if present, it must be identical to the readiness call. The stable
+coding envelope is:
 
 ```json
 {
@@ -329,8 +333,7 @@ when present) already checked for readiness. The stable coding envelope is:
       },
       "work_packet_digest": "sha256:15070222bcf40d76aecc100d459df6f873178037400e5dfe9e2f9802833ebdae"
     }
-  },
-  "timeout": 900000
+  }
 }
 ```
 
