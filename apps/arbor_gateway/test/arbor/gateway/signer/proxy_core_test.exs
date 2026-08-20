@@ -307,6 +307,283 @@ defmodule Arbor.Gateway.Signer.ProxyCoreTest do
       assert ProxyCore.protocol_version_from_initialize_body(body) == "2025-03-26"
       assert ProxyCore.protocol_version_from_initialize_body(~s({"method":"tools/list"})) == nil
     end
+
+    test "a second initialize resets stale state and adopts the negotiated response protocol" do
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-03-26",
+        cached_initialize_body: "old initialize",
+        cached_initialized_body: "old initialized"
+      }
+
+      request =
+        ~s({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      prepared = ProxyCore.prepare_http_session(session, request)
+
+      assert prepared == %{
+               session_id: nil,
+               protocol_version: "2025-06-18",
+               cached_initialize_body: nil,
+               cached_initialized_body: nil
+             }
+
+      assert ProxyCore.extra_forward_headers(prepared) == [
+               {"mcp-protocol-version", "2025-06-18"}
+             ]
+
+      response =
+        ~s({"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2025-11-25"}})
+
+      adopted =
+        ProxyCore.adopt_http_session(
+          prepared,
+          [{"mcp-session-id", "sess-new"}],
+          request,
+          response
+        )
+
+      assert adopted == %{
+               session_id: "sess-new",
+               protocol_version: "2025-11-25",
+               cached_initialize_body: request,
+               cached_initialized_body: nil
+             }
+
+      assert ProxyCore.extra_forward_headers(adopted) == [
+               {"mcp-session-id", "sess-new"},
+               {"mcp-protocol-version", "2025-11-25"}
+             ]
+
+      initialized =
+        ~s({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+
+      completed =
+        adopted
+        |> ProxyCore.adopt_http_session([], initialized, "")
+        |> ProxyCore.remember_successful_initialized(initialized)
+
+      assert completed.cached_initialized_body == initialized
+    end
+
+    test "initialize without params.protocolVersion clears the stale protocol" do
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-03-26",
+        cached_initialize_body: "old initialize",
+        cached_initialized_body: "old initialized"
+      }
+
+      request = ~s({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}})
+
+      assert ProxyCore.prepare_http_session(session, request) == %{
+               session_id: nil,
+               protocol_version: nil,
+               cached_initialize_body: nil,
+               cached_initialized_body: nil
+             }
+    end
+
+    test "builds and applies a complete compatible recovery lifecycle" do
+      initialize =
+        ~s({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      initialized =
+        ~s({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-06-18",
+        cached_initialize_body: initialize,
+        cached_initialized_body: initialized
+      }
+
+      assert {:ok, recovery_session, plan} =
+               ProxyCore.begin_http_session_recovery(session)
+
+      assert recovery_session == %{
+               session_id: nil,
+               protocol_version: "2025-06-18",
+               cached_initialize_body: nil,
+               cached_initialized_body: nil
+             }
+
+      assert plan == %{
+               initialize_body: initialize,
+               initialized_body: initialized,
+               expected_protocol: "2025-06-18"
+             }
+
+      initialize_response =
+        ~s({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}})
+
+      assert {:ok, initialized_session} =
+               ProxyCore.apply_http_session_recovery_response(
+                 recovery_session,
+                 plan,
+                 :initialize,
+                 200,
+                 [{"mcp-session-id", "sess-new"}],
+                 initialize_response
+               )
+
+      assert initialized_session.session_id == "sess-new"
+      assert initialized_session.cached_initialize_body == initialize
+
+      assert {:ok, recovered_session} =
+               ProxyCore.apply_http_session_recovery_response(
+                 initialized_session,
+                 plan,
+                 :initialized,
+                 202,
+                 [{"mcp-session-id", "sess-new"}],
+                 ""
+               )
+
+      assert recovered_session.protocol_version == "2025-06-18"
+      assert recovered_session.cached_initialized_body == initialized
+    end
+
+    test "rejects an incomplete cached recovery lifecycle" do
+      initialize =
+        ~s({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-06-18",
+        cached_initialize_body: initialize,
+        cached_initialized_body: nil
+      }
+
+      assert {:error, :incomplete_cached_lifecycle} =
+               ProxyCore.begin_http_session_recovery(session)
+    end
+
+    test "allows the requested protocol to differ from the prior negotiated protocol" do
+      initialize =
+        ~s({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      initialized =
+        ~s({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-11-25",
+        cached_initialize_body: initialize,
+        cached_initialized_body: initialized
+      }
+
+      assert {:ok, recovery_session, plan} =
+               ProxyCore.begin_http_session_recovery(session)
+
+      assert plan.expected_protocol == "2025-11-25"
+
+      initialize_response =
+        ~s({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}})
+
+      assert {:ok, recovered_initialize} =
+               ProxyCore.apply_http_session_recovery_response(
+                 recovery_session,
+                 plan,
+                 :initialize,
+                 200,
+                 [{"mcp-session-id", "sess-new"}],
+                 initialize_response
+               )
+
+      assert recovered_initialize.protocol_version == "2025-11-25"
+    end
+
+    test "rejects a recovery initialize response that negotiates a different protocol" do
+      initialize =
+        ~s({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      initialized =
+        ~s({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+
+      session = %{
+        session_id: "sess-old",
+        protocol_version: "2025-06-18",
+        cached_initialize_body: initialize,
+        cached_initialized_body: initialized
+      }
+
+      assert {:ok, recovery_session, plan} =
+               ProxyCore.begin_http_session_recovery(session)
+
+      incompatible_response =
+        ~s({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}})
+
+      assert {:error, {:incompatible_protocol, "2025-06-18", "2025-11-25"}} =
+               ProxyCore.apply_http_session_recovery_response(
+                 recovery_session,
+                 plan,
+                 :initialize,
+                 200,
+                 [{"mcp-session-id", "sess-new"}],
+                 incompatible_response
+               )
+    end
+
+    test "classifies the exact stale protocol and unknown session responses as invalidations" do
+      session = %{session_id: "sess-old", protocol_version: "2025-06-18"}
+      request = ~s({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+
+      protocol_error =
+        ~s({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"data":{"expectedVersion":"2025-11-25"},"message":"MCP-Protocol-Version 2025-06-18 does not match the negotiated version 2025-11-25."}})
+
+      session_error =
+        ~s({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Session not found"}})
+
+      assert ProxyCore.http_session_invalidated?(session, request, 400, protocol_error)
+      assert ProxyCore.http_session_invalidated?(session, request, 404, session_error)
+    end
+
+    test "does not classify application errors or invalidation responses without stale session context" do
+      session = %{session_id: "sess-old", protocol_version: "2025-06-18"}
+      request = ~s({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{}})
+
+      application_error =
+        ~s({"jsonrpc":"2.0","id":2,"error":{"code":-32600,"data":{"type":"duplicate_request_id"},"message":"Request ID has already been used in this session"}})
+
+      protocol_error =
+        ~s({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"data":{"expectedVersion":"2025-11-25"},"message":"MCP-Protocol-Version 2025-06-18 does not match the negotiated version 2025-11-25."}})
+
+      session_error =
+        ~s({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Session not found"}})
+
+      initialize =
+        ~s({"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})
+
+      oversized_protocol_error =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => nil,
+          "error" => %{
+            "code" => -32_600,
+            "data" => %{
+              "expectedVersion" => "2025-11-25",
+              "padding" => String.duplicate("x", 20_000)
+            },
+            "message" =>
+              "MCP-Protocol-Version 2025-06-18 does not match the negotiated version 2025-11-25."
+          }
+        })
+
+      refute ProxyCore.http_session_invalidated?(session, request, 400, application_error)
+      refute ProxyCore.http_session_invalidated?(session, request, 404, protocol_error)
+      refute ProxyCore.http_session_invalidated?(session, request, 400, session_error)
+
+      refute ProxyCore.http_session_invalidated?(
+               %{session | session_id: nil},
+               request,
+               400,
+               protocol_error
+             )
+
+      refute ProxyCore.http_session_invalidated?(session, initialize, 400, protocol_error)
+      refute ProxyCore.http_session_invalidated?(session, request, 400, oversized_protocol_error)
+    end
   end
 
   describe "round-trip property: client signs, server can verify the canonical bytes" do

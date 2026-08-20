@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 651,
+  "entry_count": 652,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8007,8 +8007,21 @@
       "source_incident": "found 2026-08-17 during E0B2C `--write`).",
       "content_sha256": "7490fc0ec31983393d3c8fd60867ac7c5d9026b86627a1d3f477003d986c714f",
       "always_loaded": false
+    },
+    {
+      "source_ordinal": 652,
+      "source_kind": "post-migration",
+      "slug": "rehydrate-stdio-mcp-proxies-after-upstream-session-loss",
+      "title": "Rehydrate stdio MCP proxies in-process after the upstream loses session state.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-rehydrate-stdio-mcp-proxies-after-upstream-session-loss",
+      "source_date": "2026-08-20",
+      "source_incident": "found 2026-08-20 when a live Codex postcheck stayed permanently transport-closed after the signer exited).",
+      "content_sha256": "a20fd838b725f27f246eaf22a7d51753407d5c9ab3fd22e7a9bdfc677a457c2a",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 190
+  "post_migration_entry_count": 191
 }

@@ -35,6 +35,13 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
           private_key: binary()
         }
 
+  @typedoc "Validated inputs for one transparent HTTP session recovery attempt."
+  @type recovery_plan :: %{
+          initialize_body: binary(),
+          initialized_body: binary(),
+          expected_protocol: binary()
+        }
+
   @doc """
   Parse the contents of a `.arbor.key` file.
 
@@ -176,6 +183,7 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
 
   @session_header "mcp-session-id"
   @protocol_header "mcp-protocol-version"
+  @max_invalidation_body_bytes 16_384
 
   @doc """
   Read a server-issued `mcp-session-id` from HTTP response headers.
@@ -201,13 +209,32 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
   """
   @spec protocol_version_from_initialize_body(binary()) :: String.t() | nil
   def protocol_version_from_initialize_body(body) when is_binary(body) do
-    case Jason.decode(body) do
-      {:ok, %{"method" => "initialize", "params" => %{"protocolVersion" => version}}}
-      when is_binary(version) and version != "" ->
-        version
+    case parse_initialize_request(body) do
+      {:initialize, version} -> version
+      :other -> nil
+    end
+  end
 
-      _ ->
-        nil
+  @doc """
+  Prepare the HTTP session before forwarding a JSON-RPC request.
+
+  Every `initialize` begins a fresh HTTP session, even when the stdio proxy
+  process outlives an upstream server. The prior session ID is discarded and
+  the requested protocol replaces the prior value, including with `nil` when
+  `params.protocolVersion` is absent or invalid.
+  """
+  @spec prepare_http_session(map(), binary()) :: map()
+  def prepare_http_session(session, body) when is_map(session) and is_binary(body) do
+    case parse_initialize_request(body) do
+      {:initialize, version} ->
+        session
+        |> Map.put(:session_id, nil)
+        |> Map.put(:protocol_version, version)
+        |> Map.put(:cached_initialize_body, nil)
+        |> Map.put(:cached_initialized_body, nil)
+
+      :other ->
+        session
     end
   end
 
@@ -225,6 +252,188 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
   end
 
   @doc """
+  Adopt session state from a successful upstream HTTP response.
+
+  Response headers retain their existing behavior. For an `initialize`
+  request, `result.protocolVersion` in the JSON response then becomes the
+  negotiated protocol, including when the HTTP response omits the protocol
+  header.
+  """
+  @spec adopt_http_session(map(), [{term(), term()}] | nil, binary(), binary() | nil) :: map()
+  def adopt_http_session(session, headers, request_body, response_body)
+      when is_map(session) and is_binary(request_body) do
+    adopted = adopt_http_session(session, headers)
+
+    case parse_initialize_request(request_body) do
+      {:initialize, _requested} ->
+        case protocol_version_from_initialize_response(response_body) do
+          version when is_binary(version) ->
+            adopted
+            |> Map.put(:protocol_version, version)
+            |> Map.put(:cached_initialize_body, request_body)
+            |> Map.put(:cached_initialized_body, nil)
+
+          nil ->
+            adopted
+        end
+
+      :other ->
+        adopted
+    end
+  end
+
+  @doc "Remember an acknowledged `notifications/initialized` request for recovery replay."
+  @spec remember_successful_initialized(map(), binary()) :: map()
+  def remember_successful_initialized(session, request_body)
+      when is_map(session) and is_binary(request_body) do
+    maybe_cache_initialized(session, request_body)
+  end
+
+  @doc """
+  Build one recovery plan from a complete, compatible cached MCP lifecycle.
+
+  The cached initialize request and a successfully forwarded
+  `notifications/initialized` request must both be present. The returned
+  session has no HTTP session ID and no cached lifecycle so replay responses
+  must repopulate both before the original request can be retried. A fresh
+  initialize response must reproduce the protocol originally negotiated with
+  the stdio client, even when that differs from the client's requested version.
+  """
+  @spec begin_http_session_recovery(map()) ::
+          {:ok, map(), recovery_plan()}
+          | {:error, :incomplete_cached_lifecycle | tuple()}
+  def begin_http_session_recovery(session) when is_map(session) do
+    initialize_body = Map.get(session, :cached_initialize_body)
+    initialized_body = Map.get(session, :cached_initialized_body)
+    expected_protocol = Map.get(session, :protocol_version)
+
+    case {initialize_body, initialized_body, expected_protocol} do
+      {initialize_body, initialized_body, expected_protocol}
+      when is_binary(initialize_body) and is_binary(initialized_body) and
+             is_binary(expected_protocol) and expected_protocol != "" ->
+        build_recovery_plan(
+          session,
+          initialize_body,
+          initialized_body,
+          expected_protocol
+        )
+
+      _other ->
+        {:error, :incomplete_cached_lifecycle}
+    end
+  end
+
+  @doc """
+  Admit one upstream response while replaying the cached lifecycle.
+
+  Initialize replay requires HTTP 200, a valid initialize result, a new
+  server-issued session ID, and the protocol already negotiated with the stdio
+  client. Initialized replay requires the normal empty HTTP 202/204 response
+  and preserves the same session/protocol invariants.
+  """
+  @spec apply_http_session_recovery_response(
+          map(),
+          recovery_plan(),
+          :initialize | :initialized,
+          integer(),
+          [{term(), term()}] | nil,
+          binary() | nil
+        ) :: {:ok, map()} | {:error, term()}
+  def apply_http_session_recovery_response(
+        session,
+        plan,
+        :initialize,
+        200,
+        headers,
+        response_body
+      )
+      when is_map(session) and is_map(plan) and is_binary(response_body) do
+    next =
+      adopt_http_session(
+        session,
+        headers,
+        plan.initialize_body,
+        response_body
+      )
+
+    with true <- Map.get(next, :cached_initialize_body) == plan.initialize_body,
+         :ok <- validate_recovery_session(next, plan.expected_protocol) do
+      {:ok, next}
+    else
+      false -> {:error, :invalid_initialize_response}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def apply_http_session_recovery_response(
+        session,
+        plan,
+        :initialized,
+        status,
+        headers,
+        response_body
+      )
+      when is_map(session) and is_map(plan) and status in [202, 204] and
+             response_body in ["", nil] do
+    next =
+      adopt_http_session(
+        session,
+        headers,
+        plan.initialized_body,
+        response_body
+      )
+      |> remember_successful_initialized(plan.initialized_body)
+
+    with true <- Map.get(next, :cached_initialized_body) == plan.initialized_body,
+         :ok <- validate_recovery_session(next, plan.expected_protocol) do
+      {:ok, next}
+    else
+      false -> {:error, :invalid_initialized_response}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def apply_http_session_recovery_response(
+        _session,
+        _plan,
+        stage,
+        status,
+        _headers,
+        _response_body
+      ),
+      do: {:error, {:unexpected_recovery_response, stage, status}}
+
+  @doc "Clear transport state after a failed recovery while retaining lifecycle evidence."
+  @spec clear_http_session(map()) :: map()
+  def clear_http_session(session) when is_map(session) do
+    session
+    |> Map.put(:session_id, nil)
+    |> Map.put(:protocol_version, nil)
+  end
+
+  @doc """
+  Return whether an upstream response proves the held HTTP session is stale.
+
+  Classification is deliberately narrow and bounded. It applies only to a
+  non-initialize request carrying an existing session, and recognizes the two
+  ExMCP invalidation envelopes produced after an upstream restart:
+
+  - HTTP 400 with the exact negotiated-version mismatch for the held protocol
+  - HTTP 404 with JSON-RPC invalid-request message `Session not found`
+  """
+  @spec http_session_invalidated?(map(), binary(), integer(), binary() | nil) :: boolean()
+  def http_session_invalidated?(session, request_body, status, response_body)
+      when is_map(session) and is_binary(request_body) and is_binary(response_body) and
+             status in [400, 404] do
+    existing_session?(session) and
+      not initialize_request?(request_body) and
+      byte_size(response_body) <= @max_invalidation_body_bytes and
+      invalidation_response?(session, status, response_body)
+  end
+
+  def http_session_invalidated?(_session, _request_body, _status, _response_body), do: false
+
+  @doc """
   Extra headers the proxy must replay on later POSTs to the same session.
   """
   @spec extra_forward_headers(map()) :: [{String.t(), String.t()}]
@@ -239,6 +448,136 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
 
   defp maybe_header(headers, _name, value) when value in [nil, ""], do: headers
   defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
+
+  defp maybe_cache_initialized(session, body) do
+    if initialized_notification?(body) and is_binary(Map.get(session, :cached_initialize_body)) do
+      Map.put(session, :cached_initialized_body, body)
+    else
+      session
+    end
+  end
+
+  defp build_recovery_plan(session, initialize_body, initialized_body, expected_protocol) do
+    case parse_initialize_request(initialize_body) do
+      {:initialize, _requested_protocol} ->
+        if initialized_notification?(initialized_body) do
+          recovery_session =
+            session
+            |> Map.put(:session_id, nil)
+            |> Map.put(:protocol_version, expected_protocol)
+            |> Map.put(:cached_initialize_body, nil)
+            |> Map.put(:cached_initialized_body, nil)
+
+          plan = %{
+            initialize_body: initialize_body,
+            initialized_body: initialized_body,
+            expected_protocol: expected_protocol
+          }
+
+          {:ok, recovery_session, plan}
+        else
+          {:error, :incomplete_cached_lifecycle}
+        end
+
+      :other ->
+        {:error, :incomplete_cached_lifecycle}
+    end
+  end
+
+  defp validate_recovery_session(session, expected_protocol) do
+    cond do
+      not existing_session?(session) ->
+        {:error, :missing_recovery_session_id}
+
+      Map.get(session, :protocol_version) != expected_protocol ->
+        {:error, {:incompatible_protocol, expected_protocol, Map.get(session, :protocol_version)}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp parse_initialize_request(body) do
+    case Jason.decode(body) do
+      {:ok, %{"method" => "initialize"} = request} ->
+        version =
+          case Map.get(request, "params") do
+            %{"protocolVersion" => version} when is_binary(version) and version != "" -> version
+            _other -> nil
+          end
+
+        {:initialize, version}
+
+      _other ->
+        :other
+    end
+  end
+
+  defp initialize_request?(body),
+    do: match?({:initialize, _version}, parse_initialize_request(body))
+
+  defp initialized_notification?(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"method" => "notifications/initialized"} = request} ->
+        not Map.has_key?(request, "id")
+
+      _other ->
+        false
+    end
+  end
+
+  defp protocol_version_from_initialize_response(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"result" => %{"protocolVersion" => version}}}
+      when is_binary(version) and version != "" ->
+        version
+
+      _other ->
+        nil
+    end
+  end
+
+  defp protocol_version_from_initialize_response(_body), do: nil
+
+  defp existing_session?(session) do
+    case Map.get(session, :session_id) do
+      session_id when is_binary(session_id) and session_id != "" -> true
+      _other -> false
+    end
+  end
+
+  defp invalidation_response?(session, status, body) do
+    case Jason.decode(body) do
+      {:ok,
+       %{
+         "jsonrpc" => "2.0",
+         "id" => nil,
+         "error" => %{"code" => -32_600} = error
+       }} ->
+        invalidation_error?(session, status, error)
+
+      _other ->
+        false
+    end
+  end
+
+  defp invalidation_error?(_session, 404, %{"message" => "Session not found"}), do: true
+
+  defp invalidation_error?(
+         %{protocol_version: current_version},
+         400,
+         %{
+           "message" => message,
+           "data" => %{"expectedVersion" => expected_version}
+         }
+       )
+       when is_binary(current_version) and current_version != "" and
+              is_binary(expected_version) and expected_version != "" and is_binary(message) do
+    message ==
+      "MCP-Protocol-Version #{current_version} does not match the negotiated version #{expected_version}."
+  end
+
+  defp invalidation_error?(_session, _status, _error), do: false
 
   defp fetch_header(headers, name) do
     Enum.find_value(headers, fn

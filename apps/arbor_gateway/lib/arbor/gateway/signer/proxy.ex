@@ -54,7 +54,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
           upstream_url: String.t(),
           upstream_path: String.t(),
           session_id: String.t() | nil,
-          protocol_version: String.t() | nil
+          protocol_version: String.t() | nil,
+          cached_initialize_body: String.t() | nil,
+          cached_initialized_body: String.t() | nil
         }
 
   # ===========================================================================
@@ -64,10 +66,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
   @doc """
   Start the proxy with the given config and block until stdin closes.
 
-  Returns `:ok` when the parent process closes its end of the stdio pipe
-  (the natural shutdown signal). Returns `{:error, reason}` if the proxy
-  fails before entering its main loop (key file not found, parse error,
-  etc.).
+  Returns `:ok` when the parent process closes its end of the stdio pipe.
+  Returns `{:error, reason}` if the proxy fails before entering its main loop
+  (key file not found, parse error, etc.).
   """
   @spec start(keyword()) :: :ok | {:error, term()}
   def start(opts) do
@@ -101,7 +102,9 @@ defmodule Arbor.Gateway.Signer.Proxy do
          upstream_url: upstream_url,
          upstream_path: upstream_path,
          session_id: nil,
-         protocol_version: nil
+         protocol_version: nil,
+         cached_initialize_body: nil,
+         cached_initialized_body: nil
        }}
     end
   end
@@ -154,8 +157,8 @@ defmodule Arbor.Gateway.Signer.Proxy do
     else
       log_stderr("[arbor.signer] -> #{summarize_request(trimmed)}")
 
-      {response, config} =
-        sign_and_forward(trimmed, maybe_remember_protocol_version(config, trimmed))
+      prepared = ProxyCore.prepare_http_session(config, trimmed)
+      {response, config} = sign_and_forward(trimmed, prepared)
 
       write_response(response)
       config
@@ -172,21 +175,12 @@ defmodule Arbor.Gateway.Signer.Proxy do
       config
   end
 
-  defp maybe_remember_protocol_version(%{protocol_version: nil} = config, body) do
-    case ProxyCore.protocol_version_from_initialize_body(body) do
-      nil -> config
-      version -> %{config | protocol_version: version}
-    end
-  end
-
-  defp maybe_remember_protocol_version(config, _body), do: config
-
   defp sign_and_forward(body, config) do
-    case ProxyCore.sign_request(config.key_material, "POST", config.upstream_path, body) do
-      {:ok, signed} ->
-        forward_signed(body, signed, config)
+    case sign_and_post(body, config) do
+      {:ok, resp} ->
+        handle_initial_response(body, config, resp)
 
-      {:error, reason} ->
+      {:error, {:signing_failed, reason}} ->
         log_stderr("[arbor.signer] signing failed: #{inspect(reason)}")
         id = parse_id_safely(body)
 
@@ -197,51 +191,178 @@ defmodule Arbor.Gateway.Signer.Proxy do
           |> Jason.encode!()
 
         {response, config}
+
+      {:error, {:upstream_failed, reason}} ->
+        upstream_unreachable_response(body, config, reason)
     end
   end
 
-  defp forward_signed(body, signed, config) do
-    auth_header = ProxyCore.authorization_header_value(signed)
+  defp sign_and_post(body, config) do
+    case ProxyCore.sign_request(config.key_material, "POST", config.upstream_path, body) do
+      {:ok, signed} ->
+        headers =
+          [
+            {"authorization", ProxyCore.authorization_header_value(signed)},
+            {"content-type", "application/json"}
+          ] ++ ProxyCore.extra_forward_headers(config)
 
-    headers =
-      [
-        {"authorization", auth_header},
-        {"content-type", "application/json"}
-      ] ++ ProxyCore.extra_forward_headers(config)
-
-    case do_post(config.upstream_url, body, headers) do
-      {:ok, %{status: 200, body: resp_body} = resp} when is_binary(resp_body) ->
-        {resp_body, adopt_upstream_session(config, resp)}
-
-      {:ok, %{status: status, body: resp_body} = resp}
-      when status in [202, 204] and resp_body in ["", nil] ->
-        config = adopt_upstream_session(config, resp)
-
-        if jsonrpc_notification?(body) do
-          {:no_response, config}
-        else
-          {upstream_error_response(status, resp_body, body), config}
+        case do_post(config.upstream_url, body, headers) do
+          {:ok, resp} -> {:ok, resp}
+          {:error, reason} -> {:error, {:upstream_failed, reason}}
         end
 
-      {:ok, %{status: status, body: resp_body}} ->
-        {upstream_error_response(status, resp_body, body), config}
-
       {:error, reason} ->
-        log_stderr("[arbor.signer] upstream request failed: #{inspect(reason)}")
-        id = parse_id_safely(body)
-
-        response =
-          ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable", %{
-            "reason" => inspect(reason)
-          })
-          |> Jason.encode!()
-
-        {response, config}
+        {:error, {:signing_failed, reason}}
     end
   end
 
-  defp adopt_upstream_session(config, resp) do
-    next = ProxyCore.adopt_http_session(config, Map.get(resp, :headers))
+  defp handle_initial_response(body, config, resp) do
+    case successful_response(body, config, resp) do
+      {:ok, result} ->
+        result
+
+      :error ->
+        status = Map.get(resp, :status)
+        response_body = Map.get(resp, :body)
+
+        if ProxyCore.http_session_invalidated?(config, body, status, response_body) do
+          recover_and_retry(body, config, status, response_body)
+        else
+          {upstream_error_response(status, response_body, body), config}
+        end
+    end
+  end
+
+  defp successful_response(body, config, %{status: 200, body: response_body} = resp)
+       when is_binary(response_body) do
+    {:ok, {response_body, adopt_upstream_session(config, body, resp)}}
+  end
+
+  defp successful_response(
+         body,
+         config,
+         %{status: status, body: response_body} = resp
+       )
+       when status in [202, 204] and response_body in ["", nil] do
+    next =
+      config
+      |> adopt_upstream_session(body, resp)
+      |> ProxyCore.remember_successful_initialized(body)
+
+    if jsonrpc_notification?(body) do
+      {:ok, {:no_response, next}}
+    else
+      {:ok, {upstream_error_response(status, response_body, body), next}}
+    end
+  end
+
+  defp successful_response(_body, _config, _resp), do: :error
+
+  defp recover_and_retry(body, config, status, response_body) do
+    with {:ok, recovery_session, plan} <- ProxyCore.begin_http_session_recovery(config),
+         {:ok, initialize_resp} <- sign_and_post(plan.initialize_body, recovery_session),
+         {:ok, initialized_session} <-
+           apply_recovery_response(recovery_session, plan, :initialize, initialize_resp),
+         {:ok, initialized_resp} <- sign_and_post(plan.initialized_body, initialized_session),
+         {:ok, recovered_session} <-
+           apply_recovery_response(initialized_session, plan, :initialized, initialized_resp) do
+      log_stderr("[arbor.signer] rehydrated MCP HTTP session after upstream restart")
+      retry_original_once(body, recovered_session)
+    else
+      {:error, reason} ->
+        recovery_failure_response(body, config, reason, status, response_body)
+    end
+  end
+
+  defp apply_recovery_response(session, plan, stage, resp) do
+    ProxyCore.apply_http_session_recovery_response(
+      session,
+      plan,
+      stage,
+      Map.get(resp, :status),
+      Map.get(resp, :headers),
+      Map.get(resp, :body)
+    )
+  end
+
+  defp retry_original_once(body, config) do
+    case sign_and_post(body, config) do
+      {:ok, resp} ->
+        handle_retry_response(body, config, resp)
+
+      {:error, reason} ->
+        recovery_failure_response(body, config, {:retry_failed, reason}, nil, nil)
+    end
+  end
+
+  defp handle_retry_response(body, config, resp) do
+    case successful_response(body, config, resp) do
+      {:ok, result} ->
+        result
+
+      :error ->
+        status = Map.get(resp, :status)
+        response_body = Map.get(resp, :body)
+
+        if ProxyCore.http_session_invalidated?(config, body, status, response_body) do
+          recovery_failure_response(
+            body,
+            config,
+            :retry_session_invalidated,
+            status,
+            response_body
+          )
+        else
+          {upstream_error_response(status, response_body, body), config}
+        end
+    end
+  end
+
+  defp recovery_failure_response(body, config, reason, status, response_body) do
+    log_stderr("[arbor.signer] MCP HTTP session recovery failed: #{inspect(reason)}")
+
+    data =
+      %{"reason" => inspect(reason)}
+      |> maybe_put_error_data("upstream_status", status)
+      |> maybe_put_error_data("upstream_body", response_body)
+
+    response =
+      body
+      |> parse_id_safely()
+      |> ProxyCore.jsonrpc_error_response(
+        -32_603,
+        "upstream MCP session lost; automatic recovery failed",
+        data
+      )
+      |> Jason.encode!()
+
+    {response, ProxyCore.clear_http_session(config)}
+  end
+
+  defp maybe_put_error_data(data, _key, nil), do: data
+  defp maybe_put_error_data(data, key, value), do: Map.put(data, key, value)
+
+  defp upstream_unreachable_response(body, config, reason) do
+    log_stderr("[arbor.signer] upstream request failed: #{inspect(reason)}")
+    id = parse_id_safely(body)
+
+    response =
+      ProxyCore.jsonrpc_error_response(id, -32_603, "upstream gateway unreachable", %{
+        "reason" => inspect(reason)
+      })
+      |> Jason.encode!()
+
+    {response, config}
+  end
+
+  defp adopt_upstream_session(config, request_body, resp) do
+    next =
+      ProxyCore.adopt_http_session(
+        config,
+        Map.get(resp, :headers),
+        request_body,
+        Map.get(resp, :body)
+      )
 
     if next.session_id not in [nil, config.session_id] do
       log_stderr("[arbor.signer] adopted mcp-session-id from upstream")
@@ -251,14 +372,14 @@ defmodule Arbor.Gateway.Signer.Proxy do
   end
 
   # Use OTP's built-in :httpc rather than Req. Two reasons:
-  #   1. The proxy makes exactly one POST per MCP request — no streaming,
-  #      no retries needed at this level (upstream handles its own).
+  #   1. Each forwarding step is a simple request/response POST. The only
+  #      retry is the explicit, bounded stale-session recovery above.
   #   2. Pulling in Req via Application.ensure_all_started transitively
   #      starts the whole umbrella app graph, which collides with the
   #      live dev server when it is already running on port 4000.
   #
   # :httpc is part of :inets, has no in-umbrella dep entanglements, and
-  # is more than enough for a one-shot POST. Tests can override the
+  # is more than enough for these bounded POSTs. Tests can override the
   # client module via Application config if they want to mock.
   defp do_post(url, body, headers) do
     http_client = Application.get_env(:arbor_gateway, :signer_http_client, __MODULE__)

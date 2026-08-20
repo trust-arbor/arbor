@@ -966,3 +966,17 @@ Arbor coding worktrees contain files tracked by the parent repository; the separ
 must follow into the canonical WorkPacket and task prompt. Otherwise a correctly
 isolated worker cannot read the cited design and may silently reconstruct weaker
 requirements (found 2026-08-15 while dispatching E0B2P).
+
+<!-- applied-learning: rehydrate-stdio-mcp-proxies-after-upstream-session-loss -->
+<a id="applied-learning-rehydrate-stdio-mcp-proxies-after-upstream-session-loss"></a>
+**Rehydrate stdio MCP proxies in-process after the upstream loses session state.** A
+signing proxy can outlive the HTTP gateway whose in-memory Streamable HTTP session
+it replays, and MCP hosts do not reliably respawn a proxy that closes stdio. Cache
+only the latest successfully completed `initialize` plus
+`notifications/initialized` lifecycle. On a narrowly identified stale-session or
+negotiated-version rejection, freshly sign and replay that lifecycle, require a new
+session with the same negotiated protocol, retry the interrupted request once, and
+keep stdio open. Never retry arbitrary upstream errors. A client-driven second
+`initialize` must likewise discard the old HTTP session before forwarding it (found
+2026-08-20 when a live Codex postcheck stayed permanently transport-closed after the
+signer exited).
