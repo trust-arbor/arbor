@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 655,
+  "entry_count": 656,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8059,8 +8059,21 @@
       "source_incident": "found 2026-08-20 when a pre-commit hook blocked a skills edit and `git checkout --` restored the still-staged bad copy, duplicating a section",
       "always_loaded": false,
       "content_sha256": "f4e854f17d35d98263fd241f82551f945a60cc7696fb46c2e70667b34dd07fa2"
+    },
+    {
+      "source_ordinal": 656,
+      "source_kind": "post-migration",
+      "slug": "in-zsh-harness-scripts-never-use-status-as-a-scratch-variable",
+      "title": "In zsh harness scripts, never use status as a scratch variable.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-in-zsh-harness-scripts-never-use-status-as-a-scratch-variable",
+      "source_date": "2026-08-20",
+      "source_incident": "found 2026-08-20 while independently validating P1C-A).",
+      "content_sha256": "41eb7a0628eebf6ce08f9282293d0567087da94d3987e59219e9fe3cd75599ee",
+      "always_loaded": false
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 194
+  "post_migration_entry_count": 195
 }

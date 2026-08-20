@@ -816,3 +816,7 @@ directory set to `apps/some_app` and a fresh isolated `MIX_BUILD_PATH`; inspect
 the compiled app list as well as the test result. This exposed 15 Security test
 failures hidden by the umbrella build because fixtures still called Persistence,
 Historian, Comms, and Phoenix modules (found 2026-08-20 during P1C acceptance).
+
+<!-- applied-learning: in-zsh-harness-scripts-never-use-status-as-a-scratch-variable -->
+<a id="applied-learning-in-zsh-harness-scripts-never-use-status-as-a-scratch-variable"></a>
+**In zsh harness scripts, never use `status` as a scratch variable.** `status` is a read-only special parameter, so `status=$?` aborts cleanup exactly when a validation command fails. Use `exit_code`, capture it immediately, and install an `EXIT` trap before commands that create worktrees or build roots so cleanup runs on both success and failure (found 2026-08-20 while independently validating P1C-A).
