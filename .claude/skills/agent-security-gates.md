@@ -97,16 +97,43 @@ another one. It doubles as user documentation — anyone standing up agents need
 ## 5. The egress gate is ENFORCING by default (dev + prod)
 
 - **What:** `config :arbor_security, egress_gate_enforcing: true` (dev.exs/prod.exs).
-  `EgressGate.decide`: `on_host` (local LM Studio) → `:allow`; **tainted (untrusted/
-  hostile) content to external egress → `{:block}`**; `external_provider` (cloud LLM)
-  egress → `policy_mode` (default `external_provider: :allow` via
-  `default_egress_modes`, else `:ask`).
+  `EgressGate.decide/5` is a cond with THREE distinct branches — do not collapse
+  them, the difference is load-bearing:
+  1. external + `:hostile` → `{:block, :hostile}`. **Absolute**; no capability
+     overrides it.
+  2. external + `:untrusted` → `:allow` **if** the agent holds a route-scoped
+     **disclosure capability** (`arbor://egress/disclose/...`) and no explicit
+     `:block`; otherwise `{:block, :untrusted}`. This branch is NOT absolute —
+     the disclosure cap is the designed relief valve.
+  3. everything else (incl. `on_host`) → `policy_mode`, whose fallback is
+     `config :arbor_trust, :default_egress_modes` (**`:arbor_trust`, not
+     `:arbor_security`** — `Arbor.Trust.Policy.default_egress_mode/1`). Library
+     default is conservative (`external_provider: :ask`); `dev.exs` already sets
+     `%{external_provider: :allow}`.
 - **Symptom:** a cloud-LLM agent's call is refused (`requires_approval`), or an agent
-  processing web/tainted content can't send it to an external provider.
+  processing web/tainted content can't send it to an external provider. On a session
+  turn this surfaces as `⛔ Egress blocked: session turn-egress authorizer refused
+  (:initial_denied)`.
 - **Action:** for local-first, use `on_host` models (unaffected). For cloud egress,
-  ensure `external_provider: :allow` in the profile's `egress_modes` or grant a
-  destination-scoped egress cap. Tainted→external is *meant* to block — that's the
-  exfil defense, not a misconfiguration.
+  ensure `external_provider: :allow` in the profile's `egress_modes`, or issue a
+  disclosure capability (`Arbor.Security.issue_disclosure_capability/1`) scoped to
+  the route. Tainted→external is *meant* to gate — that's the exfil defense, not a
+  misconfiguration.
+- **Both interesting branches are currently unreachable in production (2026-08-20).**
+  Nothing outside `arbor_security` mints a disclosure capability, so branch 2 can
+  never take its `:allow` path; and no ingress ever assigns `:hostile` (`web.ex`
+  ingress declares `output_taint :untrusted`; `:hostile` appears only as a
+  fail-closed deserialization fallback in `checkpoint.ex`), so branch 1 never
+  fires. In practice the cond collapses to "untrusted → block, always", which is
+  why a fresh agent cannot hold a cloud-model conversation. Branch 2 is
+  `.arbor/roadmap/0-inbox/session-disclosure-capability-minting.md`; branch 1 is
+  H4 of `.arbor/roadmap/2-planned/prompt-injection-defense-plan.md` (local Prompt
+  Guard 2 escalating taint to hostile). Until H4 lands, `:untrusted` is the only
+  level that ever reaches this gate — so treat branch 2 as the whole defense.
+- **A user chat message is `:untrusted`**, not `:trusted` — `session.ex` tags it
+  `level: :untrusted, chain: ["session_steering"]`. So "use the turn's actual taint
+  instead of worst-case" is a no-op for chat; the actual value already IS
+  untrusted. Do not re-propose it as a fix for `:initial_denied`.
 
 ## 6. `arbor://agent/discover_tools` must be infrastructure-`:auto`
 
