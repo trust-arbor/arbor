@@ -953,9 +953,12 @@ A control targeted at `implement` may be delivered after a design provider turn
 ends but before the pipeline inspects the no-write design workspace. The retained
 agent can then write correct source while Arbor still enforces the design invariant
 and terminalize `design_turn_modified_workspace`. Wait for task status/checkpoint
-evidence that the worker phase has durably changed; if source is produced anyway,
-checkpoint that exact tree and continue from its commit rather than replaying the
-packet (found 2026-08-13 during PK-K0 design rework).
+evidence that the worker phase has durably changed. This also applies to untargeted
+same-session follow-ups: while the owner action is still design-only, steering may
+refine the design but must not say to apply, edit, cherry-pick, or commit. If source
+is produced anyway, checkpoint that exact tree and continue from its commit rather
+than replaying the packet (found 2026-08-13 during PK-K0 design rework; reinforced
+2026-08-20 when an untargeted follow-up caused `design_turn_modified_workspace`).
 
 <!-- applied-learning: inline-load-bearing-nested-repository-context-in-delegated-work-packets -->
 <a id="applied-learning-inline-load-bearing-nested-repository-context-in-delegated-work-packets"></a>
