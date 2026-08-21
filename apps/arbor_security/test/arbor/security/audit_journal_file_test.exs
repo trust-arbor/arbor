@@ -6,6 +6,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
   alias Arbor.Common.SafePath
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFile
+  alias Arbor.Security.AuditJournalFileCore
   alias Arbor.Security.Contracts.AuditJournal
 
   @digest String.duplicate("ab", 32)
@@ -19,10 +20,13 @@ defmodule Arbor.Security.AuditJournalFileTest do
     %{root: root}
   end
 
-  test "append prepared then applied survives close/reopen with the same projection", %{root: root} do
+  test "append prepared then applied survives close/reopen with the same projection", %{
+    root: root
+  } do
     {prepared, applied, _delivered} = grant_lifecycle()
 
     assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert_file_identity(handle)
     assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
     assert {:ok, handle} = AuditJournalFile.append(handle, applied)
     before = snapshot(handle)
@@ -30,8 +34,25 @@ defmodule Arbor.Security.AuditJournalFileTest do
 
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
     assert snapshot(reopened) == before
+    assert_file_identity(reopened)
     assert {:ok, folded} = AuditJournalCore.fold([prepared, applied])
     assert reopened.core |> AuditJournalCore.show() == AuditJournalCore.show(folded)
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "file identity records major_device, minor_device, and inode", %{root: root} do
+    {prepared, applied, _delivered} = grant_lifecycle()
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert_file_identity(handle)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    assert_file_identity(handle)
+    assert {:ok, handle} = AuditJournalFile.append(handle, applied)
+    assert_file_identity(handle)
+    assert :ok = AuditJournalFile.close(handle)
+
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert_file_identity(reopened)
     assert :ok = AuditJournalFile.close(reopened)
   end
 
@@ -65,7 +86,9 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert :ok = AuditJournalFile.close(reopened)
   end
 
-  test "partial_write inject of a magic prefix reopens as torn_tail of the prefix", %{root: root} do
+  test "partial_write inject of a magic prefix reopens as torn_tail of the prefix", %{
+    root: root
+  } do
     {prepared, applied, _delivered} = grant_lifecycle()
 
     assert {:ok, handle} = AuditJournalFile.open(root: root)
@@ -85,8 +108,43 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert :ok = AuditJournalFile.close(reopened)
   end
 
+  test "partial_write at or above frame size is commit_uncertain", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    {:ok, bytes} = AuditJournal.canonical_record_bytes(prepared)
+
+    {:ok, frame, _digest} =
+      AuditJournalFileCore.encode_frame(bytes, AuditJournalFileCore.genesis_digest())
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    path = handle.path
+
+    AuditJournalFile.__test_inject__(:partial_write, byte_size(frame))
+    result = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:clear)
+
+    refute match?({:error, {:not_committed, _}}, result)
+    assert {:error, {:commit_uncertain, :write_failed}} = result
+    assert File.lstat!(path).size == 0
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    AuditJournalFile.__test_inject__(:partial_write, byte_size(frame) + 1)
+    result = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:clear)
+
+    refute match?({:error, {:not_committed, _}}, result)
+    assert {:error, {:commit_uncertain, :write_failed}} = result
+    assert File.lstat!(path).size == 0
+
+    on_disk = File.read!(path)
+    assert {:ok, empty} = AuditJournalFileCore.new()
+    assert {:ok, replayed} = AuditJournalFileCore.consume(empty, on_disk)
+    shown = AuditJournalFileCore.show(replayed)
+    complete? = shown.evidence.torn_tail == nil and shown.evidence.committed_frames >= 1
+    refute complete?
+  end
+
   test "partial_write of wrong-magic residue reopens as malformed_header", %{root: root} do
-    {prepared, applied, _delivered} = grant_lifecycle()
+    {prepared, _applied, _delivered} = grant_lifecycle()
 
     assert {:ok, handle} = AuditJournalFile.open(root: root)
     assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
@@ -176,6 +234,16 @@ defmodule Arbor.Security.AuditJournalFileTest do
       committed_digest: handle.digest,
       committed_frames: handle.frames
     }
+  end
+
+  defp assert_file_identity(handle) do
+    stat = File.lstat!(handle.path)
+    assert Map.has_key?(handle.identity, :major_device)
+    assert Map.has_key?(handle.identity, :minor_device)
+    assert Map.has_key?(handle.identity, :inode)
+    assert handle.identity.major_device == stat.major_device
+    assert handle.identity.minor_device == stat.minor_device
+    assert handle.identity.inode == stat.inode
   end
 
   defp unique_root do

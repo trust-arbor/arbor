@@ -129,11 +129,26 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     assert :ok = AuditJournalFile.close(handle)
 
     header =
-      @magic <> <<1_000_000::32-big>> <>
+      @magic <>
+        <<1_000_000::32-big>> <>
         AuditJournalFileCore.genesis_digest() <> AuditJournalFileCore.genesis_digest()
 
     assert byte_size(header) == 72
     File.write!(path, header)
+    File.chmod!(path, 0o600)
+
+    assert {:error, :oversized_frame} = AuditJournalFile.open(root: root)
+  end
+
+  test "security regression: impossible incomplete length prefix is oversized_frame not torn", %{
+    root: root
+  } do
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    path = handle.path
+    assert :ok = AuditJournalFile.close(handle)
+
+    residue = @magic <> <<0, 0, 0x81>>
+    File.write!(path, residue)
     File.chmod!(path, 0o600)
 
     assert {:error, :oversized_frame} = AuditJournalFile.open(root: root)
@@ -144,7 +159,9 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     prepared = prepared_record(intent)
     {:ok, canonical} = AuditJournal.canonical_record_bytes(prepared)
     variant = canonical <> " "
-    {:ok, frame, _digest} = AuditJournalFileCore.encode_frame(variant, AuditJournalFileCore.genesis_digest())
+
+    {:ok, frame, _digest} =
+      AuditJournalFileCore.encode_frame(variant, AuditJournalFileCore.genesis_digest())
 
     assert {:ok, handle} = AuditJournalFile.open(root: root)
     path = handle.path
@@ -156,7 +173,9 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     assert {:error, :non_canonical} = AuditJournalFile.open(root: root)
   end
 
-  test "security regression: schema-invalid payload never enters reducer state", %{root: root} do
+  test "security regression: schema-invalid payload never enters reducer state", %{
+    root: root
+  } do
     {:ok, frame, _digest} =
       AuditJournalFileCore.encode_frame(~s({"nope":true}), AuditJournalFileCore.genesis_digest())
 
@@ -190,6 +209,29 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     path = Path.join(link, "audit_journal.v1.log")
 
     assert {:error, :symlink_rejected} = AuditJournalFile.open(root: root, path: path)
+  end
+
+  test "security regression: post-sync minor-device mismatch is commit_uncertain", %{
+    root: root
+  } do
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    path = handle.path
+    size_before = File.lstat!(path).size
+
+    AuditJournalFile.__test_inject__(:post_sync_lstat_minor_device_delta, 1)
+
+    assert {:error, {:commit_uncertain, :identity_changed}} =
+             AuditJournalFile.append(handle, prepared)
+
+    AuditJournalFile.__test_inject__(:clear)
+
+    assert File.lstat!(path).size > size_before
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert %{committed_frames: 1} = AuditJournalFile.evidence(reopened)
+    assert :ok = AuditJournalFile.close(reopened)
   end
 
   defp unique_root do

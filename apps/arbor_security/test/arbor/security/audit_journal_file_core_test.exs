@@ -125,7 +125,49 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
     test "payload_len=32769 header is oversized_frame" do
       suffix = @magic <> <<32_769::32-big>>
-      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) == {:error, :oversized_frame}
+
+      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) ==
+               {:error, :oversized_frame}
+    end
+  end
+
+  describe "incomplete length prefix" do
+    test "impossible 7-byte length prefix is oversized_frame not torn" do
+      suffix = @magic <> <<0, 0, 0x81>>
+      assert byte_size(suffix) == 7
+
+      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) ==
+               {:error, :oversized_frame}
+
+      assert {:ok, empty} = FileCore.new()
+      assert {:error, :oversized_frame} = FileCore.consume(empty, suffix)
+    end
+
+    test "impossible 5-byte and 6-byte length prefixes are oversized_frame" do
+      five = @magic <> <<1>>
+      six = @magic <> <<0, 1>>
+
+      assert FileCore.classify_suffix(five, FileCore.genesis_digest()) ==
+               {:error, :oversized_frame}
+
+      assert FileCore.classify_suffix(six, FileCore.genesis_digest()) ==
+               {:error, :oversized_frame}
+    end
+
+    test "7-byte prefix that can complete to 32768 is torn_tail" do
+      suffix = @magic <> <<0, 0, 0x80>>
+
+      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) == :torn_tail
+
+      assert {:ok, empty} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(empty, suffix)
+      assert FileCore.show(replayed).evidence.torn_tail == %{offset: 0, byte_size: 7}
+    end
+
+    test "7-byte zero length prefix that can complete to 1..255 is torn_tail" do
+      suffix = @magic <> <<0, 0, 0>>
+
+      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) == :torn_tail
     end
   end
 
@@ -152,7 +194,9 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
     test "8-byte AJL1 plus len=0 is malformed_header" do
       suffix = @magic <> <<0::32-big>>
-      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) == {:error, :malformed_header}
+
+      assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) ==
+               {:error, :malformed_header}
     end
 
     test "40-byte good magic+len+wrong predecessor is predecessor_mismatch not torn" do
@@ -173,6 +217,37 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       shown = FileCore.show(replayed)
       assert shown.projection["entry_count"] == 0
       assert shown.evidence.torn_tail == %{offset: 0, byte_size: byte_size(truncated)}
+    end
+
+    test "offset beyond binary size is malformed" do
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      {:ok, frame, _digest} = encode_one(prepared)
+
+      assert {:ok, empty} = FileCore.new()
+      assert {:ok, committed} = FileCore.consume(empty, frame)
+      assert committed.offset == byte_size(frame)
+      assert {:error, :malformed} = FileCore.consume(committed, <<>>)
+
+      truncated = binary_part(frame, 0, div(byte_size(frame), 2))
+      assert {:error, :malformed} = FileCore.consume(committed, truncated)
+    end
+
+    test "extended binary that completes a torn frame clears torn_tail" do
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      {:ok, frame, _digest} = encode_one(prepared)
+      truncated = binary_part(frame, 0, 20)
+
+      assert {:ok, empty} = FileCore.new()
+      assert {:ok, torn} = FileCore.consume(empty, truncated)
+      assert FileCore.show(torn).evidence.torn_tail == %{offset: 0, byte_size: 20}
+
+      assert {:ok, completed} = FileCore.consume(torn, frame)
+      shown = FileCore.show(completed)
+      assert {:ok, folded} = AuditJournalCore.fold([prepared])
+      assert shown.projection == AuditJournalCore.show(folded)
+      assert shown.evidence.torn_tail == nil
+      assert shown.evidence.committed_frames == 1
+      assert shown.evidence.committed_offset == byte_size(frame)
     end
 
     test "72-byte header with wrong pred and truncated payload is predecessor_mismatch not torn" do
@@ -287,9 +362,7 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       ]
 
       src =
-        File.read!(
-          Path.expand("../../../lib/arbor/security/audit_journal_file_core.ex", __DIR__)
-        )
+        File.read!(Path.expand("../../../lib/arbor/security/audit_journal_file_core.ex", __DIR__))
 
       for regex <- forbidden do
         refute Regex.match?(regex, src), "matched #{inspect(regex)}"
@@ -303,12 +376,16 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
   end
 
   defp encode_records(records) do
-    Enum.reduce_while(records, {:ok, <<>>, FileCore.genesis_digest()}, fn record, {:ok, acc, pred} ->
-      case encode_one(record, pred) do
-        {:ok, frame, digest} -> {:cont, {:ok, acc <> frame, digest}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    Enum.reduce_while(
+      records,
+      {:ok, <<>>, FileCore.genesis_digest()},
+      fn record, {:ok, acc, pred} ->
+        case encode_one(record, pred) do
+          {:ok, frame, digest} -> {:cont, {:ok, acc <> frame, digest}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
       end
-    end)
+    )
     |> case do
       {:ok, log, _digest} -> {:ok, log}
       {:error, reason} -> {:error, reason}

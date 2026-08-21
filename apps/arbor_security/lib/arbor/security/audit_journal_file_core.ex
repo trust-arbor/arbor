@@ -201,13 +201,19 @@ defmodule Arbor.Security.AuditJournalFileCore do
   end
 
   defp consume_loop(state, binary) do
-    remaining = byte_size(binary) - state.offset
+    size = byte_size(binary)
+    offset = state.offset
 
-    if remaining == 0 do
-      {:ok, state}
-    else
-      suffix = binary_part(binary, state.offset, remaining)
-      consume_suffix(state, binary, suffix)
+    cond do
+      offset > size ->
+        {:error, :malformed}
+
+      offset == size ->
+        {:ok, %{state | torn_tail: nil}}
+
+      true ->
+        suffix = binary_part(binary, offset, size - offset)
+        consume_suffix(state, binary, suffix)
     end
   end
 
@@ -241,7 +247,8 @@ defmodule Arbor.Security.AuditJournalFileCore do
         | core: core,
           digest: header.frame_digest,
           offset: state.offset + @header_size + header.payload_len,
-          frames: state.frames + 1
+          frames: state.frames + 1,
+          torn_tail: nil
       }
 
       consume_loop(next, binary)
@@ -267,12 +274,11 @@ defmodule Arbor.Security.AuditJournalFileCore do
   end
 
   defp classify_incomplete_length(suffix) do
-    <<magic::binary-size(4), _rest::binary>> = suffix
+    <<magic::binary-size(4), len_prefix::binary>> = suffix
 
-    if magic == @magic do
+    with :ok <- require_magic(magic),
+         :ok <- require_possible_payload_len(len_prefix) do
       :torn_tail
-    else
-      {:error, :malformed_header}
     end
   end
 
@@ -338,6 +344,22 @@ defmodule Arbor.Security.AuditJournalFileCore do
       {:error, :oversized_frame}
     else
       :ok
+    end
+  end
+
+  defp require_possible_payload_len(<<>>), do: :ok
+
+  defp require_possible_payload_len(len_prefix)
+       when is_binary(len_prefix) and byte_size(len_prefix) in 1..3 do
+    pad = 4 - byte_size(len_prefix)
+    min_len = :binary.decode_unsigned(len_prefix <> :binary.copy(<<0>>, pad), :big)
+    max_len = :binary.decode_unsigned(len_prefix <> :binary.copy(<<0xFF>>, pad), :big)
+    max_payload = max_payload_bytes()
+
+    cond do
+      min_len > max_payload -> {:error, :oversized_frame}
+      max_len < 1 -> {:error, :malformed_header}
+      true -> :ok
     end
   end
 

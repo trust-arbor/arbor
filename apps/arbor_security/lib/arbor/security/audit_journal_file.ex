@@ -37,6 +37,7 @@ defmodule Arbor.Security.AuditJournalFile do
 
   @type identity :: %{
           major_device: non_neg_integer(),
+          minor_device: non_neg_integer(),
           inode: non_neg_integer(),
           uid: non_neg_integer(),
           gid: non_neg_integer(),
@@ -228,21 +229,46 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp persist_frame(handle, core, frame, digest) do
-    offset = handle.offset
+  if Mix.env() == :test do
+    defp persist_frame(handle, core, frame, digest) do
+      offset = handle.offset
 
-    case write_frame(handle.fd, offset, frame) do
-      {:error, {:not_committed, _reason}} = err ->
-        invalidate(handle)
-        err
+      case write_frame(handle.fd, offset, frame) do
+        {:error, {:commit_uncertain, _reason}} = err ->
+          invalidate(handle)
+          err
 
-      {:error, reason} ->
-        invalidate(handle)
-        {:error, {:not_committed, reason}}
-
-      :ok ->
-        prove_commit(handle, core, frame, digest, offset)
+        result ->
+          finish_frame_write(result, handle, core, frame, digest, offset)
+      end
     end
+  else
+    defp persist_frame(handle, core, frame, digest) do
+      offset = handle.offset
+      result = write_frame(handle.fd, offset, frame)
+      finish_frame_write(result, handle, core, frame, digest, offset)
+    end
+  end
+
+  defp finish_frame_write(
+         {:error, {:not_committed, _reason}} = err,
+         handle,
+         _core,
+         _frame,
+         _digest,
+         _offset
+       ) do
+    invalidate(handle)
+    err
+  end
+
+  defp finish_frame_write({:error, reason}, handle, _core, _frame, _digest, _offset) do
+    invalidate(handle)
+    {:error, {:not_committed, reason}}
+  end
+
+  defp finish_frame_write(:ok, handle, core, frame, digest, offset) do
+    prove_commit(handle, core, frame, digest, offset)
   end
 
   defp prove_commit(handle, core, frame, digest, offset) do
@@ -302,10 +328,17 @@ defmodule Arbor.Security.AuditJournalFile do
           pwrite_all(fd, offset, frame)
 
         byte_count ->
-          take = min(byte_count, byte_size(frame))
-          part = binary_part(frame, 0, take)
-          _ = :file.pwrite(fd, offset, part)
-          {:error, {:not_committed, :write_failed}}
+          write_injected_partial(fd, offset, frame, byte_count)
+      end
+    end
+
+    defp write_injected_partial(fd, offset, frame, byte_count) do
+      if byte_count < byte_size(frame) do
+        part = binary_part(frame, 0, byte_count)
+        _ = :file.pwrite(fd, offset, part)
+        {:error, {:not_committed, :write_failed}}
+      else
+        {:error, {:commit_uncertain, :write_failed}}
       end
     end
 
@@ -739,7 +772,9 @@ defmodule Arbor.Security.AuditJournalFile do
   defp require_expected_size(_stat, _expected), do: {:error, :size_mismatch}
 
   defp require_same_inode(identity, %File.Stat{} = stat) when is_map(identity) do
-    if identity.major_device == stat.major_device and identity.inode == stat.inode do
+    if identity.major_device == stat.major_device and
+         identity.minor_device == stat.minor_device and
+         identity.inode == stat.inode do
       :ok
     else
       {:error, :identity_changed}
@@ -765,6 +800,7 @@ defmodule Arbor.Security.AuditJournalFile do
   defp file_identity(%File.Stat{} = stat) do
     %{
       major_device: stat.major_device,
+      minor_device: stat.minor_device,
       inode: stat.inode,
       uid: stat.uid,
       gid: stat.gid,
