@@ -690,6 +690,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
         review_raw(%{
           "aaa" => %{
             "id" => "aaa",
+            "state" => "open",
             "blocks_merge" => true,
             "severity" => "blocking",
             "owner" => "security",
@@ -719,6 +720,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
           {"f#{i}",
            %{
              "id" => "f#{i}",
+             "state" => "open",
              "blocks_merge" => true,
              "evidence" => String.duplicate("x", 5_000)
            }}
@@ -726,7 +728,216 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
 
       findings = get_in(TaskArtifacts.normalize(review_raw(many)), [:payload, :blocking_findings])
       assert length(findings) == 16
-      assert Enum.all?(findings, &(byte_size(&1.evidence) <= 2_048))
+      assert Enum.all?(findings, &(byte_size(&1.evidence) == 2_048))
+    end
+
+    test "omits fixed and otherwise inactive findings while retaining active merge blockers" do
+      raw =
+        review_raw(%{
+          "open" => %{
+            "id" => "open",
+            "owner" => "aaa",
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => "live open"
+          },
+          "new_regression" => %{
+            "id" => "new_regression",
+            "owner" => "bbb",
+            "state" => "new_regression",
+            "blocks_merge" => true,
+            "title" => "live regression"
+          },
+          "arch" => %{
+            "id" => "arch",
+            "owner" => "ccc",
+            "state" => "architectural_blocker",
+            "severity" => "blocking",
+            "title" => "live architectural"
+          },
+          "fixed" => %{
+            "id" => "fixed",
+            "owner" => "ddd",
+            "state" => "fixed",
+            "blocks_merge" => true,
+            "severity" => "blocking",
+            "title" => "already fixed"
+          },
+          "resolved" => %{
+            "id" => "resolved",
+            "owner" => "eee",
+            "state" => "resolved",
+            "blocks_merge" => true,
+            "title" => "already resolved"
+          },
+          "oos" => %{
+            "id" => "oos",
+            "owner" => "fff",
+            "state" => "out_of_scope",
+            "blocks_merge" => true,
+            "title" => "out of scope"
+          },
+          "nit" => %{
+            "id" => "nit",
+            "owner" => "ggg",
+            "state" => "open",
+            "blocks_merge" => false,
+            "severity" => "nit",
+            "title" => "open nit"
+          }
+        })
+
+      findings = get_in(TaskArtifacts.normalize(raw), [:payload, :blocking_findings])
+      assert Enum.map(findings, & &1.id) == ["open", "new_regression", "arch"]
+      refute Enum.any?(findings, &(&1.id in ["fixed", "resolved", "oos", "nit"]))
+    end
+
+    test "surfaces an active architectural blocker with nit severity and false blocks_merge" do
+      raw =
+        review_raw(%{
+          "arch" => %{
+            "id" => "arch",
+            "state" => "architectural_blocker",
+            "severity" => "nit",
+            "blocks_merge" => false,
+            "title" => "grain mismatch"
+          },
+          "nit" => %{
+            "id" => "nit",
+            "state" => "open",
+            "severity" => "nit",
+            "blocks_merge" => false,
+            "title" => "open nit"
+          }
+        })
+
+      assert [finding] = get_in(TaskArtifacts.normalize(raw), [:payload, :blocking_findings])
+      assert finding.id == "arch"
+      assert finding.state == "architectural_blocker"
+      assert finding.severity == "nit"
+    end
+
+    test "hostile finding scalars and anchors do not crash projection" do
+      raw =
+        review_raw(%{
+          "good" => %{
+            "id" => "good",
+            "owner" => "security",
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => "real",
+            "anchor" => %{"path" => "lib/ok.ex", "line" => 1}
+          },
+          "hostile" => %{
+            "id" => %{"nested" => true},
+            "owner" => [1, 2, 3],
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => %{"x" => 1},
+            "evidence" => %{"y" => 2},
+            "required_action" => %{"z" => 3},
+            "anchor" => %{"path" => %{}, "line" => [10]}
+          }
+        })
+
+      findings = get_in(TaskArtifacts.normalize(raw), [:payload, :blocking_findings])
+      assert length(findings) == 2
+      assert {:ok, _} = Jason.encode(findings)
+
+      good = Enum.find(findings, &(&1[:id] == "good"))
+      assert good.title == "real"
+      assert good.anchor == %{path: "lib/ok.ex", line: 1}
+
+      hostile = Enum.find(findings, &(not Map.has_key?(&1, :id)))
+      refute Map.has_key?(hostile, :title)
+      refute Map.has_key?(hostile, :owner)
+      refute Map.has_key?(hostile, :evidence)
+      refute Map.has_key?(hostile, :required_action)
+      refute Map.has_key?(hostile, :anchor)
+      assert hostile.state == "open"
+    end
+
+    test "bounds finding text on UTF-8 codepoint boundaries" do
+      mixed = String.duplicate("a", 2047) <> "é"
+
+      [mixed_finding] =
+        get_in(
+          TaskArtifacts.normalize(
+            review_raw(%{
+              "aaa" => %{
+                "id" => "aaa",
+                "state" => "open",
+                "blocks_merge" => true,
+                "evidence" => mixed
+              }
+            })
+          ),
+          [:payload, :blocking_findings]
+        )
+
+      assert String.valid?(mixed_finding.evidence)
+      assert byte_size(mixed_finding.evidence) == 2047
+      refute String.ends_with?(mixed_finding.evidence, "é")
+
+      accents = String.duplicate("é", 2000)
+
+      [accent_finding] =
+        get_in(
+          TaskArtifacts.normalize(
+            review_raw(%{
+              "bbb" => %{
+                "id" => "bbb",
+                "state" => "open",
+                "blocks_merge" => true,
+                "evidence" => accents
+              }
+            })
+          ),
+          [:payload, :blocking_findings]
+        )
+
+      assert String.valid?(accent_finding.evidence)
+      assert byte_size(accent_finding.evidence) == 2048
+      assert rem(byte_size(accent_finding.evidence), 2) == 0
+    end
+
+    test "invalid UTF-8 finding scalars are omitted without crashing" do
+      raw =
+        review_raw(%{
+          "bad" => %{
+            "id" => "bad",
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => <<0xFF, 0xFE>>,
+            "evidence" => "ok" <> <<0x80>>
+          },
+          "sort-bad" => %{
+            "id" => <<0xFF>>,
+            "owner" => <<0x80>>,
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => "still here"
+          },
+          "good" => %{
+            "id" => "good",
+            "state" => "open",
+            "blocks_merge" => true,
+            "title" => "valid sibling"
+          }
+        })
+
+      findings = get_in(TaskArtifacts.normalize(raw), [:payload, :blocking_findings])
+
+      bad = Enum.find(findings, &(&1[:id] == "bad"))
+      refute Map.has_key?(bad, :title)
+      refute Map.has_key?(bad, :evidence)
+
+      good = Enum.find(findings, &(&1[:id] == "good"))
+      assert good.title == "valid sibling"
+
+      sort_bad = Enum.find(findings, &(&1[:title] == "still here"))
+      refute Map.has_key?(sort_bad, :id)
+      refute Map.has_key?(sort_bad, :owner)
     end
   end
 end

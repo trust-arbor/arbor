@@ -62,4 +62,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCoreTest do
     assert {:ok, ready} = ReadinessCore.report(@digest, @observed_at, [diagnostic("passed")])
     assert ready["status"] == "ready"
   end
+
+  test "security regression: empty diagnostics fail closed as degraded" do
+    assert {:ok, report} = ReadinessCore.report(@digest, @observed_at, [])
+    assert report["status"] == "degraded"
+    refute report["status"] == "ready"
+    assert report["diagnostics"] == []
+  end
 end

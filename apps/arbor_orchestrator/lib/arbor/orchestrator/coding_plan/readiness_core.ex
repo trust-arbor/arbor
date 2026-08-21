@@ -49,13 +49,21 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
     decisions = Enum.map(diagnostics, & &1.decision)
 
     cond do
-      "blocked" in decisions -> "blocked"
-      Enum.any?(decisions, &(&1 in ["degraded", "unavailable"])) -> "degraded"
-      # Only an all-"passed" set is ready. Previously any decision outside the
-      # known list fell through to "ready", so a new or unexpected decision
-      # would have failed OPEN. Nothing may reach "ready" by default.
-      Enum.all?(decisions, &(&1 == "passed")) -> "ready"
-      true -> "degraded"
+      "blocked" in decisions ->
+        "blocked"
+
+      Enum.any?(decisions, &(&1 in ["degraded", "unavailable"])) ->
+        "degraded"
+
+      # Only a non-empty all-"passed" set is ready. Enum.all?/2 on [] is true,
+      # so an empty diagnostic set must not count as all-passed. Previously any
+      # decision outside the known list (and the empty set) fell through to
+      # "ready" — a gate failing OPEN. Nothing may reach "ready" by default.
+      match?([_ | _], decisions) and Enum.all?(decisions, &(&1 == "passed")) ->
+        "ready"
+
+      true ->
+        "degraded"
     end
   end
 

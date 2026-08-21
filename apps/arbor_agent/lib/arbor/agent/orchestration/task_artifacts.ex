@@ -39,6 +39,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @max_provider_session_id_length 200
   @max_blocking_findings 16
   @max_finding_text_bytes 2_048
+  # Copied from ReviewLedgerCore's active set; do not import that module here.
+  @active_finding_states MapSet.new(~w(open new_regression architectural_blocker))
   @outcome_container_keys [
     :payload,
     "payload",
@@ -404,32 +406,37 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp blocking_finding?(finding) when is_map(finding) do
-    value(finding, :blocks_merge) == true or value(finding, :severity) == "blocking"
+    state = finding_text(value(finding, :state))
+
+    MapSet.member?(@active_finding_states, state) and
+      (value(finding, :blocks_merge) == true or
+         finding_text(value(finding, :severity)) == "blocking" or
+         state == "architectural_blocker")
   end
 
   defp blocking_finding?(_finding), do: false
 
   # Stable ordering so repeated reads of one result agree: owner, then id.
   defp finding_sort_key(finding) do
-    {to_string(value(finding, :owner) || ""), to_string(value(finding, :id) || "")}
+    {finding_text(value(finding, :owner)) || "", finding_text(value(finding, :id)) || ""}
   end
 
   defp compact_finding(finding) do
     %{
-      id: value(finding, :id),
-      title: bounded_finding_text(value(finding, :title)),
-      severity: value(finding, :severity),
-      owner: value(finding, :owner),
-      state: value(finding, :state),
-      evidence: bounded_finding_text(value(finding, :evidence)),
-      required_action: bounded_finding_text(value(finding, :required_action)),
+      id: finding_text(value(finding, :id)),
+      title: finding_text(value(finding, :title)),
+      severity: finding_text(value(finding, :severity)),
+      owner: finding_text(value(finding, :owner)),
+      state: finding_text(value(finding, :state)),
+      evidence: finding_text(value(finding, :evidence)),
+      required_action: finding_text(value(finding, :required_action)),
       anchor: finding_anchor(value(finding, :anchor))
     }
     |> reject_nil_values()
   end
 
   defp finding_anchor(anchor) when is_map(anchor) do
-    %{path: value(anchor, :path), line: value(anchor, :line)}
+    %{path: finding_text(value(anchor, :path)), line: finding_line(value(anchor, :line))}
     |> reject_nil_values()
     |> case do
       empty when map_size(empty) == 0 -> nil
@@ -439,15 +446,21 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp finding_anchor(_anchor), do: nil
 
-  defp bounded_finding_text(text) when is_binary(text) do
-    if String.valid?(text) and byte_size(text) <= @max_finding_text_bytes do
-      text
-    else
-      String.slice(text, 0, @max_finding_text_bytes)
+  defp finding_line(line) when is_integer(line) and line > 0, do: line
+  defp finding_line(_line), do: nil
+
+  defp finding_text(value) when is_binary(value) do
+    case ApprovalAnswer.bound_utf8_prefix(value, @max_finding_text_bytes) do
+      "" -> nil
+      text -> text
     end
   end
 
-  defp bounded_finding_text(_text), do: nil
+  defp finding_text(value) when is_atom(value) and value not in [nil, true, false] do
+    finding_text(Atom.to_string(value))
+  end
+
+  defp finding_text(_value), do: nil
 
   defp verdict(raw) do
     review = value(raw, :review)
