@@ -1958,10 +1958,33 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
+  # Bounds RETAINED events (memory), counted from the table itself.
+  #
+  # This previously compared `state.global_position`, which is a MONOTONIC
+  # lifetime counter — it never decreases when retention trims events or when a
+  # stream is purged. So once a node had ever appended `max_events` over its
+  # whole life, every subsequent append failed with `:event_log_full`
+  # PERMANENTLY, even with zero rows retained, until the process restarted.
+  #
+  # Found 2026-08-20 on a long-running dev server: max_events 1_000_000,
+  # global_position 5_187_597, actual retained rows 0. Every audit append was
+  # failing, and `Historian.DurableSignalSink` logs a gap and continues — so
+  # `shell:execution` and `agent:lifecycle` events were being dropped silently.
+  #
+  # Position-space exhaustion is a DIFFERENT concern and is still checked
+  # separately by `EventLog.ensure_position_capacity/3` at the call site; this
+  # change does not weaken it.
   defp check_capacity(events, state) do
-    if state.global_position + length(events) > state.max_events,
-      do: {:error, :event_log_full},
-      else: :ok
+    case :ets.info(state.global_table, :size) do
+      retained when is_integer(retained) ->
+        if retained + length(events) > state.max_events,
+          do: {:error, :event_log_full},
+          else: :ok
+
+      # Table missing: fail closed rather than admitting an unbounded append.
+      _ ->
+        {:error, :event_log_full}
+    end
   end
 
   defp read_head_event(stream_id, state) do

@@ -700,6 +700,33 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
                ETS.append("s1", Event.new("s1", "t4", %{}), name: name)
     end
 
+    test "capacity counts RETAINED events, not the lifetime position counter" do
+      # `global_position` is monotonic — it never decreases when events are
+      # purged or trimmed. Bounding on it meant that once a log had EVER
+      # appended max_events, every later append failed :event_log_full forever,
+      # even with an empty table, until the process restarted. On a real dev
+      # server that silently stopped all audit persistence:
+      # max_events 1_000_000, global_position 5_187_597, retained rows 0.
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_capacity_retained_#{:erlang.unique_integer([:positive])}"
+      start_supervised!({ETS, name: name, max_events: 3}, id: name)
+      initialize_empty_store(name)
+
+      for i <- 1..3 do
+        assert {:ok, _} = ETS.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
+      end
+
+      # Genuinely full: three retained against a bound of three.
+      assert {:error, :event_log_full} =
+               ETS.append("s1", Event.new("s1", "t4", %{}), name: name)
+
+      # Free the space. The lifetime counter stays at 3; retained drops to 0.
+      assert :ok = ETS.purge_stream("s1", name: name)
+
+      # Must succeed now. Pre-fix this returned :event_log_full forever.
+      assert {:ok, _} = ETS.append("s2", Event.new("s2", "t5", %{}), name: name)
+    end
+
     test "read_all uses default limit when none specified" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"el_read_limit_#{:erlang.unique_integer([:positive])}"
