@@ -83,8 +83,10 @@ defmodule Arbor.Persistence.EventLog do
           | :global_position_conflict
           | :invalid_precondition
           | :invalid_projection_events
+          | :projection_batch_bytes_exceeded
           | :projection_batch_too_large
           | :projection_capacity_exceeded
+          | :projection_event_too_large
           | :projection_fingerprint_invalid
           | :projection_fingerprint_missing
           | :projection_fingerprint_mismatch
@@ -836,6 +838,18 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
+  @spec admission_byte_limits() :: %{event: pos_integer(), batch: pos_integer()}
+  def admission_byte_limits, do: %{event: @max_event_bytes, batch: @max_append_bytes}
+
+  @doc false
+  @spec validate_admission_byte_bounds(term()) ::
+          :ok | {:error, :event_too_large | :append_batch_too_large | :invalid_events}
+  def validate_admission_byte_bounds(events) do
+    %{event: max_event_bytes, batch: max_batch_bytes} = admission_byte_limits()
+    validate_admission_byte_bounds(events, 0, max_event_bytes, max_batch_bytes)
+  end
+
+  @doc false
   @spec validate_append(stream_id(), [Event.t()] | Event.t(), opts()) ::
           {:ok, [Event.t()], append_preconditions()}
           | {:error,
@@ -900,12 +914,14 @@ defmodule Arbor.Persistence.EventLog do
   defp event_list(_invalid), do: {:error, :invalid_events}
 
   defp validate_event_list(events, allow_empty?, enforce_unique?) do
+    %{event: max_event_bytes, batch: max_batch_bytes} = admission_byte_limits()
+
     validate_event_list(
       events,
       allow_empty?,
       enforce_unique?,
-      @max_event_bytes,
-      @max_append_bytes
+      max_event_bytes,
+      max_batch_bytes
     )
   end
 
@@ -1015,6 +1031,45 @@ defmodule Arbor.Persistence.EventLog do
          _unique,
          _max_event_bytes,
          _max_total_bytes
+       ),
+       do: {:error, :invalid_events}
+
+  defp validate_admission_byte_bounds([], _total_bytes, _max_event_bytes, _max_batch_bytes),
+    do: :ok
+
+  defp validate_admission_byte_bounds(
+         [event | rest],
+         total_bytes,
+         max_event_bytes,
+         max_batch_bytes
+       ) do
+    event_bytes = safe_external_size(event)
+
+    cond do
+      not is_integer(event_bytes) ->
+        {:error, :invalid_events}
+
+      event_bytes > max_event_bytes ->
+        {:error, :event_too_large}
+
+      total_bytes + event_bytes > max_batch_bytes ->
+        {:error, :append_batch_too_large}
+
+      true ->
+        validate_admission_byte_bounds(
+          rest,
+          total_bytes + event_bytes,
+          max_event_bytes,
+          max_batch_bytes
+        )
+    end
+  end
+
+  defp validate_admission_byte_bounds(
+         _improper_or_invalid,
+         _total_bytes,
+         _max_event_bytes,
+         _max_batch_bytes
        ),
        do: {:error, :invalid_events}
 

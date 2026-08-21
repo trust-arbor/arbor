@@ -47,6 +47,23 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
                Persistence.project_committed_events(name, ETS, events)
     end
 
+    test "rejects an event above the authoritative EventLog byte ceiling", %{name: name} do
+      max_event_bytes = EventLog.admission_byte_limits().event
+
+      oversized =
+        event_with_external_size(max_event_bytes + 1,
+          id: "evt_oversized",
+          event_number: 1,
+          global_position: 1
+        )
+
+      assert {:error, :projection_event_too_large} =
+               Persistence.project_committed_events(name, ETS, [oversized])
+
+      assert {:ok, 0} = Persistence.event_count(name, ETS)
+      assert {:ok, []} = Persistence.list_streams(name, ETS)
+    end
+
     test "surfaces the per-surface conflict vocabulary", %{name: name} do
       assert {:ok, _} =
                Persistence.project_committed_events(name, ETS, [
@@ -161,5 +178,36 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
     }
 
     %Event{event | operation_fingerprint: EventLog.event_fingerprint(stream_id, event)}
+  end
+
+  defp event_with_external_size(target_bytes, opts) do
+    opts
+    |> Keyword.put(:data, %{"blob" => ""})
+    |> event()
+    |> resize_event(target_bytes)
+    |> then(fn %Event{} = event ->
+      %Event{
+        event
+        | operation_fingerprint: EventLog.event_fingerprint(event.stream_id, event)
+      }
+    end)
+  end
+
+  defp resize_event(%Event{} = event, target_bytes) do
+    difference = target_bytes - :erlang.external_size(event)
+
+    cond do
+      difference == 0 ->
+        event
+
+      difference > 0 ->
+        blob = event.data["blob"] <> String.duplicate("x", difference)
+        resize_event(%Event{event | data: %{"blob" => blob}}, target_bytes)
+
+      true ->
+        blob = event.data["blob"]
+        keep = byte_size(blob) + difference
+        resize_event(%Event{event | data: %{"blob" => binary_part(blob, 0, keep)}}, target_bytes)
+    end
   end
 end

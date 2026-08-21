@@ -32,6 +32,43 @@ defmodule Arbor.Persistence.EventLog.ProjectionCoreTest do
       assert {:error, :projection_batch_too_large} = ProjectionCore.prepare(over_limit)
     end
 
+    test "enforces the EventLog per-event byte ceiling before fingerprint validation" do
+      %{event: max_event_bytes} = EventLog.admission_byte_limits()
+      at_limit = event_with_external_size(max_event_bytes)
+
+      assert :erlang.external_size(at_limit) == max_event_bytes
+      assert {:ok, [_entry]} = ProjectionCore.prepare([at_limit])
+
+      over_limit = event_with_external_size(max_event_bytes + 1)
+      over_limit = %Event{over_limit | operation_fingerprint: String.duplicate("g", 64)}
+
+      assert {:error, :projection_event_too_large} = ProjectionCore.prepare([over_limit])
+    end
+
+    test "enforces the EventLog aggregate byte ceiling with individually bounded events" do
+      %{event: max_event_bytes, batch: max_batch_bytes} = EventLog.admission_byte_limits()
+
+      at_limit =
+        for n <- 1..4 do
+          event_with_external_size(max_event_bytes,
+            id: "evt_bytes_#{n}",
+            event_number: n,
+            global_position: n
+          )
+        end
+
+      assert Enum.sum(Enum.map(at_limit, &:erlang.external_size/1)) == max_batch_bytes
+      assert {:ok, entries} = ProjectionCore.prepare(at_limit)
+      assert length(entries) == 4
+
+      over_limit =
+        at_limit ++
+          [event(id: "evt_bytes_5", event_number: 5, global_position: 5)]
+
+      assert {:error, :projection_batch_bytes_exceeded} =
+               ProjectionCore.prepare(over_limit)
+    end
+
     test "requires positive bounded stream and global positions" do
       for invalid <- [0, -1, 2_147_483_648, nil, "1", 1.0] do
         assert {:error, :invalid_projection_events} =
@@ -339,5 +376,31 @@ defmodule Arbor.Persistence.EventLog.ProjectionCoreTest do
 
   defp with_fingerprint(%Event{} = event) do
     %Event{event | operation_fingerprint: EventLog.event_fingerprint(event.stream_id, event)}
+  end
+
+  defp event_with_external_size(target_bytes, opts \\ []) do
+    opts
+    |> Keyword.put(:data, %{"blob" => ""})
+    |> event()
+    |> resize_event(target_bytes)
+    |> with_fingerprint()
+  end
+
+  defp resize_event(%Event{} = event, target_bytes) do
+    difference = target_bytes - :erlang.external_size(event)
+
+    cond do
+      difference == 0 ->
+        event
+
+      difference > 0 ->
+        blob = event.data["blob"] <> String.duplicate("x", difference)
+        resize_event(%Event{event | data: %{"blob" => blob}}, target_bytes)
+
+      true ->
+        blob = event.data["blob"]
+        keep = byte_size(blob) + difference
+        resize_event(%Event{event | data: %{"blob" => binary_part(blob, 0, keep)}}, target_bytes)
+    end
   end
 end

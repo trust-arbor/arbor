@@ -278,6 +278,43 @@ defmodule Arbor.Persistence.EventLogProjectionSecurityRegressionTest do
     refute_receive {:event, %Event{}}, 100
   end
 
+  test "security regression: aggregate projection byte rejection admits no events or metadata",
+       %{name: name} do
+    bounded_event_bytes = 900_000
+
+    events =
+      for n <- 1..5 do
+        positioned_with_external_size(
+          "evt_bounded_#{n}",
+          n,
+          n,
+          bounded_event_bytes
+        )
+      end
+
+    assert Enum.all?(events, &(:erlang.external_size(&1) == bounded_event_bytes))
+
+    assert {:error, :projection_batch_bytes_exceeded} =
+             Persistence.project_committed_events(name, ETS, events)
+
+    assert {:ok, 0} = Persistence.event_count(name, ETS)
+    assert {:ok, []} = Persistence.list_streams(name, ETS)
+    assert {:ok, 0} = Persistence.stream_version(name, ETS, "stream")
+
+    assert {:ok, %{global_position: 0, observed_global_position: 0}} =
+             ETS.projection_status(name: name)
+
+    assert {:error, :identity_history_unavailable} =
+             ETS.event_identity("stream", "evt_bounded_1", name: name)
+
+    # Four fixtures remain below the aggregate ceiling; the fifth crosses it.
+    assert {:ok, %{projected: 4, skipped: 0}} =
+             Persistence.project_committed_events(name, ETS, Enum.take(events, 4))
+
+    assert {:ok, 4} = Persistence.event_count(name, ETS)
+    assert {:ok, 4} = Persistence.stream_version(name, ETS, "stream")
+  end
+
   test "security regression: a tampered third event leaves all five projection surfaces unchanged",
        %{name: name} do
     original = positioned("evt_a", 1, 1)
@@ -412,5 +449,33 @@ defmodule Arbor.Persistence.EventLogProjectionSecurityRegressionTest do
     }
 
     %Event{event | operation_fingerprint: EventLog.event_fingerprint("stream", event)}
+  end
+
+  defp positioned_with_external_size(id, event_number, global_position, target_bytes) do
+    id
+    |> positioned(event_number, global_position)
+    |> then(fn %Event{} = event -> %Event{event | data: %{"blob" => ""}} end)
+    |> resize_event(target_bytes)
+    |> then(fn %Event{} = event ->
+      %Event{event | operation_fingerprint: EventLog.event_fingerprint("stream", event)}
+    end)
+  end
+
+  defp resize_event(%Event{} = event, target_bytes) do
+    difference = target_bytes - :erlang.external_size(event)
+
+    cond do
+      difference == 0 ->
+        event
+
+      difference > 0 ->
+        blob = event.data["blob"] <> String.duplicate("x", difference)
+        resize_event(%Event{event | data: %{"blob" => blob}}, target_bytes)
+
+      true ->
+        blob = event.data["blob"]
+        keep = byte_size(blob) + difference
+        resize_event(%Event{event | data: %{"blob" => binary_part(blob, 0, keep)}}, target_bytes)
+    end
   end
 end

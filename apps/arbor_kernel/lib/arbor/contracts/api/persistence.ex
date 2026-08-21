@@ -93,8 +93,10 @@ defmodule Arbor.Contracts.API.Persistence do
           | :global_position_conflict
           | :invalid_precondition
           | :invalid_projection_events
+          | :projection_batch_bytes_exceeded
           | :projection_batch_too_large
           | :projection_capacity_exceeded
+          | :projection_event_too_large
           | :projection_fingerprint_invalid
           | :projection_fingerprint_missing
           | :projection_fingerprint_mismatch

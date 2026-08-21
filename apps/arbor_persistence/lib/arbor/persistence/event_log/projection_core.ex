@@ -72,8 +72,10 @@ defmodule Arbor.Persistence.EventLog.ProjectionCore do
   @typedoc "Closed failure vocabulary for the projection core."
   @type error ::
           :invalid_projection_events
+          | :projection_batch_bytes_exceeded
           | :projection_batch_too_large
           | :projection_capacity_exceeded
+          | :projection_event_too_large
           | :projection_fingerprint_invalid
           | :projection_fingerprint_missing
           | :projection_fingerprint_mismatch
@@ -95,6 +97,7 @@ defmodule Arbor.Persistence.EventLog.ProjectionCore do
   @spec prepare(term()) :: {:ok, [entry()]} | {:error, error()}
   def prepare(events) when is_list(events) do
     with :ok <- bounded_batch(events, 0),
+         :ok <- bounded_bytes(events),
          {:ok, entries} <- build_entries(events) do
       dedupe(entries)
     end
@@ -170,6 +173,15 @@ defmodule Arbor.Persistence.EventLog.ProjectionCore do
 
   defp bounded_batch([_event | rest], count), do: bounded_batch(rest, count + 1)
   defp bounded_batch(_improper, _count), do: {:error, :invalid_projection_events}
+
+  defp bounded_bytes(events) do
+    case EventLog.validate_admission_byte_bounds(events) do
+      :ok -> :ok
+      {:error, :event_too_large} -> {:error, :projection_event_too_large}
+      {:error, :append_batch_too_large} -> {:error, :projection_batch_bytes_exceeded}
+      {:error, :invalid_events} -> {:error, :invalid_projection_events}
+    end
+  end
 
   defp build_entries(events) do
     events
