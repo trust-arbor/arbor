@@ -16,8 +16,10 @@ defmodule Arbor.Agent.IdentityAliases do
 
   ## Usage
 
-      # Link a secondary identity to a primary
-      IdentityAliases.link(caller_id, "human_new_hash", "human_existing_hash")
+      # Link a secondary identity to a primary (caller must prove possession)
+      IdentityAliases.link(caller_id, "human_new_hash", "human_existing_hash",
+        signed_request: signed_request
+      )
 
       # Resolve an identity (returns primary if aliased, or self)
       IdentityAliases.resolve("human_new_hash")
@@ -29,12 +31,22 @@ defmodule Arbor.Agent.IdentityAliases do
 
   ## Security
 
-  Link and unlink require the caller to hold
-  `arbor://identity/alias/manage`. Without this gate, any code path that
-  could call `link/3` would be able to redirect a victim's future OIDC
-  logins to an attacker-controlled identity — and then receive any
-  capabilities granted to that identity (M5). This is an admin-class
-  operation; resolve and list are read-only and remain ungated.
+  Link and unlink require **possession-proof plus capability**:
+
+    1. a `SignedRequest` the *caller* produced from key material it holds
+       (Ed25519 over `arbor://identity/alias/manage`)
+    2. that same caller holding `arbor://identity/alias/manage`
+
+  Naming a principal is not proof. The server only verifies; it does not
+  load a stored key and sign on a caller-named principal's behalf. A
+  missing, malformed, or mismatched proof is refused as a proof failure
+  and is distinguishable from a capability denial.
+
+  Without this gate, any code path that could call `link/3` would be able
+  to redirect a victim's future OIDC logins to an attacker-controlled
+  identity — and then receive any capabilities granted to that identity
+  (M5). This is an admin-class operation; resolve and list are read-only
+  and remain ungated.
   """
 
   alias Arbor.Agent.UserConfig
@@ -51,15 +63,16 @@ defmodule Arbor.Agent.IdentityAliases do
   Link a secondary identity to a primary identity.
 
   After linking, any OIDC login that derives `secondary_id` will be
-  treated as `primary_id`. Requires `caller_id` to hold
-  `arbor://identity/alias/manage` (M5).
+  treated as `primary_id`. Requires a caller-produced `SignedRequest`
+  (`opts[:signed_request]`) proving possession of `caller_id`'s private
+  key, and that principal must hold `arbor://identity/alias/manage` (M5).
 
   Returns `:ok` or `{:error, reason}`.
   """
-  @spec link(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
-  def link(caller_id, secondary_id, primary_id)
+  @spec link(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def link(caller_id, secondary_id, primary_id, opts \\ [])
       when is_binary(caller_id) and is_binary(secondary_id) and is_binary(primary_id) do
-    with :ok <- authorize_manage(caller_id),
+    with :ok <- authorize_manage(caller_id, opts),
          :ok <- check_not_self(secondary_id, primary_id),
          :ok <- check_primary_not_aliased(primary_id) do
       Logger.info("[IdentityAliases] caller=#{caller_id} linking #{secondary_id} → #{primary_id}")
@@ -78,13 +91,21 @@ defmodule Arbor.Agent.IdentityAliases do
     end
   end
 
-  # M5: authorize the caller against arbor://identity/alias/manage. The
-  # function takes a single string caller_id (NOT a context map) because the
-  # callers that exist for this surface — operator REPL, system-internal
-  # bootstrap, future admin LiveView — all have a known principal at the
-  # call site. We never derive it from process-dict ambient context here.
-  defp authorize_manage(caller_id) do
-    case Arbor.Security.authorize(caller_id, @manage_resource, :write) do
+  # M5: authorize the caller against arbor://identity/alias/manage with a
+  # caller-produced SignedRequest. The function takes a string caller_id
+  # (NOT a context map) because the callers that exist for this surface —
+  # operator CLI, system-internal bootstrap, future admin LiveView — all
+  # have a known principal at the call site. We never derive it from
+  # process-dict ambient context here, and we never load a stored private
+  # key to sign on a named principal's behalf.
+  defp authorize_manage(caller_id, opts) do
+    signed_request = signed_request_from_opts(opts)
+
+    case Arbor.Security.authorize(caller_id, @manage_resource, :write,
+           signed_request: signed_request,
+           expected_resource: @manage_resource,
+           verify_identity: true
+         ) do
       {:ok, :authorized} ->
         :ok
 
@@ -98,6 +119,12 @@ defmodule Arbor.Agent.IdentityAliases do
         {:error, {:unauthorized_alias_management, {:unexpected, other}}}
     end
   end
+
+  defp signed_request_from_opts(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: Keyword.get(opts, :signed_request)
+  end
+
+  defp signed_request_from_opts(_opts), do: nil
 
   @doc """
   Resolve an identity to its primary. Returns the input if no alias exists.
@@ -126,13 +153,15 @@ defmodule Arbor.Agent.IdentityAliases do
   @doc """
   Remove an alias, restoring the secondary identity as independent.
 
-  Requires `caller_id` to hold `arbor://identity/alias/manage` (M5).
+  Requires a caller-produced `SignedRequest` proving possession of
+  `caller_id`'s private key, and that principal must hold
+  `arbor://identity/alias/manage` (M5).
   Returns `:ok` on success, `{:error, reason}` if unauthorized.
   """
-  @spec unlink(String.t(), String.t()) :: :ok | {:error, term()}
-  def unlink(caller_id, secondary_id)
+  @spec unlink(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def unlink(caller_id, secondary_id, opts \\ [])
       when is_binary(caller_id) and is_binary(secondary_id) do
-    with :ok <- authorize_manage(caller_id) do
+    with :ok <- authorize_manage(caller_id, opts) do
       alias_key = @alias_prefix <> secondary_id
 
       # Find and update the primary's linked list

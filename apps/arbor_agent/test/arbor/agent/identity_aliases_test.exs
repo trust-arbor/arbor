@@ -117,6 +117,45 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     Arbor.Security.CapabilityStore.put(cap)
   end
 
+  defp registered_principal do
+    {:ok, identity} = Arbor.Security.generate_identity()
+    :ok = Arbor.Security.register_identity(identity)
+    identity
+  end
+
+  defp signed_manage(identity) do
+    {:ok, signed} =
+      Arbor.Agent.IdentityAliasProof.sign(%{
+        agent_id: identity.agent_id,
+        private_key: identity.private_key
+      })
+
+    signed
+  end
+
+  defp cleanup_principal(identity, secondary_ids \\ []) do
+    Enum.each(List.wrap(secondary_ids), fn secondary ->
+      case Arbor.Agent.IdentityAliasProof.sign(%{
+             agent_id: identity.agent_id,
+             private_key: identity.private_key
+           }) do
+        {:ok, signed} ->
+          _ = IdentityAliases.unlink(identity.agent_id, secondary, signed_request: signed)
+
+        _ ->
+          :ok
+      end
+    end)
+
+    _ = Arbor.Security.delete_signing_key(identity.agent_id)
+    _ = Arbor.Security.deregister_identity(identity.agent_id)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
   describe "link/3" do
     test "security regression (M5): unauthorized caller cannot create an alias",
          %{caller: caller, victim_primary: victim, attacker_secondary: attacker} do
@@ -139,71 +178,233 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     end
 
     test "authorized caller can create an alias",
-         %{caller: caller, victim_primary: primary, victim_secondary: secondary} do
+         %{victim_primary: primary, victim_secondary: secondary} do
+      identity = registered_principal()
+      caller = identity.agent_id
       grant_manage_cap(caller)
 
-      assert :ok = IdentityAliases.link(caller, secondary, primary)
-      assert IdentityAliases.resolve(secondary) == primary
+      {link_result, resolved} =
+        try do
+          result =
+            IdentityAliases.link(caller, secondary, primary,
+              signed_request: signed_manage(identity)
+            )
 
-      # Clean up so list_aliases doesn't bleed into other tests
-      IdentityAliases.unlink(caller, secondary)
+          {result, IdentityAliases.resolve(secondary)}
+        after
+          cleanup_principal(identity, secondary)
+        end
+
+      assert :ok = link_result
+      assert resolved == primary
     end
 
-    test "rejects self-aliasing even with manage capability", %{caller: caller} do
+    test "rejects self-aliasing even with manage capability" do
+      identity = registered_principal()
+      caller = identity.agent_id
       grant_manage_cap(caller)
-      assert {:error, :cannot_alias_self} = IdentityAliases.link(caller, "h_x", "h_x")
+
+      result =
+        try do
+          IdentityAliases.link(caller, "h_x", "h_x", signed_request: signed_manage(identity))
+        after
+          cleanup_principal(identity)
+        end
+
+      assert {:error, :cannot_alias_self} = result
     end
 
     test "rejects linking when the primary is itself an alias",
-         %{caller: caller, victim_primary: primary, victim_secondary: secondary} do
+         %{victim_primary: primary, victim_secondary: secondary} do
+      identity = registered_principal()
+      caller = identity.agent_id
       grant_manage_cap(caller)
 
-      # Create primary → primary_root chain by linking primary to a third id
       n = System.unique_integer([:positive])
       root = "human_root_m5_#{n}"
-      :ok = IdentityAliases.link(caller, primary, root)
 
-      # Now try to link secondary to primary (which is itself aliased)
-      result = IdentityAliases.link(caller, secondary, primary)
+      result =
+        try do
+          :ok =
+            IdentityAliases.link(caller, primary, root, signed_request: signed_manage(identity))
+
+          IdentityAliases.link(caller, secondary, primary, signed_request: signed_manage(identity))
+        after
+          cleanup_principal(identity, [primary, secondary])
+        end
+
       assert {:error, {:primary_is_alias, ^root}} = result
-
-      IdentityAliases.unlink(caller, primary)
     end
   end
 
   describe "unlink/2" do
     test "security regression (M5): unauthorized caller cannot unlink an alias",
          %{caller: caller, victim_primary: primary, victim_secondary: secondary} do
-      # Set up an alias as a privileged caller, then try to unlink as
-      # an unprivileged one.
-      privileged = "human_setup_caller_#{System.unique_integer([:positive])}"
+      privileged_identity = registered_principal()
+      privileged = privileged_identity.agent_id
       grant_manage_cap(privileged)
 
-      :ok = IdentityAliases.link(privileged, secondary, primary)
-      assert IdentityAliases.resolve(secondary) == primary
+      {unlink_result, still_aliased} =
+        try do
+          :ok =
+            IdentityAliases.link(privileged, secondary, primary,
+              signed_request: signed_manage(privileged_identity)
+            )
 
-      # caller has NOT been granted manage_resource.
-      result = IdentityAliases.unlink(caller, secondary)
+          assert IdentityAliases.resolve(secondary) == primary
 
-      assert {:error, {:unauthorized_alias_management, _}} = result,
+          result = IdentityAliases.unlink(caller, secondary)
+          {result, IdentityAliases.resolve(secondary)}
+        after
+          cleanup_principal(privileged_identity, secondary)
+        end
+
+      assert {:error, {:unauthorized_alias_management, _}} = unlink_result,
              "Unauthorized caller must NOT be able to unlink — M5 regression. " <>
-               "Got: #{inspect(result)}"
+               "Got: #{inspect(unlink_result)}"
 
-      # Alias still resolves
-      assert IdentityAliases.resolve(secondary) == primary
-
-      # Clean up
-      IdentityAliases.unlink(privileged, secondary)
+      assert still_aliased == primary
     end
 
     test "authorized caller can unlink",
-         %{caller: caller, victim_primary: primary, victim_secondary: secondary} do
+         %{victim_primary: primary, victim_secondary: secondary} do
+      identity = registered_principal()
+      caller = identity.agent_id
       grant_manage_cap(caller)
 
-      :ok = IdentityAliases.link(caller, secondary, primary)
-      :ok = IdentityAliases.unlink(caller, secondary)
+      resolved =
+        try do
+          :ok =
+            IdentityAliases.link(caller, secondary, primary,
+              signed_request: signed_manage(identity)
+            )
 
+          :ok =
+            IdentityAliases.unlink(caller, secondary,
+              signed_request: signed_manage(identity)
+            )
+
+          IdentityAliases.resolve(secondary)
+        after
+          cleanup_principal(identity, secondary)
+        end
+
+      assert resolved == secondary
+    end
+  end
+
+  describe "possession-proof authorization" do
+    test "proof-backed caller with the capability can link" do
+      identity = registered_principal()
+      caller = identity.agent_id
+      grant_manage_cap(caller)
+      n = System.unique_integer([:positive])
+      secondary = "human_proof_sec_#{n}"
+      primary = "human_proof_pri_#{n}"
+
+      {link_result, resolved} =
+        try do
+          result =
+            IdentityAliases.link(caller, secondary, primary,
+              signed_request: signed_manage(identity)
+            )
+
+          {result, IdentityAliases.resolve(secondary)}
+        after
+          cleanup_principal(identity, secondary)
+        end
+
+      assert :ok = link_result
+      assert resolved == primary
+    end
+
+    test "valid proof without the capability is a capability denial, not a proof failure" do
+      identity = registered_principal()
+      caller = identity.agent_id
+      n = System.unique_integer([:positive])
+      secondary = "human_nocap_sec_#{n}"
+      primary = "human_nocap_pri_#{n}"
+
+      result =
+        try do
+          IdentityAliases.link(caller, secondary, primary, signed_request: signed_manage(identity))
+        after
+          cleanup_principal(identity, secondary)
+        end
+
+      assert {:error, {:unauthorized_alias_management, :unauthorized}} = result
+      assert IdentityAliases.resolve(secondary) == secondary
+    end
+
+    test "capability without a produced proof is a proof failure" do
+      identity = registered_principal()
+      caller = identity.agent_id
+      grant_manage_cap(caller)
+      n = System.unique_integer([:positive])
+      secondary = "human_noproof_sec_#{n}"
+      primary = "human_noproof_pri_#{n}"
+
+      result =
+        try do
+          IdentityAliases.link(caller, secondary, primary)
+        after
+          cleanup_principal(identity, secondary)
+        end
+
+      assert {:error, {:unauthorized_alias_management, :missing_signed_request}} = result
+      assert IdentityAliases.resolve(secondary) == secondary
+    end
+
+    test "security regression: naming another stored-key principal cannot exercise alias-management" do
+      # The rejected design loaded the named principal's SigningKeyStore key
+      # and signed on its behalf. This test stores the victim's key, grants
+      # the capability, then names the victim WITHOUT a client-produced
+      # SignedRequest. A server-signs-for-you implementation would return :ok.
+      victim = registered_principal()
+      :ok = Arbor.Security.store_signing_key(victim.agent_id, victim.private_key)
+      grant_manage_cap(victim.agent_id)
+
+      n = System.unique_integer([:positive])
+      secondary = "human_impersonation_sec_#{n}"
+      primary = "human_impersonation_pri_#{n}"
+
+      result =
+        try do
+          IdentityAliases.link(victim.agent_id, secondary, primary)
+        after
+          cleanup_principal(victim, secondary)
+        end
+
+      assert {:error, {:unauthorized_alias_management, :missing_signed_request}} = result,
+             "Naming a stored-key principal must not exercise its " <>
+               "alias-management capability. Got: #{inspect(result)}"
+
+      assert IdentityAliases.resolve(secondary) == secondary
+    end
+
+    test "security regression: a proof for a different principal cannot be used as the victim" do
+      victim = registered_principal()
+      attacker = registered_principal()
+      :ok = Arbor.Security.store_signing_key(victim.agent_id, victim.private_key)
+      grant_manage_cap(victim.agent_id)
+
+      n = System.unique_integer([:positive])
+      secondary = "human_mismatch_sec_#{n}"
+      primary = "human_mismatch_pri_#{n}"
+
+      result =
+        try do
+          IdentityAliases.link(victim.agent_id, secondary, primary,
+            signed_request: signed_manage(attacker)
+          )
+        after
+          cleanup_principal(victim, secondary)
+          cleanup_principal(attacker)
+        end
+
+      assert {:error, {:unauthorized_alias_management, {:identity_mismatch, _, _}}} = result
       assert IdentityAliases.resolve(secondary) == secondary
     end
   end
 end
+

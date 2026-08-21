@@ -578,6 +578,29 @@ another one. It doubles as user documentation — anyone standing up agents need
   adversary have influenced this byte?"* No → `:trusted`. Came out of a model →
   `:derived` floor. Came from outside → `:untrusted`.
 
+## 23. `mix arbor.user.link` requires possession-proof plus `arbor://identity/alias/manage`
+
+- **What:** Linking or unlinking OIDC aliases is an admin-class operation.
+  `IdentityAliases.link/3` and `unlink/2` authorize
+  `arbor://identity/alias/manage` with `verify_identity: true` and a
+  `SignedRequest` the **CLI produced** from a `.arbor.key` file it holds
+  (`mix arbor.user.init` writes `~/.arbor/operator.key` at 0600). `--as`
+  names which key file to use; it is not authority. The server only
+  verifies. It does not load a stored private key and sign on a
+  caller-named principal's behalf.
+- **Symptom:** `mix arbor.user.link` reports a possession-proof failure
+  (`key file not found`, `principal_mismatch`, `:missing_signed_request`)
+  or a capability denial (`:unauthorized`) instead of linking. A previous
+  confused-deputy design (`authorize_as_stored_principal`) would have
+  succeeded for `mix arbor.user.link --as <victim>` whenever the victim's
+  key sat in SigningKeyStore.
+- **Action:** Run `mix arbor.user.init` so the operator key file exists,
+  pass `--as <that principal>` (and `--key-file` if it is not at
+  `~/.arbor/operator.key`), and grant `arbor://identity/alias/manage` to
+  that principal. Do **not** add a server-side "sign as this principal_id"
+  path. Proof failures and capability denials are distinct
+  `{:unauthorized_alias_management, reason}` values.
+
 ## Applied Learning: Security Gates
 
 Read this when changing capabilities, trust, authorization, identity, URI matching, taint, egress, or proof boundaries.

@@ -4,34 +4,37 @@ defmodule Mix.Tasks.Arbor.User.Link do
 
   ## Usage
 
-      mix arbor.user.link <new_login_id> --to <existing_id>  # link new login → existing account
-      mix arbor.user.link --unlink <id>                       # remove a link
-      mix arbor.user.link --list <id>                         # list linked identities
+      mix arbor.user.link <new_login_id> --to <existing_id> --as <existing_id>
+      mix arbor.user.link --unlink <id> --as <existing_id>
+      mix arbor.user.link --list <id>
 
   ## Options
 
-    * `--as <principal>` — the identity performing the link. Linking redirects
-      a principal's future logins, so it is capability-gated on
-      `arbor://identity/alias/manage`. Defaults to the local-operator
-      principal, which is enough on a single-operator dev box; the capability
-      check is the real control, so this default cannot grant anything.
+    * `--as <principal>` — claim of *which* key file to use. Defaults to
+      the local-operator principal. The claim is not authority: the CLI
+      signs the request with the matching key file, and the server verifies
+      that proof **and** that the principal holds
+      `arbor://identity/alias/manage`.
+    * `--key-file <path>` — operator key file (default `~/.arbor/operator.key`,
+      written by `mix arbor.user.init`). Must belong to the `--as` principal.
 
   ## Examples
 
       # You have an existing account (human_def456) with agents and data.
       # You created a new OIDC login that generates human_abc123.
       # Link the new login to your existing account:
-      mix arbor.user.link human_abc123 --to human_def456
+      mix arbor.user.link human_abc123 --to human_def456 --as human_def456
 
       # See what's linked to an identity
       mix arbor.user.link --list human_def456
 
       # Remove a link
-      mix arbor.user.link --unlink human_abc123
+      mix arbor.user.link --unlink human_abc123 --as human_def456
   """
 
   use Mix.Task
 
+  alias Arbor.Agent.IdentityAliasProof
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shortdoc "Link OIDC identities to a primary Arbor identity"
@@ -40,7 +43,8 @@ defmodule Mix.Tasks.Arbor.User.Link do
     to: :string,
     unlink: :string,
     list: :string,
-    as: :string
+    as: :string,
+    key_file: :string
   ]
 
   @impl Mix.Task
@@ -59,11 +63,11 @@ defmodule Mix.Tasks.Arbor.User.Link do
         list_aliases(opts[:list])
 
       opts[:unlink] ->
-        unlink(opts[:unlink], caller_id(opts))
+        unlink(opts[:unlink], caller_id(opts), opts)
 
       length(args) == 1 and opts[:to] ->
         [new_login_id] = args
-        link(new_login_id, opts[:to], caller_id(opts))
+        link(new_login_id, opts[:to], caller_id(opts), opts)
 
       true ->
         Mix.shell().error("""
@@ -78,54 +82,32 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  defp link(secondary_id, primary_id, caller_id) do
+  defp link(secondary_id, primary_id, caller_id, opts) do
     # Announce the INTENT only. This previously printed "Linking X → Y / All
     # logins producing X will resolve to Y" before the call, so a failure read
     # as though the link had happened.
     Mix.shell().info("Linking #{secondary_id} → #{primary_id} (as #{caller_id})")
 
-    case rpc!(Arbor.Agent.IdentityAliases, :link, [caller_id, secondary_id, primary_id]) do
-      :ok ->
-        Mix.shell().info("Linked successfully.")
-        Mix.shell().info("  All logins producing #{secondary_id} now resolve to #{primary_id}")
-
-      {:error, {:unauthorized_alias_management, reason}} ->
-        Mix.shell().error("""
-        #{caller_id} may not manage identity aliases (#{inspect(reason)}).
-
-        Linking redirects a principal's future logins, so it requires
-        arbor://identity/alias/manage. Grant it to the caller, or re-run with
-        --as <principal> for an identity that holds it.
-        """)
-
-      {:error, :cannot_alias_self} ->
-        Mix.shell().error("Cannot link an identity to itself.")
-
-      {:error, {:primary_is_alias, resolved}} ->
-        Mix.shell().error(
-          "#{primary_id} is itself an alias for #{resolved}. Link to #{resolved} instead."
-        )
-
-      {:error, reason} ->
-        Mix.shell().error("Failed: #{inspect(reason)}")
-    end
-  end
-
-  defp unlink(secondary_id, caller_id) do
-    resolved = rpc!(Arbor.Agent.IdentityAliases, :resolve, [secondary_id])
-
-    if resolved == secondary_id do
-      Mix.shell().info("#{secondary_id} is not an alias — nothing to unlink.")
-    else
-      case rpc!(Arbor.Agent.IdentityAliases, :unlink, [caller_id, secondary_id]) do
+    with {:ok, signed_request} <- prove_caller(caller_id, opts) do
+      case rpc!(Arbor.Agent.IdentityAliases, :link, [
+             caller_id,
+             secondary_id,
+             primary_id,
+             [signed_request: signed_request]
+           ]) do
         :ok ->
-          Mix.shell().info("Unlinked #{secondary_id} (was → #{resolved})")
+          Mix.shell().info("Linked successfully.")
+          Mix.shell().info("  All logins producing #{secondary_id} now resolve to #{primary_id}")
 
         {:error, {:unauthorized_alias_management, reason}} ->
+          Mix.shell().error(unauthorized_message(caller_id, reason))
+
+        {:error, :cannot_alias_self} ->
+          Mix.shell().error("Cannot link an identity to itself.")
+
+        {:error, {:primary_is_alias, resolved}} ->
           Mix.shell().error(
-            "#{caller_id} may not manage identity aliases (#{inspect(reason)}). " <>
-              "Re-run with --as <principal> for an identity holding " <>
-              "arbor://identity/alias/manage."
+            "#{primary_id} is itself an alias for #{resolved}. Link to #{resolved} instead."
           )
 
         {:error, reason} ->
@@ -134,15 +116,136 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  # The principal performing the link. `IdentityAliases.link/3` authorizes it
-  # against `arbor://identity/alias/manage` — without a caller the whole
-  # surface is an account-takeover vector (M5), which is why the arity is 3.
-  #
-  # Defaults to the local-operator principal so a single-operator dev box needs
-  # no flag; the capability check remains the real control, so defaulting here
-  # cannot grant anything.
+  defp unlink(secondary_id, caller_id, opts) do
+    resolved = rpc!(Arbor.Agent.IdentityAliases, :resolve, [secondary_id])
+
+    if resolved == secondary_id do
+      Mix.shell().info("#{secondary_id} is not an alias — nothing to unlink.")
+    else
+      with {:ok, signed_request} <- prove_caller(caller_id, opts) do
+        case rpc!(Arbor.Agent.IdentityAliases, :unlink, [
+               caller_id,
+               secondary_id,
+               [signed_request: signed_request]
+             ]) do
+          :ok ->
+            Mix.shell().info("Unlinked #{secondary_id} (was → #{resolved})")
+
+          {:error, {:unauthorized_alias_management, reason}} ->
+            Mix.shell().error(unauthorized_message(caller_id, reason))
+
+          {:error, reason} ->
+            Mix.shell().error("Failed: #{inspect(reason)}")
+        end
+      end
+    end
+  end
+
+  # `--as` (or the local-operator default) is a claim of which key file to
+  # use. Possession of that file's private key is the proof; the claim
+  # itself never grants alias-management authority.
   defp caller_id(opts) do
     opts[:as] || Arbor.Contracts.Security.Identity.local_operator_id()
+  end
+
+  defp prove_caller(caller_id, opts) do
+    key_path = IdentityAliasProof.key_file_path(opts)
+
+    case IdentityAliasProof.prove(key_path, caller_id) do
+      {:ok, signed_request} ->
+        {:ok, signed_request}
+
+      {:error, reason} ->
+        Mix.shell().error(proof_error_message(caller_id, key_path, reason))
+        {:error, reason}
+    end
+  end
+
+  defp unauthorized_message(caller_id, reason) do
+    if proof_failure?(reason) do
+      """
+      Possession proof for #{caller_id} was rejected (#{inspect(reason)}).
+
+      The CLI signs alias-management requests from a key file it holds; the
+      server only verifies. A named principal is not proof.
+      """
+    else
+      """
+      #{caller_id} may not manage identity aliases (#{inspect(reason)}).
+
+      Linking redirects a principal's future logins, so it requires
+      arbor://identity/alias/manage. Grant it to the caller, or re-run with
+      --as <principal> for an identity that holds it.
+      """
+    end
+  end
+
+  defp proof_failure?(reason)
+       when reason in [
+              :missing_signed_request,
+              :invalid_signature,
+              :unknown_agent,
+              :expired_timestamp,
+              :malformed_request,
+              :cluster_replay_protection_unavailable,
+              :invalid_private_key
+            ],
+       do: true
+
+  defp proof_failure?({:identity_mismatch, _verified, _claimed}), do: true
+  defp proof_failure?({:resource_mismatch, _payload, _expected}), do: true
+  defp proof_failure?(_reason), do: false
+
+  defp proof_error_message(caller_id, key_path, {:read_failed, :enoent}) do
+    """
+    Cannot prove possession of #{caller_id}: key file not found at #{key_path}.
+
+    Create one with `mix arbor.user.init`, or pass --key-file <path>.
+    """
+  end
+
+  defp proof_error_message(caller_id, key_path, {:read_failed, reason}) do
+    """
+    Cannot prove possession of #{caller_id}: key file #{key_path} is unreadable (#{inspect(reason)}).
+    """
+  end
+
+  defp proof_error_message(caller_id, key_path, {:insecure_permissions, mode}) do
+    """
+    Cannot prove possession of #{caller_id}: key file #{key_path} has insecure permissions #{Integer.to_string(mode, 8)} (expected 0600).
+    """
+  end
+
+  defp proof_error_message(caller_id, key_path, {:principal_mismatch, claimed, actual}) do
+    """
+    Cannot prove possession of #{caller_id}: key file #{key_path} belongs to #{actual}, not claimed #{claimed}.
+
+    --as names which key file to use; it does not grant that principal's authority.
+    """
+  end
+
+  defp proof_error_message(caller_id, key_path, {:missing_field, field}) do
+    "Cannot prove possession of #{caller_id}: key file #{key_path} is missing #{field}."
+  end
+
+  defp proof_error_message(caller_id, key_path, {:empty_field, field}) do
+    "Cannot prove possession of #{caller_id}: key file #{key_path} has an empty #{field}."
+  end
+
+  defp proof_error_message(caller_id, key_path, :invalid_private_key_base64) do
+    "Cannot prove possession of #{caller_id}: key file #{key_path} has invalid private_key_b64."
+  end
+
+  defp proof_error_message(caller_id, key_path, {:invalid_private_key_size, size}) do
+    "Cannot prove possession of #{caller_id}: key file #{key_path} private key is #{size} bytes; expected 32 or 64."
+  end
+
+  defp proof_error_message(caller_id, key_path, {:invalid_agent_id, id}) do
+    "Cannot prove possession of #{caller_id}: key file #{key_path} has invalid principal id #{inspect(id)}."
+  end
+
+  defp proof_error_message(caller_id, key_path, reason) do
+    "Cannot prove possession of #{caller_id} from #{key_path}: #{inspect(reason)}."
   end
 
   defp list_aliases(primary_id) do
