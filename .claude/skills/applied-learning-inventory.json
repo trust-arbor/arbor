@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 661,
+  "entry_count": 662,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8137,8 +8137,21 @@
       "source_incident": "found 2026-08-21 when a delayed local suspension audit re-entered the identity sync reducer after resume",
       "always_loaded": false,
       "content_sha256": "69b873feed70b04c4377c47010e675e9fbcfa786a4de7bba274bacd91aad2f99"
+    },
+    {
+      "source_ordinal": 662,
+      "source_kind": "post-migration",
+      "slug": "hot-reload-updates-modules-not-running-child-processes",
+      "title": "Hot code reload updates modules; it does NOT restart supervised children or migrate their state.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-hot-reload-updates-modules-not-running-child-processes",
+      "source_date": "2026-08-21",
+      "source_incident": "found 2026-08-21 diagnosing Historian hot_projection_failed: modules hot-reloaded and md5-current, but the ETS child still ran with the pre-12:19 args so mode was nil",
+      "always_loaded": false,
+      "content_sha256": "fcf3422be6ed09bf5a987d8faf8601ba1ba4adc1c743d306563cb7cc1427738d"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 200
+  "post_migration_entry_count": 201
 }
