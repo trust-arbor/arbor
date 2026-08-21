@@ -466,10 +466,13 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: boolean()
 
   @doc """
-  Get the current version (latest event number) of a stream.
+  Get the authoritative current version (latest event number) of a stream.
 
   Returns `{:ok, version}` where version is the event number of the
-  most recent event in the stream.
+  most recent event in the stream. A non-authoritative projection returns
+  `{:error, :stream_version_unavailable}`; use
+  `get_resident_projected_stream_version_using_backend/4` only to inspect
+  projection residency.
   """
   @callback get_stream_version_using_backend(
               store_name(),
@@ -511,11 +514,12 @@ defmodule Arbor.Contracts.API.Persistence do
   Project events another component already committed durably into a backend.
 
   Non-authoritative. The caller supplies each event's exact event number, global
-  position, and canonical operation fingerprint; the backend assigns nothing,
-  notifies no subscribers, and gains no identity, existence, head, or position
-  authority. The complete batch is validated before any mutation, so a conflict
-  leaves every backend surface unchanged, and re-projecting a byte-identical
-  batch is idempotent and reported as skipped.
+  position, and canonical operation fingerprint; committed positions are
+  positive and 1-based. The backend assigns nothing, notifies no subscribers,
+  and gains no identity, existence, head, or position authority. The complete
+  batch is validated before any mutation, so a conflict leaves every backend
+  surface unchanged, and re-projecting a byte-identical batch is idempotent and
+  reported as skipped.
 
   Backends without projection support fail before dispatch; a backend running in
   its ordinary authoritative mode refuses with `:projection_mode_required`.

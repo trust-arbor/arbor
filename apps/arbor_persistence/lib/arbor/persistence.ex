@@ -1250,8 +1250,8 @@ defmodule Arbor.Persistence do
 
   A non-authoritative projection returns
   `{:error, :stream_version_unavailable}`. Use
-  `resident_stream_version/4` only when explicitly inspecting projection
-  residency.
+  `resident_projected_stream_version/4` only when explicitly inspecting
+  projection residency.
   """
   @spec stream_version(atom(), module(), String.t(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
@@ -1267,15 +1267,15 @@ defmodule Arbor.Persistence do
   `{:error, :projection_not_supported}` and authoritative backends return
   `{:error, :projection_mode_required}`.
   """
-  @spec resident_stream_version(atom(), module(), String.t(), keyword()) ::
+  @spec resident_projected_stream_version(atom(), module(), String.t(), keyword()) ::
           {:ok, non_neg_integer()}
           | {:error, EventLog.projection_control_error()}
-  def resident_stream_version(name, backend, stream_id, opts \\ []) do
+  def resident_projected_stream_version(name, backend, stream_id, opts \\ []) do
     with :ok <- validate_store_name(name),
          {:ok, normalized_opts} <-
            EventLog.validate_projection_stream_request(stream_id, opts),
-         :ok <- validate_backend(backend, :resident_stream_version, 2) do
-      backend.resident_stream_version(
+         :ok <- validate_backend(backend, :resident_projected_stream_version, 2) do
+      backend.resident_projected_stream_version(
         stream_id,
         Keyword.put(normalized_opts, :name, name)
       )
@@ -1477,7 +1477,7 @@ defmodule Arbor.Persistence do
 
   @impl Arbor.Contracts.API.Persistence
   def get_resident_projected_stream_version_using_backend(name, backend, stream_id, opts),
-    do: resident_stream_version(name, backend, stream_id, opts)
+    do: resident_projected_stream_version(name, backend, stream_id, opts)
 
   # -- VectorStore (optional) --
 

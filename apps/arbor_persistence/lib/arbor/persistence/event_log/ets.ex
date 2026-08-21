@@ -229,11 +229,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   @impl Arbor.Persistence.EventLog
-  def resident_stream_version(stream_id, opts) do
+  def resident_projected_stream_version(stream_id, opts) do
     with {:ok, normalized_opts} <-
            EventLog.validate_projection_stream_request(stream_id, opts),
          {:ok, name} <- fetch_name(normalized_opts) do
-      safe_control_call(name, {:resident_stream_version, stream_id})
+      safe_control_call(name, {:resident_projected_stream_version, stream_id})
     end
   end
 
@@ -529,14 +529,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   def handle_call(
-        {:resident_stream_version, stream_id},
+        {:resident_projected_stream_version, stream_id},
         _from,
         %{mode: :projection} = state
       ) do
     {:reply, {:ok, resident_stream_max(state, stream_id) || 0}, state}
   end
 
-  def handle_call({:resident_stream_version, _stream_id}, _from, state) do
+  def handle_call({:resident_projected_stream_version, _stream_id}, _from, state) do
     {:reply, {:error, :projection_mode_required}, state}
   end
 

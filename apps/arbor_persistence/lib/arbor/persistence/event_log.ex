@@ -282,9 +282,9 @@ defmodule Arbor.Persistence.EventLog do
 
   This optional callback exists for **non-authoritative projections only**. The
   caller supplies each event's exact `event_number`, `global_position`, and
-  canonical `operation_fingerprint`; the backend assigns nothing, notifies no
-  subscribers, and gains no identity, existence, head, or position authority
-  from the resident rows.
+  canonical `operation_fingerprint`; committed positions are positive and
+  1-based. The backend assigns nothing, notifies no subscribers, and gains no
+  identity, existence, head, or position authority from the resident rows.
 
   The complete batch is canonicalized and validated before any mutation, so a
   conflict on any event leaves every backend surface unchanged. Re-projecting a
@@ -316,7 +316,7 @@ defmodule Arbor.Persistence.EventLog do
   resident. It is not an authoritative stream version. An authoritative backend
   must refuse with `:projection_mode_required`.
   """
-  @callback resident_stream_version(stream_id(), opts()) ::
+  @callback resident_projected_stream_version(stream_id(), opts()) ::
               {:ok, non_neg_integer()} | {:error, projection_control_error()}
 
   @doc """
@@ -341,7 +341,7 @@ defmodule Arbor.Persistence.EventLog do
     durability_class: 1,
     project_committed_events: 2,
     evict_projected_stream: 2,
-    resident_stream_version: 2
+    resident_projected_stream_version: 2
   ]
 
   @doc false

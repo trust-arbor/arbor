@@ -174,8 +174,8 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
     assert {:error, :stream_version_unavailable} =
              Persistence.stream_version(name, ETS, "gapped")
 
-    assert {:ok, 9} = Persistence.resident_stream_version(name, ETS, "gapped")
-    assert {:ok, 0} = Persistence.resident_stream_version(name, ETS, "missing")
+    assert {:ok, 9} = Persistence.resident_projected_stream_version(name, ETS, "gapped")
+    assert {:ok, 0} = Persistence.resident_projected_stream_version(name, ETS, "missing")
   end
 
   test "security regression: durable purge cannot evict a resident projection", %{name: name} do
@@ -188,7 +188,7 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
              Persistence.purge_stream(name, ETS, "stream")
 
     assert {:ok, [^projected]} = Persistence.read_stream(name, ETS, "stream")
-    assert {:ok, 7} = Persistence.resident_stream_version(name, ETS, "stream")
+    assert {:ok, 7} = Persistence.resident_projected_stream_version(name, ETS, "stream")
   end
 
   test "projection eviction is exact, idempotent, and permits byte-identical re-projection",
@@ -207,7 +207,7 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
 
     assert {:ok, []} = Persistence.read_stream(name, ETS, "alpha")
     assert {:ok, [^beta]} = Persistence.read_stream(name, ETS, "beta")
-    assert {:ok, 0} = Persistence.resident_stream_version(name, ETS, "alpha")
+    assert {:ok, 0} = Persistence.resident_projected_stream_version(name, ETS, "alpha")
 
     assert {:ok, %{projected: 1, skipped: 0}} =
              Persistence.project_committed_events(name, ETS, [alpha])
@@ -218,13 +218,13 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
              Persistence.evict_projected_stream(name, StoreETS, "stream")
 
     assert {:error, :projection_not_supported} =
-             Persistence.resident_stream_version(name, StoreETS, "stream")
+             Persistence.resident_projected_stream_version(name, StoreETS, "stream")
 
     assert {:error, :invalid_stream_id} =
              Persistence.evict_projected_stream(name, ETS, "")
 
     assert {:error, :invalid_precondition} =
-             Persistence.resident_stream_version(name, ETS, "stream", %{bad: :opts})
+             Persistence.resident_projected_stream_version(name, ETS, "stream", %{bad: :opts})
   end
 
   test "authoritative mode retains purge and version authority but rejects projection controls" do
@@ -239,7 +239,7 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
     assert {:ok, 1} = Persistence.stream_version(name, ETS, "authoritative")
 
     assert {:error, :projection_mode_required} =
-             Persistence.resident_stream_version(name, ETS, "authoritative")
+             Persistence.resident_projected_stream_version(name, ETS, "authoritative")
 
     assert {:error, :projection_mode_required} =
              Persistence.evict_projected_stream(name, ETS, "authoritative")
