@@ -5,6 +5,7 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
 
   alias Arbor.Security
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Events
   alias Arbor.Security.Identity.NonceCache
   alias Arbor.Security.Identity.Registry
   alias Arbor.Signals
@@ -143,6 +144,25 @@ defmodule Arbor.Security.DistributedSignalSubscriptionSecurityTest do
     # before concluding it was not.
     refute eventually(fn -> Security.identity_status(identity.agent_id) == {:ok, :active} end)
     assert {:ok, :suspended} = Security.identity_status(identity.agent_id)
+  end
+
+  test "security regression: local lifecycle audit echo is not a remote mutation" do
+    assert {:ok, identity} =
+             Security.generate_identity(name: "audit-echo-#{System.unique_integer([:positive])}")
+
+    assert :ok = Security.register_identity(identity)
+    assert {:ok, :active} = Security.identity_status(identity.agent_id)
+
+    # Deterministically model a delayed local suspension audit. The telemetry
+    # bridge must identify it as this node's observation, not as a remote
+    # authority mutation.
+    assert :ok = Events.record_identity_suspended(identity.agent_id, "delayed audit")
+
+    refute eventually(fn ->
+             Security.identity_status(identity.agent_id) == {:ok, :suspended}
+           end)
+
+    assert {:ok, :active} = Security.identity_status(identity.agent_id)
   end
 
   test "security regression: remote security mutations are admitted by authority direction" do

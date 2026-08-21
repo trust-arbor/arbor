@@ -702,3 +702,15 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 <!-- applied-learning: opaque-identifiers-in-capability-uris-must-not-become-uri-syntax -->
 <a id="applied-learning-opaque-identifiers-in-capability-uris-must-not-become-uri-syntax"></a>
 **Opaque identifiers interpolated into capability URIs must not become URI syntax.** A caller-supplied task id such as `**` can turn an intended exact grant like `arbor://agent/task/adopt/<task-id>` into a recursive wildcard capability. Before constructing a scoped capability URI, either encode/digest the opaque id into one safe segment or enforce a bounded single-segment alphabet; reject `/`, `*`, traversal segments, whitespace/control bytes, and invalid UTF-8 before any grant occurs (found 2026-07-21 while reviewing post-terminal coding-task adoption).
+
+<!-- applied-learning: telemetry-bridged-security-audits-are-observations-not-sync-mutations -->
+<a id="applied-learning-telemetry-bridged-security-audits-are-observations-not-sync-mutations"></a>
+**Telemetry-bridged security audits are observations, not sync mutations.**
+Security lifecycle audit events are reflected onto the same restricted topics used by the
+temporary distributed-sync transport and carry `permanent: true`. A sync reducer must reject
+that marker before classifying remote authority direction; otherwise a delayed local suspension
+audit can re-suspend an identity after resume, while the corresponding authority-restoring echo
+is correctly denied and cannot repair the state. Preserve the audit payload distinction instead
+of adding sync provenance to it, which would also make observers count both the direct mutation
+and its audit reflection as sync events (found 2026-08-21 during the approval CLI Security-suite
+verification).

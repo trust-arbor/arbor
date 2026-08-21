@@ -944,8 +944,14 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp handle_distributed_signal(signal, state) do
     origin_node = signal.data[:origin_node] || signal.data["origin_node"]
+    permanent_audit? = (signal.data[:permanent] || signal.data["permanent"]) == true
 
     cond do
+      # The telemetry bridge reflects permanent audit observations onto the
+      # signal bus. They are observability, not distributed mutation transport.
+      permanent_audit? ->
+        state
+
       origin_node in [node(), Atom.to_string(node())] ->
         state
 

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 660,
+  "entry_count": 661,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8124,8 +8124,21 @@
       "source_incident": "found 2026-08-21 when concurrent retained-worktree inspection tripped the post-commit Git-storage TOCTOU guard",
       "always_loaded": false,
       "content_sha256": "7100b5f8916d7149ac3f210e73bfd4ae4812a9c91df5a7d735ccd0b705ae91f9"
+    },
+    {
+      "source_ordinal": 661,
+      "source_kind": "post-migration",
+      "slug": "telemetry-bridged-security-audits-are-observations-not-sync-mutations",
+      "title": "Telemetry-bridged security audits are observations, not sync mutations.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-telemetry-bridged-security-audits-are-observations-not-sync-mutations",
+      "source_date": "2026-08-21",
+      "source_incident": "found 2026-08-21 when a delayed local suspension audit re-entered the identity sync reducer after resume",
+      "always_loaded": false,
+      "content_sha256": "69b873feed70b04c4377c47010e675e9fbcfa786a4de7bba274bacd91aad2f99"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 199
+  "post_migration_entry_count": 200
 }
