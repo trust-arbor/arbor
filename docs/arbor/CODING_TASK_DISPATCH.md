@@ -56,6 +56,87 @@ native `read_file`, `search_replace`, `grep`, and `list_dir` tools and denies
 an execution boundary, not a prompt suggestion: launch verification fails
 closed if the file, content, mode, command, or isolated home does not match.
 
+### Cursor workers
+
+Cursor is available as the native ACP provider `cursor` through
+`cursor-agent acp`. Authentication is out of band (`cursor-agent login`); check
+the identity on the host that runs Arbor with `cursor-agent status`. Cursor
+does **not** inherit the Grok-specific runtime home, OAuth projection, command
+attestation, or tool profile described above. Prefer managed coding dispatch so
+Arbor still owns task authorization, approvals, session continuity, review,
+terminal evidence, and cleanup.
+
+Cursor exposes two related but non-interchangeable model catalogs:
+
+- `cursor-agent models` (or `cursor-agent --list-models`) prints direct CLI
+  aliases for the current account and client version. Run it before selecting a
+  model; availability changes over time and by account.
+- Managed ACP selection must use an exact value advertised by the live
+  `session/new` response under `configOptions[].options[].value`. A CLI alias
+  may be rejected by ACP even when it names the same underlying model. Arbor
+  waits for `session/set_config_option` and fails closed unless Cursor confirms
+  the exact requested value.
+
+With Cursor Agent `2026.08.11-e8db854` on 2026-08-21, the live ACP catalog
+accepted this worker fragment:
+
+```json
+{
+  "worker": {
+    "provider": "cursor",
+    "model": "gpt-5.6-sol[context=272k,reasoning=medium,fast=false]",
+    "use_pool": true
+  }
+}
+```
+
+Treat that selector as a known-good example, not a permanent catalog entry.
+After selection, the model in `Arbor.AI.acp_managed_session_status/2` is the
+authority; requested plan metadata alone does not prove which model ran.
+
+Do not use Cursor `auto` for architecture, security, or cross-library contract
+work. In the 2026-08-21 evaluation it resolved to Haiku 4.5 Thinking and twice
+missed load-bearing boundedness and sealing constraints. The explicit direct
+CLI alias `gpt-5.6-sol-high` preserved the regression matrix, designed the
+cross-library deadline boundary correctly, and passed independent review. Use
+an explicit high-reasoning model for those packets; reserve medium tiers for
+tightly bounded edits and still review their test changes for accidental loss
+of coverage.
+
+#### Direct CLI fallback
+
+Use the direct CLI only when managed ACP terminal delivery or recovery is
+broken, or when testing Cursor itself. It gives up Arbor's managed approval,
+session, evidence, and cleanup controls. Create a disposable isolated worktree,
+tell the worker not to commit, and run the prompt as the final positional
+argument:
+
+```bash
+cursor-agent -p \
+  --model gpt-5.6-sol-high \
+  --force \
+  --trust \
+  --sandbox disabled \
+  --workspace /private/tmp/arbor-cursor-task \
+  'Implement the bounded task with tests. Do not commit.'
+```
+
+`--print` does not read the task from stdin; omitting the positional prompt
+fails with `No prompt provided for print mode`. The tested text output mode can
+remain silent for several minutes while the process is healthy. For machine
+observability, use `--output-format stream-json --stream-partial-output`. Do
+not inspect, format, or mutate the active worker tree; wait for the process to
+finish, then freeze and independently review the terminal candidate before
+integrating it. `--force --sandbox disabled` grants broad host execution, so it
+is appropriate only in the deliberately isolated fallback worktree.
+
+A managed task ending in `worker_recovery_send_failed` with `:timeout` may have
+failed **after** Cursor produced useful edits. Preserve the terminal worktree
+and immutable task snapshot, inspect the diff and transcript, and validate the
+candidate before redispatching. That terminal state is a control/delivery
+failure, not evidence that the implementation is empty or should be restarted
+from scratch.
+
 ## Workspace and Git binding
 
 The plan's `repo_root`, workspace policy, and worker `cwd` are explicit
