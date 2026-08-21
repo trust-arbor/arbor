@@ -155,8 +155,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_workspace_recovery_string_bytes 512
   @workspace_recovery_resource_types ~w(retained_workspace_record live_workspace_lease)
 
+  # Maps a terminal error code to the node whose Engine failure reason explains
+  # it. Needed when the code names a downstream symptom rather than the cause.
+  #
+  # Every `worker_*_recovery`/`worker_recovery_*` code below is reachable ONLY
+  # after `implement` (the sole send site entering the recovery gate) already
+  # failed. The DOT writes those codes with transform="constant" over the single
+  # `error` key, so without this mapping the recovery bookkeeping overwrites the
+  # cause and the operator is pointed at the wrong subsystem entirely.
   @pipeline_error_failure_nodes %{
-    "worker_recovery_send_failed" => "retry_recovered_send"
+    "worker_recovery_send_failed" => "retry_recovered_send",
+    "worker_send_recovery_exhausted" => "implement",
+    "worker_provider_session_id_missing" => "implement",
+    "worker_stale_close_failed" => "implement",
+    "worker_recovery_reopen_failed" => "implement",
+    "worker_recovery_continuity_invalid" => "implement",
+    "worker_recovery_summary_failed" => "implement"
   }
 
   @generic_pipeline_failure_nodes ~w(

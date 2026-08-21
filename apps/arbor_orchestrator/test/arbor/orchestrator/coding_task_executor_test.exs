@@ -4787,6 +4787,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert detail["failure_reason"] == provider_failure
     end
 
+    test "recovery-path codes surface the implement failure, not the recovery bookkeeping" do
+      # Each of these codes is reachable only after `implement` already failed.
+      # The DOT overwrites `error` with a constant, so without the mapping the
+      # operator sees recovery bookkeeping and never learns the actual cause.
+      primary = "Action acp_send_message failed: ACP error: worker stream closed"
+
+      for code <- [
+            "worker_send_recovery_exhausted",
+            "worker_provider_session_id_missing",
+            "worker_stale_close_failed",
+            "worker_recovery_reopen_failed",
+            "worker_recovery_continuity_invalid",
+            "worker_recovery_summary_failed"
+          ] do
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_engine_result(
+                   %{"status" => "pipeline_error", "error" => code, "workspace_id" => "ws_r"},
+                   %{node_failure_reasons: %{"implement" => primary}}
+                 )
+
+        assert detail["error"] == code,
+               "expected the machine code to be preserved for #{code}"
+
+        assert detail["failure_reason"] == primary,
+               "expected #{code} to surface the implement failure as the cause"
+      end
+    end
+
     test "pipeline_error maps every reviewed DOT error code" do
       for code <- [
             "committed_change_materialization_failed",
