@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 659,
+  "entry_count": 660,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8111,8 +8111,21 @@
       "source_incident": "found 2026-08-20 after four bad before/after comparisons, including one against a tree a concurrent agent session was committing to",
       "always_loaded": false,
       "content_sha256": "2f064c238a13b792a582f3843344b3a475bb1fb7e5a2ef35eaae39ee1e0de695"
+    },
+    {
+      "source_ordinal": 660,
+      "source_kind": "post-migration",
+      "slug": "do-not-inspect-an-active-factory-worktree-after-approving-a-git-mutation",
+      "title": "Do not run Git commands in an active factory worktree after approving a Git mutation.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-do-not-inspect-an-active-factory-worktree-after-approving-a-git-mutation",
+      "source_date": "2026-08-21",
+      "source_incident": "found 2026-08-21 when concurrent retained-worktree inspection tripped the post-commit Git-storage TOCTOU guard",
+      "always_loaded": false,
+      "content_sha256": "7100b5f8916d7149ac3f210e73bfd4ae4812a9c91df5a7d735ccd0b705ae91f9"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 198
+  "post_migration_entry_count": 199
 }

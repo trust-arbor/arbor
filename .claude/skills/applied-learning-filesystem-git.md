@@ -424,3 +424,13 @@ treating them as package roots (found 2026-08-14 during K2 app-env validation).
 <!-- applied-learning: git-checkout-double-dash-restores-from-the-index-not-head -->
 <a id="applied-learning-git-checkout-double-dash-restores-from-the-index-not-head"></a>
 **`git checkout -- <file>` restores from the INDEX, not HEAD — which un-does nothing after a blocked commit.** When a pre-commit hook rejects a commit, the changes are still staged. Reaching for `git checkout -- <file>` then faithfully restores the exact content you are trying to discard, and a second edit lands on top of the first: on 2026-08-20 this produced two copies of one skills section and a corrupted applied-learning ownership range (the validator caught it, twice). Use `git restore --source=HEAD --staged --worktree <file>` to actually reset, and verify with a count (`grep -c` for a unique heading) before re-applying rather than assuming the revert worked.
+
+<!-- applied-learning: do-not-inspect-an-active-factory-worktree-after-approving-a-git-mutation -->
+<a id="applied-learning-do-not-inspect-an-active-factory-worktree-after-approving-a-git-mutation"></a>
+**Do not run Git commands in an active factory worktree after approving a Git mutation.**
+Even `git status` can refresh the linked-worktree index and change Git-storage metadata while
+the hardened action is completing its post-mutation reads. That correctly trips the TOCTOU
+guard after the commit exists, leaving a preserved commit but a failed pipeline. Review the
+exact diff before approval, then leave the worktree untouched until the task reaches a terminal
+state; inspect the preserved branch only afterward (found 2026-08-21 during reviewed-commit
+approval for the TaskArtifacts/readiness fixes).
