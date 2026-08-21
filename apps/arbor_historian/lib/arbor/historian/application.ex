@@ -17,16 +17,12 @@ defmodule Arbor.Historian.Application do
 
   alias Arbor.Signals
 
-  # Host-injected Arbor.Historian.Adapters.SecurityEventLog persists Security
-  # events onto this same EventLog stream (`security:events`).
-  @event_log_name Arbor.Historian.EventLog.ETS
-
   @impl true
   def start(_type, _args) do
     children =
       if Application.get_env(:arbor_historian, :start_children, true) do
         [
-          {Arbor.Persistence.EventLog.ETS, name: @event_log_name, mode: :projection},
+          {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS, mode: :projection},
           {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
         ]
       else

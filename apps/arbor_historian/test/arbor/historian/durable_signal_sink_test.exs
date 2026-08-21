@@ -8,15 +8,25 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.EventLog.ETS
 
+  alias Arbor.Historian.DurableSignalSinkTest.{
+    ErrorBackend,
+    MalformedBackend,
+    MalformedSuccessBackend,
+    ProjectionErrorBackend,
+    RaisingBackend
+  }
+
   setup do
     originals = %{
       hot: Application.fetch_env(:arbor_historian, :hot_event_log_target),
-      durable: Application.fetch_env(:arbor_historian, :durable_event_log_target)
+      durable: Application.fetch_env(:arbor_historian, :durable_event_log_target),
+      reply_mode: Application.fetch_env(:arbor_historian, :durable_reply_mode)
     }
 
     on_exit(fn ->
       restore(:hot_event_log_target, originals.hot)
       restore(:durable_event_log_target, originals.durable)
+      restore(:durable_reply_mode, originals.reply_mode)
     end)
 
     :ok
@@ -63,6 +73,7 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   test "durable failure is persist_failed and cannot create a hot phantom" do
     ctx = start_isolated_targets()
+    assert {:module, ErrorBackend} = Code.ensure_loaded(ErrorBackend)
     configure_target(:durable_event_log_target, ctx.durable, ErrorBackend)
     configure_target(:hot_event_log_target, ctx.hot, ETS)
     stream_id = unique_stream("no_phantom")
@@ -73,8 +84,30 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
     assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
   end
 
+  test "malformed successful durable replies cannot reach the hot projection" do
+    ctx = start_isolated_targets()
+    assert {:module, MalformedSuccessBackend} = Code.ensure_loaded(MalformedSuccessBackend)
+    configure_target(:durable_event_log_target, ctx.durable, MalformedSuccessBackend)
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+    stream_id = unique_stream("malformed_success")
+
+    log =
+      capture_log(fn ->
+        for mode <- [:wrong_stream, :wrong_event, :wrong_event_id, :bad_fingerprint, :extra_event] do
+          Application.put_env(:arbor_historian, :durable_reply_mode, mode)
+
+          assert {:error, :persist_failed} =
+                   Arbor.Historian.persist_durable_event(stream_id, :submitted, %{value: 1}, [])
+        end
+      end)
+
+    assert length(Regex.scan(~r/reason=durable_append_malformed/, log)) == 5
+    assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+  end
+
   test "invalid, unavailable, raised, malformed, and failed durable writes normalize" do
     ctx = start_isolated_targets()
+    Enum.each([RaisingBackend, MalformedBackend, ErrorBackend], &Code.ensure_loaded!/1)
     configure_target(:hot_event_log_target, ctx.hot, ETS)
     stream_id = unique_stream("durable_failures")
 
@@ -200,6 +233,48 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   defmodule MalformedBackend do
     def append(_stream_id, _events, _opts), do: {:ok, []}
+  end
+
+  defmodule MalformedSuccessBackend do
+    alias Arbor.Persistence.Event
+    alias Arbor.Persistence.EventLog
+
+    def append(stream_id, [%Event{} = submitted], _opts) do
+      %Event{} = committed = position(submitted, stream_id, 1, 1)
+
+      case Application.fetch_env!(:arbor_historian, :durable_reply_mode) do
+        :wrong_stream ->
+          wrong = %Event{committed | stream_id: "another-stream"}
+          {:ok, [fingerprint(wrong, wrong.stream_id)]}
+
+        :wrong_event ->
+          wrong = %Event{committed | type: "different-type"}
+          {:ok, [fingerprint(wrong, stream_id)]}
+
+        :wrong_event_id ->
+          wrong = %Event{committed | id: "evt_wrong_identity"}
+          {:ok, [fingerprint(wrong, stream_id)]}
+
+        :bad_fingerprint ->
+          {:ok, [%Event{committed | operation_fingerprint: "not-canonical"}]}
+
+        :extra_event ->
+          extra =
+            %Event{committed | id: "evt_extra", event_number: 2, global_position: 2}
+            |> fingerprint(stream_id)
+
+          {:ok, [committed, extra]}
+      end
+    end
+
+    defp position(%Event{} = event, stream_id, event_number, global_position) do
+      %Event{event | event_number: event_number, global_position: global_position}
+      |> fingerprint(stream_id)
+    end
+
+    defp fingerprint(%Event{} = event, stream_id) do
+      %Event{event | operation_fingerprint: EventLog.event_fingerprint(stream_id, event)}
+    end
   end
 
   defmodule ProjectionErrorBackend do

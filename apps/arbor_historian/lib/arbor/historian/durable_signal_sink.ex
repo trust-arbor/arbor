@@ -6,6 +6,7 @@ defmodule Arbor.Historian.DurableSignalSink do
   alias Arbor.Historian.Config
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
+  alias Arbor.Persistence.EventLog
 
   @spec persist(String.t(), term(), map(), keyword()) :: :ok | {:error, :persist_failed}
   def persist(stream_id, event_type, data, opts) do
@@ -13,6 +14,7 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:ok, event} ->
         case persist_durable(stream_id, event) do
           {:ok, committed_events} ->
+            # Durable acknowledgement is authoritative; projection gaps are observability-only.
             project_hot(stream_id, committed_events)
             :ok
 
@@ -122,7 +124,7 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:ok, target} ->
         case durable_ready?(target) do
           :ok ->
-            append_durable(stream_id, event, target)
+            commit_durable(stream_id, event, target)
 
           {:gap, reason} ->
             log_gap(stream_id, reason)
@@ -150,10 +152,10 @@ defmodule Arbor.Historian.DurableSignalSink do
 
   # In-process observe-before-:ok (P1C-B). Persistence.append applies
   # EventLog's operation deadline; do not wrap in Task.start.
-  defp append_durable(stream_id, event, target) do
+  defp commit_durable(stream_id, event, target) do
     case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
       {:ok, committed_events} ->
-        if valid_committed_events?(committed_events) do
+        if valid_committed_reply?(committed_events, stream_id, event) do
           {:ok, committed_events}
         else
           log_gap(stream_id, :durable_append_malformed)
@@ -174,26 +176,32 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:error, :persist_failed}
   end
 
-  defp valid_committed_events?(events) when is_list(events) and events != [] do
-    Enum.all?(events, fn
-      %Event{
-        event_number: event_number,
-        global_position: global_position,
-        operation_fingerprint: fingerprint
-      }
-      when is_integer(event_number) and event_number > 0 and
-             is_integer(global_position) and global_position > 0 and
-             is_binary(fingerprint) and byte_size(fingerprint) > 0 ->
-        true
+  defp valid_committed_reply?(
+         [
+           %Event{
+             id: committed_id,
+             stream_id: committed_stream_id,
+             event_number: event_number,
+             global_position: global_position,
+             operation_fingerprint: fingerprint
+           } = committed
+         ],
+         stream_id,
+         %Event{id: submitted_id} = submitted
+       )
+       when committed_id == submitted_id and committed_stream_id == stream_id and
+              is_integer(event_number) and event_number > 0 and
+              is_integer(global_position) and global_position > 0 and is_binary(fingerprint) do
+    expected_fingerprint = EventLog.event_fingerprint(stream_id, submitted)
 
-      _ ->
-        false
-    end)
+    is_binary(expected_fingerprint) and
+      fingerprint == expected_fingerprint and
+      EventLog.event_fingerprint_matches?(stream_id, committed, expected_fingerprint)
   rescue
     _ -> false
   end
 
-  defp valid_committed_events?(_events), do: false
+  defp valid_committed_reply?(_events, _stream_id, _submitted), do: false
 
   @stream_id_log_max_bytes 64
 
