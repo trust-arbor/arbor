@@ -34,13 +34,17 @@ defmodule Arbor.Agent.IdentityAliases do
   Link and unlink require **possession-proof plus capability**:
 
     1. a `SignedRequest` the *caller* produced from key material it holds
-       (Ed25519 over `arbor://identity/alias/manage`)
+       (Ed25519 over a canonical payload bound to this exact mutation:
+       version + operation + arguments, length-prefixed)
     2. that same caller holding `arbor://identity/alias/manage`
 
-  Naming a principal is not proof. The server only verifies; it does not
-  load a stored key and sign on a caller-named principal's behalf. A
-  missing, malformed, or mismatched proof is refused as a proof failure
-  and is distinguishable from a capability denial.
+  Naming a principal is not proof. The server reconstructs the payload
+  from the arguments it is about to act on and requires an exact match;
+  it never takes the payload from the caller. It only verifies; it does
+  not load a stored key and sign on a caller-named principal's behalf.
+
+  A missing/malformed proof, a payload mismatch, and a capability denial
+  are distinct `{:unauthorized_alias_management, reason}` values.
 
   Without this gate, any code path that could call `link/3` would be able
   to redirect a victim's future OIDC logins to an attacker-controlled
@@ -49,8 +53,10 @@ defmodule Arbor.Agent.IdentityAliases do
   and remain ungated.
   """
 
+  alias Arbor.Agent.IdentityAliasProofCore
   alias Arbor.Agent.UserConfig
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Persistence.BufferedStore
 
   require Logger
@@ -65,14 +71,15 @@ defmodule Arbor.Agent.IdentityAliases do
   After linking, any OIDC login that derives `secondary_id` will be
   treated as `primary_id`. Requires a caller-produced `SignedRequest`
   (`opts[:signed_request]`) proving possession of `caller_id`'s private
-  key, and that principal must hold `arbor://identity/alias/manage` (M5).
+  key over this exact `link` mutation, and that principal must hold
+  `arbor://identity/alias/manage` (M5).
 
   Returns `:ok` or `{:error, reason}`.
   """
   @spec link(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def link(caller_id, secondary_id, primary_id, opts \\ [])
       when is_binary(caller_id) and is_binary(secondary_id) and is_binary(primary_id) do
-    with :ok <- authorize_manage(caller_id, opts),
+    with :ok <- authorize_manage(caller_id, {:link, secondary_id, primary_id}, opts),
          :ok <- check_not_self(secondary_id, primary_id),
          :ok <- check_primary_not_aliased(primary_id) do
       Logger.info("[IdentityAliases] caller=#{caller_id} linking #{secondary_id} → #{primary_id}")
@@ -92,31 +99,67 @@ defmodule Arbor.Agent.IdentityAliases do
   end
 
   # M5: authorize the caller against arbor://identity/alias/manage with a
-  # caller-produced SignedRequest. The function takes a string caller_id
+  # caller-produced SignedRequest bound to THIS mutation. Reconstruct the
+  # canonical payload from the arguments we are about to act on; never take
+  # the payload from the caller. The function takes a string caller_id
   # (NOT a context map) because the callers that exist for this surface —
   # operator CLI, system-internal bootstrap, future admin LiveView — all
   # have a known principal at the call site. We never derive it from
   # process-dict ambient context here, and we never load a stored private
   # key to sign on a named principal's behalf.
-  defp authorize_manage(caller_id, opts) do
-    signed_request = signed_request_from_opts(opts)
-
-    case Arbor.Security.authorize(caller_id, @manage_resource, :write,
-           signed_request: signed_request,
-           expected_resource: @manage_resource,
-           verify_identity: true
-         ) do
-      {:ok, :authorized} ->
-        :ok
+  defp authorize_manage(caller_id, mutation, opts) do
+    case IdentityAliasProofCore.canonical_payload(mutation) do
+      {:ok, expected_payload} ->
+        authorize_bound(caller_id, expected_payload, opts)
 
       {:error, reason} ->
         {:error, {:unauthorized_alias_management, reason}}
+    end
+  end
 
-      {:ok, :pending_approval, _} ->
-        {:error, {:unauthorized_alias_management, :pending_approval}}
+  defp authorize_bound(caller_id, expected_payload, opts) do
+    case bind_mutation_proof(signed_request_from_opts(opts), expected_payload) do
+      {:ok, bound_request} ->
+        case Arbor.Security.authorize(caller_id, @manage_resource, :write,
+               signed_request: bound_request,
+               expected_resource: expected_payload,
+               verify_identity: true
+             ) do
+          {:ok, :authorized} ->
+            :ok
 
-      other ->
-        {:error, {:unauthorized_alias_management, {:unexpected, other}}}
+          {:error, reason} ->
+            {:error, {:unauthorized_alias_management, reason}}
+
+          {:ok, :pending_approval, _} ->
+            {:error, {:unauthorized_alias_management, :pending_approval}}
+
+          other ->
+            {:error, {:unauthorized_alias_management, {:unexpected, other}}}
+        end
+
+      {:error, reason} ->
+        {:error, {:unauthorized_alias_management, reason}}
+    end
+  end
+
+  # Reconstruct, require an exact match, then proceed with the reconstructed
+  # bytes so authorize never uses caller-supplied payload as the source of
+  # truth. A mismatch is distinct from a proof failure and from a capability
+  # denial.
+  defp bind_mutation_proof(nil, _expected_payload), do: {:error, :missing_signed_request}
+
+  defp bind_mutation_proof(signed_request, expected_payload) do
+    case SignedRequest.canonicalize(signed_request) do
+      {:ok, canonical} ->
+        if canonical.payload == expected_payload do
+          {:ok, %{canonical | payload: expected_payload}}
+        else
+          {:error, :payload_mismatch}
+        end
+
+      {:error, _reason} ->
+        {:error, :malformed_request}
     end
   end
 
@@ -154,14 +197,14 @@ defmodule Arbor.Agent.IdentityAliases do
   Remove an alias, restoring the secondary identity as independent.
 
   Requires a caller-produced `SignedRequest` proving possession of
-  `caller_id`'s private key, and that principal must hold
-  `arbor://identity/alias/manage` (M5).
+  `caller_id`'s private key over this exact `unlink` mutation, and that
+  principal must hold `arbor://identity/alias/manage` (M5).
   Returns `:ok` on success, `{:error, reason}` if unauthorized.
   """
   @spec unlink(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def unlink(caller_id, secondary_id, opts \\ [])
       when is_binary(caller_id) and is_binary(secondary_id) do
-    with :ok <- authorize_manage(caller_id, opts) do
+    with :ok <- authorize_manage(caller_id, {:unlink, secondary_id}, opts) do
       alias_key = @alias_prefix <> secondary_id
 
       # Find and update the primary's linked list

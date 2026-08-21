@@ -14,6 +14,8 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security.KeyFile
 
+  @sample_mutation {:link, "human_sec", "human_pri"}
+
   setup do
     tmp = System.tmp_dir!() |> Path.join("alias_proof_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
@@ -26,22 +28,30 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
     written
   end
 
-  describe "prove/2" do
-    test "signs a request from a key file the caller holds", %{tmp_dir: tmp_dir} do
+  describe "prove/3" do
+    test "signs a mutation-bound request from a key file the caller holds", %{tmp_dir: tmp_dir} do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
       agent_id = "agent_" <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
       path = write_key!(Path.join(tmp_dir, "operator.key"), agent_id, private_key)
 
-      assert {:ok, %SignedRequest{} = signed} = IdentityAliasProof.prove(path, agent_id)
+      assert {:ok, %SignedRequest{} = signed} =
+               IdentityAliasProof.prove(path, agent_id, @sample_mutation)
+
       assert signed.agent_id == agent_id
-      assert signed.payload == IdentityAliasProof.resource()
+      {:ok, expected} = IdentityAliasProof.canonical_payload(@sample_mutation)
+      assert signed.payload == expected
+      refute signed.payload == IdentityAliasProof.resource()
     end
 
     test "fails closed when the key file is absent", %{tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "missing.key")
 
       assert {:error, {:read_failed, :enoent}} =
-               IdentityAliasProof.prove(path, "human_0123456789abcdef0123456789abcdef01234567")
+               IdentityAliasProof.prove(
+                 path,
+                 "human_0123456789abcdef0123456789abcdef01234567",
+                 @sample_mutation
+               )
     end
 
     test "fails closed when the key file is malformed", %{tmp_dir: tmp_dir} do
@@ -50,7 +60,11 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
       File.chmod!(path, 0o600)
 
       assert {:error, {:missing_field, "agent_id"}} =
-               IdentityAliasProof.prove(path, "human_0123456789abcdef0123456789abcdef01234567")
+               IdentityAliasProof.prove(
+                 path,
+                 "human_0123456789abcdef0123456789abcdef01234567",
+                 @sample_mutation
+               )
     end
 
     test "fails closed when --as names a different principal than the key file", %{tmp_dir: tmp_dir} do
@@ -60,7 +74,7 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
       path = write_key!(Path.join(tmp_dir, "operator.key"), actual, private_key)
 
       assert {:error, {:principal_mismatch, ^claimed, ^actual}} =
-               IdentityAliasProof.prove(path, claimed)
+               IdentityAliasProof.prove(path, claimed, @sample_mutation)
     end
 
     test "fails closed when group/other can read the key file", %{tmp_dir: tmp_dir} do
@@ -70,7 +84,16 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
       File.chmod!(path, 0o644)
 
       assert {:error, {:insecure_permissions, 0o644}} =
-               IdentityAliasProof.prove(path, agent_id)
+               IdentityAliasProof.prove(path, agent_id, @sample_mutation)
+    end
+
+    test "fails closed when the mutation is invalid", %{tmp_dir: tmp_dir} do
+      {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      agent_id = "agent_" <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
+      path = write_key!(Path.join(tmp_dir, "operator.key"), agent_id, private_key)
+
+      assert {:error, :invalid_mutation} =
+               IdentityAliasProof.prove(path, agent_id, {:link, "", "pri"})
     end
   end
 
@@ -79,6 +102,7 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
       files = [
         Path.expand("../../../lib/arbor/agent/identity_aliases.ex", __DIR__),
         Path.expand("../../../lib/arbor/agent/identity_alias_proof.ex", __DIR__),
+        Path.expand("../../../lib/arbor/agent/identity_alias_proof_core.ex", __DIR__),
         Path.expand("../../../lib/mix/tasks/arbor/user/link.ex", __DIR__),
         Path.expand("../../../lib/mix/tasks/arbor/user/init.ex", __DIR__)
       ]
@@ -93,6 +117,9 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
 
       refute src =~ "verify_identity: false",
              "alias management must not skip possession proof"
+
+      assert src =~ "canonical_payload",
+             "CLI and aliases must share the mutation-bound canonical payload"
     end
   end
 end

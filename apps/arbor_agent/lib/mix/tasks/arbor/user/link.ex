@@ -12,9 +12,12 @@ defmodule Mix.Tasks.Arbor.User.Link do
 
     * `--as <principal>` — claim of *which* key file to use. Defaults to
       the local-operator principal. The claim is not authority: the CLI
-      signs the request with the matching key file, and the server verifies
-      that proof **and** that the principal holds
-      `arbor://identity/alias/manage`.
+      signs the exact mutation (link + secondary + primary, or unlink +
+      secondary) with the matching key file, and the server reconstructs
+      that payload from the arguments it will act on, then verifies the
+      proof **and** that the principal holds
+      `arbor://identity/alias/manage`. A proof for one link cannot
+      authorize a different link or an unlink.
     * `--key-file <path>` — operator key file (default `~/.arbor/operator.key`,
       written by `mix arbor.user.init`). Must belong to the `--as` principal.
 
@@ -88,7 +91,8 @@ defmodule Mix.Tasks.Arbor.User.Link do
     # as though the link had happened.
     Mix.shell().info("Linking #{secondary_id} → #{primary_id} (as #{caller_id})")
 
-    with {:ok, signed_request} <- prove_caller(caller_id, opts) do
+    with {:ok, signed_request} <-
+           prove_caller(caller_id, {:link, secondary_id, primary_id}, opts) do
       case rpc!(Arbor.Agent.IdentityAliases, :link, [
              caller_id,
              secondary_id,
@@ -122,7 +126,7 @@ defmodule Mix.Tasks.Arbor.User.Link do
     if resolved == secondary_id do
       Mix.shell().info("#{secondary_id} is not an alias — nothing to unlink.")
     else
-      with {:ok, signed_request} <- prove_caller(caller_id, opts) do
+      with {:ok, signed_request} <- prove_caller(caller_id, {:unlink, secondary_id}, opts) do
         case rpc!(Arbor.Agent.IdentityAliases, :unlink, [
                caller_id,
                secondary_id,
@@ -148,10 +152,10 @@ defmodule Mix.Tasks.Arbor.User.Link do
     opts[:as] || Arbor.Contracts.Security.Identity.local_operator_id()
   end
 
-  defp prove_caller(caller_id, opts) do
+  defp prove_caller(caller_id, mutation, opts) do
     key_path = IdentityAliasProof.key_file_path(opts)
 
-    case IdentityAliasProof.prove(key_path, caller_id) do
+    case IdentityAliasProof.prove(key_path, caller_id, mutation) do
       {:ok, signed_request} ->
         {:ok, signed_request}
 
@@ -162,23 +166,38 @@ defmodule Mix.Tasks.Arbor.User.Link do
   end
 
   defp unauthorized_message(caller_id, reason) do
-    if proof_failure?(reason) do
-      """
-      Possession proof for #{caller_id} was rejected (#{inspect(reason)}).
+    cond do
+      payload_mismatch?(reason) ->
+        """
+        Possession proof for #{caller_id} does not match this alias mutation (#{inspect(reason)}).
 
-      The CLI signs alias-management requests from a key file it holds; the
-      server only verifies. A named principal is not proof.
-      """
-    else
-      """
-      #{caller_id} may not manage identity aliases (#{inspect(reason)}).
+        The CLI signs the exact operation and identity arguments; a proof
+        produced for a different link or unlink cannot be reused.
+        """
 
-      Linking redirects a principal's future logins, so it requires
-      arbor://identity/alias/manage. Grant it to the caller, or re-run with
-      --as <principal> for an identity that holds it.
-      """
+      proof_failure?(reason) ->
+        """
+        Possession proof for #{caller_id} was rejected (#{inspect(reason)}).
+
+        The CLI signs alias-management requests from a key file it holds; the
+        server only verifies. A named principal is not proof.
+        """
+
+      true ->
+        """
+        #{caller_id} may not manage identity aliases (#{inspect(reason)}).
+
+        Linking redirects a principal's future logins, so it requires
+        arbor://identity/alias/manage. Grant it to the caller, or re-run with
+        --as <principal> for an identity that holds it.
+        """
     end
   end
+
+  defp payload_mismatch?(:payload_mismatch), do: true
+  defp payload_mismatch?({:payload_mismatch, _given, _expected}), do: true
+  defp payload_mismatch?({:resource_mismatch, _payload, _expected}), do: true
+  defp payload_mismatch?(_reason), do: false
 
   defp proof_failure?(reason)
        when reason in [
@@ -193,7 +212,6 @@ defmodule Mix.Tasks.Arbor.User.Link do
        do: true
 
   defp proof_failure?({:identity_mismatch, _verified, _claimed}), do: true
-  defp proof_failure?({:resource_mismatch, _payload, _expected}), do: true
   defp proof_failure?(_reason), do: false
 
   defp proof_error_message(caller_id, key_path, {:read_failed, :enoent}) do

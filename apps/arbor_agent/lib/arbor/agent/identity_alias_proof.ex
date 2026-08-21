@@ -2,19 +2,23 @@ defmodule Arbor.Agent.IdentityAliasProof do
   @moduledoc """
   Client-side possession proof for identity-alias management.
 
-  The caller holds a `.arbor.key` file, builds a canonical payload, and
-  signs with `Arbor.Contracts.Security.SignedRequest.sign/3`. The server
-  only verifies. This module never loads a stored principal key and never
-  asks the server to sign.
+  The caller holds a `.arbor.key` file, builds a canonical payload bound to
+  the exact mutation (operation + arguments), and signs with
+  `Arbor.Contracts.Security.SignedRequest.sign/3`. The server only verifies.
+  This module never loads a stored principal key and never asks the server
+  to sign.
+
+  `--as` is a claim of *which* key file to use. It never grants authority.
   """
 
+  alias Arbor.Agent.IdentityAliasProofCore
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Security.KeyFile
 
   @manage_resource "arbor://identity/alias/manage"
   @default_key_path "~/.arbor/operator.key"
 
-  @doc "Resource URI the alias-management proof is bound to."
+  @doc "Resource URI the alias-management *capability* is bound to."
   @spec resource() :: String.t()
   def resource, do: @manage_resource
 
@@ -36,33 +40,47 @@ defmodule Arbor.Agent.IdentityAliasProof do
   end
 
   @doc """
-  Sign the alias-management resource with caller-held key material.
-  """
-  @spec sign(KeyFile.key_material()) :: {:ok, SignedRequest.t()} | {:error, term()}
-  def sign(%{agent_id: agent_id, private_key: private_key})
-      when is_binary(agent_id) and is_binary(private_key) do
-    SignedRequest.sign(@manage_resource, agent_id, private_key)
-  end
+  Canonical mutation payload the server will reconstruct and require.
 
-  def sign(_), do: {:error, :invalid_key_material}
+  Delegates to `IdentityAliasProofCore` so the byte layout can be tested
+  without IO.
+  """
+  @spec canonical_payload(IdentityAliasProofCore.mutation() | term()) ::
+          {:ok, binary()} | {:error, :invalid_mutation}
+  defdelegate canonical_payload(mutation), to: IdentityAliasProofCore
 
   @doc """
-  Read a key file the caller holds and produce a SignedRequest.
+  Sign the mutation-bound alias-management payload with caller-held key material.
+  """
+  @spec sign(KeyFile.key_material(), IdentityAliasProofCore.mutation()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def sign(%{agent_id: agent_id, private_key: private_key}, mutation)
+      when is_binary(agent_id) and is_binary(private_key) do
+    with {:ok, payload} <- IdentityAliasProofCore.canonical_payload(mutation) do
+      SignedRequest.sign(payload, agent_id, private_key)
+    end
+  end
+
+  def sign(_, _), do: {:error, :invalid_key_material}
+
+  @doc """
+  Read a key file the caller holds and produce a mutation-bound SignedRequest.
 
   `claimed_principal_id` is the `--as` (or default) claim of *which* key
   file to use. It never grants authority: a mismatch with the file's
   principal fails closed.
   """
-  @spec prove(Path.t(), String.t()) :: {:ok, SignedRequest.t()} | {:error, term()}
-  def prove(path, claimed_principal_id)
+  @spec prove(Path.t(), String.t(), IdentityAliasProofCore.mutation()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def prove(path, claimed_principal_id, mutation)
       when is_binary(path) and is_binary(claimed_principal_id) do
     with {:ok, material} <- KeyFile.read(path),
          :ok <- assert_claimed_identity(material.agent_id, claimed_principal_id) do
-      sign(material)
+      sign(material, mutation)
     end
   end
 
-  def prove(_path, _claimed_principal_id), do: {:error, :invalid_proof_args}
+  def prove(_path, _claimed_principal_id, _mutation), do: {:error, :invalid_proof_args}
 
   defp assert_claimed_identity(actual, claimed) when actual == claimed, do: :ok
 

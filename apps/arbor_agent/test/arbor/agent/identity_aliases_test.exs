@@ -123,22 +123,22 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     identity
   end
 
-  defp signed_manage(identity) do
+  defp signed_proof(identity, mutation) do
     {:ok, signed} =
-      Arbor.Agent.IdentityAliasProof.sign(%{
-        agent_id: identity.agent_id,
-        private_key: identity.private_key
-      })
+      Arbor.Agent.IdentityAliasProof.sign(
+        %{agent_id: identity.agent_id, private_key: identity.private_key},
+        mutation
+      )
 
     signed
   end
 
   defp cleanup_principal(identity, secondary_ids \\ []) do
     Enum.each(List.wrap(secondary_ids), fn secondary ->
-      case Arbor.Agent.IdentityAliasProof.sign(%{
-             agent_id: identity.agent_id,
-             private_key: identity.private_key
-           }) do
+      case Arbor.Agent.IdentityAliasProof.sign(
+             %{agent_id: identity.agent_id, private_key: identity.private_key},
+             {:unlink, secondary}
+           ) do
         {:ok, signed} ->
           _ = IdentityAliases.unlink(identity.agent_id, secondary, signed_request: signed)
 
@@ -187,7 +187,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
         try do
           result =
             IdentityAliases.link(caller, secondary, primary,
-              signed_request: signed_manage(identity)
+              signed_request: signed_proof(identity, {:link, secondary, primary})
             )
 
           {result, IdentityAliases.resolve(secondary)}
@@ -206,7 +206,9 @@ defmodule Arbor.Agent.IdentityAliasesTest do
 
       result =
         try do
-          IdentityAliases.link(caller, "h_x", "h_x", signed_request: signed_manage(identity))
+          IdentityAliases.link(caller, "h_x", "h_x",
+            signed_request: signed_proof(identity, {:link, "h_x", "h_x"})
+          )
         after
           cleanup_principal(identity)
         end
@@ -226,9 +228,13 @@ defmodule Arbor.Agent.IdentityAliasesTest do
       result =
         try do
           :ok =
-            IdentityAliases.link(caller, primary, root, signed_request: signed_manage(identity))
+            IdentityAliases.link(caller, primary, root,
+              signed_request: signed_proof(identity, {:link, primary, root})
+            )
 
-          IdentityAliases.link(caller, secondary, primary, signed_request: signed_manage(identity))
+          IdentityAliases.link(caller, secondary, primary,
+            signed_request: signed_proof(identity, {:link, secondary, primary})
+          )
         after
           cleanup_principal(identity, [primary, secondary])
         end
@@ -248,7 +254,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
         try do
           :ok =
             IdentityAliases.link(privileged, secondary, primary,
-              signed_request: signed_manage(privileged_identity)
+              signed_request: signed_proof(privileged_identity, {:link, secondary, primary})
             )
 
           assert IdentityAliases.resolve(secondary) == primary
@@ -276,12 +282,12 @@ defmodule Arbor.Agent.IdentityAliasesTest do
         try do
           :ok =
             IdentityAliases.link(caller, secondary, primary,
-              signed_request: signed_manage(identity)
+              signed_request: signed_proof(identity, {:link, secondary, primary})
             )
 
           :ok =
             IdentityAliases.unlink(caller, secondary,
-              signed_request: signed_manage(identity)
+              signed_request: signed_proof(identity, {:unlink, secondary})
             )
 
           IdentityAliases.resolve(secondary)
@@ -306,7 +312,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
         try do
           result =
             IdentityAliases.link(caller, secondary, primary,
-              signed_request: signed_manage(identity)
+              signed_request: signed_proof(identity, {:link, secondary, primary})
             )
 
           {result, IdentityAliases.resolve(secondary)}
@@ -327,7 +333,9 @@ defmodule Arbor.Agent.IdentityAliasesTest do
 
       result =
         try do
-          IdentityAliases.link(caller, secondary, primary, signed_request: signed_manage(identity))
+          IdentityAliases.link(caller, secondary, primary,
+            signed_request: signed_proof(identity, {:link, secondary, primary})
+          )
         after
           cleanup_principal(identity, secondary)
         end
@@ -395,7 +403,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
       result =
         try do
           IdentityAliases.link(victim.agent_id, secondary, primary,
-            signed_request: signed_manage(attacker)
+            signed_request: signed_proof(attacker, {:link, secondary, primary})
           )
         after
           cleanup_principal(victim, secondary)
@@ -404,6 +412,112 @@ defmodule Arbor.Agent.IdentityAliasesTest do
 
       assert {:error, {:unauthorized_alias_management, {:identity_mismatch, _, _}}} = result
       assert IdentityAliases.resolve(secondary) == secondary
+    end
+
+    @tag :security_regression
+    test "security regression: a proof produced for one link cannot authorize a different link" do
+      # A captured proof for link(sec_a, pri_a) must not become a bearer
+      # credential for link(sec_b, pri_a), link(sec_a, pri_b), or both.
+      identity = registered_principal()
+      caller = identity.agent_id
+      grant_manage_cap(caller)
+      n = System.unique_integer([:positive])
+      sec_a = "human_bind_sec_a_#{n}"
+      pri_a = "human_bind_pri_a_#{n}"
+      sec_b = "human_bind_sec_b_#{n}"
+      pri_b = "human_bind_pri_b_#{n}"
+      proof_a = signed_proof(identity, {:link, sec_a, pri_a})
+
+      {diff_secondary, diff_primary, both} =
+        try do
+          {
+            IdentityAliases.link(caller, sec_b, pri_a, signed_request: proof_a),
+            IdentityAliases.link(caller, sec_a, pri_b, signed_request: proof_a),
+            IdentityAliases.link(caller, sec_b, pri_b, signed_request: proof_a)
+          }
+        after
+          cleanup_principal(identity, [sec_a, sec_b])
+        end
+
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = diff_secondary
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = diff_primary
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = both
+      assert IdentityAliases.resolve(sec_a) == sec_a
+      assert IdentityAliases.resolve(sec_b) == sec_b
+    end
+
+    @tag :security_regression
+    test "security regression: a link proof cannot authorize unlink, and vice versa" do
+      identity = registered_principal()
+      caller = identity.agent_id
+      grant_manage_cap(caller)
+      n = System.unique_integer([:positive])
+      secondary = "human_op_sec_#{n}"
+      primary = "human_op_pri_#{n}"
+      other_secondary = "human_op_sec_other_#{n}"
+      link_proof = signed_proof(identity, {:link, secondary, primary})
+      unlink_proof = signed_proof(identity, {:unlink, secondary})
+
+      {unlink_with_link, still_aliased, link_with_unlink} =
+        try do
+          :ok =
+            IdentityAliases.link(caller, secondary, primary, signed_request: link_proof)
+
+          unlink_result =
+            IdentityAliases.unlink(caller, secondary, signed_request: link_proof)
+
+          link_result =
+            IdentityAliases.link(caller, other_secondary, primary,
+              signed_request: unlink_proof
+            )
+
+          {unlink_result, IdentityAliases.resolve(secondary), link_result}
+        after
+          cleanup_principal(identity, [secondary, other_secondary])
+        end
+
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = unlink_with_link
+      assert still_aliased == primary
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = link_with_unlink
+      assert IdentityAliases.resolve(other_secondary) == other_secondary
+    end
+
+    test "capability denial, proof failure, and payload mismatch are distinguishable" do
+      n = System.unique_integer([:positive])
+      secondary = "human_dist_sec_#{n}"
+      primary = "human_dist_pri_#{n}"
+      other_secondary = "human_dist_sec_other_#{n}"
+
+      no_cap = registered_principal()
+      no_proof = registered_principal()
+      grant_manage_cap(no_proof.agent_id)
+      wrong_mutation = registered_principal()
+      grant_manage_cap(wrong_mutation.agent_id)
+
+      {cap_denial, proof_failure, payload_mismatch} =
+        try do
+          {
+            IdentityAliases.link(no_cap.agent_id, secondary, primary,
+              signed_request: signed_proof(no_cap, {:link, secondary, primary})
+            ),
+            IdentityAliases.link(no_proof.agent_id, secondary, primary),
+            IdentityAliases.link(wrong_mutation.agent_id, secondary, primary,
+              signed_request:
+                signed_proof(wrong_mutation, {:link, other_secondary, primary})
+            )
+          }
+        after
+          cleanup_principal(no_cap)
+          cleanup_principal(no_proof)
+          cleanup_principal(wrong_mutation, [secondary, other_secondary])
+        end
+
+      assert {:error, {:unauthorized_alias_management, :unauthorized}} = cap_denial
+      assert {:error, {:unauthorized_alias_management, :missing_signed_request}} = proof_failure
+      assert {:error, {:unauthorized_alias_management, :payload_mismatch}} = payload_mismatch
+      refute cap_denial == proof_failure
+      refute proof_failure == payload_mismatch
+      refute cap_denial == payload_mismatch
     end
   end
 end

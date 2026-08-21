@@ -584,22 +584,28 @@ another one. It doubles as user documentation — anyone standing up agents need
   `IdentityAliases.link/3` and `unlink/2` authorize
   `arbor://identity/alias/manage` with `verify_identity: true` and a
   `SignedRequest` the **CLI produced** from a `.arbor.key` file it holds
-  (`mix arbor.user.init` writes `~/.arbor/operator.key` at 0600). `--as`
-  names which key file to use; it is not authority. The server only
-  verifies. It does not load a stored private key and sign on a
-  caller-named principal's behalf.
+  (`mix arbor.user.init` writes `~/.arbor/operator.key` at 0600). The
+  signed payload is bound to the **specific mutation**, not merely to the
+  alias-management resource: version tag + operation (`link`/`unlink`) +
+  every argument, each length-prefixed. The server reconstructs that
+  payload from the arguments it is about to act on and requires an exact
+  match; a proof for one link cannot authorize a different link or an
+  unlink. `--as` names which key file to use; it is not authority. The
+  server only verifies. It does not load a stored private key and sign on
+  a caller-named principal's behalf.
 - **Symptom:** `mix arbor.user.link` reports a possession-proof failure
-  (`key file not found`, `principal_mismatch`, `:missing_signed_request`)
-  or a capability denial (`:unauthorized`) instead of linking. A previous
-  confused-deputy design (`authorize_as_stored_principal`) would have
-  succeeded for `mix arbor.user.link --as <victim>` whenever the victim's
-  key sat in SigningKeyStore.
+  (`key file not found`, `principal_mismatch`, `:missing_signed_request`),
+  a payload mismatch (`:payload_mismatch`), or a capability denial
+  (`:unauthorized`) instead of linking. A previous confused-deputy design
+  (`authorize_as_stored_principal`) would have succeeded for
+  `mix arbor.user.link --as <victim>` whenever the victim's key sat in
+  SigningKeyStore.
 - **Action:** Run `mix arbor.user.init` so the operator key file exists,
   pass `--as <that principal>` (and `--key-file` if it is not at
   `~/.arbor/operator.key`), and grant `arbor://identity/alias/manage` to
   that principal. Do **not** add a server-side "sign as this principal_id"
-  path. Proof failures and capability denials are distinct
-  `{:unauthorized_alias_management, reason}` values.
+  path. Proof failures, payload mismatches, and capability denials are
+  distinct `{:unauthorized_alias_management, reason}` values.
 
 ## Applied Learning: Security Gates
 

@@ -177,18 +177,25 @@ defmodule Mix.Tasks.Arbor.User.Init do
   end
 
   # Do not claim success we have not verified. Alias management requires both
-  # a registered principal that holds the capability and a SignedRequest
-  # produced from the key file this task just wrote.
+  # a registered principal that holds the capability and a mutation-bound
+  # SignedRequest produced from the key file this task just wrote. The
+  # synthetic self-link is never applied; IdentityAliases would reject it.
+  # It only proves the key can sign the canonical payload and the principal
+  # can pass authorize with that exact reconstructed payload.
   defp verify_usable(agent_id, key_path) do
-    case IdentityAliasProof.prove(key_path, agent_id) do
+    mutation = {:link, agent_id, agent_id}
+
+    case IdentityAliasProof.prove(key_path, agent_id, mutation) do
       {:ok, signed_request} ->
+        {:ok, expected_payload} = IdentityAliasProof.canonical_payload(mutation)
+
         case rpc(Arbor.Security, :authorize, [
                agent_id,
                @manage_resource,
                :write,
                [
                  signed_request: signed_request,
-                 expected_resource: @manage_resource,
+                 expected_resource: expected_payload,
                  verify_identity: true
                ]
              ]) do
