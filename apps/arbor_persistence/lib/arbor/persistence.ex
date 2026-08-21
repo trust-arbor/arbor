@@ -1270,6 +1270,43 @@ defmodule Arbor.Persistence do
     backend.event_count(Keyword.put(opts, :name, name))
   end
 
+  @doc """
+  Project events another component already committed durably into a backend.
+
+  This is a **non-authoritative** operation: the caller supplies each event's
+  exact `event_number`, `global_position`, and canonical `operation_fingerprint`,
+  and the backend assigns nothing. The complete batch is validated before any
+  mutation, so a conflict leaves every backend surface unchanged, and
+  re-projecting a byte-identical batch is idempotent.
+
+  Backends that do not implement projection return
+  `{:error, :projection_not_supported}`; a backend running in its ordinary
+  authoritative mode returns `{:error, :projection_mode_required}`. Check
+  `supports_projection?/1` first when the backend is not statically known.
+  """
+  @spec project_committed_events(atom(), module(), [Event.t()], keyword()) ::
+          EventLog.projection_result() | {:error, :projection_not_supported}
+  def project_committed_events(name, backend, events, opts \\ []) do
+    with :ok <- validate_store_name(name),
+         :ok <- validate_backend(backend, :project_committed_events, 2),
+         {:ok, normalized_opts} <- EventLog.normalize_opts(opts) do
+      backend.project_committed_events(events, Keyword.put(normalized_opts, :name, name))
+    else
+      {:error, :backend_unavailable} -> {:error, :projection_not_supported}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  True when the backend module is loaded and exports `project_committed_events/2`.
+  """
+  @spec supports_projection?(module()) :: boolean()
+  def supports_projection?(backend) when is_atom(backend) do
+    Code.ensure_loaded?(backend) and function_exported?(backend, :project_committed_events, 2)
+  end
+
+  def supports_projection?(_backend), do: false
+
   # ============================================================================
   # Contract Callbacks (Arbor.Contracts.API.Persistence)
   # ============================================================================
@@ -1371,6 +1408,10 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def get_event_count_using_backend(name, backend, opts),
     do: event_count(name, backend, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def project_already_committed_events_into_backend(name, backend, events, opts),
+    do: project_committed_events(name, backend, events, opts)
 
   # -- VectorStore (optional) --
 

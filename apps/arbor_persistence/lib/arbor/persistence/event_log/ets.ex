@@ -29,6 +29,30 @@ defmodule Arbor.Persistence.EventLog.ETS do
   so it is convergent rather than crash-atomic. Target identity associations are
   removed last; a deadline or caller failure can therefore be retried until all
   payload, version, identity, and subscriber surfaces prove absence.
+
+  ## Modes
+
+  `:mode` selects the log's authority and defaults to `:authoritative`, which is
+  everything described above. Passing `mode: :projection` starts a sealed,
+  bounded, **non-authoritative** cache of events some other component already
+  committed durably:
+
+      {Arbor.Persistence.EventLog.ETS, name: :my_projection, mode: :projection}
+
+  A projection accepts rows only through `project_committed_events/2`, which
+  requires exact caller-supplied positions and canonical fingerprints. It
+  assigns no positions, notifies no subscribers, and never becomes identity,
+  existence, head, or position authority. `append/3`, `reconcile_append/2`,
+  `replay_identity_history/2`, and `rehydrate_metadata/2` fail with
+  `:projection_read_only`; snapshot export fails with
+  `:projection_not_snapshottable` and any configured `:snapshot_store` is
+  ignored with one warning; `read_stream_head/2` reports `:head_unavailable` and
+  `stream_absent/2` reports `:absence_not_supported`, because a resident-only
+  cache can prove neither a head nor an absence. Reads, counts, and stream lists
+  describe resident rows only, and retention evicts all five surfaces so an
+  evicted event can be safely re-projected later.
+
+  Any `:mode` other than `:authoritative` or `:projection` refuses to start.
   """
 
   use GenServer
@@ -39,7 +63,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
-  alias Arbor.Persistence.EventLog.BoundedWorker
+  alias Arbor.Persistence.EventLog.{BoundedWorker, ProjectionCore}
+
+  @modes [:authoritative, :projection]
 
   @default_max_events 1_000_000
   @default_max_read 10_000
@@ -186,6 +212,52 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, {:read_agent_events, agent_id, opts})
   end
 
+  @impl Arbor.Persistence.EventLog
+  def project_committed_events(events, opts) do
+    with {:ok, name} <- fetch_name_from_public_opts(opts) do
+      safe_control_call(name, {:project_committed_events, events})
+    end
+  end
+
+  @doc """
+  Return this log's configured authority mode.
+
+  `:authoritative` assigns positions and owns identity; `:projection` is a
+  sealed resident-only cache of already-committed events.
+  """
+  @spec mode(keyword()) :: {:ok, :authoritative | :projection} | {:error, term()}
+  def mode(opts) do
+    with {:ok, name} <- fetch_name_from_public_opts(opts) do
+      safe_control_call(name, :mode)
+    end
+  end
+
+  @doc """
+  Describe a projection's resident rows and its observed durable high-water mark.
+
+  `resident_events` and `resident_streams` count only rows this projection
+  currently holds. `global_position` is the projection's own position counter,
+  which stays `0` forever because a projection assigns nothing;
+  `observed_global_position` is the largest global position it has *seen* in a
+  projected batch and is observation only, never position authority.
+
+  Returns `{:error, :projection_mode_required}` for an authoritative log.
+  """
+  @spec projection_status(keyword()) ::
+          {:ok,
+           %{
+             global_position: non_neg_integer(),
+             observed_global_position: non_neg_integer(),
+             resident_events: non_neg_integer(),
+             resident_streams: non_neg_integer()
+           }}
+          | {:error, :projection_mode_required | :invalid_precondition | :backend_unavailable}
+  def projection_status(opts) do
+    with {:ok, name} <- fetch_name_from_public_opts(opts) do
+      safe_control_call(name, :projection_status)
+    end
+  end
+
   @impl true
   def durability_class(_opts), do: :process_lifetime
 
@@ -293,6 +365,13 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @impl GenServer
   def init(opts) do
+    case Keyword.get(opts, :mode, :authoritative) do
+      mode when mode in @modes -> init_mode(mode, opts)
+      invalid -> {:stop, {:invalid_event_log_mode, invalid}}
+    end
+  end
+
+  defp init_mode(mode, opts) do
     name = Keyword.get(opts, :name, __MODULE__)
     max_events = Keyword.get(opts, :max_events, @default_max_events)
 
@@ -332,13 +411,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
     trim_interval_ms = Keyword.get(opts, :trim_interval_ms, @default_trim_interval_ms)
     append_candidate_hook = Keyword.get(opts, :append_candidate_hook)
 
-    identity_history =
-      case Keyword.get(opts, :identity_history, :known_empty) do
-        :known_empty -> :complete
-        :incomplete -> {:unavailable, :startup_incomplete}
-      end
+    identity_history = initial_identity_history(mode, opts)
 
     base_state = %{
+      mode: mode,
+      observed_global_position: 0,
       stream_table: stream_table,
       global_table: global_table,
       id_table: id_table,
@@ -365,19 +442,132 @@ defmodule Arbor.Persistence.EventLog.ETS do
     snapshot_namespace = Keyword.get(opts, :snapshot_namespace, "eventlog_snapshots")
 
     state =
-      maybe_restore_from_snapshot(
-        base_state,
-        snapshot_store,
-        snapshot_store_opts,
-        snapshot_namespace
-      )
+      case mode do
+        :projection ->
+          skip_projection_snapshot(base_state, snapshot_store)
+
+        :authoritative ->
+          maybe_restore_from_snapshot(
+            base_state,
+            snapshot_store,
+            snapshot_store_opts,
+            snapshot_namespace
+          )
+      end
 
     schedule_trim(state)
 
     {:ok, state}
   end
 
+  # A projection holds no authority, so a restored snapshot would fabricate
+  # positions and identities it cannot own. Ignoring the store once at startup
+  # keeps `global_position` at zero and the ledger permanently incomplete.
+  defp skip_projection_snapshot(state, nil), do: state
+
+  defp skip_projection_snapshot(state, _snapshot_store) do
+    Logger.warning(
+      "EventLog.ETS: ignoring :snapshot_store in projection mode; projections are not snapshottable"
+    )
+
+    state
+  end
+
+  defp initial_identity_history(:projection, _opts), do: {:unavailable, :projection_mode}
+
+  defp initial_identity_history(:authoritative, opts) do
+    case Keyword.get(opts, :identity_history, :known_empty) do
+      :known_empty -> :complete
+      :incomplete -> {:unavailable, :startup_incomplete}
+    end
+  end
+
+  # --- Projection mode: sealed surfaces come first so no authoritative clause
+  # can be reached while `mode: :projection`. ---
+
   @impl GenServer
+  def handle_call({:project_committed_events, events}, _from, %{mode: :projection} = state) do
+    case run_projection(events, state) do
+      {:ok, summary, next_state} -> {:reply, {:ok, summary}, next_state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:project_committed_events, _events}, _from, state) do
+    {:reply, {:error, :projection_mode_required}, state}
+  end
+
+  def handle_call(:mode, _from, state), do: {:reply, {:ok, state.mode}, state}
+
+  def handle_call(:projection_status, _from, %{mode: :projection} = state) do
+    status = %{
+      global_position: state.global_position,
+      observed_global_position: state.observed_global_position,
+      resident_events: resident_event_count(state),
+      resident_streams: map_size(state.stream_versions)
+    }
+
+    {:reply, {:ok, status}, state}
+  end
+
+  def handle_call(:projection_status, _from, state) do
+    {:reply, {:error, :projection_mode_required}, state}
+  end
+
+  def handle_call(
+        {:append, _stream_id, _events, _preconditions, _operation, _deadline_mono},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, EventLog.stamp_completion({:error, :projection_read_only}), state}
+  end
+
+  def handle_call(
+        {:reconcile_append, _operation, _deadline_mono},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, EventLog.stamp_completion({:error, :projection_read_only}), state}
+  end
+
+  def handle_call({:rehydrate_metadata, _snapshot}, _from, %{mode: :projection} = state) do
+    {:reply, {:error, :projection_read_only}, state}
+  end
+
+  def handle_call(
+        {:replay_identity_history, _events, _complete?},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, {:error, :projection_read_only}, state}
+  end
+
+  def handle_call(:export_state, _from, %{mode: :projection} = state) do
+    {:reply, {:error, :projection_not_snapshottable}, state}
+  end
+
+  # A resident-only cache cannot distinguish "no head" from "head evicted", and
+  # cannot prove a stream absent anywhere but in its own tables.
+  def handle_call(
+        {:read_stream_head, _stream_id, _max_current_age_ms},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, {:error, :head_unavailable}, state}
+  end
+
+  def handle_call(
+        {:stream_absent, _stream_id, _deadline_mono, _owner_identity},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, EventLog.stamp_completion({:error, :absence_not_supported}), state}
+  end
+
+  def handle_call(:event_count, _from, %{mode: :projection} = state) do
+    {:reply, {:ok, resident_event_count(state)}, state}
+  end
+
   def handle_call(
         {:append, stream_id, events, preconditions, operation, deadline_mono},
         _from,
@@ -750,6 +940,76 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   # --- Private ---
 
+  # ----- Projection admission (pure core + thin shell) -----
+
+  defp run_projection(events, state) do
+    with {:ok, entries} <- ProjectionCore.prepare(events),
+         {:ok, plan} <-
+           ProjectionCore.plan(
+             entries,
+             resident_view(entries, state),
+             resident_event_count(state),
+             state.max_events
+           ) do
+      {:ok, projection_summary(plan), apply_projection(plan, state)}
+    end
+  end
+
+  defp resident_view(entries, state) do
+    keys = ProjectionCore.lookup_keys(entries)
+
+    %{
+      identities: resident_rows(state.id_table, keys.event_ids),
+      identity_positions: resident_rows(state.identity_position_table, keys.global_positions),
+      identity_stream_positions:
+        resident_rows(state.identity_stream_position_table, keys.stream_positions),
+      payloads: resident_rows(state.global_table, keys.global_positions),
+      stream_pointers: resident_rows(state.stream_table, keys.stream_positions)
+    }
+  end
+
+  # Absence and malformation are different facts. An absent key is projectable;
+  # a row this shell cannot read as a well-formed `{key, value}` pair is
+  # surfaced as `:malformed` so the core fails the batch closed instead of
+  # overwriting a row it never understood.
+  defp resident_rows(table, keys) do
+    Enum.reduce(keys, %{}, fn key, acc ->
+      case :ets.lookup(table, key) do
+        [] -> acc
+        [{^key, value}] -> Map.put(acc, key, value)
+        _malformed -> Map.put(acc, key, :malformed)
+      end
+    end)
+  end
+
+  defp apply_projection(plan, state) do
+    :ets.insert(state.global_table, plan.global_rows)
+    :ets.insert(state.stream_table, plan.stream_rows)
+    :ets.insert(state.id_table, plan.identity_rows)
+    :ets.insert(state.identity_position_table, plan.identity_position_rows)
+    :ets.insert(state.identity_stream_position_table, plan.identity_stream_position_rows)
+
+    %{
+      state
+      | stream_versions:
+          Map.merge(state.stream_versions, plan.stream_versions, fn _stream_id,
+                                                                    current,
+                                                                    incoming ->
+            max(current, incoming)
+          end),
+        observed_global_position: max(state.observed_global_position, plan.max_global_position)
+    }
+  end
+
+  defp projection_summary(plan), do: %{projected: plan.projected, skipped: plan.skipped}
+
+  defp resident_event_count(state) do
+    case :ets.info(state.global_table, :size) do
+      size when is_integer(size) -> size
+      _table_missing -> 0
+    end
+  end
+
   # ----- Retention sweep -----
 
   defp schedule_trim(%{trim_interval_ms: :disabled}), do: :ok
@@ -796,10 +1056,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
                 :ets.delete(state.global_table, gpos)
                 :ets.delete(state.stream_table, {event.stream_id, event.event_number})
 
-                # Preserve the bounded ID/fingerprint entry after payload retention.
-                # Without this tombstone, retrying a trimmed append could create a
-                # second event with the same durable operation identity.
-                trim_from_front(state, cutoff, trimmed + 1)
+                # Authoritative logs preserve the bounded ID/fingerprint entry
+                # after payload retention. Without that tombstone, retrying a
+                # trimmed append could create a second event with the same
+                # durable operation identity. A projection assigns nothing, so
+                # it evicts its identity rows too and stays re-projectable.
+                state
+                |> evict_projection_identity(event)
+                |> trim_from_front(cutoff, trimmed + 1)
 
               true ->
                 log_trim(trimmed)
@@ -810,6 +1074,46 @@ defmodule Arbor.Persistence.EventLog.ETS do
             log_trim(trimmed)
             state
         end
+    end
+  end
+
+  defp evict_projection_identity(%{mode: :projection} = state, %Event{} = event) do
+    :ets.delete(state.id_table, event.id)
+    :ets.delete(state.identity_position_table, event.global_position)
+    :ets.delete(state.identity_stream_position_table, {event.stream_id, event.event_number})
+
+    prune_projection_stream_metadata(state, event.stream_id)
+  end
+
+  defp evict_projection_identity(state, _event), do: state
+
+  # Projection metadata describes resident rows only, so eviction recomputes the
+  # stream version from the surviving rows rather than only pruning the last
+  # one. Evicting the highest resident event number must lower the reported
+  # version; evicting a fully drained stream removes it from `list_streams`,
+  # `stream_count`, and `stream_exists?`.
+  defp prune_projection_stream_metadata(state, stream_id) do
+    case resident_stream_version(state, stream_id) do
+      nil ->
+        %{
+          state
+          | stream_versions: Map.delete(state.stream_versions, stream_id),
+            head_inserted_mono: Map.delete(state.head_inserted_mono, stream_id)
+        }
+
+      version ->
+        %{state | stream_versions: Map.put(state.stream_versions, stream_id, version)}
+    end
+  end
+
+  # The stream table is an `:ordered_set` keyed by `{stream_id, event_number}`.
+  # Every atom sorts above every integer in Erlang term order, so stepping back
+  # from `{stream_id, :max_event_number}` lands on this stream's highest
+  # resident event number, or outside the stream when none remain.
+  defp resident_stream_version(state, stream_id) do
+    case :ets.prev(state.stream_table, {stream_id, :max_event_number}) do
+      {^stream_id, event_number} when is_integer(event_number) -> event_number
+      _no_resident_rows -> nil
     end
   end
 

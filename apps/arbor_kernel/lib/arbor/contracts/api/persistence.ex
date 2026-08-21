@@ -86,6 +86,27 @@ defmodule Arbor.Contracts.API.Persistence do
           | {:error, {:absence_indeterminate, stream_id()}}
           | {:error, event_stream_absence_error()}
 
+  @typedoc "Closed public failures for non-authoritative EventLog projection."
+  @type event_projection_error ::
+          :backend_unavailable
+          | :event_id_conflict
+          | :global_position_conflict
+          | :invalid_precondition
+          | :invalid_projection_events
+          | :projection_batch_too_large
+          | :projection_capacity_exceeded
+          | :projection_fingerprint_invalid
+          | :projection_fingerprint_missing
+          | :projection_fingerprint_mismatch
+          | :projection_mode_required
+          | :projection_not_supported
+          | :stream_position_conflict
+
+  @typedoc "Counts of newly projected and idempotently skipped events."
+  @type event_projection_result ::
+          {:ok, %{projected: non_neg_integer(), skipped: non_neg_integer()}}
+          | {:error, event_projection_error()}
+
   @typedoc "Canonical vector mutation or bounded atomic batch."
   @type vector_operation :: Arbor.Contracts.Persistence.VectorOperation.t()
 
@@ -471,6 +492,26 @@ defmodule Arbor.Contracts.API.Persistence do
               opts()
             ) :: {:ok, non_neg_integer()}
 
+  @doc """
+  Project events another component already committed durably into a backend.
+
+  Non-authoritative. The caller supplies each event's exact event number, global
+  position, and canonical operation fingerprint; the backend assigns nothing,
+  notifies no subscribers, and gains no identity, existence, head, or position
+  authority. The complete batch is validated before any mutation, so a conflict
+  leaves every backend surface unchanged, and re-projecting a byte-identical
+  batch is idempotent and reported as skipped.
+
+  Backends without projection support fail before dispatch; a backend running in
+  its ordinary authoritative mode refuses with `:projection_mode_required`.
+  """
+  @callback project_already_committed_events_into_backend(
+              store_name(),
+              backend(),
+              events :: [event()],
+              opts()
+            ) :: event_projection_result()
+
   # ===========================================================================
   # VectorStore Operations (optional)
   # ===========================================================================
@@ -622,6 +663,7 @@ defmodule Arbor.Contracts.API.Persistence do
     list_all_streams_using_backend: 3,
     get_stream_count_using_backend: 3,
     get_event_count_using_backend: 3,
+    project_already_committed_events_into_backend: 4,
     # VectorStore operations
     execute_validated_vector_operation_for_agent: 3,
     reconcile_validated_vector_operation_for_agent: 3,

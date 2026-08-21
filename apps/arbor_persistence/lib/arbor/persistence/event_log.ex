@@ -77,6 +77,22 @@ defmodule Arbor.Persistence.EventLog do
           | {:ok, false}
           | {:error, {:absence_indeterminate, stream_id()}}
           | {:error, absence_error()}
+  @type projection_error ::
+          :backend_unavailable
+          | :event_id_conflict
+          | :global_position_conflict
+          | :invalid_precondition
+          | :invalid_projection_events
+          | :projection_batch_too_large
+          | :projection_capacity_exceeded
+          | :projection_fingerprint_invalid
+          | :projection_fingerprint_missing
+          | :projection_fingerprint_mismatch
+          | :projection_mode_required
+          | :stream_position_conflict
+  @type projection_result ::
+          {:ok, %{projected: non_neg_integer(), skipped: non_neg_integer()}}
+          | {:error, projection_error()}
 
   @doc """
   Append one or more events to a stream.
@@ -251,6 +267,26 @@ defmodule Arbor.Persistence.EventLog do
               {:ok, [Event.t()]} | {:error, term()}
 
   @doc """
+  Admit events that another component already committed durably.
+
+  This optional callback exists for **non-authoritative projections only**. The
+  caller supplies each event's exact `event_number`, `global_position`, and
+  canonical `operation_fingerprint`; the backend assigns nothing, notifies no
+  subscribers, and gains no identity, existence, head, or position authority
+  from the resident rows.
+
+  The complete batch is canonicalized and validated before any mutation, so a
+  conflict on any event leaves every backend surface unchanged. Re-projecting a
+  byte-identical batch is idempotent and reported as skipped rather than
+  projected. Conflicts are reported per surface as `:event_id_conflict`,
+  `:global_position_conflict`, or `:stream_position_conflict`.
+
+  A backend running in its ordinary authoritative mode must refuse with
+  `{:error, :projection_mode_required}`.
+  """
+  @callback project_committed_events([Event.t()], opts()) :: projection_result()
+
+  @doc """
   Return this EventLog's code-owned durability class.
 
   This value describes backend-owned durability semantics and is not configurable by
@@ -269,7 +305,8 @@ defmodule Arbor.Persistence.EventLog do
     stream_count: 1,
     event_count: 1,
     read_agent_events: 2,
-    durability_class: 1
+    durability_class: 1,
+    project_committed_events: 2
   ]
 
   @doc false
