@@ -1,15 +1,30 @@
 defmodule Arbor.Historian.QueryEngineTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Historian.QueryEngine
   alias Arbor.Historian.TestHelpers
+  alias Arbor.Persistence
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
 
   defmodule ColdDurable do
     # Mirrors Ecto.read_stream/2: honors :limit and :from, ignores :max_scan.
+    def stream_version(stream_id, opts) do
+      repo = Keyword.fetch!(opts, :repo)
+
+      Agent.get_and_update(repo, fn state ->
+        version =
+          state.streams
+          |> Map.get(stream_id, [])
+          |> Enum.map(& &1.event_number)
+          |> Enum.max(fn -> 0 end)
+
+        {{:ok, version}, %{state | probes: state.probes + 1}}
+      end)
+    end
+
     def read_stream(stream_id, opts) do
       repo = Keyword.fetch!(opts, :repo)
       from = Keyword.get(opts, :from, 0)
@@ -26,21 +41,78 @@ defmodule Arbor.Historian.QueryEngineTest do
         events =
           if is_integer(limit) and limit > 0, do: Enum.take(events, limit), else: events
 
-        captured = Keyword.take(opts, [:from, :to, :limit, :max_scan])
+        captured = Keyword.take(opts, [:name, :repo, :from, :to, :limit, :max_scan])
         {{:ok, events}, %{state | reads: [{stream_id, captured} | state.reads]}}
       end)
     end
   end
 
   defmodule FlunkDurable do
+    def stream_version(_stream_id, _opts), do: {:ok, 1}
+
     def read_stream(_stream_id, _opts) do
-      raise "durable must not be consulted for a complete payload cache"
+      raise "sensitive payload that must not be logged"
     end
+  end
+
+  defmodule ErrorDurable do
+    def stream_version(_stream_id, _opts), do: {:ok, 1}
+    def read_stream(_stream_id, _opts), do: {:error, %{payload: "stale-secret"}}
+  end
+
+  defmodule MalformedDurable do
+    def stream_version(_stream_id, _opts), do: {:ok, 1}
+    def read_stream(_stream_id, _opts), do: {:ok, %{payload: "not-a-list"}}
+  end
+
+  defmodule ThrowDurable do
+    def stream_version(_stream_id, _opts), do: {:ok, 1}
+    def read_stream(_stream_id, _opts), do: throw(:sensitive_backend_term)
+  end
+
+  defmodule ExitDurable do
+    def stream_version(_stream_id, _opts), do: {:ok, 1}
+    def read_stream(_stream_id, _opts), do: exit(:sensitive_backend_term)
+  end
+
+  defmodule UnavailableDurable do
   end
 
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"qe_#{System.unique_integer([:positive])}")
+    original_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
+    original_hot_target = Application.fetch_env(:arbor_historian, :hot_event_log_target)
+
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: ctx.event_log,
+      backend: PersistenceETS,
+      opts: []
+    })
+
+    Application.put_env(:arbor_historian, :hot_event_log_target, %{
+      name: :query_engine_test_hot_placeholder,
+      backend: PersistenceETS,
+      opts: []
+    })
+
+    on_exit(fn ->
+      case original_target do
+        {:ok, value} ->
+          Application.put_env(:arbor_historian, :durable_event_log_target, value)
+
+        :error ->
+          Application.delete_env(:arbor_historian, :durable_event_log_target)
+      end
+
+      case original_hot_target do
+        {:ok, value} ->
+          Application.put_env(:arbor_historian, :hot_event_log_target, value)
+
+        :error ->
+          Application.delete_env(:arbor_historian, :hot_event_log_target)
+      end
+    end)
 
     # Seed some signals
     signals = [
@@ -227,27 +299,41 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
   end
 
-  describe "cache-miss fallthrough (graceful degradation)" do
-    # When ETS has events from oldest_event_number onward and a read
-    # requests events from BEFORE that, the fallthrough check fires.
-    # In tests there's no Repo running, so `durable_backend_available?`
-    # returns false — the cache result is returned unchanged. This guards
-    # the degradation path from accidental breakage by a future refactor.
-    # The durable backend is adapter-agnostic (Postgres or SQLite3) — the
-    # check is on Repo presence, not on a specific adapter.
-    test "with :from earlier than cache coverage, returns cache result when durable backend unavailable",
-         %{
-           ctx: ctx
-         } do
-      # Populate the stream with a few events.
+  describe "explicit authoritative EventLog compatibility" do
+    test "a named authoritative test EventLog is honored through the public facade" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      authoritative = :"qe_authoritative_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {PersistenceETS, name: authoritative, max_age_ms: :infinity, trim_interval_ms: :disabled}
+      )
+
+      event = durable_historian_event(id: "named-authoritative")
+      assert {:ok, [_positioned]} = PersistenceETS.append("global", event, name: authoritative)
+
+      assert {:ok, [entry]} = Arbor.Historian.recent(event_log: authoritative)
+      assert entry.signal_id == "named-authoritative"
+    end
+
+    test "a named projection EventLog is rejected through the public facade" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      projection = :"qe_named_projection_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {PersistenceETS,
+         name: projection, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled}
+      )
+
+      assert {:error, {:authoritative_target_rejected, :projection}} =
+               Arbor.Historian.recent(event_log: projection)
+    end
+
+    test "an authoritative named EventLog supports inclusive cursors", %{ctx: ctx} do
       signal_1 = TestHelpers.build_signal(category: :test, type: :evt1)
       signal_2 = TestHelpers.build_signal(category: :test, type: :evt2)
       TestHelpers.collect_signal(ctx, signal_1)
       TestHelpers.collect_signal(ctx, signal_2)
 
-      # Read with :from set to an integer — exercises the fallthrough
-      # check. Postgres isn't running in unit tests, so we must get the
-      # cache result back without crashing.
       result =
         QueryEngine.read_stream("global",
           event_log: ctx.event_log,
@@ -258,12 +344,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert is_list(entries)
     end
 
-    test "empty cache + integer :from triggers fallthrough check (PR 2 fix)", %{ctx: ctx} do
-      # After PR 2, ETS starts empty at boot for streams that exist
-      # only in the durable backend. The fallthrough must fire when
-      # `oldest_event_number` returns nil. Without the durable backend
-      # running in tests, the path falls back to cache (empty list) —
-      # the important thing is that this does NOT raise.
+    test "an empty authoritative named EventLog returns an empty history", %{ctx: ctx} do
       assert {:ok, []} =
                QueryEngine.read_stream("stream_only_in_durable",
                  event_log: ctx.event_log,
@@ -271,10 +352,7 @@ defmodule Arbor.Historian.QueryEngineTest do
                )
     end
 
-    test "non-integer :from skips fallthrough (post-filter case)", %{ctx: ctx} do
-      # query/1 passes DateTime values via :from / :to as post-filter
-      # bounds, not event_number cursors. The fallthrough path must
-      # NOT try to do `oldest > from + 1` on a DateTime.
+    test "DateTime bounds are not converted into event-number cursors", %{ctx: ctx} do
       TestHelpers.collect_signal(ctx, TestHelpers.build_signal(category: :test, type: :evt))
 
       now = DateTime.utc_now()
@@ -300,35 +378,47 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
   end
 
-  describe "injected durable complete-history fallthrough" do
+  describe "injected authoritative complete-history target" do
     setup do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       ctx = TestHelpers.start_test_historian(:"qe_cold_#{System.unique_integer([:positive])}")
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       repo = :"qe_cold_repo_#{System.unique_integer([:positive])}"
 
-      {:ok, _pid} = Agent.start_link(fn -> %{streams: %{}, reads: []} end, name: repo)
+      {:ok, _pid} =
+        Agent.start_link(fn -> %{streams: %{}, reads: [], probes: 0} end, name: repo)
+
+      original_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
+
+      Application.put_env(:arbor_historian, :durable_event_log_target, %{
+        name: :configured_query_authority,
+        backend: ColdDurable,
+        opts: [repo: repo]
+      })
 
       on_exit(fn ->
+        case original_target do
+          {:ok, value} ->
+            Application.put_env(:arbor_historian, :durable_event_log_target, value)
+
+          :error ->
+            Application.delete_env(:arbor_historian, :durable_event_log_target)
+        end
+
         if pid = Process.whereis(repo), do: Process.exit(pid, :kill)
       end)
 
       %{ctx: ctx, repo: repo}
     end
 
-    test "empty cache default reads durable history", %{ctx: ctx, repo: repo} do
+    test "empty cache default reads durable history", %{repo: repo} do
       event = durable_historian_event(id: "hist_cold_default")
 
       Agent.update(repo, fn state ->
         %{state | streams: %{"global" => [event]}}
       end)
 
-      assert {:ok, entries} =
-               QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo
-               )
+      assert {:ok, entries} = QueryEngine.read_global([])
 
       assert length(entries) == 1
       assert hd(entries).signal_id == "hist_cold_default"
@@ -339,7 +429,58 @@ defmodule Arbor.Historian.QueryEngineTest do
       refute Keyword.has_key?(captured, :limit)
     end
 
-    test "bounded default reads do not fetch the entire durable stream", %{ctx: ctx, repo: repo} do
+    test "legacy durable_event_log and repo keys cannot replace Config-owned authority", %{
+      repo: repo
+    } do
+      event = durable_historian_event(id: "configured-authority")
+      Agent.update(repo, &%{&1 | streams: %{"global" => [event]}})
+
+      assert {:ok, [entry]} =
+               QueryEngine.query(
+                 category: :activity,
+                 durable_event_log: ErrorDurable,
+                 repo: :caller_repo
+               )
+
+      assert entry.signal_id == "configured-authority"
+      assert [{"global", _captured}] = Agent.get(repo, &Enum.reverse(&1.reads))
+      assert Agent.get(repo, & &1.probes) == 0
+    end
+
+    test "test seam replaces only the Config hot name while Config owns backend and opts", %{
+      repo: repo
+    } do
+      event = durable_historian_event(id: "configured-hot-authority")
+      Agent.update(repo, &%{&1 | streams: %{"global" => [event]}})
+
+      Application.put_env(:arbor_historian, :durable_event_log_target, %{
+        name: :durable_must_not_be_used,
+        backend: ErrorDurable,
+        opts: []
+      })
+
+      Application.put_env(:arbor_historian, :hot_event_log_target, %{
+        name: :configured_hot_name,
+        backend: ColdDurable,
+        opts: [repo: repo]
+      })
+
+      assert {:ok, [entry]} =
+               Arbor.Historian.recent(
+                 event_log: :caller_named_authority,
+                 durable_event_log: ErrorDurable,
+                 backend: ErrorDurable,
+                 opts: [repo: :caller_repo],
+                 repo: :caller_repo
+               )
+
+      assert entry.signal_id == "configured-hot-authority"
+      assert [{"global", captured}] = Agent.get(repo, &Enum.reverse(&1.reads))
+      assert captured[:name] == :caller_named_authority
+      assert captured[:repo] == repo
+    end
+
+    test "bounded default reads do not fetch the entire durable stream", %{repo: repo} do
       events =
         for n <- 1..3 do
           durable_historian_event(
@@ -354,12 +495,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       end)
 
       assert {:ok, entries} =
-               QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
-                 limit: 1
-               )
+               QueryEngine.read_global(limit: 1)
 
       assert length(entries) == 1
       assert hd(entries).signal_id == "hist_bound_1"
@@ -370,7 +506,6 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
 
     test "unfiltered max_scan maps to Ecto :limit and fails closed when the page is full", %{
-      ctx: ctx,
       repo: repo
     } do
       events =
@@ -387,12 +522,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       end)
 
       assert {:error, {:scan_limit_exceeded, %{max_scan: 2}}} =
-               QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
-                 max_scan: 2
-               )
+               QueryEngine.read_global(max_scan: 2)
 
       assert [{"global", captured}] = Agent.get(repo, &Enum.reverse(&1.reads))
       assert Keyword.get(captured, :from) == 0
@@ -400,12 +530,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       refute Keyword.has_key?(captured, :max_scan)
 
       assert {:ok, entries} =
-               QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
-                 max_scan: 10
-               )
+               QueryEngine.read_global(max_scan: 10)
 
       assert Enum.map(entries, & &1.signal_id) == [
                "hist_scan_1",
@@ -415,7 +540,6 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
 
     test "max_scan admits a stream whose cardinality exactly equals the bound", %{
-      ctx: ctx,
       repo: repo
     } do
       events =
@@ -432,12 +556,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       end)
 
       assert {:ok, entries} =
-               QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
-                 max_scan: 2
-               )
+               QueryEngine.read_global(max_scan: 2)
 
       assert Enum.map(entries, & &1.signal_id) == [
                "hist_exact_scan_1",
@@ -448,7 +567,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert Keyword.get(captured, :limit) == 3
     end
 
-    test "smaller caller :limit is preserved over a larger max_scan", %{ctx: ctx, repo: repo} do
+    test "smaller caller :limit is preserved over a larger max_scan", %{repo: repo} do
       events =
         for n <- 1..3 do
           durable_historian_event(
@@ -464,9 +583,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, entries} =
                QueryEngine.read_global(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  limit: 1,
                  max_scan: 100
                )
@@ -477,7 +593,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert Keyword.get(captured, :limit) == 1
     end
 
-    test "inclusive from falls through when the immediately preceding row aged out", %{
+    test "inclusive from reads the authoritative row when a projection row aged out", %{
       repo: repo
     } do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
@@ -515,9 +631,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, entries} =
                QueryEngine.read_stream("global",
-                 event_log: name,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  from: 5
                )
 
@@ -526,7 +639,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert captured[:from] == 5
     end
 
-    test "DateTime filters read durable history then post-filter", %{ctx: ctx, repo: repo} do
+    test "DateTime filters read durable history then post-filter", %{repo: repo} do
       now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
       past = DateTime.add(now, -3_600, :second)
       old = DateTime.add(now, -7_200, :second)
@@ -554,9 +667,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, entries} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  from: past,
                  to: future,
                  limit: 1
@@ -573,7 +683,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       refute Keyword.has_key?(captured, :max_scan)
     end
 
-    test "DateTime filters map explicit max_scan to durable :limit", %{ctx: ctx, repo: repo} do
+    test "DateTime filters map explicit max_scan to durable :limit", %{repo: repo} do
       now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
       past = DateTime.add(now, -3_600, :second)
       future = DateTime.add(now, 3_600, :second)
@@ -592,9 +702,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, entries} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  from: past,
                  to: future,
                  limit: 1,
@@ -609,7 +716,6 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
 
     test "DateTime max_scan fails closed instead of returning a clipped page as complete", %{
-      ctx: ctx,
       repo: repo
     } do
       now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
@@ -632,9 +738,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:error, {:scan_limit_exceeded, %{max_scan: 1}}} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  from: past,
                  to: future,
                  limit: 10,
@@ -647,7 +750,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       refute Keyword.has_key?(captured, :to)
     end
 
-    test "filtered limit finds a match on a later durable page", %{ctx: ctx, repo: repo} do
+    test "filtered limit finds a match on a later durable page", %{repo: repo} do
       events = [
         durable_historian_event(
           id: "hist_later_1",
@@ -674,9 +777,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, [entry]} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  category: :logs,
                  limit: 1,
                  max_scan: 10,
@@ -691,8 +791,42 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert Enum.all?(reads, fn {"global", opts} -> not Keyword.has_key?(opts, :max_scan) end)
     end
 
+    test "filtered integer from remains inclusive", %{repo: repo} do
+      events =
+        for n <- 1..3 do
+          durable_historian_event(
+            id: "hist_filtered_from_#{n}",
+            category: if(n == 2, do: :logs, else: :activity),
+            event_number: n,
+            global_position: n
+          )
+        end
+
+      Agent.update(repo, &%{&1 | streams: %{"global" => events}})
+
+      assert {:ok, [entry]} =
+               QueryEngine.query(
+                 category: :logs,
+                 from: 2,
+                 max_scan: 2
+               )
+
+      assert entry.signal_id == "hist_filtered_from_2"
+      assert [{"global", captured}] = Agent.get(repo, &Enum.reverse(&1.reads))
+      assert captured[:from] == 2
+    end
+
+    test "filtered backward query with a result limit is rejected explicitly", %{repo: repo} do
+      assert {:error, {:invalid_query_options, :backward_filtered_scan_unsupported}} =
+               QueryEngine.query(category: :logs, direction: :backward, limit: 1)
+
+      assert {:error, {:invalid_query_options, :backward_filtered_scan_unsupported}} =
+               QueryEngine.find_by_signal_id("missing", direction: :backward)
+
+      assert Agent.get(repo, & &1.reads) == []
+    end
+
     test "filtered no-match fails when durable scan completeness exceeds the bound", %{
-      ctx: ctx,
       repo: repo
     } do
       events =
@@ -708,9 +842,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:error, {:scan_limit_exceeded, %{max_scan: 2}}} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  category: :logs,
                  limit: 1,
                  max_scan: 2
@@ -722,7 +853,6 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
 
     test "filtered scan admits exact-bound EOF and rejects one row beyond the bound", %{
-      ctx: ctx,
       repo: repo
     } do
       events =
@@ -738,9 +868,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, []} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  category: :logs,
                  max_scan: 2
                )
@@ -749,15 +876,12 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:error, {:scan_limit_exceeded, %{max_scan: 1}}} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  category: :logs,
                  max_scan: 1
                )
     end
 
-    test "combined post-filters are applied after durable pagination", %{ctx: ctx, repo: repo} do
+    test "combined post-filters are applied after durable pagination", %{repo: repo} do
       now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
       past = DateTime.add(now, -3_600, :second)
       old = DateTime.add(now, -7_200, :second)
@@ -796,9 +920,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, [entry]} =
                QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  category: :logs,
                  type: :error,
                  source: "arbor://target",
@@ -817,7 +938,6 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
 
     test "signal-id lookup paginates and stops when a later match is proved", %{
-      ctx: ctx,
       repo: repo
     } do
       events =
@@ -833,9 +953,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:ok, entry} =
                QueryEngine.find_by_signal_id("hist_signal_page_3",
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  max_scan: 10,
                  durable_page_size: 1
                )
@@ -845,7 +962,7 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert Enum.map(reads, fn {"global", opts} -> opts[:from] end) == [0, 2, 3]
     end
 
-    test "signal-id lookup distinguishes EOF from scan exhaustion", %{ctx: ctx, repo: repo} do
+    test "signal-id lookup distinguishes EOF from scan exhaustion", %{repo: repo} do
       events =
         for n <- 1..2 do
           durable_historian_event(
@@ -859,9 +976,6 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:error, :not_found} =
                QueryEngine.find_by_signal_id("missing",
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  max_scan: 2
                )
 
@@ -869,27 +983,90 @@ defmodule Arbor.Historian.QueryEngineTest do
 
       assert {:error, {:scan_limit_exceeded, %{max_scan: 1}}} =
                QueryEngine.find_by_signal_id("hist_signal_bound_2",
-                 event_log: ctx.event_log,
-                 durable_event_log: ColdDurable,
-                 repo: repo,
                  max_scan: 1
                )
     end
 
-    test "complete payload cache does not consult durable", %{ctx: ctx, repo: repo} do
-      TestHelpers.collect_signal(
-        ctx,
-        TestHelpers.build_signal(category: :activity, type: :agent_started)
+    test "durable is consulted even when projection rows look complete", %{repo: repo} do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      projection = :"qe_complete_projection_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {PersistenceETS,
+         name: projection, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled}
       )
 
-      assert {:ok, entries} =
-               QueryEngine.query(
-                 event_log: ctx.event_log,
-                 durable_event_log: FlunkDurable,
-                 repo: repo
+      projected = durable_historian_event(id: "projection-looks-complete")
+
+      projected = %{
+        projected
+        | operation_fingerprint: Persistence.canonical_event_fingerprint("global", projected)
+      }
+
+      assert {:ok, %{projected: 1}} =
+               Persistence.project_committed_events(
+                 projection,
+                 PersistenceETS,
+                 [projected]
                )
 
+      durable = durable_historian_event(id: "durable-wins")
+      Agent.update(repo, &%{&1 | streams: %{"global" => [durable]}})
+
+      assert {:ok, entries} = QueryEngine.query([])
+
       assert length(entries) == 1
+      assert hd(entries).signal_id == "durable-wins"
+      assert [{"global", _captured}] = Agent.get(repo, &Enum.reverse(&1.reads))
+    end
+
+    test "stale projection rows are never returned after durable failures", %{
+      ctx: ctx,
+      repo: repo
+    } do
+      TestHelpers.collect_signal(
+        ctx,
+        TestHelpers.build_signal(id: "stale-projection", category: :logs, type: :error)
+      )
+
+      failures = [
+        {ErrorDurable, {:authoritative_read_failed, :backend_error}},
+        {FlunkDurable, {:authoritative_read_failed, :backend_exception}},
+        {MalformedDurable, {:authoritative_read_failed, :malformed_success_reply}},
+        {ThrowDurable, {:authoritative_read_failed, :backend_throw}},
+        {ExitDurable, {:authoritative_read_failed, :backend_exit}},
+        {UnavailableDurable, {:authoritative_read_failed, :backend_exception}}
+      ]
+
+      Enum.each(failures, fn {backend, expected_reason} ->
+        Application.put_env(:arbor_historian, :durable_event_log_target, %{
+          name: :configured_query_authority,
+          backend: backend,
+          opts: [repo: repo]
+        })
+
+        assert {:error, ^expected_reason} =
+                 QueryEngine.query([])
+      end)
+    end
+
+    test "a configured projection-mode EventLog is rejected as authority" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      projection = :"qe_projection_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {PersistenceETS,
+         name: projection, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled}
+      )
+
+      Application.put_env(:arbor_historian, :durable_event_log_target, %{
+        name: projection,
+        backend: PersistenceETS,
+        opts: []
+      })
+
+      assert {:error, {:authoritative_target_rejected, :projection}} =
+               QueryEngine.read_global([])
     end
   end
 

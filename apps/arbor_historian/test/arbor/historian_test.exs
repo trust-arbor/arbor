@@ -1,5 +1,5 @@
 defmodule Arbor.HistorianTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduledoc """
   Integration tests for the Arbor.Historian facade.
@@ -12,6 +12,7 @@ defmodule Arbor.HistorianTest do
   alias Arbor.Historian.StreamRegistry
   alias Arbor.Historian.TestHelpers
   alias Arbor.Historian.Timeline
+  alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
   alias QueryEngine.Aggregator
   alias Timeline.Span
 
@@ -21,6 +22,23 @@ defmodule Arbor.HistorianTest do
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     ctx = TestHelpers.start_test_historian(:"facade_#{System.unique_integer([:positive])}")
+    original_target = Application.fetch_env(:arbor_historian, :durable_event_log_target)
+
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: ctx.event_log,
+      backend: PersistenceETS,
+      opts: []
+    })
+
+    on_exit(fn ->
+      case original_target do
+        {:ok, value} ->
+          Application.put_env(:arbor_historian, :durable_event_log_target, value)
+
+        :error ->
+          Application.delete_env(:arbor_historian, :durable_event_log_target)
+      end
+    end)
 
     now = DateTime.utc_now()
     t1 = DateTime.add(now, -600, :second)
@@ -334,7 +352,8 @@ defmodule Arbor.HistorianTest do
     end
 
     test "find_history_entry_by_signal_id/2 returns not_found for nonexistent" do
-      assert {:error, :not_found} = Arbor.Historian.find_history_entry_by_signal_id("nonexistent", [])
+      assert {:error, :not_found} =
+               Arbor.Historian.find_history_entry_by_signal_id("nonexistent", [])
     end
 
     test "read_agent_activity_summary/2 returns map" do
