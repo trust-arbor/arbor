@@ -1156,11 +1156,12 @@ defmodule Arbor.Security.Config do
       :absolute ->
         {:ok, Path.expand(value)}
 
-      _relative when @config_env == :dev ->
-        {:ok, Path.expand(value, @repo_root)}
-
       _relative ->
-        {:error, :authority_root_not_absolute}
+        if @config_env == :dev do
+          {:ok, Path.expand(value, @repo_root)}
+        else
+          {:error, :authority_root_not_absolute}
+        end
     end
   end
 
