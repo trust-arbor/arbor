@@ -37,6 +37,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @max_metrics_depth 16
   @max_outcome_depth 6
   @max_provider_session_id_length 200
+  @max_blocking_findings 16
+  @max_finding_text_bytes 2_048
   @outcome_container_keys [
     :payload,
     "payload",
@@ -106,6 +108,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
               files: files(raw),
               report: report(raw, artifacts, metrics, outcome),
               verdict: verdict(raw),
+              blocking_findings: blocking_findings(raw),
               artifacts: artifacts,
               metrics: metrics,
               repo_path: value(raw, :repo_path),
@@ -372,6 +375,79 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp bounded_provider_session_id(_), do: nil
+
+  # The blocking findings ARE the actionable output of a rejected review, but
+  # they used to be reachable only by reading the temp evidence JSON off disk
+  # and matching `blocking_ids` hashes against `finding_ledger.findings`. The
+  # data is already in `raw` — surface it, bounded, so a caller can act on a
+  # rejection from the task result alone.
+  defp blocking_findings(raw) do
+    review = value(raw, :review)
+    ledger = value(review, :finding_ledger)
+
+    case value(ledger, :findings) do
+      findings when is_map(findings) and map_size(findings) > 0 ->
+        findings
+        |> Map.values()
+        |> Enum.filter(&blocking_finding?/1)
+        |> Enum.sort_by(&finding_sort_key/1)
+        |> Enum.take(@max_blocking_findings)
+        |> Enum.map(&compact_finding/1)
+        |> case do
+          [] -> nil
+          list -> list
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp blocking_finding?(finding) when is_map(finding) do
+    value(finding, :blocks_merge) == true or value(finding, :severity) == "blocking"
+  end
+
+  defp blocking_finding?(_finding), do: false
+
+  # Stable ordering so repeated reads of one result agree: owner, then id.
+  defp finding_sort_key(finding) do
+    {to_string(value(finding, :owner) || ""), to_string(value(finding, :id) || "")}
+  end
+
+  defp compact_finding(finding) do
+    %{
+      id: value(finding, :id),
+      title: bounded_finding_text(value(finding, :title)),
+      severity: value(finding, :severity),
+      owner: value(finding, :owner),
+      state: value(finding, :state),
+      evidence: bounded_finding_text(value(finding, :evidence)),
+      required_action: bounded_finding_text(value(finding, :required_action)),
+      anchor: finding_anchor(value(finding, :anchor))
+    }
+    |> reject_nil_values()
+  end
+
+  defp finding_anchor(anchor) when is_map(anchor) do
+    %{path: value(anchor, :path), line: value(anchor, :line)}
+    |> reject_nil_values()
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      map -> map
+    end
+  end
+
+  defp finding_anchor(_anchor), do: nil
+
+  defp bounded_finding_text(text) when is_binary(text) do
+    if String.valid?(text) and byte_size(text) <= @max_finding_text_bytes do
+      text
+    else
+      String.slice(text, 0, @max_finding_text_bytes)
+    end
+  end
+
+  defp bounded_finding_text(_text), do: nil
 
   defp verdict(raw) do
     review = value(raw, :review)

@@ -669,4 +669,64 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
       "message" => "completed"
     }
   end
+
+  describe "blocking findings" do
+    defp review_raw(findings) do
+      %{
+        "status" => "human_review_required",
+        "branch" => "b",
+        "review" => %{
+          "verdict" => %{"decision" => "rejected"},
+          "finding_ledger" => %{"findings" => findings}
+        }
+      }
+    end
+
+    test "surfaces blocking findings from the result, not just their hashed ids" do
+      # Regression: the actionable output of a rejected review used to be
+      # reachable only by reading the temp evidence JSON off disk and matching
+      # blocking_ids hashes against finding_ledger.findings.
+      raw =
+        review_raw(%{
+          "aaa" => %{
+            "id" => "aaa",
+            "blocks_merge" => true,
+            "severity" => "blocking",
+            "owner" => "security",
+            "title" => "Confused deputy",
+            "evidence" => "signs for a caller-named principal",
+            "required_action" => "bind to an authenticated caller",
+            "anchor" => %{"path" => "lib/x.ex", "line" => 155}
+          },
+          "bbb" => %{"id" => "bbb", "blocks_merge" => false, "severity" => "nit"}
+        })
+
+      assert [finding] = get_in(TaskArtifacts.normalize(raw), [:payload, :blocking_findings])
+      assert finding.id == "aaa"
+      assert finding.title == "Confused deputy"
+      assert finding.required_action == "bind to an authenticated caller"
+      assert finding.anchor == %{path: "lib/x.ex", line: 155}
+    end
+
+    test "omits the key entirely when nothing blocks" do
+      raw = review_raw(%{"bbb" => %{"id" => "bbb", "blocks_merge" => false}})
+      refute Map.has_key?(TaskArtifacts.normalize(raw).payload, :blocking_findings)
+    end
+
+    test "bounds how many findings and how much text it will echo" do
+      many =
+        for i <- 1..40, into: %{} do
+          {"f#{i}",
+           %{
+             "id" => "f#{i}",
+             "blocks_merge" => true,
+             "evidence" => String.duplicate("x", 5_000)
+           }}
+        end
+
+      findings = get_in(TaskArtifacts.normalize(review_raw(many)), [:payload, :blocking_findings])
+      assert length(findings) == 16
+      assert Enum.all?(findings, &(byte_size(&1.evidence) <= 2_048))
+    end
+  end
 end
