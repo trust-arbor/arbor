@@ -43,4 +43,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCoreTest do
       nil
     )
   end
+
+  test "only an all-passed diagnostic set reaches ready" do
+    # Regression: the status fold used to end in `true -> "ready"`, so any
+    # decision outside the known list fell through to ready — a gate failing
+    # OPEN. Nothing may reach "ready" by default.
+    for decision <- ["blocked", "degraded", "unavailable"] do
+      assert {:ok, report} =
+               ReadinessCore.report(@digest, @observed_at, [
+                 diagnostic("passed"),
+                 diagnostic(decision)
+               ])
+
+      refute report["status"] == "ready",
+             "a #{decision} diagnostic must never yield a ready report"
+    end
+
+    assert {:ok, ready} = ReadinessCore.report(@digest, @observed_at, [diagnostic("passed")])
+    assert ready["status"] == "ready"
+  end
 end

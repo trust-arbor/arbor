@@ -601,7 +601,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
                readiness_opts(ctx)
              )
 
-    assert report["status"] == "blocked"
+    # The property under test is that caller-supplied roots are IGNORED, not the
+    # particular status that results. In static mode an unconfigured root now
+    # reports "unavailable"/degraded rather than "blocked", because static mode
+    # runs without runtime config and cannot observe a root the runtime creates
+    # at boot. What must stay true is that the override buys the caller nothing:
+    # the trusted_roots gate still fires and the report never reaches "ready".
+    refute report["status"] == "ready"
+    assert Enum.any?(report["diagnostics"], &(&1["gate_id"] == "trusted_roots"))
     refute Enum.any?(report["diagnostics"], &(&1["code"] == "compilation_valid"))
   end
 

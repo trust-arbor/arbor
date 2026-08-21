@@ -200,7 +200,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
       )
     else
       {:error, reason} ->
-        blocked_report(requested_plan_digest, observed_at, reason)
+        blocked_report(requested_plan_digest, observed_at, reason, mode)
     end
   end
 
@@ -222,7 +222,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         end
 
       {:error, reason} ->
-        blocked_report(plan_digest, observed_at, {:prepared_compilation_invalid, reason})
+        blocked_report(plan_digest, observed_at, {:prepared_compilation_invalid, reason}, mode)
     end
   end
 
@@ -730,14 +730,41 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp blocked_report(plan_digest, observed_at, reason) do
+  # Static mode runs without `config/runtime.exs` applied, so a root that the
+  # runtime creates at boot is INVISIBLE here -- indistinguishable from one
+  # that was never configured. Reporting "blocked" for a fact we structurally
+  # cannot observe is crying wolf, and a gate whose default answer is blocked
+  # on a healthy install trains operators to wave it through.
+  #
+  # Report "unavailable" instead, matching how this module already handles
+  # validation capacity in static mode. `unavailable` NEVER counts as a pass:
+  # ReadinessCore maps it to a "degraded" report, and only "passed" yields
+  # "ready". It means "ask --live", not "fine".
+  #
+  # Only ABSENCE is downgraded. A root that is configured but invalid is
+  # something static mode CAN observe, so it stays blocked.
+  @statically_unobservable_reasons [
+    {:coding_roots_not_configured, :repo},
+    {:coding_roots_not_configured, :worktree}
+  ]
+
+  defp blocked_report(plan_digest, observed_at, reason, mode) do
     {gate_id, code, message, remediation} = failure_diagnostic(reason)
 
-    ReadinessCore.report(
-      plan_digest,
-      observed_at,
-      [blocked(gate_id, code, observed_at, message, remediation)]
-    )
+    diagnostic =
+      if mode == :static and reason in @statically_unobservable_reasons do
+        unavailable(
+          gate_id,
+          code,
+          observed_at,
+          message <> " Not observable in static mode, which runs without runtime configuration.",
+          "Confirm with live readiness (--live) before dispatch."
+        )
+      else
+        blocked(gate_id, code, observed_at, message, remediation)
+      end
+
+    ReadinessCore.report(plan_digest, observed_at, [diagnostic])
   end
 
   defp failure_diagnostic({:coding_roots_not_configured, :repo}) do

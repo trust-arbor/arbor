@@ -51,7 +51,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
     cond do
       "blocked" in decisions -> "blocked"
       Enum.any?(decisions, &(&1 in ["degraded", "unavailable"])) -> "degraded"
-      true -> "ready"
+      # Only an all-"passed" set is ready. Previously any decision outside the
+      # known list fell through to "ready", so a new or unexpected decision
+      # would have failed OPEN. Nothing may reach "ready" by default.
+      Enum.all?(decisions, &(&1 == "passed")) -> "ready"
+      true -> "degraded"
     end
   end
 
