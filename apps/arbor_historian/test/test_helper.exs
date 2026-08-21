@@ -3,7 +3,7 @@ is_ci = System.get_env("CI") == "true"
 
 # Add children to the empty app supervisor (start_children: false leaves it empty)
 for child <- [
-      {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS},
+      {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS, mode: :projection},
       {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
     ] do
   Supervisor.start_child(Arbor.Historian.Supervisor, child)

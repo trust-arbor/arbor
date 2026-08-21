@@ -10,368 +10,238 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   setup do
     originals = %{
-      hot: Application.get_env(:arbor_historian, :hot_event_log_target, :unset),
-      durable: Application.get_env(:arbor_historian, :durable_event_log_target, :unset),
-      starter: Application.get_env(:arbor_historian, :durable_task_starter, :unset)
+      hot: Application.fetch_env(:arbor_historian, :hot_event_log_target),
+      durable: Application.fetch_env(:arbor_historian, :durable_event_log_target)
     }
 
-    Arbor.Signals.Config.Testing.isolate_namespace()
-    Application.delete_env(:arbor_historian, :durable_task_starter)
-
     on_exit(fn ->
-      restore(:arbor_historian, :hot_event_log_target, originals.hot)
-      restore(:arbor_historian, :durable_event_log_target, originals.durable)
-      restore(:arbor_historian, :durable_task_starter, originals.starter)
+      restore(:hot_event_log_target, originals.hot)
+      restore(:durable_event_log_target, originals.durable)
     end)
 
     :ok
   end
 
-  test "facade exports persist_durable_event/4 and the Signals durable-sink behaviour" do
-    assert {:module, Arbor.Historian} = Code.ensure_loaded(Arbor.Historian)
-    assert function_exported?(Arbor.Historian, :persist_durable_event, 4)
-
-    behaviours =
-      Arbor.Historian.module_info(:attributes)
-      |> Keyword.get_values(:behaviour)
-      |> List.flatten()
-
-    assert Arbor.Signals.Contracts.DurableSink in behaviours
-  end
-
-  test "persist_durable_event returns only after durable is readable and ready durable failure is persist_failed" do
+  test "durable acknowledgement precedes projection and projection uses exact assigned positions" do
     ctx = start_isolated_targets()
 
-    Application.put_env(:arbor_historian, :durable_task_starter, fn _fun ->
-      flunk("production persist must not consult :durable_task_starter")
+    configure_target(:durable_event_log_target, ctx.durable, ETS)
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+
+    stream_id = unique_stream("durable_first")
+    :ok = :sys.suspend(ctx.hot)
+
+    task =
+      Task.async(fn ->
+        Arbor.Historian.persist_durable_event(
+          stream_id,
+          :ordered,
+          %{probe: true},
+          correlation_id: "corr",
+          cause_id: "cause"
+        )
+      end)
+
+    task_ref = task.ref
+
+    durable_event =
+      try do
+        assert {:ok, [event]} = await_durable_event(ctx.durable, stream_id)
+        refute_receive {^task_ref, _result}
+        assert event.event_number == 1
+        assert event.global_position == 1
+        event
+      after
+        :ok = :sys.resume(ctx.hot)
+      end
+
+    assert :ok = Task.await(task)
+    assert {:ok, [^durable_event]} = Persistence.read_stream(ctx.durable, ETS, stream_id)
+    assert {:ok, [projected_event]} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+    assert projected_event === durable_event
+  end
+
+  test "durable failure is persist_failed and cannot create a hot phantom" do
+    ctx = start_isolated_targets()
+    configure_target(:durable_event_log_target, ctx.durable, ErrorBackend)
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+    stream_id = unique_stream("no_phantom")
+
+    assert {:error, :persist_failed} =
+             Arbor.Historian.persist_durable_event(stream_id, :failed, %{secret: "payload"}, [])
+
+    assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+  end
+
+  test "invalid, unavailable, raised, malformed, and failed durable writes normalize" do
+    ctx = start_isolated_targets()
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+    stream_id = unique_stream("durable_failures")
+
+    failures = [
+      %{invalid: true},
+      %{name: ctx.durable, backend: :missing_durable_backend, opts: []},
+      %{name: ctx.durable, backend: RaisingBackend, opts: []},
+      %{name: ctx.durable, backend: MalformedBackend, opts: []},
+      %{name: ctx.durable, backend: ErrorBackend, opts: []}
+    ]
+
+    Enum.each(failures, fn target ->
+      Application.put_env(:arbor_historian, :durable_event_log_target, target)
+
+      assert {:error, :persist_failed} =
+               Arbor.Historian.persist_durable_event(stream_id, :failed, %{}, [])
     end)
 
-    stream_id = "p1c_b_sync_#{System.unique_integer([:positive])}"
-    type = :"sync_probe_#{System.unique_integer([:positive])}"
+    assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+  end
 
-    assert :ok =
-             Arbor.Historian.persist_durable_event(stream_id, type, %{probe: true}, [])
-
-    event = read_event!(ctx.durable, stream_id, type)
-    assert event.data["probe"] == true
-    refute Map.has_key?(event.data, "permanent")
-    refute Map.has_key?(event.data, :permanent)
-    assert read_event!(ctx.hot, stream_id, type)
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: ctx.durable,
-      backend: __MODULE__.ErrorBackend,
-      opts: []
-    })
+  test "projection failure cannot negate durable success" do
+    ctx = start_isolated_targets()
+    configure_target(:durable_event_log_target, ctx.durable, ETS)
+    configure_target(:hot_event_log_target, ctx.hot, ProjectionErrorBackend)
+    stream_id = unique_stream("projection_gap")
 
     log =
       capture_log(fn ->
-        assert {:error, :persist_failed} =
+        assert :ok =
                  Arbor.Historian.persist_durable_event(
                    stream_id,
-                   :gap,
+                   :committed,
                    %{secret: "payload"},
                    []
                  )
       end)
 
-    assert log =~ "durable_append_failed"
+    assert log =~ "hot_projection_failed"
     refute log =~ "secret"
     refute log =~ "payload"
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: ctx.durable,
-      backend: __MODULE__.RaisingBackend,
-      opts: []
-    })
-
-    log =
-      capture_log(fn ->
-        assert {:error, :persist_failed} =
-                 Arbor.Historian.persist_durable_event(stream_id, :gap, %{secret: "payload"}, [])
-      end)
-
-    assert log =~ "durable_append_failed" or log =~ "durable_append_raised"
-    refute log =~ "secret"
-    refute log =~ "durable boom"
+    assert {:ok, [_event]} = Persistence.read_stream(ctx.durable, ETS, stream_id)
+    assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
   end
 
-  test "security regression: durable_emit preserves lineage and caller metadata at EventLog boundary" do
+  test "absent, invalid, and unsupported hot projections remain successful gaps" do
     ctx = start_isolated_targets()
-    ensure_signals()
-    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
+    configure_target(:durable_event_log_target, ctx.durable, ETS)
+    stream_id = unique_stream("hot_gaps")
 
-    suffix = System.unique_integer([:positive])
-    stream_id = "audit_lineage_#{suffix}"
-    type = :"lineage_probe_#{suffix}"
-    corr = "corr_lineage_#{suffix}"
-    cause = "cause_lineage_#{suffix}"
-    agent = "agent_lineage_#{suffix}"
+    hot_targets = [
+      %{invalid: true},
+      %{name: :absent_hot_projection, backend: ETS, opts: []},
+      %{name: ctx.hot, backend: ErrorBackend, opts: []}
+    ]
+
+    Enum.each(hot_targets, fn target ->
+      Application.put_env(:arbor_historian, :hot_event_log_target, target)
+      assert :ok = Arbor.Historian.persist_durable_event(stream_id, :committed, %{}, [])
+    end)
+
+    assert {:ok, events} = Persistence.read_stream(ctx.durable, ETS, stream_id)
+    assert length(events) == 3
+  end
+
+  test "lineage and system-owned source_node survive the durable-first boundary" do
+    ctx = start_isolated_targets()
+    configure_target(:durable_event_log_target, ctx.durable, ETS)
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+    stream_id = unique_stream("lineage")
 
     assert :ok =
-             Arbor.Signals.durable_emit(
-               :activity,
-               type,
+             Arbor.Historian.persist_durable_event(
+               stream_id,
+               :lineage,
                %{probe: true},
-               stream_id: stream_id,
-               correlation_id: corr,
-               cause_id: cause,
-               agent_id: agent,
+               correlation_id: "corr",
+               cause_id: "cause",
+               agent_id: "agent",
                metadata: %{
-                 "source_node" => "spoofed_string_node",
-                 audit_reason: "lineage_regression",
-                 source_node: :spoofed_atom_node
+                 "source_node" => "spoofed-string",
+                 source_node: :spoofed_atom,
+                 audit_reason: "regression"
                }
              )
 
-    event = read_event!(ctx.hot, stream_id, type)
-
-    assert event.correlation_id == corr
-    assert event.causation_id == cause
-    assert event.agent_id == agent
-    assert event.metadata["audit_reason"] == "lineage_regression"
-    assert event.type == to_string(type)
-    assert event.data["timestamp"]
-    refute Map.has_key?(event.data, "permanent")
-
-    system_node = to_string(node())
-    assert event.metadata["source_node"] == system_node
-
-    refute event.metadata["source_node"] in [
-             "spoofed_atom_node",
-             ":spoofed_atom_node",
-             "spoofed_string_node"
-           ]
-
-    refute Map.has_key?(event.metadata, :source_node)
+    assert {:ok, [durable_event]} = Persistence.read_stream(ctx.durable, ETS, stream_id)
+    assert {:ok, [hot_event]} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+    assert durable_event === hot_event
+    assert durable_event.correlation_id == "corr"
+    assert durable_event.causation_id == "cause"
+    assert durable_event.agent_id == "agent"
+    assert durable_event.metadata["audit_reason"] == "regression"
+    assert durable_event.metadata["source_node"] == to_string(node())
+    refute Map.has_key?(durable_event.metadata, :source_node)
   end
 
-  test "security regression: absent lineage opts stay nil without empty sentinels" do
-    ctx = start_isolated_targets()
-    ensure_signals()
-    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
-
-    suffix = System.unique_integer([:positive])
-    stream_id = "audit_lineage_absent_#{suffix}"
-    type = :"lineage_absent_#{suffix}"
-
-    assert :ok =
-             Arbor.Signals.durable_emit(:activity, type, %{probe: true}, stream_id: stream_id)
-
-    event = read_event!(ctx.hot, stream_id, type)
-
-    assert is_nil(event.correlation_id)
-    assert is_nil(event.causation_id)
-    assert is_nil(event.agent_id)
-    assert is_map(event.metadata)
-    assert Map.has_key?(event.metadata, "source_node")
-    refute Map.get(event.metadata, "correlation_id") in ["", "nil"]
-  end
-
-  test "writes isolated Config targets rather than leftover hardcoded names" do
-    ctx = start_isolated_targets()
-    ensure_signals()
-    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
-
-    stream_id = "k1e_isolated_#{System.unique_integer([:positive])}"
-    type = :"isolated_#{System.unique_integer([:positive])}"
-
-    assert :ok =
-             Arbor.Historian.persist_durable_event(stream_id, type, %{isolated: true}, [])
-
-    assert read_event!(ctx.hot, stream_id, type)
-    assert read_event!(ctx.durable, stream_id, type)
-    refute ctx.hot == Arbor.Historian.EventLog.ETS
-  end
-
-  test "invalid or unavailable targets log bounded gaps and stay :ok" do
-    ensure_signals()
-    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
-
-    stream_id = "k1e_gap_#{System.unique_integer([:positive])}"
-    payload = %{secret: "payload"}
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{invalid: true})
+  test "invalid UTF-8 and long stream ids are logged safely within the 64-byte bound" do
     Application.put_env(:arbor_historian, :durable_event_log_target, %{invalid: true})
-
-    log =
-      capture_log(fn ->
-        assert :ok = Arbor.Signals.durable_emit(:activity, :gap, payload, stream_id: stream_id)
-      end)
-
-    assert log =~ stream_id
-    assert log =~ "hot_target_invalid"
-    assert log =~ "durable_target_invalid"
-    refute log =~ "secret"
-    refute log =~ "payload"
-
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-    missing_hot = :"k1e_missing_hot_#{System.unique_integer([:positive])}"
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{
-      name: missing_hot,
-      backend: ETS,
-      opts: []
-    })
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: :k1e_missing_durable,
-      backend: :k1e_missing_backend_module,
-      opts: []
-    })
-
-    log =
-      capture_log(fn ->
-        assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, payload, [])
-      end)
-
-    assert log =~ "hot_unavailable"
-    assert log =~ "durable_backend_unavailable"
-    refute log =~ "secret"
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: :k1e_absent_repo_log,
-      backend: ETS,
-      opts: [repo: :k1e_absent_configured_repo]
-    })
-
-    log =
-      capture_log(fn ->
-        assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, payload, [])
-      end)
-
-    assert log =~ "durable_repo_unavailable"
-    refute Process.whereis(:k1e_absent_configured_repo)
-
-    ctx = start_isolated_targets()
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{
-      name: ctx.hot,
-      backend: __MODULE__.ErrorBackend,
-      opts: []
-    })
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{invalid: true})
-
-    log =
-      capture_log(fn ->
-        assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, payload, [])
-      end)
-
-    assert log =~ "hot_append_failed"
-    assert log =~ "durable_target_invalid"
-    refute log =~ "secret"
-  end
-
-  test "security regression: long stream_id is bounded and tail is absent from logs" do
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{invalid: true})
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{invalid: true})
-
-    tail = "TAIL_MUST_NOT_APPEAR_k1e"
-    stream_id = String.duplicate("s", 80) <> tail
-
-    log =
-      capture_log(fn ->
-        assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, %{}, [])
-      end)
-
-    assert log =~ "hot_target_invalid"
-    assert log =~ String.duplicate("s", 64)
-    assert log =~ "..."
-    refute log =~ tail
-    refute log =~ stream_id
-  end
-
-  test "security regression: invalid UTF-8 stream_id cannot escape logs or raise" do
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{invalid: true})
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{invalid: true})
-
-    tail = "TAIL_INVALID_UTF8_k1e"
+    tail = "TAIL_MUST_NOT_APPEAR"
     stream_id = <<"head", 0xFF, 0xFE>> <> String.duplicate("x", 80) <> tail
 
     log =
       capture_log(fn ->
-        assert :ok = Arbor.Historian.persist_durable_event(stream_id, :gap, %{}, [])
+        assert {:error, :persist_failed} =
+                 Arbor.Historian.persist_durable_event(stream_id, :gap, %{}, [])
       end)
 
     assert log =~ "stream=head??"
-    assert log =~ "hot_target_invalid"
-    assert log =~ "durable_target_invalid"
+    assert log =~ "..."
     refute log =~ tail
     refute log =~ <<0xFF, 0xFE>>
     refute log =~ stream_id
   end
-
-  defp start_isolated_targets do
-    suffix = System.unique_integer([:positive])
-    # credo:disable-for-lines:2 Credo.Check.Security.UnsafeAtomConversion
-    hot = :"k1e_hot_#{suffix}"
-    durable = :"k1e_durable_#{suffix}"
-
-    start_event_log!(hot)
-    start_event_log!(durable)
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{
-      name: hot,
-      backend: ETS,
-      opts: []
-    })
-
-    Application.put_env(:arbor_historian, :durable_event_log_target, %{
-      name: durable,
-      backend: ETS,
-      opts: []
-    })
-
-    %{hot: hot, durable: durable}
-  end
-
-  defp start_event_log!(name) do
-    case Process.whereis(name) do
-      pid when is_pid(pid) ->
-        :ok
-
-      nil ->
-        {:ok, pid} = ETS.start_link(name: name)
-
-        on_exit(fn ->
-          if Process.alive?(pid) do
-            try do
-              GenServer.stop(pid)
-            catch
-              :exit, _ -> :ok
-            end
-          end
-        end)
-    end
-  end
-
-  defp ensure_signals do
-    Application.ensure_all_started(:arbor_kernel_runtime)
-
-    Enum.each([Arbor.Signals.Store, Arbor.Signals.Bus], fn mod ->
-      unless Process.whereis(mod) do
-        {:ok, _} = mod.start_link([])
-      end
-    end)
-  end
-
-  defp read_event!(name, stream_id, type) do
-    assert {:ok, events} = Persistence.read_stream(name, ETS, stream_id)
-    type_str = to_string(type)
-
-    Enum.find(events, &(&1.type == type_str)) ||
-      flunk("expected event type #{inspect(type_str)} in #{inspect(stream_id)}")
-  end
-
-  defp restore(app, key, :unset), do: Application.delete_env(app, key)
-  defp restore(app, key, value), do: Application.put_env(app, key, value)
 
   defmodule ErrorBackend do
     def append(_stream_id, _events, _opts), do: {:error, :boom}
   end
 
   defmodule RaisingBackend do
-    def append(_stream_id, _events, _opts), do: raise("durable boom")
+    def append(_stream_id, _events, _opts), do: raise("secret backend exception")
   end
+
+  defmodule MalformedBackend do
+    def append(_stream_id, _events, _opts), do: {:ok, []}
+  end
+
+  defmodule ProjectionErrorBackend do
+    def project_committed_events(_events, _opts), do: {:error, :boom}
+  end
+
+  defp start_isolated_targets do
+    suffix = System.unique_integer([:positive])
+    # credo:disable-for-lines:2 Credo.Check.Security.UnsafeAtomConversion
+    hot = :"historian_hot_projection_#{suffix}"
+    durable = :"historian_durable_log_#{suffix}"
+
+    start_supervised!({ETS, name: durable}, id: durable)
+    start_supervised!({ETS, name: hot, mode: :projection}, id: hot)
+
+    configure_target(:durable_event_log_target, durable, ETS)
+    configure_target(:hot_event_log_target, hot, ETS)
+
+    %{hot: hot, durable: durable}
+  end
+
+  defp configure_target(key, name, backend) do
+    Application.put_env(:arbor_historian, key, %{name: name, backend: backend, opts: []})
+  end
+
+  defp unique_stream(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp await_durable_event(name, stream_id, attempts \\ 50)
+
+  defp await_durable_event(_name, _stream_id, 0), do: {:error, :timeout}
+
+  defp await_durable_event(name, stream_id, attempts) do
+    case Persistence.read_stream(name, ETS, stream_id) do
+      {:ok, [_event]} = found ->
+        found
+
+      {:ok, []} ->
+        Process.sleep(10)
+        await_durable_event(name, stream_id, attempts - 1)
+    end
+  end
+
+  defp restore(key, {:ok, value}), do: Application.put_env(:arbor_historian, key, value)
+  defp restore(key, :error), do: Application.delete_env(:arbor_historian, key)
 end

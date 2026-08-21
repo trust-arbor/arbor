@@ -11,12 +11,13 @@ defmodule Arbor.Historian.DurableSignalSink do
   def persist(stream_id, event_type, data, opts) do
     case construct(stream_id, event_type, data, opts) do
       {:ok, event} ->
-        case append_hot(stream_id, event) do
-          :ok ->
-            persist_durable(stream_id, event)
+        case persist_durable(stream_id, event) do
+          {:ok, committed_events} ->
+            project_hot(stream_id, committed_events)
+            :ok
 
-          :raised ->
-            {:error, :persist_failed}
+          {:error, :persist_failed} = error ->
+            error
         end
 
       {:error, :persist_failed} = error ->
@@ -72,7 +73,7 @@ defmodule Arbor.Historian.DurableSignalSink do
   defp put_present(kw, _key, nil), do: kw
   defp put_present(kw, key, value), do: Keyword.put(kw, key, value)
 
-  defp append_hot(stream_id, event) do
+  defp project_hot(stream_id, committed_events) do
     case Config.hot_event_log_target() do
       {:error, _} ->
         log_gap(stream_id, :hot_target_invalid)
@@ -80,32 +81,33 @@ defmodule Arbor.Historian.DurableSignalSink do
 
       {:ok, target} ->
         cond do
-          not loaded?(target.backend) ->
-            log_gap(stream_id, :hot_backend_unavailable)
-            :ok
-
           is_nil(Process.whereis(target.name)) ->
             log_gap(stream_id, :hot_unavailable)
             :ok
 
           true ->
-            dispatch_hot(stream_id, event, target)
+            dispatch_hot(stream_id, committed_events, target)
         end
     end
   rescue
     _ ->
-      log_gap(stream_id, :hot_append_failed)
-      :raised
+      log_gap(stream_id, :hot_projection_failed)
+      :ok
   catch
     kind, _reason when kind in [:throw, :exit] ->
-      log_gap(stream_id, :hot_append_failed)
-      :raised
+      log_gap(stream_id, :hot_projection_failed)
+      :ok
   end
 
-  defp dispatch_hot(stream_id, event, target) do
-    case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
+  defp dispatch_hot(stream_id, committed_events, target) do
+    case Persistence.project_committed_events(
+           target.name,
+           target.backend,
+           committed_events,
+           target.opts
+         ) do
       {:ok, _} -> :ok
-      _ -> log_gap(stream_id, :hot_append_failed)
+      _ -> log_gap(stream_id, :hot_projection_failed)
     end
 
     :ok
@@ -115,7 +117,7 @@ defmodule Arbor.Historian.DurableSignalSink do
     case Config.durable_event_log_target() do
       {:error, _} ->
         log_gap(stream_id, :durable_target_invalid)
-        :ok
+        {:error, :persist_failed}
 
       {:ok, target} ->
         case durable_ready?(target) do
@@ -124,16 +126,13 @@ defmodule Arbor.Historian.DurableSignalSink do
 
           {:gap, reason} ->
             log_gap(stream_id, reason)
-            :ok
+            {:error, :persist_failed}
         end
     end
   end
 
   defp durable_ready?(target) do
     cond do
-      not loaded?(target.backend) ->
-        {:gap, :durable_backend_unavailable}
-
       Keyword.has_key?(target.opts, :repo) ->
         if is_pid(Process.whereis(Keyword.get(target.opts, :repo))) do
           :ok
@@ -153,8 +152,13 @@ defmodule Arbor.Historian.DurableSignalSink do
   # EventLog's operation deadline; do not wrap in Task.start.
   defp append_durable(stream_id, event, target) do
     case Persistence.append(target.name, target.backend, stream_id, event, target.opts) do
-      {:ok, _} ->
-        :ok
+      {:ok, committed_events} ->
+        if valid_committed_events?(committed_events) do
+          {:ok, committed_events}
+        else
+          log_gap(stream_id, :durable_append_malformed)
+          {:error, :persist_failed}
+        end
 
       _ ->
         log_gap(stream_id, :durable_append_failed)
@@ -170,11 +174,26 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:error, :persist_failed}
   end
 
-  defp loaded?(backend) when is_atom(backend) do
-    match?({:module, _}, Code.ensure_loaded(backend))
+  defp valid_committed_events?(events) when is_list(events) and events != [] do
+    Enum.all?(events, fn
+      %Event{
+        event_number: event_number,
+        global_position: global_position,
+        operation_fingerprint: fingerprint
+      }
+      when is_integer(event_number) and event_number > 0 and
+             is_integer(global_position) and global_position > 0 and
+             is_binary(fingerprint) and byte_size(fingerprint) > 0 ->
+        true
+
+      _ ->
+        false
+    end)
+  rescue
+    _ -> false
   end
 
-  defp loaded?(_backend), do: false
+  defp valid_committed_events?(_events), do: false
 
   @stream_id_log_max_bytes 64
 
