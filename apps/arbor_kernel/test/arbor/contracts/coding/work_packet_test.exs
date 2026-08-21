@@ -146,7 +146,18 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
         Map.put(attrs, "unknown_#{index}", "value")
       end)
 
-    assert {:error, {:invalid_object, :object_too_large}} = WorkPacket.new(oversized_object)
+    # A map with unknown keys is named, not just counted -- the key count alone
+    # used to mask which field was actually wrong.
+    assert {:error, {:unknown_fields, unknown}} = WorkPacket.new(oversized_object)
+    assert "unknown_1" in unknown
+
+    # Genuinely huge objects are still refused outright, without itemising.
+    far_oversized =
+      Enum.reduce(1..(WorkPacket.max_diagnosable_fields() + 1), @valid, fn index, attrs ->
+        Map.put(attrs, "unknown_#{index}", "value")
+      end)
+
+    assert {:error, {:invalid_object, :object_too_large}} = WorkPacket.new(far_oversized)
 
     assert {:error, {:invalid_object, :object_too_large}} =
              WorkPacket.new([success_criteria: ["one"]] ++ List.duplicate({:version, 1}, 7))

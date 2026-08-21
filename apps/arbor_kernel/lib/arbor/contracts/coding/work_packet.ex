@@ -30,6 +30,9 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   @max_text_bytes 4_096
   @max_architecture_ref_bytes 4_096
   @max_packet_bytes 256_000
+  # Upper bound on keys we will itemise in an error before refusing outright.
+  # Above this an oversized object is rejected without naming its fields.
+  @max_diagnosable_fields 64
   @digest_prefix "sha256:"
 
   @schema %{
@@ -95,6 +98,10 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   @doc "Return the maximum encoded packet size in bytes."
   @spec max_packet_bytes() :: pos_integer()
   def max_packet_bytes, do: @max_packet_bytes
+
+  @doc "Return the key count above which an object is refused without itemising."
+  @spec max_diagnosable_fields() :: pos_integer()
+  def max_diagnosable_fields, do: @max_diagnosable_fields
 
   @doc "Construct and validate a closed work packet object."
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
@@ -187,7 +194,23 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   def sha256(packet_or_attrs), do: digest(packet_or_attrs)
 
   defp normalize_version(@schema_version), do: {:ok, @schema_version}
-  defp normalize_version(_version), do: {:error, {:invalid_field, "version", :unsupported}}
+  # Name the accepted value. `version` here is the PACKET SCHEMA version, and it
+  # sits next to `plan.version`, which is a different field with different valid
+  # values -- so a bare :unsupported leaves the caller guessing which "version"
+  # is wrong and what it wanted. Echo the offending value only when it is a
+  # small scalar, so an oversized or hostile term is not reflected back.
+  defp normalize_version(value) do
+    {:error, {:invalid_field, "version", {:expected_one_of, [@schema_version], echoable(value)}}}
+  end
+
+  defp echoable(value) when is_integer(value) or is_boolean(value) or is_nil(value), do: value
+  defp echoable(value) when is_atom(value), do: value
+
+  defp echoable(value) when is_binary(value) do
+    if String.valid?(value) and byte_size(value) <= 64, do: value, else: :unsupported
+  end
+
+  defp echoable(_value), do: :unsupported
 
   defp required_text_list(attrs, field) do
     case Map.fetch(attrs, field) do
@@ -315,10 +338,17 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
       else: {:error, {:invalid_field, field, :unsupported}}
   end
 
+  # A map with more keys than the closed field set NECESSARILY contains an
+  # unknown, duplicate (atom/string variants of one name), or invalid key --
+  # only @field_names distinct names exist. So `normalize_entries/1` can always
+  # name the real problem, and rejecting on the bare key count first only
+  # replaced an accurate error with a misleading one ("object_too_large" for a
+  # 9KB packet against a 256KB limit). Let it diagnose, and keep the size guard
+  # for objects too large to itemise cheaply.
   defp normalize_object(attrs) when is_map(attrs) do
     cond do
       is_struct(attrs) -> {:error, {:invalid_object, :struct_not_allowed}}
-      map_size(attrs) > @max_fields -> {:error, {:invalid_object, :object_too_large}}
+      map_size(attrs) > @max_diagnosable_fields -> {:error, {:invalid_object, :object_too_large}}
       true -> normalize_entries(Map.to_list(attrs))
     end
   end
