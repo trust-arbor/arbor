@@ -18,11 +18,20 @@ defmodule Mix.Tasks.Arbor.Approve do
   ## Options
 
     * `--list` — show pending requests and exit
-    * `--reject` — respond `:rejected` instead of `:approved`
+    * `--reject` — answer `:deny` instead of `:approve`
     * `--basis` — why the decision was made; recorded in the response
       metadata so the decision stays auditable
     * `--key-file` — caller key file (default `~/.arbor/identity.key`)
     * `--as` — optional caller claim; must match the key-file principal
+
+  ## Decision vocabulary
+
+  This task calls `Arbor.Agent.Orchestration.answer_approval/3` with a
+  DECISION (`:approve` / `:deny`), not a response. `Arbor.Contracts.Comms.ApprovalAnswer`
+  normalizes the pair — the response (`:approved` / `:rejected`) and the
+  decision refinement (`:approve` / `:deny` / `:rework`) are two different
+  fields, not two spellings of one value. Read that contract before changing
+  what is sent here.
   """
 
   use Mix.Task
