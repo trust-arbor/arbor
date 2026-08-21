@@ -498,7 +498,7 @@ source-coupling baseline).
 
 <!-- applied-learning: requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it -->
 <a id="applied-learning-requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it"></a>
-**Requested ACP model metadata is a claim until the provider confirms it.** A managed session can report the plan's requested model while the provider actually runs its default: OpenCode started `task_953218` on `opencode/big-pickle` even though Arbor's action result said `zai-coding-plan/glm-5.2`. Verify provider-native session or turn telemetry before attributing work or cost. When model selection is explicit, the start boundary should wait for and validate the selector response, then fail closed on rejection or mismatch instead of silently preserving requested metadata. For config-selectable providers, inspect the validated `AcpSession.status/1` model after selection; the original `session/new` response may still show its pre-selection catalog default. Select only values advertised by the live ACP `configOptions[].options[].value` catalog: provider CLI aliases can be rejected even when their underlying model exists. Do not rely on Cursor `auto` for architecture-heavy work; on 2026-08-21 it resolved to Haiku 4.5 and repeatedly missed load-bearing boundedness and sealing constraints, while explicit Opus 5 handled the same analysis materially better (found 2026-07-21 during managed-branch lifecycle integration; reconfirmed with Codex Spark on 2026-07-24 and Cursor on 2026-08-21).
+**Requested ACP model metadata is a claim until the provider confirms it.** A managed session can report the plan's requested model while the provider actually runs its default: OpenCode started `task_953218` on `opencode/big-pickle` even though Arbor's action result said `zai-coding-plan/glm-5.2`. Verify provider-native session or turn telemetry before attributing work or cost. When model selection is explicit, the start boundary should wait for and validate the selector response, then fail closed on rejection or mismatch instead of silently preserving requested metadata. For config-selectable providers, inspect the validated `AcpSession.status/1` model after selection; the original `session/new` response may still show its pre-selection catalog default. Select only values advertised by the live ACP `configOptions[].options[].value` catalog: provider CLI aliases can be rejected even when their underlying model exists. Do not rely on Cursor `auto` for architecture-heavy work; on 2026-08-21 it resolved to Haiku 4.5 and repeatedly missed load-bearing boundedness and sealing constraints. Explicit `gpt-5.6-sol-high` preserved the regression matrix, designed the cross-library deadline boundary correctly, and passed independent review; use an explicit high-reasoning model for architecture or security packets and reserve medium tiers for tightly bounded edits (found 2026-07-21 during managed-branch lifecycle integration; reconfirmed with Codex Spark on 2026-07-24 and Cursor on 2026-08-21).
 
 <!-- applied-learning: claude-acp-resume-is-launch-bound-and-model-aliases-need-live-attestation -->
 <a id="applied-learning-claude-acp-resume-is-launch-bound-and-model-aliases-need-live-attestation"></a>
@@ -698,9 +698,15 @@ consume the coding stage's remaining wall-clock budget before reopen or
 follow-up delivery, producing `worker_recovery_reopen_failed` or
 `worker_recovery_send_failed` with `:budget_exhausted`. The same failure on Grok
 and Claude proves this is orchestration accounting, not provider behavior.
-Preserve the exact candidate tree, avoid blind cross-provider retries, and
-reserve enough stage budget for one complete recovery turn plus settlement
-(found 2026-07-28 while completing the managed ACP reconciliation read model).
+The send boundary can also time out after a useful provider turn with no manual
+steering, so a terminal-delivery failure is not evidence that the candidate is
+bad. Preserve the exact terminal worktree or immutable snapshot, inspect it,
+avoid blind cross-provider retries, and reserve enough stage budget for one
+complete recovery turn plus settlement. If managed delivery itself remains the
+failure, use the provider's direct CLI against an isolated worktree rather than
+rerunning the implementation from scratch (found 2026-07-28 while completing
+the managed ACP reconciliation read model; extended 2026-08-21 after Cursor
+returned useful code before `worker_recovery_send_failed: :timeout`).
 
 <!-- applied-learning: budget-design-required-plans-for-the-design-and-the-reserved-tail -->
 <a id="applied-learning-budget-design-required-plans-for-the-design-and-the-reserved-tail"></a>

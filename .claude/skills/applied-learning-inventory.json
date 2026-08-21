@@ -5964,7 +5964,7 @@
       "anchor": "applied-learning-requested-acp-model-metadata-is-a-claim-until-the-provider-confirms-it",
       "source_date": "2026-07-21",
       "source_incident": "found 2026-07-21 during managed-branch lifecycle integration).",
-      "content_sha256": "1bb1b8df69ace4cc5e5130277d5dd34e3d8b4c60f20a9392af90a30df4f03cfc",
+      "content_sha256": "c0143747ca1a9ef56bbdb6c69b05107c2c3574e94551f2f561f901202464abcc",
       "always_loaded": false
     },
     {
@@ -6822,7 +6822,7 @@
       "anchor": "applied-learning-acp-recovery-needs-reserved-budget-not-a-provider-switch",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while completing the managed ACP reconciliation read model).",
-      "content_sha256": "c24e43cdef62912d1fcdd2534aea357c65851a1cd55e4d91f04c50d5d486d9e3",
+      "content_sha256": "e39ce8d252fad5ce21493d478c8fd6a7259fe756b76f4761f7a8fd34b486899c",
       "always_loaded": false
     },
     {

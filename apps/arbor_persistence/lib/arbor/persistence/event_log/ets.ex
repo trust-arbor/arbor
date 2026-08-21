@@ -12,7 +12,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   each event up in the global table. This costs one extra ETS lookup per
   event read but cuts the in-memory footprint roughly in half — at scale
   the duplicate full-event storage in both indexes dominated total RAM
-  (see `.arbor/roadmap/0-inbox/historian-startup-replay-cost.md`).
+  (see `.arbor/roadmap/5-completed/historian-startup-replay-cost.md`).
 
   Supports subscriber notifications via pid monitoring.
 
