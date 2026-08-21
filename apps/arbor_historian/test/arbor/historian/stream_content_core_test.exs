@@ -77,6 +77,14 @@ defmodule Arbor.Historian.StreamContent.CoreTest do
       assert :uncertain = Core.classify_absence_reply(:durable, true)
     end
 
+    test "classify projection eviction acknowledgement without treating it as absence proof" do
+      assert :acknowledged = Core.classify_eviction_reply({:ok, %{evicted: 0}})
+      assert :acknowledged = Core.classify_eviction_reply({:ok, %{evicted: 42}})
+      assert :uncertain = Core.classify_eviction_reply({:ok, %{evicted: -1}})
+      assert :uncertain = Core.classify_eviction_reply({:error, :backend_unavailable})
+      assert :uncertain = Core.classify_eviction_reply(:ok)
+    end
+
     test "Keyword.put remaining budget overwrites stale timeout keys" do
       static = [repo: :Repo, purge_timeout_ms: 1, absence_timeout_ms: 1]
 
@@ -86,6 +94,9 @@ defmodule Arbor.Historian.StreamContent.CoreTest do
 
       absence_opts = Core.put_remaining_budget(static, :absence, 99)
       assert Keyword.get(absence_opts, :absence_timeout_ms) == 99
+
+      eviction_opts = Core.put_remaining_budget([], :eviction, 17)
+      assert eviction_opts == [timeout_ms: 17]
     end
 
     test "remaining_ms reports exhaustion" do

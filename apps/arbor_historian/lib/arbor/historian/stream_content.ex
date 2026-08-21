@@ -4,9 +4,10 @@ defmodule Arbor.Historian.StreamContent do
   # Imperative shell for complete-history stream content delete/absence
   # (VP-05D2C3I0C4C). Resolves Historian-owned Config targets, captures one
   # outer monotonic deadline from admitted timeout_ms (default 5000, bound
-  # 1..60_000), and drives durable→hot purge/verify via the public
-  # Arbor.Persistence facade only. Each stage receives only the remaining
-  # budget — timeouts are never reminted per stage.
+  # 1..60_000), and drives durable purge/verify followed by hot projection
+  # eviction through the public Arbor.Persistence facade only. Read-only
+  # absence consults only the durable complete-history authority. Each stage
+  # receives only the remaining budget — timeouts are never reminted per stage.
 
   alias Arbor.Historian.Config
   alias Arbor.Historian.StreamContent.Core
@@ -26,10 +27,9 @@ defmodule Arbor.Historian.StreamContent do
   @spec delete(String.t(), keyword()) :: delete_result()
   def delete(stream_id, opts \\ []) do
     with {:ok, %{timeout_ms: timeout_ms}} <- Core.admit(stream_id, opts),
-         {:ok, durable} <- Config.durable_event_log_target(),
-         {:ok, hot} <- Config.hot_event_log_target() do
+         {:ok, durable} <- Config.durable_event_log_target() do
       deadline_mono = System.monotonic_time(:millisecond) + timeout_ms
-      run_delete(stream_id, durable, hot, deadline_mono, :none_proven_absent)
+      run_delete(stream_id, durable, deadline_mono, :none_proven_absent)
     else
       {:error, reason} -> {:error, reason}
     end
@@ -43,10 +43,9 @@ defmodule Arbor.Historian.StreamContent do
   @spec absent?(String.t(), keyword()) :: absence_result()
   def absent?(stream_id, opts \\ []) do
     with {:ok, %{timeout_ms: timeout_ms}} <- Core.admit(stream_id, opts),
-         {:ok, durable} <- Config.durable_event_log_target(),
-         {:ok, hot} <- Config.hot_event_log_target() do
+         {:ok, durable} <- Config.durable_event_log_target() do
       deadline_mono = System.monotonic_time(:millisecond) + timeout_ms
-      run_absent(stream_id, durable, hot, deadline_mono)
+      observe(stream_id, :durable, durable, deadline_mono)
     else
       {:error, reason} -> {:error, reason}
     end
@@ -57,15 +56,12 @@ defmodule Arbor.Historian.StreamContent do
       Core.absence_indeterminate(stream_id_or_unknown(stream_id))
   end
 
-  defp run_delete(stream_id, durable, hot, deadline_mono, progress) do
+  defp run_delete(stream_id, durable, deadline_mono, progress) do
     with :ok <-
            stage_purge(stream_id, :durable, :durable_delete, durable, deadline_mono, progress),
          {:ok, progress} <-
-           stage_verify(stream_id, :durable, :durable_verify, durable, deadline_mono, progress),
-         :ok <- stage_purge(stream_id, :hot, :hot_delete, hot, deadline_mono, progress),
-         {:ok, _progress} <-
-           stage_verify(stream_id, :hot, :hot_verify, hot, deadline_mono, progress) do
-      :ok
+           stage_verify(stream_id, :durable, :durable_verify, durable, deadline_mono, progress) do
+      stage_evict_hot(stream_id, deadline_mono, progress)
     end
   end
 
@@ -115,9 +111,9 @@ defmodule Arbor.Historian.StreamContent do
   end
 
   defp map_verify_stage(stream_id, source, stage, progress, reply) do
-    # Verify stages only run after a successful purge dispatch for that source, so
-    # pre-dispatch atoms still become incomplete (retryable) rather than bare
-    # pre-effect errors that would hide the attempted durable/hot delete.
+    # Durable verify runs only after a successful purge dispatch, so pre-dispatch
+    # atoms still become incomplete (retryable) rather than bare pre-effect
+    # errors that would hide the attempted durable delete.
     case Core.classify_absence_reply(source, reply) do
       {:proof, true} ->
         next = Core.advance_progress(progress, source, {:ok, true})
@@ -134,14 +130,39 @@ defmodule Arbor.Historian.StreamContent do
     end
   end
 
-  defp run_absent(stream_id, durable, hot, deadline_mono) do
-    with {:ok, durable_proof} <- observe(stream_id, :durable, durable, deadline_mono),
-         {:ok, hot_proof} <- observe(stream_id, :hot, hot, deadline_mono) do
-      cond do
-        durable_proof and hot_proof -> {:ok, true}
-        true -> {:ok, false}
-      end
+  defp stage_evict_hot(stream_id, deadline_mono, progress) do
+    case Config.hot_event_log_target() do
+      {:ok, hot} ->
+        case Core.remaining_ms(deadline_mono, System.monotonic_time(:millisecond)) do
+          :exhausted ->
+            Core.incomplete(stream_id, :hot_delete, progress)
+
+          {:ok, remaining} ->
+            opts = Core.put_remaining_budget(hot.opts, :eviction, remaining)
+            reply = safe_evict(hot.name, hot.backend, stream_id, opts)
+
+            case Core.classify_eviction_reply(reply) do
+              :acknowledged -> :ok
+              :uncertain -> Core.incomplete(stream_id, :hot_delete, progress)
+            end
+        end
+
+      {:error, _reason} ->
+        Core.incomplete(stream_id, :hot_delete, progress)
     end
+  rescue
+    _error -> Core.incomplete(stream_id, :hot_delete, progress)
+  catch
+    _kind, _reason -> Core.incomplete(stream_id, :hot_delete, progress)
+  end
+
+  defp safe_evict(name, backend, stream_id, opts) do
+    Persistence.evict_projected_stream(name, backend, stream_id, opts)
+  rescue
+    _ -> {:error, :backend_unavailable}
+  catch
+    :exit, _ -> {:error, :backend_unavailable}
+    :throw, _ -> {:error, :backend_unavailable}
   end
 
   defp observe(stream_id, source, target, deadline_mono) do

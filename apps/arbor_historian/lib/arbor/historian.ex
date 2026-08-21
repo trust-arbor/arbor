@@ -763,14 +763,16 @@ defmodule Arbor.Historian do
   # ============================================================================
 
   @doc """
-  Delete one exact complete-history stream's content from durable and hot stores.
+  Delete one exact complete-history stream's content from durable authority and
+  evict its hot projection.
 
   Short facade for `delete_complete_history_stream_content/2`. Callers pass only
   a stream id and optional `:timeout_ms` (default 5000 ms, bound `1..60_000`).
-  One outer monotonic deadline is captured; each durable/hot purge and absence
-  call receives only remaining budget (never reminted). Returns `:ok` only after
-  both sources independently prove absence. Partial or uncertain outcomes report
-  `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}`.
+  One outer monotonic deadline is captured; durable purge, durable absence
+  verification, and hot eviction each receive only remaining budget (never
+  reminted). Returns `:ok` only after durable absence is proven and the hot
+  projection acknowledges exact-stream eviction. Partial or uncertain outcomes
+  report `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}`.
   """
   @spec delete_stream_content(String.t(), keyword()) ::
           Arbor.Contracts.API.Historian.stream_content_delete_result()
@@ -778,12 +780,12 @@ defmodule Arbor.Historian do
     do: delete_complete_history_stream_content(stream_id, opts)
 
   @doc """
-  Prove whether one exact complete-history stream's content is absent on both sources.
+  Prove whether one exact complete-history stream's durable content is absent.
 
   Short facade for `check_complete_history_stream_content_absent/2`. Read-only.
   Uses one outer deadline from optional `:timeout_ms` (default 5000 ms, bound
-  `1..60_000`) and remaining-budget observations only. Returns `{:ok, true}`
-  only after dual independent proofs.
+  `1..60_000`) and one remaining-budget observation of the Config-owned durable
+  authority. The replaceable hot projection is never consulted.
   """
   @spec stream_content_absent?(String.t(), keyword()) ::
           Arbor.Contracts.API.Historian.stream_content_absence_result()

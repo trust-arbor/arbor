@@ -15,6 +15,19 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
 
   @timestamp ~U[2026-08-21 00:00:00.000000Z]
 
+  defmodule BlockingEvictionBackend do
+    @moduledoc false
+
+    def evict_projected_stream(_stream_id, name: name) when is_atom(name) do
+      receive do
+        :never -> {:ok, %{evicted: 0}}
+      end
+    end
+
+    def evict_projected_stream(_stream_id, _unsealed_opts),
+      do: {:error, :invalid_precondition}
+  end
+
   setup do
     {:ok, name: start_projection()}
   end
@@ -213,6 +226,22 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
              Persistence.project_committed_events(name, ETS, [alpha])
   end
 
+  test "projection eviction bounds dispatch and keeps backend projection opts sealed" do
+    started_mono = System.monotonic_time(:millisecond)
+
+    assert {:error, :backend_unavailable} =
+             Persistence.evict_projected_stream(
+               :bounded_projection,
+               BlockingEvictionBackend,
+               "alpha",
+               timeout_ms: 25
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_mono
+    assert elapsed_ms >= 10
+    assert elapsed_ms < 1_000
+  end
+
   test "projection control APIs reject unsupported backends and invalid inputs", %{name: name} do
     assert {:error, :projection_not_supported} =
              Persistence.evict_projected_stream(name, StoreETS, "stream")
@@ -225,6 +254,12 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
 
     assert {:error, :invalid_precondition} =
              Persistence.resident_projected_stream_version(name, ETS, "stream", %{bad: :opts})
+
+    assert {:error, :invalid_precondition} =
+             Persistence.evict_projected_stream(name, ETS, "stream", timeout_ms: 0)
+
+    assert {:error, :invalid_precondition} =
+             Persistence.evict_projected_stream(name, ETS, "stream", timeout_ms: 60_001)
   end
 
   test "authoritative mode retains purge and version authority but rejects projection controls" do

@@ -38,7 +38,10 @@ defmodule Arbor.Historian.StreamContentIntegrationTest do
 
   setup do
     hot_name = :"c4c_integ_hot_#{System.unique_integer([:positive])}"
-    start_supervised!({ETS, name: hot_name, max_age_ms: :infinity, trim_interval_ms: :disabled})
+
+    start_supervised!(
+      {ETS, name: hot_name, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled}
+    )
 
     previous_durable = Application.get_env(:arbor_historian, :durable_event_log_target)
     previous_hot = Application.get_env(:arbor_historian, :hot_event_log_target)
@@ -105,8 +108,8 @@ defmodule Arbor.Historian.StreamContentIntegrationTest do
         assert is_integer(persisted.global_position)
         assert persisted.stream_id == stream
 
-        assert {:ok, [hot_persisted]} = Persistence.append(hot_name, ETS, stream, event)
-        assert hot_persisted.stream_id == stream
+        assert {:ok, %{projected: 1, skipped: 0}} =
+                 Persistence.project_committed_events(hot_name, ETS, [persisted])
 
         {stream, persisted}
       end
@@ -138,7 +141,7 @@ defmodule Arbor.Historian.StreamContentIntegrationTest do
     assert {:ok, true} =
              Persistence.event_stream_absent?(durable_name, EctoEventLog, target, repo: Repo)
 
-    assert {:ok, true} = Persistence.event_stream_absent?(hot_name, ETS, target)
+    assert {:ok, []} = Persistence.read_stream(hot_name, ETS, target)
 
     assert {:ok, [prefix_d_after]} =
              Persistence.read_stream(durable_name, EctoEventLog, prefix_related, repo: Repo)

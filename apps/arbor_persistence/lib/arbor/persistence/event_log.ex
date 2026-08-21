@@ -512,6 +512,27 @@ defmodule Arbor.Persistence.EventLog do
   end
 
   @doc false
+  @spec prepare_projection_eviction(stream_id(), term()) ::
+          {:ok, keyword(), integer()}
+          | {:error, :invalid_stream_id | :invalid_precondition}
+  def prepare_projection_eviction(stream_id, opts) do
+    started_mono = System.monotonic_time(:millisecond)
+
+    with :ok <- validate_stream_id(stream_id),
+         {:ok, normalized_opts} <- normalize_opts(opts),
+         keys = Keyword.keys(normalized_opts),
+         true <- length(keys) == length(Enum.uniq(keys)),
+         true <- Enum.all?(keys, &(&1 == :timeout_ms)),
+         {:ok, timeout_ms} <-
+           bounded_timeout(Keyword.get(normalized_opts, :timeout_ms, @default_append_timeout_ms)) do
+      {:ok, [], started_mono + timeout_ms}
+    else
+      false -> {:error, :invalid_precondition}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
   @spec validate_stream_range(stream_id(), term()) ::
           {:ok,
            %{

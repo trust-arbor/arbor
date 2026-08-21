@@ -46,14 +46,23 @@ defmodule Arbor.Contracts.API.Historian do
   @typedoc "Caller options for complete-history stream content delete/absence."
   @type stream_content_opts :: [{:timeout_ms, stream_content_timeout_ms()}]
 
-  @typedoc "Exact stage of a dual-source stream content delete pipeline."
+  @typedoc """
+  Exact stage of durable stream deletion and hot projection eviction.
+
+  `:hot_verify` is retained in the public vocabulary for compatibility with
+  previously persisted result envelopes; current implementations do not use a
+  hot projection as absence authority and therefore do not emit that stage.
+  """
   @type stream_content_delete_stage ::
           :durable_delete | :durable_verify | :hot_delete | :hot_verify
 
   @typedoc """
-  Proof-based progress for dual-source stream content delete.
+  Proof-based progress for complete-history stream content deletion.
 
-  Advanced only by successful absence proofs, never by purge dispatch alone.
+  Current implementations advance only to `:durable_proven_absent`, after the
+  configured durable authority proves absence. The legacy
+  `:durable_and_hot_proven_absent` value remains decodable for compatibility;
+  hot projection eviction is an acknowledgement, not an absence proof.
   """
   @type stream_content_proven_progress ::
           :none_proven_absent
@@ -70,7 +79,7 @@ defmodule Arbor.Contracts.API.Historian do
           | :absence_not_supported
           | :verification_failed
 
-  @typedoc "Result of deleting one complete history stream's durable+hot content."
+  @typedoc "Result of deleting durable history and evicting its hot projection."
   @type stream_content_delete_result ::
           :ok
           | {:error,
@@ -87,7 +96,7 @@ defmodule Arbor.Contracts.API.Historian do
           | :absence_not_supported
           | :verification_failed
 
-  @typedoc "Result of proving complete history stream content absence on both sources."
+  @typedoc "Result of proving absence from the configured durable authority."
   @type stream_content_absence_result ::
           {:ok, true}
           | {:ok, false}
@@ -271,20 +280,23 @@ defmodule Arbor.Contracts.API.Historian do
   # ===========================================================================
 
   @doc """
-  Permanently delete one exact complete-history stream's content from both the
-  Historian-owned durable EventLog and hot cache under one absolute deadline.
+  Permanently delete one exact complete-history stream from the Historian-owned
+  durable EventLog, then evict the corresponding hot projection under the same
+  absolute deadline.
 
   Captures a single outer monotonic deadline from `:timeout_ms` (default
-  5000 ms, bound `1..60_000`). Every durable/hot purge and absence call
-  receives only the remaining budget — timeouts are never reminted per stage.
+  5000 ms, bound `1..60_000`). Durable purge, durable absence verification, and
+  hot projection eviction receive only the remaining budget; timeouts are never
+  reminted per stage.
   Exhausted budget stops the pipeline with
   `{:error, {:delete_incomplete, stream_id, stage, proven_progress}}` at the
   stage about to run or running.
 
-  Success (`:ok`) requires independent absence proofs on both sources. Progress
-  is proof-based: purge `:ok` alone never advances proven progress. Partial or
-  uncertain outcomes after an attempted effect return the same
-  `delete_incomplete` envelope with exact stage and proven progress.
+  Success (`:ok`) requires durable absence proof followed by an acknowledged
+  exact-stream cache eviction. Only the durable proof advances proven progress;
+  the hot projection is never absence authority. Partial or uncertain outcomes
+  after an attempted effect return the same `delete_incomplete` envelope with
+  exact stage and proven progress.
 
   Callers supply only a validated stream id and timeout options.
   Backend/repo/process selection is not public.
@@ -293,13 +305,13 @@ defmodule Arbor.Contracts.API.Historian do
               stream_content_delete_result()
 
   @doc """
-  Prove whether one exact complete-history stream's content is absent on both
-  the durable EventLog and hot cache under one absolute deadline.
+  Prove whether one exact complete-history stream is absent from the configured
+  durable EventLog under one absolute deadline.
 
   Captures a single outer monotonic deadline from `:timeout_ms` (default
-  5000 ms, bound `1..60_000`) and passes only remaining budget to each source
-  observation. Read-only. Returns `{:ok, true}` only after independent dual
-  proofs. Source uncertainty returns
+  5000 ms, bound `1..60_000`) and passes only remaining budget to the durable
+  observation. Read-only. The hot projection is never consulted and cannot
+  prove or refute durable absence. Durable uncertainty returns
   `{:error, {:absence_indeterminate, stream_id}}` and must never be normalized
   to true. Does not mutate content. Backend/repo/process selection is not public.
   """

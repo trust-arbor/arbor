@@ -175,6 +175,38 @@ defmodule Arbor.Historian.StreamContentTest do
       end
     end
 
+    def evict_projected_stream(stream_id, opts) do
+      name = Keyword.fetch!(opts, :name)
+      record_call(name, :evict, stream_id)
+
+      case take_script(name, :evict) do
+        :ok ->
+          do_evict(name, stream_id)
+
+        :indeterminate ->
+          {:error, :backend_unavailable}
+
+        :malformed ->
+          {:ok, %{evicted: -1}}
+
+        :raise ->
+          raise "injected eviction failure"
+
+        :exit ->
+          exit(:injected_eviction_exit)
+
+        :unavailable ->
+          {:error, :backend_unavailable}
+
+        :not_supported ->
+          {:error, :projection_not_supported}
+
+        :hold ->
+          hold_until_release(name, :evict, stream_id)
+          {:error, :backend_unavailable}
+      end
+    end
+
     defp hold_until_release(name, op, stream_id) do
       holder = self()
 
@@ -209,6 +241,18 @@ defmodule Arbor.Historian.StreamContentTest do
         end)
 
       {:ok, not present?}
+    end
+
+    defp do_evict(name, stream_id) do
+      evicted =
+        Agent.get_and_update(@agent_name, fn state ->
+          streams = Map.fetch!(state.streams, name)
+          present? = MapSet.member?(streams, stream_id)
+          next_streams = Map.put(state.streams, name, MapSet.delete(streams, stream_id))
+          {if(present?, do: 1, else: 0), %{state | streams: next_streams}}
+        end)
+
+      {:ok, %{evicted: evicted}}
     end
 
     defp take_script(name, op) do
@@ -246,8 +290,8 @@ defmodule Arbor.Historian.StreamContentTest do
       InjectBackend.start_state!(%{
         streams: %{durable_name => MapSet.new(), hot_name => MapSet.new()},
         scripts: %{
-          durable_name => %{purge: [], absent: []},
-          hot_name => %{purge: [], absent: []}
+          durable_name => %{purge: [], absent: [], evict: []},
+          hot_name => %{purge: [], absent: [], evict: []}
         },
         calls: [],
         waiter: self(),
@@ -314,30 +358,52 @@ defmodule Arbor.Historian.StreamContentTest do
     assert {:error, :delete_not_supported} = Historian.delete_stream_content("t")
   end
 
-  test "read-only absence never purges and dual-proves", %{
+  test "security regression: stale present hot projection cannot refute durable absence", %{
     durable_name: durable_name,
     hot_name: hot_name
   } do
     seed(durable_name, hot_name, "target")
 
-    assert {:ok, false} = Historian.stream_content_absent?("target")
-    calls = InjectBackend.get_state().calls
-    assert Enum.all?(calls, fn {_name, op, _} -> op == :absent end)
-    assert length(calls) >= 2
-
-    # Clear and prove true without purge.
     InjectBackend.update_state(fn state ->
-      streams =
-        state.streams
-        |> Map.put(durable_name, MapSet.new())
-        |> Map.put(hot_name, MapSet.new())
-
+      streams = Map.put(state.streams, durable_name, MapSet.new())
       %{state | streams: streams, calls: []}
     end)
 
     assert {:ok, true} = Historian.stream_content_absent?("target")
     calls = InjectBackend.get_state().calls
-    refute Enum.any?(calls, fn {_n, op, _} -> op == :purge end)
+    assert calls == [{durable_name, :absent, "target"}]
+    assert present?(hot_name, "target")
+  end
+
+  test "security regression: empty hot projection cannot hide durable presence", %{
+    durable_name: durable_name,
+    hot_name: hot_name
+  } do
+    seed(durable_name, hot_name, "target")
+
+    InjectBackend.update_state(fn state ->
+      streams = Map.put(state.streams, hot_name, MapSet.new())
+      %{state | streams: streams, calls: []}
+    end)
+
+    assert {:ok, false} = Historian.stream_content_absent?("target")
+    calls = InjectBackend.get_state().calls
+    assert calls == [{durable_name, :absent, "target"}]
+  end
+
+  test "security regression: hot unavailability cannot affect or receive read-only absence",
+       %{durable_name: durable_name, hot_name: hot_name} do
+    seed(durable_name, hot_name, "target")
+
+    InjectBackend.update_state(fn state ->
+      streams = Map.put(state.streams, durable_name, MapSet.new())
+      %{state | streams: streams, calls: []}
+    end)
+
+    Application.put_env(:arbor_historian, :hot_event_log_target, :malformed)
+
+    assert {:ok, true} = Historian.stream_content_absent?("target")
+    assert InjectBackend.get_state().calls == [{durable_name, :absent, "target"}]
   end
 
   test "absence uncertainty is indeterminate and preserves content", %{
@@ -354,7 +420,8 @@ defmodule Arbor.Historian.StreamContentTest do
     assert present?(hot_name, "target")
   end
 
-  # Complete four-stage deterministic failure matrix (Rev 2).
+  # Preserve the durable failure matrix and adapt only the obsolete hot stages
+  # to the projection-eviction boundary.
   for {stage, source_name, op, inject, progress} <- [
         {:durable_delete, :durable_name, :purge, :indeterminate, :none_proven_absent},
         {:durable_delete, :durable_name, :purge, :malformed, :none_proven_absent},
@@ -365,15 +432,10 @@ defmodule Arbor.Historian.StreamContentTest do
         {:durable_verify, :durable_name, :absent, :raise, :none_proven_absent},
         {:durable_verify, :durable_name, :absent, :exit, :none_proven_absent},
         {:durable_verify, :durable_name, :absent, false, :none_proven_absent},
-        {:hot_delete, :hot_name, :purge, :indeterminate, :durable_proven_absent},
-        {:hot_delete, :hot_name, :purge, :malformed, :durable_proven_absent},
-        {:hot_delete, :hot_name, :purge, :raise, :durable_proven_absent},
-        {:hot_delete, :hot_name, :purge, :exit, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :indeterminate, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :malformed, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :raise, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :exit, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, false, :durable_proven_absent}
+        {:hot_delete, :hot_name, :evict, :indeterminate, :durable_proven_absent},
+        {:hot_delete, :hot_name, :evict, :malformed, :durable_proven_absent},
+        {:hot_delete, :hot_name, :evict, :raise, :durable_proven_absent},
+        {:hot_delete, :hot_name, :evict, :exit, :durable_proven_absent}
       ] do
     test "inject #{stage}/#{inject} reports incomplete then retry converges", context do
       stage = unquote(stage)
@@ -395,14 +457,20 @@ defmodule Arbor.Historian.StreamContentTest do
       # Healthy retry: empty scripts fall through to store-backed success.
       assert :ok = Historian.delete_stream_content("target", timeout_ms: 5_000)
       assert {:ok, true} = Historian.stream_content_absent?("target")
+
+      calls = InjectBackend.get_state().calls
+
+      refute Enum.any?(calls, fn
+               {^hot_name, op, _} -> op in [:purge, :absent]
+               _other -> false
+             end)
     end
   end
 
   for {stage, source_name, op, progress} <- [
         {:durable_delete, :durable_name, :purge, :none_proven_absent},
         {:durable_verify, :durable_name, :absent, :none_proven_absent},
-        {:hot_delete, :hot_name, :purge, :durable_proven_absent},
-        {:hot_verify, :hot_name, :absent, :durable_proven_absent}
+        {:hot_delete, :hot_name, :evict, :durable_proven_absent}
       ] do
     test "timeout hold at #{stage} reports incomplete then retry converges", context do
       stage = unquote(stage)
@@ -425,8 +493,12 @@ defmodule Arbor.Historian.StreamContentTest do
 
       assert_receive {:stage_entered, ^name, ^op, "target"}, 1_000
 
+      started_mono = System.monotonic_time(:millisecond)
+
       assert {:error, {:delete_incomplete, "target", ^stage, ^progress}} =
                Task.await(task, 5_000)
+
+      assert System.monotonic_time(:millisecond) - started_mono < 1_000
 
       # Later stages must not run after the held stage times out.
       later_forbidden? = later_stage_forbidden?(stage, durable_name, hot_name)
@@ -451,7 +523,7 @@ defmodule Arbor.Historian.StreamContentTest do
     )
 
     start_supervised!(
-      {ETS, name: hot, max_age_ms: :infinity, trim_interval_ms: :disabled},
+      {ETS, name: hot, mode: :projection, max_age_ms: :infinity, trim_interval_ms: :disabled},
       id: hot
     )
 
@@ -479,9 +551,10 @@ defmodule Arbor.Historian.StreamContentTest do
     prefix_related = "agent:alice2"
     unrelated = "session:other"
 
-    for store <- [durable, hot], stream <- [target, prefix_related, unrelated] do
+    for stream <- [target, prefix_related, unrelated] do
       event = Event.new(stream, "test.created", %{"stream" => stream})
-      assert {:ok, [_]} = Persistence.append(store, ETS, stream, event)
+      assert {:ok, [persisted]} = Persistence.append(durable, ETS, stream, event)
+      assert {:ok, %{projected: 1}} = Persistence.project_committed_events(hot, ETS, [persisted])
     end
 
     assert {:ok, [prefix_d]} = Persistence.read_stream(durable, ETS, prefix_related)
@@ -527,7 +600,7 @@ defmodule Arbor.Historian.StreamContentTest do
     seed(durable_name, hot_name, "target")
     script(durable_name, :purge, [:ok])
     script(durable_name, :absent, [true])
-    script(hot_name, :purge, [:unavailable])
+    script(hot_name, :evict, [:unavailable])
 
     assert {:error, {:delete_incomplete, "target", :hot_delete, :durable_proven_absent}} =
              Historian.delete_stream_content("target")
@@ -543,12 +616,47 @@ defmodule Arbor.Historian.StreamContentTest do
     seed(durable_name, hot_name, "target")
     script(durable_name, :purge, [:ok])
     script(durable_name, :absent, [true])
-    script(hot_name, :purge, [:not_supported])
+    script(hot_name, :evict, [:not_supported])
 
     assert {:error, {:delete_incomplete, "target", :hot_delete, :durable_proven_absent}} =
              Historian.delete_stream_content("target")
 
     assert :ok = Historian.delete_stream_content("target")
+  end
+
+  test "security regression: delete evicts projection and never gives it purge or absence authority",
+       %{durable_name: durable_name, hot_name: hot_name} do
+    seed(durable_name, hot_name, "target")
+
+    assert :ok = Historian.delete_stream_content("target")
+
+    calls = InjectBackend.get_state().calls |> Enum.reverse()
+
+    assert calls == [
+             {durable_name, :purge, "target"},
+             {durable_name, :absent, "target"},
+             {hot_name, :evict, "target"}
+           ]
+
+    refute present?(durable_name, "target")
+    refute present?(hot_name, "target")
+  end
+
+  test "security regression: caller cannot substitute Config-owned storage authority", %{
+    durable_name: durable_name,
+    hot_name: hot_name
+  } do
+    seed(durable_name, hot_name, "target")
+
+    assert {:error, :invalid_precondition} =
+             Historian.delete_stream_content("target",
+               event_log: :attacker_log,
+               backend: UnsupportedBackend
+             )
+
+    assert present?(durable_name, "target")
+    assert present?(hot_name, "target")
+    assert InjectBackend.get_state().calls == []
   end
 
   test "config rejects timeout keys in static target opts" do
@@ -609,8 +717,8 @@ defmodule Arbor.Historian.StreamContentTest do
         |> Map.update!(hot_name, &MapSet.put(&1, stream_id))
 
       scripts = %{
-        durable_name => %{purge: [], absent: []},
-        hot_name => %{purge: [], absent: []}
+        durable_name => %{purge: [], absent: [], evict: []},
+        hot_name => %{purge: [], absent: [], evict: []}
       }
 
       %{state | streams: streams, scripts: scripts, calls: [], holders: []}
@@ -623,7 +731,7 @@ defmodule Arbor.Historian.StreamContentTest do
     end)
   end
 
-  defp script_reach_stage(stage, durable_name, hot_name, name, op, inject) do
+  defp script_reach_stage(stage, durable_name, _hot_name, name, op, inject) do
     case stage do
       :durable_delete ->
         script(name, op, [inject])
@@ -635,12 +743,6 @@ defmodule Arbor.Historian.StreamContentTest do
       :hot_delete ->
         script(durable_name, :purge, [:ok])
         script(durable_name, :absent, [true])
-        script(name, op, [inject])
-
-      :hot_verify ->
-        script(durable_name, :purge, [:ok])
-        script(durable_name, :absent, [true])
-        script(hot_name, :purge, [:ok])
         script(name, op, [inject])
     end
   end
@@ -668,11 +770,9 @@ defmodule Arbor.Historian.StreamContentTest do
       :hot_delete ->
         fn
           {^hot_name, :absent, _} -> true
+          {^hot_name, :purge, _} -> true
           _ -> false
         end
-
-      :hot_verify ->
-        fn _ -> false end
     end
   end
 

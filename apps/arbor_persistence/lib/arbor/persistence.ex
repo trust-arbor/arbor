@@ -1382,18 +1382,32 @@ defmodule Arbor.Persistence do
   only the number of resident event payloads removed and makes no claim that
   the stream is absent from its authoritative store. Byte-identical events may
   be projected again afterward.
+
+  `:timeout_ms` sets one `1..60_000` millisecond facade deadline (default
+  `5_000`) across backend dispatch and reply. The timeout control is consumed
+  by this facade and is never passed into the backend's sealed projection opts.
+  Timeout or worker failure returns `{:error, :backend_unavailable}`; eviction
+  is idempotent and may be retried after that uncertainty.
   """
   @spec evict_projected_stream(atom(), module(), String.t(), keyword()) ::
           EventLog.projection_eviction_result()
   def evict_projected_stream(name, backend, stream_id, opts \\ []) do
     with :ok <- validate_store_name(name),
-         {:ok, normalized_opts} <-
-           EventLog.validate_projection_stream_request(stream_id, opts),
+         {:ok, backend_opts, deadline_mono} <-
+           EventLog.prepare_projection_eviction(stream_id, opts),
          :ok <- validate_backend(backend, :evict_projected_stream, 2) do
-      backend.evict_projected_stream(
-        stream_id,
-        Keyword.put(normalized_opts, :name, name)
-      )
+      case BoundedWorker.run(
+             fn ->
+               backend.evict_projected_stream(
+                 stream_id,
+                 Keyword.put(backend_opts, :name, name)
+               )
+             end,
+             deadline_mono
+           ) do
+        {:ok, result} -> result
+        {:error, _uncertain} -> {:error, :backend_unavailable}
+      end
     else
       {:error, :backend_unavailable} -> {:error, :projection_not_supported}
       {:error, _reason} = error -> error

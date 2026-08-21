@@ -36,6 +36,7 @@ defmodule Arbor.Historian.StreamContent.Core do
           {:proof, boolean()}
           | {:pre, pre_error()}
           | :uncertain
+  @type eviction_class :: :acknowledged | :uncertain
 
   @spec admit(term(), term()) ::
           {:ok, %{timeout_ms: pos_integer()}}
@@ -128,6 +129,13 @@ defmodule Arbor.Historian.StreamContent.Core do
 
   def classify_absence_reply(source, _reply) when source in [:durable, :hot], do: :uncertain
 
+  @spec classify_eviction_reply(term()) :: eviction_class()
+  def classify_eviction_reply({:ok, %{evicted: evicted}})
+      when is_integer(evicted) and evicted >= 0,
+      do: :acknowledged
+
+  def classify_eviction_reply(_reply), do: :uncertain
+
   @spec incomplete(String.t(), stage(), proven_progress()) ::
           {:error, {:delete_incomplete, String.t(), stage(), proven_progress()}}
   def incomplete(stream_id, stage, progress)
@@ -146,7 +154,8 @@ defmodule Arbor.Historian.StreamContent.Core do
     {:error, {:absence_indeterminate, stream_id}}
   end
 
-  @spec put_remaining_budget(keyword(), :purge | :absence, pos_integer()) :: keyword()
+  @spec put_remaining_budget(keyword(), :purge | :absence | :eviction, pos_integer()) ::
+          keyword()
   def put_remaining_budget(static_opts, :purge, remaining)
       when is_list(static_opts) and is_integer(remaining) and remaining > 0 do
     Keyword.put(static_opts, :purge_timeout_ms, remaining)
@@ -155,6 +164,11 @@ defmodule Arbor.Historian.StreamContent.Core do
   def put_remaining_budget(static_opts, :absence, remaining)
       when is_list(static_opts) and is_integer(remaining) and remaining > 0 do
     Keyword.put(static_opts, :absence_timeout_ms, remaining)
+  end
+
+  def put_remaining_budget(static_opts, :eviction, remaining)
+      when is_list(static_opts) and is_integer(remaining) and remaining > 0 do
+    Keyword.put(static_opts, :timeout_ms, remaining)
   end
 
   defp source_unavailable(:durable), do: :durable_unavailable
