@@ -829,3 +829,7 @@ absent key, so teardown can delete a deliberate override and silently reactivate
 default backend. Snapshot with `Application.fetch_env/2` and restore `{:ok, value}`
 versus `:error` exactly (found 2026-08-20 when Security teardown re-enabled JSONFile
 and cascaded into 220 `:authority_root_unconfigured` failures).
+
+<!-- applied-learning: a-baseline-is-only-valid-on-a-pinned-tree -->
+<a id="applied-learning-a-baseline-is-only-valid-on-a-pinned-tree"></a>
+**A baseline is only valid if it is the identical command on a PINNED tree.** Comparing a suite run "before" and "after" a change proves nothing when the scope differs or the tree moves. Three ways this went wrong on 2026-08-20: baselining a three-app `mix test` invocation against a single-file run (multi-app paths also defeat per-app BEAM isolation and manufactured 251 failures); "verifying" a fix against a call that produced nothing to suppress, reading a null result as a positive; and — worst — attributing failures to a new test file while another agent session committed concurrently, so the test count moved 1316 → 1322 → 1333 → 1376 between runs and every comparison was two different codebases. Before a before/after, record HEAD and `git status`, re-check both afterwards, and treat any change in total test count as invalidating the comparison. Corollary: `git stash` is NOT read-only on a shared tree — it mutates the index and left another session's new file in an unmerged `DU` state.
