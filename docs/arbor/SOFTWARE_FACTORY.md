@@ -325,6 +325,12 @@ Local static check:
 ./bin/mix arbor.coding.check --plan /tmp/factory-first-run.json --static --json
 ```
 
+`--static` runs without `config/runtime.exs` applied, so it reports
+`trusted_roots: worktree_roots_unconfigured` even on a healthy dev install —
+the dev worktree root is created at boot by runtime config, not at compile
+time. Treat that specific code as noise from `--static` and confirm with
+`--live`, which evaluates against the running node.
+
 Live readiness (same payload you will dispatch):
 
 ```bash
@@ -424,8 +430,22 @@ caller = "agent_<caller>"
 target = "agent_<coordinator>"
 task = Jason.decode!(File.read!("/tmp/factory-first-run.json"))
 
-{:ok, report} = Arbor.Agent.coding_dispatch_readiness(target, task, caller_id: caller)
-{:ok, task_id} = Arbor.Agent.dispatch_task(target, task, caller_id: caller)
+{:ok, report} = Arbor.Agent.coding_dispatch_readiness(caller, target, task)
+{:ok, task_id} = Arbor.Agent.dispatch_task(caller, target, task)
+```
+
+Both take the caller **first** and the target second, as positional arguments —
+`coding_dispatch_readiness(caller_id, target_agent_id, task, opts \\ [])` and
+`dispatch_task(caller_id, target_agent_id, task, opts \\ [])`. Passing the
+caller in `opts` instead returns `{:error, :invalid_agent_id}`, which reads like
+a bad agent id rather than a wrong call shape.
+
+`Arbor.Agent.task_status/2` does not exist; status and result live on
+`Arbor.Agent.Orchestration`:
+
+```elixir
+{:ok, status} = Arbor.Agent.Orchestration.task_status(task_id, caller_id: caller)
+{:ok, result} = Arbor.Agent.Orchestration.task_result(task_id, caller_id: caller)
 ```
 
 ACP evidence capture can be skewed a few seconds after a previous worker;
