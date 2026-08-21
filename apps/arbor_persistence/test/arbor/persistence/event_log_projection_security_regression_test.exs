@@ -299,7 +299,7 @@ defmodule Arbor.Persistence.EventLogProjectionSecurityRegressionTest do
 
     assert {:ok, 0} = Persistence.event_count(name, ETS)
     assert {:ok, []} = Persistence.list_streams(name, ETS)
-    assert {:ok, 0} = Persistence.stream_version(name, ETS, "stream")
+    assert {:ok, 0} = Persistence.resident_stream_version(name, ETS, "stream")
 
     assert {:ok, %{global_position: 0, observed_global_position: 0}} =
              ETS.projection_status(name: name)
@@ -312,7 +312,7 @@ defmodule Arbor.Persistence.EventLogProjectionSecurityRegressionTest do
              Persistence.project_committed_events(name, ETS, Enum.take(events, 4))
 
     assert {:ok, 4} = Persistence.event_count(name, ETS)
-    assert {:ok, 4} = Persistence.stream_version(name, ETS, "stream")
+    assert {:ok, 4} = Persistence.resident_stream_version(name, ETS, "stream")
   end
 
   test "security regression: a tampered third event leaves all five projection surfaces unchanged",
@@ -334,7 +334,7 @@ defmodule Arbor.Persistence.EventLogProjectionSecurityRegressionTest do
     assert {:ok, 1} = ETS.event_count(name: name)
 
     # Stream-pointer and stream-version surfaces.
-    assert {:ok, 1} = ETS.stream_version("stream", name: name)
+    assert {:ok, 1} = ETS.resident_stream_version("stream", name: name)
 
     # Identity surface: the two legitimate leading events left no tombstone.
     assert {:error, :identity_history_unavailable} =

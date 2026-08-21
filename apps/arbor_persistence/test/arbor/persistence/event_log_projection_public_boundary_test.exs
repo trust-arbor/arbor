@@ -129,6 +129,17 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
 
       assert {:ok, %{projected: 0, skipped: 1}} =
                Persistence.project_already_committed_events_into_backend(name, ETS, events, [])
+
+      assert {:ok, 1} =
+               Persistence.get_resident_projected_stream_version_using_backend(
+                 name,
+                 ETS,
+                 "stream",
+                 []
+               )
+
+      assert {:ok, %{evicted: 1}} =
+               Persistence.evict_projected_event_stream_from_backend(name, ETS, "stream", [])
     end
   end
 
@@ -148,6 +159,93 @@ defmodule Arbor.Persistence.EventLogProjectionPublicBoundaryTest do
   test "the facade refuses to assert absence on a projection", %{name: name} do
     assert {:error, :absence_not_supported} =
              Persistence.event_stream_absent?(name, ETS, "alpha")
+  end
+
+  test "security regression: authoritative stream_version never derives projection authority",
+       %{name: name} do
+    events = [
+      event(id: "evt_low", stream_id: "gapped", event_number: 4, global_position: 40),
+      event(id: "evt_high", stream_id: "gapped", event_number: 9, global_position: 90)
+    ]
+
+    assert {:ok, %{projected: 2}} =
+             Persistence.project_committed_events(name, ETS, events)
+
+    assert {:error, :stream_version_unavailable} =
+             Persistence.stream_version(name, ETS, "gapped")
+
+    assert {:ok, 9} = Persistence.resident_stream_version(name, ETS, "gapped")
+    assert {:ok, 0} = Persistence.resident_stream_version(name, ETS, "missing")
+  end
+
+  test "security regression: durable purge cannot evict a resident projection", %{name: name} do
+    projected = event(id: "evt_a", event_number: 7, global_position: 41)
+
+    assert {:ok, %{projected: 1}} =
+             Persistence.project_committed_events(name, ETS, [projected])
+
+    assert {:error, :purge_not_supported} =
+             Persistence.purge_stream(name, ETS, "stream")
+
+    assert {:ok, [^projected]} = Persistence.read_stream(name, ETS, "stream")
+    assert {:ok, 7} = Persistence.resident_stream_version(name, ETS, "stream")
+  end
+
+  test "projection eviction is exact, idempotent, and permits byte-identical re-projection",
+       %{name: name} do
+    alpha = event(id: "evt_a", stream_id: "alpha", event_number: 7, global_position: 41)
+    beta = event(id: "evt_b", stream_id: "beta", event_number: 3, global_position: 42)
+
+    assert {:ok, %{projected: 2}} =
+             Persistence.project_committed_events(name, ETS, [alpha, beta])
+
+    assert {:ok, %{evicted: 1}} =
+             Persistence.evict_projected_stream(name, ETS, "alpha")
+
+    assert {:ok, %{evicted: 0}} =
+             Persistence.evict_projected_stream(name, ETS, "alpha")
+
+    assert {:ok, []} = Persistence.read_stream(name, ETS, "alpha")
+    assert {:ok, [^beta]} = Persistence.read_stream(name, ETS, "beta")
+    assert {:ok, 0} = Persistence.resident_stream_version(name, ETS, "alpha")
+
+    assert {:ok, %{projected: 1, skipped: 0}} =
+             Persistence.project_committed_events(name, ETS, [alpha])
+  end
+
+  test "projection control APIs reject unsupported backends and invalid inputs", %{name: name} do
+    assert {:error, :projection_not_supported} =
+             Persistence.evict_projected_stream(name, StoreETS, "stream")
+
+    assert {:error, :projection_not_supported} =
+             Persistence.resident_stream_version(name, StoreETS, "stream")
+
+    assert {:error, :invalid_stream_id} =
+             Persistence.evict_projected_stream(name, ETS, "")
+
+    assert {:error, :invalid_precondition} =
+             Persistence.resident_stream_version(name, ETS, "stream", %{bad: :opts})
+  end
+
+  test "authoritative mode retains purge and version authority but rejects projection controls" do
+    name = unique_name("el_authoritative_boundary")
+    start_supervised!({ETS, name: name}, id: name)
+
+    assert {:ok, [_]} =
+             Persistence.append(name, ETS, "authoritative", [
+               Event.new("authoritative", "created", %{"value" => 1})
+             ])
+
+    assert {:ok, 1} = Persistence.stream_version(name, ETS, "authoritative")
+
+    assert {:error, :projection_mode_required} =
+             Persistence.resident_stream_version(name, ETS, "authoritative")
+
+    assert {:error, :projection_mode_required} =
+             Persistence.evict_projected_stream(name, ETS, "authoritative")
+
+    assert :ok = Persistence.purge_stream(name, ETS, "authoritative")
+    assert {:ok, 0} = Persistence.stream_version(name, ETS, "authoritative")
   end
 
   # --- helpers ---

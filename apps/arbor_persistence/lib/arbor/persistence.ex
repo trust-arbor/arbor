@@ -1245,11 +1245,44 @@ defmodule Arbor.Persistence do
     backend.stream_exists?(stream_id, Keyword.put(opts, :name, name))
   end
 
-  @doc "Get the current version of a stream."
+  @doc """
+  Get the authoritative current version of a stream.
+
+  A non-authoritative projection returns
+  `{:error, :stream_version_unavailable}`. Use
+  `resident_stream_version/4` only when explicitly inspecting projection
+  residency.
+  """
   @spec stream_version(atom(), module(), String.t(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def stream_version(name, backend, stream_id, opts \\ []) do
     backend.stream_version(stream_id, Keyword.put(opts, :name, name))
+  end
+
+  @doc """
+  Return the highest event number currently resident for one projected stream.
+
+  This value is non-authoritative observation only. It returns zero when no
+  event for the stream is resident. Unsupported backends return
+  `{:error, :projection_not_supported}` and authoritative backends return
+  `{:error, :projection_mode_required}`.
+  """
+  @spec resident_stream_version(atom(), module(), String.t(), keyword()) ::
+          {:ok, non_neg_integer()}
+          | {:error, EventLog.projection_control_error()}
+  def resident_stream_version(name, backend, stream_id, opts \\ []) do
+    with :ok <- validate_store_name(name),
+         {:ok, normalized_opts} <-
+           EventLog.validate_projection_stream_request(stream_id, opts),
+         :ok <- validate_backend(backend, :resident_stream_version, 2) do
+      backend.resident_stream_version(
+        stream_id,
+        Keyword.put(normalized_opts, :name, name)
+      )
+    else
+      {:error, :backend_unavailable} -> {:error, :projection_not_supported}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc "List all known stream IDs."
@@ -1291,6 +1324,31 @@ defmodule Arbor.Persistence do
          :ok <- validate_backend(backend, :project_committed_events, 2),
          {:ok, normalized_opts} <- EventLog.normalize_opts(opts) do
       backend.project_committed_events(events, Keyword.put(normalized_opts, :name, name))
+    else
+      {:error, :backend_unavailable} -> {:error, :projection_not_supported}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Evict every resident projection surface for exactly one stream.
+
+  This is an idempotent cache operation, not a durable purge. Success reports
+  only the number of resident event payloads removed and makes no claim that
+  the stream is absent from its authoritative store. Byte-identical events may
+  be projected again afterward.
+  """
+  @spec evict_projected_stream(atom(), module(), String.t(), keyword()) ::
+          EventLog.projection_eviction_result()
+  def evict_projected_stream(name, backend, stream_id, opts \\ []) do
+    with :ok <- validate_store_name(name),
+         {:ok, normalized_opts} <-
+           EventLog.validate_projection_stream_request(stream_id, opts),
+         :ok <- validate_backend(backend, :evict_projected_stream, 2) do
+      backend.evict_projected_stream(
+        stream_id,
+        Keyword.put(normalized_opts, :name, name)
+      )
     else
       {:error, :backend_unavailable} -> {:error, :projection_not_supported}
       {:error, _reason} = error -> error
@@ -1412,6 +1470,14 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def project_already_committed_events_into_backend(name, backend, events, opts),
     do: project_committed_events(name, backend, events, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def evict_projected_event_stream_from_backend(name, backend, stream_id, opts),
+    do: evict_projected_stream(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def get_resident_projected_stream_version_using_backend(name, backend, stream_id, opts),
+    do: resident_stream_version(name, backend, stream_id, opts)
 
   # -- VectorStore (optional) --
 

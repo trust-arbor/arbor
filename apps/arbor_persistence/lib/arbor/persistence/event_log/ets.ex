@@ -219,6 +219,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
+  @impl Arbor.Persistence.EventLog
+  def evict_projected_stream(stream_id, opts) do
+    with {:ok, normalized_opts} <-
+           EventLog.validate_projection_stream_request(stream_id, opts),
+         {:ok, name} <- fetch_name(normalized_opts) do
+      safe_control_call(name, {:evict_projected_stream, stream_id})
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def resident_stream_version(stream_id, opts) do
+    with {:ok, normalized_opts} <-
+           EventLog.validate_projection_stream_request(stream_id, opts),
+         {:ok, name} <- fetch_name(normalized_opts) do
+      safe_control_call(name, {:resident_stream_version, stream_id})
+    end
+  end
+
   @doc """
   Return this log's configured authority mode.
 
@@ -497,6 +515,31 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {:reply, {:error, :projection_mode_required}, state}
   end
 
+  def handle_call(
+        {:evict_projected_stream, stream_id},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {evicted, next_state} = evict_projected_stream_rows(state, stream_id)
+    {:reply, {:ok, %{evicted: evicted}}, next_state}
+  end
+
+  def handle_call({:evict_projected_stream, _stream_id}, _from, state) do
+    {:reply, {:error, :projection_mode_required}, state}
+  end
+
+  def handle_call(
+        {:resident_stream_version, stream_id},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, {:ok, resident_stream_max(state, stream_id) || 0}, state}
+  end
+
+  def handle_call({:resident_stream_version, _stream_id}, _from, state) do
+    {:reply, {:error, :projection_mode_required}, state}
+  end
+
   def handle_call(:mode, _from, state), do: {:reply, {:ok, state.mode}, state}
 
   def handle_call(:projection_status, _from, %{mode: :projection} = state) do
@@ -562,6 +605,22 @@ defmodule Arbor.Persistence.EventLog.ETS do
         %{mode: :projection} = state
       ) do
     {:reply, EventLog.stamp_completion({:error, :absence_not_supported}), state}
+  end
+
+  def handle_call(
+        {:purge_stream, _stream_id, _deadline_mono, _owner_identity},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, EventLog.stamp_completion({:error, :purge_not_supported}), state}
+  end
+
+  def handle_call(
+        {:stream_version, _stream_id},
+        _from,
+        %{mode: :projection} = state
+      ) do
+    {:reply, {:error, :stream_version_unavailable}, state}
   end
 
   def handle_call(:event_count, _from, %{mode: :projection} = state) do
@@ -1003,6 +1062,117 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   defp projection_summary(plan), do: %{projected: plan.projected, skipped: plan.skipped}
 
+  defp evict_projected_stream_rows(state, stream_id) do
+    first_key = :ets.next(state.stream_table, {stream_id, 0})
+    evicted = evict_projected_stream_keys(state, stream_id, first_key, 0)
+
+    next_state = %{
+      state
+      | stream_versions: Map.delete(state.stream_versions, stream_id),
+        head_inserted_mono: Map.delete(state.head_inserted_mono, stream_id)
+    }
+
+    {evicted, next_state}
+  end
+
+  defp evict_projected_stream_keys(_state, _stream_id, :"$end_of_table", evicted),
+    do: evicted
+
+  defp evict_projected_stream_keys(
+         state,
+         stream_id,
+         {stream_id, event_number} = stream_key,
+         evicted
+       ) do
+    # Capture the successor before deleting the current ordered-set key.
+    next_key = :ets.next(state.stream_table, stream_key)
+    removed = evict_projected_stream_key(state, stream_id, event_number, stream_key)
+    evict_projected_stream_keys(state, stream_id, next_key, evicted + removed)
+  end
+
+  defp evict_projected_stream_keys(_state, _stream_id, _next_stream_key, evicted),
+    do: evicted
+
+  defp evict_projected_stream_key(state, stream_id, event_number, stream_key) do
+    pointer_position =
+      case :ets.lookup(state.stream_table, stream_key) do
+        [{^stream_key, position}] when is_integer(position) -> position
+        _missing_or_malformed -> nil
+      end
+
+    indexed_event_id =
+      case :ets.lookup(state.identity_stream_position_table, stream_key) do
+        [{^stream_key, event_id}] -> event_id
+        _missing_or_malformed -> nil
+      end
+
+    payload_event_id =
+      case projection_payload(state, pointer_position, stream_id, event_number) do
+        %Event{id: event_id} -> event_id
+        nil -> nil
+      end
+
+    event_ids =
+      [indexed_event_id, payload_event_id]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    identity_entries =
+      Enum.flat_map(event_ids, fn event_id ->
+        case :ets.lookup(state.id_table, event_id) do
+          [{^event_id, {_fingerprint, ^stream_id, ^event_number, position}}]
+          when is_integer(position) ->
+            [{event_id, position}]
+
+          _missing_cross_stream_or_malformed ->
+            []
+        end
+      end)
+
+    positions =
+      [pointer_position | Enum.map(identity_entries, &elem(&1, 1))]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    removed =
+      Enum.reduce(positions, 0, fn position, count ->
+        case projection_payload(state, position, stream_id, event_number) do
+          %Event{} ->
+            :ets.delete(state.global_table, position)
+            count + 1
+
+          nil ->
+            count
+        end
+      end)
+
+    Enum.each(identity_entries, fn {event_id, position} ->
+      :ets.delete(state.id_table, event_id)
+
+      case :ets.lookup(state.identity_position_table, position) do
+        [{^position, ^event_id}] -> :ets.delete(state.identity_position_table, position)
+        _missing_or_cross_event -> :ok
+      end
+    end)
+
+    :ets.delete(state.identity_stream_position_table, stream_key)
+    :ets.delete(state.stream_table, stream_key)
+    removed
+  end
+
+  defp projection_payload(state, position, stream_id, event_number)
+       when is_integer(position) do
+    case :ets.lookup(state.global_table, position) do
+      [{^position, %Event{stream_id: ^stream_id, event_number: ^event_number} = event}] ->
+        event
+
+      _missing_cross_stream_or_malformed ->
+        nil
+    end
+  end
+
+  defp projection_payload(_state, _position, _stream_id, _event_number), do: nil
+
   defp resident_event_count(state) do
     case :ets.info(state.global_table, :size) do
       size when is_integer(size) -> size
@@ -1093,7 +1263,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   # version; evicting a fully drained stream removes it from `list_streams`,
   # `stream_count`, and `stream_exists?`.
   defp prune_projection_stream_metadata(state, stream_id) do
-    case resident_stream_version(state, stream_id) do
+    case resident_stream_max(state, stream_id) do
       nil ->
         %{
           state
@@ -1110,7 +1280,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   # Every atom sorts above every integer in Erlang term order, so stepping back
   # from `{stream_id, :max_event_number}` lands on this stream's highest
   # resident event number, or outside the stream when none remain.
-  defp resident_stream_version(state, stream_id) do
+  defp resident_stream_max(state, stream_id) do
     case :ets.prev(state.stream_table, {stream_id, :max_event_number}) do
       {^stream_id, event_number} when is_integer(event_number) -> event_number
       _no_resident_rows -> nil

@@ -95,6 +95,15 @@ defmodule Arbor.Persistence.EventLog do
   @type projection_result ::
           {:ok, %{projected: non_neg_integer(), skipped: non_neg_integer()}}
           | {:error, projection_error()}
+  @type projection_control_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :projection_mode_required
+          | :projection_not_supported
+  @type projection_eviction_result ::
+          {:ok, %{evicted: non_neg_integer()}}
+          | {:error, projection_control_error()}
 
   @doc """
   Append one or more events to a stream.
@@ -289,6 +298,28 @@ defmodule Arbor.Persistence.EventLog do
   @callback project_committed_events([Event.t()], opts()) :: projection_result()
 
   @doc """
+  Evict every resident projection row and index entry for exactly one stream.
+
+  This optional callback is a cache operation, not a durable purge: success
+  reports only how many resident event payloads were removed and makes no claim
+  that the stream is absent from an authoritative store. It is idempotent, and
+  byte-identical events may be projected again after eviction.
+
+  An authoritative backend must refuse with `:projection_mode_required`.
+  """
+  @callback evict_projected_stream(stream_id(), opts()) :: projection_eviction_result()
+
+  @doc """
+  Return the highest event number currently resident for one projected stream.
+
+  The result is observation-only and returns zero when no row for the stream is
+  resident. It is not an authoritative stream version. An authoritative backend
+  must refuse with `:projection_mode_required`.
+  """
+  @callback resident_stream_version(stream_id(), opts()) ::
+              {:ok, non_neg_integer()} | {:error, projection_control_error()}
+
+  @doc """
   Return this EventLog's code-owned durability class.
 
   This value describes backend-owned durability semantics and is not configurable by
@@ -308,7 +339,9 @@ defmodule Arbor.Persistence.EventLog do
     event_count: 1,
     read_agent_events: 2,
     durability_class: 1,
-    project_committed_events: 2
+    project_committed_events: 2,
+    evict_projected_stream: 2,
+    resident_stream_version: 2
   ]
 
   @doc false
@@ -461,6 +494,22 @@ defmodule Arbor.Persistence.EventLog do
   @doc false
   @spec normalize_opts(term()) :: {:ok, keyword()} | {:error, :invalid_precondition}
   def normalize_opts(opts), do: bounded_opts(opts, 0, [])
+
+  @doc false
+  @spec validate_projection_stream_request(stream_id(), term()) ::
+          {:ok, keyword()} | {:error, :invalid_stream_id | :invalid_precondition}
+  def validate_projection_stream_request(stream_id, opts) do
+    with :ok <- validate_stream_id(stream_id),
+         {:ok, normalized_opts} <- normalize_opts(opts),
+         keys = Keyword.keys(normalized_opts),
+         true <- length(keys) == length(Enum.uniq(keys)),
+         true <- Enum.all?(keys, &(&1 == :name)) do
+      {:ok, normalized_opts}
+    else
+      false -> {:error, :invalid_precondition}
+      {:error, _reason} = error -> error
+    end
+  end
 
   @doc false
   @spec validate_stream_range(stream_id(), term()) ::

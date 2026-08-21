@@ -109,6 +109,19 @@ defmodule Arbor.Contracts.API.Persistence do
           {:ok, %{projected: non_neg_integer(), skipped: non_neg_integer()}}
           | {:error, event_projection_error()}
 
+  @typedoc "Closed public failures for projection-only cache inspection and eviction."
+  @type event_projection_control_error ::
+          :backend_unavailable
+          | :invalid_precondition
+          | :invalid_stream_id
+          | :projection_mode_required
+          | :projection_not_supported
+
+  @typedoc "Count of resident event payloads removed from one projected stream."
+  @type event_projection_eviction_result ::
+          {:ok, %{evicted: non_neg_integer()}}
+          | {:error, event_projection_control_error()}
+
   @typedoc "Canonical vector mutation or bounded atomic batch."
   @type vector_operation :: Arbor.Contracts.Persistence.VectorOperation.t()
 
@@ -514,6 +527,38 @@ defmodule Arbor.Contracts.API.Persistence do
               opts()
             ) :: event_projection_result()
 
+  @doc """
+  Evict one stream from a non-authoritative resident projection.
+
+  Success removes every resident event and index surface for exactly the named
+  stream and reports the resident payload count removed. It is idempotent,
+  makes no durable absence claim, and permits byte-identical re-projection.
+  Unsupported backends fail before dispatch; authoritative backends refuse with
+  `:projection_mode_required`.
+  """
+  @callback evict_projected_event_stream_from_backend(
+              store_name(),
+              backend(),
+              stream_id(),
+              opts()
+            ) :: event_projection_eviction_result()
+
+  @doc """
+  Return the highest event number currently resident for one projected stream.
+
+  This is projection-specific observation only, not authoritative stream
+  version evidence. Empty or non-resident streams return zero. Unsupported
+  backends fail before dispatch; authoritative backends refuse with
+  `:projection_mode_required`.
+  """
+  @callback get_resident_projected_stream_version_using_backend(
+              store_name(),
+              backend(),
+              stream_id(),
+              opts()
+            ) ::
+              {:ok, non_neg_integer()} | {:error, event_projection_control_error()}
+
   # ===========================================================================
   # VectorStore Operations (optional)
   # ===========================================================================
@@ -666,6 +711,8 @@ defmodule Arbor.Contracts.API.Persistence do
     get_stream_count_using_backend: 3,
     get_event_count_using_backend: 3,
     project_already_committed_events_into_backend: 4,
+    evict_projected_event_stream_from_backend: 4,
+    get_resident_projected_stream_version_using_backend: 4,
     # VectorStore operations
     execute_validated_vector_operation_for_agent: 3,
     reconcile_validated_vector_operation_for_agent: 3,

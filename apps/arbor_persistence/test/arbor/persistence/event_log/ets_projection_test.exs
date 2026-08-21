@@ -44,8 +44,8 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
       assert alpha.global_position == 41
       assert alpha.operation_fingerprint == EventLog.event_fingerprint("alpha", alpha)
 
-      assert {:ok, 7} = ETS.stream_version("alpha", name: name)
-      assert {:ok, 2} = ETS.stream_version("beta", name: name)
+      assert {:ok, 7} = ETS.resident_stream_version("alpha", name: name)
+      assert {:ok, 2} = ETS.resident_stream_version("beta", name: name)
       assert {:ok, 2} = ETS.event_count(name: name)
     end
 
@@ -216,7 +216,7 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
 
       assert {:ok, 1} = ETS.event_count(name: name)
       assert {:ok, ["stream"]} = ETS.list_streams(name: name)
-      assert {:ok, 2} = ETS.stream_version("stream", name: name)
+      assert {:ok, 2} = ETS.resident_stream_version("stream", name: name)
       assert identity_state(name, "stream", "evt_old") == :not_resident
       assert identity_state(name, "stream", "evt_fresh") == :resident
     end
@@ -238,14 +238,14 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
         )
 
       assert {:ok, %{projected: 2}} = ETS.project_committed_events([head, tail], name: name)
-      assert {:ok, 9} = ETS.stream_version("stream", name: name)
+      assert {:ok, 9} = ETS.resident_stream_version("stream", name: name)
 
       trim(name)
 
       assert {:ok, 1} = ETS.event_count(name: name)
       assert {:ok, ["stream"]} = ETS.list_streams(name: name)
       # Resident-only: version 9 is gone, so the projection must report 4.
-      assert {:ok, 4} = ETS.stream_version("stream", name: name)
+      assert {:ok, 4} = ETS.resident_stream_version("stream", name: name)
     end
   end
 
@@ -271,7 +271,7 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
       assert {:ok, 1} = ETS.event_count(name: name)
       assert {:ok, [resident]} = ETS.read_stream("stream", name: name)
       assert resident.id == "evt_a"
-      assert {:ok, 1} = ETS.stream_version("stream", name: name)
+      assert {:ok, 1} = ETS.resident_stream_version("stream", name: name)
 
       # Identity surface: neither rejected event left a tombstone.
       assert identity_state(name, "stream", "evt_b") == :not_resident
@@ -316,7 +316,7 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
     assert {:error, :projection_mode_required} = ETS.projection_status(name: name)
   end
 
-  test "projection purge removes the complete stream and prunes its metadata", %{name: name} do
+  test "projection purge is rejected without mutating resident rows", %{name: name} do
     assert {:ok, _} =
              ETS.project_committed_events(
                [
@@ -326,17 +326,43 @@ defmodule Arbor.Persistence.EventLog.ETSProjectionTest do
                name: name
              )
 
-    assert :ok = ETS.purge_stream("alpha", name: name)
+    assert {:error, :purge_not_supported} = ETS.purge_stream("alpha", name: name)
 
-    assert {:ok, ["beta"]} = ETS.list_streams(name: name)
-    assert {:ok, 1} = ETS.event_count(name: name)
-    assert identity_state(name, "alpha", "evt_a") == :not_resident
+    assert {:ok, ["alpha", "beta"]} = ETS.list_streams(name: name)
+    assert {:ok, 2} = ETS.event_count(name: name)
+    assert identity_state(name, "alpha", "evt_a") == :resident
 
-    assert {:ok, %{projected: 1}} =
+    assert {:ok, %{projected: 0, skipped: 1}} =
              ETS.project_committed_events(
                [event(id: "evt_a", stream_id: "alpha", event_number: 1, global_position: 1)],
                name: name
              )
+  end
+
+  test "projection eviction removes all five surfaces and is idempotent", %{name: name} do
+    alpha =
+      event(id: "evt_a", stream_id: "alpha", event_number: 7, global_position: 41)
+
+    beta =
+      event(id: "evt_b", stream_id: "beta", event_number: 2, global_position: 42)
+
+    assert {:ok, %{projected: 2}} =
+             ETS.project_committed_events([alpha, beta], name: name)
+
+    assert {:ok, %{evicted: 1}} = ETS.evict_projected_stream("alpha", name: name)
+    assert {:ok, %{evicted: 0}} = ETS.evict_projected_stream("alpha", name: name)
+
+    assert {:ok, [^beta]} = ETS.read_stream("beta", name: name)
+    assert {:ok, []} = ETS.read_stream("alpha", name: name)
+    assert {:ok, ["beta"]} = ETS.list_streams(name: name)
+    assert {:ok, 0} = ETS.resident_stream_version("alpha", name: name)
+    assert identity_state(name, "alpha", "evt_a") == :not_resident
+
+    # Clean re-projection at the same ID and both exact positions proves that
+    # identity, global-position, stream-position, pointer, and payload surfaces
+    # were all evicted.
+    assert {:ok, %{projected: 1, skipped: 0}} =
+             ETS.project_committed_events([alpha], name: name)
   end
 
   # --- helpers ---
