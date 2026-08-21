@@ -48,7 +48,6 @@ defmodule Mix.Tasks.Arbor.User.Init do
   use Mix.Task
 
   alias Arbor.Agent.IdentityAliasProof
-  alias Arbor.Security.KeyFile
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shortdoc "Create the local operator's human identity (dev only)"
@@ -138,7 +137,7 @@ defmodule Mix.Tasks.Arbor.User.Init do
 
   defp export_key_file(%{agent_id: agent_id, private_key: private_key}, path)
        when is_binary(agent_id) and is_binary(private_key) do
-    case KeyFile.write(path, %{agent_id: agent_id, private_key: private_key}) do
+    case Arbor.Security.write_key_file(path, %{agent_id: agent_id, private_key: private_key}) do
       {:ok, written} ->
         Mix.shell().info("  Wrote operator key file: #{written} (mode 0600)")
         Mix.shell().info("  Plaintext Ed25519 key material; passphrase wrapping is not applied.")
@@ -243,7 +242,9 @@ defmodule Mix.Tasks.Arbor.User.Init do
   defp format_key_file_error({:invalid_agent_id, id}), do: "invalid principal id #{inspect(id)}"
   defp format_key_file_error({:missing_field, field}), do: "missing field #{field}"
   defp format_key_file_error({:empty_field, field}), do: "empty field #{field}"
-  defp format_key_file_error(:invalid_private_key_base64), do: "private_key_b64 is not valid base64"
+
+  defp format_key_file_error(:invalid_private_key_base64),
+    do: "private_key_b64 is not valid base64"
 
   defp format_key_file_error({:invalid_private_key_size, size}),
     do: "private key is #{size} bytes; expected 32 or 64"

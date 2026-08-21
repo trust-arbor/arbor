@@ -13,7 +13,6 @@ defmodule Arbor.Agent.IdentityAliasProof do
 
   alias Arbor.Agent.IdentityAliasProofCore
   alias Arbor.Contracts.Security.SignedRequest
-  alias Arbor.Security.KeyFile
 
   @manage_resource "arbor://identity/alias/manage"
   @default_key_path "~/.arbor/operator.key"
@@ -52,7 +51,7 @@ defmodule Arbor.Agent.IdentityAliasProof do
   @doc """
   Sign the mutation-bound alias-management payload with caller-held key material.
   """
-  @spec sign(KeyFile.key_material(), IdentityAliasProofCore.mutation()) ::
+  @spec sign(Arbor.Security.key_file_material(), IdentityAliasProofCore.mutation()) ::
           {:ok, SignedRequest.t()} | {:error, term()}
   def sign(%{agent_id: agent_id, private_key: private_key}, mutation)
       when is_binary(agent_id) and is_binary(private_key) do
@@ -62,6 +61,23 @@ defmodule Arbor.Agent.IdentityAliasProof do
   end
 
   def sign(_, _), do: {:error, :invalid_key_material}
+
+  @doc """
+  Read the caller-held key file and sign as the principal recorded in it.
+
+  This is the default CLI path when `--as` is omitted. Returning the resolved
+  principal alongside the proof keeps the caller id and signature sourced from
+  the same key-file read.
+  """
+  @spec prove(Path.t(), IdentityAliasProofCore.mutation()) ::
+          {:ok, String.t(), SignedRequest.t()} | {:error, term()}
+  def prove(path, mutation) when is_binary(path) do
+    with {:ok, payload} <- IdentityAliasProofCore.canonical_payload(mutation) do
+      Arbor.Security.sign_key_file_request(path, payload)
+    end
+  end
+
+  def prove(_path, _mutation), do: {:error, :invalid_proof_args}
 
   @doc """
   Read a key file the caller holds and produce a mutation-bound SignedRequest.
@@ -74,9 +90,9 @@ defmodule Arbor.Agent.IdentityAliasProof do
           {:ok, SignedRequest.t()} | {:error, term()}
   def prove(path, claimed_principal_id, mutation)
       when is_binary(path) and is_binary(claimed_principal_id) do
-    with {:ok, material} <- KeyFile.read(path),
-         :ok <- assert_claimed_identity(material.agent_id, claimed_principal_id) do
-      sign(material, mutation)
+    with {:ok, actual_principal_id, signed_request} <- prove(path, mutation),
+         :ok <- assert_claimed_identity(actual_principal_id, claimed_principal_id) do
+      {:ok, signed_request}
     end
   end
 

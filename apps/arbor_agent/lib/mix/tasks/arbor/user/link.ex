@@ -10,8 +10,8 @@ defmodule Mix.Tasks.Arbor.User.Link do
 
   ## Options
 
-    * `--as <principal>` — claim of *which* key file to use. Defaults to
-      the local-operator principal. The claim is not authority: the CLI
+    * `--as <principal>` — optional claim of *which* key file to use. When
+      omitted, the principal is read from the key file. The claim is not authority: the CLI
       signs the exact mutation (link + secondary + primary, or unlink +
       secondary) with the matching key file, and the server reconstructs
       that payload from the arguments it will act on, then verifies the
@@ -66,11 +66,11 @@ defmodule Mix.Tasks.Arbor.User.Link do
         list_aliases(opts[:list])
 
       opts[:unlink] ->
-        unlink(opts[:unlink], caller_id(opts), opts)
+        unlink(opts[:unlink], opts[:as], opts)
 
       length(args) == 1 and opts[:to] ->
         [new_login_id] = args
-        link(new_login_id, opts[:to], caller_id(opts), opts)
+        link(new_login_id, opts[:to], opts[:as], opts)
 
       true ->
         Mix.shell().error("""
@@ -85,14 +85,12 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  defp link(secondary_id, primary_id, caller_id, opts) do
-    # Announce the INTENT only. This previously printed "Linking X → Y / All
-    # logins producing X will resolve to Y" before the call, so a failure read
-    # as though the link had happened.
-    Mix.shell().info("Linking #{secondary_id} → #{primary_id} (as #{caller_id})")
+  defp link(secondary_id, primary_id, claimed_caller_id, opts) do
+    with {:ok, caller_id, signed_request} <-
+           prove_caller(claimed_caller_id, {:link, secondary_id, primary_id}, opts) do
+      # Announce intent only after the key file has resolved the real caller.
+      Mix.shell().info("Linking #{secondary_id} → #{primary_id} (as #{caller_id})")
 
-    with {:ok, signed_request} <-
-           prove_caller(caller_id, {:link, secondary_id, primary_id}, opts) do
       case rpc!(Arbor.Agent.IdentityAliases, :link, [
              caller_id,
              secondary_id,
@@ -120,13 +118,14 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  defp unlink(secondary_id, caller_id, opts) do
+  defp unlink(secondary_id, claimed_caller_id, opts) do
     resolved = rpc!(Arbor.Agent.IdentityAliases, :resolve, [secondary_id])
 
     if resolved == secondary_id do
       Mix.shell().info("#{secondary_id} is not an alias — nothing to unlink.")
     else
-      with {:ok, signed_request} <- prove_caller(caller_id, {:unlink, secondary_id}, opts) do
+      with {:ok, caller_id, signed_request} <-
+             prove_caller(claimed_caller_id, {:unlink, secondary_id}, opts) do
         case rpc!(Arbor.Agent.IdentityAliases, :unlink, [
                caller_id,
                secondary_id,
@@ -145,22 +144,28 @@ defmodule Mix.Tasks.Arbor.User.Link do
     end
   end
 
-  # `--as` (or the local-operator default) is a claim of which key file to
-  # use. Possession of that file's private key is the proof; the claim
-  # itself never grants alias-management authority.
-  defp caller_id(opts) do
-    opts[:as] || Arbor.Contracts.Security.Identity.local_operator_id()
-  end
-
-  defp prove_caller(caller_id, mutation, opts) do
+  defp prove_caller(claimed_caller_id, mutation, opts) do
     key_path = IdentityAliasProof.key_file_path(opts)
 
-    case IdentityAliasProof.prove(key_path, caller_id, mutation) do
-      {:ok, signed_request} ->
-        {:ok, signed_request}
+    result =
+      case claimed_caller_id do
+        caller_id when is_binary(caller_id) ->
+          case IdentityAliasProof.prove(key_path, caller_id, mutation) do
+            {:ok, signed_request} -> {:ok, caller_id, signed_request}
+            {:error, reason} -> {:error, reason}
+          end
+
+        nil ->
+          IdentityAliasProof.prove(key_path, mutation)
+      end
+
+    case result do
+      {:ok, caller_id, signed_request} ->
+        {:ok, caller_id, signed_request}
 
       {:error, reason} ->
-        Mix.shell().error(proof_error_message(caller_id, key_path, reason))
+        caller_label = claimed_caller_id || "the principal in the key file"
+        Mix.shell().error(proof_error_message(caller_label, key_path, reason))
         {:error, reason}
     end
   end

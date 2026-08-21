@@ -1,14 +1,11 @@
 defmodule Mix.Tasks.Arbor.Approve do
   @shortdoc "Respond to a pending Arbor approval request from the shell"
   @moduledoc """
-  Approve or reject a pending interaction (an `irq_...` request) on the
-  running Arbor node.
+  Approve or reject a pending approval on the running Arbor node.
 
-  Interactions live in the running node's registry, so this task RPCs into it.
-  Calling `Arbor.Comms.respond_to_interaction/3` via `mix run -e` instead
-  starts a SEPARATE BEAM whose registry is empty, and the request is simply
-  reported as not found — a silent, confusing failure this task exists to
-  prevent.
+  Approvals live in the running node's registries, so this task RPCs into the
+  authorized `Arbor.Agent.Orchestration` facade. The caller is resolved from a
+  mode-private key file and must hold the relevant approval capability.
 
   ## Usage
 
@@ -16,6 +13,7 @@ defmodule Mix.Tasks.Arbor.Approve do
       mix arbor.approve irq_56c6b9f2826a0fab
       mix arbor.approve irq_56c6b9f2826a0fab --reject
       mix arbor.approve irq_56c6b9f2826a0fab --basis "confined to isolated worktree"
+      mix arbor.approve irq_design_abc123 --key-file ~/.arbor/identity.key
 
   ## Options
 
@@ -23,15 +21,19 @@ defmodule Mix.Tasks.Arbor.Approve do
     * `--reject` — respond `:rejected` instead of `:approved`
     * `--basis` — why the decision was made; recorded in the response
       metadata so the decision stays auditable
+    * `--key-file` — caller key file (default `~/.arbor/identity.key`)
+    * `--as` — optional caller claim; must match the key-file principal
   """
 
   use Mix.Task
 
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
+  alias Arbor.Contracts.Comms.ApprovalAnswer
 
   @rpc_timeout_ms 15_000
   @max_basis_bytes 512
-  @request_id_pattern ~r/^irq_[a-f0-9]{8,64}$/
+  @default_key_path "~/.arbor/identity.key"
+  @switches [list: :boolean, reject: :boolean, basis: :string, key_file: :string, as: :string]
 
   @impl true
   def run(args) do
@@ -45,45 +47,112 @@ defmodule Mix.Tasks.Arbor.Approve do
   @spec execute([String.t()], keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(args, runtime_opts \\ []) when is_list(args) and is_list(runtime_opts) do
     with {:ok, cli} <- parse_args(args),
+         {:ok, caller_id} <- resolve_caller(cli, runtime_opts),
          {:ok, target} <- discover_target(runtime_opts) do
-      dispatch(cli, target, runtime_opts)
+      dispatch(cli, caller_id, target, runtime_opts)
     end
   end
 
   defp parse_args(args) do
-    {opts, positional, _invalid} =
-      OptionParser.parse(args,
-        strict: [list: :boolean, reject: :boolean, basis: :string]
-      )
+    {opts, positional, invalid} = OptionParser.parse(args, strict: @switches)
 
     cond do
-      opts[:list] ->
-        {:ok, %{action: :list}}
+      invalid != [] ->
+        {:error, "unknown or invalid option: #{inspect(invalid)}"}
+
+      duplicate_options(opts) != [] ->
+        {:error, "duplicate option: #{inspect(duplicate_options(opts))}"}
+
+      opts[:list] == true and
+          (positional != [] or opts[:reject] == true or not is_nil(opts[:basis])) ->
+        {:error, "--list cannot be combined with a request id, --reject, or --basis"}
+
+      opts[:list] == true ->
+        {:ok, caller_options(%{action: :list}, opts)}
 
       positional == [] ->
         {:error, "missing request id. Try: mix arbor.approve --list"}
 
-      not Regex.match?(@request_id_pattern, hd(positional)) ->
-        {:error, "not a valid interaction id: #{inspect(hd(positional))} (expected irq_...)"}
+      length(positional) != 1 ->
+        {:error, "expected exactly one approval request id"}
 
       true ->
-        {:ok,
-         %{
-           action: :respond,
-           request_id: hd(positional),
-           response: if(opts[:reject], do: :rejected, else: :approved),
-           basis: bounded_basis(opts[:basis])
-         }}
+        with {:ok, request_id} <- validate_request_id(hd(positional)),
+             {:ok, basis} <- validate_basis(opts[:basis]) do
+          {:ok,
+           caller_options(
+             %{
+               action: :respond,
+               request_id: request_id,
+               decision: if(opts[:reject], do: :deny, else: :approve),
+               basis: basis
+             },
+             opts
+           )}
+        end
     end
   end
 
-  defp bounded_basis(basis) when is_binary(basis) do
-    if String.valid?(basis) and byte_size(basis) <= @max_basis_bytes,
-      do: basis,
-      else: String.slice(basis, 0, @max_basis_bytes)
+  defp validate_request_id(id) do
+    case ApprovalAnswer.validate_request_id(id) do
+      {:ok, valid} -> {:ok, valid}
+      {:error, reason} -> {:error, "not a valid approval id: #{inspect(id)} (#{reason})"}
+    end
   end
 
-  defp bounded_basis(_basis), do: nil
+  defp validate_basis(nil), do: {:ok, nil}
+
+  defp validate_basis(basis) when is_binary(basis) do
+    cond do
+      byte_size(basis) > @max_basis_bytes ->
+        {:error, "--basis exceeds #{@max_basis_bytes} bytes"}
+
+      true ->
+        case ApprovalAnswer.validate_note(basis) do
+          {:ok, valid} -> {:ok, valid}
+          {:error, reason} -> {:error, "invalid --basis: #{reason}"}
+        end
+    end
+  end
+
+  defp caller_options(cli, opts) do
+    Map.merge(cli, %{
+      caller_claim: opts[:as],
+      key_file: Path.expand(opts[:key_file] || @default_key_path)
+    })
+  end
+
+  defp duplicate_options(opts) do
+    opts
+    |> Keyword.keys()
+    |> Enum.frequencies()
+    |> Enum.filter(fn {_key, count} -> count > 1 end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
+  end
+
+  defp resolve_caller(cli, runtime_opts) do
+    resolver = Keyword.get(runtime_opts, :caller_resolver, &key_file_caller/1)
+
+    case safe_callback(resolver, cli) do
+      {:ok, caller_id} when is_binary(caller_id) and caller_id != "" -> {:ok, caller_id}
+      {:error, reason} -> {:error, "could not resolve approval caller: #{inspect(reason)}"}
+      _ -> {:error, "could not resolve approval caller: invalid key-file identity"}
+    end
+  end
+
+  defp key_file_caller(cli) do
+    with {:ok, caller_id} <- Arbor.Security.key_file_principal(cli.key_file),
+         :ok <- caller_claim_matches(cli.caller_claim, caller_id) do
+      {:ok, caller_id}
+    end
+  end
+
+  defp caller_claim_matches(nil, _actual), do: :ok
+  defp caller_claim_matches(actual, actual), do: :ok
+
+  defp caller_claim_matches(claimed, actual),
+    do: {:error, {:principal_mismatch, claimed, actual}}
 
   defp discover_target(runtime_opts) do
     ensure_distribution =
@@ -104,38 +173,32 @@ defmodule Mix.Tasks.Arbor.Approve do
     end
   end
 
-  defp dispatch(%{action: :list}, target, runtime_opts) do
-    case rpc(runtime_opts, target, Arbor.Comms.InteractionRegistry, :list_pending, []) do
-      pending when is_list(pending) -> {:ok, render_pending(pending)}
+  defp dispatch(%{action: :list}, caller_id, target, runtime_opts) do
+    case rpc(runtime_opts, target, Arbor.Agent.Orchestration, :list_pending_approvals, [
+           [caller_id: caller_id]
+         ]) do
+      {:ok, pending} when is_list(pending) -> {:ok, render_pending(pending)}
+      {:error, reason} -> {:error, "could not list pending requests: #{inspect(reason)}"}
       other -> {:error, "could not list pending requests: #{inspect(other)}"}
     end
   end
 
-  defp dispatch(%{action: :respond} = cli, target, runtime_opts) do
-    metadata =
-      %{"approver" => "mix arbor.approve"}
-      |> maybe_put_basis(cli.basis)
-
-    case rpc(runtime_opts, target, Arbor.Comms, :respond_to_interaction, [
+  defp dispatch(%{action: :respond} = cli, caller_id, target, runtime_opts) do
+    case rpc(runtime_opts, target, Arbor.Agent.Orchestration, :answer_approval, [
            cli.request_id,
-           cli.response,
-           metadata
+           cli.decision,
+           [caller_id: caller_id, note: cli.basis]
          ]) do
       :ok ->
-        {:ok, "#{cli.response}: #{cli.request_id}"}
+        {:ok, "#{cli.decision}: #{cli.request_id}"}
 
       {:error, reason} ->
-        {:error, "#{cli.request_id} not #{cli.response}: #{inspect(reason)}"}
+        {:error, "#{cli.request_id} not #{cli.decision}: #{inspect(reason)}"}
 
       other ->
         {:error, "unexpected response for #{cli.request_id}: #{inspect(other)}"}
     end
   end
-
-  defp maybe_put_basis(metadata, basis) when is_binary(basis),
-    do: Map.put(metadata, "basis", basis)
-
-  defp maybe_put_basis(metadata, _basis), do: metadata
 
   defp render_pending([]), do: "no pending approval requests"
 
@@ -144,9 +207,13 @@ defmodule Mix.Tasks.Arbor.Approve do
     |> Enum.map_join("\n", fn interaction ->
       map = if is_struct(interaction), do: Map.from_struct(interaction), else: interaction
 
-      "#{map[:request_id]}  #{map[:kind]}  #{map[:resource_uri]}\n  #{map[:description]}"
+      "#{value(map, :id) || value(map, :request_id)}  " <>
+        "#{value(map, :source) || value(map, :kind)}  #{value(map, :resource_uri)}\n  " <>
+        "#{value(map, :description)}"
     end)
   end
+
+  defp value(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
   defp rpc(runtime_opts, target, module, function, args) do
     rpc_call =
@@ -166,6 +233,14 @@ defmodule Mix.Tasks.Arbor.Approve do
 
   defp safe_callback(fun) when is_function(fun, 0) do
     fun.()
+  rescue
+    _ -> :unavailable
+  catch
+    _, _ -> :unavailable
+  end
+
+  defp safe_callback(fun, arg) when is_function(fun, 1) do
+    fun.(arg)
   rescue
     _ -> :unavailable
   catch

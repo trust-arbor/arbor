@@ -12,7 +12,6 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
 
   alias Arbor.Agent.IdentityAliasProof
   alias Arbor.Contracts.Security.SignedRequest
-  alias Arbor.Security.KeyFile
 
   @sample_mutation {:link, "human_sec", "human_pri"}
 
@@ -24,11 +23,22 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
   end
 
   defp write_key!(path, agent_id, private_key) do
-    {:ok, written} = KeyFile.write(path, %{agent_id: agent_id, private_key: private_key})
+    {:ok, written} =
+      Arbor.Security.write_key_file(path, %{agent_id: agent_id, private_key: private_key})
+
     written
   end
 
   describe "prove/3" do
+    test "defaults to the principal stored in the caller-held key file", %{tmp_dir: tmp_dir} do
+      {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+      agent_id = "agent_" <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
+      path = write_key!(Path.join(tmp_dir, "operator.key"), agent_id, private_key)
+
+      assert {:ok, ^agent_id, %SignedRequest{agent_id: ^agent_id}} =
+               IdentityAliasProof.prove(path, @sample_mutation)
+    end
+
     test "signs a mutation-bound request from a key file the caller holds", %{tmp_dir: tmp_dir} do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
       agent_id = "agent_" <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
@@ -67,7 +77,9 @@ defmodule Arbor.Agent.IdentityAliasProofTest do
                )
     end
 
-    test "fails closed when --as names a different principal than the key file", %{tmp_dir: tmp_dir} do
+    test "fails closed when --as names a different principal than the key file", %{
+      tmp_dir: tmp_dir
+    } do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
       actual = "agent_" <> Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
       claimed = "human_0123456789abcdef0123456789abcdef01234567"

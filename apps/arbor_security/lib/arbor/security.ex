@@ -74,6 +74,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.Keychain
+  alias Arbor.Security.KeyFile
   alias Arbor.Security.Reflex
   alias Arbor.Security.RevocationFence
   alias Arbor.Security.SigningAuthorityBroker
@@ -2654,6 +2655,33 @@ defmodule Arbor.Security do
   # ===========================================================================
   # Signing Key Storage
   # ===========================================================================
+
+  @typedoc "Caller-held key material read from a private `.arbor.key` file."
+  @type key_file_material :: %{agent_id: String.t(), private_key: binary()}
+
+  @doc "Write a new mode-0600 `.arbor.key` file without overwriting an existing file."
+  @spec write_key_file(Path.t(), key_file_material()) :: {:ok, String.t()} | {:error, term()}
+  defdelegate write_key_file(path, key_material), to: KeyFile, as: :write
+
+  @doc "Read only the principal id from a mode-private `.arbor.key` file."
+  @spec key_file_principal(Path.t()) :: {:ok, String.t()} | {:error, term()}
+  def key_file_principal(path) when is_binary(path) do
+    with {:ok, %{agent_id: principal_id}} <- KeyFile.read(path), do: {:ok, principal_id}
+  end
+
+  def key_file_principal(_path), do: {:error, :invalid_key_file_path}
+
+  @doc "Sign one payload from a mode-private key file without exposing its private key."
+  @spec sign_key_file_request(Path.t(), binary()) ::
+          {:ok, String.t(), SignedRequest.t()} | {:error, term()}
+  def sign_key_file_request(path, payload) when is_binary(path) and is_binary(payload) do
+    with {:ok, %{agent_id: principal_id, private_key: private_key}} <- KeyFile.read(path),
+         {:ok, signed_request} <- SignedRequest.sign(payload, principal_id, private_key) do
+      {:ok, principal_id, signed_request}
+    end
+  end
+
+  def sign_key_file_request(_path, _payload), do: {:error, :invalid_key_file_signing_args}
 
   @doc """
   Store an agent's signing private key (encrypted at rest).
