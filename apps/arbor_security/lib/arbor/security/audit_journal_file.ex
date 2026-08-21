@@ -160,6 +160,13 @@ defmodule Arbor.Security.AuditJournalFile do
       put_inject(:post_sync_chmod, mode)
     end
 
+    @doc false
+    @spec __test_inject__(:post_sync_lstat_minor_device_delta, integer()) :: :ok
+    def __test_inject__(:post_sync_lstat_minor_device_delta, delta)
+        when is_integer(delta) and delta != 0 do
+      put_inject(:post_sync_lstat_minor_device_delta, delta)
+    end
+
     defp put_inject(key, value) do
       current = Process.get(@inject_key, %{})
       Process.put(@inject_key, Map.put(current, key, value))
@@ -340,6 +347,15 @@ defmodule Arbor.Security.AuditJournalFile do
           {:error, {:commit_uncertain, reason}}
       end
     end
+
+    defp post_sync_lstat(path) do
+      with {:ok, stat} <- lstat_file(path) do
+        case inject(:post_sync_lstat_minor_device_delta) do
+          :absent -> {:ok, stat}
+          delta -> {:ok, %{stat | minor_device: stat.minor_device + delta}}
+        end
+      end
+    end
   else
     defp write_frame(fd, offset, frame), do: pwrite_all(fd, offset, frame)
 
@@ -349,6 +365,8 @@ defmodule Arbor.Security.AuditJournalFile do
         {:error, reason} -> {:error, {:commit_uncertain, reason}}
       end
     end
+
+    defp post_sync_lstat(path), do: lstat_file(path)
   end
 
   defp prove_identity_after_sync(handle, expected_size) do
@@ -358,7 +376,7 @@ defmodule Arbor.Security.AuditJournalFile do
          :ok <- require_single_link(fstat),
          :ok <- require_file_mode_0600(fstat),
          :ok <- require_expected_size(fstat, expected_size),
-         {:ok, lstat} <- lstat_file(handle.path),
+         {:ok, lstat} <- post_sync_lstat(handle.path),
          :ok <- require_regular(lstat),
          :ok <- require_same_inode(handle.identity, lstat),
          :ok <- require_stat_pair(fstat, lstat) do
