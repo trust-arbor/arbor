@@ -76,13 +76,23 @@ defmodule Arbor.Gateway.Signer.ProxyCoreTest do
       assert {:error, {:invalid_private_key_size, 16}} = ProxyCore.parse_key_file(contents)
     end
 
-    test "errors on agent_id that doesn't start with 'agent_'" do
+    test "accepts a human_ principal id" do
       contents = """
       agent_id=human_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e
       private_key_b64=#{Base.encode64(:crypto.strong_rand_bytes(32))}
       """
 
-      assert {:error, {:invalid_agent_id, _}} = ProxyCore.parse_key_file(contents)
+      assert {:ok, %{agent_id: id}} = ProxyCore.parse_key_file(contents)
+      assert String.starts_with?(id, "human_")
+    end
+
+    test "errors on a principal id outside the agent_/human_ allowlist" do
+      contents = """
+      agent_id=system_authority
+      private_key_b64=#{Base.encode64(:crypto.strong_rand_bytes(32))}
+      """
+
+      assert {:error, {:invalid_agent_id, "system_authority"}} = ProxyCore.parse_key_file(contents)
     end
   end
 
