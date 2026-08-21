@@ -1086,6 +1086,51 @@ defmodule Arbor.Persistence do
     end)
   end
 
+  @doc """
+  Compute the canonical identity fingerprint for one EventLog event.
+
+  This is the public adapter boundary for components that must construct or
+  validate committed append acknowledgements without depending on EventLog
+  internals. Invalid stream or event input returns `nil`.
+  """
+  @spec canonical_event_fingerprint(String.t(), Event.t()) :: String.t() | nil
+  def canonical_event_fingerprint(stream_id, event),
+    do: EventLog.event_fingerprint(stream_id, event)
+
+  @doc """
+  Verify that one positioned committed event is the exact durable
+  acknowledgement of a submitted event.
+
+  Assigned positions may differ because the backend owns them. Event identity,
+  content, stream, and the backend-reported operation fingerprint must match the
+  canonical submitted event.
+  """
+  @spec committed_event_matches_submission?(String.t(), Event.t(), Event.t()) :: boolean()
+  def committed_event_matches_submission?(
+        stream_id,
+        %Event{id: submitted_id, stream_id: submitted_stream_id} = submitted,
+        %Event{
+          id: committed_id,
+          stream_id: committed_stream_id,
+          event_number: event_number,
+          global_position: global_position,
+          operation_fingerprint: reported_fingerprint
+        } = committed
+      )
+      when submitted_stream_id == stream_id and committed_stream_id == stream_id and
+             submitted_id == committed_id and is_integer(event_number) and event_number > 0 and
+             is_integer(global_position) and global_position > 0 and
+             is_binary(reported_fingerprint) do
+    expected_fingerprint = EventLog.event_fingerprint(stream_id, submitted)
+
+    is_binary(expected_fingerprint) and reported_fingerprint == expected_fingerprint and
+      EventLog.event_fingerprint_matches?(stream_id, committed, expected_fingerprint)
+  rescue
+    _ -> false
+  end
+
+  def committed_event_matches_submission?(_stream_id, _submitted, _committed), do: false
+
   @doc "Reconcile an indeterminate append by exact event identity."
   @spec reconcile_append(atom(), module(), AppendOperation.t(), keyword()) ::
           EventLog.append_reconciliation()

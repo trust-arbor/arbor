@@ -1236,6 +1236,48 @@ defmodule Arbor.PersistenceTest do
       assert length(all) == 1
     end
 
+    test "public facade validates exact committed append acknowledgements" do
+      stream_id = "facade-ack"
+      submitted = Event.new(stream_id, "created", %{value: 1})
+      fingerprint = Persistence.canonical_event_fingerprint(stream_id, submitted)
+
+      committed = %Event{
+        submitted
+        | event_number: 1,
+          global_position: 2,
+          operation_fingerprint: fingerprint
+      }
+
+      assert is_binary(fingerprint)
+      assert Persistence.committed_event_matches_submission?(stream_id, submitted, committed)
+
+      refute Persistence.committed_event_matches_submission?(
+               stream_id,
+               submitted,
+               %Event{committed | type: "forged"}
+             )
+
+      refute Persistence.committed_event_matches_submission?(
+               stream_id,
+               submitted,
+               %Event{committed | operation_fingerprint: "forged"}
+             )
+
+      refute Persistence.committed_event_matches_submission?(
+               stream_id,
+               submitted,
+               %Event{committed | stream_id: "another-stream"}
+             )
+
+      refute Persistence.committed_event_matches_submission?(
+               stream_id,
+               submitted,
+               %Event{committed | event_number: nil}
+             )
+
+      refute Persistence.committed_event_matches_submission?(stream_id, submitted, %{})
+    end
+
     test "forwards append preconditions and bounded head reads", %{name: name, backend: backend} do
       event = Event.new("s1", "started", %{})
 

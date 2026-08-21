@@ -17,6 +17,8 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
   }
 
   setup do
+    Arbor.Signals.Config.Testing.isolate_namespace()
+
     originals = %{
       hot: Application.fetch_env(:arbor_historian, :hot_event_log_target),
       durable: Application.fetch_env(:arbor_historian, :durable_event_log_target),
@@ -80,6 +82,24 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
     assert {:error, :persist_failed} =
              Arbor.Historian.persist_durable_event(stream_id, :failed, %{secret: "payload"}, [])
+
+    assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
+  end
+
+  test "Signals durable_emit remains best-effort when Historian rejects the durable write" do
+    ctx = start_isolated_targets()
+    configure_target(:durable_event_log_target, ctx.durable, ErrorBackend)
+    configure_target(:hot_event_log_target, ctx.hot, ETS)
+    Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
+    stream_id = unique_stream("signals_best_effort")
+
+    capture_log(fn ->
+      assert {:error, :persist_failed} =
+               Arbor.Historian.persist_durable_event(stream_id, :direct, %{value: 1}, [])
+
+      assert :ok =
+               Arbor.Signals.durable_emit(:activity, :via_bus, %{value: 2}, stream_id: stream_id)
+    end)
 
     assert {:ok, []} = Persistence.read_stream(ctx.hot, ETS, stream_id)
   end
@@ -237,7 +257,6 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
 
   defmodule MalformedSuccessBackend do
     alias Arbor.Persistence.Event
-    alias Arbor.Persistence.EventLog
 
     def append(stream_id, [%Event{} = submitted], _opts) do
       %Event{} = committed = position(submitted, stream_id, 1, 1)
@@ -273,7 +292,10 @@ defmodule Arbor.Historian.DurableSignalSinkTest do
     end
 
     defp fingerprint(%Event{} = event, stream_id) do
-      %Event{event | operation_fingerprint: EventLog.event_fingerprint(stream_id, event)}
+      %Event{
+        event
+        | operation_fingerprint: Arbor.Persistence.canonical_event_fingerprint(stream_id, event)
+      }
     end
   end
 

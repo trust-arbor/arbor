@@ -6,7 +6,6 @@ defmodule Arbor.Historian.DurableSignalSink do
   alias Arbor.Historian.Config
   alias Arbor.Persistence
   alias Arbor.Persistence.Event
-  alias Arbor.Persistence.EventLog
 
   @spec persist(String.t(), term(), map(), keyword()) :: :ok | {:error, :persist_failed}
   def persist(stream_id, event_type, data, opts) do
@@ -176,27 +175,8 @@ defmodule Arbor.Historian.DurableSignalSink do
       {:error, :persist_failed}
   end
 
-  defp valid_committed_reply?(
-         [
-           %Event{
-             id: committed_id,
-             stream_id: committed_stream_id,
-             event_number: event_number,
-             global_position: global_position,
-             operation_fingerprint: fingerprint
-           } = committed
-         ],
-         stream_id,
-         %Event{id: submitted_id} = submitted
-       )
-       when committed_id == submitted_id and committed_stream_id == stream_id and
-              is_integer(event_number) and event_number > 0 and
-              is_integer(global_position) and global_position > 0 and is_binary(fingerprint) do
-    expected_fingerprint = EventLog.event_fingerprint(stream_id, submitted)
-
-    is_binary(expected_fingerprint) and
-      fingerprint == expected_fingerprint and
-      EventLog.event_fingerprint_matches?(stream_id, committed, expected_fingerprint)
+  defp valid_committed_reply?([%Event{} = committed], stream_id, %Event{} = submitted) do
+    Persistence.committed_event_matches_submission?(stream_id, submitted, committed)
   rescue
     _ -> false
   end
