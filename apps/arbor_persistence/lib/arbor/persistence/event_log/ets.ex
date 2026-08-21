@@ -218,11 +218,19 @@ defmodule Arbor.Persistence.EventLog.ETS do
   Idempotent: the `stream_versions` map is merged (max wins per stream)
   and `global_position` takes the max of current and incoming. Safe to
   call multiple times.
+
+  Optional `event_count` is active durable row cardinality (`COUNT(*)`).
+  When present it sets `purged_event_count` from the snapshot's own hole
+  count (`snapshot.global_position - event_count`), merged with any local
+  purge count. The merged ETS high-water is not used, so repeating
+  rehydrate after local appends does not overcount holes. When absent,
+  dense snapshots keep the existing `purged_event_count`.
   """
   @spec rehydrate_metadata(
           %{
-            stream_versions: %{String.t() => non_neg_integer()},
-            global_position: non_neg_integer()
+            :stream_versions => %{String.t() => non_neg_integer()},
+            :global_position => non_neg_integer(),
+            optional(:event_count) => non_neg_integer()
           },
           keyword()
         ) ::
@@ -249,8 +257,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
   Replay one bounded page of positioned durable events into the identity ledger.
 
   Pass `complete: true` on the final page. Completeness is accepted only when
-  the ledger contains one unique identity for every position through the
-  rehydrated global position.
+  the ledger contains one unique identity per active durable row
+  (`global_position - purged_event_count`), not occupancy of every integer
+  through the high-water mark.
   """
   @spec replay_identity_history([Event.t()], keyword()) ::
           {:ok,
@@ -616,6 +625,16 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     new_global_position = max(state.global_position, snapshot.global_position)
 
+    purged_event_count =
+      case Map.get(snapshot, :event_count) do
+        nil ->
+          state.purged_event_count
+
+        event_count ->
+          snapshot_purged = snapshot.global_position - event_count
+          max(state.purged_event_count, snapshot_purged)
+      end
+
     head_inserted_mono =
       Enum.reduce(rehydrated_stream_ids, state.head_inserted_mono, fn stream_id, freshness ->
         Map.put(freshness, stream_id, :unknown)
@@ -625,13 +644,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
       state
       | stream_versions: merged_stream_versions,
         global_position: new_global_position,
+        purged_event_count: purged_event_count,
         head_inserted_mono: head_inserted_mono,
         identity_history: {:unavailable, :durable_metadata_only},
         identity_metadata_consistent:
           metadata_sequence_consistent?(
             merged_stream_versions,
             new_global_position,
-            state.purged_event_count
+            purged_event_count
           )
     }
 
@@ -1572,23 +1592,43 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp validate_metadata_snapshot(%{
-         stream_versions: stream_versions,
-         global_position: global_position
-       })
+  defp validate_metadata_snapshot(
+         %{
+           stream_versions: stream_versions,
+           global_position: global_position
+         } = snapshot
+       )
        when is_map(stream_versions) and map_size(stream_versions) <= @default_max_events and
               is_integer(global_position) and global_position >= 0 and
               global_position <= 2_147_483_647 do
-    valid? =
+    valid_streams? =
       Enum.all?(stream_versions, fn {stream_id, version} ->
         is_binary(stream_id) and byte_size(stream_id) > 0 and byte_size(stream_id) <= 255 and
           String.valid?(stream_id) and is_integer(version) and version >= 0 and
           version <= 2_147_483_647
       end)
 
-    if valid?,
-      do: {:ok, %{stream_versions: stream_versions, global_position: global_position}},
-      else: {:error, :invalid_metadata_snapshot}
+    if valid_streams? do
+      case Map.fetch(snapshot, :event_count) do
+        :error ->
+          {:ok, %{stream_versions: stream_versions, global_position: global_position}}
+
+        {:ok, event_count}
+        when is_integer(event_count) and event_count >= 0 and event_count <= global_position and
+               event_count <= 2_147_483_647 ->
+          {:ok,
+           %{
+             stream_versions: stream_versions,
+             global_position: global_position,
+             event_count: event_count
+           }}
+
+        {:ok, _invalid} ->
+          {:error, :invalid_metadata_snapshot}
+      end
+    else
+      {:error, :invalid_metadata_snapshot}
+    end
   end
 
   defp validate_metadata_snapshot(_invalid), do: {:error, :invalid_metadata_snapshot}

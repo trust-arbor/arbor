@@ -62,6 +62,7 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
             snapshot: %{
               stream_versions: %{"durable" => 1_001},
               global_position: 1_001,
+              event_count: 1_001,
               identity_history: {:unavailable, :metadata_only}
             },
             events: events,
@@ -116,6 +117,73 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
              ETS.append("durable", event, name: Arbor.Historian.EventLog.ETS)
   end
 
+  test "security regression: sparse purge-shaped durable replay completes startup" do
+    Agent.update(@repo_name, fn state ->
+      %{
+        state
+        | snapshot: %{
+            stream_versions: %{"durable" => 2},
+            global_position: 5,
+            event_count: 2,
+            identity_history: {:unavailable, :metadata_only}
+          },
+          events: [positioned_event(1, 2), positioned_event(2, 5)]
+      }
+    end)
+
+    assert {:ok, _started} = Application.ensure_all_started(:arbor_historian)
+
+    assert {:ok, :identity_history_complete} =
+             ETS.identity_history_status(name: Arbor.Historian.EventLog.ETS)
+
+    event = Event.new("durable", "arbor.review.ordinary", %{value: 6})
+
+    assert {:ok, [%Event{event_number: 3, global_position: 6}]} =
+             ETS.append("durable", event, name: Arbor.Historian.EventLog.ETS)
+  end
+
+  test "security regression: truncated sparse replay fails startup closed" do
+    Agent.update(@repo_name, fn state ->
+      %{
+        state
+        | snapshot: %{
+            stream_versions: %{"durable" => 3},
+            global_position: 5,
+            event_count: 3,
+            identity_history: {:unavailable, :metadata_only}
+          },
+          events: [positioned_event(1, 2), positioned_event(2, 5)]
+      }
+    end)
+
+    assert {:error, {:arbor_historian, {startup_error, _application_mfa}}} =
+             Application.ensure_all_started(:arbor_historian)
+
+    assert match?({:event_log_rehydrate_failed, _reason}, startup_error)
+    refute Process.whereis(Arbor.Historian.EventLog.ETS)
+  end
+
+  test "security regression: decreasing sparse replay fails startup closed" do
+    Agent.update(@repo_name, fn state ->
+      %{
+        state
+        | snapshot: %{
+            stream_versions: %{"durable" => 2},
+            global_position: 5,
+            event_count: 2,
+            identity_history: {:unavailable, :metadata_only}
+          },
+          events: [positioned_event(2, 5), positioned_event(1, 2)]
+      }
+    end)
+
+    assert {:error, {:arbor_historian, {startup_error, _application_mfa}}} =
+             Application.ensure_all_started(:arbor_historian)
+
+    assert match?({:event_log_rehydrate_failed, _reason}, startup_error)
+    refute Process.whereis(Arbor.Historian.EventLog.ETS)
+  end
+
   test "security regression: incomplete durable replay fails startup closed" do
     Agent.update(@repo_name, &%{&1 | events: []})
 
@@ -162,17 +230,19 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
     refute Process.whereis(Arbor.Historian.EventLog.ETS)
   end
 
-  defp positioned_event(position) do
+  defp positioned_event(position), do: positioned_event(position, position)
+
+  defp positioned_event(event_number, global_position) do
     event =
       %Event{
         Event.new(
           "durable",
           "arbor.review.ordinary",
-          %{value: position},
-          id: "evt_durable_#{position}"
+          %{value: global_position},
+          id: "evt_durable_#{global_position}"
         )
-        | event_number: position,
-          global_position: position
+        | event_number: event_number,
+          global_position: global_position
       }
 
     fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)

@@ -68,6 +68,12 @@ defmodule Arbor.Persistence.EventLog.EctoPurgeSecurityRegressionTest do
     assert remaining.id == surviving.id
     assert remaining.global_position == surviving.global_position
 
+    assert {:ok, snapshot} = EctoEventLog.metadata_snapshot(repo: Repo)
+    assert snapshot.event_count == 1
+    assert snapshot.global_position == surviving.global_position
+    assert snapshot.event_count < snapshot.global_position
+    assert snapshot.stream_versions == %{survivor => 1}
+
     assert {:ok, {:committed, [reconciled]}} =
              Persistence.reconcile_append(
                :ecto_purge,

@@ -261,12 +261,13 @@ defmodule Arbor.Historian do
   @spec for_correlation(String.t(), keyword()) :: {:ok, [map()]}
   defdelegate for_correlation(correlation_id, opts \\ []), to: QueryEngine, as: :read_correlation
 
-  @doc "Query with filters (category, type, source, from, to, limit)."
-  @spec query(keyword()) :: {:ok, [map()]}
+  @doc "Query with filters (category, type, source, from, to, limit, max_scan)."
+  @spec query(keyword()) :: {:ok, [map()]} | {:error, term()}
   defdelegate query(opts \\ []), to: QueryEngine
 
   @doc "Find a history entry by its original signal ID."
-  @spec find_by_signal_id(String.t(), keyword()) :: {:ok, map()} | {:error, :not_found}
+  @spec find_by_signal_id(String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found | term()}
   defdelegate find_by_signal_id(signal_id, opts \\ []), to: QueryEngine
 
   # ── Aggregation ──

@@ -1148,10 +1148,17 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   rehydrate an in-memory cache's `stream_versions` map and
   `global_position` counter without replaying any events.
 
-  Two aggregate SQL queries:
+  Three adapter-agnostic aggregate queries:
 
     1. `SELECT stream_id, max(event_number) FROM events GROUP BY stream_id`
     2. `SELECT max(global_position) FROM events`
+    3. `SELECT count(*) FROM events`
+
+  `global_position` is the high-water mark (`MAX(global_position)`), not a
+  dense occupancy count. `event_count` is the number of active rows
+  (`COUNT(*)`). Authorized stream purge may leave `event_count < global_position`;
+  both values satisfy `0 <= event_count <= global_position`. `event_count` is
+  not the ETS `event_count/1` high-water display.
 
   Used by `Arbor.Historian.Application` at boot to align the ETS
   cache's bookkeeping with the durable backend so that subsequent
@@ -1160,8 +1167,10 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   fallthrough path in `QueryEngine` handles cold reads for historical
   events).
 
-  Returns `{:ok, %{stream_versions: map, global_position: integer}}`.
-  An empty database returns `{:ok, %{stream_versions: %{}, global_position: 0}}`.
+  Returns
+  `{:ok, %{stream_versions: map, global_position: integer, event_count: integer, ...}}`.
+  An empty database returns
+  `{:ok, %{stream_versions: %{}, global_position: 0, event_count: 0, ...}}`.
 
   ## Options
 
@@ -1172,6 +1181,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
            %{
              stream_versions: %{String.t() => non_neg_integer()},
              global_position: non_neg_integer(),
+             event_count: non_neg_integer(),
              identity_history: {:unavailable, :metadata_only}
            }}
           | {:error, term()}
@@ -1184,19 +1194,24 @@ defmodule Arbor.Persistence.EventLog.Ecto do
         select: {e.stream_id, max(e.event_number)}
       )
 
-    global_position_query = from(e in EventSchema, select: max(e.global_position))
+    totals_query = from(e in EventSchema, select: {count(e.id), max(e.global_position)})
 
     stream_versions =
       stream_versions_query
       |> repo.all()
       |> Map.new()
 
-    global_position = repo.one(global_position_query) || 0
+    {event_count, global_position} =
+      case repo.one(totals_query) do
+        {count, position} -> {count || 0, position || 0}
+        nil -> {0, 0}
+      end
 
     {:ok,
      %{
        stream_versions: stream_versions,
        global_position: global_position,
+       event_count: event_count,
        identity_history: {:unavailable, :metadata_only}
      }}
   rescue

@@ -109,35 +109,17 @@ defmodule Arbor.Historian.Application do
       try do
         case durable_event_log.metadata_snapshot(repo: repo) do
           {:ok, snapshot} ->
-            rehydrate_result =
-              cache_event_log.rehydrate_metadata(
-                snapshot,
-                name: @event_log_name
-              )
-
-            stream_count = map_size(snapshot.stream_versions)
-
-            if stream_count > 0 or snapshot.global_position > 0 do
-              Logger.info(
-                "[Historian] Rehydrated metadata: #{stream_count} streams, global_position=#{snapshot.global_position}"
-              )
-            end
-
-            case rehydrate_result do
-              {:ok, :identity_history_complete} ->
-                :ok
-
-              {:ok, {:identity_history_unavailable, details}} ->
-                replay_identity_history(
+            case admit_completeness_snapshot(snapshot) do
+              {:ok, snapshot} ->
+                rehydrate_from_admitted_snapshot(
                   durable_event_log,
                   cache_event_log,
                   repo,
-                  snapshot,
-                  details
+                  snapshot
                 )
 
               {:error, reason} ->
-                {:error, {:metadata_rehydrate_rejected, reason}}
+                {:error, {:metadata_snapshot_invalid_completeness, reason}}
             end
 
           {:error, reason} ->
@@ -167,6 +149,63 @@ defmodule Arbor.Historian.Application do
     end
   end
 
+  defp rehydrate_from_admitted_snapshot(durable_event_log, cache_event_log, repo, snapshot) do
+    rehydrate_result =
+      cache_event_log.rehydrate_metadata(
+        snapshot,
+        name: @event_log_name
+      )
+
+    stream_count = map_size(snapshot.stream_versions)
+
+    if stream_count > 0 or snapshot.global_position > 0 do
+      Logger.info(
+        "[Historian] Rehydrated metadata: #{stream_count} streams, global_position=#{snapshot.global_position}, event_count(active_rows)=#{Map.get(snapshot, :event_count, 0)}"
+      )
+    end
+
+    case rehydrate_result do
+      {:ok, :identity_history_complete} ->
+        :ok
+
+      {:ok, {:identity_history_unavailable, details}} ->
+        replay_identity_history(
+          durable_event_log,
+          cache_event_log,
+          repo,
+          snapshot,
+          details
+        )
+
+      {:error, reason} ->
+        {:error, {:metadata_rehydrate_rejected, reason}}
+    end
+  end
+
+  defp admit_completeness_snapshot(
+         %{
+           stream_versions: stream_versions,
+           global_position: global_position
+         } = snapshot
+       )
+       when is_map(stream_versions) and is_integer(global_position) and global_position >= 0 do
+    empty? = map_size(stream_versions) == 0 and global_position == 0
+    event_count = Map.get(snapshot, :event_count)
+
+    cond do
+      empty? and (is_nil(event_count) or event_count == 0) ->
+        {:ok, snapshot}
+
+      is_integer(event_count) and event_count > 0 and event_count <= global_position ->
+        {:ok, snapshot}
+
+      true ->
+        {:error, :invalid_event_count}
+    end
+  end
+
+  defp admit_completeness_snapshot(_snapshot), do: {:error, :invalid_snapshot}
+
   defp replay_identity_history(
          durable_event_log,
          cache_event_log,
@@ -176,25 +215,54 @@ defmodule Arbor.Historian.Application do
        ) do
     Logger.info("[Historian] Replaying bounded EventLog identity history: #{inspect(details)}")
 
-    replay_identity_page(
-      durable_event_log,
-      cache_event_log,
-      repo,
-      1,
-      snapshot.global_position
-    )
-  end
+    event_count = Map.get(snapshot, :event_count, 0)
 
-  defp replay_identity_page(_durable, cache, _repo, from_position, target_position)
-       when from_position > target_position do
-    case cache.identity_history_status(name: @event_log_name) do
-      {:ok, :identity_history_complete} -> :ok
-      {:ok, status} -> {:error, {:identity_replay_incomplete, status}}
-      {:error, reason} -> {:error, {:identity_replay_status_failed, reason}}
+    if is_integer(event_count) and event_count > 0 do
+      replay_identity_page(
+        durable_event_log,
+        cache_event_log,
+        repo,
+        1,
+        snapshot.global_position,
+        event_count,
+        0
+      )
+    else
+      {:error, {:identity_replay_incomplete, details}}
     end
   end
 
-  defp replay_identity_page(durable, cache, repo, from_position, target_position) do
+  defp replay_identity_page(
+         _durable,
+         cache,
+         _repo,
+         from_position,
+         target_position,
+         event_count,
+         consumed
+       )
+       when from_position > target_position do
+    if consumed == event_count do
+      case cache.identity_history_status(name: @event_log_name) do
+        {:ok, :identity_history_complete} -> :ok
+        {:ok, status} -> {:error, {:identity_replay_incomplete, status}}
+        {:error, reason} -> {:error, {:identity_replay_status_failed, reason}}
+      end
+    else
+      {:error,
+       {:identity_replay_incomplete_count, %{consumed: consumed, event_count: event_count}}}
+    end
+  end
+
+  defp replay_identity_page(
+         durable,
+         cache,
+         repo,
+         from_position,
+         target_position,
+         event_count,
+         consumed
+       ) do
     limit = min(@identity_replay_page_size, target_position - from_position + 1)
 
     case durable.read_all(repo: repo, from: from_position, limit: limit) do
@@ -205,7 +273,9 @@ defmodule Arbor.Historian.Application do
           repo,
           events,
           from_position,
-          target_position
+          target_position,
+          event_count,
+          consumed
         )
 
       {:ok, []} ->
@@ -225,30 +295,46 @@ defmodule Arbor.Historian.Application do
          repo,
          events,
          from_position,
-         target_position
+         target_position,
+         event_count,
+         consumed
        ) do
     case validate_replay_positions(events, from_position, target_position) do
       {:ok, last_position} ->
-        complete? = last_position == target_position
+        consumed_after = consumed + length(events)
 
-        case cache.replay_identity_history(events,
-               name: @event_log_name,
-               complete: complete?
-             ) do
-          {:ok, %{status: :identity_history_complete}} when complete? ->
-            :ok
+        cond do
+          consumed_after > event_count ->
+            {:error,
+             {:identity_replay_too_many_events,
+              %{consumed: consumed_after, event_count: event_count}}}
 
-          {:ok, %{status: {:identity_history_unavailable, _details}}} when not complete? ->
-            replay_identity_page(durable, cache, repo, last_position + 1, target_position)
+          last_position == target_position and consumed_after == event_count ->
+            finish_identity_replay(cache, events)
 
-          {:ok, %{status: status}} ->
-            {:error, {:identity_replay_incomplete, status}}
+          last_position == target_position ->
+            {:error,
+             {:identity_replay_truncated, %{consumed: consumed_after, event_count: event_count}}}
 
-          {:error, reason} ->
-            {:error, {:identity_replay_write_failed, reason}}
+          last_position < target_position and consumed_after == event_count ->
+            {:error,
+             {:identity_replay_high_water_missed,
+              %{last_position: last_position, target: target_position}}}
 
-          other ->
-            {:error, {:identity_replay_invalid_write, other}}
+          last_position < target_position ->
+            continue_identity_replay(
+              durable,
+              cache,
+              repo,
+              events,
+              last_position,
+              target_position,
+              event_count,
+              consumed_after
+            )
+
+          true ->
+            {:error, {:identity_replay_invalid_sequence, from_position}}
         end
 
       :error ->
@@ -256,25 +342,81 @@ defmodule Arbor.Historian.Application do
     end
   end
 
+  defp finish_identity_replay(cache, events) do
+    case cache.replay_identity_history(events,
+           name: @event_log_name,
+           complete: true
+         ) do
+      {:ok, %{status: :identity_history_complete}} ->
+        :ok
+
+      {:ok, %{status: status}} ->
+        {:error, {:identity_replay_incomplete, status}}
+
+      {:error, reason} ->
+        {:error, {:identity_replay_write_failed, reason}}
+
+      other ->
+        {:error, {:identity_replay_invalid_write, other}}
+    end
+  end
+
+  defp continue_identity_replay(
+         durable,
+         cache,
+         repo,
+         events,
+         last_position,
+         target_position,
+         event_count,
+         consumed
+       ) do
+    case cache.replay_identity_history(events,
+           name: @event_log_name,
+           complete: false
+         ) do
+      {:ok, %{status: {:identity_history_unavailable, _details}}} ->
+        replay_identity_page(
+          durable,
+          cache,
+          repo,
+          last_position + 1,
+          target_position,
+          event_count,
+          consumed
+        )
+
+      {:ok, %{status: status}} ->
+        {:error, {:identity_replay_incomplete, status}}
+
+      {:error, reason} ->
+        {:error, {:identity_replay_write_failed, reason}}
+
+      other ->
+        {:error, {:identity_replay_invalid_write, other}}
+    end
+  end
+
   defp validate_replay_positions(events, from_position, target_position) do
     validate_replay_positions(events, from_position, target_position, nil)
   end
 
-  defp validate_replay_positions([], _expected, _target, last_position)
+  defp validate_replay_positions([], _from_position, _target, last_position)
        when is_integer(last_position),
        do: {:ok, last_position}
 
   defp validate_replay_positions(
          [%{global_position: position} | rest],
-         expected,
+         from_position,
          target,
-         _last_position
+         last_position
        )
-       when is_integer(position) and position == expected and position <= target do
-    validate_replay_positions(rest, expected + 1, target, position)
+       when is_integer(position) and position > 0 and position >= from_position and
+              position <= target and (is_nil(last_position) or position > last_position) do
+    validate_replay_positions(rest, from_position, target, position)
   end
 
-  defp validate_replay_positions(_events, _expected, _target, _last_position), do: :error
+  defp validate_replay_positions(_events, _from_position, _target, _last_position), do: :error
 
   defp emit_started do
     Signals.emit(:historian, :started, %{})

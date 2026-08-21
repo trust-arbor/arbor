@@ -135,16 +135,17 @@ defmodule Arbor.Contracts.API.Historian do
   Query history entries with filters.
 
   Supports filters such as `:category`, `:type`, `:source`, `:from`,
-  `:to`, and `:limit`.
+  `:to`, and `:limit`. Implementations may bound complete-history scans with
+  `:max_scan` and return a typed error when completeness cannot be proved.
   """
   @callback query_history_entries_with_filters(query_opts()) ::
-              {:ok, [history_entry()]}
+              {:ok, [history_entry()]} | {:error, term()}
 
   @doc """
   Find a single history entry by its original signal ID.
   """
   @callback find_history_entry_by_signal_id(signal_id(), query_opts()) ::
-              {:ok, history_entry()} | {:error, :not_found}
+              {:ok, history_entry()} | {:error, :not_found | term()}
 
   # ===========================================================================
   # Aggregation

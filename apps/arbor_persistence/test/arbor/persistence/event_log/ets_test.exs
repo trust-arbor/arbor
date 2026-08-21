@@ -981,6 +981,85 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:error, :head_unavailable} = ETS.read_stream_head("s1", name: name)
     end
 
+    test "sparse event_count sets expected identities below the high-water mark", %{name: name} do
+      snapshot = %{
+        stream_versions: %{"s1" => 1},
+        global_position: 5,
+        event_count: 1
+      }
+
+      assert {:ok,
+              {:identity_history_unavailable,
+               %{expected_events: 1, loaded_events: 0, reason: :durable_metadata_only}}} =
+               ETS.rehydrate_metadata(snapshot, name: name)
+
+      event =
+        %Event{
+          Event.new("s1", "arbor.review.ordinary", %{value: 1}, id: "evt_sparse_1")
+          | event_number: 1,
+            global_position: 5
+        }
+        |> with_durable_fingerprint()
+
+      assert {:ok, %{accepted: 1, remaining: 0, status: :identity_history_complete}} =
+               ETS.replay_identity_history([event], name: name, complete: true)
+
+      assert {:ok, [%Event{event_number: 2, global_position: 6}]} =
+               ETS.append("s1", Event.new("s1", "next", %{}), name: name)
+    end
+
+    test "rehydrating a sparse snapshot after local appends keeps identity complete", %{
+      name: name
+    } do
+      snapshot = %{
+        stream_versions: %{"s1" => 1},
+        global_position: 5,
+        event_count: 1
+      }
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(snapshot, name: name)
+
+      event =
+        %Event{
+          Event.new("s1", "arbor.review.ordinary", %{value: 1}, id: "evt_sparse_repeat")
+          | event_number: 1,
+            global_position: 5
+        }
+        |> with_durable_fingerprint()
+
+      assert {:ok, %{status: :identity_history_complete}} =
+               ETS.replay_identity_history([event], name: name, complete: true)
+
+      assert {:ok, [%Event{event_number: 2, global_position: 6}]} =
+               ETS.append("s1", Event.new("s1", "local", %{}), name: name)
+
+      assert {:ok, :identity_history_complete} =
+               ETS.rehydrate_metadata(snapshot, name: name)
+
+      assert {:ok, :identity_history_complete} =
+               ETS.identity_history_status(name: name)
+
+      assert {:ok, [%Event{event_number: 3, global_position: 7}]} =
+               ETS.append("s1", Event.new("s1", "after-repeat", %{}), name: name)
+    end
+
+    test "rejects event_count above the high-water mark", %{name: name} do
+      assert {:error, :invalid_metadata_snapshot} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{"s1" => 1}, global_position: 5, event_count: 6},
+                 name: name
+               )
+    end
+
+    test "rejects negative event_count", %{name: name} do
+      assert {:error, :invalid_metadata_snapshot} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{}, global_position: 0, event_count: -1},
+                 name: name
+               )
+    end
+
     test "next append waits for identity replay instead of assuming an ID is absent", %{
       name: name
     } do
