@@ -53,6 +53,8 @@ required_capabilities:
 trust_preset:
   baseline: block
   rules:
+    "arbor://memory": auto
+    "arbor://action/session_goals/prune_stale_intents": auto
     "arbor://orchestrator/execute": allow
     "arbor://fs/read": allow
     "arbor://fs/list": allow

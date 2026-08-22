@@ -102,6 +102,8 @@ source: "builtin"
 trust_preset:
   baseline: block
   rules:
+    "arbor://memory": auto
+    "arbor://action/session_goals/prune_stale_intents": auto
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/design_checkpoint": auto
     "arbor://action/coding/reviewed_commit": auto

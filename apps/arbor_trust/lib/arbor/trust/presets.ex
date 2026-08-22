@@ -34,6 +34,13 @@ defmodule Arbor.Trust.Presets do
        "arbor://fs/read" => :auto,
        "arbor://historian/query" => :auto,
        "arbor://orchestrator" => :auto,
+       # An agent's OWN memory is its cognitive loop, not outward reach. The
+       # heartbeat's first node (session_memory.background_checks) resolves to
+       # arbor://memory/write; without this rule the baseline blocks it and the
+       # agent silently never thinks. :balanced/:hands_off/:full_trust already
+       # carry this; :cautious omitting it is what made every agent inert
+       # (found 2026-08-21).
+       "arbor://memory" => :auto,
        # Proactive notify allowed by default (bounded by a rate-limit constraint);
        # the user dials block/ask in their profile.
        "arbor://comms/notify/session" => :allow,

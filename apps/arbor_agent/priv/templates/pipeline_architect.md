@@ -67,6 +67,8 @@ source: "builtin"
 trust_preset:
   baseline: "block"
   rules:
+    "arbor://memory": auto
+    "arbor://action/session_goals/prune_stale_intents": auto
     "arbor://orchestrator/execute": "allow"
     "arbor://orchestrator/execute/adapt": "block"
     "arbor://orchestrator/execute/compose": "block"
