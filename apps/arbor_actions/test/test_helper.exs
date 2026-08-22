@@ -88,45 +88,20 @@ for child <- [
   Supervisor.start_child(Arbor.Signals.Supervisor, child)
 end
 
-# Security system — needed for signing integration tests
-buffered_store = Arbor.Persistence.BufferedStore
-
-security_backend =
-  Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-for {name, collection} <- [
-      {:arbor_security_capabilities, "capabilities"},
-      {:arbor_security_identities, "identities"},
-      {:arbor_security_signing_keys, "signing_keys"}
-    ] do
-  child =
-    Supervisor.child_spec(
-      {buffered_store,
-       name: name, backend: security_backend, write_mode: :sync, collection: collection},
-      id: name
-    )
-
-  case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-    {:ok, _} -> :ok
-    {:error, {:already_started, _}} -> :ok
-    {:error, reason} -> IO.warn("Failed to start #{name}: #{inspect(reason)}")
-  end
-end
-
-for child <- [
-      {Arbor.Security.Identity.Registry, []},
-      {Arbor.Security.Identity.NonceCache, []},
-      {Arbor.Security.Identity.ReplayPeers, []},
-      {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.Constraint.RateLimiter, []},
-      {Arbor.Security.CapabilityStore, []},
-      {Arbor.Security.Reflex.Registry, []}
-    ] do
-  case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-    {:ok, _} -> :ok
-    {:error, {:already_started, _}} -> :ok
-    {:error, reason} -> IO.warn("Failed to start #{inspect(child)}: #{inspect(reason)}")
-  end
-end
+# Security system — needed for signing integration tests.
+#
+# Use the Security-owned canonical test tree rather than hand-starting the
+# children here. The hand-rolled version started `Arbor.Persistence.BufferedStore`
+# under the `:arbor_security_*` names, but `Identity.Registry` hydrates via
+# `AuthorityStore.take_hydrated_entries/1`, and BufferedStore has no handler for
+# that call — so the store crashed, Registry failed with
+# `{:identity_authority, :inventory_unavailable}`, SystemAuthority then died with
+# :noproc calling Registry, and CapabilityStore could not restore. That chain
+# failed ~300 tests in this suite.
+#
+# TestBootstrap starts AuthorityStore under those names and proves supervisor
+# ownership of each registered name instead of treating name occupancy as
+# success. It is in arbor_security's lib/, so it is reusable from here.
+:ok = Arbor.Security.TestBootstrap.start!()
 
 ExUnit.start(exclude: [:llm, :llm_local])
