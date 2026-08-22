@@ -11,7 +11,7 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
 
     stripped_providers =
       case prior_providers do
-        {:ok, providers} -> Map.drop(providers, [:grok, :pi])
+        {:ok, providers} -> Map.drop(providers, [:antigravity, :grok, :pi])
         :error -> %{}
       end
 
@@ -177,6 +177,44 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
       refute Keyword.has_key?(opts, :adapter)
       refute Keyword.has_key?(opts, :transport_mod)
       assert Config.model_selection_strategy(:kiro) == :session_set_model
+    end
+  end
+
+  describe "resolve/2 for :antigravity native ACP" do
+    @describetag :fast
+
+    test "uses the dedicated server and dynamic config-option model selection" do
+      assert {:ok, opts} = Config.resolve(:antigravity, model: "gemini-observed-model")
+      assert Keyword.fetch!(opts, :command) == ["antigravity-acp"]
+      assert Keyword.fetch!(opts, :model) == "gemini-observed-model"
+      refute Keyword.has_key?(opts, :adapter)
+      refute Keyword.has_key?(opts, :transport_mod)
+      assert Config.model_selection_strategy(:antigravity) == :dynamic
+      assert {:antigravity, :native} in Config.list_providers()
+      assert :antigravity in Arbor.AI.acp_providers()
+    end
+
+    test "rejects command, args, and adapter overrides" do
+      providers = Application.get_env(:arbor_ai, :acp_providers, %{})
+
+      for override <- [
+            %{command: ["agy_acp_server.par"]},
+            %{command: ["antigravity-acp"], args: ["--unsafe"]},
+            %{
+              command: ["antigravity-acp"],
+              transport_mod: ExMCP.ACP.AdapterTransport,
+              adapter: ExMCP.ACP.Adapters.Pi
+            },
+            %{command: ["antigravity-acp"], handler: __MODULE__}
+          ] do
+        Application.put_env(
+          :arbor_ai,
+          :acp_providers,
+          Map.put(providers, :antigravity, override)
+        )
+
+        assert {:error, :invalid_antigravity_command} = Config.resolve(:antigravity)
+      end
     end
   end
 

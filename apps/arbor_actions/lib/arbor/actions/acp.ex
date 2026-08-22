@@ -299,7 +299,7 @@ defmodule Arbor.Actions.Acp do
 
     | Name | Type | Required | Description |
     |------|------|----------|-------------|
-    | `provider` | string | yes | Provider: claude, codex, gemini, opencode, goose, cursor |
+    | `provider` | string | yes | Catalog provider ID, e.g. antigravity, claude, codex, grok, kiro |
     | `model` | string | no | Model override |
     | `cwd` | string | no | Working directory for the session |
     | `workspace_id` | string | no | Authorized coding workspace lease used to bind linked-worktree Grok sessions |
@@ -321,7 +321,7 @@ defmodule Arbor.Actions.Acp do
         provider: [
           type: :string,
           required: true,
-          doc: "Provider: claude, codex, gemini, grok, opencode, goose, cursor"
+          doc: "ACP catalog provider ID (e.g. antigravity, claude, codex, gemini, grok, kiro)"
         ],
         model: [
           type: :string,

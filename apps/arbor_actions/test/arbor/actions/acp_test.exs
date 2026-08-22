@@ -2172,8 +2172,10 @@ defmodule Arbor.Actions.AcpTest do
       assert :grok in Acp.allowed_providers()
     end
 
-    test "includes cursor (native ACP provider)" do
+    test "includes native ACP providers from the catalog" do
+      assert :antigravity in Acp.allowed_providers()
       assert :cursor in Acp.allowed_providers()
+      assert :kiro in Acp.allowed_providers()
     end
   end
 

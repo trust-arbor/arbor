@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 666,
+  "entry_count": 668,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8202,8 +8202,34 @@
       "source_incident": "found 2026-08-22 in the managed Kiro coding canary",
       "always_loaded": false,
       "content_sha256": "3de1be6994826a10d5e80eacaca0cb77a61cee27856fcebfe7bf71204351b159"
+    },
+    {
+      "source_ordinal": 667,
+      "source_kind": "post-migration",
+      "slug": "probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape",
+      "title": "Probe provider-owned ACP credential layouts instead of substituting a familiar OAuth shape.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 while adding Antigravity as a managed coding provider",
+      "always_loaded": false,
+      "content_sha256": "574c4966c6882ba71ec884303c379eea42af7f75b79ca48600f278d72d339491"
+    },
+    {
+      "source_ordinal": 668,
+      "source_kind": "post-migration",
+      "slug": "reassert-acp-provider-launch-ceilings-after-every-raw-configuration-seam",
+      "title": "Reassert ACP provider launch ceilings after every raw configuration seam.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-reassert-acp-provider-launch-ceilings-after-every-raw-configuration-seam",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 while hardening Antigravity ACP; a schema-valid raw handler override otherwise survived into provider startup",
+      "always_loaded": false,
+      "content_sha256": "68b372f0ae38d41aab986e5561b62ee0aad607ff0f46f0a674eb7e9eeb85a70c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 205
+  "post_migration_entry_count": 207
 }

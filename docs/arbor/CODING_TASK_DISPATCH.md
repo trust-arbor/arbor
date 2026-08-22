@@ -176,6 +176,62 @@ factory path; repeat a bounded canary after material CLI or protocol changes.
 Kiro also emits optional `_kiro.dev/*` notifications; ExMCP currently logs unknown
 extensions at debug level and continues, so standard ACP completion still succeeds.
 
+### Google Antigravity workers
+
+Google Antigravity is available as the native ACP provider `antigravity` through
+the dedicated `antigravity-acp` executable. The official registry archive runs
+`agy_acp_server.par`; install a stable local wrapper or symlink named
+`antigravity-acp` that launches that archive. Keep the archive's
+`localharness_external` binary beside the invoked executable or publish it under
+that exact name on `PATH`; a server-only symlink cannot create sessions because
+the packaged server resolves this sibling from its invocation directory. Verify
+both signed binaries. Arbor does not download or update the archive because the
+registry distribution is not pinned by a publisher digest. Obtain it manually
+and verify its provenance under the host's operator policy.
+
+Antigravity authentication is deliberately out of band. Acquire an
+`oauth-personal` credential once, publish the refresh-capable JSON as an
+Arbor-owned mode-`0600` file, and select it in this order:
+
+1. `ARBOR_ANTIGRAVITY_ACP_TOKEN_FILE`
+2. `config :arbor_ai, antigravity_acp_token_file: "/private/path.json"`
+3. `~/.arbor/oauth/antigravity-acp.json`
+
+The projected document is the provider's six-field Google credential record:
+`client_id`, `client_secret`, `project_id`, `refresh_token`, `scopes`, and the
+Google OAuth `token_uri`. Arbor rejects alternate or extended credential
+shapes instead of forwarding arbitrary JSON into the worker home.
+
+Do not point any of these at global Gemini configuration. Ordinary worker
+launch never starts interactive OAuth. A managed `mix arbor.acp.login
+antigravity` flow remains a follow-up; it is not currently an available
+command.
+
+Every session replaces both `HOME` and `GEMINI_HOME` with the same private,
+owner-tracked runtime root, pins ex_mcp's isolated environment policy, rejects
+alternate Google/Antigravity credential variables, and sets
+`AGY_ACP_FORCE_FILE_STORAGE=1`. Arbor writes
+only the exact `oauth-personal` settings document and a validated private token
+projection under `antigravity-acp/acp_token.json`. The operator's real home and
+global Gemini state are not exposed to the provider, child-harness writes stay
+inside the disposable root, and the complete root is removed with the ACP
+session.
+
+Antigravity advertises model choices through ACP config options. Set
+`worker.model` to an exact live-advertised value; Arbor selects it with
+`session/set_config_option` and fails closed unless the response confirms the
+same value. Observed IDs are not permanent catalog entries:
+
+```json
+{
+  "worker": {
+    "provider": "antigravity",
+    "model": "<exact session/new configOptions model value>",
+    "use_pool": true
+  }
+}
+```
+
 ## Workspace and Git binding
 
 The plan's `repo_root`, workspace policy, and worker `cwd` are explicit

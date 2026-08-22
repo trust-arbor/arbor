@@ -11,6 +11,37 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
   @kiro_home_directory "kiro"
+  @antigravity_home_directory "antigravity-acp"
+  @antigravity_token_filename "acp_token.json"
+  @antigravity_settings_filename "settings.json"
+  @antigravity_settings ~s({"auth":{"type":"oauth-personal"}})
+  @max_antigravity_token_bytes 65_536
+  @max_antigravity_token_field_bytes 65_536
+  @antigravity_token_fields MapSet.new([
+                              "client_id",
+                              "client_secret",
+                              "project_id",
+                              "refresh_token",
+                              "scopes",
+                              "token_uri"
+                            ])
+  @antigravity_token_uri "https://oauth2.googleapis.com/token"
+  @max_antigravity_scopes 16
+  @max_antigravity_scope_bytes 2_048
+  @antigravity_controlled_env_keys MapSet.new([
+                                     "AGY_ACP_FORCE_FILE_STORAGE",
+                                     "GEMINI_HOME",
+                                     "HOME"
+                                   ])
+  @antigravity_reserved_env_prefixes ["AGY_", "CLOUDSDK_", "GCLOUD_", "GEMINI_", "GOOGLE_"]
+  @antigravity_forbidden_client_keys [
+    :adapter,
+    :adapter_opts,
+    :args,
+    :handler,
+    :handler_opts,
+    :transport_mod
+  ]
   @grok_log_filename "grok.log"
   @grok_agent_profile_filename "arbor-agent-profile.md"
   @grok_agent_profile_content """
@@ -131,6 +162,90 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   def grok_external_auth_method do
     %{"id" => @grok_auth_method_id, "name" => @grok_auth_provider_label}
   end
+
+  @doc false
+  @spec antigravity_settings_path(String.t()) :: String.t()
+  def antigravity_settings_path(runtime_home) when is_binary(runtime_home),
+    do:
+      Path.join([
+        runtime_home,
+        @antigravity_home_directory,
+        @antigravity_settings_filename
+      ])
+
+  @doc false
+  @spec antigravity_token_path(String.t()) :: String.t()
+  def antigravity_token_path(runtime_home) when is_binary(runtime_home) do
+    Path.join([runtime_home, @antigravity_home_directory, @antigravity_token_filename])
+  end
+
+  @doc false
+  @spec stage_antigravity_credentials(map()) :: :ok | {:error, atom()}
+  def stage_antigravity_credentials(%{path: runtime_home})
+      when is_binary(runtime_home) and runtime_home != "" do
+    settings_path = antigravity_settings_path(runtime_home)
+    token_path = antigravity_token_path(runtime_home)
+
+    with :ok <- verify_private_directory(runtime_home),
+         :ok <-
+           ensure_private_provider_home(
+             Path.dirname(token_path),
+             :antigravity_acp_runtime_home_unavailable
+           ),
+         {:ok, source_path} <- antigravity_token_source(),
+         {:ok, token_bytes} <- read_antigravity_token(source_path),
+         :ok <-
+           publish_private_projection(
+             settings_path,
+             @antigravity_settings,
+             byte_size(@antigravity_settings),
+             :antigravity_acp_settings_stage_failed
+           ),
+         :ok <-
+           publish_private_projection(
+             token_path,
+             token_bytes,
+             @max_antigravity_token_bytes,
+             :antigravity_acp_credential_stage_failed
+           ),
+         :ok <- verify_antigravity_runtime(%{path: runtime_home}) do
+      :ok
+    end
+  rescue
+    _exception -> {:error, :antigravity_acp_credential_unavailable}
+  catch
+    _kind, _reason -> {:error, :antigravity_acp_credential_unavailable}
+  end
+
+  def stage_antigravity_credentials(_cleanup_identity),
+    do: {:error, :antigravity_acp_runtime_home_unavailable}
+
+  @doc false
+  @spec verify_antigravity_runtime(map()) :: :ok | {:error, atom()}
+  def verify_antigravity_runtime(%{path: runtime_home})
+      when is_binary(runtime_home) and runtime_home != "" do
+    settings_path = antigravity_settings_path(runtime_home)
+    token_path = antigravity_token_path(runtime_home)
+
+    with :ok <- verify_private_directory(runtime_home),
+         :ok <- verify_private_directory(Path.dirname(token_path)),
+         :ok <- verify_exact_private_file(settings_path, @antigravity_settings),
+         {:ok, source_path} <- antigravity_token_source(),
+         {:ok, expected_token} <- read_antigravity_token(source_path),
+         {:ok, ^expected_token} <- read_antigravity_token(token_path) do
+      :ok
+    else
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _other -> {:error, :antigravity_acp_runtime_attestation_failed}
+    end
+  rescue
+    _exception -> {:error, :antigravity_acp_runtime_attestation_failed}
+  catch
+    _kind, _reason -> {:error, :antigravity_acp_runtime_attestation_failed}
+  end
+
+  def verify_antigravity_runtime(_cleanup_identity),
+    do: {:error, :antigravity_acp_runtime_attestation_failed}
 
   @doc false
   @spec stage_grok_external_auth(map()) :: :ok | {:error, atom()}
@@ -457,6 +572,27 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
+  defp inject_provider_home(client_opts, runtime_home, :antigravity) do
+    if Keyword.get(client_opts, :command) != ["antigravity-acp"] or
+         Enum.any?(@antigravity_forbidden_client_keys, &Keyword.has_key?(client_opts, &1)) do
+      {:error, :antigravity_acp_runtime_native_transport_required}
+    else
+      with :ok <- require_antigravity_environment_isolation(client_opts),
+           :ok <- reject_antigravity_provider_env(Keyword.get(client_opts, :env)),
+           {:ok, env} <-
+             put_env_values(Keyword.get(client_opts, :env), [
+               {"HOME", runtime_home},
+               {"GEMINI_HOME", runtime_home},
+               {"AGY_ACP_FORCE_FILE_STORAGE", "1"}
+             ]) do
+        {:ok,
+         client_opts
+         |> Keyword.put(:env, env)
+         |> Keyword.put(:environment_policy, :isolated)}
+      end
+    end
+  end
+
   defp inject_provider_home(client_opts, _runtime_home, _provider), do: {:ok, client_opts}
 
   defp ensure_private_provider_home(path, failure_reason) do
@@ -605,6 +741,264 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
 
       {:error, _reason} ->
         {:error, failure_reason}
+    end
+  end
+
+  defp antigravity_token_source do
+    case System.fetch_env("ARBOR_ANTIGRAVITY_ACP_TOKEN_FILE") do
+      {:ok, path} ->
+        normalize_antigravity_source(path)
+
+      :error ->
+        case Application.fetch_env(:arbor_ai, :antigravity_acp_token_file) do
+          {:ok, path} ->
+            normalize_antigravity_source(path)
+
+          :error ->
+            case System.user_home() do
+              home when is_binary(home) and home != "" ->
+                normalize_antigravity_source(
+                  Path.join([home, ".arbor", "oauth", "antigravity-acp.json"])
+                )
+
+              _other ->
+                {:error, :antigravity_acp_credential_unavailable}
+            end
+        end
+    end
+  end
+
+  defp normalize_antigravity_source(path)
+       when is_binary(path) and path != "" and byte_size(path) <= 4_096 do
+    if String.valid?(path),
+      do: {:ok, Path.expand(path)},
+      else: {:error, :antigravity_acp_credential_unavailable}
+  end
+
+  defp normalize_antigravity_source(_path),
+    do: {:error, :antigravity_acp_credential_unavailable}
+
+  defp read_antigravity_token(path) do
+    with {:ok, before} <- antigravity_source_identity(path),
+         {:ok, bytes} <-
+           map_antigravity_read_result(
+             Arbor.LLM.read_bounded_regular_file(path, @max_antigravity_token_bytes)
+           ),
+         true <- byte_size(bytes) == before.size or {:error, :antigravity_acp_credential_changed},
+         {:ok, after_stat} <- antigravity_source_identity(path),
+         true <-
+           antigravity_file_identity(before) == antigravity_file_identity(after_stat) or
+             {:error, :antigravity_acp_credential_changed},
+         {:ok, decoded} <-
+           Arbor.LLM.decode_bounded_json(bytes,
+             max_bytes: @max_antigravity_token_bytes,
+             max_nodes: 32,
+             max_depth: 3,
+             max_map_keys: 16,
+             max_list_items: @max_antigravity_scopes,
+             max_string_bytes: @max_antigravity_token_field_bytes
+           ),
+         :ok <- validate_antigravity_token(decoded) do
+      {:ok, bytes}
+    else
+      {:error, {:file_bytes_exceeded, _maximum}} ->
+        {:error, :antigravity_acp_credential_too_large}
+
+      {:error, {:invalid_json, _reason}} ->
+        {:error, :antigravity_acp_credential_malformed}
+
+      {:error, reason} when is_atom(reason) ->
+        {:error, reason}
+
+      _other ->
+        {:error, :antigravity_acp_credential_malformed}
+    end
+  end
+
+  defp antigravity_source_identity(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = stat}
+      when (mode &&& 0o7777) == 0o600 and size > 0 and
+             size <= @max_antigravity_token_bytes ->
+        {:ok, stat}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :antigravity_acp_credential_symlink}
+
+      {:ok, %File.Stat{type: :regular, links: links}} when links != 1 ->
+        {:error, :antigravity_acp_credential_hardlinked}
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} when (mode &&& 0o7777) != 0o600 ->
+        {:error, :antigravity_acp_credential_insecure_mode}
+
+      {:ok, %File.Stat{type: :regular, size: 0}} ->
+        {:error, :antigravity_acp_credential_malformed}
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, :antigravity_acp_credential_too_large}
+
+      {:ok, _other} ->
+        {:error, :antigravity_acp_credential_nonregular}
+
+      {:error, :enoent} ->
+        {:error, :antigravity_acp_credential_missing}
+
+      {:error, _reason} ->
+        {:error, :antigravity_acp_credential_unavailable}
+    end
+  end
+
+  defp map_antigravity_read_result({:ok, bytes}), do: {:ok, bytes}
+
+  defp map_antigravity_read_result({:error, :symlink_rejected}),
+    do: {:error, :antigravity_acp_credential_symlink}
+
+  defp map_antigravity_read_result({:error, :hardlink_rejected}),
+    do: {:error, :antigravity_acp_credential_hardlinked}
+
+  defp map_antigravity_read_result({:error, :file_changed_during_read}),
+    do: {:error, :antigravity_acp_credential_changed}
+
+  defp map_antigravity_read_result({:error, {:file_bytes_exceeded, _maximum}}),
+    do: {:error, :antigravity_acp_credential_too_large}
+
+  defp map_antigravity_read_result({:error, _reason}),
+    do: {:error, :antigravity_acp_credential_unavailable}
+
+  defp validate_antigravity_token(token) when is_map(token) and map_size(token) == 6 do
+    with true <-
+           MapSet.equal?(MapSet.new(Map.keys(token)), @antigravity_token_fields),
+         :ok <- validate_antigravity_token_string(Map.get(token, "client_id")),
+         :ok <- validate_antigravity_token_string(Map.get(token, "client_secret")),
+         :ok <- validate_antigravity_token_string(Map.get(token, "project_id")),
+         :ok <- validate_antigravity_token_string(Map.get(token, "refresh_token")),
+         true <- Map.get(token, "token_uri") == @antigravity_token_uri,
+         :ok <- validate_antigravity_scopes(Map.get(token, "scopes")) do
+      :ok
+    else
+      _other -> {:error, :antigravity_acp_credential_incomplete}
+    end
+  end
+
+  defp validate_antigravity_token(_token),
+    do: {:error, :antigravity_acp_credential_incomplete}
+
+  defp validate_antigravity_token_string(value)
+       when is_binary(value) and byte_size(value) > 0 and
+              byte_size(value) <= @max_antigravity_token_field_bytes do
+    if String.valid?(value) and not String.match?(value, ~r/[\x00-\x1F\x7F]/),
+      do: :ok,
+      else: {:error, :antigravity_acp_credential_incomplete}
+  end
+
+  defp validate_antigravity_token_string(_value),
+    do: {:error, :antigravity_acp_credential_incomplete}
+
+  defp validate_antigravity_scopes(scopes)
+       when is_list(scopes) and scopes != [] and length(scopes) <= @max_antigravity_scopes do
+    if Enum.all?(scopes, fn scope ->
+         is_binary(scope) and byte_size(scope) <= @max_antigravity_scope_bytes and
+           validate_antigravity_token_string(scope) == :ok
+       end) do
+      :ok
+    else
+      {:error, :antigravity_acp_credential_incomplete}
+    end
+  end
+
+  defp validate_antigravity_scopes(_scopes),
+    do: {:error, :antigravity_acp_credential_incomplete}
+
+  defp antigravity_file_identity(stat) do
+    {
+      stat.type,
+      stat.mode &&& 0o7777,
+      stat.size,
+      stat.mtime,
+      stat.ctime,
+      stat.major_device,
+      stat.minor_device,
+      stat.inode,
+      stat.links
+    }
+  end
+
+  defp publish_private_projection(path, content, maximum, failure_reason)
+       when is_binary(path) and is_binary(content) and byte_size(content) > 0 and
+              byte_size(content) <= maximum do
+    temp_path =
+      Path.join(
+        Path.dirname(path),
+        ".arbor-acp-stage-" <>
+          Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+      )
+
+    result =
+      with {:error, :enoent} <- File.lstat(path),
+           :ok <- write_private_file(temp_path, content, failure_reason),
+           :ok <- File.ln(temp_path, path),
+           {:ok, %File.Stat{type: :regular, links: 2} = staged} <- File.lstat(temp_path),
+           {:ok, %File.Stat{type: :regular, links: 2} = published} <- File.lstat(path),
+           true <-
+             antigravity_file_identity(staged) == antigravity_file_identity(published) or
+               {:error, failure_reason},
+           :ok <- File.rm(temp_path),
+           :ok <- verify_exact_private_file(path, content) do
+        :ok
+      else
+        _other -> {:error, failure_reason}
+      end
+
+    _ = File.rm(temp_path)
+    result
+  end
+
+  defp publish_private_projection(_path, _content, _maximum, failure_reason),
+    do: {:error, failure_reason}
+
+  defp verify_exact_private_file(path, expected) do
+    with {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size}} <-
+           File.lstat(path),
+         true <- (mode &&& 0o7777) == 0o600,
+         true <- size == byte_size(expected),
+         {:ok, ^expected} <- Arbor.LLM.read_bounded_regular_file(path, byte_size(expected)) do
+      :ok
+    else
+      _other -> {:error, :antigravity_acp_runtime_attestation_failed}
+    end
+  end
+
+  defp require_antigravity_environment_isolation(client_opts) do
+    if Keyword.get(client_opts, :environment_policy, :isolated) == :isolated,
+      do: :ok,
+      else: {:error, :antigravity_acp_runtime_isolation_required}
+  end
+
+  defp reject_antigravity_provider_env(nil), do: :ok
+
+  defp reject_antigravity_provider_env(env) when is_map(env),
+    do: reject_antigravity_provider_env(Map.to_list(env))
+
+  defp reject_antigravity_provider_env(env) when is_list(env) do
+    if Enum.all?(env, &(is_tuple(&1) and tuple_size(&1) == 2)) do
+      if Enum.any?(env, fn {key, _value} -> antigravity_reserved_env_key?(key) end),
+        do: {:error, :antigravity_acp_provider_env_forbidden},
+        else: :ok
+    else
+      {:error, :invalid_acp_launch_env}
+    end
+  end
+
+  defp reject_antigravity_provider_env(_env), do: {:error, :invalid_acp_launch_env}
+
+  defp antigravity_reserved_env_key?(key) do
+    case normalize_env_key(key) do
+      {:ok, normalized} ->
+        not MapSet.member?(@antigravity_controlled_env_keys, normalized) and
+          Enum.any?(@antigravity_reserved_env_prefixes, &String.starts_with?(normalized, &1))
+
+      :error ->
+        false
     end
   end
 

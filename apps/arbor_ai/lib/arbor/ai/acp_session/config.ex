@@ -92,6 +92,9 @@ defmodule Arbor.AI.AcpSession.Config do
 
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
+    # Google Antigravity's official archive exposes a dedicated ACP v1 server.
+    # RuntimeHome supplies its isolated HOME/GEMINI_HOME and Arbor-owned token.
+    antigravity: %{command: ["antigravity-acp"]},
     # Global policy flags must precede the `agent` subcommand; `--no-leader` and
     # `--model` belong to `agent` and must precede the `stdio` subcommand.
     # RuntimeHome binds Grok 0.2.118's external auth-provider command to an
@@ -180,6 +183,8 @@ defmodule Arbor.AI.AcpSession.Config do
 
     with {:ok, provider_config} <- config,
          {:ok, provider_config} <- enforce_grok_command_policy(provider, provider_config),
+         {:ok, provider_config} <-
+           enforce_antigravity_command_policy(provider, provider_config),
          :ok <- validate_requested_model(provider, Keyword.get(opts, :model)) do
       opts = maybe_inject_alternate_endpoint(provider, opts)
 
@@ -204,6 +209,31 @@ defmodule Arbor.AI.AcpSession.Config do
   defp enforce_grok_command_policy(_provider, provider_config),
     do: {:ok, provider_config}
 
+  defp enforce_antigravity_command_policy(
+         :antigravity,
+         %{command: ["antigravity-acp"]} = provider_config
+       ) do
+    cond do
+      Map.get(provider_config, :args) not in [nil, []] ->
+        {:error, :invalid_antigravity_command}
+
+      Enum.any?(
+        [:adapter, :adapter_opts, :handler, :handler_opts, :transport_mod],
+        &Map.has_key?(provider_config, &1)
+      ) ->
+        {:error, :invalid_antigravity_command}
+
+      true ->
+        {:ok, provider_config}
+    end
+  end
+
+  defp enforce_antigravity_command_policy(:antigravity, _provider_config),
+    do: {:error, :invalid_antigravity_command}
+
+  defp enforce_antigravity_command_policy(_provider, provider_config),
+    do: {:ok, provider_config}
+
   @doc false
   @spec validate_requested_model(atom(), term()) :: :ok | {:error, :invalid_grok_model}
   def validate_requested_model(:grok, model) when model in [nil, @grok_launch_model], do: :ok
@@ -215,6 +245,7 @@ defmodule Arbor.AI.AcpSession.Config do
           :dynamic | :session_set_model | {:launch_bound, String.t()}
   def model_selection_strategy(:grok), do: {:launch_bound, @grok_launch_model}
   def model_selection_strategy(:kiro), do: :session_set_model
+  def model_selection_strategy(:antigravity), do: :dynamic
   def model_selection_strategy(_provider), do: :dynamic
 
   # When the Claude CLI is pointed at an OpenAI/Anthropic-compatible endpoint

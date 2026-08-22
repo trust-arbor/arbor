@@ -26,7 +26,8 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
          {:ok, requested_model_id, launch_bound_model_id} <-
            model_ids(provider_atom, strategy, requested_model),
          {:ok, resolved} <- resolve_config(provider_atom),
-         {:ok, availability} <- availability(provider_kind, resolved, opts) do
+         {:ok, availability} <-
+           availability(provider_atom, provider_kind, resolved, opts) do
       build_envelope(%{
         provider: Atom.to_string(provider_atom),
         source: @source,
@@ -275,17 +276,17 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
     _, _ -> {:error, :invalid_config}
   end
 
-  defp availability(_provider_kind, resolved, opts) do
+  defp availability(provider, _provider_kind, resolved, opts) do
     case Keyword.fetch(opts, :observation) do
       {:ok, observation} -> normalize_observation(observation)
-      :error -> probe_resolved_config(resolved, opts)
+      :error -> probe_resolved_config(provider, resolved, opts)
     end
   end
 
-  defp probe_resolved_config(resolved, opts) do
+  defp probe_resolved_config(provider, resolved, opts) do
     cond do
       Keyword.has_key?(resolved, :command) ->
-        probe_native(resolved, opts)
+        probe_native(provider, resolved, opts)
 
       Keyword.has_key?(resolved, :transport_mod) or Keyword.has_key?(resolved, :adapter) ->
         probe_adapted(resolved, opts)
@@ -299,13 +300,15 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
     _, _ -> {:error, :invalid_config}
   end
 
-  defp probe_native(resolved, opts) do
+  defp probe_native(provider, resolved, opts) do
     with {:ok, executable} <- executable_from(Keyword.get(resolved, :command)),
-         true <- executable_available?(executable, opts) do
+         {:ok, executable_path} <- locate_executable(executable, opts),
+         true <- native_prerequisites_available?(provider, executable_path, opts) do
       {:ok, "degraded"}
     else
       false -> {:error, :missing_executable}
-      {:error, _} -> {:error, :invalid_config}
+      {:error, :missing_executable} -> {:error, :missing_executable}
+      {:error, _reason} -> {:error, :invalid_config}
     end
   end
 
@@ -318,14 +321,36 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
 
   defp executable_from(_command), do: {:error, :invalid_config}
 
-  defp executable_available?(executable, opts) do
+  defp locate_executable(executable, opts) do
     checker = Keyword.get(opts, :executable_checker, &System.find_executable/1)
-    is_function(checker, 1) and checker.(executable) not in [nil, false]
+
+    if is_function(checker, 1) do
+      case checker.(executable) do
+        path when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
+        true -> {:ok, executable}
+        _other -> {:error, :missing_executable}
+      end
+    else
+      {:error, :missing_executable}
+    end
   rescue
-    _ -> false
+    _ -> {:error, :missing_executable}
   catch
-    _, _ -> false
+    _, _ -> {:error, :missing_executable}
   end
+
+  # Antigravity's registered server delegates session work to this companion
+  # executable. Checking only the ACP front-end produces a false-ready result.
+  defp native_prerequisites_available?(:antigravity, executable_path, opts) do
+    executable_path
+    |> Path.dirname()
+    |> Path.join("localharness_external")
+    |> then(&[&1, "localharness_external"])
+    |> Enum.uniq()
+    |> Enum.any?(fn candidate -> match?({:ok, _path}, locate_executable(candidate, opts)) end)
+  end
+
+  defp native_prerequisites_available?(_provider, _executable_path, _opts), do: true
 
   defp probe_adapted(resolved, opts) do
     with {:ok, transport} <- module_from(resolved, :transport_mod),

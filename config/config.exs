@@ -192,12 +192,13 @@ config :arbor_ai, :acp_providers, %{
     adapter_opts: [model: "opus"]
   }
 
-  # agy (Antigravity CLI, intended for Gemini 3.5 Flash) — NO native ACP. Verified via
-  # `mix arbor.acp.probe agy` + manual probing: agy exposes only --print / --prompt-interactive
-  # and subcommands (changelog/install/plugin/update); `--experimental-acp`, `--acp`, `acp`, and
-  # `serve` are all rejected or treated as prompts. To use it, write an ExMCP.ACP adapter wrapping
-  # `agy --print`. Interim: the built-in `gemini` provider (native ACP via `--experimental-acp`)
-  # still works for Flash until antigravity ships ACP. Omitted here to avoid a known-broken command.
+  # antigravity is a built-in native ACP provider using the dedicated
+  # `antigravity-acp` executable. RuntimeHome replaces HOME and GEMINI_HOME and
+  # projects only an Arbor-owned oauth-personal token. Do not override its
+  # policy-owned command here. Optionally select the source outside this map:
+  #
+  # config :arbor_ai,
+  #   antigravity_acp_token_file: "/private/operator/antigravity-acp.json"
 }
 
 # AI routing defaults

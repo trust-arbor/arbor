@@ -828,7 +828,8 @@ defmodule Arbor.AI do
 
   ## Options
 
-  - `:provider` — provider atom (required): `:claude`, `:codex`, `:gemini`, etc.
+  - `:provider` — provider atom (required): `:claude`, `:codex`, `:gemini`,
+    `:antigravity`, etc.
   - `:model` — model string override
   - `:system_prompt` — system prompt for the agent
   - `:cwd` — working directory for the session

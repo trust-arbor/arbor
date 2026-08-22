@@ -81,6 +81,36 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     refute Map.has_key?(result, "env")
   end
 
+  test "Antigravity readiness requires its session-harness companion" do
+    missing_companion = fn
+      "antigravity-acp" -> "/opt/antigravity/antigravity-acp"
+      _other -> nil
+    end
+
+    result =
+      observe(:antigravity, "gemini-3.7-flash-high", executable_checker: missing_companion)
+
+    assert result["observation"]["availability"] == "unavailable"
+    assert result["observation"]["failure_code"] == "transport_error"
+
+    packaged_pair = fn
+      "antigravity-acp" ->
+        "/opt/antigravity/antigravity-acp"
+
+      "/opt/antigravity/localharness_external" ->
+        "/opt/antigravity/localharness_external"
+
+      _other ->
+        nil
+    end
+
+    result =
+      observe(:antigravity, "gemini-3.7-flash-high", executable_checker: packaged_pair)
+
+    assert result["observation"]["availability"] == "degraded"
+    refute Map.has_key?(result["observation"], "failure_code")
+  end
+
   test "reports adapted module availability and required adapter config" do
     Application.put_env(:arbor_ai, :acp_providers, %{
       adapted_ready: %{

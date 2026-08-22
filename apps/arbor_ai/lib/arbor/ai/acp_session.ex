@@ -1027,7 +1027,7 @@ defmodule Arbor.AI.AcpSession do
         with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
              {:ok, client_opts} <-
                RuntimeHome.inject(client_opts, runtime_home_cleanup, state.provider),
-             :ok <- stage_grok_external_auth(state.provider, runtime_home_cleanup) do
+             :ok <- stage_provider_runtime(state.provider, runtime_home_cleanup) do
           GrokSandbox.with_launch(
             state.provider,
             client_opts,
@@ -2075,6 +2075,7 @@ defmodule Arbor.AI.AcpSession do
   defp provider_to_backend(:claude), do: :anthropic
   defp provider_to_backend(:codex), do: :openai
   defp provider_to_backend(:gemini), do: :google
+  defp provider_to_backend(:antigravity), do: :google
   defp provider_to_backend(other), do: other
 
   # -- Crash Recovery --
@@ -2092,7 +2093,7 @@ defmodule Arbor.AI.AcpSession do
       with {:ok, client_opts} <- resolve_client_opts(state.provider, state.opts),
            {:ok, client_opts} <-
              RuntimeHome.inject(client_opts, state.runtime_home_cleanup, state.provider),
-           :ok <- refresh_grok_external_auth(state.provider, state.runtime_home_cleanup) do
+           :ok <- prepare_provider_reconnect(state.provider, state.runtime_home_cleanup) do
         GrokSandbox.with_launch(
           state.provider,
           client_opts,
@@ -4739,10 +4740,21 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp stage_grok_external_auth(:grok, cleanup_identity),
+  defp stage_provider_runtime(:grok, cleanup_identity),
     do: RuntimeHome.stage_grok_external_auth(cleanup_identity)
 
-  defp stage_grok_external_auth(_provider, _cleanup_identity), do: :ok
+  defp stage_provider_runtime(:antigravity, cleanup_identity),
+    do: RuntimeHome.stage_antigravity_credentials(cleanup_identity)
+
+  defp stage_provider_runtime(_provider, _cleanup_identity), do: :ok
+
+  defp prepare_provider_reconnect(:grok, cleanup_identity),
+    do: RuntimeHome.refresh_grok_external_auth(cleanup_identity)
+
+  defp prepare_provider_reconnect(:antigravity, cleanup_identity),
+    do: RuntimeHome.verify_antigravity_runtime(cleanup_identity)
+
+  defp prepare_provider_reconnect(_provider, _cleanup_identity), do: :ok
 
   defp refresh_grok_external_auth(:grok, cleanup_identity),
     do: RuntimeHome.refresh_grok_external_auth(cleanup_identity)

@@ -1046,3 +1046,24 @@ fallback. When changing the canonical DOT template, also update its exact source
 regression and run the compiler plus pipeline tests, because compile-only validation
 will not catch that drift (found 2026-08-20 after hundreds of generic coding commits
 and a focused post-council test run).
+
+<!-- applied-learning: probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape -->
+<a id="applied-learning-probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape"></a>
+**Probe provider-owned ACP credential layouts instead of substituting a familiar
+OAuth shape.** Native ACP providers can use provider-specific paths, settings, and
+refresh records. Probe them under an isolated home and inspect only names and shape,
+never secret values; then stage exactly that bounded schema. Google Antigravity uses
+`$GEMINI_HOME/antigravity-acp/{settings.json,acp_token.json}` and a six-field Google
+refresh credential. Assuming a generic `access_token` document and a root-level
+settings file produced a plausible implementation that could never authenticate
+(found 2026-08-22 while adding Antigravity as a managed coding provider).
+
+<!-- applied-learning: reassert-acp-provider-launch-ceilings-after-every-raw-configuration-seam -->
+<a id="applied-learning-reassert-acp-provider-launch-ceilings-after-every-raw-configuration-seam"></a>
+**Reassert ACP provider launch ceilings after every raw configuration seam.** A
+strict catalog policy protects only calls that pass through `Config.resolve/2`;
+direct sessions can accept raw `client_opts`. Enforce the exact command, native
+transport, Arbor permission handler, and isolated environment again at the last
+pre-spawn boundary. `Keyword.put_new(:handler, ...)` is not a ceiling when a raw
+caller can pre-populate the key (found 2026-08-22 while hardening Antigravity ACP;
+a schema-valid raw handler override otherwise survived into provider startup).
