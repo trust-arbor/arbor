@@ -60,6 +60,14 @@ Supervisor.start_child(
 
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, []})
 
+# OwnedTreeRegistry backs Arbor.Shell.create_private_owned_tree/1, which every
+# validation resource creation goes through — and Actions Mix/Shell require a
+# validation resource before a unit exists. Introduced 2026-08-16 (4d506b378)
+# without being added here, so `start_children: false` left it absent and every
+# create_private_owned_tree/1 returned :owned_tree_registry_unavailable. That
+# cascaded into ~84 failures across the Mix, Shell and Coding suites.
+Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.OwnedTreeRegistry, []})
+
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
