@@ -137,6 +137,45 @@ candidate before redispatching. That terminal state is a control/delivery
 failure, not evidence that the implementation is empty or should be restarted
 from scratch.
 
+### Kiro workers
+
+Kiro is available as the native ACP provider `kiro` through the standalone
+`kiro-cli acp` command. Current Kiro installations use `kiro` for the IDE or
+command router; `kiro --acp` and `kiro-cli --acp` are not valid ACP launches.
+Authenticate out of band with `kiro-cli login`.
+
+Arbor binds `KIRO_HOME` to the worker's private owner-tracked runtime directory.
+This prevents user-global Kiro agents, prompts, skills, steering, settings,
+sessions, and MCP configuration from entering a delegated session. Repository-local
+`.kiro` content remains workspace input and is constrained by the worker's leased
+workspace and sandbox. Kiro's credential store is separate from `KIRO_HOME`, so
+the isolated worker can still use the operator's existing CLI login. The private
+runtime directory is removed with the ACP session.
+
+Kiro CLI `2.19.1` completed both a direct ACP smoke test and a bounded managed
+coding canary on 2026-08-22. Its `session/new` response advertised
+`kiro_default`, `kiro_planner`, and `kiro_guide` modes plus a model catalog.
+Arbor validates a requested model against that bounded catalog and selects it
+with ACP `session/set_model`; Kiro rejects the config-option method used by some
+other providers. Query the live catalog rather than treating observed model IDs
+as permanent.
+
+Kiro permission requests may identify a native tool only with a bounded opaque
+`tooluse_*` ID and a descriptive title. Arbor never treats that title as an
+authorization identity. It binds the opaque namespace to the code-owned `kiro`
+provider and authorizes the coarse child `arbor://acp/tool/kiro`; malformed IDs
+and the same IDs from another provider fail closed. A worker therefore needs
+that exact capability or the reviewed `arbor://acp/tool/**` subtree grant.
+
+The managed canary used model `claude-sonnet-4.6`, edited two files in a leased
+worktree, ran focused tests, surfaced and received a task-scoped compile
+approval, passed contained full-project compilation, surfaced and received the
+fingerprint-bound commit approval, and passed a 10-0 council review before
+publishing its commit. This qualifies the tested Kiro version and model for the
+factory path; repeat a bounded canary after material CLI or protocol changes.
+Kiro also emits optional `_kiro.dev/*` notifications; ExMCP currently logs unknown
+extensions at debug level and continues, so standard ACP completion still succeeds.
+
 ## Workspace and Git binding
 
 The plan's `repo_root`, workspace policy, and worker `cwd` are explicit

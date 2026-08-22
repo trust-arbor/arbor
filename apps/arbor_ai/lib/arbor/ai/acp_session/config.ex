@@ -107,7 +107,9 @@ defmodule Arbor.AI.AcpSession.Config do
     opencode: %{command: ["opencode", "acp"]},
     goose: %{command: ["goose", "--acp"]},
     copilot: %{command: ["github-copilot", "--acp"]},
-    kiro: %{command: ["kiro", "--acp"]},
+    # Kiro CLI speaks ACP through the `acp` subcommand. The `kiro` executable is
+    # the IDE/router on current installations, and `--acp` is not a valid flag.
+    kiro: %{command: ["kiro-cli", "acp"]},
     qwen_code: %{command: ["qwen-code", "--acp"]},
     hermes: %{command: ["hermes", "acp"]},
     # Cursor CLI is a native ACP server: `cursor-agent acp` (stdio, JSON-RPC 2.0,
@@ -209,8 +211,10 @@ defmodule Arbor.AI.AcpSession.Config do
   def validate_requested_model(_provider, _model), do: :ok
 
   @doc false
-  @spec model_selection_strategy(atom()) :: :dynamic | {:launch_bound, String.t()}
+  @spec model_selection_strategy(atom()) ::
+          :dynamic | :session_set_model | {:launch_bound, String.t()}
   def model_selection_strategy(:grok), do: {:launch_bound, @grok_launch_model}
+  def model_selection_strategy(:kiro), do: :session_set_model
   def model_selection_strategy(_provider), do: :dynamic
 
   # When the Claude CLI is pointed at an OpenAI/Anthropic-compatible endpoint

@@ -144,6 +144,17 @@ defmodule Arbor.AI.AcpSession.ReadinessTest do
     refute Map.has_key?(observation, "launch_bound_model_id")
   end
 
+  test "session/set_model providers retain runtime-selectable readiness" do
+    result = observe(:kiro, "claude-sonnet-4.6", observation: :available)
+    observation = result["observation"]
+
+    assert observation["availability"] == "degraded"
+    assert observation["requested_model_id"] == "claude-sonnet-4.6"
+    assert observation["model_catalog_membership"] == "unknown"
+    refute Map.has_key?(observation, "launch_bound_model_id")
+    refute Map.has_key?(observation, "failure_code")
+  end
+
   test "rejects non-string requested models for dynamic providers" do
     result = observe(:claude, 123, observation: :available)
     observation = result["observation"]

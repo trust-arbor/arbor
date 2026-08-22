@@ -24,10 +24,12 @@ defmodule Arbor.AI.AcpSession.Handler do
   @default_permission_timeout_ms 60_000
   @max_tool_name_bytes 128
   @tool_name_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._~-]*\z/
+  @kiro_tool_call_id_pattern ~r/\Atooluse_[A-Za-z0-9_-]{1,128}\z/
 
   defstruct [
     :session_pid,
     :agent_id,
+    :provider,
     :workspace_root,
     permission_timeout_ms: @default_permission_timeout_ms,
     roots: []
@@ -51,6 +53,7 @@ defmodule Arbor.AI.AcpSession.Handler do
       state = %__MODULE__{
         session_pid: Keyword.get(opts, :session_pid),
         agent_id: Keyword.get(opts, :agent_id),
+        provider: Keyword.get(opts, :provider),
         workspace_root: cwd,
         permission_timeout_ms: permission_timeout_ms,
         roots: roots
@@ -73,7 +76,7 @@ defmodule Arbor.AI.AcpSession.Handler do
   tool identities fail closed.
   """
   def handle_permission_request(_session_id, tool_call, options, state) do
-    case canonical_tool_name(tool_call) do
+    case canonical_tool_name(tool_call, state.provider) do
       {:ok, tool_name} ->
         resource_uri = "arbor://acp/tool/#{tool_name}"
 
@@ -162,7 +165,7 @@ defmodule Arbor.AI.AcpSession.Handler do
   # Capability identity comes from machine-readable ACP fields. `title` is a
   # final compatibility fallback only when it is itself a bounded identifier;
   # native agents may put an entire command description there.
-  defp canonical_tool_name(tool_call) when is_map(tool_call) do
+  defp canonical_tool_name(tool_call, provider) when is_map(tool_call) do
     candidates = [
       Map.get(tool_call, "name") || Map.get(tool_call, :name),
       Map.get(tool_call, "toolName") || Map.get(tool_call, :toolName),
@@ -175,12 +178,32 @@ defmodule Arbor.AI.AcpSession.Handler do
     ]
 
     case Enum.find_value(candidates, &normalize_tool_name/1) do
-      nil -> {:error, :unrecognized_tool_identity}
+      nil -> opaque_provider_tool_name(provider, tool_call)
       tool_name -> {:ok, tool_name}
     end
   end
 
-  defp canonical_tool_name(_), do: {:error, :unrecognized_tool_identity}
+  defp canonical_tool_name(_tool_call, _provider),
+    do: {:error, :unrecognized_tool_identity}
+
+  # Kiro CLI 2.x emits spec-valid permission requests with only an opaque
+  # `tooluse_*` id and a descriptive title. Bind those calls to one coarse,
+  # provider-scoped capability instead of treating the title as authority.
+  # Richer Kiro payloads still take the structured-name path above.
+  defp opaque_provider_tool_name(:kiro, tool_call) do
+    case Map.get(tool_call, "toolCallId") || Map.get(tool_call, :toolCallId) do
+      id when is_binary(id) and byte_size(id) <= 136 ->
+        if Regex.match?(@kiro_tool_call_id_pattern, id),
+          do: {:ok, "kiro"},
+          else: {:error, :unrecognized_tool_identity}
+
+      _other ->
+        {:error, :unrecognized_tool_identity}
+    end
+  end
+
+  defp opaque_provider_tool_name(_provider, _tool_call),
+    do: {:error, :unrecognized_tool_identity}
 
   defp normalize_tool_name(name) when is_atom(name) and name not in [nil, true, false],
     do: normalize_tool_name(Atom.to_string(name))

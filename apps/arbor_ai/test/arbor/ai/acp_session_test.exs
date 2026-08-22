@@ -338,6 +338,31 @@ defmodule Arbor.AI.AcpSessionTest do
     end)
   end
 
+  test "security regression: Kiro ACP sessions cannot inherit ambient Kiro resources" do
+    assert {:ok, cleanup} = RuntimeHome.create()
+    ambient_home = Path.join(System.tmp_dir!(), "must-not-reach-live-kiro-home")
+
+    client_opts = [
+      command: ["kiro-cli", "acp"],
+      env: [{"KEEP_ME", "kiro"}, {"KIRO_HOME", ambient_home}]
+    ]
+
+    assert {:ok, isolated_opts} = RuntimeHome.inject(client_opts, cleanup, :kiro)
+
+    env = isolated_opts |> Keyword.fetch!(:env) |> Map.new()
+    kiro_home = Map.fetch!(env, "KIRO_HOME")
+
+    assert env["KEEP_ME"] == "kiro"
+    assert env["ARBOR_HOME"] == cleanup.path
+    assert kiro_home == Path.join(cleanup.path, "kiro")
+    refute kiro_home == ambient_home
+    assert {:ok, %File.Stat{type: :directory, mode: mode}} = File.lstat(kiro_home)
+    assert Bitwise.band(mode, 0o777) == 0o700
+
+    assert :ok = RuntimeHome.cleanup(cleanup)
+    refute File.exists?(cleanup.path)
+  end
+
   test "bounds the provider initialize handshake inside the session startup deadline" do
     install_fake_progress_client(100)
 
@@ -401,6 +426,25 @@ defmodule Arbor.AI.AcpSessionTest do
     assert Keyword.fetch!(overridden_opts, :pending_request_timeout) == 45_000
     assert Keyword.fetch!(overridden_opts, :handler_request_timeout) == 15_000
     assert :ok = AcpSession.close(overridden)
+  end
+
+  test "binds the code-owned provider identity into ACP handler options" do
+    install_fake_progress_client(100)
+
+    assert {:ok, session} =
+             AcpSession.start_link(
+               provider: :test,
+               client_opts: [test_pid: self()],
+               timeout: 1_000
+             )
+
+    assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+    started_opts = Agent.get(:sys.get_state(session).client, & &1.opts)
+    handler_opts = Keyword.fetch!(started_opts, :handler_opts)
+
+    assert Keyword.fetch!(handler_opts, :provider) == :test
+    assert :ok = AcpSession.close(session)
   end
 
   test "rejects an invalid provider initialize timeout before spawning the client" do
@@ -2411,11 +2455,23 @@ defmodule Arbor.AI.AcpSessionTest do
 
       def start_link(opts), do: Agent.start_link(fn -> opts end)
 
-      def new_session(_client, _cwd, _opts),
-        do: {:ok, %{"sessionId" => "model-select-session"}}
+      def new_session(client, _cwd, _opts) do
+        Agent.get(
+          client,
+          &Keyword.get(
+            &1,
+            :new_session_result,
+            {:ok, %{"sessionId" => "model-select-session"}}
+          )
+        )
+      end
 
-      def load_session(_client, session_id, _cwd, _opts),
-        do: {:ok, %{"sessionId" => session_id}}
+      def load_session(client, session_id, _cwd, _opts) do
+        Agent.get(
+          client,
+          &Keyword.get(&1, :load_session_result, {:ok, %{"sessionId" => session_id}})
+        )
+      end
 
       def set_config_option(client, _session_id, _key, _value) do
         Agent.get_and_update(client, fn s ->
@@ -2442,6 +2498,18 @@ defmodule Arbor.AI.AcpSessionTest do
         Agent.get(client, &Keyword.get(&1, :set_config_option_count, 0))
       end
 
+      def set_model(client, _session_id, _model) do
+        Agent.get_and_update(client, fn state ->
+          count = Keyword.get(state, :set_model_count, 0) + 1
+          result = Keyword.get(state, :set_model_response, {:ok, %{}})
+          {result, Keyword.put(state, :set_model_count, count)}
+        end)
+      end
+
+      def set_model_count(client) do
+        Agent.get(client, &Keyword.get(&1, :set_model_count, 0))
+      end
+
       def cancel(_client, _session_id), do: :ok
 
       def disconnect(client) do
@@ -2455,6 +2523,19 @@ defmodule Arbor.AI.AcpSessionTest do
 
     defp model_confirmed_response(model) do
       {:ok, %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}}
+    end
+
+    defp kiro_model_session_info(current_model, available_models) do
+      %{
+        "sessionId" => "kiro-model-session",
+        "models" => %{
+          "currentModelId" => current_model,
+          "availableModels" =>
+            Enum.map(available_models, fn model ->
+              %{"modelId" => model, "name" => model}
+            end)
+        }
+      }
     end
 
     defp codex_catalog_response(model, catalog_size) do
@@ -2666,6 +2747,50 @@ defmodule Arbor.AI.AcpSessionTest do
       session = start_model_session("zai-coding-plan/glm-5.2")
       assert :ok = AcpSession.await_ready(session, timeout: 1_000)
       assert %{status: :ready, model: "zai-coding-plan/glm-5.2"} = AcpSession.status(session)
+    end
+
+    test "Kiro selects an advertised model with session/set_model" do
+      model = "claude-sonnet-4.6"
+      info = kiro_model_session_info("auto", ["auto", model])
+
+      client_opts =
+        install_model_select_client(
+          new_session_result: {:ok, info},
+          set_model_response: {:ok, %{}}
+        )
+
+      {:ok, session} =
+        AcpSession.start_link(provider: :kiro, model: model, client_opts: client_opts)
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+      assert {:ok, ^info} = AcpSession.create_session(session, timeout: 1_000)
+
+      client = :sys.get_state(session).client
+      assert ModelSelectClient.set_model_count(client) == 1
+      assert ModelSelectClient.set_config_option_count(client) == 0
+    end
+
+    test "Kiro rejects an unadvertised model before session/set_model" do
+      info = kiro_model_session_info("auto", ["auto", "claude-sonnet-4.6"])
+      client_opts = install_model_select_client(new_session_result: {:ok, info})
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :kiro,
+          model: "not-advertised",
+          client_opts: client_opts
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+      assert :ok = AcpSession.await_ready(session, timeout: 1_000)
+
+      assert {:error, {:model_selection_failed, {:model_not_confirmed, :model_not_available}}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      client = :sys.get_state(session).client
+      assert ModelSelectClient.set_model_count(client) == 0
+      assert ModelSelectClient.set_config_option_count(client) == 0
     end
 
     test "Codex-sized model catalog confirms the exact requested model at startup" do

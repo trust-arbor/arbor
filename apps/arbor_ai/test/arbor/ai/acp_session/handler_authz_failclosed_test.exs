@@ -132,6 +132,57 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
       assert reason =~ "tool identity"
       refute_receive {_uri, :execute}
     end
+
+    test "security regression: Kiro opaque ids use a provider-scoped capability" do
+      Application.put_env(:arbor_ai, :trust_policy_module, AutoTrustPolicy)
+      Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+      Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+      {:ok, state} = Handler.init(agent_id: "agent_x", provider: :kiro)
+
+      tool_call = %{
+        "title" => "Running: rm -rf /workspace",
+        "toolCallId" => "tooluse_60NpwuAE0q7zHuFzBQAN8Z"
+      }
+
+      assert {:ok, %{"outcome" => "approved"}, ^state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+
+      assert_receive {"arbor://acp/tool/kiro", :execute}
+    end
+
+    test "Kiro opaque id fallback is unavailable to other providers" do
+      Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+      Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+      {:ok, state} = Handler.init(agent_id: "agent_x", provider: :claude)
+
+      tool_call = %{
+        "title" => "Running: pwd",
+        "toolCallId" => "tooluse_60NpwuAE0q7zHuFzBQAN8Z"
+      }
+
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+
+      assert reason =~ "tool identity"
+      refute_receive {_uri, :execute}
+    end
+
+    test "Kiro still rejects opaque ids outside its observed bounded namespace" do
+      Application.put_env(:arbor_ai, :security_module, RecordingSecurity)
+      Application.put_env(:arbor_ai, :handler_authz_test_pid, self())
+      {:ok, state} = Handler.init(agent_id: "agent_x", provider: :kiro)
+
+      tool_call = %{
+        "title" => "Running: pwd",
+        "toolCallId" => "call-opaque-27"
+      }
+
+      assert {:ok, %{"outcome" => "denied", "reason" => reason}, ^state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+
+      assert reason =~ "tool identity"
+      refute_receive {_uri, :execute}
+    end
   end
 
   test "security regression: configured trust policy failure denies the permission" do

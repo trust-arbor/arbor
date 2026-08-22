@@ -22,8 +22,9 @@ defmodule Arbor.AI.AcpSession do
   ## Requested model confirmation
 
   When `:model` is set for a dynamically selectable provider, session creation,
-  load, and reconnect remain unready until `session/set_config_option` confirms
-  that exact value in a canonical string-keyed response:
+  load, and reconnect remain unready until the provider confirms that exact
+  value. Most providers use `session/set_config_option` and return a canonical
+  string-keyed response:
 
       %{"configOptions" => [%{"id" => "model", "currentValue" => model}]}
 
@@ -33,6 +34,10 @@ defmodule Arbor.AI.AcpSession do
   data, or an unconfirmed model fails closed. A reconnect confirmation failure
   leaves the session in `:error` with `client`, `client_monitor`, `session_id`,
   and `last_session_id` cleared.
+
+  Kiro implements ACP's dedicated `session/set_model` method instead. Arbor
+  first requires the requested model in the bounded session model catalog, then
+  requires an exact successful `session/set_model` acknowledgement.
 
   Grok is launch-bound instead: its sandbox attests the exact reviewed
   `--model grok-4.6` command before every launch and reconnect, and Grok's ACP
@@ -617,6 +622,7 @@ defmodule Arbor.AI.AcpSession do
            state.client,
            session_id,
            state.model,
+           session_info,
            opts
          ) do
       :ok ->
@@ -673,6 +679,7 @@ defmodule Arbor.AI.AcpSession do
                    state.client,
                    session_id,
                    state.model,
+                   session_info,
                    provider_opts
                  ) do
               :ok ->
@@ -935,6 +942,7 @@ defmodule Arbor.AI.AcpSession do
       |> normalize_handler_opts()
       |> Keyword.put(:session_pid, session_pid)
       |> Keyword.put(:agent_id, Keyword.get(opts, :agent_id))
+      |> Keyword.put(:provider, Keyword.fetch!(opts, :provider))
       |> Keyword.put(:cwd, cwd)
 
     client_opts
@@ -2106,7 +2114,7 @@ defmodule Arbor.AI.AcpSession do
       end
 
     case result do
-      {:ok, client} ->
+      {:ok, client, session_info} ->
         case attach_client(client) do
           {:ok, client_monitor} ->
             case select_and_confirm_provider_model(
@@ -2114,6 +2122,7 @@ defmodule Arbor.AI.AcpSession do
                    client,
                    state.last_session_id,
                    state.model,
+                   session_info,
                    internal_reconnect_opts()
                  ) do
               :ok ->
@@ -2183,7 +2192,7 @@ defmodule Arbor.AI.AcpSession do
         {:ok, session_info} ->
           case validate_resume_session_response(session_info, state.last_session_id) do
             :ok ->
-              {:ok, client}
+              {:ok, client, session_info}
 
             {:error, _reason} ->
               terminate_client(client)
@@ -4072,6 +4081,7 @@ defmodule Arbor.AI.AcpSession do
                  state.client,
                  sid,
                  state.model,
+                 info,
                  provider_opts
                ) do
           {:ok, %{state | session_id: sid, last_session_id: sid}}
@@ -4222,10 +4232,16 @@ defmodule Arbor.AI.AcpSession do
     select_and_confirm_model(client, sid, model, opts, @default_model_confirm_retries)
   end
 
-  defp select_and_confirm_provider_model(provider, client, sid, model, opts) do
+  defp select_and_confirm_provider_model(provider, client, sid, model, session_info, opts) do
     case Config.model_selection_strategy(provider) do
-      {:launch_bound, launch_model} -> confirm_launch_bound_model(model, launch_model)
-      :dynamic -> select_and_confirm_model(client, sid, model, opts)
+      {:launch_bound, launch_model} ->
+        confirm_launch_bound_model(model, launch_model)
+
+      :session_set_model ->
+        select_and_confirm_session_model(client, sid, model, session_info, opts)
+
+      :dynamic ->
+        select_and_confirm_model(client, sid, model, opts)
     end
   end
 
@@ -4234,6 +4250,38 @@ defmodule Arbor.AI.AcpSession do
 
   defp confirm_launch_bound_model(_requested_model, _launch_model),
     do: {:error, {:model_not_confirmed, :launch_bound_model_mismatch}}
+
+  defp select_and_confirm_session_model(_client, _sid, nil, _session_info, _opts), do: :ok
+
+  defp select_and_confirm_session_model(client, sid, model, session_info, opts) do
+    module = acp_client_module()
+
+    with :ok <- validate_model_string(model),
+         :ok <- verify_session_model_catalog(session_info, model),
+         :ok <- pre_rpc_deadline_check(opts),
+         true <- function_exported?(module, :set_model, 3) do
+      case OwnedOperation.run(
+             fn ->
+               # credo:disable-for-next-line Credo.Check.Refactor.Apply
+               apply(module, :set_model, [client, sid, model])
+             end,
+             opts,
+             :timeout
+           ) do
+        {:error, :timeout} ->
+          {:error, :model_selection_timeout}
+
+        {:error, reason} ->
+          {:error, {:model_selection_rejected, Arbor.LLM.sanitize_external_reason(reason)}}
+
+        response ->
+          verify_set_model_response(response)
+      end
+    else
+      false -> {:error, {:model_not_confirmed, :set_model_unavailable}}
+      {:error, _reason} = error -> error
+    end
+  end
 
   @spec select_and_confirm_model(pid(), String.t(), String.t(), keyword(), non_neg_integer()) ::
           :ok | {:error, term()}
@@ -4340,6 +4388,124 @@ defmodule Arbor.AI.AcpSession do
   @max_option_scalar_bytes 256
   @max_config_options 20
   @max_model_catalog_options 512
+
+  defp verify_session_model_catalog(session_info, model) when is_map(session_info) do
+    case Arbor.LLM.validate_decoded_term(session_info, @response_budget) do
+      :ok -> do_verify_session_model_catalog(session_info, model)
+      {:error, _reason} -> {:error, {:model_not_confirmed, :response_exceeds_budget}}
+    end
+  end
+
+  defp verify_session_model_catalog(_session_info, _model),
+    do: {:error, {:model_not_confirmed, :missing_model_catalog}}
+
+  defp do_verify_session_model_catalog(
+         %{
+           "models" => %{
+             "currentModelId" => current_model,
+             "availableModels" => available_models
+           }
+         },
+         requested_model
+       )
+       when is_binary(current_model) and is_list(available_models) do
+    with :ok <- validate_catalog_model_id(current_model),
+         :ok <-
+           validate_session_model_entries(
+             available_models,
+             requested_model,
+             current_model,
+             MapSet.new(),
+             0
+           ) do
+      :ok
+    end
+  end
+
+  defp do_verify_session_model_catalog(_session_info, _model),
+    do: {:error, {:model_not_confirmed, :missing_model_catalog}}
+
+  defp validate_session_model_entries([], requested_model, current_model, seen, _count) do
+    cond do
+      not MapSet.member?(seen, current_model) ->
+        {:error, {:model_not_confirmed, :invalid_current_model}}
+
+      not MapSet.member?(seen, requested_model) ->
+        {:error, {:model_not_confirmed, :model_not_available}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_session_model_entries(
+         [%{"modelId" => model_id} | rest],
+         requested_model,
+         current_model,
+         seen,
+         count
+       )
+       when count < @max_model_catalog_options do
+    with :ok <- validate_catalog_model_id(model_id),
+         false <- MapSet.member?(seen, model_id) do
+      validate_session_model_entries(
+        rest,
+        requested_model,
+        current_model,
+        MapSet.put(seen, model_id),
+        count + 1
+      )
+    else
+      true -> {:error, {:model_not_confirmed, :ambiguous_model_catalog}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_session_model_entries(
+         [_entry | _rest],
+         _requested_model,
+         _current_model,
+         _seen,
+         count
+       )
+       when count >= @max_model_catalog_options,
+       do: {:error, {:model_not_confirmed, :model_catalog_too_many}}
+
+  defp validate_session_model_entries(
+         [_entry | _rest],
+         _requested_model,
+         _current_model,
+         _seen,
+         _count
+       ),
+       do: {:error, {:model_not_confirmed, :invalid_model_catalog_shape}}
+
+  defp validate_session_model_entries(
+         _improper_list,
+         _requested_model,
+         _current_model,
+         _seen,
+         _count
+       ),
+       do: {:error, {:model_not_confirmed, :invalid_model_catalog_shape}}
+
+  defp validate_catalog_model_id(model_id) do
+    case validate_model_string(model_id) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, {:model_not_confirmed, :invalid_model_catalog_shape}}
+    end
+  end
+
+  defp verify_set_model_response({:ok, response}) when is_map(response) do
+    case Arbor.LLM.validate_decoded_term(response, @response_budget) do
+      :ok when map_size(response) == 0 -> :ok
+      :ok -> {:error, {:model_not_confirmed, :invalid_set_model_acknowledgement}}
+      {:error, _reason} -> {:error, {:model_not_confirmed, :response_exceeds_budget}}
+    end
+  end
+
+  defp verify_set_model_response(_response),
+    do: {:error, {:model_not_confirmed, :invalid_set_model_acknowledgement}}
 
   defp verify_model_response({:ok, inner}, model) when is_map(inner) do
     case Arbor.LLM.validate_decoded_term(inner, @response_budget) do

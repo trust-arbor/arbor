@@ -159,6 +159,9 @@ defmodule Arbor.AI.AcpSession.Readiness.Internal do
       :dynamic ->
         {:ok, :dynamic}
 
+      :session_set_model ->
+        {:ok, :dynamic}
+
       {:launch_bound, model} when is_binary(model) and byte_size(model) <= 512 ->
         {:ok, {:launch_bound, model}}
 

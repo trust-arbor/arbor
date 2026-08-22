@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 662,
+  "entry_count": 666,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8150,8 +8150,60 @@
       "source_incident": "found 2026-08-21 diagnosing Historian hot_projection_failed: modules hot-reloaded and md5-current, but the ETS child still ran with the pre-12:19 args so mode was nil",
       "always_loaded": false,
       "content_sha256": "fcf3422be6ed09bf5a987d8faf8601ba1ba4adc1c743d306563cb7cc1427738d"
+    },
+    {
+      "source_ordinal": 663,
+      "source_kind": "post-migration",
+      "slug": "treat-official-acp-registry-membership-as-protocol-discovery-not-executable-provenance",
+      "title": "Treat official ACP registry membership as protocol discovery, not executable provenance.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-treat-official-acp-registry-membership-as-protocol-discovery-not-executable-provenance",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 when sandboxed checks falsely rejected Apple's /bin/ls, notarized Kiro, and Google's Antigravity ACP binary; all verified correctly outside the sandbox",
+      "always_loaded": false,
+      "content_sha256": "02d8d3e9e3d5cd7b4d4879f92c2c44f8d3074a89d8d09b6c62346166ff6ec32c"
+    },
+    {
+      "source_ordinal": 664,
+      "source_kind": "post-migration",
+      "slug": "discover-progressively-disclosed-arbor-mcp-tools-before-declaring-them-unavailable",
+      "title": "Discover progressively disclosed Arbor MCP tools before declaring them unavailable.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-discover-progressively-disclosed-arbor-mcp-tools-before-declaring-them-unavailable",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 while qualifying Kiro ACP dispatch",
+      "always_loaded": false,
+      "content_sha256": "b0d8c8b802433f5f84ed0d6838c7f39df4e4dccf614debe981032315023ee853"
+    },
+    {
+      "source_ordinal": 665,
+      "source_kind": "post-migration",
+      "slug": "select-acp-models-through-the-provider-s-advertised-protocol-surface",
+      "title": "Select ACP models through the provider's advertised protocol surface.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-select-acp-models-through-the-provider-s-advertised-protocol-surface",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 in the managed Kiro coding canary",
+      "always_loaded": false,
+      "content_sha256": "26bd131c5f9b679e7fae186e4c51aaea12ed7a99cfc950a09fc8dc504f00e949"
+    },
+    {
+      "source_ordinal": 666,
+      "source_kind": "post-migration",
+      "slug": "bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title",
+      "title": "Bind opaque ACP tool identities to the code-owned provider, never the display title.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title",
+      "source_date": "2026-08-22",
+      "source_incident": "found 2026-08-22 in the managed Kiro coding canary",
+      "always_loaded": false,
+      "content_sha256": "3de1be6994826a10d5e80eacaca0cb77a61cee27856fcebfe7bf71204351b159"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 201
+  "post_migration_entry_count": 205
 }

@@ -170,13 +170,17 @@ another one. It doubles as user documentation — anyone standing up agents need
 
 - **What:** starting an ACP session and authorizing the worker's native tool callbacks
   are separate operations. `AcpSession.Handler` maps a bounded, machine-readable tool
-  name or kind to `arbor://acp/tool/<tool>`. A concrete `arbor://acp/tool` capability
-  does not authorize those child resources.
+  name or kind to `arbor://acp/tool/<tool>`. Some providers expose only a documented
+  opaque callback namespace: Kiro `2.19.1` uses `tooluse_*`, which Arbor accepts only
+  when the code-owned session provider is `kiro` and maps to the coarse child
+  `arbor://acp/tool/kiro`. A concrete `arbor://acp/tool` capability does not authorize
+  any of these child resources.
 - **Symptom:** the delegated worker starts normally, then its first native tool request
   is denied or cancelled despite holding the base capability. Descriptive ACP titles
   such as an entire shell command are not authorization identities and fail closed
   unless the payload also supplies a canonical `name`, `toolName`, `tool_name`, `kind`,
-  or typed `toolCallId` prefix.
+  typed `toolCallId` prefix, or a provider-bound opaque ID namespace. Never infer
+  authority from the title or from an untrusted provider field in the callback.
 - **Action:** for agents trusted to use their native ACP harness, grant the bounded
   subtree explicitly:
   ```elixir
@@ -487,7 +491,8 @@ another one. It doubles as user documentation — anyone standing up agents need
    `external_provider` egress — and remember tainted→external is blocked by design.
 7. To watch `security.*` signals, subscribe with a `principal_id:` and **tolerate refusal**.
 8. For native ACP workers, grant exact callback URIs or `arbor://acp/tool/**`; the base
-   capability alone only names the namespace.
+   capability alone only names the namespace. Provider-bound opaque callbacks use a
+   coarse child such as `arbor://acp/tool/kiro`, never their descriptive title.
 9. For nested reviewed graphs, grant every pinned child action's exact canonical URI;
    outer-action and domain capabilities do not substitute for action authority.
 10. For binding council runs, grant and auto-trust the exact

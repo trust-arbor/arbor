@@ -168,6 +168,18 @@ defmodule Arbor.AI.AcpSession.ConfigTest do
     end
   end
 
+  describe "resolve/2 for :kiro native ACP" do
+    @describetag :fast
+
+    test "uses the standalone CLI ACP subcommand" do
+      assert {:ok, opts} = Config.resolve(:kiro, [])
+      assert Keyword.fetch!(opts, :command) == ["kiro-cli", "acp"]
+      refute Keyword.has_key?(opts, :adapter)
+      refute Keyword.has_key?(opts, :transport_mod)
+      assert Config.model_selection_strategy(:kiro) == :session_set_model
+    end
+  end
+
   describe "resolve/2 for :claude (alternate endpoint, e.g. Ollama)" do
     @describetag :fast
 

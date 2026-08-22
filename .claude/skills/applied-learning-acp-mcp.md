@@ -4,6 +4,51 @@ Read this when dispatching, steering, approving, resuming, or reviewing delegate
 
 ## Retained Applied Learning
 
+<!-- applied-learning: bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title -->
+<a id="applied-learning-bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title"></a>
+**Bind opaque ACP tool identities to the code-owned provider, never the display
+title.** Some spec-valid native agents emit permission requests containing only
+an opaque `toolCallId` and a descriptive title. Thread the session's code-owned
+provider into the handler, accept only a documented bounded ID namespace, and
+map it to a coarse provider child capability; keep other providers and malformed
+IDs denied. Kiro CLI 2.19.1 emits `tooluse_*`, which maps to
+`arbor://acp/tool/kiro` without trusting the title (found 2026-08-22 in the
+managed Kiro coding canary).
+
+<!-- applied-learning: discover-progressively-disclosed-arbor-mcp-tools-before-declaring-them-unavailable -->
+<a id="applied-learning-discover-progressively-disclosed-arbor-mcp-tools-before-declaring-them-unavailable"></a>
+**Discover progressively disclosed Arbor MCP tools before declaring them
+unavailable.** The client intentionally keeps most Arbor actions out of the
+default visible surface to control context size. Query the available tool
+registry for `arbor_help`, `arbor_actions`, and `arbor_dispatch_task`; use
+`arbor_actions` for the category index and `arbor_help` for one exact schema.
+Do not fall back to direct CLI orchestration merely because a specialized action
+was not initially listed (found 2026-08-22 while qualifying Kiro ACP dispatch).
+
+<!-- applied-learning: select-acp-models-through-the-provider-s-advertised-protocol-surface -->
+<a id="applied-learning-select-acp-models-through-the-provider-s-advertised-protocol-surface"></a>
+**Select ACP models through the provider's advertised protocol surface.**
+`session/set_config_option` is not interchangeable with ACP's dedicated
+`session/set_model`: Kiro CLI 2.19.1 advertises a `models` catalog from
+`session/new`, accepts `session/set_model`, and rejects the config-option method
+with `-32601`. Bind the strategy per provider, validate the requested id against
+the bounded session catalog, and require the method's exact successful response
+before marking the model confirmed (found 2026-08-22 in the managed Kiro coding
+canary).
+
+<!-- applied-learning: treat-official-acp-registry-membership-as-protocol-discovery-not-executable-provenance -->
+<a id="applied-learning-treat-official-acp-registry-membership-as-protocol-discovery-not-executable-provenance"></a>
+**Treat official ACP registry membership as protocol discovery, not executable
+provenance.** Registry conformance can establish that an entry speaks ACP and
+advertises authentication, while its binary distribution still lacks a publisher
+digest. Probe an unactivated candidate without credentials in an isolated temporary
+home and require verified artifact integrity before publishing a runtime launch
+specification. Run platform-signature verification where host trust services are
+available: a restricted sandbox can make valid code fail as `invalid` or
+`CSSMERR_TP_NOT_TRUSTED` (found 2026-08-22 when sandboxed checks falsely rejected
+Apple's `/bin/ls`, notarized Kiro, and Google's Antigravity ACP binary; all verified
+correctly outside the sandbox).
+
 <!-- applied-learning: bind-ex-mcp-acp-pending-request-timeouts-at-client-start -->
 <a id="applied-learning-bind-ex-mcp-acp-pending-request-timeouts-at-client-start"></a>
 **Bind `ExMCP.ACP.Client` pending and handler request timeouts at client start.**

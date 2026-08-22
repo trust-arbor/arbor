@@ -10,6 +10,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   @grok_auth_lock_filename "auth.json.lock"
   @grok_auth_payload_filename "arbor-xai-access.json"
   @grok_home_directory "grok"
+  @kiro_home_directory "kiro"
   @grok_log_filename "grok.log"
   @grok_agent_profile_filename "arbor-agent-profile.md"
   @grok_agent_profile_content """
@@ -443,7 +444,63 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
+  defp inject_provider_home(client_opts, runtime_home, :kiro) do
+    if Keyword.has_key?(client_opts, :adapter) or Keyword.has_key?(client_opts, :adapter_opts) do
+      {:error, :kiro_runtime_native_transport_required}
+    else
+      kiro_home = Path.join(runtime_home, @kiro_home_directory)
+
+      with :ok <- ensure_private_provider_home(kiro_home, :kiro_runtime_home_unavailable),
+           {:ok, env} <- put_kiro_home(Keyword.get(client_opts, :env), kiro_home) do
+        {:ok, Keyword.put(client_opts, :env, env)}
+      end
+    end
+  end
+
   defp inject_provider_home(client_opts, _runtime_home, _provider), do: {:ok, client_opts}
+
+  defp ensure_private_provider_home(path, failure_reason) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        with :ok <- File.mkdir(path),
+             :ok <- File.chmod(path, 0o700),
+             :ok <- verify_private_directory(path) do
+          :ok
+        else
+          _other -> {:error, failure_reason}
+        end
+
+      {:ok, %File.Stat{type: :directory}} ->
+        case verify_private_directory(path) do
+          :ok -> :ok
+          {:error, _reason} -> {:error, failure_reason}
+        end
+
+      _other ->
+        {:error, failure_reason}
+    end
+  end
+
+  defp put_kiro_home(nil, kiro_home), do: {:ok, [{"KIRO_HOME", kiro_home}]}
+
+  defp put_kiro_home(env, kiro_home) when is_map(env) do
+    env = env |> Map.drop(["KIRO_HOME", :KIRO_HOME, ~c"KIRO_HOME"]) |> Map.to_list()
+    {:ok, env ++ [{"KIRO_HOME", kiro_home}]}
+  end
+
+  defp put_kiro_home(env, kiro_home) when is_list(env) do
+    if Enum.all?(env, &(is_tuple(&1) and tuple_size(&1) == 2)) do
+      env = Enum.reject(env, fn {key, _value} -> kiro_home_key?(key) end)
+      {:ok, env ++ [{"KIRO_HOME", kiro_home}]}
+    else
+      {:error, :invalid_acp_launch_env}
+    end
+  end
+
+  defp put_kiro_home(_env, _kiro_home), do: {:error, :invalid_acp_launch_env}
+
+  defp kiro_home_key?(key),
+    do: key == "KIRO_HOME" or key == :KIRO_HOME or key == ~c"KIRO_HOME"
 
   defp ensure_private_grok_home(grok_home) do
     case File.lstat(grok_home) do
