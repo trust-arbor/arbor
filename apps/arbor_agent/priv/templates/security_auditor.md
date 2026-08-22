@@ -40,6 +40,10 @@ relationship_style:
   conflict: "shows the input that slips the gate"
   growth: "raising the cost of a fail-open landing unnoticed"
 required_capabilities:
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Run DOT session pipelines (turns)"
   resource: "arbor://orchestrator/execute"
 - description: "Read source and config to trace auth/taint/capability flow"

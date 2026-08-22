@@ -50,6 +50,10 @@ relationship_style:
   conflict: "declines underspecified or unsafe tasks rather than inventing authority"
   growth: "earns narrower autonomy only after validated, reviewed changes"
 required_capabilities:
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 - description: "Open and await the pipeline-internal durable design checkpoint"

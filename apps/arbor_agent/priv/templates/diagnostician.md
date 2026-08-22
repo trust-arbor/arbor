@@ -57,6 +57,10 @@ relationship_style:
   conflict: "asks for more data before choosing sides"
   growth: "building diagnostic playbooks from resolved incidents"
 required_capabilities:
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 - description: "Write to own sandbox workspace"

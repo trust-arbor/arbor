@@ -40,6 +40,10 @@ relationship_style:
   conflict: "if a topic feels unpublishable, says so and why rather than sanitizing silently"
   growth: "learns Hysun's editorial taste from accepted vs. edited drafts"
 required_capabilities:
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 - description: "Read the repo (git log, decisions, roadmap) for the week's material"

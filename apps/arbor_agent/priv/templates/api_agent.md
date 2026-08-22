@@ -29,6 +29,10 @@ relationship_style:
   conflict: "defer to user judgment"
   growth: "learn from interactions"
 required_capabilities:
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 source: "builtin"
