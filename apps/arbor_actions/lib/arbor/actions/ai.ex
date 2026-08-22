@@ -46,11 +46,18 @@ defmodule Arbor.Actions.AI do
     :gemini,
     :ollama,
     :lmstudio,
+    :lm_studio,
     :opencode,
     :opencode_zen,
     :openrouter,
     :qwen
   ]
+
+  # ProviderRegistry canonical names whose Arbor.AI atom differs.
+  @ai_provider_aliases %{
+    lm_studio: :lmstudio,
+    google: :gemini
+  }
 
   @doc false
   def llm_providers, do: @llm_providers
@@ -59,7 +66,8 @@ defmodule Arbor.Actions.AI do
   Normalize an action `provider` parameter onto a known LLM provider atom.
 
   Unknown or missing values stay `nil` so routing can decide. Canonical
-  aliases such as `opencode-zen` fold through `Arbor.LLM.ProviderRegistry`.
+  aliases such as `opencode-zen` and `:lm_studio` fold through
+  `Arbor.LLM.ProviderRegistry` onto the atom Arbor.AI expects.
   """
   @spec normalize_provider(term()) :: atom() | nil
   def normalize_provider(nil), do: nil
@@ -69,19 +77,22 @@ defmodule Arbor.Actions.AI do
 
     case SafeAtom.to_allowed(folded, @llm_providers) do
       {:ok, atom} ->
-        atom
+        ai_provider(atom)
 
       {:error, _} ->
         case SafeAtom.to_allowed(provider, @llm_providers) do
-          {:ok, atom} -> atom
-          {:error, _} -> nil
+          {:ok, atom} ->
+            ai_provider(atom)
+
+          {:error, _} ->
+            known_registry_provider(folded)
         end
     end
   end
 
   def normalize_provider(provider) when is_atom(provider) do
     case SafeAtom.to_allowed(provider, @llm_providers) do
-      {:ok, atom} -> atom
+      {:ok, atom} -> ai_provider(atom)
       {:error, _} -> provider |> Atom.to_string() |> normalize_provider()
     end
   end
@@ -412,5 +423,18 @@ defmodule Arbor.Actions.AI do
 
     defp format_error({:unauthorized, reason}), do: "Unauthorized: #{inspect(reason)}"
     defp format_error(reason), do: "Code analysis failed: #{inspect(reason)}"
+  end
+
+  defp ai_provider(atom), do: Map.get(@ai_provider_aliases, atom, atom)
+
+  defp known_registry_provider(folded) do
+    if Arbor.LLM.ProviderRegistry.known?(folded) do
+      case SafeAtom.to_existing(folded) do
+        {:ok, atom} -> ai_provider(atom)
+        {:error, _} -> nil
+      end
+    else
+      nil
+    end
   end
 end

@@ -164,7 +164,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     assert %{received?: false} = Task.await(server, 2_000)
   end
 
-  test "admission catalog is read and decoded at most once per path" do
+  test "a missing admission catalog denies even after a previously successful load" do
     source = Application.app_dir(:arbor_llm, "priv/opencode_zen/admission.json")
 
     path =
@@ -174,22 +174,18 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     on_exit(fn -> File.rm(path) end)
     Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
 
-    assert OpenCodeZen.admission_load_count(path) == 0
-    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
-    assert OpenCodeZen.admission_load_count(path) == 1
-
-    _ = OpenCodeZen.admitted_ids()
-    _ = OpenCodeZen.catalog()
     assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
-    assert OpenCodeZen.admission_load_count(path) == 1
+    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
 
     File.rm!(path)
-    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
-    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
-    assert OpenCodeZen.admission_load_count(path) == 1
+
+    assert OpenCodeZen.admit_model("glm-4.6-flash") ==
+             {:error, :opencode_zen_admission_unreadable}
+
+    assert OpenCodeZen.admitted_ids() == []
   end
 
-  test "persist_admission invalidates the process-lifetime cache" do
+  test "persist_admission is visible on the next admit/list call" do
     path =
       Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
 
@@ -213,11 +209,72 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
 
     :ok = OpenCodeZen.persist_admission(admitted)
     assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
-    assert OpenCodeZen.admission_load_count(path) == 1
+    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
 
     :ok = OpenCodeZen.persist_admission(empty)
     assert OpenCodeZen.admitted_ids() == []
-    assert OpenCodeZen.admission_load_count(path) == 1
+
+    assert OpenCodeZen.admit_model("glm-4.6-flash") ==
+             {:error, {:opencode_zen_model_not_admitted, "glm-4.6-flash"}}
+  end
+
+  test "security regression: live evaluation does not open a VM-wide admission bypass for concurrent requests",
+       %{ack_path: ack_path} do
+    :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
+    assert File.exists?(ack_path)
+
+    path =
+      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+
+    File.write!(path, JSON.encode!(%{"version" => 1, "models" => []}) <> "\n")
+    on_exit(fn -> File.rm(path) end)
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
+
+    candidate = "unadmitted-concurrent-probe"
+
+    assert OpenCodeZen.admit_model(candidate) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    {ordinary_url, ordinary_server} = start_capture_server()
+    parent = self()
+    request = %{opencode_request() | model: candidate}
+
+    evaluator =
+      Task.async(fn ->
+        OpenCodeZen.with_probe_models([candidate], fn ->
+          send(parent, {:probe_open, self()})
+
+          receive do
+            {:run_probe, url} ->
+              Adapter.complete(request,
+                base_url: url,
+                receive_timeout: 2_000
+              )
+          after
+            10_000 ->
+              {:error, :evaluator_not_signaled}
+          end
+        end)
+      end)
+
+    assert_receive {:probe_open, eval_pid}, 1_000
+
+    ordinary =
+      Adapter.complete(request,
+        base_url: ordinary_url,
+        receive_timeout: 1_000
+      )
+
+    assert ordinary == {:error, {:opencode_zen_model_not_admitted, candidate}}
+    assert %{received?: false} = Task.await(ordinary_server, 2_000)
+
+    {eval_url, eval_server} = start_capture_server()
+    send(eval_pid, {:run_probe, eval_url})
+
+    eval_result = Task.await(evaluator, 5_000)
+    refute match?({:error, {:opencode_zen_model_not_admitted, _}}, eval_result)
+    refute eval_result == {:error, :opencode_zen_admission_unreadable}
+    assert %{received?: true} = Task.await(eval_server, 2_000)
   end
 
   test "unreadable admission catalog fails closed with a named error", %{ack_path: ack_path} do

@@ -94,4 +94,12 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLiveTest do
     assert nano["reason"] == "tier1_no_tool_call"
     assert get_in(payload, ["eval", "tier2"]) =~ "--max-heartbeats 2"
   end
+
+  test "tier-1 probe assembles an enforcing tool_choice on the outbound request" do
+    request = OpenCodeZenLive.tier1_request("glm-4.6-flash")
+    opts = Arbor.LLM.Adapter.ReqLLM.build_req_opts(request, [])
+
+    assert opts[:tool_choice] == %{type: "tool", name: "ping"}
+    assert Enum.any?(opts[:tools], &(&1.name == "ping"))
+  end
 end

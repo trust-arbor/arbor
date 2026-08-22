@@ -61,6 +61,38 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
     end
   end
 
+  @doc false
+  @spec tier1_request(String.t()) :: Arbor.LLM.Request.t()
+  def tier1_request(id) when is_binary(id) do
+    %Arbor.LLM.Request{
+      provider: "opencode_zen",
+      model: id,
+      messages: [
+        %Arbor.LLM.Message{
+          role: :user,
+          content: "Call the ping tool exactly once with ok=true. Do not reply with text."
+        }
+      ],
+      tools: [
+        %{
+          "type" => "function",
+          "function" => %{
+            "name" => "ping",
+            "description" => "Mechanical admission probe",
+            "parameters" => %{
+              "type" => "object",
+              "properties" => %{"ok" => %{"type" => "boolean"}},
+              "required" => ["ok"]
+            }
+          }
+        }
+      ],
+      # ReqLLM drops OpenAI-spec "required"; pin ping so the wire request
+      # actually enforces a tool call.
+      tool_choice: %{type: "tool", name: "ping"}
+    }
+  end
+
   defp probe_one(id, max_heartbeats, complete, eval_task, log) do
     log.("  tier 1 #{id}")
     response = complete.(id)
@@ -94,33 +126,7 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
   end
 
   defp default_complete(id) do
-    request = %Arbor.LLM.Request{
-      provider: "opencode_zen",
-      model: id,
-      messages: [
-        %Arbor.LLM.Message{
-          role: :user,
-          content: "Call the ping tool exactly once with ok=true. Do not reply with text."
-        }
-      ],
-      tools: [
-        %{
-          "type" => "function",
-          "function" => %{
-            "name" => "ping",
-            "description" => "Mechanical admission probe",
-            "parameters" => %{
-              "type" => "object",
-              "properties" => %{"ok" => %{"type" => "boolean"}},
-              "required" => ["ok"]
-            }
-          }
-        }
-      ],
-      tool_choice: "required"
-    }
-
-    Arbor.LLM.Adapter.ReqLLM.complete(request)
+    Arbor.LLM.Adapter.ReqLLM.complete(tier1_request(id))
   end
 
   defp default_eval_task(id, max_heartbeats) do

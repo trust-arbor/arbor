@@ -40,8 +40,7 @@ defmodule Arbor.LLM.OpenCodeZen do
   @provider "opencode_zen"
   @provider_atom :opencode_zen
   @base_url "https://opencode.ai/zen/v1"
-  @admission_cache_key {__MODULE__, :admission}
-  @admission_load_count_key {__MODULE__, :admission_loads}
+  @probe_ids_key {__MODULE__, :probe_ids}
 
   @spec provider() :: String.t()
   def provider, do: @provider
@@ -146,7 +145,7 @@ defmodule Arbor.LLM.OpenCodeZen do
   @spec apply_anonymous_auth(term()) :: term()
   def apply_anonymous_auth(request), do: Transport.apply_anonymous_auth(request)
 
-  @doc "Write a new admission payload and invalidate the cached entry for that path."
+  @doc "Write a new admission payload. The next admit/list call re-reads the file."
   @spec persist_admission(map()) :: :ok | {:error, :opencode_zen_admission_unreadable}
   def persist_admission(payload) when is_map(payload) do
     path = admission_path()
@@ -154,7 +153,6 @@ defmodule Arbor.LLM.OpenCodeZen do
 
     case File.write(path, JSON.encode!(payload) <> "\n") do
       :ok ->
-        invalidate_admission_cache(path)
         :ok
 
       {:error, _reason} ->
@@ -163,50 +161,22 @@ defmodule Arbor.LLM.OpenCodeZen do
   end
 
   @doc false
-  @spec reset_admission_cache() :: :ok
-  def reset_admission_cache do
-    _ = :persistent_term.erase(@admission_cache_key)
-    _ = :persistent_term.erase(@admission_load_count_key)
-    :ok
-  end
-
-  @doc false
-  @spec admission_load_count(String.t() | nil) :: non_neg_integer()
-  def admission_load_count(path \\ nil) do
-    key = path || admission_path()
-    :persistent_term.get(@admission_load_count_key, %{}) |> Map.get(key, 0)
-  end
-
-  @doc false
+  # Probe authorization is process-scoped: only this process's admit/dispatch
+  # calls may use `ids`. Concurrent ordinary requests in other processes cannot
+  # observe the marker.
   @spec with_probe_models([String.t()], (-> result)) :: result when result: var
   def with_probe_models(ids, fun) when is_list(ids) and is_function(fun, 0) do
-    previous = Application.get_env(:arbor_llm, :opencode_zen_probe_ids)
-    Application.put_env(:arbor_llm, :opencode_zen_probe_ids, ids)
+    previous = Process.get(@probe_ids_key)
+    Process.put(@probe_ids_key, ids)
 
     try do
       fun.()
     after
-      restore_env(:opencode_zen_probe_ids, previous)
+      restore_probe_ids(previous)
     end
   end
 
   defp load_admission do
-    path = admission_path()
-    cache = :persistent_term.get(@admission_cache_key, %{})
-
-    case Map.fetch(cache, path) do
-      {:ok, result} ->
-        result
-
-      :error ->
-        result = read_admission()
-        :persistent_term.put(@admission_cache_key, Map.put(cache, path, result))
-        bump_load_count(path)
-        result
-    end
-  end
-
-  defp read_admission do
     case File.read(admission_path()) do
       {:ok, contents} ->
         case JSON.decode(contents) do
@@ -229,26 +199,13 @@ defmodule Arbor.LLM.OpenCodeZen do
     end
   end
 
-  defp bump_load_count(path) do
-    counts = :persistent_term.get(@admission_load_count_key, %{})
-    :persistent_term.put(@admission_load_count_key, Map.update(counts, path, 1, &(&1 + 1)))
-  end
-
-  defp invalidate_admission_cache(path) do
-    cache = :persistent_term.get(@admission_cache_key, %{})
-    :persistent_term.put(@admission_cache_key, Map.delete(cache, path))
-    counts = :persistent_term.get(@admission_load_count_key, %{})
-    :persistent_term.put(@admission_load_count_key, Map.delete(counts, path))
-    :ok
-  end
-
   defp probe_model?(id) do
-    case Application.get_env(:arbor_llm, :opencode_zen_probe_ids, []) do
+    case Process.get(@probe_ids_key, []) do
       ids when is_list(ids) -> id in ids
       _ -> false
     end
   end
 
-  defp restore_env(_key, nil), do: Application.delete_env(:arbor_llm, :opencode_zen_probe_ids)
-  defp restore_env(key, value), do: Application.put_env(:arbor_llm, key, value)
+  defp restore_probe_ids(nil), do: Process.delete(@probe_ids_key)
+  defp restore_probe_ids(ids), do: Process.put(@probe_ids_key, ids)
 end
