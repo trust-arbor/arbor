@@ -53,10 +53,6 @@ relationship_style:
   conflict: "surfaces unsupported profiles or missing information instead of inventing execution policy"
   growth: "improves plan quality while keeping the authoring boundary fixed"
 required_capabilities:
-- description: "Own memory checks + consolidation (FIRST heartbeat node)"
-  resource: "arbor://memory/write"
-- description: "Prune stale intents during the heartbeat cycle"
-  resource: "arbor://action/session_goals/prune_stale_intents"
 - description: "Traverse the built-in Arbor session turn pipeline"
   resource: "arbor://orchestrator/execute"
 - description: "Read repository files within the repo root"
@@ -67,8 +63,6 @@ source: "builtin"
 trust_preset:
   baseline: "block"
   rules:
-    "arbor://memory": auto
-    "arbor://action/session_goals/prune_stale_intents": auto
     "arbor://orchestrator/execute": "allow"
     "arbor://orchestrator/execute/adapt": "block"
     "arbor://orchestrator/execute/compose": "block"
