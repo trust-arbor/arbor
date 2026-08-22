@@ -362,7 +362,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
         true ->
           case build_embed_model_spec(arbor_provider, model) do
-            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts)
+            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts, model)
             {:error, _} = err -> err
           end
       end
@@ -394,10 +394,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_embed(arbor_provider, model_spec, texts, opts) do
+  defp do_embed(arbor_provider, model_spec, texts, opts, model) do
     {usage_context, opts} = pop_provider_usage_context(opts)
 
-    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
+    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, model, opts) do
       case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
         {:ok, indexed, usage} when is_list(indexed) ->
           case Boundary.embedding_response_with_indices(
@@ -788,7 +788,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # Strip private attribution before any provider option assembly.
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    with :ok <- ensure_keyless_ready(request.provider) do
+    with :ok <- ensure_keyless_ready(request.provider, request.model) do
       request
       |> build_req_opts(opts)
       |> maybe_mark_anonymous(request.provider)
@@ -805,10 +805,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp validated_embed_opts(arbor_provider, opts) do
+  defp validated_embed_opts(arbor_provider, model, opts) do
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    with :ok <- ensure_keyless_ready(arbor_provider) do
+    with :ok <- ensure_keyless_ready(arbor_provider, model) do
       arbor_provider
       |> build_embed_opts(opts)
       |> maybe_mark_anonymous(arbor_provider)
@@ -878,9 +878,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp present_api_key?(key) when is_binary(key) and key != "", do: true
   defp present_api_key?(_), do: false
 
-  defp ensure_keyless_ready(provider) do
+  defp ensure_keyless_ready(provider, model) do
     if is_binary(provider) and ProviderRegistry.keyless?(provider) do
-      Arbor.LLM.OpenCodeZen.ensure_acknowledged()
+      with :ok <- Arbor.LLM.OpenCodeZen.ensure_acknowledged() do
+        Arbor.LLM.OpenCodeZen.admit_model(model)
+      end
     else
       :ok
     end

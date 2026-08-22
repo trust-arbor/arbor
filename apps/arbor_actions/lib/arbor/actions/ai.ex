@@ -38,6 +38,56 @@ defmodule Arbor.Actions.AI do
   is `arbor://ai/generate`.
   """
 
+  alias Arbor.Common.SafeAtom
+
+  @llm_providers [
+    :anthropic,
+    :openai,
+    :gemini,
+    :ollama,
+    :lmstudio,
+    :opencode,
+    :opencode_zen,
+    :openrouter,
+    :qwen
+  ]
+
+  @doc false
+  def llm_providers, do: @llm_providers
+
+  @doc """
+  Normalize an action `provider` parameter onto a known LLM provider atom.
+
+  Unknown or missing values stay `nil` so routing can decide. Canonical
+  aliases such as `opencode-zen` fold through `Arbor.LLM.ProviderRegistry`.
+  """
+  @spec normalize_provider(term()) :: atom() | nil
+  def normalize_provider(nil), do: nil
+
+  def normalize_provider(provider) when is_binary(provider) do
+    folded = Arbor.LLM.ProviderRegistry.normalize(provider)
+
+    case SafeAtom.to_allowed(folded, @llm_providers) do
+      {:ok, atom} ->
+        atom
+
+      {:error, _} ->
+        case SafeAtom.to_allowed(provider, @llm_providers) do
+          {:ok, atom} -> atom
+          {:error, _} -> nil
+        end
+    end
+  end
+
+  def normalize_provider(provider) when is_atom(provider) do
+    case SafeAtom.to_allowed(provider, @llm_providers) do
+      {:ok, atom} -> atom
+      {:error, _} -> provider |> Atom.to_string() |> normalize_provider()
+    end
+  end
+
+  def normalize_provider(_), do: nil
+
   defmodule GenerateText do
     @moduledoc """
     Generate text using an LLM provider.
@@ -95,7 +145,6 @@ defmodule Arbor.Actions.AI do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Common.SafeAtom
 
     def taint_roles do
       %{
@@ -114,28 +163,17 @@ defmodule Arbor.Actions.AI do
 
     def egress_tier(params, _context) do
       params[:provider]
-      |> normalize_provider()
+      |> Arbor.Actions.AI.normalize_provider()
       |> Arbor.AI.egress_tier_for()
     end
 
     # Destination-scoped egress caps match on the provider (nil when routing decides).
     def egress_destination(params, _context) do
-      case normalize_provider(params[:provider]) do
+      case Arbor.Actions.AI.normalize_provider(params[:provider]) do
         nil -> nil
         provider -> to_string(provider)
       end
     end
-
-    @allowed_providers [
-      :anthropic,
-      :openai,
-      :gemini,
-      :ollama,
-      :lmstudio,
-      :opencode,
-      :openrouter,
-      :qwen
-    ]
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -179,22 +217,11 @@ defmodule Arbor.Actions.AI do
 
     defp build_opts(params) do
       []
-      |> maybe_add(:provider, normalize_provider(params[:provider]))
+      |> maybe_add(:provider, Arbor.Actions.AI.normalize_provider(params[:provider]))
       |> maybe_add(:max_tokens, params[:max_tokens])
       |> maybe_add(:system_prompt, params[:system_prompt])
       |> maybe_add(:temperature, params[:temperature])
     end
-
-    defp normalize_provider(nil), do: nil
-
-    defp normalize_provider(provider) when is_binary(provider) do
-      case SafeAtom.to_allowed(provider, @allowed_providers) do
-        {:ok, atom} -> atom
-        {:error, _} -> nil
-      end
-    end
-
-    defp normalize_provider(provider) when is_atom(provider), do: provider
 
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
@@ -260,7 +287,6 @@ defmodule Arbor.Actions.AI do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Common.SafeAtom
 
     def taint_roles do
       %{
@@ -277,28 +303,17 @@ defmodule Arbor.Actions.AI do
 
     def egress_tier(params, _context) do
       params[:provider]
-      |> normalize_provider()
+      |> Arbor.Actions.AI.normalize_provider()
       |> Arbor.AI.egress_tier_for()
     end
 
     # Destination-scoped egress caps match on the provider (nil when routing decides).
     def egress_destination(params, _context) do
-      case normalize_provider(params[:provider]) do
+      case Arbor.Actions.AI.normalize_provider(params[:provider]) do
         nil -> nil
         provider -> to_string(provider)
       end
     end
-
-    @allowed_providers [
-      :anthropic,
-      :openai,
-      :gemini,
-      :ollama,
-      :lmstudio,
-      :opencode,
-      :openrouter,
-      :qwen
-    ]
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -369,24 +384,13 @@ defmodule Arbor.Actions.AI do
 
     defp build_opts(params) do
       []
-      |> maybe_add(:provider, normalize_provider(params[:provider]))
+      |> maybe_add(:provider, Arbor.Actions.AI.normalize_provider(params[:provider]))
       |> maybe_add(:max_tokens, params[:max_tokens])
       |> Keyword.put(
         :system_prompt,
         "You are a code analysis assistant. Provide clear, actionable analysis."
       )
     end
-
-    defp normalize_provider(nil), do: nil
-
-    defp normalize_provider(provider) when is_binary(provider) do
-      case SafeAtom.to_allowed(provider, @allowed_providers) do
-        {:ok, atom} -> atom
-        {:error, _} -> nil
-      end
-    end
-
-    defp normalize_provider(provider) when is_atom(provider), do: provider
 
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)

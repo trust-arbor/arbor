@@ -22,7 +22,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
 
   use Mix.Task
 
-  alias Arbor.Agent.Eval.OpenCodeZenAdmission
+  alias Arbor.Agent.Eval.{OpenCodeZenAdmission, OpenCodeZenLive}
   alias Arbor.LLM.OpenCodeZen
   alias Arbor.LLM.OpenCodeZen.AdmissionCore
 
@@ -50,24 +50,48 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
   defp run_live(opts) do
     case OpenCodeZen.prompt_acknowledgement() do
       :ok ->
+        start_live_apps()
         ids = live_ids(opts)
+        max_heartbeats = opts[:max_heartbeats] || 3
+
         Mix.shell().info("Live probe of #{length(ids)} candidate(s). Tier 1 is mechanical;")
         Mix.shell().info("tier 2 is mix arbor.eval.task. A model that cannot tool-call")
         Mix.shell().info("never reaches a proposal and is rejected.")
         Mix.shell().info("")
 
-        Enum.each(ids, fn id ->
-          Mix.shell().info("  candidate #{id}")
-        end)
+        result =
+          OpenCodeZen.with_probe_models(ids, fn ->
+            OpenCodeZenLive.run(
+              ids: ids,
+              max_heartbeats: max_heartbeats,
+              log: fn line -> Mix.shell().info(line) end
+            )
+          end)
 
-        Mix.shell().info("")
-        Mix.shell().info("Recording lives in apps/arbor_llm/priv/opencode_zen/admission.json.")
-        Mix.shell().info("Re-derive with mix arbor.eval.opencode_zen after updating it.")
+        case result do
+          {:ok, _payload} ->
+            Mix.shell().info("")
+            Mix.shell().info(OpenCodeZen.listing())
+            Mix.shell().info("Recording lives in apps/arbor_llm/priv/opencode_zen/admission.json.")
+
+          {:error, reason} ->
+            Mix.shell().error("Live probe failed: #{inspect(reason)}")
+            exit({:shutdown, 1})
+        end
 
       {:error, :disclosure_not_acknowledged} ->
         Mix.shell().error("Live probe refused: data-disclosure was not acknowledged.")
         exit({:shutdown, 1})
     end
+  end
+
+  defp start_live_apps do
+    {:ok, _} = Application.ensure_all_started(:arbor_memory)
+    {:ok, _} = Application.ensure_all_started(:arbor_ai)
+    {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
+    {:ok, _} = Application.ensure_all_started(:arbor_agent)
+    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+    :ok
   end
 
   defp live_ids(opts) do

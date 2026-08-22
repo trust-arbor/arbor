@@ -58,6 +58,11 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
   @spec admitted_ids(t()) :: [String.t()]
   def admitted_ids(state), do: state |> admitted() |> Enum.flat_map(&id_list/1)
 
+  @doc "True when `id` is in the admitted set derived from recorded evidence."
+  @spec admitted_id?(t(), term()) :: boolean()
+  def admitted_id?(state, id) when is_binary(id) and id != "", do: id in admitted_ids(state)
+  def admitted_id?(_state, _id), do: false
+
   @doc "Models that did not pass both tiers, with their recorded reason."
   @spec rejected(t()) :: [record()]
   def rejected(%{models: models}) do

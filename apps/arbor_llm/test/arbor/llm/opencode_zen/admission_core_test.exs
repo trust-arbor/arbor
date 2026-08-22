@@ -37,6 +37,10 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
       assert "mimo-v2.5-free" in rejected_ids
       assert Enum.find(AdmissionCore.rejected(state), &(&1["id"] == "big-pickle"))["reason"] ==
                "ua_gated"
+
+      assert AdmissionCore.admitted_id?(state, "glm-4.6-flash")
+      refute AdmissionCore.admitted_id?(state, "big-pickle")
+      refute AdmissionCore.admitted_id?(state, "unknown-model")
     end
 
     test "status=admitted is ignored when tier evidence is missing" do

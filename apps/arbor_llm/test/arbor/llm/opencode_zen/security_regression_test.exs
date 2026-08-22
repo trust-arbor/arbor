@@ -20,6 +20,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
 
   setup do
     previous_path = Application.get_env(:arbor_llm, :opencode_zen_acknowledgement_path)
+    previous_admission = Application.get_env(:arbor_llm, :opencode_zen_admission_path)
     previous_proxy = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
     previous_openai = System.get_env("OPENAI_API_KEY")
 
@@ -35,6 +36,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
       if previous_path,
         do: Application.put_env(:arbor_llm, :opencode_zen_acknowledgement_path, previous_path),
         else: Application.delete_env(:arbor_llm, :opencode_zen_acknowledgement_path)
+
+      if previous_admission,
+        do: Application.put_env(:arbor_llm, :opencode_zen_admission_path, previous_admission),
+        else: Application.delete_env(:arbor_llm, :opencode_zen_admission_path)
 
       restore_env(:trusted_proxy_endpoints, previous_proxy)
 
@@ -123,6 +128,118 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     %{request: request} = Task.await(server, 2_000)
     refute request =~ secret
     assert authorization_header(request) == ""
+  end
+
+  test "security regression: rejected catalog model big-pickle cannot reach the network", %{
+    ack_path: ack_path
+  } do
+    :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
+    assert File.exists?(ack_path)
+
+    {url, server} = start_capture_server()
+    request = %{opencode_request() | model: "big-pickle"}
+
+    complete =
+      Adapter.complete(request,
+        base_url: url,
+        receive_timeout: 1_000
+      )
+
+    stream =
+      Adapter.stream(request,
+        base_url: url,
+        receive_timeout: 1_000
+      )
+
+    embed =
+      Adapter.embed(["hello"], "big-pickle",
+        provider: "opencode_zen",
+        base_url: url,
+        receive_timeout: 1_000
+      )
+
+    assert complete == {:error, {:opencode_zen_model_not_admitted, "big-pickle"}}
+    assert stream == {:error, {:opencode_zen_model_not_admitted, "big-pickle"}}
+    assert embed == {:error, {:opencode_zen_model_not_admitted, "big-pickle"}}
+    assert %{received?: false} = Task.await(server, 2_000)
+  end
+
+  test "admission catalog is read and decoded at most once per path" do
+    source = Application.app_dir(:arbor_llm, "priv/opencode_zen/admission.json")
+
+    path =
+      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+
+    File.cp!(source, path)
+    on_exit(fn -> File.rm(path) end)
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
+
+    assert OpenCodeZen.admission_load_count(path) == 0
+    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
+    assert OpenCodeZen.admission_load_count(path) == 1
+
+    _ = OpenCodeZen.admitted_ids()
+    _ = OpenCodeZen.catalog()
+    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
+    assert OpenCodeZen.admission_load_count(path) == 1
+
+    File.rm!(path)
+    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
+    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
+    assert OpenCodeZen.admission_load_count(path) == 1
+  end
+
+  test "persist_admission invalidates the process-lifetime cache" do
+    path =
+      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+
+    on_exit(fn -> File.rm(path) end)
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
+
+    admitted = %{
+      "version" => 1,
+      "models" => [
+        %{
+          "id" => "glm-4.6-flash",
+          "evidence" => %{
+            "tier1" => %{"passed" => true},
+            "tier2" => %{"passed" => true}
+          }
+        }
+      ]
+    }
+
+    empty = %{"version" => 1, "models" => []}
+
+    :ok = OpenCodeZen.persist_admission(admitted)
+    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
+    assert OpenCodeZen.admission_load_count(path) == 1
+
+    :ok = OpenCodeZen.persist_admission(empty)
+    assert OpenCodeZen.admitted_ids() == []
+    assert OpenCodeZen.admission_load_count(path) == 1
+  end
+
+  test "unreadable admission catalog fails closed with a named error", %{ack_path: ack_path} do
+    :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
+    assert File.exists?(ack_path)
+
+    Application.put_env(
+      :arbor_llm,
+      :opencode_zen_admission_path,
+      "/no/such/opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+    )
+
+    {url, server} = start_capture_server()
+
+    result =
+      Adapter.complete(opencode_request(),
+        base_url: url,
+        receive_timeout: 1_000
+      )
+
+    assert result == {:error, :opencode_zen_admission_unreadable}
+    assert %{received?: false} = Task.await(server, 2_000)
   end
 
   test "security regression: missing or blank keys for credentialed providers still fail closed" do

@@ -40,3 +40,58 @@ defmodule Arbor.Agent.Eval.OpenCodeZenAdmissionTest do
     assert Enum.any?(rejected, &(&1["id"] == "nemotron-3-nano-free"))
   end
 end
+
+defmodule Arbor.Agent.Eval.OpenCodeZenLiveTest do
+  use ExUnit.Case, async: false
+  @moduletag :fast
+
+  alias Arbor.Agent.Eval.OpenCodeZenLive
+  alias Arbor.LLM.OpenCodeZen
+  alias Arbor.LLM.OpenCodeZen.AdmissionCore
+
+  test "live probe runs both advertised tiers and updates the recorded catalog" do
+    parent = self()
+
+    passing = %{
+      content_parts: [%{kind: :tool_call, name: "ping", arguments: %{"ok" => true}}]
+    }
+
+    {:ok, payload} =
+      OpenCodeZenLive.run(
+        ids: ["glm-4.6-flash", "nemotron-3-nano-free"],
+        max_heartbeats: 2,
+        existing: OpenCodeZen.catalog(),
+        now: "2026-08-21",
+        complete: fn id ->
+          send(parent, {:tier1, id})
+
+          if id == "glm-4.6-flash" do
+            {:ok, passing}
+          else
+            {:ok, %{content_parts: [%{kind: :text, text: "no tools"}]}}
+          end
+        end,
+        eval_task: fn id, max_heartbeats ->
+          send(parent, {:tier2, id, max_heartbeats})
+          %{proposal_submitted: true, heartbeats_to_proposal: max_heartbeats}
+        end,
+        persist: fn payload ->
+          send(parent, {:persisted, payload})
+          :ok
+        end
+      )
+
+    assert_received {:tier1, "glm-4.6-flash"}
+    assert_received {:tier1, "nemotron-3-nano-free"}
+    assert_received {:tier2, "glm-4.6-flash", 2}
+    refute_received {:tier2, "nemotron-3-nano-free", _}
+    assert_received {:persisted, ^payload}
+
+    catalog = AdmissionCore.new(payload)
+    assert AdmissionCore.admitted_ids(catalog) == ["glm-4.6-flash"]
+
+    nano = Enum.find(AdmissionCore.rejected(catalog), &(&1["id"] == "nemotron-3-nano-free"))
+    assert nano["reason"] == "tier1_no_tool_call"
+    assert get_in(payload, ["eval", "tier2"]) =~ "--max-heartbeats 2"
+  end
+end

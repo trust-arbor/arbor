@@ -103,6 +103,35 @@ defmodule Arbor.Actions.AITest do
     end
   end
 
+  describe "provider normalization" do
+    @describetag :fast
+
+    test "schema-valid opencode_zen resolves and supplies the egress destination on GenerateText" do
+      assert AI.normalize_provider("opencode_zen") == :opencode_zen
+      assert AI.normalize_provider("opencode-zen") == :opencode_zen
+      assert AI.normalize_provider("opencode-free") == :opencode_zen
+
+      assert AI.GenerateText.egress_destination(%{provider: "opencode_zen"}, %{}) ==
+               "opencode_zen"
+
+      assert AI.GenerateText.egress_destination(%{provider: "opencode-zen"}, %{}) ==
+               "opencode_zen"
+    end
+
+    test "schema-valid opencode_zen resolves and supplies the egress destination on AnalyzeCode" do
+      assert AI.AnalyzeCode.egress_destination(%{provider: "opencode_zen"}, %{}) ==
+               "opencode_zen"
+
+      assert AI.AnalyzeCode.egress_destination(%{provider: "opencode-free"}, %{}) ==
+               "opencode_zen"
+    end
+
+    test "historical lmstudio spelling still resolves" do
+      assert AI.normalize_provider("lmstudio") == :lmstudio
+      assert AI.GenerateText.egress_destination(%{provider: "lmstudio"}, %{}) == "lmstudio"
+    end
+  end
+
   describe "suggestion extraction" do
     @describetag :fast
 
