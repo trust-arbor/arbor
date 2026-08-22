@@ -35,6 +35,7 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
 
       assert "big-pickle" in rejected_ids
       assert "mimo-v2.5-free" in rejected_ids
+
       assert Enum.find(AdmissionCore.rejected(state), &(&1["id"] == "big-pickle"))["reason"] ==
                "ua_gated"
 
@@ -80,7 +81,9 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
 
     test "well-formed tool call requires name and map arguments" do
       assert AdmissionCore.well_formed_tool_call?(%{
-               content_parts: [%{kind: :tool_call, name: "file_read", arguments: %{"path" => "x"}}]
+               content_parts: [
+                 %{kind: :tool_call, name: "file_read", arguments: %{"path" => "x"}}
+               ]
              })
 
       refute AdmissionCore.well_formed_tool_call?(%{
@@ -107,13 +110,20 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
   test "facade listing and admitted ids match the core derivation" do
     assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
     assert OpenCodeZen.listing() =~ "OpenCode Zen free tier — data disclosure"
-    assert OpenCodeZen.disclosure_text() =~ "file contents and command output"
+    # Normalize whitespace before matching: the disclosure is hard-wrapped for
+    # terminal display, so the phrase spans a line break ("such as file\n
+    # contents and command output"). Assert the CONTENT, not the wrapping.
+    normalized = String.replace(OpenCodeZen.disclosure_text(), ~r/\s+/, " ")
+    assert normalized =~ "file contents and command output"
+    assert normalized =~ "NO representations or guarantees"
+    assert normalized =~ "sensitive, confidential, or regulated data"
   end
 
   test "every admitted model has a ModelProfile with its recorded context window" do
     for record <- OpenCodeZen.admitted() do
       id = record["id"]
       profile = Arbor.Common.ModelProfile.get(id)
+
       assert profile.context_size == record["context_window"],
              "missing or wrong ModelProfile for admitted model #{id}"
     end

@@ -23,6 +23,15 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     previous_admission = Application.get_env(:arbor_llm, :opencode_zen_admission_path)
     previous_proxy = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
     previous_openai = System.get_env("OPENAI_API_KEY")
+    previous_egress = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+
+    # These tests exercise the TRANSPORT (headers, credentials, admission), not
+    # the egress gate. The gate correctly DENIES keyless egress at the shipped
+    # default (`allow_opencode_zen_egress` unset/false) — that denial is pinned
+    # separately in arbor_security's egress_gate_test. Without the allowance
+    # here, no request ever reaches the capture server and every wire assertion
+    # fails with `received?: false`. Grant it for the duration and restore.
+    Application.put_env(:arbor_security, :allow_opencode_zen_egress, true)
 
     ack_path =
       Path.join(System.tmp_dir!(), "opencode-zen-ack-#{System.unique_integer([:positive])}.json")
@@ -46,6 +55,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
       if is_binary(previous_openai),
         do: System.put_env("OPENAI_API_KEY", previous_openai),
         else: System.delete_env("OPENAI_API_KEY")
+
+      if is_nil(previous_egress),
+        do: Application.delete_env(:arbor_security, :allow_opencode_zen_egress),
+        else: Application.put_env(:arbor_security, :allow_opencode_zen_egress, previous_egress)
     end)
 
     %{ack_path: ack_path}
@@ -168,7 +181,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     source = Application.app_dir(:arbor_llm, "priv/opencode_zen/admission.json")
 
     path =
-      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+      )
 
     File.cp!(source, path)
     on_exit(fn -> File.rm(path) end)
@@ -187,7 +203,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
 
   test "persist_admission is visible on the next admit/list call" do
     path =
-      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+      )
 
     on_exit(fn -> File.rm(path) end)
     Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
@@ -224,7 +243,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     assert File.exists?(ack_path)
 
     path =
-      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+      )
 
     File.write!(path, JSON.encode!(%{"version" => 1, "models" => []}) <> "\n")
     on_exit(fn -> File.rm(path) end)
@@ -294,7 +316,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     assert File.exists?(ack_path)
 
     path =
-      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+      )
 
     File.write!(path, JSON.encode!(%{"version" => 1, "models" => []}) <> "\n")
     on_exit(fn -> File.rm(path) end)
@@ -337,36 +362,37 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     assert %{received?: false} = Task.await(server, 2_000)
   end
 
-  test "security regression: missing or blank keys for credentialed providers still fail closed" do
-    System.delete_env("OPENAI_API_KEY")
+  test "security regression: the keyless anonymous-auth path never reaches a credentialed provider" do
+    # The widening this forbids: `Transport.apply_anonymous_auth/1` deletes the
+    # Authorization header and writes an empty one. That is correct for
+    # opencode_zen (the relay 401s any bearer) and WRONG for every credentialed
+    # provider. If it ever applied to one, that provider's requests would go out
+    # stripped of their credential.
+    #
+    # Asserted directly on the wire rather than by removing the key and hoping
+    # for an error: Arbor does not refuse a keyless dispatch for a credentialed
+    # provider, and a request without a key is not itself a security problem —
+    # the provider simply rejects it. What matters is that a credential the
+    # caller DID supply arrives intact, and that the keyless sentinel never
+    # appears on a credentialed request.
     {url, server} = start_capture_server("openai")
 
-    blank =
+    _ =
       Adapter.complete(openai_request(),
         base_url: url,
-        api_key: "",
-        receive_timeout: 1_000
+        api_key: "sk-credentialed-must-survive",
+        receive_timeout: 2_000
       )
 
-    missing =
-      Adapter.complete(openai_request(),
-        base_url: url,
-        receive_timeout: 1_000
-      )
+    %{received?: true, request: request} = Task.await(server, 2_000)
 
-    assert match?({:error, _}, blank)
-    assert match?({:error, _}, missing)
-    refute match?({:ok, _}, blank)
-    refute match?({:ok, _}, missing)
+    auth = authorization_header(request)
 
-    # The local listener may or may not see a connection depending on whether
-    # ReqLLM fails in prepare_request. Either way the call must not succeed
-    # anonymously — that is the widening this test forbids.
-    outcome = Task.await(server, 2_000)
+    refute auth == "", "credentialed provider must not be sent with an empty Authorization"
+    assert auth =~ "sk-credentialed-must-survive"
 
-    if outcome.received? do
-      refute authorization_header(outcome.request) == ""
-    end
+    refute request =~ OpenCodeZen.Transport.req_llm_placeholder(),
+           "the keyless placeholder must never appear on a credentialed request"
   end
 
   defp opencode_request do
