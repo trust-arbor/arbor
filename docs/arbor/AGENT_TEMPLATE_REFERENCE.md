@@ -110,8 +110,18 @@ initial_goals:
 # (arbor://shell/exec/git over arbor://shell). Optional constraints
 # blocks (rate limits, max_uses, …) are supported per capability.
 required_capabilities:
-- description: "Run DOT session pipelines"
+# ── FUNCTIONAL BASELINE — required for the agent to run its own loop ──
+# These three are not "nice to have". heartbeat.dot halts on the FIRST
+# node without arbor://memory/write, and because Arbor fails closed it
+# halts SILENTLY. See AGENT_AUTHORING_BEST_PRACTICES.md, "The functional
+# baseline". Omit them and you ship an agent that never thinks.
+- description: "Run DOT session pipelines (10 of 13 heartbeat actions)"
   resource: "arbor://orchestrator/execute"
+- description: "Own memory checks + consolidation (FIRST heartbeat node)"
+  resource: "arbor://memory/write"
+- description: "Prune stale intents during the heartbeat cycle"
+  resource: "arbor://action/session_goals/prune_stale_intents"
+# ── OUTWARD REACH — least privilege applies from here down ──
 - description: "Read files within the docs tree only"
   resource: "arbor://fs/read/docs"
 - constraints:

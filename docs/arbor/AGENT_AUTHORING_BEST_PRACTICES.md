@@ -158,6 +158,58 @@ can pair with a tight capability set unnoticed. Recommendation:
 - The reviewer/approval screen renders capabilities and modes as one table:
   URI · granted? · mode · why. One artifact, both axes, one review.
 
+## The functional baseline (what an agent needs to run *at all*)
+
+Least privilege governs what an agent may reach **outward**. It does not
+excuse withholding the capabilities the agent needs to run **its own**
+cognitive loop. Those are not optional extras; without them the agent is
+inert, and — because Arbor fails closed — inert *silently*.
+
+Every agent whose session runs `heartbeat.dot` needs these three:
+
+| Resource | Why | Consequence if missing |
+|---|---|---|
+| `arbor://orchestrator/execute` | 10 of the 13 heartbeat actions resolve here (mode select, prompt build, goal updates, consolidation, action routing) | The loop cannot execute any node |
+| `arbor://memory/write` | `session_memory.background_checks` — the **first** node after `start` | The graph halts at node 2 on every beat. Nothing downstream ever runs |
+| `arbor://action/session_goals/prune_stale_intents` | the one goal action that does not collapse to `orchestrator/execute` | Intent pruning fails mid-cycle |
+
+**Do not infer the manifest from "it is a session action."** The URI derivation
+is NOT uniform: most session actions fall back to `arbor://orchestrator/execute`
+via `canonical_uri_for/2`, but `session_memory.background_checks` derives
+`arbor://memory/write` and `session_goals.prune_stale_intents` derives its own
+action URI. Verify each action's resolved URI rather than assuming the family
+shares one.
+
+To check an action's actual requirement:
+
+```elixir
+Arbor.Actions.canonical_uri_for(Arbor.Actions.SessionMemory.BackgroundChecks, %{})
+#=> "arbor://memory/write"
+```
+
+### Why this section exists
+
+On 2026-08-21, **none of the eleven shipped agent templates granted
+`arbor://memory/write`**. Every heartbeat, for every agent, halted at the first
+node — 1719 of 1719 consecutive beats in one log produced the identical
+`2 nodes, content=nil`. Mode selection never ran once. No agent had ever
+completed a cognitive cycle or formed a durable memory.
+
+The denial was correct: a capability was missing and the kernel refused. Two
+things hid it. `HeartbeatService` logged `"Heartbeat completed"` without
+inspecting `final_outcome.status` (see the Engine contract in CLAUDE.md), and
+the missing grant was invisible in the template because the manifest *looked*
+complete — the canonical example below granted `arbor://orchestrator/execute`
+with the description "Run its turn/heartbeat pipelines", which is exactly the
+capability that is necessary and not sufficient.
+
+The action itself worked the whole time. Called directly it returned a real
+insight — a workflow pattern observed 67 times — which the agent was then
+denied permission to record.
+
+**Least privilege is about outward reach. An agent's own loop is not a
+privilege you are being generous by granting; it is the floor.**
+
 ## The worked example (the shape to copy)
 
 A repo-contributor agent, authored correctly:
@@ -173,8 +225,14 @@ trust_profile:
     "arbor://shell/exec/git": ask       # ceiling would force ask anyway
     "arbor://shell/exec/mix": ask
 required_capabilities:                  # the allowlist — every rule URI appears here
+  # ── functional baseline: without all three the agent cannot run its loop ──
   - resource: "arbor://orchestrator/execute"
-    description: "Run its turn/heartbeat pipelines"
+    description: "Run its turn/heartbeat pipeline nodes"
+  - resource: "arbor://memory/write"
+    description: "Its own memory checks + consolidation (FIRST heartbeat node)"
+  - resource: "arbor://action/session_goals/prune_stale_intents"
+    description: "Prune stale intents during the heartbeat cycle"
+  # ── outward reach: least privilege applies from here down ──
   - resource: "arbor://fs/read/repo"
     description: "Read the codebase it works on"
   - resource: "arbor://fs/write/worktree"
