@@ -615,9 +615,12 @@ defmodule Arbor.Security do
   agent's egress-constrained caps to `EgressGate` for the `:ask`-downgrade
   refinement.
 
-  Inert (`:allow`) unless `config :arbor_security, :egress_gate_enforcing`. The
-  security kernel does not consult trust policy directly; callers that want
-  profile standing pass `:egress_mode` in `opts` or use `Arbor.Trust.authorize_egress/3`.
+  The general gate is inert (`:allow`) unless
+  `config :arbor_security, :egress_gate_enforcing`. Keyless destinations
+  (`opencode_zen` / `opencode.ai`) are decided even while that switch is dark:
+  they require `allow_opencode_zen_egress` independently. The security kernel
+  does not consult trust policy directly; callers that want profile standing
+  pass `:egress_mode` in `opts` or use `Arbor.Trust.authorize_egress/3`.
   Emits `:egress_observed` telemetry for boundary-crossing egress regardless, so
   the compute-node egress surface is observable while the gate is dark. Arbor's
   signal runtime bridges this telemetry back to signals when `arbor_signals` is

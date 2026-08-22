@@ -607,6 +607,34 @@ another one. It doubles as user documentation — anyone standing up agents need
   path. Proof failures, payload mismatches, and capability denials are
   distinct `{:unauthorized_alias_management, reason}` values.
 
+## 24. OpenCode Zen keyless egress is an explicit, gated allowance
+
+- **What:** OpenCode Zen (`https://opencode.ai/zen/v1`) is a keyless free-tier
+  LLM. There is no API-key consent signal, so egress to `opencode_zen` /
+  `opencode.ai` is **not** implied by `external_provider: :allow`. It requires
+  `config :arbor_security, :allow_opencode_zen_egress` (`true` only in
+  `dev.exs`; default `false`). This check is **always on** and runs before
+  the general `egress_gate_enforcing` dark-launch short-circuit — a dark
+  gate still denies keyless destinations when the allowance is absent.
+  Production must set the flag explicitly. Independently, the first request
+  is blocked until the user acknowledges the data-disclosure warning
+  (`Arbor.LLM.OpenCodeZen.ensure_acknowledged/0`), and dispatch refuses any
+  model that is not in the admitted catalog.
+- **Symptom:** `EgressGate.decide` / `Arbor.Security.authorize_egress/3`
+  returns `{:block, :keyless_egress_not_allowed}` (or
+  `{:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}}`)
+  when the flag is absent, including with the shipped defaults
+  (`egress_gate_enforcing: false`, `allow_opencode_zen_egress: false`). LLM
+  complete returns `{:error, :disclosure_not_acknowledged}` before any HTTP
+  request if the disclosure was not acknowledged, or
+  `{:error, {:opencode_zen_model_not_admitted, id}}` for a rejected/unknown
+  model such as `big-pickle`. The relay itself 401s any `Authorization`
+  bearer, including placeholders.
+- **Action:** In development the flag is already on. For production, set
+  `allow_opencode_zen_egress: true` deliberately, show the disclosure, and do
+  not send a credential. Do not spoof `User-Agent: opencode/latest` to unlock
+  UA-gated models.
+
 ## Applied Learning: Security Gates
 
 Read this when changing capabilities, trust, authorization, identity, URI matching, taint, egress, or proof boundaries.

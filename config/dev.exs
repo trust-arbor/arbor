@@ -244,6 +244,11 @@ config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 # Production expects a working OIDC provider and must NEVER set this; the
 # facade additionally refuses whenever any OIDC provider is configured.
 config :arbor_security, allow_local_human_identity: true
+# DEV ONLY. Permits egress to the keyless OpenCode Zen free endpoint
+# (`opencode.ai`). Production must not set this; operators who want the
+# free tier there set it explicitly. Default is false — zero-config is
+# not zero-policy.
+config :arbor_security, allow_opencode_zen_egress: true
 # To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
 
 # SpawnWorker capability intersection fails CLOSED by default — if a parent's permissions

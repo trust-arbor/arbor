@@ -43,13 +43,16 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   defp do_dispatch(:complete, {model_spec, messages, opts}, single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, 16_777_216)
-    req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
+    anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
+
+    req_opts = Keyword.drop(opts, [:arbor_max_response_bytes, :arbor_anonymous_auth])
 
     with {:ok, model} <- ReqLLM.model(model_spec),
          {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts),
          request <- ResponseBudget.apply_req_receipt(request, maximum),
          request <- maybe_disable_req_retry(request, single_attempt?),
+         request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
            Req.request(request) do
       {:error, {:response_bytes_exceeded, maximum}}
@@ -141,14 +144,21 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   defp maybe_disable_req_retry(request, _single_attempt?), do: request
 
+  defp maybe_apply_anonymous_auth(request, true),
+    do: Arbor.LLM.OpenCodeZen.apply_anonymous_auth(request)
+
+  defp maybe_apply_anonymous_auth(request, _anonymous?), do: request
+
   defp dispatch_embedding(model, texts, opts, source, single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
-    req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
+    anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
+    req_opts = Keyword.drop(opts, [:arbor_max_response_bytes, :arbor_anonymous_auth])
 
     with {:ok, provider_module} <- ReqLLM.provider(model.provider),
          {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts),
          request <- ResponseBudget.apply_req_receipt(request, maximum),
          request <- maybe_disable_req_retry(request, single_attempt?),
+         request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
            Req.request(request) do
       {:error, {:response_bytes_exceeded, maximum}}

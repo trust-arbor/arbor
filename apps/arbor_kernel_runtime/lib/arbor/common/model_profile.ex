@@ -137,6 +137,15 @@ defmodule Arbor.Common.ModelProfile do
       family: :openrouter_free
     },
 
+    # ===== OpenCode Zen free (admitted via recorded eval, 2026-08-21) =====
+    # Compaction fires at 75% of effective_window; missing entries silently
+    # get the 100K default. Keep in sync with priv/opencode_zen/admission.json.
+    "glm-4.6-flash" => %{
+      context_size: 131_072,
+      max_output_tokens: 8_192,
+      family: :glm
+    },
+
     # ===== DeepSeek =====
     "deepseek-chat" => %{context_size: 128_000, max_output_tokens: 8_192, family: :deepseek},
     "deepseek-coder" => %{context_size: 128_000, max_output_tokens: 8_192, family: :deepseek},
@@ -164,7 +173,9 @@ defmodule Arbor.Common.ModelProfile do
     deepseek: %{context_size: 128_000, max_output_tokens: 8_192},
     llama: %{context_size: 128_000, max_output_tokens: 4_096},
     qwen: %{context_size: 32_768, max_output_tokens: 4_096},
-    mistral: %{context_size: 32_000, max_output_tokens: 4_096}
+    mistral: %{context_size: 32_000, max_output_tokens: 4_096},
+    mixtral: %{context_size: 32_000, max_output_tokens: 4_096},
+    glm: %{context_size: 131_072, max_output_tokens: 8_192}
   }
 
   # Pattern matching rules: {pattern, family}
@@ -179,7 +190,8 @@ defmodule Arbor.Common.ModelProfile do
     {"qwen", :qwen},
     {"mistral", :mistral},
     {"mixtral", :mixtral},
-    {"trinity", :openrouter_free}
+    {"trinity", :openrouter_free},
+    {"glm", :glm}
   ]
 
   # -- ModelEntry resolution (Phase 1 of item 9) --
@@ -510,7 +522,7 @@ defmodule Arbor.Common.ModelProfile do
   # it — otherwise fall back to the family-pattern inference. Avoids
   # arbitrary atom creation from a downstream-controlled string.
   defp safe_family_atom(family_str, model_id) do
-    known = [:claude, :gpt, :gemini, :deepseek, :llama, :qwen, :mistral, :mixtral]
+    known = [:claude, :gpt, :gemini, :deepseek, :llama, :qwen, :mistral, :mixtral, :glm]
     candidate = String.to_existing_atom(family_str)
     if candidate in known, do: candidate, else: infer_family(model_id)
   rescue

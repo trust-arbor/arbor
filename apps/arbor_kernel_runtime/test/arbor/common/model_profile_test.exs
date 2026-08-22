@@ -42,6 +42,13 @@ defmodule Arbor.Common.ModelProfileTest do
       assert profile.family == :openrouter_free
     end
 
+    test "opencode zen admitted model uses its real context window" do
+      profile = ModelProfile.get("glm-4.6-flash")
+      assert profile.context_size == 131_072
+      assert profile.family == :glm
+      assert ModelProfile.effective_window("glm-4.6-flash") == round(131_072 * 0.75)
+    end
+
     test "deepseek-chat" do
       assert ModelProfile.context_size("deepseek-chat") == 128_000
       assert ModelProfile.family("deepseek-chat") == :deepseek

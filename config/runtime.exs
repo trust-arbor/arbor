@@ -534,6 +534,7 @@ known_providers = %{
   "ollama" => :ollama,
   "lmstudio" => :lmstudio,
   "opencode" => :opencode,
+  "opencode_zen" => :opencode_zen,
   "qwen" => :qwen
 }
 

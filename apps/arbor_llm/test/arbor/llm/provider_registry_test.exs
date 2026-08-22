@@ -82,6 +82,24 @@ defmodule Arbor.LLM.ProviderRegistryTest do
     end
   end
 
+  describe "keyless OpenCode Zen" do
+    test "is known, not local, anonymous credential shape, openai transport" do
+      assert ProviderRegistry.known?("opencode_zen")
+      assert ProviderRegistry.known?(:opencode_zen)
+      assert ProviderRegistry.known?("opencode-free")
+      refute ProviderRegistry.local?("opencode_zen")
+      assert ProviderRegistry.keyless?("opencode_zen")
+      assert ProviderRegistry.credential_shape("opencode_zen") == :anonymous
+      assert ProviderRegistry.credential_shape("openai") == :api_key
+      assert ProviderRegistry.credential_shape("ollama") == :local
+      assert ProviderRegistry.req_llm_atom("opencode_zen") == :openai
+      assert ProviderRegistry.default_env_key("opencode_zen") == nil
+      assert ProviderRegistry.default_base_url("opencode_zen") == "https://opencode.ai/zen/v1"
+      assert ProviderRegistry.env_available?("opencode_zen")
+      assert ProviderRegistry.display_name("opencode_zen") == "OpenCode Zen (free)"
+    end
+  end
+
   describe "env_available?/1" do
     test "recognizes a key propagated into ReqLLM application config" do
       env_key = "ZAI_API_KEY"

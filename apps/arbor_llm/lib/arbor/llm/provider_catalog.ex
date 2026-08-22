@@ -155,8 +155,9 @@ defmodule Arbor.LLM.ProviderCatalog do
   defp discover_all do
     cloud = Enum.map(ProviderRegistry.list_cloud(), &build_cloud_entry/1)
     local = Enum.map(ProviderRegistry.list_local(), &build_local_entry/1)
+    keyless = Enum.map(ProviderRegistry.list_keyless(), &build_keyless_entry/1)
     acp = build_acp_entry()
-    entries = cloud ++ local ++ List.wrap(acp)
+    entries = cloud ++ local ++ keyless ++ List.wrap(acp)
     Map.new(entries, fn entry -> {entry.provider, entry} end)
   end
 
@@ -196,6 +197,32 @@ defmodule Arbor.LLM.ProviderCatalog do
     exception -> {:error, Arbor.LLM.ExternalTerm.exception(exception)}
   catch
     kind, reason -> {:error, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+  end
+
+  defp build_keyless_entry(provider) do
+    capabilities = ProviderRegistry.capabilities(provider)
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: provider,
+        display_name: ProviderRegistry.display_name(provider),
+        type: :api,
+        env_vars: [],
+        capabilities: capabilities
+      )
+
+    check_result = RuntimeContract.check(contract)
+
+    %{
+      provider: provider,
+      display_name: ProviderRegistry.display_name(provider),
+      type: :api,
+      available?: match?({:ok, _}, check_result),
+      capabilities: capabilities,
+      contract: contract,
+      check_result: check_result,
+      adapter_module: Arbor.LLM.Adapter.ReqLLM
+    }
   end
 
   defp build_local_entry(provider) do

@@ -311,6 +311,127 @@ defmodule Arbor.Security.EgressGateTest do
     end
   end
 
+  describe "keyless OpenCode Zen destination allowance" do
+    test "security regression: shipped defaults deny OpenCode Zen while the general gate is dark" do
+      previous_allow = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      previous_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
+
+      Application.delete_env(:arbor_security, :egress_gate_enforcing)
+      Application.delete_env(:arbor_security, :allow_opencode_zen_egress)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous_enforce)
+        restore(:allow_opencode_zen_egress, previous_allow)
+      end)
+
+      refute Application.get_env(:arbor_security, :egress_gate_enforcing, false)
+      refute Application.get_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
+               Arbor.Security.authorize_egress("agent_1", :external_provider,
+                 egress_destination: "opencode_zen"
+               )
+
+      assert {:error, {:egress_blocked, :external_provider, :keyless_egress_not_allowed}} =
+               Arbor.Security.authorize_egress("agent_1", :external_provider,
+                 egress_destination: "opencode.ai"
+               )
+    end
+
+    test "security regression: dark-launch still allows an existing destination when the gate is dark" do
+      previous_allow = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      previous_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
+
+      Application.delete_env(:arbor_security, :egress_gate_enforcing)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous_enforce)
+        restore(:allow_opencode_zen_egress, previous_allow)
+      end)
+
+      refute Application.get_env(:arbor_security, :egress_gate_enforcing, false)
+
+      assert Arbor.Security.authorize_egress("agent_1", :external_provider,
+               egress_destination: "openrouter",
+               egress_mode: :allow
+             ) == :allow
+    end
+
+    test "security regression: request is refused when the allowance is absent" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [],
+                 nil
+               )
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode.ai", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: request is allowed only when the explicit flag is set" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, true)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: explicit allowance admits keyless even while the general gate is dark" do
+      previous_allow = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, true)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous_allow) end)
+
+      assert Arbor.Security.authorize_egress("agent_1", :external_provider,
+               egress_destination: "opencode_zen",
+               egress_mode: :allow
+             ) == :allow
+    end
+
+    test "security regression: other providers are not gated by the keyless flag" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "openrouter", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+  end
+
   describe "VP-05D2A0: decide/5 interactive-disclosure override (pure)" do
     @tag spec: "VP-05D2A0"
     test "a valid exact disclosure cap admits :untrusted on its exact route" do

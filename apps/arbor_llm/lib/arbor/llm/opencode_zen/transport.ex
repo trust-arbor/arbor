@@ -1,0 +1,73 @@
+defmodule Arbor.LLM.OpenCodeZen.Transport do
+  @moduledoc false
+
+  # Do not spoof User-Agent as `opencode/latest`. The OpenCode Zen relay
+  # is User-Agent gated: it returns 429 FreeUsageLimitError unless the UA
+  # is `opencode/latest`. Hermes delisted big-pickle and mimo-v2.5-free
+  # for this reason. Spoofing a UA to obtain free compute is exactly the
+  # behavior Arbor's trust model exists to prevent an agent from learning.
+  # Arbor sends honest attribution and accepts the smaller admitted list.
+
+  @user_agent "Arbor/0.1 (+https://github.com/trust-arbor/arbor)"
+  @referer "https://github.com/trust-arbor/arbor"
+  @title "Arbor"
+
+  # ReqLLM's OpenAI-compatible provider refuses to dispatch without an
+  # `:api_key`. The OpenCode Zen relay 401s ANY bearer — including their
+  # own placeholder and paid OpenCode Go keys — so this value is stripped
+  # from the Authorization header in `apply_anonymous_auth/1` before the
+  # request hits the wire. It must never appear in the outgoing request.
+  @req_llm_placeholder "arbor-keyless-not-a-credential"
+
+  @spec user_agent() :: String.t()
+  def user_agent, do: @user_agent
+
+  @spec referer() :: String.t()
+  def referer, do: @referer
+
+  @spec title() :: String.t()
+  def title, do: @title
+
+  @spec req_llm_placeholder() :: String.t()
+  def req_llm_placeholder, do: @req_llm_placeholder
+
+  @spec attribution_headers() :: [{String.t(), String.t()}]
+  def attribution_headers do
+    [
+      {"authorization", ""},
+      {"user-agent", @user_agent},
+      {"http-referer", @referer},
+      {"x-title", @title}
+    ]
+  end
+
+  @spec req_http_options() :: keyword()
+  def req_http_options do
+    [headers: attribution_headers()]
+  end
+
+  @doc """
+  Force anonymous auth on a prepared Req request.
+
+  Deletes any Authorization value (Bearer from ReqLLM, leftover env keys,
+  the internal placeholder) and writes an empty Authorization header so
+  no credential reaches the wire.
+  """
+  @spec apply_anonymous_auth(term()) :: term()
+  def apply_anonymous_auth(%Req.Request{} = request) do
+    request
+    |> Req.Request.delete_header("authorization")
+    |> Req.Request.merge_options(auth: false)
+    |> Req.Request.put_header("authorization", "")
+    |> Req.Request.put_header("user-agent", @user_agent)
+    |> Req.Request.put_header("http-referer", @referer)
+    |> Req.Request.put_header("x-title", @title)
+  end
+
+  def apply_anonymous_auth(request), do: request
+
+  @doc "True when `opts` mark this dispatch as the keyless provider."
+  @spec anonymous?(keyword()) :: boolean()
+  def anonymous?(opts) when is_list(opts), do: Keyword.get(opts, :arbor_anonymous_auth) == true
+  def anonymous?(_), do: false
+end

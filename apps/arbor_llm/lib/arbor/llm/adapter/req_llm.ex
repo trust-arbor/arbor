@@ -63,6 +63,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.PostProcessors
   alias Arbor.LLM.Call
   alias Arbor.LLM.Pipeline
+  alias Arbor.LLM.OpenCodeZen
   alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Plugs.Usage
   alias Arbor.LLM.Request
@@ -112,6 +113,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete(request, opts \\ [])
 
   def complete(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -133,6 +136,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete_single_attempt(request, opts \\ [])
 
   def complete_single_attempt(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -163,6 +168,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def stream(request, opts \\ [])
 
   def stream(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -218,6 +225,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -246,6 +255,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming_single_attempt(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -338,6 +349,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
           {:ok, Arbor.LLM.ProviderAdapter.embed_batch_result()} | {:error, term()}
   def embed(texts, model, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <- Deadline.normalize_transport_options(opts),
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
@@ -362,7 +375,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
         true ->
           case build_embed_model_spec(arbor_provider, model) do
-            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts)
+            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts, model)
             {:error, _} = err -> err
           end
       end
@@ -384,7 +397,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp build_embed_model_spec(arbor_provider, model) do
-    if ProviderRegistry.local?(arbor_provider) do
+    if ProviderRegistry.local?(arbor_provider) or ProviderRegistry.keyless?(arbor_provider) do
       build_local_model_struct(arbor_provider, model)
     else
       case ProviderRegistry.req_llm_atom(arbor_provider) do
@@ -394,10 +407,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_embed(arbor_provider, model_spec, texts, opts) do
+  defp do_embed(arbor_provider, model_spec, texts, opts, model) do
     {usage_context, opts} = pop_provider_usage_context(opts)
 
-    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
+    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, model, opts) do
       case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
         {:ok, indexed, usage} when is_list(indexed) ->
           case Boundary.embedding_response_with_indices(
@@ -573,7 +586,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def build_model_spec(%Request{provider: provider, model: model})
       when is_binary(provider) and is_binary(model) do
-    if ProviderRegistry.local?(provider) do
+    if ProviderRegistry.local?(provider) or ProviderRegistry.keyless?(provider) do
       build_local_model_struct(provider, model)
     else
       case ProviderRegistry.req_llm_atom(provider) do
@@ -788,9 +801,14 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # Strip private attribution before any provider option assembly.
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    request
-    |> build_req_opts(opts)
-    |> validate_base_url_opt(request.provider)
+    with :ok <- ensure_keyless_ready(request.provider, request.model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
+      request
+      |> build_req_opts(opts)
+      |> maybe_mark_anonymous(request.provider)
+      |> validate_base_url_opt(request.provider)
+    end
   end
 
   defp validated_stream_opts(request, opts) do
@@ -802,12 +820,17 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp validated_embed_opts(arbor_provider, opts) do
+  defp validated_embed_opts(arbor_provider, model, opts) do
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    arbor_provider
-    |> build_embed_opts(opts)
-    |> validate_base_url_opt(arbor_provider)
+    with :ok <- ensure_keyless_ready(arbor_provider, model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
+      arbor_provider
+      |> build_embed_opts(opts)
+      |> maybe_mark_anonymous(arbor_provider)
+      |> validate_base_url_opt(arbor_provider)
+    end
   end
 
   defp validate_base_url_opt(opts, provider) do
@@ -833,23 +856,60 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # for cloud providers (keep req's default backoff for flaky cloud APIs).
   defp local_req_http_options(provider, opts) do
     cond do
-      Keyword.has_key?(opts, :req_http_options) -> Keyword.get(opts, :req_http_options)
-      is_binary(provider) and ProviderRegistry.local?(provider) -> [retry: false]
-      true -> nil
+      Keyword.has_key?(opts, :req_http_options) ->
+        Keyword.get(opts, :req_http_options)
+
+      is_binary(provider) and ProviderRegistry.keyless?(provider) ->
+        Arbor.LLM.OpenCodeZen.Transport.req_http_options()
+
+      is_binary(provider) and ProviderRegistry.local?(provider) ->
+        [retry: false]
+
+      true ->
+        nil
     end
   end
 
-  # Local-LM servers (Ollama, LM Studio) need no real auth, but req_llm's
-  # OpenAI-compatible provider — which we route these through — refuses to
-  # dispatch without an :api_key / OPENAI_API_KEY. Inject a harmless
-  # placeholder so the call reaches the local base_url. Caller-supplied
-  # keys always win. Returns nil for cloud providers (req_llm resolves
-  # their real key from the env).
+  # Credential injection is keyed off credential_shape/1, not "empty string
+  # means no key". Local servers accept a placeholder bearer. The keyless
+  # provider must NOT send that placeholder — the relay 401s any bearer —
+  # so we inject a sentinel that Transport.apply_anonymous_auth/1 strips
+  # before the request hits the wire. Cloud providers keep nil so req_llm
+  # resolves their real key from the env; missing/blank still fails closed.
   defp local_api_key(provider, opts) do
     cond do
-      Keyword.get(opts, :api_key) -> Keyword.get(opts, :api_key)
-      is_binary(provider) and ProviderRegistry.local?(provider) -> "arbor-local"
-      true -> nil
+      is_binary(provider) and ProviderRegistry.keyless?(provider) ->
+        Arbor.LLM.OpenCodeZen.Transport.req_llm_placeholder()
+
+      present_api_key?(Keyword.get(opts, :api_key)) ->
+        Keyword.get(opts, :api_key)
+
+      is_binary(provider) and ProviderRegistry.local?(provider) ->
+        "arbor-local"
+
+      true ->
+        nil
+    end
+  end
+
+  defp present_api_key?(key) when is_binary(key) and key != "", do: true
+  defp present_api_key?(_), do: false
+
+  defp ensure_keyless_ready(provider, model, opts) do
+    if is_binary(provider) and ProviderRegistry.keyless?(provider) do
+      with :ok <- OpenCodeZen.ensure_acknowledged() do
+        OpenCodeZen.admit_model(model, opts)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp maybe_mark_anonymous(opts, provider) do
+    if is_binary(provider) and ProviderRegistry.keyless?(provider) do
+      Keyword.put(opts, :arbor_anonymous_auth, true)
+    else
+      opts
     end
   end
 

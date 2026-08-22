@@ -47,7 +47,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   `mix arbor.doctor --configure` picks the best available provider and writes
   `ARBOR_DEFAULT_PROVIDER` and `ARBOR_DEFAULT_MODEL` to your `.env` file.
 
-  Priority: OpenRouter > Ollama > LM Studio > ACP > Anthropic > OpenAI > Gemini > xAI
+  Priority: OpenRouter > Ollama > LM Studio > ACP > OpenCode Zen (keyless) > Anthropic > OpenAI > Gemini > xAI
 
   Model selection uses LLMDB to find the best available model for the chosen
   provider (requires chat capability). Falls back to hardcoded defaults if
@@ -63,6 +63,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     {"ollama", :ollama, :ollama_cloud},
     {"lm_studio", :lmstudio, :lmstudio},
     {"acp", :acp, :acp},
+    {"opencode_zen", :opencode_zen, :opencode_zen},
     {"anthropic", :anthropic, :anthropic},
     {"openai", :openai, :openai},
     {"google", :gemini, :google},
@@ -465,7 +466,15 @@ defmodule Mix.Tasks.Arbor.Doctor do
         end
 
         if opts[:configure] do
-          configure_default(provider_atom, model)
+          case maybe_acknowledge_keyless(provider_atom) do
+            :ok ->
+              configure_default(provider_atom, model)
+
+            {:error, :disclosure_not_acknowledged} ->
+              Mix.shell().error(
+                "  OpenCode Zen was not configured: the data-disclosure warning was not acknowledged."
+              )
+          end
         end
 
         Mix.shell().info("")
@@ -486,6 +495,13 @@ defmodule Mix.Tasks.Arbor.Doctor do
   # ACP "model" is the agent name, not an LLMDB model.
   # Pick best detected CLI agent by quality priority.
   @acp_agent_priority ~w(claude gemini codex goose aider opencode cline)
+
+  defp select_best_model(:opencode_zen, :opencode_zen) do
+    case Arbor.LLM.OpenCodeZen.admitted_ids() do
+      [id | _] -> id
+      _ -> nil
+    end
+  end
 
   defp select_best_model(:acp, :acp) do
     acp_mod = Arbor.AI.LLM.Adapter.Acp
@@ -597,6 +613,11 @@ defmodule Mix.Tasks.Arbor.Doctor do
   catch
     :exit, _ -> :ok
   end
+
+  defp maybe_acknowledge_keyless(:opencode_zen),
+    do: Arbor.LLM.OpenCodeZen.prompt_acknowledgement()
+
+  defp maybe_acknowledge_keyless(_provider), do: :ok
 
   defp configure_default(provider_atom, model) do
     env_path = Path.join(File.cwd!(), ".env")

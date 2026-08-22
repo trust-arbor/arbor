@@ -14,11 +14,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
   @spec start(term(), term(), keyword(), keyword()) :: {:ok, t()} | {:error, term()}
   def start(model_spec, messages, opts, limits_opts) do
+    anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
+    opts = Keyword.delete(opts, :arbor_anonymous_auth)
+
     with {:ok, model} <- ReqLLM.model(model_spec),
          {:ok, provider} <- ReqLLM.provider(model.provider),
          {:ok, context} <- ReqLLM.Context.normalize(messages, opts),
          finch_name = Keyword.get(opts, :finch_name, ReqLLM.Finch),
          {:ok, request} <- provider.attach_stream(model, context, opts, finch_name),
+         request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, limits} <- build_limits(opts, limits_opts) do
       ref = make_ref()
 
@@ -45,6 +49,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     kind, reason ->
       {:error, {:stream_setup_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
+
+  defp maybe_apply_anonymous_auth(request, true),
+    do: Arbor.LLM.OpenCodeZen.apply_anonymous_auth(request)
+
+  defp maybe_apply_anonymous_auth(request, _anonymous?), do: request
 
   @spec process(t(), keyword()) :: {:ok, ReqLLM.Response.t()} | {:error, term()}
   def process(%__MODULE__{} = response, callbacks \\ []) do

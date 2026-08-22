@@ -85,6 +85,17 @@ defmodule Arbor.LLM.ClientRoutingTest do
                "provider #{provider} should not be registered with no API key"
       end
     end
+
+    test "keyless OpenCode Zen is registered without any API key" do
+      adapters =
+        Client.from_env(
+          discover_local: false,
+          discover_acp: false,
+          discover_oauth: false
+        ).adapters
+
+      assert adapters["opencode_zen"] == Generic
+    end
   end
 
   describe "Client.embed/4 forwards :provider to the adapter" do

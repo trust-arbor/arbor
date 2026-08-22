@@ -51,6 +51,17 @@ defmodule Arbor.LLM.ProviderRegistry do
     "ollama" => %{config_key: :ollama, default_base_url: "http://localhost:11434/v1"}
   }
 
+  # Keyless cloud providers. Distinct credential shape: the request MUST
+  # go out with no credential (empty Authorization). Do not fold these
+  # into `@local_providers` — local servers accept a placeholder bearer,
+  # and the OpenCode Zen relay 401s any bearer at all.
+  @keyless_providers %{
+    "opencode_zen" => %{
+      config_key: :opencode_zen,
+      default_base_url: "https://opencode.ai/zen/v1"
+    }
+  }
+
   # Provider-name aliases. The same physical provider has historically
   # been spelled different ways across Arbor's layers — arbor_ai uses
   # the atom `:lmstudio` (no underscore), arbor_orchestrator's
@@ -63,7 +74,9 @@ defmodule Arbor.LLM.ProviderRegistry do
   # canonical provider string in `@local_providers` / `list/0`.
   @aliases %{
     "lmstudio" => "lm_studio",
-    "lm-studio" => "lm_studio"
+    "lm-studio" => "lm_studio",
+    "opencode-zen" => "opencode_zen",
+    "opencode-free" => "opencode_zen"
   }
 
   # Display name overrides for providers where titlecasing the atom
@@ -79,14 +92,15 @@ defmodule Arbor.LLM.ProviderRegistry do
     "amazon_bedrock" => "Amazon Bedrock",
     "zai" => "Z.ai",
     "zai_coding_plan" => "Z.ai Coding Plan",
-    "zai_coder" => "Z.ai Coder"
+    "zai_coder" => "Z.ai Coder",
+    "opencode_zen" => "OpenCode Zen (free)"
   }
 
   # ── Listing ─────────────────────────────────────────────────────────
 
   @doc "All Arbor-known provider names, sorted."
   @spec list() :: [String.t()]
-  def list, do: (list_cloud() ++ list_local()) |> Enum.sort()
+  def list, do: (list_cloud() ++ list_local() ++ list_keyless()) |> Enum.sort()
 
   @doc """
   Cloud (non-local) provider names, sorted.
@@ -107,6 +121,10 @@ defmodule Arbor.LLM.ProviderRegistry do
   @doc "Local-LM Arbor provider names, sorted."
   @spec list_local() :: [String.t()]
   def list_local, do: @local_providers |> Map.keys() |> Enum.sort()
+
+  @doc "Keyless (anonymous-auth) Arbor provider names, sorted."
+  @spec list_keyless() :: [String.t()]
+  def list_keyless, do: @keyless_providers |> Map.keys() |> Enum.sort()
 
   # ── Identity ────────────────────────────────────────────────────────
 
@@ -134,11 +152,35 @@ defmodule Arbor.LLM.ProviderRegistry do
   @spec local?(atom() | String.t()) :: boolean()
   def local?(provider), do: Map.has_key?(@local_providers, normalize(provider))
 
-  @doc "True if `provider` (any spelling) is in the registry (cloud or local)."
+  @doc "True if `provider` (any spelling) is a keyless (anonymous-auth) provider."
+  @spec keyless?(atom() | String.t()) :: boolean()
+  def keyless?(provider), do: Map.has_key?(@keyless_providers, normalize(provider))
+
+  @doc """
+  Credential shape for a provider.
+
+  * `:anonymous` — must be called with NO credential (OpenCode Zen free)
+  * `:local` — local server; a placeholder bearer is fine
+  * `:api_key` — a non-blank API key is required; missing/blank fails closed
+  """
+  @spec credential_shape(atom() | String.t()) :: :anonymous | :local | :api_key
+  def credential_shape(provider) do
+    canonical = normalize(provider)
+
+    cond do
+      Map.has_key?(@keyless_providers, canonical) -> :anonymous
+      Map.has_key?(@local_providers, canonical) -> :local
+      true -> :api_key
+    end
+  end
+
+  @doc "True if `provider` (any spelling) is in the registry (cloud, local, or keyless)."
   @spec known?(atom() | String.t()) :: boolean()
   def known?(provider) do
     canonical = normalize(provider)
-    canonical in list_cloud() or Map.has_key?(@local_providers, canonical)
+
+    canonical in list_cloud() or Map.has_key?(@local_providers, canonical) or
+      Map.has_key?(@keyless_providers, canonical)
   end
 
   @doc """
@@ -159,6 +201,7 @@ defmodule Arbor.LLM.ProviderRegistry do
 
     cond do
       Map.has_key?(@local_providers, canonical) -> :openai
+      Map.has_key?(@keyless_providers, canonical) -> :openai
       canonical in list_cloud() -> String.to_existing_atom(canonical)
       true -> nil
     end
@@ -194,6 +237,7 @@ defmodule Arbor.LLM.ProviderRegistry do
 
     cond do
       Map.has_key?(@local_providers, canonical) -> nil
+      Map.has_key?(@keyless_providers, canonical) -> nil
       not known?(canonical) -> nil
       true -> env_key_from_req_llm(req_llm_atom(canonical))
     end
@@ -222,13 +266,22 @@ defmodule Arbor.LLM.ProviderRegistry do
   """
   @spec default_base_url(atom() | String.t()) :: String.t() | nil
   def default_base_url(provider) do
-    case Map.fetch(@local_providers, normalize(provider)) do
+    canonical = normalize(provider)
+
+    case Map.fetch(@local_providers, canonical) do
       {:ok, %{config_key: config_key, default_base_url: default}} ->
         config = Application.get_env(:arbor_orchestrator, config_key, [])
         Keyword.get(config, :base_url, default)
 
       :error ->
-        nil
+        case Map.fetch(@keyless_providers, canonical) do
+          {:ok, %{config_key: config_key, default_base_url: default}} ->
+            config = Application.get_env(:arbor_llm, config_key, [])
+            Keyword.get(config, :base_url, default)
+
+          :error ->
+            nil
+        end
     end
   end
 
@@ -245,10 +298,10 @@ defmodule Arbor.LLM.ProviderRegistry do
   """
   @spec env_available?(String.t()) :: boolean()
   def env_available?(provider) do
-    if local?(provider) do
-      false
-    else
-      env_available_for?(provider) or configured_key_available?(provider)
+    cond do
+      keyless?(provider) -> true
+      local?(provider) -> false
+      true -> env_available_for?(provider) or configured_key_available?(provider)
     end
   end
 
@@ -300,6 +353,9 @@ defmodule Arbor.LLM.ProviderRegistry do
 
       canonical == "lm_studio" ->
         Capabilities.new(streaming: true, tool_calls: true, structured_output: true)
+
+      Map.has_key?(@keyless_providers, canonical) ->
+        Capabilities.new(streaming: true, tool_calls: true)
 
       true ->
         canonical

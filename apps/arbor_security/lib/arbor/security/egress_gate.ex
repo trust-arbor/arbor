@@ -10,19 +10,26 @@ defmodule Arbor.Security.EgressGate do
     supplies the agent's egress-constrained capabilities as candidates.
 
   Keys off the *resolved classification* (egress_tier + taint), NOT off parsing a
-  URI. Inert unless `config :arbor_security, :egress_gate_enforcing` is true (the
-  gate lands dark). Composition, in order:
+  URI. The general gate is inert unless
+  `config :arbor_security, :egress_gate_enforcing` is true (it lands dark) —
+  except for keyless destinations, which are always decided. Composition, in
+  order:
 
-  1. **Taint conjunct** — hostile data to an external destination is an absolute
+  1. **Keyless destination allowance** — always on. OpenCode Zen has no API-key
+     consent signal, so it cannot honor the dark-launch default. Denied unless
+     `allow_opencode_zen_egress` is explicitly true.
+  2. **Dark-launch short-circuit** — if the general gate is not enforcing, every
+     other destination is `:allow`.
+  3. **Taint conjunct** — hostile data to an external destination is an absolute
      hard block. Untrusted data is also blocked except for one exact, already-
      validated interactive-disclosure capability to an external provider route.
-  2. **Tier semantics** — `:external_peer` is advisory (1.0 ACP deferral);
+  4. **Tier semantics** — `:external_peer` is advisory (1.0 ACP deferral);
      `:on_host`/`:none` allow; `:on_premises` allows unless the on-premises flag.
-  3. **Policy standing** — caller-supplied `opts[:egress_mode]` for gated tiers
+  5. **Policy standing** — caller-supplied `opts[:egress_mode]` for gated tiers
      (`:allow`/`:ask`/`:block`). The security kernel does not consult trust
      policy directly; callers that want trust-profile modulation supply the
      resolved mode.
-  4. **Capability refinement** — a candidate cap whose `constraints.egress`
+  6. **Capability refinement** — a candidate cap whose `constraints.egress`
      (`max_tier`/`destinations`) covers the request downgrades `:ask` -> `:allow`.
   """
 
@@ -34,6 +41,11 @@ defmodule Arbor.Security.EgressGate do
   # VP-05D2A0 — interactive-disclosure capability namespace. Segment-aware
   # membership only (CapabilityUri.prefix_match?/2), never String.starts_with?/2.
   @disclosure_uri_prefix "arbor://egress/disclose"
+
+  # Keyless free-tier destinations. These have no API-key consent signal, so
+  # they need an explicit operator allowance (dev-only flag, default false).
+  # Do not treat "zero config" as "zero policy".
+  @keyless_destinations MapSet.new(["opencode_zen", "opencode.ai"])
 
   # Escalation order for egress tiers (used for cap max_tier coverage).
   @tier_rank %{
@@ -77,6 +89,16 @@ defmodule Arbor.Security.EgressGate do
   @spec decide(String.t(), atom(), keyword(), [map()], Capability.t() | nil) :: decision()
   def decide(agent_id, tier, opts \\ [], caps \\ [], disclosure_cap \\ nil) do
     cond do
+      # Keyless destinations have no API-key consent signal, so they cannot
+      # honor the general dark-launch default. `egress_gate_enforcing` lands
+      # false so existing credentialed destinations keep working; OpenCode
+      # Zen must still require an independent explicit operator allowance
+      # (`allow_opencode_zen_egress`, default false) even while that switch
+      # is dark. Checking after `not enforcing?()` would let production
+      # send to opencode.ai after disclosure with the allowance absent.
+      keyless_destination?(opts) and not keyless_egress_allowed?() ->
+        {:block, :keyless_egress_not_allowed}
+
       not enforcing?() ->
         :allow
 
@@ -168,6 +190,18 @@ defmodule Arbor.Security.EgressGate do
 
   defp gate_on_premises? do
     Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
+  end
+
+  defp keyless_destination?(opts) do
+    dest = Keyword.get(opts, :egress_destination)
+    is_binary(dest) and MapSet.member?(@keyless_destinations, dest)
+  end
+
+  # Dev-only carve-out, same shape as `allow_local_human_identity`: default
+  # false, set only in dev.exs. Production must set it explicitly if an
+  # operator wants keyless egress; there is no implicit allow.
+  defp keyless_egress_allowed? do
+    Application.get_env(:arbor_security, :allow_opencode_zen_egress, false) == true
   end
 
   # The policy layer may pass trust-profile standing in `opts[:egress_mode]`.
