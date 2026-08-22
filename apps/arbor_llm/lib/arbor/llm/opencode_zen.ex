@@ -41,6 +41,7 @@ defmodule Arbor.LLM.OpenCodeZen do
   @provider_atom :opencode_zen
   @base_url "https://opencode.ai/zen/v1"
   @probe_ids_key {__MODULE__, :probe_ids}
+  @probe_opt :opencode_zen_probe_ids
 
   @spec provider() :: String.t()
   def provider, do: @provider
@@ -99,16 +100,16 @@ defmodule Arbor.LLM.OpenCodeZen do
   `{:opencode_zen_model_not_admitted, id}`. An unreadable catalog fails
   closed with `:opencode_zen_admission_unreadable`.
   """
-  @spec admit_model(term()) ::
+  @spec admit_model(term(), keyword()) ::
           :ok
           | {:error, :opencode_zen_admission_unreadable}
           | {:error, {:opencode_zen_model_not_admitted, term()}}
-  def admit_model(id) do
+  def admit_model(id, opts \\ []) when is_list(opts) do
     cond do
       not is_binary(id) or id == "" ->
         {:error, {:opencode_zen_model_not_admitted, id}}
 
-      probe_model?(id) ->
+      probe_authorized?(id, opts) ->
         :ok
 
       true ->
@@ -161,9 +162,9 @@ defmodule Arbor.LLM.OpenCodeZen do
   end
 
   @doc false
-  # Probe authorization is process-scoped: only this process's admit/dispatch
-  # calls may use `ids`. Concurrent ordinary requests in other processes cannot
-  # observe the marker.
+  # Probe authorization is minted on the evaluator process and copied onto
+  # evaluator-owned dispatch opts before Deadline.run/3. Caller-supplied
+  # probe ids on public complete/stream/embed opts are stripped.
   @spec with_probe_models([String.t()], (-> result)) :: result when result: var
   def with_probe_models(ids, fun) when is_list(ids) and is_function(fun, 0) do
     previous = Process.get(@probe_ids_key)
@@ -175,6 +176,19 @@ defmodule Arbor.LLM.OpenCodeZen do
       restore_probe_ids(previous)
     end
   end
+
+  @doc false
+  @spec carry_probe_authorization(term()) :: term()
+  def carry_probe_authorization(opts) when is_list(opts) do
+    opts = Keyword.delete(opts, @probe_opt)
+
+    case Process.get(@probe_ids_key) do
+      ids when is_list(ids) -> Keyword.put(opts, @probe_opt, ids)
+      _ -> opts
+    end
+  end
+
+  def carry_probe_authorization(opts), do: opts
 
   defp load_admission do
     case File.read(admission_path()) do
@@ -199,10 +213,16 @@ defmodule Arbor.LLM.OpenCodeZen do
     end
   end
 
-  defp probe_model?(id) do
-    case Process.get(@probe_ids_key, []) do
-      ids when is_list(ids) -> id in ids
-      _ -> false
+  defp probe_authorized?(id, opts) do
+    case Keyword.get(opts, @probe_opt) do
+      ids when is_list(ids) ->
+        id in ids
+
+      _ ->
+        case Process.get(@probe_ids_key, []) do
+          ids when is_list(ids) -> id in ids
+          _ -> false
+        end
     end
   end
 

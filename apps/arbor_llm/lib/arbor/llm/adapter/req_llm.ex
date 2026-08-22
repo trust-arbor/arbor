@@ -63,6 +63,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.PostProcessors
   alias Arbor.LLM.Call
   alias Arbor.LLM.Pipeline
+  alias Arbor.LLM.OpenCodeZen
   alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Plugs.Usage
   alias Arbor.LLM.Request
@@ -112,6 +113,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete(request, opts \\ [])
 
   def complete(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -133,6 +136,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete_single_attempt(request, opts \\ [])
 
   def complete_single_attempt(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -163,6 +168,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def stream(request, opts \\ [])
 
   def stream(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -218,6 +225,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -246,6 +255,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming_single_attempt(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <-
            Deadline.normalize_transport_options(opts, request.receive_timeout),
          {:ok, receipt} <- Deadline.receipt(opts) do
@@ -338,6 +349,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
           {:ok, Arbor.LLM.ProviderAdapter.embed_batch_result()} | {:error, term()}
   def embed(texts, model, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
     with {:ok, opts, _timeout} <- Deadline.normalize_transport_options(opts),
          {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
@@ -788,7 +801,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # Strip private attribution before any provider option assembly.
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    with :ok <- ensure_keyless_ready(request.provider, request.model) do
+    with :ok <- ensure_keyless_ready(request.provider, request.model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
       request
       |> build_req_opts(opts)
       |> maybe_mark_anonymous(request.provider)
@@ -808,7 +823,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp validated_embed_opts(arbor_provider, model, opts) do
     opts = Keyword.delete(opts, :provider_usage_context)
 
-    with :ok <- ensure_keyless_ready(arbor_provider, model) do
+    with :ok <- ensure_keyless_ready(arbor_provider, model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
       arbor_provider
       |> build_embed_opts(opts)
       |> maybe_mark_anonymous(arbor_provider)
@@ -878,10 +895,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp present_api_key?(key) when is_binary(key) and key != "", do: true
   defp present_api_key?(_), do: false
 
-  defp ensure_keyless_ready(provider, model) do
+  defp ensure_keyless_ready(provider, model, opts) do
     if is_binary(provider) and ProviderRegistry.keyless?(provider) do
-      with :ok <- Arbor.LLM.OpenCodeZen.ensure_acknowledged() do
-        Arbor.LLM.OpenCodeZen.admit_model(model)
+      with :ok <- OpenCodeZen.ensure_acknowledged() do
+        OpenCodeZen.admit_model(model, opts)
       end
     else
       :ok

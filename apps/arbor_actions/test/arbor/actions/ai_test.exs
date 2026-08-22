@@ -143,18 +143,11 @@ defmodule Arbor.Actions.AITest do
       assert AI.GenerateText.egress_destination(%{provider: :lmstudio}, %{}) == "lmstudio"
     end
 
-    test "every ProviderRegistry canonical atom and string normalizes" do
-      names = Arbor.LLM.ProviderRegistry.list()
-      refute names == []
-
-      for name <- names do
-        {:ok, atom} = Arbor.Common.SafeAtom.to_existing(name)
-        atom_result = AI.normalize_provider(atom)
-        string_result = AI.normalize_provider(name)
-
-        assert atom_result != nil, "canonical atom #{inspect(atom)} did not normalize"
-        assert string_result != nil, "canonical string #{inspect(name)} did not normalize"
-        assert atom_result == string_result
+    test "every allowlisted provider atom and string normalizes" do
+      for atom <- AI.llm_providers() do
+        expected = AI.normalize_provider(atom)
+        assert expected != nil, "#{inspect(atom)} did not normalize"
+        assert AI.normalize_provider(Atom.to_string(atom)) == expected
       end
     end
   end

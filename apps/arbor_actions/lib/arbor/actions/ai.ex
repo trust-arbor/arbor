@@ -53,10 +53,9 @@ defmodule Arbor.Actions.AI do
     :qwen
   ]
 
-  # ProviderRegistry canonical names whose Arbor.AI atom differs.
+  # ProviderRegistry's canonical LM Studio atom differs from Arbor.AI's.
   @ai_provider_aliases %{
-    lm_studio: :lmstudio,
-    google: :gemini
+    lm_studio: :lmstudio
   }
 
   @doc false
@@ -66,8 +65,8 @@ defmodule Arbor.Actions.AI do
   Normalize an action `provider` parameter onto a known LLM provider atom.
 
   Unknown or missing values stay `nil` so routing can decide. Canonical
-  aliases such as `opencode-zen` and `:lm_studio` fold through
-  `Arbor.LLM.ProviderRegistry` onto the atom Arbor.AI expects.
+  aliases such as `opencode-zen` fold through `Arbor.LLM.ProviderRegistry`.
+  `:lm_studio` maps to `:lmstudio`, the atom Arbor.AI expects.
   """
   @spec normalize_provider(term()) :: atom() | nil
   def normalize_provider(nil), do: nil
@@ -81,11 +80,8 @@ defmodule Arbor.Actions.AI do
 
       {:error, _} ->
         case SafeAtom.to_allowed(provider, @llm_providers) do
-          {:ok, atom} ->
-            ai_provider(atom)
-
-          {:error, _} ->
-            known_registry_provider(folded)
+          {:ok, atom} -> ai_provider(atom)
+          {:error, _} -> nil
         end
     end
   end
@@ -426,15 +422,4 @@ defmodule Arbor.Actions.AI do
   end
 
   defp ai_provider(atom), do: Map.get(@ai_provider_aliases, atom, atom)
-
-  defp known_registry_provider(folded) do
-    if Arbor.LLM.ProviderRegistry.known?(folded) do
-      case SafeAtom.to_existing(folded) do
-        {:ok, atom} -> ai_provider(atom)
-        {:error, _} -> nil
-      end
-    else
-      nil
-    end
-  end
 end

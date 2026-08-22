@@ -244,12 +244,20 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
         OpenCodeZen.with_probe_models([candidate], fn ->
           send(parent, {:probe_open, self()})
 
+          # Deadline.run/3 owns a worker that does not inherit this process
+          # dictionary. A child admit without carried opts must still deny.
+          child_admit =
+            Task.async(fn -> OpenCodeZen.admit_model(candidate) end)
+
           receive do
             {:run_probe, url} ->
-              Adapter.complete(request,
-                base_url: url,
-                receive_timeout: 2_000
-              )
+              complete =
+                Adapter.complete(request,
+                  base_url: url,
+                  receive_timeout: 2_000
+                )
+
+              {Task.await(child_admit, 2_000), complete}
           after
             10_000 ->
               {:error, :evaluator_not_signaled}
@@ -271,10 +279,40 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     {eval_url, eval_server} = start_capture_server()
     send(eval_pid, {:run_probe, eval_url})
 
-    eval_result = Task.await(evaluator, 5_000)
+    {child_admit, eval_result} = Task.await(evaluator, 5_000)
+
+    assert child_admit == {:error, {:opencode_zen_model_not_admitted, candidate}}
     refute match?({:error, {:opencode_zen_model_not_admitted, _}}, eval_result)
     refute eval_result == {:error, :opencode_zen_admission_unreadable}
     assert %{received?: true} = Task.await(eval_server, 2_000)
+  end
+
+  test "security regression: caller-supplied probe ids do not admit an unadmitted model", %{
+    ack_path: ack_path
+  } do
+    :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
+    assert File.exists?(ack_path)
+
+    path =
+      Path.join(System.tmp_dir!(), "opencode-zen-admission-#{System.unique_integer([:positive])}.json")
+
+    File.write!(path, JSON.encode!(%{"version" => 1, "models" => []}) <> "\n")
+    on_exit(fn -> File.rm(path) end)
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
+
+    candidate = "unadmitted-smuggled-probe"
+    {url, server} = start_capture_server()
+    request = %{opencode_request() | model: candidate}
+
+    result =
+      Adapter.complete(request,
+        opencode_zen_probe_ids: [candidate],
+        base_url: url,
+        receive_timeout: 1_000
+      )
+
+    assert result == {:error, {:opencode_zen_model_not_admitted, candidate}}
+    assert %{received?: false} = Task.await(server, 2_000)
   end
 
   test "unreadable admission catalog fails closed with a named error", %{ack_path: ack_path} do
