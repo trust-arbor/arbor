@@ -886,6 +886,7 @@ defmodule Arbor.AI.AcpSessionTest do
       providers = Config.list_providers()
       provider_names = Enum.map(providers, &elem(&1, 0))
 
+      assert :antigravity in provider_names
       assert :gemini in provider_names
       assert :opencode in provider_names
       assert :goose in provider_names
@@ -897,6 +898,7 @@ defmodule Arbor.AI.AcpSessionTest do
     test "marks providers correctly as native or adapted" do
       providers = Config.list_providers() |> Map.new()
 
+      assert providers[:antigravity] == :native
       assert providers[:gemini] == :native
       assert providers[:claude] == :adapted
       assert providers[:codex] == :adapted
