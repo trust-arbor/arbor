@@ -39,7 +39,8 @@ defmodule Arbor.LLM.Conformance81Test do
             discover_cli: false,
             discover_local: false,
             discover_oauth: false,
-            discover_acp: false
+            discover_acp: false,
+            discover_keyless: false
           )
         end
       end)

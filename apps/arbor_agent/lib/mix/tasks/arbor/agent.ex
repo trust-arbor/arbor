@@ -179,6 +179,18 @@ defmodule Mix.Tasks.Arbor.Agent do
               to_string(Arbor.Agent.LLMDefaults.default_provider())
           )
 
+        case maybe_acknowledge_keyless(provider) do
+          :ok ->
+            :ok
+
+          {:error, :disclosure_not_acknowledged} ->
+            Mix.shell().error(
+              "OpenCode Zen was not started: the data-disclosure warning was not acknowledged."
+            )
+
+            exit({:shutdown, 1})
+        end
+
         model_config = %{
           id: model_id,
           provider: provider,
@@ -580,6 +592,11 @@ defmodule Mix.Tasks.Arbor.Agent do
     end
   end
 
+  defp maybe_acknowledge_keyless(:opencode_zen),
+    do: Arbor.LLM.OpenCodeZen.prompt_acknowledgement()
+
+  defp maybe_acknowledge_keyless(_provider), do: :ok
+
   defp parse_provider(str) when is_binary(str) do
     # Safe: bounded set of known provider atoms
     case str do
@@ -598,6 +615,9 @@ defmodule Mix.Tasks.Arbor.Agent do
       # / ~/.grok (xai), see Arbor.LLM.OAuth. The *_oauth atoms are what the session config expects.
       "openai_oauth" -> :openai_oauth
       "xai_oauth" -> :xai_oauth
+      "opencode_zen" -> :opencode_zen
+      "opencode-zen" -> :opencode_zen
+      "opencode-free" -> :opencode_zen
       other -> Mix.raise("Unknown provider: #{other}")
     end
   end

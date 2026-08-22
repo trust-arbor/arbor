@@ -35,6 +35,11 @@ defmodule Arbor.Security.EgressGate do
   # membership only (CapabilityUri.prefix_match?/2), never String.starts_with?/2.
   @disclosure_uri_prefix "arbor://egress/disclose"
 
+  # Keyless free-tier destinations. These have no API-key consent signal, so
+  # they need an explicit operator allowance (dev-only flag, default false).
+  # Do not treat "zero config" as "zero policy".
+  @keyless_destinations MapSet.new(["opencode_zen", "opencode.ai"])
+
   # Escalation order for egress tiers (used for cap max_tier coverage).
   @tier_rank %{
     none: 0,
@@ -89,6 +94,9 @@ defmodule Arbor.Security.EgressGate do
         else
           {:block, untrusted_block_reason(opts)}
         end
+
+      keyless_destination?(opts) and not keyless_egress_allowed?() ->
+        {:block, :keyless_egress_not_allowed}
 
       true ->
         case policy_mode(agent_id, tier, opts) do
@@ -168,6 +176,18 @@ defmodule Arbor.Security.EgressGate do
 
   defp gate_on_premises? do
     Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
+  end
+
+  defp keyless_destination?(opts) do
+    dest = Keyword.get(opts, :egress_destination)
+    is_binary(dest) and MapSet.member?(@keyless_destinations, dest)
+  end
+
+  # Dev-only carve-out, same shape as `allow_local_human_identity`: default
+  # false, set only in dev.exs. Production must set it explicitly if an
+  # operator wants keyless egress; there is no implicit allow.
+  defp keyless_egress_allowed? do
+    Application.get_env(:arbor_security, :allow_opencode_zen_egress, false) == true
   end
 
   # The policy layer may pass trust-profile standing in `opts[:egress_mode]`.

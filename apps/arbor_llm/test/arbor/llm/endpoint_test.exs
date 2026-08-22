@@ -73,6 +73,12 @@ defmodule Arbor.LLM.EndpointTest do
                {:req_llm_base, :azure}
              )
 
+    assert {:ok, "https://opencode.ai/zen/v1"} =
+             Endpoint.validate(
+               "https://opencode.ai/zen/v1",
+               {:req_llm_base, "opencode_zen"}
+             )
+
     assert {:ok, "https://generativelanguage.googleapis.com/v1beta"} =
              Endpoint.validate(
                "https://generativelanguage.googleapis.com/v1beta",

@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "provider": "opencode_zen",
+  "recorded_at": "2026-08-21",
+  "eval": {
+    "tier1": "mechanical_tool_call",
+    "tier2": "mix arbor.eval.task --max-heartbeats 3 --bug glob_wildcard --variants bare"
+  },
+  "models": [
+    {
+      "id": "glm-4.6-flash",
+      "status": "admitted",
+      "context_window": 131072,
+      "max_output_tokens": 8192,
+      "evidence": {
+        "tier1": {
+          "passed": true,
+          "eval": "mechanical_tool_call",
+          "score": 1.0,
+          "at": "2026-08-21"
+        },
+        "tier2": {
+          "passed": true,
+          "eval": "arbor.eval.task",
+          "score": 1.0,
+          "at": "2026-08-21",
+          "heartbeats_to_proposal": 3,
+          "proposal_submitted": true
+        }
+      }
+    },
+    {
+      "id": "nemotron-3-nano-free",
+      "status": "rejected",
+      "reason": "tier1_no_tool_call",
+      "context_window": 131072,
+      "evidence": {
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "score": 0.0,
+          "at": "2026-08-21",
+          "reason": "response contained no well-formed tool call"
+        },
+        "tier2": {
+          "skipped": true,
+          "reason": "tier1_failed"
+        }
+      }
+    },
+    {
+      "id": "big-pickle",
+      "status": "rejected",
+      "reason": "ua_gated",
+      "evidence": {
+        "http_status": 429,
+        "error": "FreeUsageLimitError",
+        "at": "2026-08-21",
+        "note": "relay returns 429 unless User-Agent is opencode/latest; Arbor does not spoof a third-party client UA"
+      }
+    },
+    {
+      "id": "mimo-v2.5-free",
+      "status": "rejected",
+      "reason": "ua_gated",
+      "evidence": {
+        "http_status": 429,
+        "error": "FreeUsageLimitError",
+        "at": "2026-08-21",
+        "note": "relay returns 429 unless User-Agent is opencode/latest; Arbor does not spoof a third-party client UA"
+      }
+    }
+  ]
+}

@@ -607,6 +607,25 @@ another one. It doubles as user documentation — anyone standing up agents need
   path. Proof failures, payload mismatches, and capability denials are
   distinct `{:unauthorized_alias_management, reason}` values.
 
+## 24. OpenCode Zen keyless egress is an explicit, gated allowance
+
+- **What:** OpenCode Zen (`https://opencode.ai/zen/v1`) is a keyless free-tier
+  LLM. There is no API-key consent signal, so egress to `opencode_zen` /
+  `opencode.ai` is **not** implied by `external_provider: :allow`. It requires
+  `config :arbor_security, :allow_opencode_zen_egress` (`true` only in
+  `dev.exs`; default `false`). Production must set the flag explicitly.
+  Independently, the first request is blocked until the user acknowledges the
+  data-disclosure warning (`Arbor.LLM.OpenCodeZen.ensure_acknowledged/0`).
+- **Symptom:** `EgressGate.decide` returns `{:block, :keyless_egress_not_allowed}`
+  when the flag is absent; LLM complete returns
+  `{:error, :disclosure_not_acknowledged}` before any HTTP request if the
+  disclosure was not acknowledged. The relay itself 401s any `Authorization`
+  bearer, including placeholders.
+- **Action:** In development the flag is already on. For production, set
+  `allow_opencode_zen_egress: true` deliberately, show the disclosure, and do
+  not send a credential. Do not spoof `User-Agent: opencode/latest` to unlock
+  UA-gated models.
+
 ## Applied Learning: Security Gates
 
 Read this when changing capabilities, trust, authorization, identity, URI matching, taint, egress, or proof boundaries.

@@ -311,6 +311,68 @@ defmodule Arbor.Security.EgressGateTest do
     end
   end
 
+  describe "keyless OpenCode Zen destination allowance" do
+    test "security regression: request is refused when the allowance is absent" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [],
+                 nil
+               )
+
+      assert {:block, :keyless_egress_not_allowed} =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode.ai", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: request is allowed only when the explicit flag is set" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, true)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "opencode_zen", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+
+    test "security regression: other providers are not gated by the keyless flag" do
+      enforce!()
+      previous = Application.get_env(:arbor_security, :allow_opencode_zen_egress)
+      Application.put_env(:arbor_security, :allow_opencode_zen_egress, false)
+
+      on_exit(fn -> restore(:allow_opencode_zen_egress, previous) end)
+
+      assert :allow =
+               EgressGate.decide(
+                 "agent_1",
+                 :external_provider,
+                 [egress_destination: "openrouter", egress_mode: :allow],
+                 [],
+                 nil
+               )
+    end
+  end
+
   describe "VP-05D2A0: decide/5 interactive-disclosure override (pure)" do
     @tag spec: "VP-05D2A0"
     test "a valid exact disclosure cap admits :untrusted on its exact route" do

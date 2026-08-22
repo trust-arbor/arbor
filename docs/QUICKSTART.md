@@ -2,9 +2,9 @@
 
 Clone-to-first-reply path for a local Arbor node. Created 2026-08-19.
 
-This is the default onboarding path: **SQLite**, **no OIDC**, a **free OpenRouter
-model** (or local/ACP), then a `conversationalist` agent. PostgreSQL, OIDC, and
-paid APIs are optional.
+This is the default onboarding path: **SQLite**, **no OIDC**, a **keyless
+OpenCode Zen free model** (or OpenRouter / local / ACP), then a
+`conversationalist` agent. PostgreSQL, OIDC, and paid APIs are optional.
 
 For the software factory (reviewed coding dispatch), start here, then continue
 with [arbor/SOFTWARE_FACTORY.md](arbor/SOFTWARE_FACTORY.md). External MCP
@@ -15,9 +15,9 @@ clients: [arbor/EXTERNAL_MCP_CLIENT.md](arbor/EXTERNAL_MCP_CLIENT.md).
 - macOS or Linux
 - [mise](https://mise.jdx.dev/) to install the versions in `.tool-versions`
   (currently Erlang `28.4.1`, Elixir `1.19.5-otp-28`)
-- An [OpenRouter](https://openrouter.ai/) key with access to a free model, **or**
-  a local runtime (Ollama / LM Studio), **or** an ACP CLI agent such as Claude
-  Code
+- Nothing for the keyless OpenCode Zen free tier, **or** an
+  [OpenRouter](https://openrouter.ai/) key, **or** a local runtime
+  (Ollama / LM Studio), **or** an ACP CLI agent such as Claude Code
 
 PostgreSQL is **not** required. The default is `ARBOR_DB=sqlite`.
 
@@ -59,16 +59,40 @@ ARBOR_DB=postgres ./bin/mix arbor.setup
 
 ## 3. Pick a free LLM
 
-Put a free-tier key in `.env`:
+A new install can run **without an API key and without OAuth**. OpenCode Zen
+is a keyless free-tier provider. Before the first request, Arbor shows this
+disclosure and you must acknowledge it (it is persisted locally and not
+re-prompted every run):
+
+```
+OpenCode Zen free tier — data disclosure
+
+Before Arbor sends any request to OpenCode's API (https://opencode.ai/zen):
+
+  1. Your prompts, and any context the agent includes — such as file
+     contents and command output — are sent to OpenCode's API.
+  2. Arbor makes NO representations or guarantees about OpenCode's
+     data-handling or privacy claims, whatever their documentation states.
+  3. Do not use this free tier for sensitive, confidential, or regulated data.
+```
+
+List the admitted models (the list is derived from recorded eval evidence,
+not vendor claims) and acknowledge:
+
+```bash
+./bin/mix arbor.llm.free
+./bin/mix arbor.doctor --configure
+```
+
+`mix arbor.doctor --configure` prefers an already-configured provider
+(OpenRouter, local, ACP) over OpenCode Zen, so existing users keep their
+current default. A new user with no key and no local runtime gets OpenCode
+Zen after acknowledging the disclosure.
+
+OpenRouter remains available if you have a key:
 
 ```bash
 OPENROUTER_API_KEY=...
-```
-
-Then let doctor prefer OpenRouter / local / ACP over paid APIs:
-
-```bash
-./bin/mix arbor.doctor --configure
 ```
 
 Local alternatives: start Ollama or LM Studio before `--configure`. ACP CLIs

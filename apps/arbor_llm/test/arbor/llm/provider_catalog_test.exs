@@ -64,6 +64,17 @@ defmodule Arbor.LLM.ProviderCatalogTest do
       assert "anthropic" in providers
       assert "openai" in providers
       assert "ollama" in providers
+      assert "opencode_zen" in providers
+    end
+
+    test "opencode_zen is available without an API key" do
+      assert {:ok, contract} = ProviderCatalog.get_contract("opencode_zen")
+      assert contract.type == :api
+      assert contract.env_vars == []
+      assert contract.display_name == "OpenCode Zen (free)"
+
+      entry = Enum.find(ProviderCatalog.all(), &(&1.provider == "opencode_zen"))
+      assert entry.available?
     end
 
     test "entries have capabilities" do

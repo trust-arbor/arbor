@@ -69,7 +69,7 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
   describe "configure priority" do
     test "prefers OpenRouter, local, and ACP before paid APIs" do
       keys = Enum.map(Doctor.provider_priority(), fn {catalog_key, _, _} -> catalog_key end)
-      free_or_local = ["openrouter", "ollama", "lm_studio", "acp"]
+      free_or_local = ["openrouter", "ollama", "lm_studio", "acp", "opencode_zen"]
       paid = ["anthropic", "openai", "google", "xai"]
 
       assert keys -- paid == free_or_local

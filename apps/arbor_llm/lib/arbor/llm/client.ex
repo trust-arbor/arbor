@@ -199,16 +199,18 @@ defmodule Arbor.LLM.Client do
   def list_models(%__MODULE__{} = client, opts \\ []) do
     provider = Keyword.get(opts, :provider)
 
-    case client.model_catalog do
-      :llmdb ->
+    cond do
+      ProviderRegistry.keyless?(provider || "") ->
+        Arbor.LLM.OpenCodeZen.list_models()
+
+      client.model_catalog == :llmdb ->
         list_models_from_llmdb(provider, Map.keys(client.adapters))
 
-      catalog when is_map(catalog) ->
-        if is_binary(provider) do
-          Map.get(catalog, provider, [])
-        else
-          catalog |> Map.values() |> List.flatten()
-        end
+      is_map(client.model_catalog) and is_binary(provider) ->
+        Map.get(client.model_catalog, provider, [])
+
+      is_map(client.model_catalog) ->
+        client.model_catalog |> Map.values() |> List.flatten()
     end
   end
 
@@ -1594,6 +1596,15 @@ defmodule Arbor.LLM.Client do
         adapters
         |> Map.put("openai_oauth", Arbor.LLM.Adapter.OAuthResponses)
         |> Map.put("xai_oauth", Arbor.LLM.Adapter.OAuthResponses)
+      else
+        adapters
+      end
+
+    adapters =
+      if Keyword.get(opts, :discover_keyless, true) do
+        Enum.reduce(ProviderRegistry.list_keyless(), adapters, fn provider, acc ->
+          Map.put(acc, provider, @generic_adapter)
+        end)
       else
         adapters
       end
