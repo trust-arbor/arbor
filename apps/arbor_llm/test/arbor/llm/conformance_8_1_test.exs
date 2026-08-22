@@ -110,10 +110,38 @@ defmodule Arbor.LLM.Conformance81Test do
         if value == nil, do: System.delete_env(key), else: System.put_env(key, value)
       end)
 
-      fun.()
+      without_configured_provider_keys(fun)
     after
       Enum.each(previous, fn {key, value} ->
         if value == nil, do: System.delete_env(key), else: System.put_env(key, value)
+      end)
+    end
+  end
+
+  # `ProviderRegistry.env_available?/1` is satisfied by an OS env var OR a key
+  # in ReqLLM's config store (`Application.get_env(:req_llm, :<p>_api_key)`),
+  # which `.env` populates at boot. Clearing only the env vars therefore leaves
+  # providers "available" and no ConfigurationError is raised — this test then
+  # passes or fails on whether the developer happens to have keys loaded.
+  # Clear both, and restore both.
+  defp without_configured_provider_keys(fun) do
+    config_keys =
+      Arbor.LLM.ProviderRegistry.list_cloud()
+      |> Enum.map(&Arbor.LLM.ProviderRegistry.req_llm_atom/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&ReqLLM.Keys.config_key/1)
+
+    previous =
+      Enum.into(config_keys, %{}, fn key -> {key, Application.get_env(:req_llm, key)} end)
+
+    try do
+      Enum.each(config_keys, &Application.delete_env(:req_llm, &1))
+      fun.()
+    after
+      Enum.each(previous, fn {key, value} ->
+        if is_nil(value),
+          do: Application.delete_env(:req_llm, key),
+          else: Application.put_env(:req_llm, key, value)
       end)
     end
   end

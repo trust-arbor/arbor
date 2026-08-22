@@ -36,11 +36,33 @@ defmodule Arbor.LLM.ClientRoutingTest do
 
     for {_provider, {env, _}} <- original_env_values, do: System.delete_env(env)
 
+    # `env_available?/1` is satisfied by an OS env var OR a key in ReqLLM's
+    # config store, which `.env` populates at boot. Clearing only env vars
+    # leaves providers registered, so "absent API key" assertions fail on a
+    # machine that has keys loaded. Clear both; restore both.
+    config_keys =
+      @api_provider_envs
+      |> Map.keys()
+      |> Enum.map(&ProviderRegistry.req_llm_atom/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&ReqLLM.Keys.config_key/1)
+
+    original_config_values =
+      Enum.into(config_keys, %{}, fn key -> {key, Application.get_env(:req_llm, key)} end)
+
+    Enum.each(config_keys, &Application.delete_env(:req_llm, &1))
+
     on_exit(fn ->
       for {_provider, {env, original_value}} <- original_env_values do
         if is_binary(original_value),
           do: System.put_env(env, original_value),
           else: System.delete_env(env)
+      end
+
+      for {key, value} <- original_config_values do
+        if is_nil(value),
+          do: Application.delete_env(:req_llm, key),
+          else: Application.put_env(:req_llm, key, value)
       end
     end)
 
