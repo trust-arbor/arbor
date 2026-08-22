@@ -168,7 +168,58 @@ defmodule Arbor.Actions.AcpToolExposureTest do
 
   # -- Helpers --
 
+  # Since ex_mcp rc.8 the HttpPlug issues server-owned Streamable HTTP sessions
+  # from ExMCP.SessionManager, so a bare request fails closed with
+  # "Session ID required" (see Arbor.AI.AcpPool.ToolServer.start/2). Perform the
+  # protocol handshake — initialize, then notifications/initialized — and carry
+  # the returned mcp-session-id on the real request.
   defp mcp_request(port, method, params) do
+    with {:ok, session_id} <- mcp_initialize(port) do
+      mcp_post(port, session_id, method, params)
+    end
+  end
+
+  defp mcp_initialize(port) do
+    body =
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => System.unique_integer([:positive]),
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "capabilities" => %{},
+          "clientInfo" => %{"name" => "acp-tool-exposure-test", "version" => "1"}
+        }
+      })
+
+    case http_post(port, [], body) do
+      {:ok, {{_, 200, _}, headers, _}} ->
+        case session_id_header(headers) do
+          nil ->
+            {:error, {:no_session_id, headers}}
+
+          session_id ->
+            # The server expects the initialized notification before other calls.
+            _ =
+              mcp_post_raw(
+                port,
+                session_id,
+                Jason.encode!(%{
+                  "jsonrpc" => "2.0",
+                  "method" => "notifications/initialized",
+                  "params" => %{}
+                })
+              )
+
+            {:ok, session_id}
+        end
+
+      other ->
+        {:error, {:initialize_failed, other}}
+    end
+  end
+
+  defp mcp_post(port, session_id, method, params) do
     body =
       Jason.encode!(%{
         "jsonrpc" => "2.0",
@@ -177,17 +228,31 @@ defmodule Arbor.Actions.AcpToolExposureTest do
         "params" => params
       })
 
-    case :httpc.request(
-           :post,
-           {~c"http://127.0.0.1:#{port}/", [], ~c"application/json", String.to_charlist(body)},
-           [{:timeout, 5_000}],
-           []
-         ) do
+    case mcp_post_raw(port, session_id, body) do
       {:ok, {{_, 200, _}, _, response_body}} ->
         {:ok, response_body |> List.to_string() |> Jason.decode!()}
 
       other ->
         {:error, other}
     end
+  end
+
+  defp mcp_post_raw(port, session_id, body) do
+    http_post(port, [{~c"mcp-session-id", String.to_charlist(session_id)}], body)
+  end
+
+  defp http_post(port, headers, body) do
+    :httpc.request(
+      :post,
+      {~c"http://127.0.0.1:#{port}/", headers, ~c"application/json", String.to_charlist(body)},
+      [{:timeout, 5_000}],
+      []
+    )
+  end
+
+  defp session_id_header(headers) do
+    Enum.find_value(headers, fn {key, value} ->
+      if String.downcase(to_string(key)) == "mcp-session-id", do: to_string(value)
+    end)
   end
 end
