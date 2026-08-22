@@ -57,7 +57,13 @@ defmodule Arbor.LLM.OpenCodeZen.Transport do
   def apply_anonymous_auth(%Req.Request{} = request) do
     request
     |> Req.Request.delete_header("authorization")
-    |> Req.Request.merge_options(auth: false)
+    # `auth: nil` — NOT `false`. Req.Steps.auth/2 has clauses for nil, a
+    # binary, {:basic,_}, {:bearer,_}, {:digest,_}, a fun, {m,f,a} and
+    # :netrc. `false` matches none of them and raises FunctionClauseError
+    # before the request is ever sent, so every keyless dispatch failed.
+    # nil makes the auth step a no-op and the empty Authorization header
+    # written below is what reaches the wire.
+    |> Req.Request.merge_options(auth: nil)
     |> Req.Request.put_header("authorization", "")
     |> Req.Request.put_header("user-agent", @user_agent)
     |> Req.Request.put_header("http-referer", @referer)
