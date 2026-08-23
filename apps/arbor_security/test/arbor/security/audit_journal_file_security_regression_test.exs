@@ -1,6 +1,7 @@
 defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
   @moduledoc """
-  Path fail-closed and admission-bound security regression for P1C-B2A.
+  Path fail-closed and admission-bound security regression for P1C-B2A,
+  plus B2C2 atomic-publication regressions.
   """
 
   use ExUnit.Case, async: true
@@ -9,12 +10,14 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
   @moduletag security: :regression
 
   alias Arbor.Common.SafePath
+  alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFile
   alias Arbor.Security.AuditJournalFileCore
   alias Arbor.Security.Contracts.AuditJournal
 
   @digest String.duplicate("ab", 32)
   @prepared_at "2026-08-20T12:00:00Z"
+  @t1 "2026-08-20T12:00:01Z"
   @magic <<"AJL1">>
 
   setup do
@@ -234,6 +237,251 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     assert :ok = AuditJournalFile.close(reopened)
   end
 
+  test "security regression: compact/1 is exported for publication" do
+    assert Code.ensure_loaded?(AuditJournalFile)
+    assert function_exported?(AuditJournalFile, :compact, 1)
+  end
+
+  test "security regression: source same-size rewrite does not publish snapshot", %{root: root} do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    arm_compact_inject(:compact_rewrite_source_same_size)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+    assert reason in [:digest_mismatch, :source_tip_mismatch, :core_mismatch]
+    refute compact_published?(handle.path, before)
+    refute_candidate_file(handle)
+    assert_old_handle_fd_invalid(handle)
+  end
+
+  test "security regression: source inode replacement does not publish snapshot", %{root: root} do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    arm_compact_inject(:compact_replace_source_inode)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+    assert reason in [:identity_changed, :size_mismatch, :source_tip_mismatch]
+    on_disk = File.read!(handle.path)
+    refute snapshot_payload?(on_disk)
+    refute_candidate_file(handle)
+    assert_old_handle_fd_invalid(handle)
+  end
+
+  test "security regression: candidate substitution does not rename attacker bytes", %{root: root} do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    arm_compact_inject(:compact_substitute_candidate)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+
+    assert reason in [
+             :digest_mismatch,
+             :identity_changed,
+             :size_mismatch,
+             :candidate_proof_failed
+           ]
+
+    assert File.read!(handle.path) == before
+    refute_candidate_file(handle)
+  end
+
+  test "security regression: post-rename failure is publish_uncertain not a definite miss", %{
+    root: root
+  } do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    arm_compact_inject(:compact_rename_after_effect)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, _reason}} = result
+    assert_old_handle_fd_invalid(handle)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 2
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "security regression: directory finalization failure after rename is publish_uncertain", %{
+    root: root
+  } do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    arm_compact_inject(:compact_dir_sync, :eio)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :dir_sync_failed}} = result
+    assert_old_handle_fd_invalid(handle)
+  end
+
+  test "security regression: published-file reopen failure is publish_uncertain", %{root: root} do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    arm_compact_inject(:compact_reopen_error, :eio)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :reopen_failed}} = result
+    assert_old_handle_fd_invalid(handle)
+  end
+
+  test "security regression: published-file replay failure is publish_uncertain", %{root: root} do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    arm_compact_inject(:compact_replay_error, :eio)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :replay_mismatch}} = result
+    assert_old_handle_fd_invalid(handle)
+  end
+
+  test "security regression: rename before effect is not_published and leaves the target", %{
+    root: root
+  } do
+    assert function_exported?(AuditJournalFile, :compact, 1)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    arm_compact_inject(:compact_rename_before_effect)
+    result = apply(AuditJournalFile, :compact, [handle])
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, _reason}} = result
+    assert File.read!(handle.path) == before
+    refute_candidate_file(handle)
+  end
+
+  test "security regression: open of snapshot-first log restores compacted core", %{root: root} do
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    assert {:ok, folded} = AuditJournalCore.fold([prepared])
+
+    source = %{
+      "committed_digest" => Base.encode16(AuditJournalFileCore.genesis_digest(), case: :lower),
+      "committed_frames" => 1,
+      "committed_offset" => 1
+    }
+
+    assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(folded, source)
+    bytes = encode_snapshot_log(snapshot, pending)
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    path = handle.path
+    assert :ok = AuditJournalFile.close(handle)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert reopened.core === compacted
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "security regression: open of snapshot-first effect_applied pending restores core", %{
+    root: root
+  } do
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    prepared = prepared_record(intent)
+    applied = applied_record(intent, @t1)
+    assert {:ok, folded} = AuditJournalCore.fold([prepared, applied])
+
+    source = %{
+      "committed_digest" => Base.encode16(AuditJournalFileCore.genesis_digest(), case: :lower),
+      "committed_frames" => 2,
+      "committed_offset" => 2
+    }
+
+    assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(folded, source)
+    assert Enum.map(pending, & &1["record_type"]) == ["prepared", "effect_applied"]
+    bytes = encode_snapshot_log(snapshot, pending)
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    path = handle.path
+    assert :ok = AuditJournalFile.close(handle)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert reopened.core === compacted
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  defp arm_compact_inject(kind) do
+    apply(AuditJournalFile, :__test_inject__, [kind])
+  end
+
+  defp arm_compact_inject(kind, value) do
+    apply(AuditJournalFile, :__test_inject__, [kind, value])
+  end
+
+  defp assert_old_handle_fd_invalid(handle) do
+    assert {:error, _reason} = :file.sync(handle.fd)
+  end
+
+  defp refute_candidate_file(handle) do
+    name = "." <> Path.basename(handle.path) <> ".compact"
+    refute File.exists?(Path.join(Path.dirname(handle.path), name))
+  end
+
+  defp snapshot_payload?(bytes) when is_binary(bytes) do
+    {:ok, empty} = AuditJournalFileCore.new()
+
+    case AuditJournalFileCore.consume(empty, bytes) do
+      {:ok, replay} -> Map.get(replay, :snapshot) != nil
+      {:error, _reason} -> false
+    end
+  end
+
+  defp compact_published?(path, before) do
+    on_disk = File.read!(path)
+    on_disk != before and snapshot_payload?(on_disk)
+  end
+
+  defp encode_snapshot_log(snapshot, pending) do
+    {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+
+    {:ok, frame, digest} =
+      AuditJournalFileCore.encode_frame(snap_bytes, AuditJournalFileCore.genesis_digest())
+
+    Enum.reduce(pending, {frame, digest}, fn record, {acc, pred} ->
+      {:ok, rec_bytes} = AuditJournal.canonical_record_bytes(record)
+      {:ok, rec_frame, next} = AuditJournalFileCore.encode_frame(rec_bytes, pred)
+      {acc <> rec_frame, next}
+    end)
+    |> elem(0)
+  end
+
   defp unique_root do
     tmp =
       Path.join(
@@ -297,6 +545,20 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
       "operation_id" => intent["operation_id"],
       "occurred_at" => intent["prepared_at"],
       "intent" => intent
+    }
+  end
+
+  defp applied_record(intent, occurred_at) do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "record_type" => "effect_applied",
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => occurred_at,
+      "observation" => %{
+        "kind" => "applied",
+        "after_fingerprint" => intent["after_fingerprint"]
+      }
     }
   end
 end

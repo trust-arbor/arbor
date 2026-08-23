@@ -7,10 +7,14 @@ defmodule Arbor.Security.AuditJournalFile do
   and acknowledges an append only after a complete frame is written, file-synced,
   and post-sync fstat-proven.
 
+  Compaction publishes a snapshot-plus-pending candidate in the same directory,
+  file-syncs it, proves it, re-proves the source identity and tip, then
+  atomically renames. Directory-entry finalize keeps the existing node-restart
+  durability claim when directory fsync is known-unsupported.
+
   Not a GenServer and not a generic store. Single-writer is assumed, not
-  enforced. Claims explicit file-sync of the log FD plus the post-sync proof —
-  not directory fsync, hostile same-UID tamper resistance, or distributed
-  linearizability.
+  enforced. Does not claim hostile same-UID tamper resistance, host power-loss
+  durability, or distributed linearizability.
   """
 
   alias Arbor.Common.SafePath
@@ -59,6 +63,46 @@ defmodule Arbor.Security.AuditJournalFile do
           torn_tail: AuditJournalFileCore.torn_tail(),
           closed?: boolean()
         }
+
+  @type not_published_reason ::
+          :torn_tail
+          | :malformed
+          | :cross_operation
+          | :record_too_large
+          | :capacity_exhausted
+          | :identity_changed
+          | :size_mismatch
+          | :digest_mismatch
+          | :symlink_rejected
+          | :hardlink_rejected
+          | :insecure_mode
+          | :not_regular
+          | :path_escape
+          | :parent_missing
+          | :candidate_exists
+          | :write_failed
+          | :sync_failed
+          | :candidate_proof_failed
+          | :source_tip_mismatch
+          | :log_too_large
+          | :non_canonical
+          | :pending_mismatch
+          | :snapshot_not_first
+          | :core_mismatch
+
+  @type publish_uncertain_reason ::
+          :rename_ambiguous
+          | :dir_sync_failed
+          | :reopen_failed
+          | :replay_mismatch
+          | :identity_changed
+          | :size_mismatch
+          | :digest_mismatch
+          | :insecure_mode
+          | :not_regular
+          | :hardlink_rejected
+          | :symlink_rejected
+          | :core_mismatch
 
   @spec open(keyword()) :: {:ok, t()} | {:error, term()}
   def open(opts) when is_list(opts) do
@@ -120,6 +164,28 @@ defmodule Arbor.Security.AuditJournalFile do
 
   def append(_handle, _raw), do: {:error, :closed}
 
+  @spec compact(t()) ::
+          {:ok, t()}
+          | {:error, :closed}
+          | {:error, {:not_published, not_published_reason()}}
+          | {:error, {:publish_uncertain, publish_uncertain_reason()}}
+  def compact(%__MODULE__{closed?: true}), do: {:error, :closed}
+
+  def compact(%__MODULE__{} = handle) do
+    case admit_compact(handle) do
+      {:ok, ctx} ->
+        publish_compacted(handle, ctx)
+
+      {:error, :closed} = err ->
+        err
+
+      {:error, reason} ->
+        publish_error(handle, nil, nil, :admit, reason)
+    end
+  end
+
+  def compact(_handle), do: {:error, :closed}
+
   if Mix.env() == :test do
     @inject_key {__MODULE__, :inject}
 
@@ -128,6 +194,25 @@ defmodule Arbor.Security.AuditJournalFile do
     def __test_inject__(:clear) do
       Process.delete(@inject_key)
       :ok
+    end
+
+    @doc false
+    @spec __test_inject__(
+            :compact_rewrite_source_same_size
+            | :compact_replace_source_inode
+            | :compact_substitute_candidate
+            | :compact_rename_before_effect
+            | :compact_rename_after_effect
+          ) :: :ok
+    def __test_inject__(kind)
+        when kind in [
+               :compact_rewrite_source_same_size,
+               :compact_replace_source_inode,
+               :compact_substitute_candidate,
+               :compact_rename_before_effect,
+               :compact_rename_after_effect
+             ] do
+      put_inject(kind, true)
     end
 
     @doc false
@@ -168,15 +253,790 @@ defmodule Arbor.Security.AuditJournalFile do
       put_inject(:post_sync_lstat_minor_device_delta, delta)
     end
 
+    @doc false
+    @spec __test_inject__(:compact_sync_error, term()) :: :ok
+    def __test_inject__(:compact_sync_error, reason) do
+      put_inject(:compact_sync_error, reason)
+    end
+
+    @doc false
+    @spec __test_inject__(:compact_after_sync_error, term()) :: :ok
+    def __test_inject__(:compact_after_sync_error, reason) do
+      put_inject(:compact_after_sync_error, reason)
+    end
+
+    @doc false
+    @spec __test_inject__(:compact_dir_sync, term()) :: :ok
+    def __test_inject__(:compact_dir_sync, result) do
+      put_inject(:compact_dir_sync, result)
+    end
+
+    @doc false
+    @spec __test_inject__(:compact_reopen_error, term()) :: :ok
+    def __test_inject__(:compact_reopen_error, reason) do
+      put_inject(:compact_reopen_error, reason)
+    end
+
+    @doc false
+    @spec __test_inject__(:compact_replay_error, term()) :: :ok
+    def __test_inject__(:compact_replay_error, reason) do
+      put_inject(:compact_replay_error, reason)
+    end
+
     defp put_inject(key, value) do
       current = Process.get(@inject_key, %{})
       Process.put(@inject_key, Map.put(current, key, value))
       :ok
     end
 
+    @spec inject(atom()) :: term()
     defp inject(key) do
       Process.get(@inject_key, %{}) |> Map.get(key, :absent)
     end
+  end
+
+  defp admit_compact(%__MODULE__{} = handle) do
+    with :ok <- require_compact_no_torn(handle),
+         :ok <- compact_revalidate(handle),
+         {:ok, source} <-
+           AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset),
+         {:ok, compacted, snapshot, pending} <- compact_reducer(handle.core, source),
+         {:ok, bytes, expected} <- AuditJournalFileCore.encode_compacted(snapshot, pending) do
+      {:ok,
+       %{
+         source: source,
+         compacted: compacted,
+         bytes: bytes,
+         expected: expected
+       }}
+    end
+  end
+
+  defp require_compact_no_torn(%__MODULE__{torn_tail: nil}), do: :ok
+  defp require_compact_no_torn(%__MODULE__{}), do: {:error, :torn_tail}
+
+  defp compact_revalidate(handle) do
+    case revalidate_identity(handle) do
+      :ok -> :ok
+      {:error, {:not_committed, reason}} -> {:error, reason}
+    end
+  end
+
+  defp compact_reducer(core, source) do
+    case AuditJournalCore.compact(core, source) do
+      {:ok, compacted, snapshot, pending} -> {:ok, compacted, snapshot, pending}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp publish_compacted(handle, ctx) do
+    case resolve_candidate_path(handle) do
+      {:ok, cand_path} ->
+        publish_candidate(handle, ctx, cand_path)
+
+      {:error, reason} ->
+        publish_error(handle, nil, nil, :admit, reason)
+    end
+  end
+
+  defp resolve_candidate_path(handle) do
+    parent = Path.dirname(handle.path)
+
+    with {:ok, name} <- AuditJournalFileCore.candidate_basename(Path.basename(handle.path)),
+         path = Path.join(parent, name),
+         {:ok, resolved} <- contained_in_root(path, handle.root) do
+      {:ok, resolved}
+    end
+  end
+
+  defp publish_candidate(handle, ctx, cand_path) do
+    case cleanup_leftover(cand_path) do
+      {:error, reason} ->
+        publish_error(handle, cand_path, nil, :cleanup, reason)
+
+      :ok ->
+        open_and_publish_candidate(handle, ctx, cand_path)
+    end
+  end
+
+  defp open_and_publish_candidate(handle, ctx, cand_path) do
+    case create_candidate(cand_path) do
+      {:error, reason} ->
+        publish_error(handle, cand_path, nil, :create, reason)
+
+      {:ok, fd, identity} ->
+        prove_then_rename(handle, ctx, cand_path, fd, identity)
+    end
+  end
+
+  defp prove_then_rename(handle, ctx, cand_path, fd, identity) do
+    case fill_and_prove_candidate(handle, ctx, cand_path, fd, identity) do
+      :ok ->
+        _ = close_io_silent(fd)
+        source_tip_then_rename(handle, ctx, cand_path, identity)
+
+      {:error, phase, reason} ->
+        _ = close_io_silent(fd)
+        publish_error(handle, cand_path, identity, phase, reason)
+    end
+  end
+
+  defp source_tip_then_rename(handle, ctx, cand_path, identity) do
+    case prove_source_tip(handle, ctx.source) do
+      :ok ->
+        rename_and_finalize(handle, ctx, cand_path, identity)
+
+      {:error, reason} ->
+        publish_error(handle, cand_path, identity, :source_tip_proof, reason)
+    end
+  end
+
+  defp fill_and_prove_candidate(handle, ctx, cand_path, fd, identity) do
+    with :ok <- tag_phase(:write, write_candidate(fd, ctx.bytes)),
+         :ok <- tag_phase(:sync, compact_sync(fd)),
+         :ok <- tag_phase(:candidate_proof, prove_candidate_first(fd, cand_path, identity, ctx)),
+         :ok <- after_first_proof(handle, cand_path),
+         :ok <-
+           tag_phase(
+             :candidate_reproof,
+             prove_candidate_again(fd, cand_path, identity, ctx.bytes)
+           ) do
+      :ok
+    end
+  end
+
+  defp write_candidate(fd, bytes) do
+    case pwrite_all(fd, 0, bytes) do
+      :ok -> :ok
+      {:error, {:not_committed, _reason}} -> {:error, :write_failed}
+      {:error, _reason} -> {:error, :write_failed}
+    end
+  end
+
+  defp do_prove_candidate_first(fd, path, identity, ctx) do
+    expected_size = byte_size(ctx.bytes)
+
+    with {:ok, data} <- read_all(fd, expected_size),
+         {:ok, empty} <- AuditJournalFileCore.new(),
+         {:ok, replay} <- AuditJournalFileCore.consume(empty, data),
+         :ok <- require_replay_complete(replay),
+         :ok <- require_core_equal(replay.core, ctx.compacted),
+         :ok <- require_replay_evidence(replay, ctx.expected),
+         {:ok, fstat} <- fstat_io(fd),
+         :ok <- require_regular(fstat),
+         :ok <- require_single_link(fstat),
+         :ok <- require_file_mode_0600(fstat),
+         :ok <- require_expected_size(fstat, expected_size),
+         :ok <- require_same_inode(identity, fstat),
+         {:ok, lstat} <- lstat_file(path),
+         :ok <- require_regular(lstat),
+         :ok <- require_same_inode(identity, lstat),
+         :ok <- require_stat_pair(fstat, lstat) do
+      :ok
+    else
+      {:error, reason} -> {:error, map_candidate_proof(reason)}
+    end
+  end
+
+  defp prove_candidate_again(fd, path, identity, bytes) do
+    expected_size = byte_size(bytes)
+
+    with {:ok, fstat} <- fstat_io(fd),
+         {:ok, lstat} <- lstat_file(path),
+         :ok <- require_regular(fstat),
+         :ok <- require_regular(lstat),
+         :ok <- require_same_inode(identity, fstat),
+         :ok <- require_same_inode(identity, lstat),
+         :ok <- require_single_link(fstat),
+         :ok <- require_file_mode_0600(fstat),
+         :ok <- require_expected_size(fstat, expected_size),
+         {:ok, data} <- read_all(fd, expected_size) do
+      if data == bytes do
+        :ok
+      else
+        {:error, :digest_mismatch}
+      end
+    end
+  end
+
+  defp prove_source_tip(handle, source) do
+    with {:ok, fstat} <- fstat_io(handle.fd),
+         {:ok, lstat} <- lstat_file(handle.path),
+         :ok <- require_regular(fstat),
+         :ok <- require_regular(lstat),
+         :ok <- require_file_mode_0600(fstat),
+         :ok <- require_single_link(fstat),
+         :ok <- require_bound_identity(handle.identity, fstat),
+         :ok <- require_bound_identity(handle.identity, lstat),
+         :ok <- require_expected_size(fstat, handle.file_size),
+         :ok <- require_expected_size(fstat, handle.offset),
+         {:ok, data} <- read_all(handle.fd, handle.file_size),
+         {:ok, empty} <- AuditJournalFileCore.new(),
+         {:ok, replay} <- AuditJournalFileCore.consume(empty, data),
+         :ok <- require_replay_complete(replay),
+         :ok <- require_source_tip(replay, source),
+         :ok <- require_core_equal(replay.core, handle.core) do
+      :ok
+    else
+      {:error, reason} -> {:error, map_source_tip(reason)}
+    end
+  end
+
+  defp rename_and_finalize(handle, ctx, cand_path, identity) do
+    case compact_rename(cand_path, handle.path) do
+      :ok ->
+        finalize_published(handle, ctx, identity)
+
+      {:after_effect, _reason} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, :rename_ambiguous}}
+
+      {:error, reason} ->
+        classify_failed_rename(handle, cand_path, identity, reason)
+    end
+  end
+
+  defp classify_failed_rename(handle, cand_path, identity, reason) do
+    present? = candidate_present?(cand_path)
+    target_identity_match? = target_still_ours?(handle)
+
+    case AuditJournalFileCore.classify_rename_outcome(%{
+           rename: {:error, reason},
+           candidate_present?: present?,
+           target_identity_match?: target_identity_match?
+         }) do
+      {:not_published, mapped} ->
+        finish_not_published(handle, cand_path, identity, {:error, {:not_published, mapped}})
+
+      {:publish_uncertain, mapped} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, mapped}}
+    end
+  end
+
+  defp finalize_published(handle, ctx, cand_identity) do
+    with :ok <- tag_phase(:dir_finalize, compact_fsync_parent(handle)),
+         :ok <-
+           tag_phase(
+             :dir_finalize,
+             prove_published_entry(handle.path, cand_identity, byte_size(ctx.bytes))
+           ),
+         {:ok, new_handle} <- reopen_published(handle, ctx) do
+      {:ok, new_handle}
+    else
+      {:error, phase, reason} ->
+        publish_error(handle, nil, nil, phase, reason)
+    end
+  end
+
+  defp prove_published_entry(path, identity, expected_size) do
+    with {:ok, lstat} <- lstat_file(path),
+         :ok <- require_regular(lstat),
+         :ok <- require_single_link(lstat),
+         :ok <- require_file_mode_0600(lstat),
+         :ok <- require_expected_size(lstat, expected_size),
+         :ok <- require_same_inode(identity, lstat) do
+      :ok
+    end
+  end
+
+  defp reopen_published(handle, ctx) do
+    with :ok <- compact_reopen_guard(),
+         {:ok, lstat} <- lstat_file(handle.path),
+         {:ok, fd, identity} <- open_existing(handle.path, lstat, handle.root) do
+      finish_reopened_fd(handle, ctx, fd, identity)
+    else
+      {:error, reason} ->
+        {:error, :reopen, reason}
+    end
+  end
+
+  if Mix.env() == :test do
+    defp finish_reopened_fd(handle, ctx, fd, identity) do
+      case compact_replay_guard() do
+        :ok ->
+          finish_published_open(handle, ctx, fd, identity)
+
+        {:error, reason} ->
+          _ = close_io_silent(fd)
+          {:error, :published_replay, reason}
+      end
+    end
+  else
+    defp finish_reopened_fd(handle, ctx, fd, identity) do
+      finish_published_open(handle, ctx, fd, identity)
+    end
+  end
+
+  defp finish_published_open(handle, ctx, fd, identity) do
+    case load_replay(fd, identity) do
+      {:ok, replay, identity} ->
+        accept_published_replay(handle, ctx, fd, identity, replay)
+
+      {:error, reason} ->
+        _ = close_io_silent(fd)
+        {:error, :published_replay, reason}
+    end
+  end
+
+  defp accept_published_replay(handle, ctx, fd, identity, replay) do
+    with :ok <- require_replay_complete(replay),
+         :ok <- require_core_equal(replay.core, ctx.compacted),
+         :ok <- require_replay_evidence(replay, ctx.expected) do
+      _ = close_io_silent(handle.fd)
+      {:ok, build_handle(fd, handle.root, handle.path, identity, replay)}
+    else
+      {:error, reason} ->
+        _ = close_io_silent(fd)
+        {:error, :published_replay, reason}
+    end
+  end
+
+  defp cleanup_leftover(path) do
+    case File.lstat(path, time: :posix) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, stat} ->
+        unlink_leftover(path, stat)
+
+      {:error, reason} ->
+        {:error, map_not_published(reason)}
+    end
+  end
+
+  defp unlink_leftover(path, stat) do
+    facts = %{type: stat.type, mode: stat.mode, links: stat.links}
+
+    case AuditJournalFileCore.leftover_action(facts) do
+      :unlink ->
+        case File.rm(path) do
+          :ok -> :ok
+          {:error, reason} -> {:error, map_not_published(reason)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp create_candidate(path) do
+    case :file.open(String.to_charlist(path), [:raw, :binary, :read, :write, :exclusive]) do
+      {:ok, fd} ->
+        finish_candidate_create(fd, path)
+
+      {:error, :eexist} ->
+        {:error, :candidate_exists}
+
+      {:error, _reason} ->
+        {:error, :write_failed}
+    end
+  end
+
+  defp finish_candidate_create(fd, path) do
+    with :ok <- chmod_private(path),
+         {:ok, stat} <- fstat_io(fd),
+         :ok <- require_regular(stat),
+         :ok <- require_single_link(stat),
+         :ok <- require_file_mode_0600(stat),
+         {:ok, lstat} <- lstat_file(path),
+         :ok <- require_same_inode(file_identity(stat), lstat) do
+      {:ok, fd, file_identity(stat)}
+    else
+      {:error, reason} ->
+        identity = identity_from_fd(fd)
+        _ = close_io_silent(fd)
+        unlink_candidate_if_ours(path, identity)
+        {:error, reason}
+    end
+  end
+
+  defp identity_from_fd(fd) do
+    case fstat_io(fd) do
+      {:ok, stat} -> file_identity(stat)
+      {:error, _reason} -> nil
+    end
+  end
+
+  # Incomplete replay is context-neutral; callers map it at their boundary.
+  defp require_replay_complete(%{torn_tail: nil}), do: :ok
+  defp require_replay_complete(_replay), do: {:error, :incomplete_replay}
+
+  defp require_core_equal(left, right) do
+    if AuditJournalFileCore.core_match?(left, right) do
+      :ok
+    else
+      {:error, :core_mismatch}
+    end
+  end
+
+  defp require_replay_evidence(replay, expected) do
+    if replay.digest == expected.digest and replay.offset == expected.offset and
+         replay.frames == expected.frames and replay.torn_tail == nil do
+      :ok
+    else
+      {:error, :candidate_proof_failed}
+    end
+  end
+
+  defp require_source_tip(replay, source) do
+    if AuditJournalFileCore.source_tip_match?(replay, source) do
+      :ok
+    else
+      {:error, :source_tip_mismatch}
+    end
+  end
+
+  defp candidate_present?(path) do
+    match?({:ok, _stat}, File.lstat(path, time: :posix))
+  end
+
+  defp target_still_ours?(handle) do
+    with {:ok, lstat} <- lstat_file(handle.path),
+         {:ok, fstat} <- fstat_io(handle.fd),
+         :ok <- require_bound_identity(handle.identity, lstat),
+         :ok <- require_bound_identity(handle.identity, fstat) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp finish_not_published(handle, cand_path, cand_identity, err) do
+    unlink_candidate_if_ours(cand_path, cand_identity)
+
+    case rebuild_and_prove_source(handle) do
+      :ok ->
+        err
+
+      {:error, _reason} ->
+        invalidate(handle)
+        err
+    end
+  end
+
+  defp rebuild_and_prove_source(handle) do
+    case AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset) do
+      {:ok, source} -> prove_source_tip(handle, source)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unlink_candidate_if_ours(nil, _identity), do: :ok
+
+  defp unlink_candidate_if_ours(_path, nil), do: :ok
+
+  defp unlink_candidate_if_ours(path, identity) do
+    case File.lstat(path, time: :posix) do
+      {:ok, stat} ->
+        facts = %{type: stat.type, mode: stat.mode, links: stat.links}
+        ours? = same_candidate_inode?(identity, stat)
+
+        if ours? and AuditJournalFileCore.leftover_action(facts) == :unlink do
+          _ = File.rm(path)
+          :ok
+        else
+          :ok
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp same_candidate_inode?(identity, stat) do
+    identity.major_device == stat.major_device and identity.minor_device == stat.minor_device and
+      identity.inode == stat.inode
+  end
+
+  defp compact_sync_fd(fd) do
+    case :file.sync(fd) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :sync_failed}
+    end
+  end
+
+  defp do_fsync_directory(dir) do
+    case :file.open(String.to_charlist(dir), [:raw, :read, :directory]) do
+      {:ok, io} ->
+        try do
+          case :file.sync(io) do
+            :ok ->
+              AuditJournalFileCore.classify_dir_sync(:ok)
+
+            {:error, reason} ->
+              map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
+          end
+        after
+          _ = close_io_silent(io)
+        end
+
+      {:error, reason} ->
+        map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
+    end
+  end
+
+  defp map_dir_sync(:ok), do: :ok
+  defp map_dir_sync({:error, _reason}), do: {:error, :dir_sync_failed}
+
+  defp tag_phase(_phase, :ok), do: :ok
+  defp tag_phase(phase, {:error, reason}), do: {:error, phase, reason}
+
+  defp publish_error(handle, cand_path, cand_identity, phase, reason) do
+    mapped = map_publish_reason(phase, reason)
+
+    case AuditJournalFileCore.classify_publish_phase(phase, mapped) do
+      {:not_published, classified} ->
+        finish_not_published(
+          handle,
+          cand_path,
+          cand_identity,
+          {:error, {:not_published, classified}}
+        )
+
+      {:publish_uncertain, classified} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, classified}}
+
+      {:error, :malformed} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, :replay_mismatch}}
+    end
+  end
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:admit, :cleanup, :create, :write, :sync] do
+    map_not_published(reason)
+  end
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:candidate_proof, :candidate_reproof] do
+    map_candidate_proof(reason)
+  end
+
+  defp map_publish_reason(:source_tip_proof, reason), do: map_source_tip(reason)
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:dir_finalize, :reopen, :published_replay] do
+    map_uncertain(reason)
+  end
+
+  defp map_publish_reason(_phase, reason), do: map_not_published(reason)
+
+  defp map_not_published(reason)
+       when reason in [
+              :torn_tail,
+              :malformed,
+              :cross_operation,
+              :record_too_large,
+              :capacity_exhausted,
+              :identity_changed,
+              :size_mismatch,
+              :digest_mismatch,
+              :symlink_rejected,
+              :hardlink_rejected,
+              :insecure_mode,
+              :not_regular,
+              :path_escape,
+              :parent_missing,
+              :candidate_exists,
+              :write_failed,
+              :sync_failed,
+              :candidate_proof_failed,
+              :source_tip_mismatch,
+              :log_too_large,
+              :non_canonical,
+              :pending_mismatch,
+              :snapshot_not_first,
+              :core_mismatch
+            ],
+       do: reason
+
+  defp map_not_published(_reason), do: :write_failed
+
+  defp map_uncertain(:incomplete_replay), do: :replay_mismatch
+
+  defp map_uncertain(reason)
+       when reason in [
+              :rename_ambiguous,
+              :dir_sync_failed,
+              :reopen_failed,
+              :replay_mismatch,
+              :identity_changed,
+              :size_mismatch,
+              :digest_mismatch,
+              :insecure_mode,
+              :not_regular,
+              :hardlink_rejected,
+              :symlink_rejected,
+              :core_mismatch
+            ],
+       do: reason
+
+  defp map_uncertain(_reason), do: :replay_mismatch
+
+  defp map_candidate_proof(:incomplete_replay), do: :candidate_proof_failed
+
+  defp map_candidate_proof(reason)
+       when reason in [
+              :identity_changed,
+              :size_mismatch,
+              :digest_mismatch,
+              :insecure_mode,
+              :not_regular,
+              :hardlink_rejected,
+              :symlink_rejected,
+              :core_mismatch,
+              :candidate_proof_failed
+            ],
+       do: reason
+
+  defp map_candidate_proof(_reason), do: :candidate_proof_failed
+
+  defp map_source_tip(:incomplete_replay), do: :source_tip_mismatch
+
+  defp map_source_tip(reason)
+       when reason in [
+              :identity_changed,
+              :size_mismatch,
+              :digest_mismatch,
+              :source_tip_mismatch,
+              :core_mismatch
+            ],
+       do: reason
+
+  defp map_source_tip(_reason), do: :source_tip_mismatch
+
+  if Mix.env() == :test do
+    defp compact_sync(fd) do
+      case inject(:compact_sync_error) do
+        :absent -> compact_sync_fd(fd)
+        _reason -> {:error, :sync_failed}
+      end
+    end
+
+    defp prove_candidate_first(fd, path, identity, ctx) do
+      case inject(:compact_after_sync_error) do
+        :absent -> do_prove_candidate_first(fd, path, identity, ctx)
+        _reason -> {:error, :candidate_proof_failed}
+      end
+    end
+
+    defp after_first_proof(handle, cand_path) do
+      apply_compact_mutations(handle.path, cand_path)
+      :ok
+    end
+
+    defp apply_compact_mutations(source_path, cand_path) do
+      if inject(:compact_substitute_candidate) != :absent do
+        substitute_candidate_bytes(cand_path)
+      end
+
+      if inject(:compact_rewrite_source_same_size) != :absent do
+        rewrite_source_same_size(source_path)
+      end
+
+      if inject(:compact_replace_source_inode) != :absent do
+        replace_source_inode(source_path)
+      end
+
+      :ok
+    end
+
+    defp substitute_candidate_bytes(path) do
+      case File.read(path) do
+        {:ok, data} when byte_size(data) > 0 ->
+          _ = File.write(path, flip_first_byte(data))
+          _ = File.chmod(path, 0o600)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+
+    defp rewrite_source_same_size(path) do
+      case File.read(path) do
+        {:ok, data} when byte_size(data) > 0 ->
+          _ = File.write(path, flip_first_byte(data))
+          _ = File.chmod(path, 0o600)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+
+    defp replace_source_inode(path) do
+      _ = File.rm(path)
+      _ = File.write(path, <<0>>)
+      _ = File.chmod(path, 0o600)
+      :ok
+    end
+
+    defp flip_first_byte(<<byte, rest::binary>>), do: <<Bitwise.bxor(byte, 0xFF), rest::binary>>
+    defp flip_first_byte(other), do: other
+
+    defp compact_rename(from, to) do
+      cond do
+        inject(:compact_rename_before_effect) != :absent ->
+          {:error, :eio}
+
+        inject(:compact_rename_after_effect) != :absent ->
+          case File.rename(from, to) do
+            :ok -> {:after_effect, :eio}
+            {:error, reason} -> {:error, reason}
+          end
+
+        true ->
+          File.rename(from, to)
+      end
+    end
+
+    defp compact_fsync_parent(handle) do
+      parent = Path.dirname(handle.path)
+
+      case inject(:compact_dir_sync) do
+        :absent ->
+          do_fsync_directory(parent)
+
+        :ok ->
+          :ok
+
+        reason ->
+          map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
+      end
+    end
+
+    @spec compact_reopen_guard() :: :ok | {:error, atom()}
+    defp compact_reopen_guard do
+      case inject(:compact_reopen_error) do
+        :absent -> :ok
+        _reason -> {:error, :reopen_failed}
+      end
+    end
+
+    @spec compact_replay_guard() :: :ok | {:error, atom()}
+    defp compact_replay_guard do
+      case inject(:compact_replay_error) do
+        :absent -> :ok
+        _reason -> {:error, :replay_mismatch}
+      end
+    end
+  else
+    defp compact_sync(fd), do: compact_sync_fd(fd)
+
+    defp prove_candidate_first(fd, path, identity, ctx),
+      do: do_prove_candidate_first(fd, path, identity, ctx)
+
+    defp after_first_proof(_handle, _cand_path), do: :ok
+
+    defp compact_rename(from, to), do: File.rename(from, to)
+
+    defp compact_fsync_parent(handle), do: do_fsync_directory(Path.dirname(handle.path))
+
+    @spec compact_reopen_guard() :: :ok | {:error, atom()}
+    defp compact_reopen_guard, do: :ok
   end
 
   defp finish_open(fd, root, path, identity) do
