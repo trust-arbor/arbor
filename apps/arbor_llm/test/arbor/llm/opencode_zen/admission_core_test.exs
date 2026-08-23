@@ -11,37 +11,56 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
   end
 
   describe "admission is derived from recorded evidence" do
-    test "running derivation on the committed file reproduces the admitted list" do
+    # These assert INVARIANTS of the shipped catalog, not specific model ids.
+    # The free tier rotates — pinning ids made the suite assert whatever the file
+    # happened to contain, which is how a catalog of models the relay does not
+    # serve passed its own tests.
+    test "every admitted model carries passing evidence for BOTH tiers" do
       state = AdmissionCore.new(recorded_payload())
 
-      assert AdmissionCore.admitted_ids(state) == ["glm-4.6-flash"]
-      refute "nemotron-3-nano-free" in AdmissionCore.admitted_ids(state)
-      refute "big-pickle" in AdmissionCore.admitted_ids(state)
-      refute "mimo-v2.5-free" in AdmissionCore.admitted_ids(state)
+      for id <- AdmissionCore.admitted_ids(state) do
+        record = Enum.find(state.models, &(&1["id"] == id))
+
+        assert get_in(record, ["evidence", "tier1", "passed"]) == true,
+               "#{id} is admitted without a passing tier 1"
+
+        assert get_in(record, ["evidence", "tier2", "passed"]) == true,
+               "#{id} is admitted without a passing tier 2"
+      end
     end
 
-    test "a model that cannot emit tool calls is rejected with a recorded reason" do
-      rejected = AdmissionCore.rejected(AdmissionCore.new(recorded_payload()))
-      nano = Enum.find(rejected, &(&1["id"] == "nemotron-3-nano-free"))
+    test "no model is admitted on an unrun or skipped tier" do
+      state = AdmissionCore.new(recorded_payload())
 
-      assert nano["reason"] == "tier1_no_tool_call"
-      assert get_in(nano, ["evidence", "tier1", "passed"]) == false
-      assert get_in(nano, ["evidence", "tier1", "reason"]) =~ "no well-formed tool call"
+      for record <- state.models do
+        if get_in(record, ["evidence", "tier2", "skipped"]) == true do
+          refute AdmissionCore.admitted_id?(state, record["id"]),
+                 "#{record["id"]} is admitted despite a skipped tier 2"
+        end
+      end
     end
 
     test "UA-gated models stay rejected and never become admitted" do
       state = AdmissionCore.new(recorded_payload())
       rejected_ids = Enum.map(AdmissionCore.rejected(state), & &1["id"])
 
+      # Arbor sends honest attribution rather than spoofing `opencode/latest`,
+      # so the relay rate-limits these. Accepting the smaller list is the point.
       assert "big-pickle" in rejected_ids
       assert "mimo-v2.5-free" in rejected_ids
 
-      assert Enum.find(AdmissionCore.rejected(state), &(&1["id"] == "big-pickle"))["reason"] ==
-               "ua_gated"
-
-      assert AdmissionCore.admitted_id?(state, "glm-4.6-flash")
       refute AdmissionCore.admitted_id?(state, "big-pickle")
+      refute AdmissionCore.admitted_id?(state, "mimo-v2.5-free")
       refute AdmissionCore.admitted_id?(state, "unknown-model")
+    end
+
+    test "every rejection records a machine-readable reason" do
+      state = AdmissionCore.new(recorded_payload())
+
+      for record <- AdmissionCore.rejected(state) do
+        assert is_binary(record["reason"]) and record["reason"] != "",
+               "#{record["id"]} is rejected without a reason"
+      end
     end
 
     test "status=admitted is ignored when tier evidence is missing" do
@@ -65,10 +84,15 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
       assert listing =~ "sent to OpenCode's API"
       assert listing =~ "NO representations or guarantees"
       assert listing =~ "sensitive, confidential, or regulated data"
-      assert listing =~ "glm-4.6-flash"
-      assert listing =~ "eval=arbor.eval.task"
-      assert listing =~ "nemotron-3-nano-free"
-      assert listing =~ "tier1_no_tool_call"
+      assert listing =~ "Admitted models"
+      assert listing =~ "Rejected"
+
+      # Every rejection must show its recorded reason, whatever the reasons
+      # currently are — not a specific one, which rotates with the catalog.
+      for record <- AdmissionCore.rejected(AdmissionCore.new(recorded_payload())) do
+        assert listing =~ record["reason"],
+               "listing omits the recorded reason for #{record["id"]}"
+      end
     end
   end
 
@@ -77,6 +101,34 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
       assert AdmissionCore.classify_slug("mimo-v2.5-free") == :free_suffix
       assert AdmissionCore.classify_slug("glm-4.6-flash") == :unsuffixed_slot
       assert AdmissionCore.classify_slug("") == :invalid
+    end
+
+    test "accepts the real OpenAI wire shape, where arguments is a JSON string" do
+      # Verified live against opencode.ai/zen/v1 on 2026-08-23 — this is exactly
+      # what ReqLLM surfaces for x-preview-f-free. Requiring is_map(arguments)
+      # rejected every model that emits a correct tool call, so tier 1 could
+      # never pass and no catalog could be honestly derived.
+      assert AdmissionCore.well_formed_tool_call?(%{
+               content_parts: [
+                 %{
+                   id: "call_-7323569051052013656",
+                   name: "ping",
+                   type: "function",
+                   arguments: ~s({"note":"ok"}),
+                   kind: :tool_call
+                 }
+               ]
+             })
+    end
+
+    test "rejects a tool call whose arguments string is not a JSON object" do
+      refute AdmissionCore.well_formed_tool_call?(%{
+               content_parts: [%{kind: :tool_call, name: "ping", arguments: "not json"}]
+             })
+
+      refute AdmissionCore.well_formed_tool_call?(%{
+               content_parts: [%{kind: :tool_call, name: "ping", arguments: "[1,2]"}]
+             })
     end
 
     test "well-formed tool call requires name and map arguments" do
@@ -108,7 +160,11 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
   end
 
   test "facade listing and admitted ids match the core derivation" do
-    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
+    # The facade must agree with the core on whatever the catalog currently
+    # holds — not on a fixed id list, which rotates with the free tier.
+    assert OpenCodeZen.admitted_ids() ==
+             AdmissionCore.admitted_ids(AdmissionCore.new(recorded_payload()))
+
     assert OpenCodeZen.listing() =~ "OpenCode Zen free tier — data disclosure"
     # Normalize whitespace before matching: the disclosure is hard-wrapped for
     # terminal display, so the phrase spans a line break ("such as file\n
@@ -129,12 +185,19 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
     end
   end
 
-  test "Client.list_models for the free provider includes disclosure" do
+  test "Client.list_models for the free provider carries the disclosure on every entry" do
+    # Listing exposes only ADMITTED models, so it is empty while the catalog has
+    # none — assert the property that must hold for each entry, whatever the
+    # rotating free tier currently admits.
     client = Arbor.LLM.Client.new(default_provider: "opencode_zen")
-    [model | _] = Arbor.LLM.Client.list_models(client, provider: "opencode_zen")
-    assert model.id == "glm-4.6-flash"
-    assert model.disclosure =~ "sent to OpenCode's API"
-    assert model.disclosure =~ "NO representations or guarantees"
-    assert model.disclosure =~ "sensitive, confidential, or regulated data"
+    models = Arbor.LLM.Client.list_models(client, provider: "opencode_zen")
+
+    assert Enum.map(models, & &1.id) == OpenCodeZen.admitted_ids()
+
+    for model <- models do
+      assert model.disclosure =~ "sent to OpenCode's API"
+      assert model.disclosure =~ "NO representations or guarantees"
+      assert model.disclosure =~ "sensitive, confidential, or regulated data"
+    end
   end
 end

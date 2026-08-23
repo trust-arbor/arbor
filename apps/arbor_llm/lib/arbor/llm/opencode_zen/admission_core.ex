@@ -190,14 +190,35 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
   end
 
   defp tool_call_part?(%{kind: :tool_call, name: name, arguments: arguments})
-       when is_binary(name) and name != "" and is_map(arguments),
-       do: true
+       when is_binary(name) and name != "",
+       do: well_formed_arguments?(arguments)
 
   defp tool_call_part?(%{"kind" => kind, "name" => name, "arguments" => arguments})
-       when kind in [:tool_call, "tool_call"] and is_binary(name) and name != "" and is_map(arguments),
-       do: true
+       when kind in [:tool_call, "tool_call"] and is_binary(name) and name != "",
+       do: well_formed_arguments?(arguments)
 
   defp tool_call_part?(_), do: false
+
+  # The OpenAI wire shape carries `arguments` as a JSON STRING, and that is what
+  # ReqLLM surfaces:
+  #
+  #     %{id: "call_...", name: "ping", type: "function",
+  #       arguments: "{\"note\":\"ok\"}", kind: :tool_call}
+  #
+  # Requiring `is_map(arguments)` therefore rejected every model that emits a
+  # standard, correct tool call — the tier-1 gate could never pass, which is
+  # consistent with an admission catalog that was written rather than measured.
+  # Accept a decodable JSON object string as well as an already-decoded map.
+  defp well_formed_arguments?(arguments) when is_map(arguments), do: true
+
+  defp well_formed_arguments?(arguments) when is_binary(arguments) do
+    case JSON.decode(arguments) do
+      {:ok, decoded} when is_map(decoded) -> true
+      _ -> false
+    end
+  end
+
+  defp well_formed_arguments?(_arguments), do: false
 
   defp stringify_keys(map) when is_map(map) do
     Map.new(map, fn
