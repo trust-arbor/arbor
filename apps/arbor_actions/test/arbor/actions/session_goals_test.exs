@@ -330,4 +330,16 @@ defmodule Arbor.Actions.SessionGoalsTest do
       end
     end
   end
+
+  describe "PruneStaleIntents — registry" do
+    test "resolves the heartbeat action through canonical and Jido names" do
+      action = SessionGoals.PruneStaleIntents
+
+      assert action in Arbor.Actions.all_actions()
+      assert {:ok, ^action} = Arbor.Actions.name_to_module("session_goals.prune_stale_intents")
+      assert {:ok, ^action} = Arbor.Actions.name_to_module("session_goals_prune_stale_intents")
+
+      assert "arbor://action/session_goals/prune_stale_intents" in Arbor.Actions.action_namespace_uri_prefixes()
+    end
+  end
 end

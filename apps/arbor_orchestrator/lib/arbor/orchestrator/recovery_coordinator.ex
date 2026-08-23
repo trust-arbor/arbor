@@ -84,6 +84,14 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   @pg_group {:arbor, :recovery_coordinators}
   @settlement_retry_interval_ms 5_000
   @crash_durable_classes [:application_restart, :node_restart]
+  @supersedable_heartbeat_graph_ids ~w(
+    Heartbeat
+    HeartbeatBare
+    HeartbeatFull
+    HeartbeatGoals
+    HeartbeatIdentity
+    HeartbeatNotes
+  )
 
   # Public API
 
@@ -266,7 +274,11 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
       state =
         if automatic_recovery_active?(state) do
-          interrupted = list_interrupted_for_recovery(journal_opts(state))
+          state = drop_superseded_heartbeat_pending(state)
+
+          interrupted =
+            list_interrupted_for_recovery(journal_opts(state))
+            |> discard_superseded_heartbeat_cycles(journal_opts(state))
 
           if interrupted == [] do
             Logger.debug("[RecoveryCoordinator] No interrupted pipelines found")
@@ -615,6 +627,52 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
       send(self(), :recover_next)
       %{state | pending: state.pending ++ new_ones}
     end
+  end
+
+  # A heartbeat graph is one replaceable autonomous cycle. The next scheduled
+  # beat rebuilds context from the agent's stores, so resuming an old cycle can
+  # replay stale decisions and provides no continuity benefit. Terminalize
+  # interrupted system heartbeat cycles while preserving ordinary pipelines for
+  # authenticated checkpoint recovery.
+  defp discard_superseded_heartbeat_cycles(candidates, journal_opts)
+       when is_list(candidates) do
+    {remaining, abandoned_count} =
+      Enum.reduce(candidates, {[], 0}, fn candidate, {keep, count} ->
+        if supersedable_heartbeat_cycle?(candidate) do
+          case mark_abandoned_entry(candidate, journal_opts) do
+            :ok ->
+              {keep, count + 1}
+
+            {:error, reason} ->
+              Logger.warning(
+                "[RecoveryCoordinator] Could not abandon superseded heartbeat " <>
+                  "#{candidate.record.run_id}: #{inspect(reason)}"
+              )
+
+              {[candidate | keep], count}
+          end
+        else
+          {[candidate | keep], count}
+        end
+      end)
+
+    if abandoned_count > 0 do
+      Logger.info(
+        "[RecoveryCoordinator] Abandoned #{abandoned_count} superseded heartbeat cycle(s)"
+      )
+    end
+
+    Enum.reverse(remaining)
+  end
+
+  defp supersedable_heartbeat_cycle?(%{record: %Record{graph_id: graph_id}}),
+    do: graph_id in @supersedable_heartbeat_graph_ids
+
+  defp supersedable_heartbeat_cycle?(_candidate), do: false
+
+  defp drop_superseded_heartbeat_pending(state) do
+    pending = Enum.reject(state.pending, &supersedable_heartbeat_cycle?/1)
+    %{state | pending: pending}
   end
 
   defp scan_stale_heartbeats(state) do

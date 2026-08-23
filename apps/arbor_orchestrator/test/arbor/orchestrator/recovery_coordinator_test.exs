@@ -269,6 +269,88 @@ defmodule Arbor.Orchestrator.RecoveryCoordinatorTest do
       assert st.durability_class == :application_restart
     end
 
+    test "superseded heartbeat cycles are abandoned while ordinary runs remain recoverable" do
+      alias Arbor.Orchestrator.RunJournal
+      alias Arbor.Orchestrator.RunLifecycle.Record
+
+      suffix = System.unique_integer([:positive, :monotonic])
+      store_name = :"rc_hb_store_#{suffix}"
+      journal_name = :"rc_hb_journal_#{suffix}"
+      ets_table = :"rc_hb_hot_#{suffix}"
+      coord_name = :"rc_hb_coord_#{suffix}"
+      heartbeat_run = "heartbeat_interrupted_#{suffix}"
+      ordinary_run = "ordinary_interrupted_#{suffix}"
+
+      {:ok, _} = start_supervised({AppRestartStore, name: store_name})
+
+      {:ok, _} =
+        start_supervised(%{
+          id: journal_name,
+          start:
+            {RunJournal, :start_link,
+             [
+               [
+                 name: journal_name,
+                 ets_table: ets_table,
+                 backend: AppRestartStore,
+                 store_name: store_name,
+                 durability_class: :application_restart,
+                 start_store: false
+               ]
+             ]}
+        })
+
+      now = DateTime.utc_now()
+
+      for {run_id, graph_id} <- [{heartbeat_run, "Heartbeat"}, {ordinary_run, "Coding"}] do
+        assert :ok =
+                 RunJournal.put(
+                   %Record{
+                     run_id: run_id,
+                     pipeline_id: run_id,
+                     graph_id: graph_id,
+                     status: :interrupted,
+                     started_at: now,
+                     last_heartbeat: now,
+                     owner_node: nil,
+                     execution_principal: "agent_recovery_#{suffix}"
+                   },
+                   server: journal_name
+                 )
+      end
+
+      {:ok, coord_pid} =
+        start_supervised(%{
+          id: coord_name,
+          start:
+            {RecoveryCoordinator, :start_link,
+             [
+               [
+                 name: coord_name,
+                 enabled: true,
+                 journal_opts: [server: journal_name],
+                 recovery_root: Path.join(System.tmp_dir!(), "rc_hb_root_#{suffix}"),
+                 delay_ms: 60_000,
+                 max_concurrent: 0
+               ]
+             ]}
+        })
+
+      send(coord_pid, :discover_interrupted)
+
+      assert_eventually(fn ->
+        match?(
+          {:ok, %Record{status: :abandoned}},
+          RunJournal.get_record(heartbeat_run, server: journal_name)
+        )
+      end)
+
+      assert {:ok, %Record{status: :interrupted}} =
+               RunJournal.get_record(ordinary_run, server: journal_name)
+
+      assert RecoveryCoordinator.status(coord_name).pending == 1
+    end
+
     test "injected recovery_root is used for materialization (not only Application env)" do
       injected =
         Path.join(System.tmp_dir!(), "rc_injected_root_#{System.unique_integer([:positive])}")

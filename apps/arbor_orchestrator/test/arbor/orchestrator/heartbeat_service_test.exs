@@ -98,47 +98,109 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
   describe "heartbeat_result handling" do
     test "success result clears in_flight flag" do
-      {:ok, pid} = start_test_service()
-
-      # Simulate a heartbeat result arriving
       fake_result = %{
+        final_outcome: %{status: :success},
         context: %{
           "__completed_nodes__" => ["start", "bg_checks"],
           "llm.content" => nil
         }
       }
 
-      send(pid, {:heartbeat_result, {:ok, fake_result}})
-      Process.sleep(50)
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, _opts -> {:ok, fake_result} end
+        )
+
+      send(pid, :heartbeat)
+
+      assert eventually(fn ->
+               state = HeartbeatService.get_state(pid)
+               state.heartbeat_in_flight == false and state.heartbeat_last_completed_at != nil
+             end)
+
+      GenServer.stop(pid)
+    end
+
+    test "failed Engine outcome is counted as a heartbeat failure" do
+      failed_result = %{
+        final_outcome: %{status: :fail, failure_reason: :unknown_action},
+        context: %{"__completed_nodes__" => ["start"]}
+      }
+
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, _opts -> {:ok, failed_result} end
+        )
+
+      send(pid, :heartbeat)
+
+      assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_failures == 1 end)
 
       state = HeartbeatService.get_state(pid)
-      assert state.heartbeat_in_flight == false
+
+      assert {:unadmitted_heartbeat_outcome, %{status: :fail, failure_reason: :unknown_action}} =
+               state.heartbeat_last_error
+
+      assert state.heartbeat_last_completed_at == nil
+
+      GenServer.stop(pid)
+    end
+
+    test "abnormal heartbeat task exit clears the in-flight guard" do
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, _opts -> exit(:simulated_engine_exit) end
+        )
+
+      send(pid, :heartbeat)
+
+      assert eventually(fn ->
+               state = HeartbeatService.get_state(pid)
+
+               state.heartbeat_in_flight == false and state.heartbeat_failures == 1 and
+                 state.heartbeat_last_error == {:heartbeat_task_exit, :simulated_engine_exit}
+             end)
 
       GenServer.stop(pid)
     end
 
     test "error result clears in_flight flag" do
-      {:ok, pid} = start_test_service()
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, _opts -> {:error, :timeout} end
+        )
 
-      send(pid, {:heartbeat_result, {:error, :timeout}})
-      Process.sleep(50)
+      send(pid, :heartbeat)
 
-      state = HeartbeatService.get_state(pid)
-      assert state.heartbeat_in_flight == false
+      assert eventually(fn ->
+               state = HeartbeatService.get_state(pid)
+               state.heartbeat_in_flight == false and state.heartbeat_last_error == :timeout
+             end)
 
       GenServer.stop(pid)
     end
 
     test "terminal auth error disables the heartbeat loop (flood regression, 2026-07-04)" do
-      {:ok, pid} = start_test_service()
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          orchestrator_authorizer: fn _agent_id, _credential ->
+            {:error, :unknown_identity}
+          end
+        )
 
       assert HeartbeatService.get_state(pid).heartbeat_disabled == false
 
       # Orphaned agent: every beat fails identically on unknown_identity. Pre-fix the loop kept
       # rescheduling → ramped to ~50 doomed pipelines/sec and crashed the BEAM. It must fail-STOP:
       # disable the loop and cancel the pending beat instead of flooding the orchestrator.
-      send(pid, {:heartbeat_result, {:error, {:unauthorized, :unknown_identity}}})
-      Process.sleep(50)
+      send(pid, :heartbeat)
+
+      assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_disabled end)
 
       state = HeartbeatService.get_state(pid)
       assert state.heartbeat_disabled == true
@@ -156,10 +218,15 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
     end
 
     test "a single transient (non-terminal) error does NOT disable the heartbeat" do
-      {:ok, pid} = start_test_service()
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, _opts -> {:error, :timeout} end
+        )
 
-      send(pid, {:heartbeat_result, {:error, :timeout}})
-      Process.sleep(50)
+      send(pid, :heartbeat)
+
+      assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_failures == 1 end)
 
       # Only terminal errors (or @max_consecutive_heartbeat_failures in a row) stop the loop;
       # a lone transient failure must keep it alive.
@@ -205,18 +272,29 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   end
 
   describe "terminate cleanup" do
-    test "marks active pipeline entries as abandoned on terminate", %{run_prefix: prefix} do
+    test "abandons only its heartbeat task's run on terminate (security regression)", %{
+      run_prefix: prefix
+    } do
       {:ok, pid} = start_test_service()
+      task_pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(task_pid), do: Process.exit(task_pid, :kill) end)
+
+      :sys.replace_state(pid, fn state ->
+        state
+        |> Map.put(:heartbeat_task_pid, task_pid)
+        |> Map.put(:heartbeat_in_flight, true)
+      end)
 
       # Collision-resistant owned row via public PipelineStatus — never touch
       # the private RunJournal ETS table from tests.
-      run_id = prefix <> "terminate_abandon"
+      run_id = prefix <> "owned_terminate_abandon"
+      unrelated_run_id = prefix <> "unrelated_must_remain_running"
 
       assert :ok =
                PipelineStatus.put(%{
                  run_id: run_id,
                  status: :running,
-                 spawning_pid: pid,
+                 spawning_pid: task_pid,
                  current_node: "bg_checks",
                  started_at: DateTime.utc_now(),
                  last_ets_sync: DateTime.utc_now(),
@@ -234,21 +312,34 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
                  last_heartbeat: DateTime.utc_now()
                })
 
+      assert :ok =
+               PipelineStatus.put(%{
+                 run_id: unrelated_run_id,
+                 status: :running,
+                 spawning_pid: self(),
+                 current_node: "unrelated_work",
+                 started_at: DateTime.utc_now(),
+                 last_ets_sync: DateTime.utc_now(),
+                 completed_count: 0,
+                 total_nodes: 2,
+                 graph_id: "UnrelatedPipeline",
+                 pipeline_id: unrelated_run_id,
+                 completed_nodes: [],
+                 node_durations: %{},
+                 finished_at: nil,
+                 duration_ms: nil,
+                 failure_reason: nil,
+                 owner_node: node(),
+                 source_node: node(),
+                 last_heartbeat: DateTime.utc_now()
+               })
+
       # Stop the service (triggers terminate)
       GenServer.stop(pid, :normal)
       Process.sleep(100)
 
-      # The entry should now be abandoned (or cleaned up)
-      case PipelineStatus.get(run_id) do
-        %{status: :abandoned} ->
-          :ok
-
-        nil ->
-          :ok
-
-        other ->
-          flunk("expected abandoned or deleted, got: #{inspect(other)}")
-      end
+      assert %{status: :abandoned} = PipelineStatus.get(run_id)
+      assert %{status: :running} = PipelineStatus.get(unrelated_run_id)
     end
   end
 
@@ -300,6 +391,10 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
         agent_id: "agent_test_heartbeat",
         signer: nil,
         trust_tier: :probationary,
+        orchestrator_authorizer: fn _agent_id, _credential -> :ok end,
+        engine_runner: fn _graph, _opts ->
+          {:ok, %{final_outcome: %{status: :success}, context: %{}}}
+        end,
         heartbeat_config:
           Keyword.get(extra_opts, :heartbeat_config, %{
             enabled: true,
@@ -310,6 +405,19 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
     HeartbeatService.start_link(opts)
   end
+
+  defp eventually(fun, attempts \\ 50)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 
   defp delete_owned_pipeline_runs(prefix) when is_binary(prefix) do
     try do

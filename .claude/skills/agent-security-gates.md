@@ -163,8 +163,15 @@ another one. It doubles as user documentation — anyone standing up agents need
   enforcement on, granting/using an unregistered URI is rejected.
 - **Symptom:** a brand-new resource URI (e.g. a new eval action) is denied despite a
   grant.
-- **Action:** add the canonical URI prefix to the registry's allowlist (e.g.
-  `arbor://eval/search` was added for the eval fixture).
+- **Action:** for generated `arbor://action/...` URIs, first ensure the action module
+  is present in `Arbor.Actions.all_actions/0`. `Arbor.Actions.Application` projects
+  that catalog into both action resolution and `UriRegistry` at startup; manually
+  registering only the URI masks a broken action catalog. For non-action resources,
+  add the canonical URI prefix to the owning registry allowlist (e.g.
+  `arbor://eval/search` was added for the eval fixture). This was the second hidden
+  failure in the 2026-08-22 heartbeat incident: `PruneStaleIntents` existed in source
+  and DOT but was absent from `all_actions/0`, so lookup failed and its derived URI
+  was never registered.
 
 ## 9. Native ACP tool callbacks need subtree authority
 

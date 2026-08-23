@@ -2214,7 +2214,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.SessionGoals.UpdateGoals,
         Arbor.Actions.SessionGoals.StoreDecompositions,
         Arbor.Actions.SessionGoals.ProcessProposalDecisions,
-        Arbor.Actions.SessionGoals.StoreIdentity
+        Arbor.Actions.SessionGoals.StoreIdentity,
+        Arbor.Actions.SessionGoals.PruneStaleIntents
       ],
       session_execution: [
         Arbor.Actions.SessionExecution.RouteActions,

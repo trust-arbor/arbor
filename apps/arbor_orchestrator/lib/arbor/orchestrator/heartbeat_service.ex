@@ -37,8 +37,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   5. Schedule the next heartbeat
 
   If a heartbeat is already in flight, the next timer tick is skipped
-  (no stacking). If the Task crashes, the rescue logs the error and
-  the next scheduled heartbeat retries cleanly.
+  (no stacking). The task is monitored, so exceptions and abnormal exits clear
+  the in-flight guard and the next scheduled heartbeat retries cleanly.
 
   ## Context Isolation
 
@@ -51,11 +51,14 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   use GenServer
 
+  alias Arbor.Orchestrator.Authorization
   alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.PipelineStatus
 
   require Logger
 
   @default_interval 30_000
+  @admitted_final_statuses [:success, :partial_success]
 
   # After this many CONSECUTIVE heartbeat failures with no known-terminal reason, disable the
   # heartbeat as a flood backstop. Terminal errors (see terminal_heartbeat_error?/1) disable it
@@ -128,9 +131,21 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_interval: interval,
       heartbeat_ref: nil,
       heartbeat_in_flight: false,
+      heartbeat_task_pid: nil,
+      heartbeat_task_ref: nil,
       heartbeat_failures: 0,
       heartbeat_no_identity_beats: 0,
       heartbeat_disabled: false,
+      heartbeat_disabled_reason: nil,
+      heartbeat_last_error: nil,
+      heartbeat_last_completed_at: nil,
+      engine_runner: Keyword.get(opts, :engine_runner, &Engine.run/2),
+      orchestrator_authorizer:
+        Keyword.get(
+          opts,
+          :orchestrator_authorizer,
+          &Authorization.check_orchestrator_access/2
+        ),
       # (B) Injectable so tests can simulate an orphan; defaults to the real Identity.Registry check.
       identity_checker: Keyword.get(opts, :identity_checker, &identity_registered?/1)
     }
@@ -200,7 +215,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   def handle_info(:heartbeat, state) do
     if state.identity_checker.(state.agent_id) do
       state = start_heartbeat_task(state)
-      state = schedule_heartbeat(state)
+      state = if state.heartbeat_disabled, do: state, else: schedule_heartbeat(state)
       {:noreply, %{state | heartbeat_no_identity_beats: 0}}
     else
       # (B) No registered identity — do NOT run the beat (skipping means zero pipelines, so no
@@ -209,7 +224,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       misses = state.heartbeat_no_identity_beats + 1
 
       if misses >= @max_no_identity_beats do
-        disable_heartbeat(state, "no registered identity after #{misses} beats (orphaned agent)")
+        {:noreply,
+         disable_heartbeat(state, "no registered identity after #{misses} beats (orphaned agent)")}
       else
         Logger.warning(
           "[HeartbeatService] #{state.agent_id} has no registered identity; " <>
@@ -222,7 +238,48 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     end
   end
 
-  def handle_info({:heartbeat_result, {:ok, result}}, state) do
+  def handle_info(
+        {:heartbeat_result, task_pid, result},
+        %{heartbeat_task_pid: task_pid} = state
+      )
+      when is_pid(task_pid) do
+    handle_heartbeat_result(result, clear_heartbeat_task(state))
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, pid, reason},
+        %{heartbeat_task_ref: ref, heartbeat_task_pid: pid} = state
+      ) do
+    state = clear_heartbeat_task(state, demonitor?: false)
+
+    failure =
+      case reason do
+        :normal -> :heartbeat_task_exited_without_result
+        other -> {:heartbeat_task_exit, other}
+      end
+
+    {:noreply, record_heartbeat_failure(state, failure)}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp handle_heartbeat_result({:ok, result}, state) do
+    case admit_heartbeat_result(result) do
+      {:ok, admitted} -> handle_heartbeat_success(state, admitted)
+      {:error, reason} -> {:noreply, record_heartbeat_failure(state, reason)}
+    end
+  end
+
+  defp handle_heartbeat_result({:error, reason}, state) do
+    {:noreply, record_heartbeat_failure(state, reason)}
+  end
+
+  defp handle_heartbeat_result(other, state) do
+    bounded = inspect(other, limit: 20, printable_limit: 200)
+    {:noreply, record_heartbeat_failure(state, {:invalid_engine_result, bounded})}
+  end
+
+  defp handle_heartbeat_success(state, result) do
     completed = Map.get(result.context, "__completed_nodes__", [])
     llm_content = Map.get(result.context, "llm.content")
 
@@ -236,10 +293,17 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     # not directly into the chat context window.
     apply_heartbeat_result(state, result)
 
-    {:noreply, %{state | heartbeat_in_flight: false, heartbeat_failures: 0}}
+    {:noreply,
+     %{
+       state
+       | heartbeat_in_flight: false,
+         heartbeat_failures: 0,
+         heartbeat_last_error: nil,
+         heartbeat_last_completed_at: DateTime.utc_now()
+     }}
   end
 
-  def handle_info({:heartbeat_result, {:error, reason}}, state) do
+  defp record_heartbeat_failure(state, reason) do
     Logger.warning(
       "[HeartbeatService] Heartbeat failed for #{state.agent_id}: #{inspect(reason)}"
     )
@@ -247,6 +311,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     emit_heartbeat_failed_signal(state, reason)
 
     failures = state.heartbeat_failures + 1
+    state = %{state | heartbeat_failures: failures, heartbeat_last_error: reason}
 
     cond do
       # A permanent auth/identity failure will recur identically every beat — retrying just
@@ -262,16 +327,16 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         disable_heartbeat(state, "#{failures} consecutive heartbeat failures")
 
       true ->
-        {:noreply, %{state | heartbeat_in_flight: false, heartbeat_failures: failures}}
+        %{state | heartbeat_in_flight: false}
     end
   end
 
-  def handle_info(_msg, state), do: {:noreply, state}
-
   @impl true
   def terminate(_reason, state) do
-    # Clean up any stale pipeline entries in both ETS and legacy JobRegistry
-    cleanup_stale_pipelines(state)
+    task_pid = Map.get(state, :heartbeat_task_pid)
+    run_ids = owned_heartbeat_run_ids(task_pid)
+    stop_heartbeat_task(state)
+    abandon_heartbeat_runs(run_ids)
     :ok
   end
 
@@ -293,7 +358,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
             "[HeartbeatService] Heartbeat blocked: unauthorized (#{inspect(reason)})"
           )
 
-          state
+          record_heartbeat_failure(state, {:unauthorized, reason})
       end
     end
   end
@@ -303,13 +368,14 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     values = build_heartbeat_values(state)
     engine_opts = build_engine_opts(state, values)
     heartbeat_graph = state.heartbeat_graph
+    engine_runner = state.engine_runner
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor
 
     task_fn = fn ->
       result =
         try do
-          Engine.run(heartbeat_graph, engine_opts)
+          engine_runner.(heartbeat_graph, engine_opts)
         rescue
           e ->
             Logger.error(
@@ -320,17 +386,30 @@ defmodule Arbor.Orchestrator.HeartbeatService do
             {:error, {:engine_crash, Exception.message(e)}}
         end
 
-      send(service_pid, {:heartbeat_result, result})
+      send(service_pid, {:heartbeat_result, self(), result})
     end
 
-    {:ok, _pid} =
+    task_result =
       if Process.whereis(task_sup) do
         Task.Supervisor.start_child(task_sup, task_fn)
       else
         Task.start(task_fn)
       end
 
-    %{state | heartbeat_in_flight: true}
+    case task_result do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        %{
+          state
+          | heartbeat_in_flight: true,
+            heartbeat_task_pid: pid,
+            heartbeat_task_ref: ref
+        }
+
+      {:error, reason} ->
+        record_heartbeat_failure(state, {:heartbeat_task_start_failed, reason})
+    end
   end
 
   # ===========================================================================
@@ -347,7 +426,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   # Stop the heartbeat loop: cancel the already-scheduled next beat and mark disabled so no future
   # beat runs or reschedules. The agent process stays up (it can still serve turns); only the
-  # autonomous loop is halted. Returns a GenServer :noreply tuple.
+  # autonomous loop is halted.
   defp disable_heartbeat(state, why) do
     Logger.error(
       "[HeartbeatService] Disabling heartbeat for #{state.agent_id}: #{why}. " <>
@@ -356,8 +435,43 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
     if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
 
-    {:noreply,
-     %{state | heartbeat_in_flight: false, heartbeat_ref: nil, heartbeat_disabled: true}}
+    %{
+      state
+      | heartbeat_in_flight: false,
+        heartbeat_ref: nil,
+        heartbeat_disabled: true,
+        heartbeat_disabled_reason: why,
+        heartbeat_last_error: state.heartbeat_last_error || why
+    }
+  end
+
+  defp admit_heartbeat_result(%{final_outcome: %{status: status}} = result)
+       when status in @admitted_final_statuses,
+       do: {:ok, result}
+
+  defp admit_heartbeat_result(%{final_outcome: outcome}) do
+    {:error, {:unadmitted_heartbeat_outcome, summarize_outcome(outcome)}}
+  end
+
+  defp admit_heartbeat_result(_), do: {:error, :missing_heartbeat_final_outcome}
+
+  defp summarize_outcome(%{status: status, failure_reason: reason}),
+    do: %{status: status, failure_reason: reason}
+
+  defp summarize_outcome(%{status: status}), do: %{status: status}
+  defp summarize_outcome(other), do: inspect(other, limit: 20, printable_limit: 200)
+
+  defp clear_heartbeat_task(state, opts \\ []) do
+    if Keyword.get(opts, :demonitor?, true) and is_reference(state.heartbeat_task_ref) do
+      Process.demonitor(state.heartbeat_task_ref, [:flush])
+    end
+
+    %{
+      state
+      | heartbeat_in_flight: false,
+        heartbeat_task_pid: nil,
+        heartbeat_task_ref: nil
+    }
   end
 
   # A heartbeat that fails on identity/authorization will fail identically forever: the agent has
@@ -484,7 +598,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # ===========================================================================
 
   defp authorize_orchestrator(state) do
-    Arbor.Orchestrator.Authorization.check_orchestrator_access(
+    state.orchestrator_authorizer.(
       state.agent_id,
       state.signing_authority || state.signer
     )
@@ -558,20 +672,44 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # Cleanup
   # ===========================================================================
 
-  defp cleanup_stale_pipelines(_state) do
-    # Canonical: abandon active runs for this session via PipelineStatus.
-    if Code.ensure_loaded?(Arbor.Orchestrator.PipelineStatus) do
+  defp stop_heartbeat_task(%{heartbeat_task_pid: pid}) when is_pid(pid) do
+    if Process.alive?(pid), do: Process.exit(pid, :shutdown)
+  end
+
+  defp stop_heartbeat_task(_state), do: :ok
+
+  defp owned_heartbeat_run_ids(task_pid) when is_pid(task_pid) do
+    # Engine binds spawning_pid to the process executing Engine.run/2. Only
+    # abandon the run owned by this service's current task; unrelated active
+    # pipelines may belong to other agents and must remain untouched.
+    if Code.ensure_loaded?(PipelineStatus) do
       try do
-        Arbor.Orchestrator.PipelineStatus.list_active()
-        |> Enum.each(fn entry ->
-          Arbor.Orchestrator.PipelineStatus.mark_abandoned(entry.run_id)
-        end)
+        case PipelineStatus.list_records() do
+          {:ok, records} ->
+            records
+            |> Enum.filter(
+              &(&1.spawning_pid == task_pid and
+                  &1.status in [:running, :suspended, :degraded, :interrupted])
+            )
+            |> Enum.map(& &1.run_id)
+
+          {:error, _reason} ->
+            []
+        end
       rescue
-        _ -> :ok
+        _ -> []
       catch
-        :exit, _ -> :ok
+        :exit, _ -> []
       end
+    else
+      []
     end
+  end
+
+  defp owned_heartbeat_run_ids(_task_pid), do: []
+
+  defp abandon_heartbeat_runs(run_ids) do
+    Enum.each(run_ids, &PipelineStatus.mark_abandoned/1)
   end
 
   # ===========================================================================
