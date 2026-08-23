@@ -70,6 +70,10 @@ canonical order; generic lexicographic JSON key sorting produces a different
 digest even when every value is identical, so coding preflight correctly rejects
 it as `digest_mismatch`. Normalize the packet, call the helper, and relay that
 exact digest (found 2026-07-29 redispatching the interaction-wait correction).
+When invoking this pure helper from the shell, use `./bin/mix run --no-start -e`;
+plain `mix run` boots the full umbrella before evaluating the expression and can
+spend the MCP request window waiting on unrelated runtime services (reinforced
+2026-08-22 during P1C-B2B preflight).
 
 <!-- applied-learning: compile-the-exact-structured-coding-plan-before-dispatch -->
 <a id="applied-learning-compile-the-exact-structured-coding-plan-before-dispatch"></a>

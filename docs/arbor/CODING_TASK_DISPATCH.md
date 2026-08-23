@@ -436,6 +436,11 @@ Do not hand-compute it. The canonical encoding is owned by
 be the same one you send in the plan. `canonical_bytes/1` returns the exact
 bytes hashed if you need to verify externally. `sha256/1` is an alias.
 
+For a shell preflight, run this pure helper with
+`./bin/mix run --no-start -e '...'`. Omitting `--no-start` boots the full
+umbrella before evaluating the expression, which can waste the request deadline
+on unrelated runtime startup.
+
 ## Pre-dispatch readiness
 
 Call `arbor_coding_dispatch_readiness` **before** `arbor_dispatch_task` with the
