@@ -440,13 +440,14 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
     test "snapshot after frame one is snapshot_not_first" do
       {prepared, _applied, _delivered} = grant_lifecycle()
-      {:ok, record_frame, _} = encode_one(prepared)
+      {:ok, record_frame, pred} = encode_one(prepared)
       {:ok, empty_core} = AuditJournalCore.new()
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
       {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
-      {:ok, snap_bytes, _} = FileCore.encode_compacted(snapshot, [])
+      {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      {:ok, snap_frame, _} = FileCore.encode_frame(snap_bytes, pred)
       assert {:ok, start} = FileCore.new()
-      assert {:error, :snapshot_not_first} = FileCore.consume(start, record_frame <> snap_bytes)
+      assert {:error, :snapshot_not_first} = FileCore.consume(start, record_frame <> snap_frame)
     end
 
     test "missing pending prefix is pending_mismatch" do
@@ -484,17 +485,17 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
     end
 
     test "substituted pending fingerprint is pending_mismatch" do
-      {prepared, applied, delivered} = grant_lifecycle()
-      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
-      pending_prepared = prepared_record(intent2)
-
-      assert {:ok, state} =
-               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
-
-      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
-      assert {:ok, _compacted, snapshot, [pending]} = AuditJournalCore.compact(state, source)
-      substituted = Map.put(pending, "occurred_at", "2026-08-20T12:00:09Z")
-      bytes = encode_snapshot_frames(snapshot, [substituted])
+      {prepared, applied, _delivered} = grant_lifecycle()
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 2, 1)
+      assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert Enum.map(pending, & &1["record_type"]) == ["prepared", "effect_applied"]
+      [prepared_pending, applied_pending] = pending
+      substituted = Map.put(applied_pending, "occurred_at", "2026-08-20T12:00:09Z")
+      {:ok, admitted} = AuditJournal.admit_record(substituted)
+      assert admitted["operation_id"] == applied_pending["operation_id"]
+      assert admitted["record_type"] == "effect_applied"
+      bytes = encode_snapshot_frames(snapshot, [prepared_pending, substituted])
       assert {:ok, start} = FileCore.new()
       assert {:error, :pending_mismatch} = FileCore.consume(start, bytes)
     end

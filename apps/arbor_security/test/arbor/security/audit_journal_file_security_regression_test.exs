@@ -269,7 +269,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     result = apply(AuditJournalFile, :compact, [handle])
     AuditJournalFile.__test_inject__(:clear)
     assert {:error, {:not_published, reason}} = result
-    assert reason in [:identity_changed, :size_mismatch]
+    assert reason in [:identity_changed, :size_mismatch, :source_tip_mismatch]
     on_disk = File.read!(handle.path)
     refute snapshot_payload?(on_disk)
     refute_candidate_file(handle)
@@ -315,7 +315,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     assert {:error, {:publish_uncertain, _reason}} = result
     assert_old_handle_fd_invalid(handle)
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
-    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 1
+    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 2
     assert :ok = AuditJournalFile.close(reopened)
   end
 

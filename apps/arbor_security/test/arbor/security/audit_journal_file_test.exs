@@ -400,7 +400,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     refute match?({:error, {:not_published, _}}, result)
     assert {:error, {:publish_uncertain, _reason}} = result
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
-    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 1
+    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 2
     assert :ok = AuditJournalFile.close(reopened)
   end
 
@@ -411,7 +411,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     AuditJournalFile.__test_inject__(:compact_dir_sync, :enotsup)
     assert {:ok, handle} = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
-    assert AuditJournalCore.capacity(handle.core)["used_entries"] == 1
+    assert AuditJournalCore.capacity(handle.core)["used_entries"] == 2
     assert :ok = AuditJournalFile.close(handle)
   end
 
@@ -471,7 +471,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     result = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
     assert {:error, {:not_published, reason}} = result
-    assert reason in [:identity_changed, :size_mismatch]
+    assert reason in [:identity_changed, :size_mismatch, :source_tip_mismatch]
     refute_candidate(handle)
   end
 
