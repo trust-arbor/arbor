@@ -241,7 +241,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     :ok = GenServer.stop(pid)
 
     path = Path.join(root, "audit_journal.v1.log")
-    File.write!(path, File.read!(path) <> <<1, 2, 3>>)
+    File.write!(path, File.read!(path) <> <<"AJL">>)
     File.chmod!(path, 0o600)
 
     assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
@@ -299,7 +299,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     :ok = GenServer.stop(pid)
 
     path = Path.join(root, "audit_journal.v1.log")
-    File.write!(path, flip_byte(File.read!(path), 20))
+    File.write!(path, flip_byte(File.read!(path), 40))
     File.chmod!(path, 0o600)
 
     assert {:error, {:journal_open_failed, :digest_mismatch}} =
