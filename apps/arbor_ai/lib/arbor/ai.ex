@@ -1197,7 +1197,13 @@ defmodule Arbor.AI do
       {:ok, input}
     else
       {:error, :disabled} -> {:error, :disabled}
-      {:error, {:route_assembly_failed, _reason} = error} -> error
+      # The binding must wrap the WHOLE match. `{:error, {..} = error}` binds
+      # `error` to the INNER tuple, so this returned a bare
+      # `{:route_assembly_failed, reason}` — violating this function's own spec
+      # and leaving callers' `case` with no matching clause. Every route
+      # assembly failure therefore raised inside the caller instead of being
+      # handled as an error.
+      {:error, {:route_assembly_failed, _reason}} = error -> error
       {:error, reason} -> {:error, {:route_assembly_failed, {:provider_route_readiness, reason}}}
     end
   end

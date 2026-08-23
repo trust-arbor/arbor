@@ -679,4 +679,74 @@ defmodule Arbor.AI.ProviderRouteReadinessTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  describe "assemble_provider_route_input/1 error shape" do
+    test "regression: an assembler-originated failure stays wrapped in :error" do
+      # `assemble_and_gate_provider_route_input/1` passes an assembler failure
+      # through unchanged. That clause was written
+      #
+      #     {:error, {:route_assembly_failed, _reason} = error} -> error
+      #
+      # which binds `error` to the INNER tuple, so it returned a BARE
+      # {:route_assembly_failed, reason}. Callers match {:error, reason}, found
+      # no clause, and RAISED. In LlmHandler that raise was swallowed by a
+      # rescue reporting a hardcoded ":malformed", so every heartbeat died here
+      # while pointing diagnosis at an assembly error that never happened.
+      #
+      # The other coverage in this file exercises only the re-wrapping clause
+      # (readiness failures), so this pass-through path was untested.
+      #
+      # Drive the real trigger: with the evidence GenServer down,
+      # route_failure_snapshot/1 returns {:error, :unavailable}, which the
+      # assembler maps to {:error, {:route_assembly_failed,
+      # :route_failure_evidence_unavailable}} — the exact value seen in the
+      # 2026-08-23 heartbeat failures.
+      # Drive a real assembler failure through CONFIG — never by killing the
+      # evidence GenServer, which is a shared supervised child (stopping one
+      # cascades restart intensity and takes the suite down).
+      #
+      # An empty catalog_model_ids makes RouteInputAssembler.assemble/1 return
+      # {:error, {:route_assembly_failed, :invalid_catalog}}, which is the
+      # pass-through clause under test.
+      prior_profile = Application.get_env(:arbor_ai, :provider_route_profile)
+
+      Application.put_env(:arbor_ai, :provider_route_profile, %{
+        enabled: true,
+        task_registry: %{"default" => %{requirements: %{}}},
+        default_task_class: "default",
+        # An empty catalog makes RouteInputAssembler.assemble/1 return
+        # {:error, {:route_assembly_failed, :invalid_catalog}} — the exact
+        # clause under test.
+        catalog_model_ids: [],
+        scoreboard: [
+          %{
+            model: "gpt-5.6-sol",
+            provider: "openai_oauth",
+            runtime: "arbor",
+            score: 1.0,
+            dangerous_misses: 0,
+            format_failure_rate: 0.0,
+            variance: 0.0,
+            marginal_cost: 0.0,
+            latency_ms: 1.0,
+            eval_run_ref: "regression",
+            last_verified: "2026-08-01T00:00:00.000000Z"
+          }
+        ]
+      })
+
+      on_exit(fn -> Application.put_env(:arbor_ai, :provider_route_profile, prior_profile) end)
+
+      result = AI.assemble_provider_route_input()
+
+      # Whatever the reason, the return must be a 2-tuple tagged :ok or :error.
+      # A bare {:route_assembly_failed, _} is the defect.
+      refute match?({:route_assembly_failed, _}, result),
+             "returned a bare #{inspect(result)} in place of the {:error, _} wrapper — " <>
+               "callers cannot match this and will raise"
+
+      assert match?({:ok, _}, result) or match?({:error, _}, result),
+             "must return {:ok, _} or {:error, _}, got: #{inspect(result)}"
+    end
+  end
 end
