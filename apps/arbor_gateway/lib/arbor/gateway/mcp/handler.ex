@@ -509,9 +509,14 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   def handle_call_tool("arbor_help", args, state) do
-    action_name = args["action"]
-    result = get_action_help(action_name)
-    {:ok, %{content: [%{type: "text", text: result}]}, state}
+    case required_string_arg(args, "action") do
+      {:ok, action_name} ->
+        result = get_action_help(action_name)
+        {:ok, %{content: [%{type: "text", text: result}]}, state}
+
+      {:error, message} ->
+        {:ok, error_content(message), state}
+    end
   end
 
   def handle_call_tool("arbor_run", args, state) do

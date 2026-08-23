@@ -1560,6 +1560,15 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   # arbor_help tool
   # ===========================================================================
 
+  test "arbor_help returns a typed MCP error for a missing or invalid action", %{state: state} do
+    for args <- [%{}, %{"action" => nil}, %{"action" => "  "}, %{"action" => 42}] do
+      assert {:ok, result, ^state} = Handler.handle_call_tool("arbor_help", args, state)
+      assert result.isError == true
+      assert [%{type: "text", text: text}] = result.content
+      assert text == "Missing required argument: action"
+    end
+  end
+
   describe "arbor_help" do
     # These tests require Arbor.Actions to be loaded (cross-app dependency).
     @describetag :integration
