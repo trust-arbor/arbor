@@ -48,18 +48,25 @@ defmodule Arbor.Security.Config do
   @repo_root Path.expand("../../../../..", __DIR__)
   @development_authority_root Path.expand(".arbor/security", @repo_root)
   @authority_root_sources [:configured, :legacy_jsonfile_base_dir, :development_default]
+  @audit_journal_modes [:durable, :ephemeral, :disabled]
+  @default_audit_journal_mode if(@config_env == :test, do: :ephemeral, else: :durable)
+  @default_audit_journal_call_timeout_ms 5_000
+  @max_audit_journal_call_timeout_ms 30_000
   @type startup_inputs :: %{
           start_children: term(),
           start_profile: atom(),
           backend: module() | nil,
-          capabilities_hydration_limit: pos_integer()
+          capabilities_hydration_limit: pos_integer(),
+          journal_mode: :durable | :ephemeral | :disabled | :invalid
         }
   @type startup_store_snapshot :: %{
           start_children: term(),
           start_profile: atom(),
           backend: module() | nil,
           capabilities_hydration_limit: pos_integer(),
-          root: String.t() | nil
+          root: String.t() | nil,
+          journal_mode: :durable | :ephemeral | :disabled,
+          journal_reason: :none | :disabled | :activation_only
         }
   @enforcement_toggle_defaults [
     identity_verification: true,
@@ -856,7 +863,7 @@ defmodule Arbor.Security.Config do
   def development_authority_root, do: @development_authority_root
 
   @doc """
-  Snapshot start_children, start_profile, backend, and hydration limit once.
+  Snapshot start_children, start_profile, backend, hydration limit, and journal mode once.
 
   Does not freeze or read the authority root.
   """
@@ -866,7 +873,8 @@ defmodule Arbor.Security.Config do
       start_children: Application.get_env(@app, :start_children, true),
       start_profile: Arbor.KernelRuntime.Config.start_profile(),
       backend: storage_backend(),
-      capabilities_hydration_limit: max_global_capabilities()
+      capabilities_hydration_limit: max_global_capabilities(),
+      journal_mode: configured_journal_mode()
     }
   end
 
@@ -874,20 +882,28 @@ defmodule Arbor.Security.Config do
   Compute the durable child-spec snapshot, freezing the authority root when needed.
 
   `context` is `:application` or `:test_bootstrap`. Freeze runs only when that
-  context will start durable (non-nil backend) AuthorityStore children.
+  context will start durable (non-nil backend) AuthorityStore children or a
+  serving durable audit journal.
   """
   @spec startup_store_snapshot(:application | :test_bootstrap) ::
           {:ok, startup_store_snapshot()} | {:error, term()}
   def startup_store_snapshot(context) when context in [:application, :test_bootstrap] do
     inputs = snapshot_startup_inputs()
 
-    if needs_durable_root?(inputs, context) do
-      with :ok <- freeze_authority_root(),
-           {:ok, root} <- authority_root() do
-        {:ok, Map.put(inputs, :root, root)}
+    with {:ok, journal_mode, journal_reason} <- effective_journal_mode(inputs) do
+      inputs =
+        inputs
+        |> Map.put(:journal_mode, journal_mode)
+        |> Map.put(:journal_reason, journal_reason)
+
+      if needs_durable_root?(inputs, context) do
+        with :ok <- freeze_authority_root(),
+             {:ok, root} <- authority_root() do
+          {:ok, Map.put(inputs, :root, root)}
+        end
+      else
+        {:ok, Map.put(inputs, :root, nil)}
       end
-    else
-      {:ok, Map.put(inputs, :root, nil)}
     end
   end
 
@@ -972,6 +988,56 @@ defmodule Arbor.Security.Config do
     dropped
     |> Keyword.merge(name: name, namespace: namespace, backend: snapshot.backend)
     |> Keyword.put(:backend_opts, backend_opts)
+  end
+
+  @doc """
+  Closed keyword options for the Application/TestBootstrap audit-journal owner.
+
+  Callers cannot select a path, file module, callback, backend, or name.
+  Non-durable modes never receive a root.
+  """
+  @spec audit_journal_start_opts(map()) :: keyword()
+  def audit_journal_start_opts(snapshot) when is_map(snapshot) do
+    mode = Map.get(snapshot, :journal_mode)
+    reason = Map.get(snapshot, :journal_reason, :none)
+    root = Map.get(snapshot, :root)
+
+    case {mode, reason, root} do
+      {:disabled, :activation_only, _root} ->
+        [mode: :disabled, reason: :activation_only]
+
+      {:disabled, :disabled, _root} ->
+        [mode: :disabled, reason: :disabled]
+
+      {:ephemeral, :none, _root} ->
+        [mode: :ephemeral]
+
+      {:durable, :none, root} when is_binary(root) and byte_size(root) > 0 ->
+        [mode: :durable, root: root]
+
+      _other ->
+        raise ArgumentError, "invalid audit journal snapshot"
+    end
+  end
+
+  @doc """
+  Timeout for calls into the audit-journal owner.
+
+  Bounded so a stuck writer cannot block callers indefinitely.
+  """
+  @spec audit_journal_call_timeout_ms() :: pos_integer()
+  def audit_journal_call_timeout_ms do
+    case Application.get_env(
+           @app,
+           :audit_journal_call_timeout_ms,
+           @default_audit_journal_call_timeout_ms
+         ) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        min(timeout_ms, @max_audit_journal_call_timeout_ms)
+
+      _invalid ->
+        @default_audit_journal_call_timeout_ms
+    end
   end
 
   defp enforcement_toggle(key, default) do
@@ -1106,12 +1172,31 @@ defmodule Arbor.Security.Config do
 
   defp needs_durable_root?(inputs, :application) do
     start_children?(inputs.start_children) and stores_included?(inputs.start_profile) and
-      not is_nil(inputs.backend)
+      (not is_nil(inputs.backend) or inputs.journal_mode == :durable)
   end
 
   defp needs_durable_root?(inputs, :test_bootstrap) do
-    stores_included?(inputs.start_profile) and not is_nil(inputs.backend)
+    stores_included?(inputs.start_profile) and
+      (not is_nil(inputs.backend) or inputs.journal_mode == :durable)
   end
+
+  defp configured_journal_mode do
+    case Application.get_env(@app, :audit_journal_mode, @default_audit_journal_mode) do
+      mode when mode in @audit_journal_modes -> mode
+      _invalid -> :invalid
+    end
+  end
+
+  defp effective_journal_mode(%{journal_mode: :invalid}),
+    do: {:error, :audit_journal_mode_invalid}
+
+  defp effective_journal_mode(%{start_profile: :activation_only}),
+    do: {:ok, :disabled, :activation_only}
+
+  defp effective_journal_mode(%{journal_mode: :disabled}), do: {:ok, :disabled, :disabled}
+  defp effective_journal_mode(%{journal_mode: :ephemeral}), do: {:ok, :ephemeral, :none}
+  defp effective_journal_mode(%{journal_mode: :durable}), do: {:ok, :durable, :none}
+  defp effective_journal_mode(_inputs), do: {:error, :audit_journal_mode_invalid}
 
   defp start_children?(false), do: false
   defp start_children?(nil), do: false

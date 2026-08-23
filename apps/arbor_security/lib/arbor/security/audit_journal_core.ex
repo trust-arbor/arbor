@@ -14,6 +14,8 @@ defmodule Arbor.Security.AuditJournalCore do
 
   @version 1
   @terminals ["effect_rejected", "delivered"]
+  @pending_statuses ["prepared", "effect_applied"]
+  @max_pending_age_seconds 31_536_000
 
   @type state :: %{
           required(String.t()) => term()
@@ -118,6 +120,41 @@ defmodule Arbor.Security.AuditJournalCore do
       "remaining_hard_entries" => max(0, limits.hard_entry_cap - used_entries),
       "remaining_hard_bytes" => max(0, limits.hard_byte_cap - used_bytes)
     }
+  end
+
+  @spec pending_operations(state()) :: [map()]
+  def pending_operations(state) when is_map(state) do
+    state
+    |> show()
+    |> Map.get("operations", [])
+    |> Enum.filter(&(&1["status"] in @pending_statuses))
+    |> Enum.take(AuditJournal.limits().hard_entry_cap)
+  end
+
+  def pending_operations(_state), do: []
+
+  @spec pending_summary(term(), term()) :: {:ok, map()} | {:error, :malformed}
+  def pending_summary(state, now) do
+    with :ok <- valid_state(state),
+         {:ok, now_unix} <- unix_from_timestamp(now),
+         {:ok, pending} <- pending_ops(state) do
+      ages = Enum.map(pending, &pending_age(&1, now_unix))
+
+      if Enum.any?(ages, &(&1 == :malformed)) do
+        {:error, :malformed}
+      else
+        {:ok,
+         %{
+           "pending_count" => length(pending),
+           "oldest_pending_age_seconds" => Enum.max(ages, fn -> 0 end),
+           "operations" => project_pending(pending)
+         }}
+      end
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
   end
 
   defp empty_state do
@@ -296,4 +333,60 @@ defmodule Arbor.Security.AuditJournalCore do
         String.duplicate("0", 64)
     end
   end
+
+  defp pending_ops(state) do
+    ops =
+      state
+      |> Map.get("operations", %{})
+      |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
+      |> Enum.filter(fn {_id, op} -> op["status"] in @pending_statuses end)
+      |> Enum.take(AuditJournal.limits().hard_entry_cap)
+
+    {:ok, ops}
+  end
+
+  defp project_pending(ops) do
+    Enum.map(ops, fn {operation_id, op} ->
+      %{
+        "operation_id" => operation_id,
+        "status" => op["status"],
+        "effect_class" => op["effect_class"],
+        "intent_sha256" => intent_sha256(op["intent"])
+      }
+    end)
+  end
+
+  defp pending_age({_id, op}, now_unix) do
+    case unix_from_timestamp(get_in(op, ["intent", "prepared_at"])) do
+      {:ok, prepared_unix} ->
+        diff = now_unix - prepared_unix
+        age = if diff < 0, do: 0, else: diff
+        min(age, @max_pending_age_seconds)
+
+      {:error, _} ->
+        :malformed
+    end
+  end
+
+  defp unix_from_timestamp(
+         <<year::binary-size(4), "-", month::binary-size(2), "-", day::binary-size(2), "T",
+           hour::binary-size(2), ":", minute::binary-size(2), ":", second::binary-size(2), "Z">>
+       ) do
+    with {yi, ""} <- Integer.parse(year),
+         {mo, ""} <- Integer.parse(month),
+         {da, ""} <- Integer.parse(day),
+         {ho, ""} <- Integer.parse(hour),
+         {mi, ""} <- Integer.parse(minute),
+         {se, ""} <- Integer.parse(second),
+         true <- Calendar.ISO.valid_date?(yi, mo, da),
+         true <- Calendar.ISO.valid_time?(ho, mi, se, {0, 0}),
+         {:ok, naive} <- NaiveDateTime.new(yi, mo, da, ho, mi, se),
+         {:ok, dt} <- DateTime.from_naive(naive, "Etc/UTC") do
+      {:ok, DateTime.to_unix(dt)}
+    else
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp unix_from_timestamp(_value), do: {:error, :malformed}
 end

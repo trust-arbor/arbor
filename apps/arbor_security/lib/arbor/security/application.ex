@@ -41,12 +41,16 @@ defmodule Arbor.Security.Application do
     children_for_profile(snapshot, signing_authority_owner_token)
   end
 
-  defp children_for_profile(%{start_profile: :activation_only}, signing_authority_owner_token) do
-    core_security_children(signing_authority_owner_token)
+  defp children_for_profile(
+         %{start_profile: :activation_only} = snapshot,
+         signing_authority_owner_token
+       ) do
+    core_security_children(snapshot, signing_authority_owner_token)
   end
 
   defp children_for_profile(snapshot, signing_authority_owner_token) do
-    security_store_children(snapshot) ++ core_security_children(signing_authority_owner_token)
+    security_store_children(snapshot) ++
+      core_security_children(snapshot, signing_authority_owner_token)
   end
 
   defp security_store_children(snapshot) do
@@ -70,7 +74,7 @@ defmodule Arbor.Security.Application do
     Supervisor.child_spec({Arbor.Security.AuthorityStore, store_opts}, id: name)
   end
 
-  defp core_security_children(signing_authority_owner_token) do
+  defp core_security_children(snapshot, signing_authority_owner_token) do
     [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.IssuerRegistry, []},
@@ -88,6 +92,7 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []},
       {Arbor.Security.UriRegistry, []},
+      {Arbor.Security.AuditJournalOwner, Arbor.Security.Config.audit_journal_start_opts(snapshot)},
       # Ephemeral one-use delivery receipts (same-node). Last so restart
       # loses outstanding receipts fail-closed without cascading earlier children.
       {Arbor.Security.DeliveryReceiptBroker, []}

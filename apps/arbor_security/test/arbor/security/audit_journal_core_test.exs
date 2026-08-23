@@ -264,6 +264,64 @@ defmodule Arbor.Security.AuditJournalCoreTest do
       assert Core.capacity(a)["used_entries"] == 3
     end
 
+    test "pending_summary empty is zero count and zero age" do
+      assert {:ok, state} = Core.new()
+      assert Core.pending_operations(state) == []
+
+      assert {:ok,
+              %{
+                "pending_count" => 0,
+                "oldest_pending_age_seconds" => 0,
+                "operations" => []
+              }} = Core.pending_summary(state, @prepared_at)
+    end
+
+    test "pending_summary ages from injected now and excludes terminals" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      assert {:ok, prepared_state} = Core.fold([prepared])
+
+      assert {:ok, summary} = Core.pending_summary(prepared_state, "2026-08-20T12:00:10Z")
+      assert summary["pending_count"] == 1
+      assert summary["oldest_pending_age_seconds"] == 10
+      assert hd(summary["operations"])["status"] == "prepared"
+      assert Core.pending_operations(prepared_state) == summary["operations"]
+
+      assert {:ok, zero} = Core.pending_summary(prepared_state, "2026-08-20T11:00:00Z")
+      assert zero["oldest_pending_age_seconds"] == 0
+
+      assert {:ok, capped} = Core.pending_summary(prepared_state, "9999-12-31T23:59:59Z")
+      assert capped["oldest_pending_age_seconds"] == 31_536_000
+
+      assert {:ok, applied_state} = Core.append(prepared_state, applied)
+      assert {:ok, applied_summary} = Core.pending_summary(applied_state, "2026-08-20T12:00:10Z")
+      assert applied_summary["pending_count"] == 1
+      assert hd(applied_summary["operations"])["status"] == "effect_applied"
+
+      assert {:ok, delivered_state} = Core.append(applied_state, delivered)
+      assert {:ok, done} = Core.pending_summary(delivered_state, "2026-08-20T12:00:10Z")
+      assert done["pending_count"] == 0
+      assert done["oldest_pending_age_seconds"] == 0
+      assert Core.pending_operations(delivered_state) == []
+
+      {:ok, intent} = AuditJournal.admit_intent(revoke_facts(1))
+      rejected = rejected_record(intent, @t1)
+      assert {:ok, rejected_state} = Core.fold([prepared_record(intent), rejected])
+      assert Core.pending_operations(rejected_state) == []
+    end
+
+    test "pending_summary malformed now fails closed without changing fold semantics" do
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      assert {:ok, state} = Core.fold([prepared])
+      snapshot = Core.show(state)
+      cap = Core.capacity(state)
+
+      assert {:error, :malformed} = Core.pending_summary(state, "nope")
+      assert {:error, :malformed} = Core.pending_summary(state, 12)
+      assert {:error, :malformed} = Core.pending_summary(%{"version" => 2}, @prepared_at)
+      assert Core.show(state) == snapshot
+      assert Core.capacity(state) == cap
+    end
+
     test "purity: production modules contain no impure calls" do
       forbidden = [
         ~r/DateTime\.utc_now/,

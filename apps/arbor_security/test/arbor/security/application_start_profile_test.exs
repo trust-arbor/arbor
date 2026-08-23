@@ -45,6 +45,16 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     assert Process.whereis(CapabilityStore)
     assert Process.whereis(Registry)
     assert Process.whereis(SystemAuthority)
+    assert Process.whereis(Arbor.Security.AuditJournalOwner)
+
+    assert {:ok, status} = Arbor.Security.audit_journal_status()
+    assert status["mode"] == "disabled"
+    assert status["durability"] == "dormant"
+    assert status["availability"] == "dormant"
+    assert status["reason"] == "activation_only"
+    assert status["last_error"] == "disabled"
+    assert status["serving"] == false
+    assert status["committed_frames"] == 0
 
     stats = CapabilityStore.stats()
     assert stats.active_capabilities == 0
@@ -81,8 +91,16 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     assert Process.whereis(CapabilityStore)
     assert Process.whereis(Registry)
     assert Process.whereis(SystemAuthority)
+    assert Process.whereis(Arbor.Security.AuditJournalOwner)
 
     children = Supervisor.which_children(Arbor.Security.Supervisor)
+
+    ids = Enum.map(children, &elem(&1, 0))
+    owner_index = Enum.find_index(ids, &(&1 == Arbor.Security.AuditJournalOwner))
+    broker_index = Enum.find_index(ids, &(&1 == Arbor.Security.DeliveryReceiptBroker))
+    assert is_integer(owner_index)
+    assert is_integer(broker_index)
+    assert owner_index > broker_index
 
     Enum.each(@named_stores, fn name ->
       assert {^name, _pid, :worker, [Arbor.Security.AuthorityStore]} =

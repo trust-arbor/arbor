@@ -51,6 +51,10 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
 
   test "security regression: start! owns every canonical id by supervisor pid equality" do
     assert :ok = TestBootstrap.start!()
+    assert Enum.at(TestBootstrap.canonical_start_ids(), -2) == Arbor.Security.AuditJournalOwner
+
+    assert List.last(TestBootstrap.canonical_start_ids()) ==
+             Arbor.Security.DeliveryReceiptBroker
 
     Enum.each(TestBootstrap.canonical_start_ids(), fn id ->
       owned = supervisor_child_pid(id)
@@ -71,6 +75,19 @@ defmodule Arbor.Security.TestBootstrapSupervisorOwnershipSecurityRegressionTest 
     assert observed_child_ids() == expected
     # Append-at-end would list the restored store first (OTP reverse listing).
     refute hd(observed_child_ids()) == @signing_store
+  end
+
+  test "security regression: terminated journal owner is restored under supervisor ownership" do
+    supervisor = Process.whereis(@supervisor)
+    assert is_pid(supervisor)
+    owner = Arbor.Security.AuditJournalOwner
+
+    assert :ok = Supervisor.terminate_child(@supervisor, owner)
+    assert :ok = TestBootstrap.start!()
+    assert Process.whereis(@supervisor) == supervisor
+    owned = supervisor_child_pid(owner)
+    assert is_pid(owned)
+    assert Process.whereis(owner) == owned
   end
 
   test "security regression: terminated-only restore preserves supervisor pid" do

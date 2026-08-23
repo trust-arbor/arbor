@@ -73,6 +73,7 @@ defmodule Arbor.Security.TestBootstrap do
       Arbor.Security.Constraint.RateLimiter,
       Arbor.Security.CapabilityStore,
       Arbor.Security.Reflex.Registry,
+      Arbor.Security.AuditJournalOwner,
       Arbor.Security.DeliveryReceiptBroker
     ]
 
@@ -307,6 +308,8 @@ defmodule Arbor.Security.TestBootstrap do
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},
+          {Arbor.Security.AuditJournalOwner,
+           Arbor.Security.Config.audit_journal_start_opts(snapshot)},
           {Arbor.Security.DeliveryReceiptBroker, []}
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))

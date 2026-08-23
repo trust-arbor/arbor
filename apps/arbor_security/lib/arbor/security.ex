@@ -65,6 +65,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Constraint
   alias Arbor.Security.Crypto
   alias Arbor.Security.Constraint.RateLimiter
+  alias Arbor.Security.AuditJournalOwner
   alias Arbor.Security.AuthDecision
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.DisclosureCapability
@@ -2719,6 +2720,25 @@ defmodule Arbor.Security do
   Called during agent destruction.
   """
   defdelegate delete_signing_key(agent_id), to: SigningKeyStore, as: :delete
+
+  @doc """
+  Bounded JSON-clean status of the Security authority-mutation audit journal.
+
+  Returns mode, durability, availability, a closed dormant/degraded reason,
+  a redacted last-error code, counts, pending age, and capacity. Never returns
+  file handles, PIDs, paths, reducer internals, capability payloads, or signing
+  material.
+  """
+  @spec audit_journal_status() :: {:ok, map()} | {:error, :journal_unavailable}
+  def audit_journal_status, do: AuditJournalOwner.status()
+
+  @doc """
+  Bounded JSON-clean pending operations in the Security audit journal.
+
+  Each item is `{operation_id, status, effect_class, intent_sha256}` only.
+  """
+  @spec audit_journal_pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
+  def audit_journal_pending_operations, do: AuditJournalOwner.pending_operations()
 
   @doc """
   Create a signer function for an agent.
