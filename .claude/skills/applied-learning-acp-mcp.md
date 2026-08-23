@@ -1073,3 +1073,11 @@ transport, Arbor permission handler, and isolated environment again at the last
 pre-spawn boundary. `Keyword.put_new(:handler, ...)` is not a ceiling when a raw
 caller can pre-populate the key (found 2026-08-22 while hardening Antigravity ACP;
 a schema-valid raw handler override otherwise survived into provider startup).
+
+<!-- applied-learning: read-progressively-disclosed-mcp-tool-schemas-before-calling -->
+<a id="applied-learning-read-progressively-disclosed-mcp-tool-schemas-before-calling"></a>
+**Read the emitted MCP tool schema before calling a progressively disclosed tool.**
+Names do not reliably imply argument keys: `arbor_help` requires `action`, not
+`action_name`. A missing required key may also expose a server admission bug rather
+than a useful lookup error, so distinguish caller correction from the separate
+typed-validation regression (found 2026-08-23 while inspecting task steering).
