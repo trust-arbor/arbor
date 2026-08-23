@@ -72,7 +72,10 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
           {:ok, _payload} ->
             Mix.shell().info("")
             Mix.shell().info(OpenCodeZen.listing())
-            Mix.shell().info("Recording lives in apps/arbor_llm/priv/opencode_zen/admission.json.")
+
+            Mix.shell().info(
+              "Recording lives in apps/arbor_llm/priv/opencode_zen/admission.json."
+            )
 
           {:error, reason} ->
             Mix.shell().error("Live probe failed: #{inspect(reason)}")
@@ -96,8 +99,24 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
 
   defp live_ids(opts) do
     case opts[:model] do
-      id when is_binary(id) and id != "" -> [id]
-      _ -> OpenCodeZen.catalog().models |> Enum.map(& &1["id"]) |> Enum.reject(&is_nil/1)
+      id when is_binary(id) and id != "" ->
+        [id]
+
+      _ ->
+        # Discover from the relay, NOT from the local admission file. Sourcing
+        # candidates from the file this probe writes made discovery circular:
+        # it could only ever re-probe what was already recorded, which is how a
+        # catalog of models the relay does not serve survived unchallenged.
+        case OpenCodeZen.discover_free_candidates() do
+          {:ok, [_ | _] = ids} ->
+            ids
+
+          {:ok, []} ->
+            Mix.raise("OpenCode Zen returned no free-tier candidates.")
+
+          {:error, reason} ->
+            Mix.raise("Could not discover OpenCode Zen candidates: #{inspect(reason)}")
+        end
     end
   end
 

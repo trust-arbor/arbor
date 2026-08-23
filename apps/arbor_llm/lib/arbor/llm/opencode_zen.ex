@@ -143,6 +143,16 @@ defmodule Arbor.LLM.OpenCodeZen do
   @spec transport_headers() :: [{String.t(), String.t()}]
   def transport_headers, do: Transport.attribution_headers()
 
+  @doc """
+  Free-tier candidate ids discovered from the relay's own catalog.
+
+  Deliberately NOT sourced from the local admission file: that file is this
+  probe's output, so reading it would make discovery circular and unable to
+  find a model it does not already list.
+  """
+  @spec discover_free_candidates(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def discover_free_candidates(opts \\ []), do: Transport.discover_free_candidates(opts)
+
   @spec apply_anonymous_auth(term()) :: term()
   def apply_anonymous_auth(request), do: Transport.apply_anonymous_auth(request)
 

@@ -46,6 +46,62 @@ defmodule Arbor.LLM.OpenCodeZen.Transport do
     [headers: attribution_headers()]
   end
 
+  @base_url "https://opencode.ai/zen/v1"
+
+  # Free-tier slugs carry a `-free` suffix. This mirrors hermes-agent's
+  # `is_opencode_zen_free_model/1`, which is where the convention was learned.
+  # `big-pickle` is OpenCode's rotating unsuffixed free slot — kept here so the
+  # relay's own naming, not a hardcoded list, decides what a candidate IS.
+  # Whether a candidate is ADMITTED is decided by the eval, never by this list.
+  @unsuffixed_free_slugs ~w(big-pickle)
+
+  @spec base_url() :: String.t()
+  def base_url, do: @base_url
+
+  @spec free_slug?(String.t()) :: boolean()
+  def free_slug?(id) when is_binary(id) do
+    bare = id |> String.trim() |> String.split("/") |> List.last() |> String.downcase()
+    String.ends_with?(bare, "-free") or bare in @unsuffixed_free_slugs
+  end
+
+  def free_slug?(_id), do: false
+
+  @doc """
+  Discover free-tier candidate ids from the relay's own catalog.
+
+  The probe MUST NOT source candidates from the local admission file — that is
+  the artifact it produces, so reading it makes discovery circular and can only
+  ever re-probe whatever is already recorded (which is how a fabricated catalog
+  survived: nothing could introduce a model it did not already contain).
+  """
+  @spec discover_free_candidates(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def discover_free_candidates(opts \\ []) do
+    timeout = Keyword.get(opts, :receive_timeout, 15_000)
+
+    case Req.get(@base_url <> "/models",
+           headers: attribution_headers(),
+           receive_timeout: timeout,
+           retry: false
+         ) do
+      {:ok, %{status: 200, body: body}} -> {:ok, extract_free_ids(body)}
+      {:ok, %{status: status}} -> {:error, {:opencode_zen_models_http_error, status}}
+      {:error, reason} -> {:error, {:opencode_zen_models_unreachable, reason}}
+    end
+  end
+
+  defp extract_free_ids(%{"data" => data}) when is_list(data) do
+    data
+    |> Enum.map(fn
+      %{"id" => id} when is_binary(id) -> id
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&free_slug?/1)
+    |> Enum.sort()
+  end
+
+  defp extract_free_ids(_body), do: []
+
   @doc """
   Force anonymous auth on a prepared Req request.
 
