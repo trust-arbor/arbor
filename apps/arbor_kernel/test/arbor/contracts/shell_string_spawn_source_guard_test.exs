@@ -9,6 +9,8 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
 
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Coding.SourceInventory
+
   @moduletag :fast
 
   @repo_root Path.expand("../../../../..", __DIR__)
@@ -77,18 +79,127 @@ defmodule Arbor.Contracts.ShellStringSpawnSourceGuardTest do
     assert detect_forbidden(Code.string_to_quoted!(source)) == []
   end
 
+  test "contained mode uses the attested inventory without Git metadata" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-shell-source-guard-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    tracked = "apps/tracked/lib/tracked.ex"
+    ignored = "apps/ignored/lib/ignored.ex"
+    File.mkdir_p!(Path.dirname(Path.join(root, tracked)))
+    File.mkdir_p!(Path.dirname(Path.join(root, ignored)))
+    File.write!(Path.join(root, tracked), "defmodule Tracked, do: nil\n")
+    File.write!(Path.join(root, ignored), "defmodule Ignored, do: nil\n")
+
+    assert {:ok, inventory} =
+             SourceInventory.build(String.duplicate("d", 40), [
+               tracked,
+               "apps/tracked/test/tracked_test.exs"
+             ])
+
+    assert {:ok, bytes} = SourceInventory.encode(inventory)
+    manifest_path = Path.join(root, "source_inventory.json")
+    File.write!(manifest_path, bytes)
+
+    env = %{
+      "ARBOR_MIX_CONTAINED" => "1",
+      "ARBOR_SOURCE_INVENTORY_PATH" => manifest_path
+    }
+
+    assert tracked_lib_files(root, env) == [tracked]
+
+    assert_raise ExUnit.AssertionError, ~r/ARBOR_SOURCE_INVENTORY_PATH/, fn ->
+      tracked_lib_files(root, %{"ARBOR_MIX_CONTAINED" => "1"})
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Scan set: git-tracked production lib files only
   # ---------------------------------------------------------------------------
 
-  defp tracked_lib_files do
-    {output, 0} =
-      System.cmd("git", ["ls-files", "-z", "--", "apps"], cd: @repo_root)
+  defp tracked_lib_files, do: tracked_lib_files(@repo_root, inventory_env_from_system())
 
-    output
-    |> String.split(<<0>>, trim: true)
-    |> Enum.filter(&production_lib_source?/1)
-    |> Enum.sort()
+  defp tracked_lib_files(root, env) when is_binary(root) and is_map(env) do
+    case Map.get(env, "ARBOR_MIX_CONTAINED") do
+      "1" ->
+        contained_tracked_lib_files(env)
+
+      _ ->
+        {output, 0} =
+          System.cmd("git", ["ls-files", "-z", "--", "apps"],
+            cd: root,
+            stderr_to_stdout: true
+          )
+
+        output
+        |> String.split(<<0>>, trim: true)
+        |> Enum.filter(&production_lib_source?/1)
+        |> Enum.sort()
+    end
+  end
+
+  defp inventory_env_from_system do
+    %{}
+    |> put_env_if_present("ARBOR_MIX_CONTAINED")
+    |> put_env_if_present("ARBOR_SOURCE_INVENTORY_PATH")
+  end
+
+  defp put_env_if_present(env, key) do
+    case System.get_env(key) do
+      nil -> env
+      value -> Map.put(env, key, value)
+    end
+  end
+
+  defp contained_tracked_lib_files(env) do
+    case resolve_source_inventory_path(env) do
+      {:error, reason} ->
+        flunk_missing_inventory({reason, :before_filesystem})
+
+      {:ok, path} ->
+        max_bytes = SourceInventory.max_encoded_bytes()
+
+        with {:ok, %File.Stat{type: :regular, size: size}} <- File.lstat(path),
+             :ok <- admit_manifest_byte_size(size, max_bytes),
+             {:ok, bytes} <- File.read(path),
+             {:ok, decoded} <- Jason.decode(bytes),
+             {:ok, inventory} <- SourceInventory.new(decoded) do
+          inventory
+          |> SourceInventory.paths()
+          |> Enum.filter(&production_lib_source?/1)
+          |> Enum.sort()
+        else
+          {:error, :enoent} -> flunk_missing_inventory({:enoent, path})
+          {:error, :oversized_manifest} -> flunk_missing_inventory({:oversized_manifest, path})
+          {:error, reason} -> flunk_missing_inventory({reason, path})
+          other -> flunk_missing_inventory({other, path})
+        end
+    end
+  end
+
+  defp admit_manifest_byte_size(size, max_bytes)
+       when is_integer(size) and is_integer(max_bytes) and size >= 0 and max_bytes > 0 do
+    if size <= max_bytes, do: :ok, else: {:error, :oversized_manifest}
+  end
+
+  defp resolve_source_inventory_path(env) do
+    case Map.fetch(env, "ARBOR_SOURCE_INVENTORY_PATH") do
+      {:ok, path} when is_binary(path) and path != "" -> {:ok, path}
+      {:ok, _value} -> {:error, :invalid_inventory_path}
+      :error -> {:error, :missing_inventory_path}
+    end
+  end
+
+  defp flunk_missing_inventory(detail) do
+    flunk(
+      "contained Mix requires a valid ARBOR_SOURCE_INVENTORY_PATH regular-file manifest; " <>
+        "refusing a filesystem fallback that would weaken the tracked-only invariant" <>
+        " (detail: #{inspect(detail)})"
+    )
   end
 
   defp production_lib_source?(path) do
