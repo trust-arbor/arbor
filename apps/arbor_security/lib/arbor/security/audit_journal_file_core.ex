@@ -21,6 +21,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
   @genesis_digest :crypto.hash(:sha256, @genesis_domain)
   @known_unsupported_dir_sync [:eisdir, :enotsup, :einval, :enotty, :eopnotsupp]
   @pre_rename_phases [
+    :admit,
     :cleanup,
     :create,
     :write,

@@ -405,7 +405,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
       pending_prepared = prepared_record(intent2)
-      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
+      assert {:ok, state} =
+               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 99)
       assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
       assert length(pending) == 1
@@ -450,7 +453,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
       pending_prepared = prepared_record(intent2)
-      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
+      assert {:ok, state} =
+               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
       assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
       assert pending != []
@@ -481,7 +487,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
       pending_prepared = prepared_record(intent2)
-      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
+      assert {:ok, state} =
+               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
       assert {:ok, _compacted, snapshot, [pending]} = AuditJournalCore.compact(state, source)
       substituted = Map.put(pending, "occurred_at", "2026-08-20T12:00:09Z")
@@ -504,7 +513,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
       pending_prepared = prepared_record(intent2)
-      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
+      assert {:ok, state} =
+               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
       assert {:ok, _compacted, snapshot, [pending]} = AuditJournalCore.compact(state, source)
       {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
@@ -541,7 +553,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       {prepared, applied, delivered} = grant_lifecycle()
       {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
       pending_prepared = prepared_record(intent2)
-      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
+      assert {:ok, state} =
+               AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+
       {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
       assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
       {:ok, bytes, _} = FileCore.encode_compacted(snapshot, pending)
@@ -606,10 +621,18 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
     test "leftover_action admits only regular 0600 single-link" do
       assert :unlink = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 1})
-      assert {:error, :symlink_rejected} = FileCore.leftover_action(%{type: :symlink, mode: 0o120777, links: 1})
-      assert {:error, :hardlink_rejected} = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 2})
-      assert {:error, :insecure_mode} = FileCore.leftover_action(%{type: :regular, mode: 0o100644, links: 1})
-      assert {:error, :not_regular} = FileCore.leftover_action(%{type: :directory, mode: 0o40700, links: 2})
+
+      assert {:error, :symlink_rejected} =
+               FileCore.leftover_action(%{type: :symlink, mode: 0o120777, links: 1})
+
+      assert {:error, :hardlink_rejected} =
+               FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 2})
+
+      assert {:error, :insecure_mode} =
+               FileCore.leftover_action(%{type: :regular, mode: 0o100644, links: 1})
+
+      assert {:error, :not_regular} =
+               FileCore.leftover_action(%{type: :directory, mode: 0o40700, links: 2})
     end
 
     test "classify_dir_sync known-unsupported is ok" do
@@ -635,11 +658,46 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
                  candidate_present?: false,
                  target_identity_match?: true
                })
+
+      refute :continue ==
+               FileCore.classify_rename_outcome(%{
+                 rename: {:error, :eio},
+                 candidate_present?: true,
+                 target_identity_match?: true
+               })
     end
 
-    test "classify_publish_phase pre-rename is not_published" do
-      assert {:not_published, :sync_failed} = FileCore.classify_publish_phase(:sync, :sync_failed)
-      assert {:publish_uncertain, :reopen_failed} = FileCore.classify_publish_phase(:reopen, :reopen_failed)
+    test "classify_publish_phase splits pre-rename from post-rename" do
+      for phase <- [
+            :admit,
+            :cleanup,
+            :create,
+            :write,
+            :sync,
+            :candidate_proof,
+            :candidate_reproof,
+            :source_tip_proof
+          ] do
+        assert {:not_published, :sync_failed} =
+                 FileCore.classify_publish_phase(phase, :sync_failed)
+      end
+
+      for phase <- [:dir_finalize, :reopen, :published_replay] do
+        assert {:publish_uncertain, :reopen_failed} =
+                 FileCore.classify_publish_phase(phase, :reopen_failed)
+      end
+
+      assert {:error, :malformed} = FileCore.classify_publish_phase(:rename, :eio)
+      assert {:error, :malformed} = FileCore.classify_publish_phase(:sync, "eio")
+    end
+
+    test "encode_compacted returns malformed for snapshots through canonical_snapshot_bytes" do
+      deep = Enum.reduce(1..6, "x", fn _i, acc -> %{"k" => acc} end)
+
+      assert {:error, :malformed} = AuditJournal.canonical_snapshot_bytes(deep)
+      assert {:error, :malformed} = FileCore.encode_compacted(deep, [])
+      assert {:error, :malformed} = FileCore.encode_compacted(self(), [])
+      assert FileCore.encode_compacted(nil, []) == {:error, :malformed}
     end
   end
 

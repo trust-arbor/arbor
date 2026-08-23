@@ -179,11 +179,8 @@ defmodule Arbor.Security.AuditJournalFile do
       {:error, :closed} = err ->
         err
 
-      {:error, {:not_published, _reason}} = err ->
-        finish_not_published(handle, nil, nil, err)
-
       {:error, reason} ->
-        finish_not_published(handle, nil, nil, {:error, {:not_published, map_not_published(reason)}})
+        publish_error(handle, nil, nil, :admit, reason)
     end
   end
 
@@ -197,6 +194,25 @@ defmodule Arbor.Security.AuditJournalFile do
     def __test_inject__(:clear) do
       Process.delete(@inject_key)
       :ok
+    end
+
+    @doc false
+    @spec __test_inject__(
+            :compact_rewrite_source_same_size
+            | :compact_replace_source_inode
+            | :compact_substitute_candidate
+            | :compact_rename_before_effect
+            | :compact_rename_after_effect
+          ) :: :ok
+    def __test_inject__(kind)
+        when kind in [
+               :compact_rewrite_source_same_size,
+               :compact_replace_source_inode,
+               :compact_substitute_candidate,
+               :compact_rename_before_effect,
+               :compact_rename_after_effect
+             ] do
+      put_inject(kind, true)
     end
 
     @doc false
@@ -238,25 +254,6 @@ defmodule Arbor.Security.AuditJournalFile do
     end
 
     @doc false
-    @spec __test_inject__(
-            :compact_rewrite_source_same_size
-            | :compact_replace_source_inode
-            | :compact_substitute_candidate
-            | :compact_rename_before_effect
-            | :compact_rename_after_effect
-          ) :: :ok
-    def __test_inject__(kind)
-        when kind in [
-               :compact_rewrite_source_same_size,
-               :compact_replace_source_inode,
-               :compact_substitute_candidate,
-               :compact_rename_before_effect,
-               :compact_rename_after_effect
-             ] do
-      put_inject(kind, true)
-    end
-
-    @doc false
     @spec __test_inject__(:compact_sync_error, term()) :: :ok
     def __test_inject__(:compact_sync_error, reason) do
       put_inject(:compact_sync_error, reason)
@@ -292,6 +289,7 @@ defmodule Arbor.Security.AuditJournalFile do
       :ok
     end
 
+    @spec inject(atom()) :: term()
     defp inject(key) do
       Process.get(@inject_key, %{}) |> Map.get(key, :absent)
     end
@@ -315,19 +313,19 @@ defmodule Arbor.Security.AuditJournalFile do
   end
 
   defp require_compact_no_torn(%__MODULE__{torn_tail: nil}), do: :ok
-  defp require_compact_no_torn(%__MODULE__{}), do: {:error, {:not_published, :torn_tail}}
+  defp require_compact_no_torn(%__MODULE__{}), do: {:error, :torn_tail}
 
   defp compact_revalidate(handle) do
     case revalidate_identity(handle) do
       :ok -> :ok
-      {:error, {:not_committed, reason}} -> {:error, {:not_published, map_not_published(reason)}}
+      {:error, {:not_committed, reason}} -> {:error, reason}
     end
   end
 
   defp compact_reducer(core, source) do
     case AuditJournalCore.compact(core, source) do
       {:ok, compacted, snapshot, pending} -> {:ok, compacted, snapshot, pending}
-      {:error, reason} -> {:error, {:not_published, map_not_published(reason)}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -337,7 +335,7 @@ defmodule Arbor.Security.AuditJournalFile do
         publish_candidate(handle, ctx, cand_path)
 
       {:error, reason} ->
-        finish_not_published(handle, nil, nil, {:error, {:not_published, map_not_published(reason)}})
+        publish_error(handle, nil, nil, :admit, reason)
     end
   end
 
@@ -354,12 +352,7 @@ defmodule Arbor.Security.AuditJournalFile do
   defp publish_candidate(handle, ctx, cand_path) do
     case cleanup_leftover(cand_path) do
       {:error, reason} ->
-        finish_not_published(
-          handle,
-          cand_path,
-          nil,
-          {:error, {:not_published, map_not_published(reason)}}
-        )
+        publish_error(handle, cand_path, nil, :cleanup, reason)
 
       :ok ->
         open_and_publish_candidate(handle, ctx, cand_path)
@@ -369,12 +362,7 @@ defmodule Arbor.Security.AuditJournalFile do
   defp open_and_publish_candidate(handle, ctx, cand_path) do
     case create_candidate(cand_path) do
       {:error, reason} ->
-        finish_not_published(
-          handle,
-          cand_path,
-          nil,
-          {:error, {:not_published, map_not_published(reason)}}
-        )
+        publish_error(handle, cand_path, nil, :create, reason)
 
       {:ok, fd, identity} ->
         prove_then_rename(handle, ctx, cand_path, fd, identity)
@@ -387,15 +375,9 @@ defmodule Arbor.Security.AuditJournalFile do
         _ = close_io_silent(fd)
         source_tip_then_rename(handle, ctx, cand_path, identity)
 
-      {:error, reason} ->
+      {:error, phase, reason} ->
         _ = close_io_silent(fd)
-
-        finish_not_published(
-          handle,
-          cand_path,
-          identity,
-          {:error, {:not_published, map_not_published(reason)}}
-        )
+        publish_error(handle, cand_path, identity, phase, reason)
     end
   end
 
@@ -405,21 +387,20 @@ defmodule Arbor.Security.AuditJournalFile do
         rename_and_finalize(handle, ctx, cand_path, identity)
 
       {:error, reason} ->
-        finish_not_published(
-          handle,
-          cand_path,
-          identity,
-          {:error, {:not_published, map_not_published(reason)}}
-        )
+        publish_error(handle, cand_path, identity, :source_tip_proof, reason)
     end
   end
 
   defp fill_and_prove_candidate(handle, ctx, cand_path, fd, identity) do
-    with :ok <- write_candidate(fd, ctx.bytes),
-         :ok <- compact_sync(fd),
-         :ok <- prove_candidate_first(fd, cand_path, identity, ctx),
+    with :ok <- tag_phase(:write, write_candidate(fd, ctx.bytes)),
+         :ok <- tag_phase(:sync, compact_sync(fd)),
+         :ok <- tag_phase(:candidate_proof, prove_candidate_first(fd, cand_path, identity, ctx)),
          :ok <- after_first_proof(handle, cand_path),
-         :ok <- prove_candidate_again(fd, cand_path, identity, ctx.bytes) do
+         :ok <-
+           tag_phase(
+             :candidate_reproof,
+             prove_candidate_again(fd, cand_path, identity, ctx.bytes)
+           ) do
       :ok
     end
   end
@@ -511,18 +492,18 @@ defmodule Arbor.Security.AuditJournalFile do
         {:error, {:publish_uncertain, :rename_ambiguous}}
 
       {:error, reason} ->
-        classify_failed_rename(handle, ctx, cand_path, identity, reason)
+        classify_failed_rename(handle, cand_path, identity, reason)
     end
   end
 
-  defp classify_failed_rename(handle, ctx, cand_path, identity, reason) do
+  defp classify_failed_rename(handle, cand_path, identity, reason) do
     present? = candidate_present?(cand_path)
-    match? = target_still_ours?(handle)
+    target_identity_match? = target_still_ours?(handle)
 
     case AuditJournalFileCore.classify_rename_outcome(%{
            rename: {:error, reason},
            candidate_present?: present?,
-           target_identity_match?: match?
+           target_identity_match?: target_identity_match?
          }) do
       {:not_published, mapped} ->
         finish_not_published(handle, cand_path, identity, {:error, {:not_published, mapped}})
@@ -530,21 +511,21 @@ defmodule Arbor.Security.AuditJournalFile do
       {:publish_uncertain, mapped} ->
         invalidate(handle)
         {:error, {:publish_uncertain, mapped}}
-
-      :continue ->
-        finalize_published(handle, ctx, identity)
     end
   end
 
   defp finalize_published(handle, ctx, cand_identity) do
-    with :ok <- compact_fsync_parent(handle),
-         :ok <- prove_published_entry(handle.path, cand_identity, byte_size(ctx.bytes)),
+    with :ok <- tag_phase(:dir_finalize, compact_fsync_parent(handle)),
+         :ok <-
+           tag_phase(
+             :dir_finalize,
+             prove_published_entry(handle.path, cand_identity, byte_size(ctx.bytes))
+           ),
          {:ok, new_handle} <- reopen_published(handle, ctx) do
       {:ok, new_handle}
     else
-      {:error, reason} ->
-        invalidate(handle)
-        {:error, {:publish_uncertain, map_uncertain(reason)}}
+      {:error, phase, reason} ->
+        publish_error(handle, nil, nil, phase, reason)
     end
   end
 
@@ -564,6 +545,9 @@ defmodule Arbor.Security.AuditJournalFile do
          {:ok, lstat} <- lstat_file(handle.path),
          {:ok, fd, identity} <- open_existing(handle.path, lstat, handle.root) do
       finish_reopened_fd(handle, ctx, fd, identity)
+    else
+      {:error, reason} ->
+        {:error, :reopen, reason}
     end
   end
 
@@ -574,7 +558,7 @@ defmodule Arbor.Security.AuditJournalFile do
 
       {:error, reason} ->
         _ = close_io_silent(fd)
-        {:error, reason}
+        {:error, :published_replay, reason}
     end
   end
 
@@ -585,7 +569,7 @@ defmodule Arbor.Security.AuditJournalFile do
 
       {:error, reason} ->
         _ = close_io_silent(fd)
-        {:error, map_uncertain(reason)}
+        {:error, :published_replay, reason}
     end
   end
 
@@ -598,7 +582,7 @@ defmodule Arbor.Security.AuditJournalFile do
     else
       {:error, reason} ->
         _ = close_io_silent(fd)
-        {:error, map_uncertain(reason)}
+        {:error, :published_replay, reason}
     end
   end
 
@@ -668,8 +652,9 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
+  # Incomplete replay is context-neutral; callers map it at their boundary.
   defp require_replay_complete(%{torn_tail: nil}), do: :ok
-  defp require_replay_complete(_replay), do: {:error, :source_tip_mismatch}
+  defp require_replay_complete(_replay), do: {:error, :incomplete_replay}
 
   defp require_core_equal(left, right) do
     if AuditJournalFileCore.core_match?(left, right) do
@@ -770,8 +755,11 @@ defmodule Arbor.Security.AuditJournalFile do
       {:ok, io} ->
         try do
           case :file.sync(io) do
-            :ok -> AuditJournalFileCore.classify_dir_sync(:ok)
-            {:error, reason} -> map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
+            :ok ->
+              AuditJournalFileCore.classify_dir_sync(:ok)
+
+            {:error, reason} ->
+              map_dir_sync(AuditJournalFileCore.classify_dir_sync({:error, reason}))
           end
         after
           _ = close_io_silent(io)
@@ -784,6 +772,50 @@ defmodule Arbor.Security.AuditJournalFile do
 
   defp map_dir_sync(:ok), do: :ok
   defp map_dir_sync({:error, _reason}), do: {:error, :dir_sync_failed}
+
+  defp tag_phase(_phase, :ok), do: :ok
+  defp tag_phase(phase, {:error, reason}), do: {:error, phase, reason}
+
+  defp publish_error(handle, cand_path, cand_identity, phase, reason) do
+    mapped = map_publish_reason(phase, reason)
+
+    case AuditJournalFileCore.classify_publish_phase(phase, mapped) do
+      {:not_published, classified} ->
+        finish_not_published(
+          handle,
+          cand_path,
+          cand_identity,
+          {:error, {:not_published, classified}}
+        )
+
+      {:publish_uncertain, classified} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, classified}}
+
+      {:error, :malformed} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, :replay_mismatch}}
+    end
+  end
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:admit, :cleanup, :create, :write, :sync] do
+    map_not_published(reason)
+  end
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:candidate_proof, :candidate_reproof] do
+    map_candidate_proof(reason)
+  end
+
+  defp map_publish_reason(:source_tip_proof, reason), do: map_source_tip(reason)
+
+  defp map_publish_reason(phase, reason)
+       when phase in [:dir_finalize, :reopen, :published_replay] do
+    map_uncertain(reason)
+  end
+
+  defp map_publish_reason(_phase, reason), do: map_not_published(reason)
 
   defp map_not_published(reason)
        when reason in [
@@ -816,6 +848,8 @@ defmodule Arbor.Security.AuditJournalFile do
 
   defp map_not_published(_reason), do: :write_failed
 
+  defp map_uncertain(:incomplete_replay), do: :replay_mismatch
+
   defp map_uncertain(reason)
        when reason in [
               :rename_ambiguous,
@@ -835,6 +869,8 @@ defmodule Arbor.Security.AuditJournalFile do
 
   defp map_uncertain(_reason), do: :replay_mismatch
 
+  defp map_candidate_proof(:incomplete_replay), do: :candidate_proof_failed
+
   defp map_candidate_proof(reason)
        when reason in [
               :identity_changed,
@@ -850,6 +886,8 @@ defmodule Arbor.Security.AuditJournalFile do
        do: reason
 
   defp map_candidate_proof(_reason), do: :candidate_proof_failed
+
+  defp map_source_tip(:incomplete_replay), do: :source_tip_mismatch
 
   defp map_source_tip(reason)
        when reason in [
@@ -964,6 +1002,7 @@ defmodule Arbor.Security.AuditJournalFile do
       end
     end
 
+    @spec compact_reopen_guard() :: :ok | {:error, atom()}
     defp compact_reopen_guard do
       case inject(:compact_reopen_error) do
         :absent -> :ok
@@ -971,6 +1010,7 @@ defmodule Arbor.Security.AuditJournalFile do
       end
     end
 
+    @spec compact_replay_guard() :: :ok | {:error, atom()}
     defp compact_replay_guard do
       case inject(:compact_replay_error) do
         :absent -> :ok
@@ -989,8 +1029,10 @@ defmodule Arbor.Security.AuditJournalFile do
 
     defp compact_fsync_parent(handle), do: do_fsync_directory(Path.dirname(handle.path))
 
+    @spec compact_reopen_guard() :: :ok | {:error, atom()}
     defp compact_reopen_guard, do: :ok
 
+    @spec compact_replay_guard() :: :ok | {:error, atom()}
     defp compact_replay_guard, do: :ok
   end
 

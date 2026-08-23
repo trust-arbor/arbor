@@ -1,6 +1,7 @@
 defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
   @moduledoc """
-  Path fail-closed and admission-bound security regression for P1C-B2A.
+  Path fail-closed and admission-bound security regression for P1C-B2A,
+  plus B2C2 atomic-publication regressions.
   """
 
   use ExUnit.Case, async: true
@@ -386,6 +387,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
     prepared = prepared_record(intent)
     assert {:ok, folded} = AuditJournalCore.fold([prepared])
+
     source = %{
       "committed_digest" => Base.encode16(AuditJournalFileCore.genesis_digest(), case: :lower),
       "committed_frames" => 1,
@@ -468,7 +470,9 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
 
   defp encode_snapshot_log(snapshot, pending) do
     {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
-    {:ok, frame, digest} = AuditJournalFileCore.encode_frame(snap_bytes, AuditJournalFileCore.genesis_digest())
+
+    {:ok, frame, digest} =
+      AuditJournalFileCore.encode_frame(snap_bytes, AuditJournalFileCore.genesis_digest())
 
     Enum.reduce(pending, {frame, digest}, fn record, {acc, pred} ->
       {:ok, rec_bytes} = AuditJournal.canonical_record_bytes(record)
