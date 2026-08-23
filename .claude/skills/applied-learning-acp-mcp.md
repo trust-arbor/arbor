@@ -62,6 +62,17 @@ ceilings (coding wall clock / intensive Mix child), not the start-handshake
 remainder. Found 2026-08-16 when C3c0.5 Pi design turns died at 32s on
 `task_58d8a4cf466dbb167d0e46bf0ab4b765`.
 
+<!-- applied-learning: outer-protocol-deadlines-must-exceed-owned-inner-callback-budgets -->
+<a id="applied-learning-outer-protocol-deadlines-must-exceed-owned-inner-callback-budgets"></a>
+**Outer protocol deadlines must strictly exceed owned inner callback budgets.**
+Do not give an MCP/HTTP transport the same deadline as the action or facade it
+wraps: scheduler jitter then lets the transport replace the subsystem's typed
+timeout with an opaque `handler_timeout`. Keep the outer bound finite but give
+it explicit cleanup/serialization headroom, and test the relationship. Found
+2026-08-23 when ExMCP HttpPlug's 10,000 ms default killed Arbor's legitimate
+10,000 ms coding-readiness projection; a 30,000 ms HTTP handler bound let the
+owned readiness result return in 6.3 seconds.
+
 <!-- applied-learning: build-structured-coding-work-packet-digests-with-the-contract-helper -->
 <a id="applied-learning-build-structured-coding-work-packet-digests-with-the-contract-helper"></a>
 **Build structured coding WorkPacket digests with the contract helper.**

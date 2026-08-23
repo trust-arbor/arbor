@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 670,
+  "entry_count": 671,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8254,8 +8254,21 @@
       "source_incident": "found 2026-08-23 during P1A-1 cross-app validation",
       "always_loaded": false,
       "content_sha256": "5365ebf6e75e83f3769d585d9934a39f9fd088426e510eb21584be3d41acbc19"
+    },
+    {
+      "source_ordinal": 671,
+      "source_kind": "post-migration",
+      "slug": "outer-protocol-deadlines-must-exceed-owned-inner-callback-budgets",
+      "title": "Outer protocol deadlines must strictly exceed owned inner callback budgets.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-outer-protocol-deadlines-must-exceed-owned-inner-callback-budgets",
+      "source_date": "2026-08-23",
+      "source_incident": "found 2026-08-23 when ExMCP HttpPlug's 10,000 ms default killed Arbor's 10,000 ms coding-readiness projection",
+      "always_loaded": false,
+      "content_sha256": "6f18b9eac569fcf32d94dff51209b90afcf90f6c3591f2db1cc8c17f69d7e9c9"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 209
+  "post_migration_entry_count": 210
 }
