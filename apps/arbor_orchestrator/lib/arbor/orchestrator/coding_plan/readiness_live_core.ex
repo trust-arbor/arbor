@@ -5,9 +5,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
 
   @acp_source "acp_provider_readiness"
   @acp_runtime "acp"
-  # The readiness timestamp is captured immediately before the ACP facade
-  # observes its provider. Permit only this bounded capture-time skew.
-  @provider_clock_skew_seconds 5
   @toolchain_fields ~w(
     schema_version platform architecture otp_release elixir_version
     mix_wrapper_path runtime_roots identity_digest
@@ -221,9 +218,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
   end
 
   defp not_future?(provider_observed_at, observed_at) do
-    latest_allowed = DateTime.add(observed_at, @provider_clock_skew_seconds, :second)
-
-    if DateTime.compare(provider_observed_at, latest_allowed) == :gt,
+    if DateTime.compare(provider_observed_at, observed_at) == :gt,
       do: {:error, :future},
       else: :ok
   end

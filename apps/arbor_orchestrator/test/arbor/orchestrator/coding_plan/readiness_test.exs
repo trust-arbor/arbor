@@ -412,7 +412,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert report["expires_at"] == "2026-07-22T12:00:30.000Z"
   end
 
-  test "live ACP evidence within the bounded capture skew is accepted", ctx do
+  test "fixed readiness observations reject ACP evidence after the supplied endpoint", ctx do
     opts =
       live_opts(ctx,
         acp_provider_readiness: fn _provider, _model ->
@@ -424,25 +424,68 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
       )
 
     assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
-    assert report["status"] == "degraded"
-    assert diagnostic(report, "acp_health")["decision"] == "degraded"
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "acp_evidence_future"
   end
 
-  test "live ACP evidence beyond the bounded capture skew is blocked", ctx do
+  @tag :security_regression
+  test "security regression: synchronous ACP evidence is admitted through the observed collection endpoint",
+       ctx do
+    observed_through = ~U[2026-07-22 12:00:10Z]
+
     opts =
       live_opts(ctx,
         acp_provider_readiness: fn _provider, _model ->
           acp_envelope(
-            observed_at: "2026-07-22T12:00:06Z",
-            expires_at: "2026-07-22T12:00:30Z"
+            observed_at: "2026-07-22T12:00:10Z",
+            expires_at: "2026-07-22T12:00:40Z"
+          )
+        end
+      )
+      |> Keyword.put(:observation_clock, fn -> observed_through end)
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "degraded"
+    assert report["observed_at"] == "2026-07-22T12:00:10Z"
+    assert report["expires_at"] == "2026-07-22T12:00:40Z"
+    assert diagnostic(report, "acp_health")["decision"] == "degraded"
+    assert Enum.all?(report["diagnostics"], &(&1["observed_at"] == report["observed_at"]))
+  end
+
+  test "live ACP evidence beyond the observed collection endpoint is blocked", ctx do
+    observed_through = ~U[2026-07-22 12:00:10Z]
+
+    opts =
+      live_opts(ctx,
+        acp_provider_readiness: fn _provider, _model ->
+          acp_envelope(
+            observed_at: "2026-07-22T12:00:11Z",
+            expires_at: "2026-07-22T12:00:40Z"
           )
         end,
         coding_toolchain_identity: fn -> flunk("toolchain must not be observed") end
       )
+      |> Keyword.put(:observation_clock, fn -> observed_through end)
 
     assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
     assert report["status"] == "blocked"
     assert blocked_code(report) == "acp_evidence_future"
+  end
+
+  test "invalid live observation clocks fail closed with one diagnostic", ctx do
+    opts =
+      ctx
+      |> live_opts()
+      |> Keyword.put(:observation_clock, fn -> :not_a_datetime end)
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "observation_clock_invalid"
+
+    assert Enum.count(
+             report["diagnostics"],
+             &(&1["code"] == "observation_clock_invalid")
+           ) == 1
   end
 
   test "pure expiry rejects provider expiry at or before readiness time" do

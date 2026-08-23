@@ -386,12 +386,21 @@ defmodule Arbor.Orchestrator do
   @spec check_coding_readiness(Plan.t() | map() | keyword(), keyword()) ::
           {:ok, map()}
   def check_coding_readiness(plan_or_attrs, opts \\ []) when is_list(opts) do
-    opts =
+    caller_supplied_observed_at? = Keyword.has_key?(opts, :observed_at)
+
+    trusted_opts =
       opts
       |> Keyword.take([:observed_at, :mode, :agent_id])
       |> Keyword.put_new(:observed_at, DateTime.utc_now() |> DateTime.to_iso8601(:extended))
 
-    Readiness.check(plan_or_attrs, opts)
+    trusted_opts =
+      if caller_supplied_observed_at? do
+        trusted_opts
+      else
+        Keyword.put(trusted_opts, :observation_clock, &DateTime.utc_now/0)
+      end
+
+    Readiness.check(plan_or_attrs, trusted_opts)
   end
 
   @doc "Run an authorized, read-only coding-resource reconciliation dry-run."

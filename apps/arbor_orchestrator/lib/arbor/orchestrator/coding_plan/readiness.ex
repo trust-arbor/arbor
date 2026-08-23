@@ -252,31 +252,34 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp live_report(plan_digest, plan, opts, observed_at, base_diagnostics) do
     observed_datetime = parse_datetime!(observed_at)
-    {:ok, expires_at} = ReadinessLiveCore.expiry(observed_datetime, nil)
 
-    case live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
-      {:ok, diagnostics, expires_at} ->
-        ReadinessCore.report(
+    case live_diagnostics(plan, opts, observed_at, observed_datetime) do
+      {:ok, diagnostics, provider_expiry, latest_observed_at} ->
+        finish_live_report(
           plan_digest,
-          observed_at,
+          opts,
+          observed_datetime,
+          latest_observed_at,
           base_diagnostics ++ diagnostics,
-          expires_at: iso_datetime(expires_at)
+          provider_expiry
         )
 
-      {:blocked, diagnostic, expires_at} ->
-        ReadinessCore.report(
+      {:blocked, diagnostic, latest_observed_at} ->
+        finish_live_report(
           plan_digest,
-          observed_at,
+          opts,
+          observed_datetime,
+          latest_observed_at,
           base_diagnostics ++ [diagnostic],
-          expires_at: iso_datetime(expires_at)
+          nil
         )
     end
   end
 
-  defp live_diagnostics(plan, opts, observed_at, observed_datetime, expires_at) do
+  defp live_diagnostics(plan, opts, observed_at, observed_datetime) do
     with {:ok, security_diagnostic} <- observe_security(opts, observed_at),
          {:ok, baseline_diagnostic} <- observe_dependency_baseline(plan, observed_at),
-         {:ok, acp_diagnostic, provider_expiry} <-
+         {:ok, acp_diagnostic, provider_expiry, acp_observed_through} <-
            observe_acp(plan, opts, observed_at, observed_datetime),
          {:ok, toolchain_diagnostic} <- observe_toolchain(opts, observed_at),
          {:ok, capacity_diagnostic} <- observe_capacity(opts, observed_at) do
@@ -287,10 +290,101 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
          acp_diagnostic,
          toolchain_diagnostic,
          capacity_diagnostic
-       ], earlier_expiry(expires_at, provider_expiry)}
+       ], provider_expiry, acp_observed_through}
     else
-      {:blocked, diagnostic} -> {:blocked, diagnostic, expires_at}
+      {:blocked, diagnostic, latest_observed_at} ->
+        {:blocked, diagnostic, latest_observed_at}
+
+      {:blocked, diagnostic} ->
+        {:blocked, diagnostic, observed_datetime}
     end
+  end
+
+  defp finish_live_report(
+         plan_digest,
+         opts,
+         started_at,
+         latest_observed_at,
+         diagnostics,
+         provider_expiry
+       ) do
+    case observation_endpoint(opts, latest_observed_at) do
+      {:ok, finished_at} ->
+        observed_datetime = latest_datetime([started_at, latest_observed_at, finished_at])
+        observed_at = iso_datetime(observed_datetime)
+        diagnostics = retimestamp_diagnostics(diagnostics, observed_at)
+
+        {diagnostics, provider_expiry} =
+          expire_acp_if_stale(diagnostics, provider_expiry, observed_at, observed_datetime)
+
+        {:ok, default_expiry} = ReadinessLiveCore.expiry(observed_datetime, nil)
+        expires_at = maybe_earlier_expiry(default_expiry, provider_expiry)
+
+        ReadinessCore.report(
+          plan_digest,
+          observed_at,
+          diagnostics,
+          expires_at: iso_datetime(expires_at)
+        )
+
+      {:error, :observation_clock_invalid} ->
+        observed_datetime = latest_datetime([started_at, latest_observed_at])
+        observed_at = iso_datetime(observed_datetime)
+
+        diagnostic =
+          blocked(
+            "readiness_clock",
+            "observation_clock_invalid",
+            observed_at,
+            "The live readiness observation clock is unavailable.",
+            "Restore the trusted readiness clock before dispatch."
+          )
+
+        {:ok, expires_at} = ReadinessLiveCore.expiry(observed_datetime, nil)
+
+        ReadinessCore.report(
+          plan_digest,
+          observed_at,
+          diagnostics
+          |> retimestamp_diagnostics(observed_at)
+          |> replace_diagnostic("readiness_clock", diagnostic),
+          expires_at: iso_datetime(expires_at)
+        )
+    end
+  end
+
+  defp expire_acp_if_stale(diagnostics, nil, _observed_at, _observed_datetime),
+    do: {diagnostics, nil}
+
+  defp expire_acp_if_stale(diagnostics, provider_expiry, observed_at, observed_datetime) do
+    if DateTime.compare(provider_expiry, observed_datetime) == :gt do
+      {diagnostics, provider_expiry}
+    else
+      diagnostic =
+        blocked(
+          "acp_health",
+          "acp_evidence_expired",
+          observed_at,
+          "The ACP readiness evidence expired before the readiness snapshot completed.",
+          "Refresh ACP readiness evidence before dispatch."
+        )
+
+      {replace_diagnostic(diagnostics, "acp_health", diagnostic), nil}
+    end
+  end
+
+  defp replace_diagnostic(diagnostics, gate_id, replacement) do
+    if Enum.any?(diagnostics, &(&1.gate_id == gate_id)) do
+      Enum.map(diagnostics, fn diagnostic ->
+        if diagnostic.gate_id == gate_id, do: replacement, else: diagnostic
+      end)
+    else
+      diagnostics ++ [replacement]
+    end
+  end
+
+  defp retimestamp_diagnostics(diagnostics, observed_at) do
+    Enum.map(diagnostics, &%{&1 | observed_at: observed_at})
   end
 
   defp observe_security(opts, observed_at) do
@@ -436,7 +530,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     end
   end
 
-  defp observe_acp(plan, _opts, observed_at, observed_datetime) do
+  defp observe_acp(plan, opts, observed_at, observed_datetime) do
     provider = plan.worker["provider"]
     requested_model = plan.worker["model"]
 
@@ -453,9 +547,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         end
       )
 
-    case result do
-      {:ok, envelope} ->
-        case ReadinessLiveCore.acp(envelope, provider, requested_model, observed_datetime) do
+    case {result, observation_endpoint(opts, observed_datetime)} do
+      {{:ok, envelope}, {:ok, observed_through}} ->
+        case ReadinessLiveCore.acp(envelope, provider, requested_model, observed_through) do
           {:ok, :passed, digest, provider_expiry} ->
             {:ok,
              passed_with_evidence(
@@ -464,7 +558,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP provider and requested model are available.",
                digest
-             ), provider_expiry}
+             ), provider_expiry, observed_through}
 
           {:ok, :degraded, digest, provider_expiry} ->
             {:ok,
@@ -474,7 +568,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "ACP provider evidence is degraded and authentication remains unconfirmed.",
                digest
-             ), provider_expiry}
+             ), provider_expiry, observed_through}
 
           {:error, :model_mismatch} ->
             {:blocked,
@@ -484,7 +578,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP provider model does not match the coding plan.",
                "Use the provider model bound to the reviewed coding plan."
-             )}
+             ), observed_through}
 
           {:error, :missing_executable} ->
             {:blocked,
@@ -494,7 +588,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP provider executable is unavailable.",
                "Restore the reviewed ACP provider executable before dispatch."
-             )}
+             ), observed_through}
 
           {:error, :unavailable} ->
             {:blocked,
@@ -504,7 +598,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP provider is unavailable for the coding plan.",
                "Restore provider availability and retry live readiness."
-             )}
+             ), observed_through}
 
           {:error, :expired} ->
             {:blocked,
@@ -514,7 +608,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP readiness evidence has expired.",
                "Refresh ACP readiness evidence before dispatch."
-             )}
+             ), observed_through}
 
           {:error, :future} ->
             {:blocked,
@@ -523,8 +617,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "acp_evidence_future",
                observed_at,
                "The ACP readiness evidence is dated in the future.",
-               "Use an ACP observation at or before the readiness observation time."
-             )}
+               "Use an ACP observation at or before the readiness observation endpoint."
+             ), observed_through}
 
           {:error, :malformed} ->
             {:blocked,
@@ -534,8 +628,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                observed_at,
                "The ACP readiness evidence is malformed.",
                "Return a canonical provider observation and matching digest."
-             )}
+             ), observed_through}
         end
+
+      {{:ok, _envelope}, {:error, :observation_clock_invalid}} ->
+        {:blocked,
+         blocked(
+           "readiness_clock",
+           "observation_clock_invalid",
+           observed_at,
+           "The live readiness observation clock is unavailable.",
+           "Restore the trusted readiness clock before dispatch."
+         ), observed_datetime}
 
       _ ->
         {:blocked,
@@ -545,7 +649,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
            observed_at,
            "The ACP readiness observation is unavailable.",
            "Restore the ACP readiness observer and retry live readiness."
-         )}
+         ), observed_datetime}
     end
   end
 
@@ -664,6 +768,37 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp earlier_expiry(first, second) do
     if DateTime.compare(first, second) == :lt, do: first, else: second
+  end
+
+  defp maybe_earlier_expiry(first, nil), do: first
+  defp maybe_earlier_expiry(first, second), do: earlier_expiry(first, second)
+
+  defp observation_endpoint(opts, fallback) do
+    case Keyword.fetch(opts, :observation_clock) do
+      :error ->
+        {:ok, fallback}
+
+      {:ok, clock} when is_function(clock, 0) ->
+        try do
+          case clock.() do
+            %DateTime{} = observed_at -> {:ok, observed_at}
+            _other -> {:error, :observation_clock_invalid}
+          end
+        rescue
+          _ -> {:error, :observation_clock_invalid}
+        catch
+          _, _ -> {:error, :observation_clock_invalid}
+        end
+
+      {:ok, _other} ->
+        {:error, :observation_clock_invalid}
+    end
+  end
+
+  defp latest_datetime([first | rest]) do
+    Enum.reduce(rest, first, fn datetime, latest ->
+      if DateTime.compare(datetime, latest) == :gt, do: datetime, else: latest
+    end)
   end
 
   defp parse_datetime!(value) do

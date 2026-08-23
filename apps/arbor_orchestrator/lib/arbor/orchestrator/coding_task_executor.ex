@@ -1524,7 +1524,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              compilation,
              mode: :live,
              agent_id: agent_id,
-             observed_at: readiness_observed_at
+             observed_at: readiness_observed_at,
+             observation_clock: &DateTime.utc_now/0
            )
            |> map_admission_failure(:readiness, readiness_observed_at),
          :ok <- admit_readiness(readiness_report, readiness_observed_at) do
@@ -1554,6 +1555,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp readiness_now_datetime(_deps), do: DateTime.utc_now()
+
+  defp readiness_observation_clock(%{now_datetime: %DateTime{} = datetime}),
+    do: fn -> datetime end
+
+  defp readiness_observation_clock(%{now_datetime: fun}) when is_function(fun, 0), do: fun
+  defp readiness_observation_clock(_deps), do: &DateTime.utc_now/0
 
   defp readiness_now_unix_ms(%{now_unix_ms: ms}, _now_dt) when is_integer(ms) and ms > 0, do: ms
 
@@ -1592,7 +1599,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                compilation,
                mode: :live,
                agent_id: agent_id,
-               observed_at: observed_at
+               observed_at: observed_at,
+               observation_clock: readiness_observation_clock(deps)
              ) do
         boundary = verify_execution_boundary_from_compilation(canonical_plan, compilation)
 
@@ -1635,7 +1643,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:ok,
          assemble_dispatch_readiness_report(%{
            agent_id: agent_id,
-           observed_at: observed_at,
+           observed_at: readiness_report["observed_at"],
            plan_digest: canonical_digest,
            readiness: readiness_report,
            boundary: boundary_section(boundary),
