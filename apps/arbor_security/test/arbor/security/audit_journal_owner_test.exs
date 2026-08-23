@@ -302,8 +302,14 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     File.write!(path, flip_byte(File.read!(path), 40))
     File.chmod!(path, 0o600)
 
-    assert {:error, {:journal_open_failed, :digest_mismatch}} =
-             Owner.start_link(mode: :durable, root: root, name: name)
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    try do
+      assert {:error, {:journal_open_failed, :digest_mismatch}} =
+               Owner.start_link(mode: :durable, root: root, name: name)
+    after
+      Process.flag(:trap_exit, previous_trap_exit)
+    end
 
     refute Process.whereis(name)
   end
