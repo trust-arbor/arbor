@@ -29,6 +29,60 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
   use Mix.Task
 
+  # Scope the ProviderRouter to the model under test.
+  #
+  # A heartbeat's llm_call runs in router mode, where — as LlmHandler puts it —
+  # "the session provider may be stale once ProviderRouter selects an exact
+  # destination". The router picks from `:provider_route_profile`, so the
+  # eval's --model/--provider were OVERRIDDEN and the run measured whatever the
+  # production profile happened to list (gpt-5.6-sol / grok-4.6). With those
+  # OAuth destinations at status "login_required" the beat stalled until the
+  # 5-minute timeout and reported 0 heartbeats — never contacting the model
+  # under test at all.
+  #
+  # That also made admission circular: a model had to already be in the route
+  # profile to be measured for entry into it. Same shape as the candidate
+  # discovery circularity fixed in 5af3bd57c, one layer up.
+  #
+  # Pinning the profile to {model, provider} keeps the real assembly path
+  # (readiness, evidence, budgets, concurrency all still apply) and only
+  # narrows WHICH destination it may choose. Scoped to this eval process, which
+  # exits when the run ends.
+  defp pin_provider_route!(model, provider) when is_binary(model) and model != "" do
+    provider_id = to_string(provider)
+
+    profile = %{
+      enabled: true,
+      task_registry: %{"default" => %{requirements: %{}}},
+      default_task_class: "default",
+      catalog_model_ids: [model],
+      scoreboard: [
+        %{
+          model: model,
+          provider: provider_id,
+          runtime: "arbor",
+          # This is the model being MEASURED — the scoreboard here is a routing
+          # input, not evidence of quality. Tier 2's verdict is the trial
+          # result, never these numbers.
+          score: 1.0,
+          dangerous_misses: 0,
+          format_failure_rate: 0.0,
+          variance: 0.0,
+          marginal_cost: 0.0,
+          latency_ms: 1.0,
+          eval_run_ref: "eval-under-test",
+          last_verified: DateTime.utc_now() |> DateTime.to_iso8601()
+        }
+      ]
+    }
+
+    Application.put_env(:arbor_ai, :provider_route_profile, profile)
+
+    Mix.shell().info("  Route pinned to #{provider_id}/#{model} for this eval.\n")
+  end
+
+  defp pin_provider_route!(_model, _provider), do: :ok
+
   # `config/runtime.exs` is applied by the `app.config` task, which `mix run`
   # and `mix test` invoke for you. A custom task that starts applications
   # itself does NOT get it — so every runtime-configured value was nil here.
@@ -58,6 +112,16 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
   @impl Mix.Task
   def run(args) do
+    {opts, _, _} = OptionParser.parse(args, switches: @switches)
+
+    # Pin BEFORE the apps start. ProviderRouteReadiness derives and caches its
+    # requirements from the profile at boot, and fails closed with
+    # {:provider_route_readiness, :route_set_changed} if the route set changes
+    # underneath it. Pinning after startup therefore produced five consecutive
+    # heartbeat failures and a disabled heartbeat — the gate behaving correctly
+    # against a profile swapped out from under it.
+    pin_provider_route!(opts[:model], parse_provider(opts[:provider]))
+
     # Start required apps (orchestrator must come before agent — provides EventRegistry + Session)
     for app <- [:arbor_memory, :arbor_ai, :arbor_orchestrator, :arbor_agent] do
       start_or_raise!(app)
@@ -66,8 +130,6 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
     _ = Application.ensure_all_started(:arbor_persistence_ecto)
 
     await_provider_route_evidence!()
-
-    {opts, _, _} = OptionParser.parse(args, switches: @switches)
 
     variants = parse_variants(opts[:variants])
     bug = parse_bug(opts[:bug])
