@@ -49,7 +49,7 @@ defmodule Arbor.Security.ConfigAuditJournalModeTest do
 
   test "configured disabled is dormant without a journal root" do
     Application.put_env(:arbor_security, :audit_journal_mode, :disabled)
-    Application.put_env(:arbor_security, :storage_backend, JSONFile)
+    Application.put_env(:arbor_security, :storage_backend, nil)
     put_kernel_runtime(start_profile: :full)
 
     assert {:ok, snapshot} = Config.startup_store_snapshot(:test_bootstrap)
