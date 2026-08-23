@@ -17,6 +17,7 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
   @digest String.duplicate("ab", 32)
   @prepared_at "2026-08-20T12:00:00Z"
   @t1 "2026-08-20T12:00:01Z"
+  @t2 "2026-08-20T12:00:02Z"
   @status_keys MapSet.new([
                  "version",
                  "mode",
@@ -167,6 +168,163 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert status["entry_count"] == 2
   end
 
+  test "security regression: durable soft-capacity reclaimable terminals publish once and retry the exact record",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    assert status["entry_count"] == 10
+    assert status["committed_frames"] == 10
+    assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "security regression: durable hard-capacity reserve reclaimable terminals publish once and keep pending intact",
+       %{name: name} do
+    root = unique_root()
+    extra = revoke_prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_hard_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    pending_ids = Enum.map(pending, & &1["operation_id"])
+    assert extra["operation_id"] in pending_ids
+    assert Enum.all?(Enum.map(1..16, fn n -> prepared(n)["operation_id"] end), &(&1 in pending_ids))
+  end
+
+  test "security regression: unreclaimable soft-capacity does not publish a replacement", %{
+    name: name
+  } do
+    root = unique_root()
+    extra = prepared(33)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_unreclaimable_soft(pid)
+    assert {:ok, before} = Owner.status(pid)
+    assert {:error, :soft_capacity_exhausted} = Owner.append(pid, extra)
+    refute match?({:ok, _}, Owner.append(pid, extra))
+    assert {:ok, after_status} = Owner.status(pid)
+    assert after_status["committed_frames"] == before["committed_frames"]
+    refute File.exists?(Path.join(root, ".audit_journal.v1.log.compact"))
+  end
+
+  test "security regression: not_published keeps the old log, original capacity, and permits later retry",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    before = File.read!(Path.join(root, "audit_journal.v1.log"))
+    assert :ok = Owner.__test_inject__(pid, :compact_sync_error, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, :soft_capacity_exhausted} = result
+    assert File.read!(Path.join(root, "audit_journal.v1.log")) == before
+    assert {:ok, :committed} = Owner.append(pid, extra)
+  end
+
+  test "security regression: source_invalid poisons immediately with not_committed and restart does not invent extra",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_rewrite_source_same_size)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:not_committed, :source_invalid}} = result
+    assert {:error, :journal_poisoned} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["last_error"] == "not_committed"
+    refute inspect(status) =~ "source_invalid"
+    :ok = GenServer.stop(pid)
+
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    try do
+      started = Owner.start_link(mode: :durable, root: root, name: name)
+
+      case started do
+        {:ok, restarted} ->
+          assert {:ok, pending} = Owner.pending_operations(restarted)
+          refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+
+        {:error, {:journal_open_failed, _reason}} ->
+          refute Process.whereis(name)
+      end
+    after
+      Process.flag(:trap_exit, previous_trap_exit)
+    end
+  end
+
+  test "security regression: publish_uncertain poisons with commit_uncertain and never acknowledges extra",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_dir_sync, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:commit_uncertain, :dir_sync_failed}} = result
+    assert {:error, :journal_poisoned} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["last_error"] == "commit_uncertain"
+    refute inspect(status) =~ "eio"
+  end
+
+  test "security regression: restart after compact+retry replays the extra record from a complete file",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, before} = Owner.status(pid)
+    :ok = GenServer.stop(pid)
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, after_status} = Owner.status(name)
+    assert {:ok, pending} = Owner.pending_operations(name)
+    assert after_status["committed_frames"] == before["committed_frames"]
+    assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "security regression: restart after pre-publication miss does not invent the extra record",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_sync_error, :eio)
+    assert {:error, :soft_capacity_exhausted} = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    :ok = GenServer.stop(pid)
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, pending} = Owner.pending_operations(name)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "security regression: restart after post-publication uncertainty does not invent the extra record",
+       %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_dir_sync, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    :ok = GenServer.stop(pid)
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, pending} = Owner.pending_operations(name)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
   defp stop_named(name) do
     case Process.whereis(name) do
       pid when is_pid(pid) ->
@@ -204,6 +362,72 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
   defp prepared(n) do
     {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
     prepared_record(intent)
+  end
+
+  defp revoke_prepared(n) do
+    {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+    prepared_record(intent)
+  end
+
+  defp fill_soft_reclaimable(pid) do
+    for n <- 1..8 do
+      {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+      assert {:ok, :committed} = Owner.append(pid, prepared_record(intent))
+      assert {:ok, :committed} = Owner.append(pid, applied_record(intent, @t1))
+      assert {:ok, :committed} = Owner.append(pid, delivered_record(intent, @t2))
+    end
+
+    for n <- 9..16 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+  end
+
+  defp fill_hard_reclaimable(pid) do
+    for n <- 1..16 do
+      {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+      assert {:ok, :committed} = Owner.append(pid, prepared_record(intent))
+      assert {:ok, :committed} = Owner.append(pid, rejected_record(intent, @t1))
+    end
+
+    for n <- 1..16 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+  end
+
+  defp fill_unreclaimable_soft(pid) do
+    for n <- 1..32 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+  end
+
+  defp revoke_facts(n) do
+    cap_id = cap_id(n)
+
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.intent_kind(),
+      "operation" => "capability_revoke",
+      "effect_class" => "authority_reduce",
+      "authority_namespace" => "capability",
+      "authority_key" => cap_id,
+      "before_fence" => %{
+        "kind" => "live",
+        "record_id" => "rec_1",
+        "generation" => 3,
+        "revision" => 1,
+        "capability_digest" => @digest
+      },
+      "after_fingerprint" => %{"kind" => "tombstone", "generation" => 3},
+      "audit" => %{
+        "event_type" => "capability_revoked",
+        "data" => %{
+          "capability_id" => cap_id,
+          "principal_id" => "agent_a",
+          "resource_uri" => "arbor://fs/read/x"
+        }
+      },
+      "prepared_at" => @prepared_at
+    }
   end
 
   defp grant_facts(n) do
@@ -258,16 +482,41 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
   end
 
   defp applied_record(intent) do
+    applied_record(intent, @t1)
+  end
+
+  defp applied_record(intent, occurred_at) do
     %{
       "version" => 1,
       "kind" => AuditJournal.record_kind(),
       "record_type" => "effect_applied",
       "operation_id" => intent["operation_id"],
-      "occurred_at" => @t1,
+      "occurred_at" => occurred_at,
       "observation" => %{
         "kind" => "applied",
         "after_fingerprint" => intent["after_fingerprint"]
       }
+    }
+  end
+
+  defp delivered_record(intent, occurred_at) do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "record_type" => "delivered",
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => occurred_at
+    }
+  end
+
+  defp rejected_record(intent, occurred_at) do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "record_type" => "effect_rejected",
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => occurred_at,
+      "observation" => %{"kind" => "rejected", "reason" => "before_mismatch"}
     }
   end
 end

@@ -316,6 +316,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     leftover = Path.join(parent, name)
     File.ln_s!(handle.path, leftover)
     assert {:error, {:not_published, :symlink_rejected}} = AuditJournalFile.compact(handle)
+    assert_live_fd(handle)
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
     assert AuditJournalFile.evidence(reopened).committed_frames == 1
     assert :ok = AuditJournalFile.close(reopened)
@@ -333,12 +334,13 @@ defmodule Arbor.Security.AuditJournalFileTest do
     File.chmod!(other, 0o600)
     File.ln!(other, leftover)
     assert {:error, {:not_published, :hardlink_rejected}} = AuditJournalFile.compact(handle)
+    assert_live_fd(handle)
     File.rm(leftover)
     File.rm(other)
     assert :ok = AuditJournalFile.close(handle)
   end
 
-  test "torn_tail compact is not_published", %{root: root} do
+  test "torn_tail compact is source_invalid", %{root: root} do
     {prepared, applied, _delivered} = grant_lifecycle()
     assert {:ok, handle} = AuditJournalFile.open(root: root)
     assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
@@ -346,7 +348,9 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert {:error, {:not_committed, :write_failed}} = AuditJournalFile.append(handle, applied)
     AuditJournalFile.__test_inject__(:clear)
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
-    assert {:error, {:not_published, :torn_tail}} = AuditJournalFile.compact(reopened)
+    assert {:error, {:source_invalid, reason}} = AuditJournalFile.compact(reopened)
+    assert reason in [:torn_tail, :source_tip_mismatch, :digest_mismatch, :core_mismatch]
+    assert_old_handle_fd_invalid(reopened)
     assert :ok = AuditJournalFile.close(reopened)
   end
 
@@ -358,6 +362,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     AuditJournalFile.__test_inject__(:compact_sync_error, :eio)
     assert {:error, {:not_published, :sync_failed}} = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
+    assert_live_fd(handle)
     assert File.read!(handle.path) == before
     refute_candidate(handle)
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
@@ -373,6 +378,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     AuditJournalFile.__test_inject__(:compact_after_sync_error, :proof)
     assert {:error, {:not_published, :candidate_proof_failed}} = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
+    assert_live_fd(handle)
     assert File.read!(handle.path) == before
     refute_candidate(handle)
   end
@@ -385,6 +391,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     AuditJournalFile.__test_inject__(:compact_rename_before_effect)
     assert {:error, {:not_published, _reason}} = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
+    assert_live_fd(handle)
     assert File.read!(handle.path) == before
     refute_candidate(handle)
   end
@@ -451,28 +458,32 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert {:error, {:publish_uncertain, :replay_mismatch}} = result
   end
 
-  test "rewrite source same-size is not_published", %{root: root} do
+  test "rewrite source same-size is source_invalid", %{root: root} do
     {prepared, _applied, _delivered} = grant_lifecycle()
     assert {:ok, handle} = AuditJournalFile.open(root: root)
     assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
     AuditJournalFile.__test_inject__(:compact_rewrite_source_same_size)
     result = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
-    assert {:error, {:not_published, reason}} = result
+    assert {:error, {:source_invalid, reason}} = result
     assert reason in [:digest_mismatch, :source_tip_mismatch, :core_mismatch]
+    assert_old_handle_fd_invalid(handle)
     refute_candidate(handle)
+    refute match?({:ok, _}, AuditJournalFile.open(root: root))
   end
 
-  test "replace source inode is not_published", %{root: root} do
+  test "replace source inode is source_invalid", %{root: root} do
     {prepared, _applied, _delivered} = grant_lifecycle()
     assert {:ok, handle} = AuditJournalFile.open(root: root)
     assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
     AuditJournalFile.__test_inject__(:compact_replace_source_inode)
     result = AuditJournalFile.compact(handle)
     AuditJournalFile.__test_inject__(:clear)
-    assert {:error, {:not_published, reason}} = result
+    assert {:error, {:source_invalid, reason}} = result
     assert reason in [:identity_changed, :size_mismatch, :source_tip_mismatch]
+    assert_old_handle_fd_invalid(handle)
     refute_candidate(handle)
+    refute match?({:ok, _}, AuditJournalFile.open(root: root))
   end
 
   test "substitute candidate is not_published and does not replace source", %{root: root} do
@@ -493,6 +504,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
            ]
 
     assert File.read!(handle.path) == before
+    assert_live_fd(handle)
     refute_candidate(handle)
   end
 
@@ -513,6 +525,14 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert handle.identity.major_device == stat.major_device
     assert handle.identity.minor_device == stat.minor_device
     assert handle.identity.inode == stat.inode
+  end
+
+  defp assert_live_fd(handle) do
+    assert :ok = :file.sync(handle.fd)
+  end
+
+  defp assert_old_handle_fd_invalid(handle) do
+    assert {:error, _reason} = :file.sync(handle.fd)
   end
 
   defp refute_candidate(handle) do

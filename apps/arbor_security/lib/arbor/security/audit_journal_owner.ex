@@ -7,8 +7,14 @@ defmodule Arbor.Security.AuditJournalOwner do
   Production callers outside this library use `Arbor.Security` status and
   pending facades only.
 
-  Not a generic store. Compaction, Historian delivery, and grant/revoke wiring
-  are later slices.
+  Durable capacity exhaustion may publish one compaction then retry the exact
+  record once when occupancy is reclaimable. A re-proven `{:not_published, _}`
+  keeps the old handle and the original capacity error. `{:source_invalid, _}`
+  and `:closed` poison as `{:not_committed, :source_invalid}`.
+  `{:publish_uncertain, _}` poisons as `{:commit_uncertain, reason}`.
+
+  Not a generic store. Historian delivery and grant/revoke wiring are later
+  slices.
   """
 
   use GenServer
@@ -80,6 +86,13 @@ defmodule Arbor.Security.AuditJournalOwner do
     @spec __test_inject__(GenServer.server(), :clear) :: :ok | {:error, :journal_unavailable}
     def __test_inject__(server, :clear) do
       safe_call(server, {:__test_inject__, :clear}, :query)
+    end
+
+    @doc false
+    @spec __test_inject__(GenServer.server(), atom()) :: :ok | {:error, :journal_unavailable}
+    def __test_inject__(server, kind)
+        when is_atom(kind) and kind != :clear do
+      safe_call(server, {:__test_inject__, kind}, :query)
     end
 
     @doc false
@@ -182,6 +195,10 @@ defmodule Arbor.Security.AuditJournalOwner do
       {:reply, AuditJournalFile.__test_inject__(:clear), state}
     end
 
+    def handle_call({:__test_inject__, kind}, _from, state) when is_atom(kind) do
+      {:reply, AuditJournalFile.__test_inject__(kind), state}
+    end
+
     def handle_call({:__test_inject__, kind, value}, _from, state) do
       {:reply, AuditJournalFile.__test_inject__(kind, value), state}
     end
@@ -217,24 +234,63 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   defp apply_durable_append(state, raw) do
-    case AuditJournalFile.append(state.handle, raw) do
+    finish_durable_append(AuditJournalFile.append(state.handle, raw), state, raw, :first)
+  end
+
+  defp finish_durable_append({:ok, handle}, state, _raw, _phase) do
+    {:reply, {:ok, :committed}, commit_handle(state, handle)}
+  end
+
+  defp finish_durable_append({:ok, handle, :idempotent}, state, _raw, _phase) do
+    {:reply, {:ok, :idempotent}, commit_handle(state, handle)}
+  end
+
+  defp finish_durable_append({:error, {:commit_uncertain, _reason} = err}, state, _raw, _phase) do
+    {:reply, {:error, err}, poison(state, :commit_uncertain)}
+  end
+
+  defp finish_durable_append({:error, {:not_committed, :torn_tail} = err}, state, _raw, _phase) do
+    {:reply, {:error, err}, mark_torn(state)}
+  end
+
+  defp finish_durable_append({:error, {:not_committed, _reason} = err}, state, _raw, _phase) do
+    {:reply, {:error, err}, poison(state, :not_committed)}
+  end
+
+  defp finish_durable_append({:error, reason}, state, raw, :first)
+       when reason in [:soft_capacity_exhausted, :capacity_exhausted] do
+    maybe_compact_and_retry(state, raw, {:error, reason})
+  end
+
+  defp finish_durable_append({:error, reason}, state, _raw, _phase) do
+    {:reply, {:error, reason}, state}
+  end
+
+  defp maybe_compact_and_retry(state, raw, cap_err) do
+    if AuditJournalCore.compaction_reclaims_occupancy?(state.core) do
+      publish_and_retry(state, raw, cap_err)
+    else
+      {:reply, cap_err, state}
+    end
+  end
+
+  defp publish_and_retry(state, raw, cap_err) do
+    case AuditJournalFile.compact(state.handle) do
       {:ok, handle} ->
-        {:reply, {:ok, :committed}, commit_handle(state, handle)}
+        adopted = commit_handle(state, handle)
+        finish_durable_append(AuditJournalFile.append(adopted.handle, raw), adopted, raw, :retry)
 
-      {:ok, handle, :idempotent} ->
-        {:reply, {:ok, :idempotent}, commit_handle(state, handle)}
+      {:error, {:not_published, _reason}} ->
+        {:reply, cap_err, state}
 
-      {:error, {:commit_uncertain, _reason} = err} ->
-        {:reply, {:error, err}, poison(state, :commit_uncertain)}
+      {:error, {:publish_uncertain, reason}} ->
+        {:reply, {:error, {:commit_uncertain, reason}}, poison(state, :commit_uncertain)}
 
-      {:error, {:not_committed, :torn_tail} = err} ->
-        {:reply, {:error, err}, mark_torn(state)}
+      {:error, {:source_invalid, _reason}} ->
+        {:reply, {:error, {:not_committed, :source_invalid}}, poison(state, :not_committed)}
 
-      {:error, {:not_committed, _reason} = err} ->
-        {:reply, {:error, err}, poison(state, :not_committed)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+      {:error, _reason} ->
+        {:reply, {:error, {:not_committed, :source_invalid}}, poison(state, :not_committed)}
     end
   end
 

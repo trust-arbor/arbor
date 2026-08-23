@@ -12,6 +12,9 @@ defmodule Arbor.Security.AuditJournalCore do
   Restore admits the snapshot and bounded pending records, rejects hard occupancy,
   then checks retained-set equality/order/content before installing state.
 
+  `compaction_reclaims_occupancy?/1` is entry-based: projected occupancy is
+  `1 + pending_record_count`, matching compact's `used_entries`.
+
   Compact errors: `:malformed`, `:cross_operation`, `:record_too_large`,
   `:capacity_exhausted`. Restore adds `:pending_mismatch`.
 
@@ -94,6 +97,30 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp fold_records(_state, _improper_tail, _count, _max_records), do: {:error, :malformed}
+
+  @doc """
+  True when compacting would drop entry occupancy below the current count.
+
+  Projected occupancy is `1 + pending_record_count` and must also fit the
+  hard entry cap. Does not invent a source or call `compact/2`.
+  """
+  @spec compaction_reclaims_occupancy?(term()) :: boolean()
+  def compaction_reclaims_occupancy?(state) do
+    with :ok <- valid_state(state),
+         {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
+         {:ok, _pending_manifest, pending} <- compact_pending(pending_ops),
+         {:ok, _terminal_manifest, _compacted} <- compact_terminals(terminal_ops) do
+      projected = 1 + length(pending)
+      current = state["entry_count"]
+      projected < current and projected <= AuditJournal.limits().hard_entry_cap
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
 
   @doc """
   Build a v1 snapshot from reducer state and a committed source binding.
