@@ -329,10 +329,27 @@ unexplained modules. There is no `selected_start_failed` finding.
 `--measure` and `--write` are manager-owned. They stage one trusted
 source lease, run one `arbor_trust` trusted-build, remove
 `releases/COOKIE`, pin the lease-owned `rel/arbor_trust` directory,
-inject a process-private `RELEASE_COOKIE`, probe in a fresh OTP
-`:peer` over `standard_io`, then always release the lease. Production
-does not accept a caller-selected executable, cookie, MFA, or artifact
-path. `--write` publishes exactly
+inject a process-private `RELEASE_COOKIE`, and create a private,
+collision-resistant ephemeral Security authority root before spawning
+the owned worker. The root is passed only to the fixed descendant peer
+as `ARBOR_SECURITY_STATE_DIR`, validated there, and installed as the
+peer-local final authority-root override before selected applications
+start. After bounded peer shutdown the manager recursively removes only
+the identity-bound root it created; removal uncertainty fails the
+measurement closed. The path is not closure evidence or an error detail,
+and the manager VM's Application configuration is never changed.
+
+This measurement-only root lets the production-built `arbor_security`
+exercise its durable startup path without writing operator state. It does
+not add a default or relax production startup: ordinary production boots
+still require an explicitly configured absolute canonical authority root
+and continue to fail closed with `:authority_root_unconfigured` when it is
+absent.
+
+The probe runs in a fresh OTP `:peer` over `standard_io`, then always
+releases the source lease. Production does not accept a caller-selected
+executable, cookie, authority root, MFA, or artifact path. `--write`
+publishes exactly
 `apps/arbor_commands/priv/packaging/safe_recovery_closure.v1.json`.
 A passing artifact `--check` is not an E0B3 result.
 

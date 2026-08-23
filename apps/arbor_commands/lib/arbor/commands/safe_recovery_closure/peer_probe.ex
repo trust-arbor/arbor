@@ -9,6 +9,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   executable, module, function, cookie, or selected set.
   """
 
+  alias Arbor.Common.SafePath
+
   @profile "safe_recovery"
   @selected ["arbor_kernel", "arbor_kernel_runtime", "arbor_security", "arbor_trust"]
   @app_atoms %{
@@ -21,6 +23,9 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   @keep_apps MapSet.new([:kernel, :stdlib, :compiler, :elixir, :logger, :sasl])
   @max_names 512
   @max_modules 4_096
+  @max_authority_root_bytes 4_096
+  @authority_root_prefix "arbor-e0b3-security-"
+  @authority_root_token_hex_bytes 64
 
   @spec measure(String.t()) :: {:ok, map()} | {:error, term()}
   def measure(@profile) do
@@ -53,7 +58,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
     apps = Enum.map(selected, &app_atom!/1)
     pre = snapshot()
 
-    with {:ok, sys_config} <- apply_release_sys_config() do
+    with {:ok, sys_config} <- apply_release_sys_config(),
+         :ok <- install_ephemeral_authority_root() do
       started_at = :erlang.monotonic_time()
       {started, start_failures} = start_selected(apps)
 
@@ -72,6 +78,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
            "os_pid" => os_pid(),
            "boot_time_us" => boot_time_us,
            "cookie_set" => cookie_set?(),
+           "authority_root_configured" => true,
            "sys_config" => sys_config,
            "start_failures" => Enum.sort_by(start_failures, & &1["name"])
          }
@@ -134,6 +141,84 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
       {:ok, root} ->
         apply_sys_config_from_root(root)
     end
+  end
+
+  # The manager is the sole producer of this process-private value. Validate
+  # its exact shape and filesystem binding before making it the final
+  # descendant-local override; never select a fallback in the peer.
+  defp install_ephemeral_authority_root do
+    with {:ok, root} <- fetch_ephemeral_authority_root(),
+         :ok <- validate_ephemeral_authority_root(root) do
+      Application.put_env(:arbor_security, :authority_state_root, root)
+    end
+  end
+
+  defp fetch_ephemeral_authority_root do
+    case System.fetch_env("ARBOR_SECURITY_STATE_DIR") do
+      {:ok, root} when is_binary(root) -> {:ok, root}
+      _missing -> {:error, :ephemeral_authority_root_missing}
+    end
+  end
+
+  defp validate_ephemeral_authority_root(root) do
+    with :ok <- validate_ephemeral_authority_root_text(root),
+         {:ok, tmp} <- resolve_tmp_root(),
+         :ok <- validate_ephemeral_authority_root_name(root, tmp),
+         {:ok, real} <- resolve_authority_root(root),
+         true <- real == root,
+         {:ok, %File.Stat{type: :directory, mode: mode}} <- File.lstat(real),
+         true <- Bitwise.band(mode, 0o077) == 0 do
+      :ok
+    else
+      _unsafe -> {:error, :ephemeral_authority_root_unsafe}
+    end
+  end
+
+  defp validate_ephemeral_authority_root_text(root) do
+    cond do
+      root == "" -> {:error, :invalid}
+      not String.valid?(root) -> {:error, :invalid}
+      byte_size(root) > @max_authority_root_bytes -> {:error, :invalid}
+      String.contains?(root, <<0>>) -> {:error, :invalid}
+      String.contains?(root, "\n") -> {:error, :invalid}
+      Path.type(root) != :absolute -> {:error, :invalid}
+      Path.expand(root) != root -> {:error, :invalid}
+      true -> :ok
+    end
+  end
+
+  defp resolve_tmp_root do
+    case SafePath.resolve_real(System.tmp_dir!()) do
+      {:ok, tmp} -> {:ok, tmp}
+      {:error, _reason} -> {:error, :unsafe}
+    end
+  end
+
+  defp validate_ephemeral_authority_root_name(root, tmp) do
+    name = Path.basename(root)
+    token = String.replace_prefix(name, @authority_root_prefix, "")
+
+    if Path.dirname(root) == tmp and
+         byte_size(token) == @authority_root_token_hex_bytes and
+         byte_size(name) == byte_size(@authority_root_prefix) + @authority_root_token_hex_bytes and
+         lower_hex?(token) do
+      :ok
+    else
+      {:error, :unsafe}
+    end
+  end
+
+  defp resolve_authority_root(root) do
+    case SafePath.resolve_real(root) do
+      {:ok, real} -> {:ok, real}
+      {:error, _reason} -> {:error, :unsafe}
+    end
+  end
+
+  defp lower_hex?(value) do
+    value
+    |> :binary.bin_to_list()
+    |> Enum.all?(fn byte -> byte in ?0..?9 or byte in ?a..?f end)
   end
 
   defp apply_sys_config_from_root(root) do

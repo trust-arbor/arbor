@@ -3,11 +3,12 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
   Monitored OTP `:peer` ownership for the E0B3 closure probe.
 
   Starts one descendant BEAM over `standard_io` using the current pinned
-  Erlang executable, injects a process-private `RELEASE_COOKIE`, installs
-  the admitted artifact ebin path plus the Commands probe path, and
-  invokes only the fixed Commands-owned probe MFA. Callers cannot choose
-  the executable, module, function, cookie, environment, or Erlang
-  arguments. This module does not change K3B scenarios or baselines.
+  Erlang executable, injects a process-private `RELEASE_COOKIE` and
+  manager-owned ephemeral Security authority root, installs the admitted
+  artifact ebin path plus the Commands probe path, and invokes only the
+  fixed Commands-owned probe MFA. Callers cannot choose the executable,
+  module, function, cookie, environment, authority root, or Erlang arguments.
+  This module does not change K3B scenarios or baselines.
   """
 
   alias Arbor.Commands.SafeRecoveryClosure.{PeerProbe, ReleaseLayout}
@@ -22,6 +23,10 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
   @shutdown_timeout_ms 5_000
   @worker_slack_ms 5_000
   @cookie_bytes 32
+  @authority_root_token_bytes 32
+  @authority_root_create_attempts 4
+  @authority_root_prefix "arbor-e0b3-security-"
+  @authority_root_cleanup_opts [max_entries: 100_000, timeout_ms: 10_000]
   @max_code_paths 512
   @max_path_bytes 4_096
   @max_path_bytes_total 256_000
@@ -36,7 +41,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
          {:ok, commands} <- commands_ebin(),
          {:ok, paths} <- admit_paths(runtime ++ ebins ++ [commands]) do
       cookie = random_cookie()
-      run_owned(cookie, paths, release_root)
+      run_with_ephemeral_root(cookie, paths, release_root, "safe_recovery", nil)
     end
   end
 
@@ -53,33 +58,70 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
            {:ok, commands} <- commands_ebin(),
            {:ok, paths} <- admit_paths(runtime ++ ebins ++ [commands]) do
         cookie = random_cookie()
-        run_owned(cookie, paths, release_root, profile_or_selected)
+        run_with_ephemeral_root(cookie, paths, release_root, profile_or_selected, nil)
       end
     end
 
     def __test_measure__(_, _), do: {:error, :invalid_test_measure}
+
+    @doc false
+    @spec __test_measure__(String.t(), String.t() | [String.t()], pid()) ::
+            {:ok, map()} | {:error, term()}
+    def __test_measure__(release_root, profile_or_selected, observer)
+        when is_binary(release_root) and is_pid(observer) do
+      with {:ok, ebins} <- ReleaseLayout.admit(release_root),
+           {:ok, runtime} <- seed_ebins(),
+           {:ok, commands} <- commands_ebin(),
+           {:ok, paths} <- admit_paths(runtime ++ ebins ++ [commands]) do
+        cookie = random_cookie()
+        run_with_ephemeral_root(cookie, paths, release_root, profile_or_selected, observer)
+      end
+    end
+
+    def __test_measure__(_, _, _), do: {:error, :invalid_test_measure}
   end
 
-  defp run_owned(cookie, paths, release_root, request \\ "safe_recovery") do
+  defp run_with_ephemeral_root(cookie, paths, release_root, request, observer) do
+    case create_ephemeral_authority_root(observer) do
+      {:ok, identity} ->
+        result = capture_owned_result(cookie, paths, release_root, identity.path, request)
+
+        case cleanup_authority_root(identity) do
+          :ok -> safe_redact_authority_root(result, identity.path)
+          {:error, _reason} -> {:error, :authority_root_cleanup_failed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp capture_owned_result(cookie, paths, release_root, authority_root, request) do
+    run_owned(cookie, paths, release_root, authority_root, request)
+  catch
+    kind, reason -> {:error, {:peer_runner_crash, {kind, reason}}}
+  end
+
+  defp run_owned(cookie, paths, release_root, authority_root, request) do
     parent = self()
     token = make_ref()
     budget_ms = worker_budget_ms()
 
     {worker, worker_mon} =
       spawn_monitor(fn ->
-        owned_worker(parent, token, cookie, paths, release_root, request)
+        owned_worker(parent, token, cookie, paths, release_root, authority_root, request)
       end)
 
     deadline = monotonic_ms() + budget_ms
     await_owned(token, worker, worker_mon, nil, nil, nil, false, false, deadline)
   end
 
-  defp owned_worker(caller, token, cookie, paths, release_root, request) do
+  defp owned_worker(caller, token, cookie, paths, release_root, authority_root, request) do
     guardian = spawn_link(fn -> guard_caller(caller) end)
     send(caller, {token, :guardian, guardian})
 
     result =
-      case start_peer(cookie, release_root) do
+      case start_peer(cookie, release_root, authority_root) do
         {:ok, control} ->
           send(caller, {token, :control, control})
           work_result = invoke_work(control, paths, request)
@@ -116,9 +158,9 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
     {:error, {:peer_cleanup_failed, control, reason}}
   end
 
-  defp start_peer(cookie, release_root) do
+  defp start_peer(cookie, release_root, authority_root) do
     with {:ok, exec} <- pinned_erlang_executable() do
-      case :peer.start_link(fixed_start_opts(exec, cookie, release_root)) do
+      case :peer.start_link(fixed_start_opts(exec, cookie, release_root, authority_root)) do
         {:ok, control, _node} when is_pid(control) -> {:ok, control}
         {:ok, control} when is_pid(control) -> {:ok, control}
         {:error, reason} -> {:error, {:peer_boot_failed, reason}}
@@ -132,7 +174,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
       {:error, {:peer_boot_failed, {kind, reason}}}
   end
 
-  defp fixed_start_opts(exec, cookie, release_root) do
+  defp fixed_start_opts(exec, cookie, release_root, authority_root) do
     %{
       connection: :standard_io,
       exec: String.to_charlist(exec),
@@ -143,7 +185,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
         {~c"RELEASE_COOKIE", String.to_charlist(cookie)},
         {~c"RELEASE_ROOT", String.to_charlist(release_root)},
         {~c"MIX_ENV", ~c"prod"},
-        {~c"ARBOR_HOME", String.to_charlist(absent_home())}
+        {~c"ARBOR_HOME", String.to_charlist(absent_home())},
+        {~c"ARBOR_SECURITY_STATE_DIR", String.to_charlist(authority_root)}
       ]
     }
   end
@@ -519,7 +562,26 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
     end)
   end
 
-  defp commands_ebin, do: app_ebin(:arbor_commands)
+  defp commands_ebin do
+    case :code.which(@probe_module) do
+      path when is_list(path) ->
+        path
+        |> List.to_string()
+        |> Path.dirname()
+        |> admit_commands_ebin()
+
+      _unavailable ->
+        {:error, {:peer_code_path_missing_app, :arbor_commands}}
+    end
+  end
+
+  defp admit_commands_ebin(ebin) do
+    if File.regular?(Path.join(ebin, "arbor_commands.app")) do
+      {:ok, ebin}
+    else
+      {:error, {:peer_code_path_missing_app, :arbor_commands}}
+    end
+  end
 
   defp app_ebin(app) do
     case :code.lib_dir(app) do
@@ -599,6 +661,111 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
   defp random_cookie do
     :crypto.strong_rand_bytes(@cookie_bytes) |> Base.encode16(case: :lower)
   end
+
+  defp create_ephemeral_authority_root(observer) do
+    case SafePath.resolve_real(System.tmp_dir!()) do
+      {:ok, tmp} ->
+        create_ephemeral_authority_root(tmp, @authority_root_create_attempts, observer)
+
+      {:error, _reason} ->
+        {:error, :authority_root_create_failed}
+    end
+  end
+
+  defp create_ephemeral_authority_root(_tmp, 0, _observer),
+    do: {:error, :authority_root_create_failed}
+
+  defp create_ephemeral_authority_root(tmp, attempts, observer) do
+    token =
+      :crypto.strong_rand_bytes(@authority_root_token_bytes)
+      |> Base.encode16(case: :lower)
+
+    path = Path.join(tmp, @authority_root_prefix <> token)
+
+    case Arbor.Shell.create_private_owned_tree(path) do
+      {:ok, identity} ->
+        notify_authority_root_observer(observer, identity.path)
+        {:ok, identity}
+
+      {:error, :root_exists} ->
+        create_ephemeral_authority_root(tmp, attempts - 1, observer)
+
+      {:error, {:owned_tree_cleanup_retained, _reason, %{identity: identity}}}
+      when is_map(identity) ->
+        case cleanup_authority_root(identity) do
+          :ok -> {:error, :authority_root_create_failed}
+          {:error, _cleanup_reason} -> {:error, :authority_root_cleanup_failed}
+        end
+
+      {:error, {:owned_tree_cleanup_retained, _reason, _evidence}} ->
+        {:error, :authority_root_cleanup_failed}
+
+      {:error, _reason} ->
+        {:error, :authority_root_create_failed}
+    end
+  end
+
+  defp notify_authority_root_observer(observer, path)
+       when is_pid(observer) and is_binary(path) do
+    send(observer, {:safe_recovery_authority_root_created, path})
+    :ok
+  end
+
+  defp notify_authority_root_observer(_observer, _path), do: :ok
+
+  defp cleanup_authority_root(identity) do
+    Arbor.Shell.remove_owned_tree(identity, @authority_root_cleanup_opts)
+  rescue
+    _exception -> {:error, :cleanup_crash}
+  catch
+    _kind, _reason -> {:error, :cleanup_crash}
+  end
+
+  defp safe_redact_authority_root(value, root) do
+    redact_authority_root(value, root)
+  rescue
+    _exception -> {:error, :peer_result_redaction_failed}
+  catch
+    _kind, _reason -> {:error, :peer_result_redaction_failed}
+  end
+
+  defp redact_authority_root(value, root) when is_binary(value),
+    do: String.replace(value, root, "[REDACTED]")
+
+  defp redact_authority_root(%module{} = value, root) do
+    fields =
+      value
+      |> Map.from_struct()
+      |> redact_authority_root(root)
+
+    struct(module, fields)
+  end
+
+  defp redact_authority_root(value, root) when is_map(value) do
+    Map.new(value, fn {key, item} ->
+      {redact_authority_root(key, root), redact_authority_root(item, root)}
+    end)
+  end
+
+  defp redact_authority_root(value, root) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.map(&redact_authority_root(&1, root))
+    |> List.to_tuple()
+  end
+
+  defp redact_authority_root(value, root) when is_list(value) do
+    if List.ascii_printable?(value) do
+      value
+      |> List.to_string()
+      |> redact_authority_root(root)
+      |> String.to_charlist()
+    else
+      Enum.map(value, &redact_authority_root(&1, root))
+    end
+  end
+
+  defp redact_authority_root(value, _root), do: value
 
   defp absent_home do
     "/private/tmp/arbor-e0b3-absent-" <>
