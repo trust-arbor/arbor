@@ -336,7 +336,7 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
 
   test "durable hard-capacity reserve reclaimable terminals publish once", %{name: name} do
     root = unique_root()
-    extra = revoke_prepared(17)
+    extra = revoke_prepared(33)
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
     fill_hard_reclaimable(pid)
     assert {:ok, :committed} = Owner.append(pid, extra)
@@ -346,9 +346,9 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     assert status["committed_frames"] == 18
     assert status["pending_count"] == 17
     assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
-    grant_ids = Enum.map(1..16, fn n -> prepared(n)["operation_id"] end)
+    revoke_ids = Enum.map(17..32, fn n -> revoke_prepared(n)["operation_id"] end)
     pending_ids = Enum.map(pending, & &1["operation_id"])
-    assert Enum.all?(grant_ids, &(&1 in pending_ids))
+    assert Enum.all?(revoke_ids, &(&1 in pending_ids))
   end
 
   test "unreclaimable soft and hard capacity do not publish", %{name: name} do
@@ -428,7 +428,8 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
           assert {:ok, pending} = Owner.pending_operations(restarted)
           refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
           assert {:ok, after_status} = Owner.status(restarted)
-          refute after_status["poisoned"] == true and after_status["serving"] == true
+          assert after_status["serving"] == true
+          assert after_status["poisoned"] == false
 
         {:error, {:journal_open_failed, _reason}} ->
           refute Process.whereis(name)
@@ -505,8 +506,12 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     root = unique_root()
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
     fill_unreclaimable_soft(pid)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    applied = applied_record(intent, @t1)
+    assert {:ok, :committed} = Owner.append(pid, applied)
     assert {:ok, before} = Owner.status(pid)
-    other = Map.put(prepared(1), "occurred_at", "2026-08-20T12:00:09Z")
+    other = Map.put(applied, "occurred_at", "2026-08-20T12:00:09Z")
+    assert {:ok, _} = AuditJournal.admit_record(other)
     assert {:error, :operation_conflict} = Owner.append(pid, other)
     assert {:error, :malformed} = Owner.append(pid, %{"nope" => true})
     assert {:ok, after_status} = Owner.status(pid)
@@ -540,6 +545,8 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
     assert {:ok, after_status} = Owner.status(name)
     assert {:ok, after_pending} = Owner.pending_operations(name)
+    assert after_status["serving"] == true
+    assert after_status["poisoned"] == false
     assert after_status["entry_count"] == before["entry_count"]
     assert after_status["committed_frames"] == before["committed_frames"]
     assert after_pending == pending
@@ -679,8 +686,8 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
       assert {:ok, :committed} = Owner.append(pid, rejected_record(intent, @t1))
     end
 
-    for n <- 1..16 do
-      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    for n <- 17..32 do
+      assert {:ok, :committed} = Owner.append(pid, revoke_prepared(n))
     end
   end
 

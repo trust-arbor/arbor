@@ -185,14 +185,15 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
   test "security regression: durable hard-capacity reserve reclaimable terminals publish once and keep pending intact",
        %{name: name} do
     root = unique_root()
-    extra = revoke_prepared(17)
+    extra = revoke_prepared(33)
     assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
     fill_hard_reclaimable(pid)
     assert {:ok, :committed} = Owner.append(pid, extra)
     assert {:ok, pending} = Owner.pending_operations(pid)
     pending_ids = Enum.map(pending, & &1["operation_id"])
     assert extra["operation_id"] in pending_ids
-    assert Enum.all?(Enum.map(1..16, fn n -> prepared(n)["operation_id"] end), &(&1 in pending_ids))
+    revoke_ids = Enum.map(17..32, fn n -> revoke_prepared(n)["operation_id"] end)
+    assert Enum.all?(revoke_ids, &(&1 in pending_ids))
   end
 
   test "security regression: unreclaimable soft-capacity does not publish a replacement", %{
@@ -252,6 +253,9 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
         {:ok, restarted} ->
           assert {:ok, pending} = Owner.pending_operations(restarted)
           refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+          assert {:ok, after_status} = Owner.status(restarted)
+          assert after_status["serving"] == true
+          assert after_status["poisoned"] == false
 
         {:error, {:journal_open_failed, _reason}} ->
           refute Process.whereis(name)
@@ -290,6 +294,8 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
     assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
     assert {:ok, after_status} = Owner.status(name)
     assert {:ok, pending} = Owner.pending_operations(name)
+    assert after_status["serving"] == true
+    assert after_status["poisoned"] == false
     assert after_status["committed_frames"] == before["committed_frames"]
     assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
   end
@@ -389,8 +395,8 @@ defmodule Arbor.Security.AuditJournalOwnerSecurityRegressionTest do
       assert {:ok, :committed} = Owner.append(pid, rejected_record(intent, @t1))
     end
 
-    for n <- 1..16 do
-      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    for n <- 17..32 do
+      assert {:ok, :committed} = Owner.append(pid, revoke_prepared(n))
     end
   end
 

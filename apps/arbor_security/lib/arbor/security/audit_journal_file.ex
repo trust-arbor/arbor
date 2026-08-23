@@ -175,6 +175,16 @@ defmodule Arbor.Security.AuditJournalFile do
 
   def append(_handle, _raw), do: {:error, :closed}
 
+  @doc """
+  Publishes a snapshot-plus-pending replacement of the bound log.
+
+  Result classes:
+  - `{:ok, handle}` — candidate renamed and rebound
+  - `{:error, :closed}` — handle is closed or not a live file handle
+  - `{:error, {:not_published, reason}}` — rename did not occur; source is intact
+  - `{:error, {:source_invalid, reason}}` — source identity or tip was lost before rename
+  - `{:error, {:publish_uncertain, reason}}` — rename or post-rename proof is ambiguous
+  """
   @spec compact(t()) ::
           {:ok, t()}
           | {:error, :closed}

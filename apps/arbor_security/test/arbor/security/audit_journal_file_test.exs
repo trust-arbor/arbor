@@ -348,8 +348,7 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert {:error, {:not_committed, :write_failed}} = AuditJournalFile.append(handle, applied)
     AuditJournalFile.__test_inject__(:clear)
     assert {:ok, reopened} = AuditJournalFile.open(root: root)
-    assert {:error, {:source_invalid, reason}} = AuditJournalFile.compact(reopened)
-    assert reason in [:torn_tail, :source_tip_mismatch, :digest_mismatch, :core_mismatch]
+    assert {:error, {:source_invalid, :size_mismatch}} = AuditJournalFile.compact(reopened)
     assert_old_handle_fd_invalid(reopened)
     assert :ok = AuditJournalFile.close(reopened)
   end

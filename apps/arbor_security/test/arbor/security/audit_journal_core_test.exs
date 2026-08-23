@@ -690,8 +690,8 @@ defmodule Arbor.Security.AuditJournalCoreTest do
         end)
 
       state =
-        Enum.reduce(1..16, state, fn n, acc ->
-          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+        Enum.reduce(17..32, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
           {:ok, next} = Core.append(acc, prepared_record(intent))
           next
         end)

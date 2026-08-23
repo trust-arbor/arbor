@@ -339,6 +339,12 @@ defmodule Arbor.Security.AuditJournalFileCore do
 
   def classify_publish_phase(_phase, _reason), do: {:error, :malformed}
 
+  @doc """
+  Classifies a post-miss source re-proof.
+
+  `:ok` keeps `{:not_published, reason}`. `{:error, proof}` with an atom proof
+  is `{:source_invalid, proof}`. Any other shape is `{:error, :malformed}`.
+  """
   @spec classify_source_reproof(term(), term()) ::
           {:not_published, atom()} | {:source_invalid, atom()} | {:error, :malformed}
   def classify_source_reproof(:ok, reason) when is_atom(reason), do: {:not_published, reason}

@@ -289,6 +289,9 @@ defmodule Arbor.Security.AuditJournalOwner do
       {:error, {:source_invalid, _reason}} ->
         {:reply, {:error, {:not_committed, :source_invalid}}, poison(state, :not_committed)}
 
+      {:error, :closed} ->
+        {:reply, {:error, {:not_committed, :source_invalid}}, poison(state, :not_committed)}
+
       {:error, _reason} ->
         {:reply, {:error, {:not_committed, :source_invalid}}, poison(state, :not_committed)}
     end
