@@ -31,6 +31,13 @@ defmodule Arbor.Gateway.RouterSecurityTest do
 
   defp call(conn), do: Router.call(conn, Router.init([]))
 
+  test "MCP transport outlives the owned coding-readiness callback budget" do
+    opts = Router.mcp_http_init_opts()
+
+    assert Keyword.fetch!(opts, :handler_call_timeout) == 30_000
+    assert Keyword.fetch!(opts, :handler_call_timeout) > 10_000
+  end
+
   describe "rate limiter ordering (codex rate-limit.gateway-auth-failures-before-limiter)" do
     test "security regression: FAILED auth attempts are rate-limited (limiter runs before auth)" do
       # Tight limit so we trip it quickly.

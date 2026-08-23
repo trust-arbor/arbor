@@ -17,6 +17,19 @@ defmodule Arbor.Gateway.Router do
   alias Arbor.Gateway.Auth
   alias Arbor.Gateway.JwtAuth
 
+  # Readiness owns a 10-second callback budget. Keep the outer MCP transport
+  # strictly larger so it can return the owned timeout result instead of
+  # terminating a legitimate probe at the same deadline.
+  @mcp_http_init_opts [
+    handler: Arbor.Gateway.MCP.Handler,
+    handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
+    handler_call_timeout: 30_000,
+    server_info: %{name: "arbor", version: "0.1.0"},
+    protocol_mode: :legacy_only,
+    sse_enabled: true,
+    cors_enabled: false
+  ]
+
   plug(Plug.Logger)
   plug(:match)
   # L (codex rate-limit.gateway-auth-failures-before-limiter): the IP-keyed rate
@@ -46,14 +59,7 @@ defmodule Arbor.Gateway.Router do
   # C1: CORS disabled — MCP is authenticated and should not accept browser-origin requests
   forward("/mcp",
     to: ExMCP.HttpPlug,
-    init_opts: [
-      handler: Arbor.Gateway.MCP.Handler,
-      handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
-      server_info: %{name: "arbor", version: "0.1.0"},
-      protocol_mode: :legacy_only,
-      sse_enabled: true,
-      cors_enabled: false
-    ]
+    init_opts: @mcp_http_init_opts
   )
 
   forward("/api/bridge", to: Arbor.Gateway.Bridge.Router)
@@ -96,6 +102,9 @@ defmodule Arbor.Gateway.Router do
       _ -> Plug.Conn.read_body(conn, opts)
     end
   end
+
+  @doc false
+  def mcp_http_init_opts, do: @mcp_http_init_opts
 
   # Try SignedRequest auth before JWT — non-destructive passthrough.
   # External agents (Claude Code, etc.) authenticate per-request via Ed25519
