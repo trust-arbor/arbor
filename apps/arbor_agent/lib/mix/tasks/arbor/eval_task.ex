@@ -53,6 +53,8 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
     _ = Application.ensure_all_started(:arbor_persistence_ecto)
 
+    await_provider_route_evidence!()
+
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
 
     variants = parse_variants(opts[:variants])
@@ -102,6 +104,66 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
   end
 
   # -- Parsers --
+
+  # `ProviderRouteEvidence` becomes ready asynchronously after `arbor_ai`
+  # starts. The eval used to begin beating immediately, so every heartbeat hit
+  # `route_failure_snapshot/1` before it was ready, got `{:error, :unavailable}`,
+  # and failed route assembly — reported as `Avg heartbeats: 0.0` while the
+  # trial was still scored "Successful" because nothing crashed.
+  #
+  # A long-running server never shows this: by the time anything beats, evidence
+  # has long been ready. Only the short-lived eval process races it.
+  #
+  # Wait rather than bypassing the route profile: the profile gates production
+  # routing (`strict_evidence: true`), and an eval that skipped it would measure
+  # something other than what actually runs.
+  defp await_provider_route_evidence!(timeout_ms \\ 30_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    case wait_for_evidence(deadline) do
+      :ok ->
+        :ok
+
+      :timeout ->
+        # Report the service's own status. A replay failure parks it at
+        # {:blocked, reason}; without printing that, the symptom is an
+        # unexplained 0-heartbeat run.
+        Mix.shell().error("""
+        Provider route evidence did not become ready within #{div(timeout_ms, 1000)}s.
+        Status: #{inspect(safe_evidence_status())}
+        Heartbeats will fail route assembly and every trial will report 0 heartbeats.
+        """)
+    end
+  end
+
+  defp wait_for_evidence(deadline) do
+    if evidence_ready?() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        :timeout
+      else
+        Process.sleep(250)
+        wait_for_evidence(deadline)
+      end
+    end
+  end
+
+  defp safe_evidence_status do
+    Arbor.AI.provider_route_evidence_status()
+  rescue
+    e -> {:status_unavailable, Exception.message(e)}
+  catch
+    k, r -> {:status_unavailable, {k, r}}
+  end
+
+  defp evidence_ready? do
+    match?(%{available: true}, Arbor.AI.provider_route_evidence_status())
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
 
   # A bare `{:ok, _} =` match turned any startup failure into a MatchError whose
   # message was the raw error tuple — which is how a 5s ActionRegistry

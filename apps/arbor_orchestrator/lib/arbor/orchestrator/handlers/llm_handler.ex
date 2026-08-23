@@ -414,21 +414,24 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         end
     end
   rescue
-    _ ->
-      {:error,
-       %Outcome{
-         status: :fail,
-         failure_reason: "Provider route assembly failed: :malformed",
-         context_updates: %{"last_response" => nil}
-       }}
+    exception ->
+      # Keep the real cause. This previously reported a hardcoded `:malformed`
+      # for ANY raise, so a heartbeat that died here said only "Provider route
+      # assembly failed: :malformed" — which is not what assembly returned (it
+      # succeeds), but the rescue's own placeholder. That sent diagnosis after a
+      # non-existent assembly error while the true exception was discarded.
+      {:error, route_assembly_failure(Exception.message(exception))}
   catch
-    _, _ ->
-      {:error,
-       %Outcome{
-         status: :fail,
-         failure_reason: "Provider route assembly failed: :malformed",
-         context_updates: %{"last_response" => nil}
-       }}
+    kind, reason ->
+      {:error, route_assembly_failure(inspect({kind, reason}))}
+  end
+
+  defp route_assembly_failure(detail) do
+    %Outcome{
+      status: :fail,
+      failure_reason: "Provider route assembly failed: #{String.slice(detail, 0, 300)}",
+      context_updates: %{"last_response" => nil}
+    }
   end
 
   defp call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts) do
