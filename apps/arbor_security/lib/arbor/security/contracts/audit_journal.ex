@@ -7,6 +7,16 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   - record: `arbor.security.authority_mutation_record.v1`
   - snapshot: `arbor.security.audit_journal_snapshot.v1`
 
+  Compact grammar (`pending_manifest` and `terminals` are maps keyed by
+  operation_id, sorted on encode, and must not overlap):
+  - pending: `prepared:<64 lowercase hex>` or
+    `prepared:<64 hex>|effect_applied:<64 hex>`
+  - delivered terminal:
+    `delivered|<effect_class>|<intent_sha256>|prepared:<hex>|effect_applied:<hex>|delivered:<hex>`
+  - rejected terminal:
+    `effect_rejected|<effect_class>|<intent_sha256>|prepared:<hex>|effect_rejected:<hex>`
+  - `effect_class` is `authority_increase` or `authority_reduce`
+
   Pure only: no IO, time, randomness, processes, ETS, logging, signals, or
   store/facade calls. Time and identifiers enter as validated data.
   """

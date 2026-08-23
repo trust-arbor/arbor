@@ -328,6 +328,176 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
     assert {:error, :capacity_exhausted} = Core.restore(snapshot, records)
   end
 
+  test "security regression: empty compact and restore store a bounded integer snapshot size" do
+    assert {:ok, empty} = Core.new()
+    source = compact_source(0, 0)
+    assert {:ok, compacted, snapshot, []} = Core.compact(empty, source)
+    assert is_integer(compacted["snapshot_bytes"])
+    assert compacted["snapshot_bytes"] >= 0
+    assert {:ok, bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+    assert compacted["snapshot_bytes"] == byte_size(bytes)
+    assert compacted["snapshot_bytes"] <= AuditJournal.limits().max_snapshot_bytes
+
+    cap = Core.capacity(compacted)
+    assert cap["used_entries"] == 1
+    assert cap["used_bytes"] == compacted["snapshot_bytes"]
+
+    assert {:ok, restored} = Core.restore(snapshot, [])
+    assert is_integer(restored["snapshot_bytes"])
+    assert restored["snapshot_bytes"] == compacted["snapshot_bytes"]
+    assert Core.capacity(restored)["used_entries"] == 1
+    assert Core.capacity(restored)["used_bytes"] == restored["snapshot_bytes"]
+    assert Core.show(restored)["operations"] == []
+  end
+
+  test "security regression: non-empty compact and restore use integer snapshot size once" do
+    {:ok, grant} = AuditJournal.admit_intent(grant_absent())
+    {:ok, revoke} = AuditJournal.admit_intent(revoke_facts())
+    prepared_grant = prepared_record(grant)
+    applied_grant = applied_record(grant)
+    delivered = delivered_record(grant)
+    prepared_revoke = prepared_record(revoke)
+    applied_revoke = applied_record(revoke)
+
+    assert {:ok, state} =
+             Core.fold([
+               prepared_grant,
+               applied_grant,
+               delivered,
+               prepared_revoke,
+               applied_revoke
+             ])
+
+    source = compact_source(5, 10)
+    assert {:ok, compacted, snapshot, pending} = Core.compact(state, source)
+    assert length(pending) == 2
+    assert is_integer(compacted["snapshot_bytes"])
+    assert compacted["snapshot_bytes"] >= 0
+    assert {:ok, bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+    assert compacted["snapshot_bytes"] == byte_size(bytes)
+
+    pending_bytes = pending_byte_size(pending)
+    assert Core.capacity(compacted)["used_bytes"] == compacted["snapshot_bytes"] + pending_bytes
+    assert Core.capacity(compacted)["used_entries"] == 1 + length(pending)
+
+    assert {:ok, restored} = Core.restore(snapshot, pending)
+    assert is_integer(restored["snapshot_bytes"])
+    assert restored["snapshot_bytes"] == compacted["snapshot_bytes"]
+    assert Core.capacity(restored)["used_bytes"] == restored["snapshot_bytes"] + pending_bytes
+    assert Core.capacity(restored)["used_entries"] == 1 + length(pending)
+  end
+
+  test "security regression: prepared-only compact expands pending entries for restore" do
+    {:ok, intent} = AuditJournal.admit_intent(grant_absent())
+    prepared = prepared_record(intent)
+    assert {:ok, state} = Core.fold([prepared])
+    source = compact_source(1, 0)
+    assert {:ok, compacted, snapshot, pending} = Core.compact(state, source)
+    assert length(pending) == 1
+    assert hd(pending)["record_type"] == "prepared"
+
+    entries = AuditJournal.snapshot_pending_entries(snapshot)
+    assert length(entries) == 1
+    assert hd(entries)["operation_id"] == intent["operation_id"]
+    assert hd(entries)["record_type"] == "prepared"
+    assert is_binary(hd(entries)["sha256"])
+    assert byte_size(hd(entries)["sha256"]) == 64
+
+    assert {:ok, restored} = Core.restore(snapshot, pending)
+    assert is_integer(restored["snapshot_bytes"])
+    assert restored["snapshot_bytes"] >= 0
+    assert Core.capacity(restored)["used_entries"] == 2
+    assert Core.show(restored)["operations"] == Core.show(compacted)["operations"]
+    assert {:ok, ^restored, :idempotent} = Core.append(restored, prepared)
+  end
+
+  test "security regression: restore hard occupancy precedes retained-set mismatch" do
+    records =
+      Enum.map(1..48, fn n ->
+        {:ok, intent} = AuditJournal.admit_intent(grant_n(n))
+        prepared_record(intent)
+      end)
+
+    snapshot = %{
+      "version" => 1,
+      "kind" => AuditJournal.snapshot_kind(),
+      "source" => compact_source(0, 0),
+      "pending_manifest" => %{},
+      "terminals" => %{}
+    }
+
+    assert {:ok, _} = AuditJournal.admit_snapshot(snapshot)
+    assert {:error, :capacity_exhausted} = Core.restore(snapshot, records)
+    refute match?({:error, :pending_mismatch}, Core.restore(snapshot, records))
+    refute match?({:error, :malformed}, Core.restore(snapshot, records))
+    refute match?({:error, :cross_operation}, Core.restore(snapshot, records))
+  end
+
+  test "security regression: restore occupancy does not bypass malformed or duplicate-record admission" do
+    snapshot = %{
+      "version" => 1,
+      "kind" => AuditJournal.snapshot_kind(),
+      "source" => compact_source(0, 0),
+      "pending_manifest" => %{},
+      "terminals" => %{}
+    }
+
+    malformed = List.duplicate(%{"nope" => true}, 48)
+    assert {:error, :malformed} = Core.restore(snapshot, malformed)
+    refute match?({:error, :capacity_exhausted}, Core.restore(snapshot, malformed))
+
+    {:ok, intent} = AuditJournal.admit_intent(grant_n(1))
+    prepared = prepared_record(intent)
+    duplicates = List.duplicate(prepared, 48)
+    assert {:error, :pending_mismatch} = Core.restore(snapshot, duplicates)
+    refute match?({:error, :capacity_exhausted}, Core.restore(snapshot, duplicates))
+
+    cross =
+      Enum.map(1..48, fn n ->
+        {:ok, member_intent} = AuditJournal.admit_intent(grant_n(n))
+        Map.put(prepared_record(member_intent), "operation_id", String.duplicate("c", 64))
+      end)
+
+    assert {:error, :cross_operation} = Core.restore(snapshot, cross)
+    refute match?({:error, :capacity_exhausted}, Core.restore(snapshot, cross))
+  end
+
+  test "security regression: restore hard byte occupancy precedes retained-set mismatch" do
+    limits = AuditJournal.limits()
+
+    snapshot = %{
+      "version" => 1,
+      "kind" => AuditJournal.snapshot_kind(),
+      "source" => compact_source(0, 0),
+      "pending_manifest" => %{},
+      "terminals" => %{}
+    }
+
+    assert {:ok, admitted} = AuditJournal.admit_snapshot(snapshot)
+    assert {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(admitted)
+    snap_size = byte_size(snap_bytes)
+
+    {records, used_bytes} =
+      Enum.reduce_while(1..(limits.hard_entry_cap - 1), {[], snap_size}, fn n, {acc, used} ->
+        {:ok, intent} = AuditJournal.admit_intent(large_grant_n(n))
+        record = prepared_record(intent)
+        {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+        next_used = used + byte_size(bytes)
+        next_acc = acc ++ [record]
+
+        if next_used > limits.hard_byte_cap do
+          {:halt, {next_acc, next_used}}
+        else
+          {:cont, {next_acc, next_used}}
+        end
+      end)
+
+    assert used_bytes > limits.hard_byte_cap
+    assert 1 + length(records) <= limits.hard_entry_cap
+    assert {:error, :capacity_exhausted} = Core.restore(snapshot, records)
+    refute match?({:error, :pending_mismatch}, Core.restore(snapshot, records))
+  end
+
   test "security regression: byte caps precede UTF-8 and grammar scans" do
     assert {:ok, _intent} = AuditJournal.admit_intent(grant_absent())
 
@@ -450,6 +620,27 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
     grant_absent()
     |> Map.put("authority_key", cap_id)
     |> put_in(["audit", "data", "capability_id"], cap_id)
+  end
+
+  defp large_grant_n(n) do
+    grant_n(n)
+    |> put_in(["audit", "data", "resource_uri"], String.duplicate("r", 2048))
+    |> put_in(["audit", "data", "principal_id"], String.duplicate("p", 256))
+    |> Map.merge(%{
+      "actor_id" => String.duplicate("a", 256),
+      "task_id" => String.duplicate("t", 256),
+      "session_id" => String.duplicate("s", 256),
+      "correlation_id" => String.duplicate("c", 128),
+      "causation_id" => String.duplicate("d", 128)
+    })
+    |> put_in(["after_fingerprint", "record_id"], String.duplicate("i", 128))
+  end
+
+  defp pending_byte_size(records) do
+    Enum.reduce(records, 0, fn record, acc ->
+      {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+      acc + byte_size(bytes)
+    end)
   end
 
   defp revoke_n(n) do

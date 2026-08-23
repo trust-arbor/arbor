@@ -6,6 +6,15 @@ defmodule Arbor.Security.AuditJournalCore do
   or prepared -> effect_rejected, exact duplicate/conflict semantics, static-floor
   capacity accounting, and pure snapshot compact/restore.
 
+  Compact occupancy is 1 (the snapshot) plus retained pending records. Terminals
+  compact to fingerprints; pending records are retained in full.
+  `snapshot_bytes` is a non-negative integer canonical snapshot byte size.
+  Restore admits the snapshot and bounded pending records, rejects hard occupancy,
+  then checks retained-set equality/order/content before installing state.
+
+  Compact errors: `:malformed`, `:cross_operation`, `:record_too_large`,
+  `:capacity_exhausted`. Restore adds `:pending_mismatch`.
+
   Returns data and errors only. No effects, IO, time, processes, ETS, logging,
   signals, or store/facade calls.
   """
@@ -32,6 +41,14 @@ defmodule Arbor.Security.AuditJournalCore do
           | :soft_capacity_exhausted
           | :capacity_exhausted
           | :pending_mismatch
+
+  @type compact_error ::
+          :malformed
+          | :cross_operation
+          | :record_too_large
+          | :capacity_exhausted
+
+  @type restore_error :: compact_error() | :pending_mismatch
 
   @spec new() :: {:ok, state()}
   def new do
@@ -78,13 +95,21 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp fold_records(_state, _improper_tail, _count, _max_records), do: {:error, :malformed}
 
+  @doc """
+  Build a v1 snapshot from reducer state and a committed source binding.
+
+  Occupancy becomes 1 (the snapshot) plus retained pending records. Terminals
+  compact to fingerprints. `snapshot_bytes` is a non-negative integer.
+  Errors: `:malformed`, `:cross_operation`, `:record_too_large`,
+  `:capacity_exhausted`.
+  """
   @spec compact(term(), term()) ::
-          {:ok, state(), map(), [map()]} | {:error, fold_error()}
+          {:ok, state(), map(), [map()]} | {:error, compact_error()}
   def compact(state, source) do
     with :ok <- valid_state(state),
          {:ok, snapshot, pending, operations} <- build_compact_snapshot(state, source),
-         {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)) do
-      finish_compact(state, snapshot, pending, operations, snap_bytes)
+         {:ok, snap_size} <- snapshot_occupancy_size(snapshot) do
+      finish_compact(snapshot, pending, operations, snap_size)
     end
   rescue
     _ -> {:error, :malformed}
@@ -92,13 +117,22 @@ defmodule Arbor.Security.AuditJournalCore do
     _, _ -> {:error, :malformed}
   end
 
-  @spec restore(term(), term()) :: {:ok, state()} | {:error, fold_error()}
+  @doc """
+  Install an admitted snapshot plus retained pending records.
+
+  Admits snapshot and bounded pending first, rejects hard occupancy, then
+  checks retained-set equality, order, and content before installing state.
+  Errors: `:malformed`, `:cross_operation`, `:record_too_large`,
+  `:capacity_exhausted`, `:pending_mismatch`.
+  """
+  @spec restore(term(), term()) :: {:ok, state()} | {:error, restore_error()}
   def restore(snapshot, pending_records) do
     with {:ok, admitted} <- map_admit(AuditJournal.admit_snapshot(snapshot)),
-         {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(admitted)),
+         {:ok, snap_size} <- snapshot_occupancy_size(admitted),
          {:ok, supplied} <- admit_pending_list(pending_records),
+         {:ok, used_entries, used_bytes} <- restore_occupancy(supplied, snap_size),
          :ok <- match_pending_entries(supplied, admitted) do
-      install_restored(admitted, supplied, snap_bytes)
+      finish_restore(admitted, supplied, snap_size, used_entries, used_bytes)
     end
   rescue
     _ -> {:error, :malformed}
@@ -117,7 +151,7 @@ defmodule Arbor.Security.AuditJournalCore do
           "operation_id" => operation_id,
           "status" => op["status"],
           "effect_class" => op["effect_class"],
-          "intent_sha256" => op_intent_sha256(op)
+          "intent_sha256" => operation_intent_digest(op)
         }
       end)
 
@@ -222,6 +256,25 @@ defmodule Arbor.Security.AuditJournalCore do
   defp map_bytes({:ok, bytes}), do: {:ok, bytes}
   defp map_bytes({:error, :record_too_large}), do: {:error, :record_too_large}
   defp map_bytes({:error, _reason}), do: {:error, :malformed}
+
+  defp snapshot_occupancy_size(snapshot) do
+    case map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)) do
+      {:ok, bytes} when is_binary(bytes) ->
+        size = byte_size(bytes)
+
+        if size > AuditJournal.limits().max_snapshot_bytes do
+          {:error, :record_too_large}
+        else
+          {:ok, size}
+        end
+
+      {:ok, _not_binary} ->
+        {:error, :malformed}
+
+      {:error, _} = err ->
+        err
+    end
+  end
 
   defp transition(state, record, bytes) do
     limits = AuditJournal.limits()
@@ -383,11 +436,11 @@ defmodule Arbor.Security.AuditJournalCore do
     }
   end
 
-  defp op_intent_sha256(%{"intent_sha256" => sha256}) when is_binary(sha256), do: sha256
-  defp op_intent_sha256(%{"intent" => intent}), do: intent_sha256(intent)
-  defp op_intent_sha256(_op), do: String.duplicate("0", 64)
+  defp operation_intent_digest(%{"intent_sha256" => sha256}) when is_binary(sha256), do: sha256
+  defp operation_intent_digest(%{"intent" => intent}), do: canonical_intent_digest(intent)
+  defp operation_intent_digest(_op), do: String.duplicate("0", 64)
 
-  defp intent_sha256(intent) when is_map(intent) do
+  defp canonical_intent_digest(intent) when is_map(intent) do
     case AuditJournal.canonical_intent_bytes(intent) do
       {:ok, bytes} ->
         Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
@@ -397,7 +450,7 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
-  defp intent_sha256(_intent), do: String.duplicate("0", 64)
+  defp canonical_intent_digest(_intent), do: String.duplicate("0", 64)
 
   defp build_compact_snapshot(state, source) do
     with {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
@@ -422,20 +475,21 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
-  defp finish_compact(_state, snapshot, pending, operations, snap_bytes) do
+  defp finish_compact(snapshot, pending, operations, snap_size)
+       when is_integer(snap_size) and snap_size >= 0 do
     limits = AuditJournal.limits()
     pending_n = length(pending)
 
     case sum_record_bytes(pending) do
       {:ok, pending_bytes} ->
         used_entries = 1 + pending_n
-        used_bytes = snap_bytes + pending_bytes
+        used_bytes = snap_size + pending_bytes
 
         finish_compact_occupancy(
           snapshot,
           pending,
           operations,
-          snap_bytes,
+          snap_size,
           used_entries,
           used_bytes,
           limits
@@ -446,11 +500,13 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
+  defp finish_compact(_snapshot, _pending, _operations, _snap_size), do: {:error, :malformed}
+
   defp finish_compact_occupancy(
          snapshot,
          pending,
          operations,
-         snap_bytes,
+         snap_size,
          used_entries,
          used_bytes,
          limits
@@ -464,7 +520,7 @@ defmodule Arbor.Security.AuditJournalCore do
         "entry_count" => used_entries,
         "byte_count" => used_bytes,
         "snapshot" => snapshot,
-        "snapshot_bytes" => snap_bytes
+        "snapshot_bytes" => snap_size
       }
 
       {:ok, next, snapshot, pending}
@@ -498,17 +554,24 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp compact_pending(pending_ops) do
-    pending_ops
-    |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
-    |> Enum.reduce_while({:ok, %{}, []}, fn {operation_id, op}, {:ok, manifest, records} ->
-      case compact_pending_op(operation_id, op) do
-        {:ok, compact, decoded} ->
-          {:cont, {:ok, Map.put(manifest, operation_id, compact), records ++ decoded}}
+    result =
+      pending_ops
+      |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
+      |> Enum.reduce_while({:ok, %{}, []}, fn {operation_id, op}, {:ok, manifest, records} ->
+        case compact_pending_op(operation_id, op) do
+          {:ok, compact, decoded} ->
+            {:cont,
+             {:ok, Map.put(manifest, operation_id, compact), Enum.reverse(decoded, records)}}
 
-        {:error, _} = err ->
-          {:halt, err}
-      end
-    end)
+          {:error, _} = err ->
+            {:halt, err}
+        end
+      end)
+
+    case result do
+      {:ok, manifest, records} -> {:ok, manifest, Enum.reverse(records)}
+      {:error, _} = err -> err
+    end
   end
 
   defp compact_pending_op(operation_id, op) do
@@ -599,6 +662,7 @@ defmodule Arbor.Security.AuditJournalCore do
     {:ok, "prepared:" <> prepared <> "|effect_applied:" <> applied}
   end
 
+  # Invariant backstop, not a success path.
   defp pending_compact_string(_status, _fingerprints), do: {:error, :malformed}
 
   defp compact_terminals(terminal_ops) do
@@ -655,7 +719,7 @@ defmodule Arbor.Security.AuditJournalCore do
     with :ok <- require_exact_types(records, types),
          {:ok, decoded, fingerprints} <- decode_terminal_records(operation_id, records, types),
          :ok <- validate_terminal_lifecycle(op, decoded),
-         {:ok, intent_sha256} <- intent_sha256_from_prepared(op, decoded) do
+         {:ok, intent_sha256} <- prepared_intent_digest(op, decoded) do
       {:ok, fingerprints, intent_sha256}
     end
   end
@@ -664,7 +728,7 @@ defmodule Arbor.Security.AuditJournalCore do
        when is_map(fingerprints) do
     with :ok <- require_exact_types(fingerprints, terminal_record_types(op["status"])),
          :ok <- require_fingerprint_values(fingerprints),
-         {:ok, intent_sha256} <- terminal_intent_sha256(op) do
+         {:ok, intent_sha256} <- terminal_intent_digest(op) do
       {:ok, fingerprints, intent_sha256}
     end
   end
@@ -722,7 +786,7 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp validate_terminal_status(_status, _prepared, _decoded), do: {:error, :malformed}
 
-  defp intent_sha256_from_prepared(op, decoded) do
+  defp prepared_intent_digest(op, decoded) do
     prepared = decoded["prepared"]
 
     with true <- is_map(prepared),
@@ -806,18 +870,18 @@ defmodule Arbor.Security.AuditJournalCore do
       get_in(applied, ["observation", "after_fingerprint"])
   end
 
-  defp terminal_intent_sha256(%{"intent_sha256" => sha256})
+  defp terminal_intent_digest(%{"intent_sha256" => sha256})
        when is_binary(sha256) and byte_size(sha256) == 64,
        do: {:ok, sha256}
 
-  defp terminal_intent_sha256(%{"intent" => intent}) when is_map(intent) do
+  defp terminal_intent_digest(%{"intent" => intent}) when is_map(intent) do
     case AuditJournal.canonical_intent_bytes(intent) do
       {:ok, bytes} -> {:ok, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
       {:error, _reason} -> {:error, :malformed}
     end
   end
 
-  defp terminal_intent_sha256(_op), do: {:error, :malformed}
+  defp terminal_intent_digest(_op), do: {:error, :malformed}
 
   defp terminal_compact_string(
          "delivered",
@@ -854,6 +918,7 @@ defmodule Arbor.Security.AuditJournalCore do
        "|" <> intent_sha256 <> "|prepared:" <> prepared <> "|effect_rejected:" <> rejected}
   end
 
+  # Invariant backstop, not a success path.
   defp terminal_compact_string(_status, _effect_class, _intent_sha256, _fingerprints),
     do: {:error, :malformed}
 
@@ -979,22 +1044,22 @@ defmodule Arbor.Security.AuditJournalCore do
     used_entries > limits.hard_entry_cap or used_bytes > limits.hard_byte_cap
   end
 
-  defp install_restored(snapshot, supplied, snap_bytes) do
-    pending_n = length(supplied)
-
+  defp restore_occupancy(supplied, snap_size) when is_integer(snap_size) and snap_size >= 0 do
     pending_bytes =
       Enum.reduce(supplied, 0, fn {_record, bytes}, acc -> acc + byte_size(bytes) end)
 
-    used_entries = 1 + pending_n
-    used_bytes = snap_bytes + pending_bytes
+    used_entries = 1 + length(supplied)
+    used_bytes = snap_size + pending_bytes
     limits = AuditJournal.limits()
 
     if occupancy_exceeded?(used_entries, used_bytes, limits) do
       {:error, :capacity_exhausted}
     else
-      finish_restore(snapshot, supplied, snap_bytes, used_entries, used_bytes)
+      {:ok, used_entries, used_bytes}
     end
   end
+
+  defp restore_occupancy(_supplied, _snap_size), do: {:error, :malformed}
 
   defp finish_restore(snapshot, supplied, snap_bytes, used_entries, used_bytes) do
     with {:ok, state} <- install_terminals(empty_state(), snapshot),
@@ -1047,6 +1112,7 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
+  # Invariant backstop, not a success path.
   defp install_pending_record(_state, _record, _bytes), do: {:error, :pending_mismatch}
 
   defp pending_ops(state) do
@@ -1066,7 +1132,7 @@ defmodule Arbor.Security.AuditJournalCore do
         "operation_id" => operation_id,
         "status" => op["status"],
         "effect_class" => op["effect_class"],
-        "intent_sha256" => intent_sha256(op["intent"])
+        "intent_sha256" => canonical_intent_digest(op["intent"])
       }
     end)
   end
