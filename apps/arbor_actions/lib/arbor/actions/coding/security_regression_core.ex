@@ -48,9 +48,10 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @untrusted_omission_marker "\n...[omitted]...\n"
   # Max incomplete UTF-8 sequence; interior windows inspect only this many extra bytes.
   @utf8_boundary_allowance 3
-  # Local three-window policy (sanitize-then-drop, 2048 ceiling, timeout authority)
-  # rather than a CrossApp call. Head/tail each take 1/share of the post-marker
-  # content budget; lookback keeps a little context before the first anchor.
+  # Local fork of Arbor.Actions.Coding.CrossApp.Core's three-window policy:
+  # this path additionally sanitizes arbitrary bytes and lets explicit process
+  # failure select the anchor window. Keep shared UTF-8/ceiling behavior aligned.
+  # Head and tail each take one eighth of the post-marker content budget.
   @excerpt_head_share 8
   @excerpt_anchor_lookback 64
   # Byte-level anchors: ExUnit numbered failure, Mix compilation banner, or
@@ -332,12 +333,13 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   path-normalized binary unchanged. Only `untrusted_diagnostic_output` is
   sanitized and byte-bounded.
 
-  Sanitize first, then bound. For a truncated child, a nonzero `exit_code` or
-  `timed_out == true` may keep a small startup head, the first stable
-  structural diagnostic anchor, and a small final tail. Successful output
-  (`exit_code == 0` and `timed_out == false`) and failed output without an
-  anchor keep the uniform head/tail excerpt. Exit code and `timed_out` are
-  the only success/failure authorities; output prose is not.
+  Sanitize first, then bound. For a truncated child, every outcome other than
+  the exact success pair (`exit_code == 0` and `timed_out == false`) may keep a
+  small startup head, the first stable structural diagnostic anchor, and a
+  small final tail. This includes a missing exit code. Exact success and
+  failure output without an anchor keep the uniform head/tail excerpt. Exit
+  code and `timed_out` are the only success/failure authorities; output prose
+  is not.
   """
   @spec child_diagnostic(integer() | nil, boolean(), binary()) :: map()
   def child_diagnostic(exit_code, timed_out, path_normalized)
@@ -350,8 +352,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       "timed_out" => timed_out,
       "output_bytes" => byte_size(path_normalized),
       "output_sha256" => sha256(path_normalized),
-      "untrusted_diagnostic_output" =>
-        bound_untrusted_output(sanitized, exit_code, timed_out)
+      "untrusted_diagnostic_output" => bound_untrusted_output(sanitized, exit_code, timed_out)
     }
   end
 

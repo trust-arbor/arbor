@@ -243,8 +243,12 @@ The compiled graph derives the Git commit subject from the reviewed
 whitespace-normalized, and bounded to 72 bytes without splitting a
 codepoint, preferring a word boundary when possible. The full Unicode C
 category is stripped, including bidi and zero-width format controls.
-Worker prose does not author the message. Archived or unrewritten graphs
-keep the template fallback `Reviewed coding change`. A provider
+Treat `plan.task` as the commit subject: write a self-contained imperative of
+at most 72 bytes and put rationale, scope, and acceptance detail in the
+WorkPacket. Compiler truncation is a safety boundary, not a prose editor; it
+cannot repair a sentence whose distinguishing clause appears after the byte
+limit. Worker prose does not author the message. Archived or unrewritten
+graphs keep the template fallback `Reviewed coding change`. A provider
 conversation can continue only when the plan explicitly supplies
 `resume_provider` and `resume_session_id`; provider-session continuity does
 not imply workspace continuity. A resumed provider session in a new worktree

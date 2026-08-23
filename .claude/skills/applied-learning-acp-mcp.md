@@ -344,7 +344,7 @@ source-coupling baseline).
 
 <!-- applied-learning: the-coding-security-regression-profile-treats-requested-paths-as-test-paths -->
 <a id="applied-learning-the-coding-security-regression-profile-treats-requested-paths-as-test-paths"></a>
-**The coding `security_regression` profile treats `requested_paths` as test paths.** Its compiler requires a non-empty list containing only files ending in `_test.exs`; adding the source file produces `{:invalid_security_regression_paths, ...}` before workspace allocation. Use that profile for its specialized two-revision proof, not merely as a descriptive label for security-sensitive feature work. A feature slice that changes source plus adversarial tests should use an executable general profile and still prove the tests fail against the candidate parent where applicable (found 2026-07-14 while continuing the Apple Container planner).
+**The coding `security_regression` profile treats `requested_paths` as test paths.** Its compiler requires a non-empty list containing only files ending in `_test.exs`; adding the source file produces `{:invalid_security_regression_paths, ...}` before workspace allocation. Use that profile only when candidate-selected test bytes should fail after overlay onto exact-parent production. A fixture-only repair with unchanged production should use ordinary validation: the parent passing is correct by construction, not failed evidence. A feature slice that changes source plus adversarial tests should use an executable general profile and still prove the tests fail against the candidate parent where applicable (found 2026-07-14 while continuing the Apple Container planner; fixture-only boundary clarified 2026-08-23).
 
 <!-- applied-learning: use-the-structured-coding-envelope-for-durable-acp-delegation -->
 <a id="applied-learning-use-the-structured-coding-envelope-for-durable-acp-delegation"></a>
@@ -1043,13 +1043,15 @@ signer exited).
 <a id="applied-learning-derive-coding-commit-subjects-from-reviewed-plan-data"></a>
 **Derive coding commit subjects from reviewed plan data.** A fixed subject such as
 `Coding agent change` destroys traceability across retained branches, evidence refs,
-and the main history. Compile a one-line, bounded, valid-UTF-8 subject from the
-reviewed `Plan.task`; strip the full Unicode control/format category and keep worker
-prose unable to override it. Give archived or uncompiled graphs a descriptive stable
-fallback. When changing the canonical DOT template, also update its exact source-size
-regression and run the compiler plus pipeline tests, because compile-only validation
-will not catch that drift (found 2026-08-20 after hundreds of generic coding commits
-and a focused post-council test run).
+and the main history. Treat `Plan.task` as the subject: supply a self-contained
+imperative of at most 72 bytes and put rationale/detail in the WorkPacket. Compiler
+truncation is a safety boundary, not a prose editor. Compile a one-line, valid-UTF-8
+subject; strip the full Unicode control/format category and keep worker prose unable
+to override it. Give archived or uncompiled graphs a descriptive stable fallback.
+When changing the canonical DOT template, also update its exact source-size regression
+and run the compiler plus pipeline tests, because compile-only validation will not
+catch that drift (found 2026-08-20 after hundreds of generic coding commits and a
+focused post-council test run; authoring rule clarified 2026-08-23).
 
 <!-- applied-learning: probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape -->
 <a id="applied-learning-probe-provider-owned-acp-credential-layouts-instead-of-substituting-a-familiar-oauth-shape"></a>

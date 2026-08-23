@@ -3159,7 +3159,7 @@
       "anchor": "applied-learning-the-coding-security-regression-profile-treats-requested-paths-as-test-paths",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 while continuing the Apple Container planner).",
-      "content_sha256": "725b1d4ac30ccbd2756e983fd0a5e7f835eaa4284951b8172b1bca890b2b1d6b",
+      "content_sha256": "35c95dcb8443d765d4cda912e38447b3357a4904ca6a4ebb9d1b4cba46390f18",
       "always_loaded": false
     },
     {
@@ -8031,7 +8031,7 @@
       "anchor": "applied-learning-derive-coding-commit-subjects-from-reviewed-plan-data",
       "source_date": "2026-08-20",
       "source_incident": "found 2026-08-20 after hundreds of generic coding commits and a focused post-council test run).",
-      "content_sha256": "ca7a486b503b1d328f316c3526ba544e2be2e22e197a754757bdbf4158da682b",
+      "content_sha256": "2c1f80598214d63287e49f9cc03fb40842708066c07a400ac3b1b1f949fdc966",
       "always_loaded": false
     },
     {
