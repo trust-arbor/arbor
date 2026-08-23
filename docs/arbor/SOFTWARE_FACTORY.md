@@ -295,6 +295,12 @@ minutes leaves room for validation, the commit gate, and council.
 High-risk classes need `checkpoint_policy: "design_required"` and a version
 2 plan. First run should stay `default` / `direct`.
 
+The `security_regression` validation profile also requires a nonempty
+`plan.requested_paths` list. Every entry must be a repository-relative path
+ending in `_test.exs`; these are the exact candidate test files overlaid onto
+the parent for fail-before/pass-after verification. A prose entry under
+`work_packet.required_evidence` does not satisfy this executable binding.
+
 ### 2. Digest the packet on the live node
 
 Never hand-hash. Canonical field order is owned by

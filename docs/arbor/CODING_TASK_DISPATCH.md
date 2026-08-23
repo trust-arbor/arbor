@@ -540,6 +540,7 @@ not opt into legacy behavior. Minimally required plan fields:
 | `worker.provider` | Worker provider id (for example `codex`) |
 | `work_packet` | Canonical bounded work intent; high-risk classes require `checkpoint_policy: "design_required"` |
 | `work_packet_digest` | Exact `sha256:` digest of the canonical packet |
+| `requested_paths` | Required and nonempty for `security_regression`; repository-relative `_test.exs` files used for exact-parent overlay verification |
 
 Explicit version 1 remains readable and compilable for archived compatibility.
 New high-risk version-1 dispatch is rejected before compilation or workspace
