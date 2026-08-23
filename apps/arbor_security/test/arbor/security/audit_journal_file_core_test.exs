@@ -370,6 +370,291 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
     end
   end
 
+  describe "snapshot-first replay" do
+    test "empty snapshot-only log restores occupancy 1 from genesis" do
+      {:ok, empty} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      assert {:ok, compacted, snapshot, []} = AuditJournalCore.compact(empty, source)
+      assert {:ok, bytes, encoded} = FileCore.encode_compacted(snapshot, [])
+      assert {:ok, start} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(start, bytes)
+      assert FileCore.core_match?(replayed.core, compacted)
+      assert FileCore.core_match?(encoded.core, compacted)
+      assert replayed.frames == 1
+      assert replayed.torn_tail == nil
+      assert replayed.digest == encoded.digest
+      assert FileCore.show(replayed).projection["entry_count"] == 1
+    end
+
+    test "effect_applied pending prefix restores prepared then applied in manifest order" do
+      {prepared, applied, _delivered} = grant_lifecycle()
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 2, 40)
+      assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert Enum.map(pending, & &1["record_type"]) == ["prepared", "effect_applied"]
+      assert {:ok, bytes, encoded} = FileCore.encode_compacted(snapshot, pending)
+      assert FileCore.core_match?(encoded.core, compacted)
+      assert {:ok, start} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(start, bytes)
+      assert FileCore.core_match?(replayed.core, compacted)
+      assert replayed.frames == 3
+      assert replayed.pending_needed == []
+    end
+
+    test "snapshot plus exact pending then later record matches restore then append" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      pending_prepared = prepared_record(intent2)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 99)
+      assert {:ok, compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert length(pending) == 1
+      assert {:ok, prefix, encoded} = FileCore.encode_compacted(snapshot, pending)
+      assert FileCore.core_match?(encoded.core, compacted)
+
+      {:ok, extra_intent} = AuditJournal.admit_intent(revoke_facts(1))
+      extra = prepared_record(extra_intent)
+      {:ok, extra_bytes} = AuditJournal.canonical_record_bytes(extra)
+      {:ok, extra_frame, _} = FileCore.encode_frame(extra_bytes, encoded.digest)
+
+      assert {:ok, start} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(start, prefix <> extra_frame)
+      assert {:ok, expected} = AuditJournalCore.append(compacted, extra)
+      assert FileCore.core_match?(replayed.core, expected)
+      assert replayed.frames == encoded.frames + 1
+    end
+
+    test "legacy record-only consume is unchanged beside extra replay keys" do
+      {prepared, applied, _delivered} = grant_lifecycle()
+      {:ok, log} = encode_records([prepared, applied])
+      assert {:ok, empty} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(empty, log)
+      assert {:ok, folded} = AuditJournalCore.fold([prepared, applied])
+      assert FileCore.show(replayed).projection == AuditJournalCore.show(folded)
+      assert replayed.snapshot == nil
+      assert replayed.pending_needed == []
+    end
+
+    test "snapshot after frame one is snapshot_not_first" do
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      {:ok, record_frame, _} = encode_one(prepared)
+      {:ok, empty_core} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
+      {:ok, snap_bytes, _} = FileCore.encode_compacted(snapshot, [])
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :snapshot_not_first} = FileCore.consume(start, record_frame <> snap_bytes)
+    end
+
+    test "missing pending prefix is pending_mismatch" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      pending_prepared = prepared_record(intent2)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
+      assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert pending != []
+      {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      {:ok, snap_frame, _} = FileCore.encode_frame(snap_bytes, FileCore.genesis_digest())
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :pending_mismatch} = FileCore.consume(start, snap_frame)
+    end
+
+    test "reordered pending prefix is pending_mismatch or cross_operation" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      {:ok, intent3} = AuditJournal.admit_intent(revoke_facts(1))
+      p2 = prepared_record(intent2)
+      p3 = prepared_record(intent3)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, p2, p3])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 5, 1)
+      assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      assert length(pending) >= 2
+      reversed = Enum.reverse(pending)
+      bytes = encode_snapshot_frames(snapshot, reversed)
+      assert {:ok, start} = FileCore.new()
+      assert {:error, reason} = FileCore.consume(start, bytes)
+      assert reason in [:pending_mismatch, :cross_operation]
+    end
+
+    test "substituted pending fingerprint is pending_mismatch" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      pending_prepared = prepared_record(intent2)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
+      assert {:ok, _compacted, snapshot, [pending]} = AuditJournalCore.compact(state, source)
+      substituted = Map.put(pending, "occurred_at", "2026-08-20T12:00:09Z")
+      bytes = encode_snapshot_frames(snapshot, [substituted])
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :pending_mismatch} = FileCore.consume(start, bytes)
+    end
+
+    test "non-canonical snapshot is non_canonical" do
+      {:ok, empty_core} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
+      {:ok, canonical} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      {:ok, frame, _} = FileCore.encode_frame(canonical <> " ", FileCore.genesis_digest())
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :non_canonical} = FileCore.consume(start, frame)
+    end
+
+    test "non-canonical record after snapshot is non_canonical" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      pending_prepared = prepared_record(intent2)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
+      assert {:ok, _compacted, snapshot, [pending]} = AuditJournalCore.compact(state, source)
+      {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      {:ok, snap_frame, digest} = FileCore.encode_frame(snap_bytes, FileCore.genesis_digest())
+      {:ok, rec_bytes} = AuditJournal.canonical_record_bytes(pending)
+      {:ok, rec_frame, _} = FileCore.encode_frame(rec_bytes <> " ", digest)
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :non_canonical} = FileCore.consume(start, snap_frame <> rec_frame)
+    end
+
+    test "predecessor corruption on snapshot-first log is predecessor_mismatch" do
+      {:ok, empty_core} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
+      {:ok, bytes, _} = FileCore.encode_compacted(snapshot, [])
+      pred = :binary.copy(<<0x11>>, 32)
+      rest = binary_part(bytes, 40, byte_size(bytes) - 40)
+      corrupted = binary_part(bytes, 0, 8) <> pred <> rest
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :predecessor_mismatch} = FileCore.consume(start, corrupted)
+    end
+
+    test "digest corruption on snapshot-first log is digest_mismatch" do
+      {:ok, empty_core} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
+      {:ok, bytes, _} = FileCore.encode_compacted(snapshot, [])
+      flipped = flip_byte(bytes, 40)
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :digest_mismatch} = FileCore.consume(start, flipped)
+    end
+
+    test "torn tail during pending prefix is pending_mismatch" do
+      {prepared, applied, delivered} = grant_lifecycle()
+      {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+      pending_prepared = prepared_record(intent2)
+      assert {:ok, state} = AuditJournalCore.fold([prepared, applied, delivered, pending_prepared])
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 4, 1)
+      assert {:ok, _compacted, snapshot, pending} = AuditJournalCore.compact(state, source)
+      {:ok, bytes, _} = FileCore.encode_compacted(snapshot, pending)
+      truncated = binary_part(bytes, 0, byte_size(bytes) - 3)
+      assert {:ok, start} = FileCore.new()
+      assert {:error, :pending_mismatch} = FileCore.consume(start, truncated)
+    end
+
+    test "torn tail after restore remains torn_tail" do
+      {:ok, empty_core} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      {:ok, _compacted, snapshot, []} = AuditJournalCore.compact(empty_core, source)
+      {:ok, prefix, encoded} = FileCore.encode_compacted(snapshot, [])
+      {prepared, _applied, _delivered} = grant_lifecycle()
+      {:ok, rec_bytes} = AuditJournal.canonical_record_bytes(prepared)
+      {:ok, rec_frame, _} = FileCore.encode_frame(rec_bytes, encoded.digest)
+      torn = prefix <> binary_part(rec_frame, 0, 3)
+      assert {:ok, start} = FileCore.new()
+      assert {:ok, replayed} = FileCore.consume(start, torn)
+      assert replayed.torn_tail == %{offset: encoded.offset, byte_size: 3}
+    end
+  end
+
+  describe "publication helpers" do
+    test "source_binding is 64 lowercase hex" do
+      digest = FileCore.genesis_digest()
+      assert {:ok, source} = FileCore.source_binding(digest, 3, 12)
+      assert byte_size(source["committed_digest"]) == 64
+      assert source["committed_digest"] == Base.encode16(digest, case: :lower)
+      assert source["committed_digest"] =~ ~r/\A[0-9a-f]{64}\z/
+      assert source["committed_frames"] == 3
+      assert source["committed_offset"] == 12
+      assert {:error, :malformed} = FileCore.source_binding(<<1, 2, 3>>, 0, 0)
+    end
+
+    test "core_match? requires full reducer equality not show/1" do
+      {:ok, empty} = AuditJournalCore.new()
+      {:ok, source} = FileCore.source_binding(FileCore.genesis_digest(), 0, 0)
+      assert {:ok, compacted, _snapshot, []} = AuditJournalCore.compact(empty, source)
+      tweaked = Map.put(compacted, "snapshot_bytes", compacted["snapshot_bytes"] + 1)
+      assert AuditJournalCore.show(compacted) == AuditJournalCore.show(tweaked)
+      refute FileCore.core_match?(compacted, tweaked)
+      assert FileCore.core_match?(compacted, compacted)
+    end
+
+    test "source_tip_match? requires digest frames and offset" do
+      {:ok, empty} = FileCore.new()
+      {:ok, source} = FileCore.source_binding(empty.digest, empty.frames, empty.offset)
+      assert FileCore.source_tip_match?(empty, source)
+      refute FileCore.source_tip_match?(empty, Map.put(source, "committed_frames", 1))
+    end
+
+    test "candidate_basename is a single hidden compact segment" do
+      assert {:ok, ".audit_journal.v1.log.compact"} =
+               FileCore.candidate_basename("audit_journal.v1.log")
+
+      assert {:error, :malformed} = FileCore.candidate_basename("")
+      assert {:error, :malformed} = FileCore.candidate_basename(".")
+      assert {:error, :malformed} = FileCore.candidate_basename("..")
+      assert {:error, :malformed} = FileCore.candidate_basename("a/b")
+    end
+
+    test "leftover_action admits only regular 0600 single-link" do
+      assert :unlink = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 1})
+      assert {:error, :symlink_rejected} = FileCore.leftover_action(%{type: :symlink, mode: 0o120777, links: 1})
+      assert {:error, :hardlink_rejected} = FileCore.leftover_action(%{type: :regular, mode: 0o100600, links: 2})
+      assert {:error, :insecure_mode} = FileCore.leftover_action(%{type: :regular, mode: 0o100644, links: 1})
+      assert {:error, :not_regular} = FileCore.leftover_action(%{type: :directory, mode: 0o40700, links: 2})
+    end
+
+    test "classify_dir_sync known-unsupported is ok" do
+      assert :ok = FileCore.classify_dir_sync(:ok)
+      assert :ok = FileCore.classify_dir_sync({:error, :enotsup})
+      assert :ok = FileCore.classify_dir_sync({:error, :eisdir})
+      assert {:error, :eio} = FileCore.classify_dir_sync({:error, :eio})
+    end
+
+    test "classify_rename_outcome splits not_published from uncertain" do
+      assert :continue = FileCore.classify_rename_outcome(%{rename: :ok})
+
+      assert {:not_published, :write_failed} =
+               FileCore.classify_rename_outcome(%{
+                 rename: {:error, :eio},
+                 candidate_present?: true,
+                 target_identity_match?: true
+               })
+
+      assert {:publish_uncertain, :rename_ambiguous} =
+               FileCore.classify_rename_outcome(%{
+                 rename: {:error, :eio},
+                 candidate_present?: false,
+                 target_identity_match?: true
+               })
+    end
+
+    test "classify_publish_phase pre-rename is not_published" do
+      assert {:not_published, :sync_failed} = FileCore.classify_publish_phase(:sync, :sync_failed)
+      assert {:publish_uncertain, :reopen_failed} = FileCore.classify_publish_phase(:reopen, :reopen_failed)
+    end
+  end
+
+  defp encode_snapshot_frames(snapshot, pending) do
+    {:ok, snap_bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+    {:ok, frame, digest} = FileCore.encode_frame(snap_bytes, FileCore.genesis_digest())
+
+    Enum.reduce(pending, {frame, digest}, fn record, {acc, pred} ->
+      {:ok, rec_bytes} = AuditJournal.canonical_record_bytes(record)
+      {:ok, rec_frame, next} = FileCore.encode_frame(rec_bytes, pred)
+      {acc <> rec_frame, next}
+    end)
+    |> elem(0)
+  end
+
   defp grant_lifecycle do
     {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
     {prepared_record(intent), applied_record(intent, @t1), delivered_record(intent, @t1)}

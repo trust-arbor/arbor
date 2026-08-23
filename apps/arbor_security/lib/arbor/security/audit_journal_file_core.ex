@@ -3,7 +3,8 @@ defmodule Arbor.Security.AuditJournalFileCore do
   Pure CRC core for the v1 Security authority-mutation audit file log.
 
   Closed binary framing, SHA-256 predecessor+header+payload digests,
-  torn-tail vs corruption classification, and replay into AuditJournalCore.
+  torn-tail vs corruption classification, record-only and snapshot-first
+  replay into AuditJournalCore, and publication decision helpers.
 
   Returns data and errors only. No IO, time, randomness, processes, ETS,
   logging, signals, or store/facade calls.
@@ -18,15 +19,31 @@ defmodule Arbor.Security.AuditJournalFileCore do
   @frame_domain <<"arbor.security.audit_journal.frame.v1", 0>>
   @genesis_domain <<"arbor.security.audit_journal.genesis.v1", 0>>
   @genesis_digest :crypto.hash(:sha256, @genesis_domain)
+  @known_unsupported_dir_sync [:eisdir, :enotsup, :einval, :enotty, :eopnotsupp]
+  @pre_rename_phases [
+    :cleanup,
+    :create,
+    :write,
+    :sync,
+    :candidate_proof,
+    :candidate_reproof,
+    :source_tip_proof
+  ]
+  @post_rename_phases [:dir_finalize, :reopen, :published_replay]
 
   @type torn_tail :: nil | %{offset: non_neg_integer(), byte_size: pos_integer()}
+
+  @type pending_needed :: [{String.t(), String.t(), String.t()}]
 
   @type replay_state :: %{
           core: AuditJournalCore.state(),
           digest: binary(),
           offset: non_neg_integer(),
           frames: non_neg_integer(),
-          torn_tail: torn_tail()
+          torn_tail: torn_tail(),
+          snapshot: map() | nil,
+          pending_needed: pending_needed(),
+          pending_have: [map()]
         }
 
   @type header :: %{
@@ -68,7 +85,10 @@ defmodule Arbor.Security.AuditJournalFileCore do
        digest: @genesis_digest,
        offset: 0,
        frames: 0,
-       torn_tail: nil
+       torn_tail: nil,
+       snapshot: nil,
+       pending_needed: [],
+       pending_have: []
      }}
   end
 
@@ -200,6 +220,143 @@ defmodule Arbor.Security.AuditJournalFileCore do
     }
   end
 
+  @spec source_binding(term(), term(), term()) :: {:ok, map()} | {:error, :malformed}
+  def source_binding(digest, frames, offset)
+      when is_binary(digest) and byte_size(digest) == @digest_size and is_integer(frames) and
+             frames >= 0 and is_integer(offset) and offset >= 0 do
+    {:ok,
+     %{
+       "committed_digest" => Base.encode16(digest, case: :lower),
+       "committed_frames" => frames,
+       "committed_offset" => offset
+     }}
+  end
+
+  def source_binding(_digest, _frames, _offset), do: {:error, :malformed}
+
+  @spec encode_compacted(term(), term()) ::
+          {:ok, binary(), replay_state()} | {:error, atom()}
+  def encode_compacted(snapshot, pending) when is_list(pending) do
+    with {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)),
+         {:ok, frame, digest} <- encode_frame(snap_bytes, @genesis_digest),
+         {:ok, bytes, _digest} <- encode_pending_frames(pending, digest, frame),
+         {:ok, empty} <- new(),
+         {:ok, replay} <- consume(empty, bytes) do
+      {:ok, bytes, replay}
+    end
+  end
+
+  def encode_compacted(_snapshot, _pending), do: {:error, :malformed}
+
+  @spec core_match?(term(), term()) :: boolean()
+  def core_match?(left, right)
+      when is_map(left) and is_map(right) and not is_struct(left) and not is_struct(right) do
+    left === right
+  end
+
+  def core_match?(_left, _right), do: false
+
+  @spec source_tip_match?(term(), term()) :: boolean()
+  def source_tip_match?(
+        %{digest: digest, frames: frames, offset: offset},
+        %{
+          "committed_digest" => hex,
+          "committed_frames" => frames,
+          "committed_offset" => offset
+        }
+      )
+      when is_binary(digest) and byte_size(digest) == @digest_size and is_binary(hex) do
+    Base.encode16(digest, case: :lower) == hex
+  end
+
+  def source_tip_match?(_replay, _source), do: false
+
+  @spec candidate_basename(term()) :: {:ok, String.t()} | {:error, :malformed}
+  def candidate_basename(name) when is_binary(name) do
+    cond do
+      name in ["", ".", ".."] -> {:error, :malformed}
+      String.contains?(name, <<0>>) -> {:error, :malformed}
+      String.contains?(name, "/") -> {:error, :malformed}
+      true -> {:ok, "." <> name <> ".compact"}
+    end
+  end
+
+  def candidate_basename(_name), do: {:error, :malformed}
+
+  @spec leftover_action(term()) :: :unlink | {:error, atom()}
+  def leftover_action(%{type: :symlink}), do: {:error, :symlink_rejected}
+
+  def leftover_action(%{type: type}) when type != :regular, do: {:error, :not_regular}
+
+  def leftover_action(%{type: :regular, links: links}) when is_integer(links) and links != 1,
+    do: {:error, :hardlink_rejected}
+
+  def leftover_action(%{type: :regular, mode: mode, links: 1}) when is_integer(mode) do
+    if Bitwise.band(mode, 0o777) == 0o600 do
+      :unlink
+    else
+      {:error, :insecure_mode}
+    end
+  end
+
+  def leftover_action(_facts), do: {:error, :malformed}
+
+  @spec classify_dir_sync(term()) :: :ok | {:error, term()}
+  def classify_dir_sync(:ok), do: :ok
+
+  def classify_dir_sync({:error, reason}) when reason in @known_unsupported_dir_sync, do: :ok
+
+  def classify_dir_sync({:error, reason}), do: {:error, reason}
+
+  def classify_dir_sync(_result), do: {:error, :malformed}
+
+  @spec classify_rename_outcome(term()) ::
+          :continue | {:not_published, atom()} | {:publish_uncertain, :rename_ambiguous}
+  def classify_rename_outcome(%{rename: :ok}), do: :continue
+
+  def classify_rename_outcome(%{
+        rename: {:error, _reason},
+        candidate_present?: true,
+        target_identity_match?: true
+      }) do
+    {:not_published, :write_failed}
+  end
+
+  def classify_rename_outcome(_outcome), do: {:publish_uncertain, :rename_ambiguous}
+
+  @spec classify_publish_phase(term(), term()) ::
+          {:not_published, atom()} | {:publish_uncertain, atom()} | {:error, :malformed}
+  def classify_publish_phase(phase, reason)
+      when phase in @pre_rename_phases and is_atom(reason) do
+    {:not_published, reason}
+  end
+
+  def classify_publish_phase(phase, reason)
+      when phase in @post_rename_phases and is_atom(reason) do
+    {:publish_uncertain, reason}
+  end
+
+  def classify_publish_phase(_phase, _reason), do: {:error, :malformed}
+
+  @spec admit_snapshot_payload(term()) :: {:ok, map()} | {:error, atom()}
+  def admit_snapshot_payload(payload) when is_binary(payload) do
+    with {:ok, decoded} <- decode_json(payload),
+         {:ok, snapshot} <- map_snapshot_admit(AuditJournal.admit_snapshot(decoded)),
+         {:ok, canonical} <- map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)) do
+      if canonical == payload do
+        {:ok, snapshot}
+      else
+        {:error, :non_canonical}
+      end
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  def admit_snapshot_payload(_payload), do: {:error, :malformed}
+
   defp consume_loop(state, binary) do
     size = byte_size(binary)
     offset = state.offset
@@ -207,6 +364,9 @@ defmodule Arbor.Security.AuditJournalFileCore do
     cond do
       offset > size ->
         {:error, :malformed}
+
+      offset == size and state.pending_needed != [] ->
+        {:error, :pending_mismatch}
 
       offset == size ->
         {:ok, %{state | torn_tail: nil}}
@@ -220,8 +380,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
   defp consume_suffix(state, binary, suffix) do
     case classify_suffix(suffix, state.digest) do
       :torn_tail ->
-        torn = %{offset: state.offset, byte_size: byte_size(suffix)}
-        {:ok, %{state | torn_tail: torn}}
+        finish_torn_tail(state, suffix)
 
       {:error, reason} ->
         {:error, reason}
@@ -240,12 +399,10 @@ defmodule Arbor.Security.AuditJournalFileCore do
   end
 
   defp fold_complete_frame(state, binary, header, payload) do
-    with {:ok, record} <- admit_payload(payload),
-         {:ok, core} <- fold_record(state.core, record) do
+    with {:ok, folded} <- admit_and_fold(state, payload) do
       next = %{
-        state
-        | core: core,
-          digest: header.frame_digest,
+        folded
+        | digest: header.frame_digest,
           offset: state.offset + @header_size + header.payload_len,
           frames: state.frames + 1,
           torn_tail: nil
@@ -254,6 +411,130 @@ defmodule Arbor.Security.AuditJournalFileCore do
       consume_loop(next, binary)
     end
   end
+
+  defp finish_torn_tail(state, suffix) do
+    if is_map(state.snapshot) and state.pending_needed != [] do
+      {:error, :pending_mismatch}
+    else
+      torn = %{offset: state.offset, byte_size: byte_size(suffix)}
+      {:ok, %{state | torn_tail: torn}}
+    end
+  end
+
+  defp admit_and_fold(state, payload) do
+    case payload_kind(payload) do
+      :snapshot when state.frames == 0 ->
+        admit_snapshot_frame(state, payload)
+
+      :snapshot ->
+        {:error, :snapshot_not_first}
+
+      :record when state.pending_needed != [] ->
+        admit_pending_frame(state, payload)
+
+      :record ->
+        admit_record_frame(state, payload)
+    end
+  end
+
+  defp payload_kind(payload) when is_binary(payload) do
+    case decode_json(payload) do
+      {:ok, %{"kind" => kind}} ->
+        if kind == AuditJournal.snapshot_kind() do
+          :snapshot
+        else
+          :record
+        end
+
+      _other ->
+        :record
+    end
+  end
+
+  defp admit_snapshot_frame(state, payload) do
+    with {:ok, snapshot} <- admit_snapshot_payload(payload) do
+      needed = pending_needed_from(snapshot)
+      finish_snapshot_frame(state, snapshot, needed)
+    end
+  end
+
+  defp finish_snapshot_frame(state, snapshot, []) do
+    case AuditJournalCore.restore(snapshot, []) do
+      {:ok, core} ->
+        {:ok, %{state | core: core, snapshot: snapshot, pending_needed: [], pending_have: []}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp finish_snapshot_frame(state, snapshot, needed) do
+    {:ok, %{state | snapshot: snapshot, pending_needed: needed, pending_have: []}}
+  end
+
+  defp pending_needed_from(snapshot) do
+    snapshot
+    |> AuditJournal.snapshot_pending_entries()
+    |> Enum.map(&{&1["operation_id"], &1["record_type"], &1["sha256"]})
+  end
+
+  defp admit_pending_frame(state, payload) do
+    with {:ok, record} <- admit_payload(payload),
+         {:ok, bytes} <- map_bytes(AuditJournal.canonical_record_bytes(record)),
+         {:ok, fingerprint} <- map_fingerprint(AuditJournal.record_fingerprint(bytes)),
+         :ok <- match_pending_head(state.pending_needed, record, fingerprint) do
+      have = state.pending_have ++ [record]
+      needed = tl(state.pending_needed)
+      finish_pending_prefix(state, have, needed)
+    end
+  end
+
+  defp finish_pending_prefix(state, have, []) do
+    case AuditJournalCore.restore(state.snapshot, have) do
+      {:ok, core} ->
+        {:ok, %{state | core: core, pending_needed: [], pending_have: have}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp finish_pending_prefix(state, have, needed) do
+    {:ok, %{state | pending_have: have, pending_needed: needed}}
+  end
+
+  defp match_pending_head([{oid, type, sha} | _rest], record, fingerprint) do
+    cond do
+      record["operation_id"] == oid and record["record_type"] == type and fingerprint == sha ->
+        :ok
+
+      record["operation_id"] != oid ->
+        {:error, :cross_operation}
+
+      true ->
+        {:error, :pending_mismatch}
+    end
+  end
+
+  defp match_pending_head(_needed, _record, _fingerprint), do: {:error, :pending_mismatch}
+
+  defp admit_record_frame(state, payload) do
+    with {:ok, record} <- admit_payload(payload),
+         {:ok, core} <- fold_record(state.core, record) do
+      {:ok, %{state | core: core}}
+    end
+  end
+
+  defp encode_pending_frames([], digest, acc), do: {:ok, acc, digest}
+
+  defp encode_pending_frames([record | rest], pred, acc) do
+    with {:ok, rec_bytes} <- map_bytes(AuditJournal.canonical_record_bytes(record)),
+         {:ok, frame, digest} <- encode_frame(rec_bytes, pred) do
+      encode_pending_frames(rest, digest, acc <> frame)
+    end
+  end
+
+  defp encode_pending_frames(_records, _pred, _acc), do: {:error, :malformed}
 
   defp fold_record(core, record) do
     case AuditJournalCore.append(core, record) do
@@ -397,6 +678,14 @@ defmodule Arbor.Security.AuditJournalFileCore do
   defp map_bytes({:error, :record_too_large}), do: {:error, :record_too_large}
   defp map_bytes({:error, _reason}), do: {:error, :malformed}
 
+  defp map_snapshot_admit({:ok, snapshot}), do: {:ok, snapshot}
+  defp map_snapshot_admit({:error, :record_too_large}), do: {:error, :record_too_large}
+  defp map_snapshot_admit({:error, _reason}), do: {:error, :malformed}
+
+  defp map_fingerprint({:ok, sha256}), do: {:ok, sha256}
+  defp map_fingerprint({:error, :record_too_large}), do: {:error, :record_too_large}
+  defp map_fingerprint({:error, _reason}), do: {:error, :malformed}
+
   defp bound_file_size(binary) do
     if byte_size(binary) > max_file_bytes() do
       {:error, :log_too_large}
@@ -410,17 +699,52 @@ defmodule Arbor.Security.AuditJournalFileCore do
          digest: digest,
          offset: offset,
          frames: frames,
-         torn_tail: torn_tail
+         torn_tail: torn_tail,
+         snapshot: snapshot,
+         pending_needed: pending_needed,
+         pending_have: pending_have
        })
        when is_binary(digest) and byte_size(digest) == @digest_size and is_integer(offset) and
               offset >= 0 and is_integer(frames) and frames >= 0 do
-    case valid_torn_tail(torn_tail) do
-      :ok -> valid_core(core)
-      {:error, reason} -> {:error, reason}
+    with :ok <- valid_torn_tail(torn_tail),
+         :ok <- valid_snapshot(snapshot),
+         :ok <- valid_pending_needed(pending_needed),
+         :ok <- valid_pending_have(pending_have) do
+      valid_core(core)
     end
   end
 
   defp valid_state(_state), do: {:error, :malformed}
+
+  defp valid_snapshot(nil), do: :ok
+  defp valid_snapshot(snapshot) when is_map(snapshot) and not is_struct(snapshot), do: :ok
+  defp valid_snapshot(_snapshot), do: {:error, :malformed}
+
+  defp valid_pending_needed(list) when is_list(list) do
+    if Enum.all?(list, &valid_pending_tuple?/1) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp valid_pending_needed(_list), do: {:error, :malformed}
+
+  defp valid_pending_tuple?({oid, type, sha})
+       when is_binary(oid) and is_binary(type) and is_binary(sha),
+       do: true
+
+  defp valid_pending_tuple?(_tuple), do: false
+
+  defp valid_pending_have(list) when is_list(list) do
+    if Enum.all?(list, &(is_map(&1) and not is_struct(&1))) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp valid_pending_have(_list), do: {:error, :malformed}
 
   defp valid_torn_tail(nil), do: :ok
 

@@ -227,6 +227,275 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert {:error, :invalid_opts} = AuditJournalFile.open(root: "/tmp", codec: :json)
   end
 
+  test "compact mixed lifecycle close/reopen keeps compacted core", %{root: root} do
+    {prepared, applied, delivered} = grant_lifecycle()
+    {:ok, intent2} = AuditJournal.admit_intent(grant_facts(2))
+    pending = prepared_record(intent2)
+
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    assert {:ok, handle} = AuditJournalFile.append(handle, applied)
+    assert {:ok, handle} = AuditJournalFile.append(handle, delivered)
+    assert {:ok, handle} = AuditJournalFile.append(handle, pending)
+
+    {:ok, source} =
+      AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset)
+
+    assert {:ok, compacted, _snapshot, _pending} = AuditJournalCore.compact(handle.core, source)
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    assert AuditJournalFileCore.core_match?(handle.core, compacted)
+    assert AuditJournalFile.evidence(handle).torn_tail == nil
+    before = handle.core
+    assert :ok = AuditJournalFile.close(handle)
+
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalFileCore.core_match?(reopened.core, before)
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "compact effect_applied pending prefix close/reopen keeps compacted core", %{root: root} do
+    {prepared, applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    assert {:ok, handle} = AuditJournalFile.append(handle, applied)
+
+    {:ok, source} =
+      AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset)
+
+    assert {:ok, compacted, _snapshot, pending} = AuditJournalCore.compact(handle.core, source)
+    assert Enum.map(pending, & &1["record_type"]) == ["prepared", "effect_applied"]
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    assert AuditJournalFileCore.core_match?(handle.core, compacted)
+    assert :ok = AuditJournalFile.close(handle)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalFileCore.core_match?(reopened.core, compacted)
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "empty compact occupancy 1 survives reopen", %{root: root} do
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    assert AuditJournalCore.capacity(handle.core)["used_entries"] == 1
+    assert :ok = AuditJournalFile.close(handle)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 1
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "post-compact delivered is idempotent", %{root: root} do
+    {prepared, applied, delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    assert {:ok, handle} = AuditJournalFile.append(handle, applied)
+    assert {:ok, handle} = AuditJournalFile.append(handle, delivered)
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    assert {:ok, handle, :idempotent} = AuditJournalFile.append(handle, delivered)
+    assert :ok = AuditJournalFile.close(handle)
+  end
+
+  test "leftover regular 0600 single-link candidate is unlinked", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    parent = Path.dirname(handle.path)
+    {:ok, name} = AuditJournalFileCore.candidate_basename(Path.basename(handle.path))
+    leftover = Path.join(parent, name)
+    File.write!(leftover, "stale")
+    File.chmod!(leftover, 0o600)
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    refute File.exists?(leftover)
+    assert :ok = AuditJournalFile.close(handle)
+  end
+
+  test "leftover symlink candidate is rejected", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    parent = Path.dirname(handle.path)
+    {:ok, name} = AuditJournalFileCore.candidate_basename(Path.basename(handle.path))
+    leftover = Path.join(parent, name)
+    File.ln_s!(handle.path, leftover)
+    assert {:error, {:not_published, :symlink_rejected}} = AuditJournalFile.compact(handle)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalFile.evidence(reopened).committed_frames == 1
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "leftover hardlink candidate is rejected", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    parent = Path.dirname(handle.path)
+    {:ok, name} = AuditJournalFileCore.candidate_basename(Path.basename(handle.path))
+    leftover = Path.join(parent, name)
+    other = Path.join(parent, "other.log")
+    File.write!(other, "x")
+    File.chmod!(other, 0o600)
+    File.ln!(other, leftover)
+    assert {:error, {:not_published, :hardlink_rejected}} = AuditJournalFile.compact(handle)
+    File.rm(leftover)
+    File.rm(other)
+    assert :ok = AuditJournalFile.close(handle)
+  end
+
+  test "torn_tail compact is not_published", %{root: root} do
+    {prepared, applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:partial_write, 3)
+    assert {:error, {:not_committed, :write_failed}} = AuditJournalFile.append(handle, applied)
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert {:error, {:not_published, :torn_tail}} = AuditJournalFile.compact(reopened)
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "compact_sync_error is not_published and leaves source", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    AuditJournalFile.__test_inject__(:compact_sync_error, :eio)
+    assert {:error, {:not_published, :sync_failed}} = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert File.read!(handle.path) == before
+    refute_candidate(handle)
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalFile.evidence(reopened).committed_frames == 1
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "compact_after_sync_error is not_published", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    AuditJournalFile.__test_inject__(:compact_after_sync_error, :proof)
+    assert {:error, {:not_published, :candidate_proof_failed}} = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert File.read!(handle.path) == before
+    refute_candidate(handle)
+  end
+
+  test "compact_rename_before_effect is not_published and does not move target", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    AuditJournalFile.__test_inject__(:compact_rename_before_effect)
+    assert {:error, {:not_published, _reason}} = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert File.read!(handle.path) == before
+    refute_candidate(handle)
+  end
+
+  test "compact_rename_after_effect is publish_uncertain", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_rename_after_effect)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, _reason}} = result
+    assert {:ok, reopened} = AuditJournalFile.open(root: root)
+    assert AuditJournalCore.capacity(reopened.core)["used_entries"] == 1
+    assert :ok = AuditJournalFile.close(reopened)
+  end
+
+  test "compact_dir_sync enotsup succeeds with node-restart only", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_dir_sync, :enotsup)
+    assert {:ok, handle} = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert AuditJournalCore.capacity(handle.core)["used_entries"] == 1
+    assert :ok = AuditJournalFile.close(handle)
+  end
+
+  test "compact_dir_sync eio is publish_uncertain", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_dir_sync, :eio)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :dir_sync_failed}} = result
+  end
+
+  test "compact_reopen_error is publish_uncertain", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_reopen_error, :eio)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :reopen_failed}} = result
+  end
+
+  test "compact_replay_error is publish_uncertain", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_replay_error, :eio)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    refute match?({:ok, _}, result)
+    refute match?({:error, {:not_published, _}}, result)
+    assert {:error, {:publish_uncertain, :replay_mismatch}} = result
+  end
+
+  test "rewrite source same-size is not_published", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_rewrite_source_same_size)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+    assert reason in [:digest_mismatch, :source_tip_mismatch, :core_mismatch]
+    refute_candidate(handle)
+  end
+
+  test "replace source inode is not_published", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    AuditJournalFile.__test_inject__(:compact_replace_source_inode)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+    assert reason in [:identity_changed, :size_mismatch]
+    refute_candidate(handle)
+  end
+
+  test "substitute candidate is not_published and does not replace source", %{root: root} do
+    {prepared, _applied, _delivered} = grant_lifecycle()
+    assert {:ok, handle} = AuditJournalFile.open(root: root)
+    assert {:ok, handle} = AuditJournalFile.append(handle, prepared)
+    before = File.read!(handle.path)
+    AuditJournalFile.__test_inject__(:compact_substitute_candidate)
+    result = AuditJournalFile.compact(handle)
+    AuditJournalFile.__test_inject__(:clear)
+    assert {:error, {:not_published, reason}} = result
+
+    assert reason in [
+             :digest_mismatch,
+             :identity_changed,
+             :size_mismatch,
+             :candidate_proof_failed
+           ]
+
+    assert File.read!(handle.path) == before
+    refute_candidate(handle)
+  end
+
   defp snapshot(handle) do
     %{
       projection: AuditJournalCore.show(handle.core),
@@ -244,6 +513,12 @@ defmodule Arbor.Security.AuditJournalFileTest do
     assert handle.identity.major_device == stat.major_device
     assert handle.identity.minor_device == stat.minor_device
     assert handle.identity.inode == stat.inode
+  end
+
+  defp refute_candidate(handle) do
+    parent = Path.dirname(handle.path)
+    {:ok, name} = AuditJournalFileCore.candidate_basename(Path.basename(handle.path))
+    refute File.exists?(Path.join(parent, name))
   end
 
   defp unique_root do
