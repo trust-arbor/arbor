@@ -403,8 +403,16 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     test "arbor_answer_approval requires id and decision", %{state: state} do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       approval_tool = Enum.find(tools, &(&1.name == "arbor_answer_approval"))
+      max_note_bytes = Arbor.Contracts.Comms.ApprovalAnswer.max_note_bytes()
+
       assert "id" in approval_tool.inputSchema.required
       assert "decision" in approval_tool.inputSchema.required
+
+      assert approval_tool.inputSchema.properties.note.description =~
+               "maximum #{max_note_bytes} UTF-8 bytes"
+
+      assert approval_tool.inputSchema.properties.note.description =~
+               "control characters rejected"
     end
 
     test "task orchestration tools require stable ids", %{state: state} do
@@ -1162,6 +1170,27 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert_received {:answer_approval, "irq_1", "rework", opts}
       assert opts[:caller_id] == "human_1"
       assert opts[:note] == "add a regression test"
+    end
+
+    test "answer_approval reports the exact note byte limit", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+      max_note_bytes = Arbor.Contracts.Comms.ApprovalAnswer.max_note_bytes()
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_answer_approval",
+          %{
+            "id" => "irq_1",
+            "decision" => "rework",
+            "note" => String.duplicate("x", max_note_bytes + 1)
+          },
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "maximum size (#{max_note_bytes} UTF-8 bytes)"
+      refute_received {:answer_approval, _, _, _}
     end
 
     test "answer_approval marks orchestration errors as MCP errors", %{state: state} do

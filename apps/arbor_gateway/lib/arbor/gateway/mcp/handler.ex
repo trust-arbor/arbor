@@ -23,6 +23,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   use ExMCP.Server.Handler
 
+  alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Gateway.MCP.ToolBridge
   alias ExMCP.Protocol.VersionNegotiator
@@ -31,6 +32,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   @server_name "arbor"
   @server_version "0.1.0"
+  @approval_note_max_bytes ApprovalAnswer.max_note_bytes()
   # ExMCP 1.0.0-rc.4 hardcodes a 10-second GenServer.call for tools/call.
   # Leave enough response budget for facade preflight and the authoritative
   # TaskStore adoption-status reconciliation after a bounded settlement wait.
@@ -296,7 +298,8 @@ defmodule Arbor.Gateway.MCP.Handler do
             },
             note: %{
               type: "string",
-              description: "Optional note recorded in the security audit log"
+              description:
+                "Optional security-audit note (maximum #{@approval_note_max_bytes} UTF-8 bytes; control characters rejected)"
             }
           },
           required: ["id", "decision"]
@@ -915,11 +918,20 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp validate_approval_note(note) when is_binary(note) do
     # MCP path rejects oversized notes (never silently truncates).
     case Arbor.Contracts.Comms.ApprovalAnswer.validate_note(note) do
-      {:ok, _} = ok -> ok
-      {:error, :note_too_large} -> {:error, "approval note exceeds maximum size"}
-      {:error, :invalid_note_utf8} -> {:error, "approval note is not valid UTF-8"}
-      {:error, :invalid_note_control} -> {:error, "approval note contains control characters"}
-      {:error, _} -> {:error, "approval note is invalid"}
+      {:ok, _} = ok ->
+        ok
+
+      {:error, :note_too_large} ->
+        {:error, "approval note exceeds maximum size (#{@approval_note_max_bytes} UTF-8 bytes)"}
+
+      {:error, :invalid_note_utf8} ->
+        {:error, "approval note is not valid UTF-8"}
+
+      {:error, :invalid_note_control} ->
+        {:error, "approval note contains control characters"}
+
+      {:error, _} ->
+        {:error, "approval note is invalid"}
     end
   end
 
