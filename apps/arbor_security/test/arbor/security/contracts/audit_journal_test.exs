@@ -19,6 +19,9 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
       assert AuditJournal.version() == 1
       assert AuditJournal.intent_kind() == "arbor.security.authority_mutation_intent.v1"
       assert AuditJournal.record_kind() == "arbor.security.authority_mutation_record.v1"
+
+      assert AuditJournal.snapshot_kind() ==
+               "arbor.security.audit_journal_snapshot.v1"
       assert AuditJournal.operations() == ["capability_grant", "capability_revoke"]
       assert AuditJournal.effect_classes() == ["authority_increase", "authority_reduce"]
       assert AuditJournal.namespaces() == ["capability"]
@@ -28,6 +31,10 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
       limits = AuditJournal.limits()
       assert limits.max_record_bytes == 32_768
+      assert limits.max_snapshot_bytes == 32_768
+      assert limits.max_snapshot_bytes == limits.max_record_bytes
+      assert limits.max_keys.snapshot == 5
+      assert limits.max_keys.snapshot_source == 3
       assert limits.hard_entry_cap == 48
       assert limits.max_fold_records == 48
       assert limits.reserve_entries == 16
@@ -563,6 +570,150 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
       assert {:ok, _} = AuditJournal.admit_record(rejected(revoke, "2026-08-20T12:00:01Z"))
       assert {:ok, _} = AuditJournal.admit_record(delivered(intent, "2026-08-20T12:00:02Z"))
     end
+  end
+
+  describe "admit_snapshot/1" do
+    test "admits the empty closed envelope and is insertion-order independent" do
+      a = empty_snapshot()
+      b = reverse_map(a) |> Map.put("source", reverse_map(a["source"]))
+
+      assert {:ok, admitted_a} = AuditJournal.admit_snapshot(a)
+      assert {:ok, admitted_b} = AuditJournal.admit_snapshot(b)
+      assert {:ok, bytes_a} = AuditJournal.canonical_snapshot_bytes(a)
+      assert {:ok, bytes_b} = AuditJournal.canonical_snapshot_bytes(b)
+      assert bytes_a == bytes_b
+      assert admitted_a["kind"] == AuditJournal.snapshot_kind()
+      assert admitted_a["pending_manifest"] == %{}
+      assert admitted_a["terminals"] == %{}
+    end
+
+    test "rejects atom keys, structs, unknown keys, and forbidden names" do
+      assert {:error, :atom_key_not_allowed} =
+               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), :version, 1))
+
+      assert {:error, :struct_not_allowed} = AuditJournal.admit_snapshot(%URI{})
+
+      swapped = empty_snapshot() |> Map.delete("terminals") |> Map.put("extra", %{})
+      assert {:error, reason} = AuditJournal.admit_snapshot(swapped)
+      assert reason in [:malformed, :unknown_field, :missing_field]
+
+      assert {:error, :forbidden_content} =
+               AuditJournal.admit_snapshot(
+                 empty_snapshot() |> Map.delete("terminals") |> Map.put("metadata", %{})
+               )
+    end
+
+    test "rejects invalid UTF-8, unsupported version, and unsupported kind" do
+      oid = String.duplicate("ab", 32)
+
+      assert {:error, :invalid_utf8} =
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["pending_manifest", oid], <<0xFF>>)
+               )
+
+      assert {:error, :unsupported_version} =
+               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "version", 2))
+
+      assert {:error, {:invalid_field, "kind"}} =
+               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "kind", "nope"))
+    end
+
+    test "byte caps precede UTF-8 and grammar on snapshot strings" do
+      oversized = String.duplicate("x", 32_768) <> <<0xFF>>
+
+      assert {:error, :record_too_large} =
+               AuditJournal.admit_snapshot(put_in(empty_snapshot(), ["terminals", "x"], oversized))
+    end
+
+    test "enforces max_nodes after increment on snapshot input" do
+      max_nodes = AuditJournal.limits().max_nodes
+      assert max_nodes == 64
+
+      at_cap = snapshot_with_digest_map(55)
+      over_cap = snapshot_with_digest_map(56)
+      assert count_nodes(at_cap) == 64
+      assert count_nodes(over_cap) == 65
+
+      assert {:error, {:invalid_field, "committed_digest"}} = AuditJournal.admit_snapshot(at_cap)
+      assert {:error, :malformed} = AuditJournal.admit_snapshot(over_cap)
+    end
+
+    test "rejects nested lists and overlapping pending/terminal ids" do
+      listed = put_in(empty_snapshot(), ["pending_manifest"], ["x"])
+      assert {:error, reason} = AuditJournal.admit_snapshot(listed)
+      assert reason in [:invalid_field, :invalid_object]
+
+      oid = String.duplicate("ab", 32)
+      sha = String.duplicate("cd", 32)
+
+      overlap =
+        empty_snapshot()
+        |> put_in(["pending_manifest", oid], "prepared:" <> sha)
+        |> put_in(["terminals", oid], terminal_rejected_compact(sha))
+
+      assert {:error, {:invalid_field, "operation_id"}} = AuditJournal.admit_snapshot(overlap)
+    end
+
+    test "rejects illegal pending and terminal compact strings" do
+      oid = String.duplicate("ab", 32)
+      sha = String.duplicate("cd", 32)
+      upper = String.duplicate("CD", 32)
+
+      assert {:error, :invalid_field} =
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["pending_manifest", oid], "effect_applied:" <> sha)
+               )
+
+      assert {:error, :invalid_field} =
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["pending_manifest", oid], "prepared:" <> upper)
+               )
+
+      assert {:error, :invalid_field} =
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["pending_manifest", oid], "prepared:" <> sha <> "|")
+               )
+
+      assert {:error, :invalid_field} =
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["terminals", oid], "delivered|authority_increase|" <> sha)
+               )
+    end
+
+    test "record_fingerprint is SHA-256 of canonical record bytes" do
+      {:ok, intent} = AuditJournal.admit_intent(grant_facts())
+      {:ok, bytes} = AuditJournal.canonical_record_bytes(prepared(intent))
+      {:ok, fingerprint} = AuditJournal.record_fingerprint(bytes)
+
+      assert fingerprint ==
+               :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+    end
+  end
+
+  defp empty_snapshot do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.snapshot_kind(),
+      "source" => %{
+        "committed_digest" => String.duplicate("ab", 32),
+        "committed_frames" => 0,
+        "committed_offset" => 0
+      },
+      "pending_manifest" => %{},
+      "terminals" => %{}
+    }
+  end
+
+  defp reverse_map(map), do: map |> Enum.reverse() |> Map.new()
+
+  defp snapshot_with_digest_map(scalar_count) do
+    nested = Map.new(1..scalar_count, fn i -> {"n#{i}", "x"} end)
+    put_in(empty_snapshot(), ["source", "committed_digest"], nested)
+  end
+
+  defp terminal_rejected_compact(sha) do
+    "effect_rejected|authority_reduce|" <>
+      sha <> "|prepared:" <> sha <> "|effect_rejected:" <> sha
   end
 
   defp nested_kind_facts(scalar_count) do

@@ -358,6 +358,297 @@ defmodule Arbor.Security.AuditJournalCoreTest do
     end
   end
 
+  describe "compact and restore" do
+    @now "2026-08-20T12:00:10Z"
+
+    test "round-trips mixed delivered, rejected, prepared, and effect_applied" do
+      {state, delivered, rejected, prepared_pending, applied_pending} = mixed_journal()
+      pre_show = Core.show(state)
+      assert {:ok, pre_pending} = Core.pending_summary(state, @now)
+
+      assert {:ok, compacted, snapshot, pending} = Core.compact(state, snapshot_source(8, 99))
+      assert {:ok, restored} = Core.restore(snapshot, pending)
+
+      assert Core.show(compacted)["operations"] == pre_show["operations"]
+      assert Core.show(restored)["operations"] == pre_show["operations"]
+      assert {:ok, ^pre_pending} = Core.pending_summary(compacted, @now)
+      assert {:ok, ^pre_pending} = Core.pending_summary(restored, @now)
+
+      cap = Core.capacity(restored)
+      assert cap["used_entries"] == 1 + length(pending)
+      assert length(pending) == 3
+      assert cap["used_bytes"] == restored["snapshot_bytes"] + pending_byte_size(pending)
+
+      refute Map.has_key?(
+               restored["operations"][delivered["operation_id"]],
+               "records"
+             )
+
+      assert is_binary(
+               compacted["operations"][prepared_pending["operation_id"]]["records"]["prepared"]
+             )
+
+      assert {:ok, bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      assert byte_size(bytes) <= AuditJournal.limits().max_record_bytes
+
+      assert rejected["record_type"] == "effect_rejected"
+      assert applied_pending["record_type"] == "effect_applied"
+    end
+
+    test "terminal retries stay idempotent or conflict after restore" do
+      {state, delivered, rejected, prepared_pending, applied_pending} = mixed_journal()
+      assert {:ok, _compacted, snapshot, pending} = Core.compact(state, snapshot_source(8, 99))
+      assert {:ok, restored} = Core.restore(snapshot, pending)
+      used = Core.capacity(restored)
+
+      assert {:ok, ^restored, :idempotent} = Core.append(restored, delivered)
+      assert {:ok, ^restored, :idempotent} = Core.append(restored, rejected)
+      assert Core.capacity(restored) == used
+
+      other_delivered = Map.put(delivered, "occurred_at", "2026-08-20T12:00:09Z")
+      assert {:error, :operation_conflict} = Core.append(restored, other_delivered)
+
+      {:ok, revoke_intent} = AuditJournal.admit_intent(revoke_facts(1))
+      assert {:error, :post_terminal} = Core.append(restored, applied_record(revoke_intent, @t2))
+
+      {:ok, pending_intent} = AuditJournal.admit_intent(grant_facts(2))
+      assert {:error, :illegal_transition} =
+               Core.append(restored, delivered_record(pending_intent, @t2))
+
+      other_applied = Map.put(applied_pending, "occurred_at", "2026-08-20T12:00:09Z")
+      assert {:error, :operation_conflict} = Core.append(restored, other_applied)
+      assert {:ok, ^restored, :idempotent} = Core.append(restored, prepared_pending)
+    end
+
+    test "restore rejects every retained-set mismatch class" do
+      {state, _delivered, _rejected, _prepared_pending, _applied_pending} = mixed_journal()
+      assert {:ok, compacted, snapshot, pending} = Core.compact(state, snapshot_source(8, 99))
+      shown = Core.show(compacted)
+      [first, second, third] = pending
+
+      assert {:error, :pending_mismatch} = Core.restore(snapshot, Enum.drop(pending, -1))
+
+      {:ok, extra_intent} = AuditJournal.admit_intent(grant_facts(8))
+      extra = prepared_record(extra_intent)
+      assert {:error, :pending_mismatch} = Core.restore(snapshot, pending ++ [extra])
+      assert {:error, :pending_mismatch} = Core.restore(snapshot, [second, first, third])
+
+      substituted =
+        Enum.map(pending, fn
+          %{"record_type" => "effect_applied"} = record ->
+            Map.put(record, "occurred_at", "2026-08-20T12:00:09Z")
+
+          record ->
+            record
+        end)
+
+      assert {:error, :pending_mismatch} = Core.restore(snapshot, substituted)
+      assert {:error, :pending_mismatch} = Core.restore(snapshot, [first, first, second, third])
+      assert {:error, :malformed} = Core.restore(snapshot, [%{"nope" => true} | tl(pending)])
+
+      unavailable = %{
+        "version" => 1,
+        "kind" => AuditJournal.record_kind(),
+        "record_type" => "effect_applied",
+        "operation_id" => first["operation_id"],
+        "occurred_at" => @t1,
+        "observation" => %{
+          "kind" => "unavailable",
+          "after_fingerprint" => %{"kind" => "absent"}
+        }
+      }
+
+      assert {:error, :malformed} = Core.restore(snapshot, [unavailable | tl(pending)])
+      assert Core.show(compacted) == shown
+
+      {:ok, other_intent} = AuditJournal.admit_intent(grant_facts(9))
+      foreign = prepared_record(other_intent)
+      assert {:error, :cross_operation} = Core.restore(snapshot, [foreign, second, third])
+
+      forged = Map.put(first, "operation_id", String.duplicate("c", 64))
+      assert {:error, :cross_operation} = Core.restore(snapshot, [forged, second, third])
+    end
+
+    test "empty compact binds source and restores occupancy 1" do
+      assert {:ok, empty} = Core.new()
+      source = snapshot_source(0, 0)
+      assert {:ok, compacted, snapshot, []} = Core.compact(empty, source)
+      assert snapshot["source"] == source
+      assert Core.capacity(compacted)["used_entries"] == 1
+      assert {:ok, restored} = Core.restore(snapshot, [])
+      assert Core.show(restored)["operations"] == []
+    end
+  end
+
+  describe "compacted capacity" do
+    test "reclaims terminal occupancy and preserves the authority-reduction reserve" do
+      {:ok, state} = Core.new()
+
+      state =
+        Enum.reduce(1..32, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      state =
+        Enum.reduce(1..8, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, acc} = Core.append(acc, applied_record(intent, @t1))
+          {:ok, acc} = Core.append(acc, delivered_record(intent, @t2))
+          acc
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 48
+      pre = Core.show(state)
+
+      assert {:ok, compacted, snapshot, pending} = Core.compact(state, snapshot_source(48, 1))
+      assert {:ok, bytes} = AuditJournal.canonical_snapshot_bytes(snapshot)
+      assert byte_size(bytes) <= 32_768
+      assert length(pending) == 24
+
+      cap = Core.capacity(compacted)
+      assert cap["used_entries"] == 25
+      assert cap["remaining_hard_entries"] - cap["remaining_soft_entries"] == 16
+      assert Core.show(compacted)["operations"] == pre["operations"]
+
+      {:ok, extra} = AuditJournal.admit_intent(grant_facts(33))
+      assert {:ok, compacted} = Core.append(compacted, prepared_record(extra))
+
+      compacted =
+        Enum.reduce(34..39, compacted, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(compacted)["used_entries"] == 32
+      {:ok, overflow_grant} = AuditJournal.admit_intent(grant_facts(40))
+
+      assert {:error, :soft_capacity_exhausted} =
+               Core.append(compacted, prepared_record(overflow_grant))
+
+      {:ok, revoke_intent} = AuditJournal.admit_intent(revoke_facts(100))
+      assert {:ok, compacted} = Core.append(compacted, prepared_record(revoke_intent))
+
+      compacted =
+        Enum.reduce(101..115, compacted, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(compacted)["used_entries"] == 48
+      {:ok, overflow_revoke} = AuditJournal.admit_intent(revoke_facts(200))
+      assert {:error, :capacity_exhausted} = Core.append(compacted, prepared_record(overflow_revoke))
+    end
+
+    test "oversized snapshot fails closed without restore" do
+      oversized = String.duplicate("x", 32_768) <> <<0xFF>>
+
+      snapshot =
+        %{
+          "version" => 1,
+          "kind" => AuditJournal.snapshot_kind(),
+          "source" => snapshot_source(0, 0),
+          "pending_manifest" => %{},
+          "terminals" => %{"x" => oversized}
+        }
+
+      assert {:error, :record_too_large} = Core.restore(snapshot, [])
+    end
+
+    test "restore rejects occupancy above the hard entry cap" do
+      records =
+        Enum.map(1..48, fn n ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          prepared_record(intent)
+        end)
+
+      manifest =
+        Map.new(records, fn record ->
+          {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+          {:ok, fingerprint} = AuditJournal.record_fingerprint(bytes)
+          {record["operation_id"], "prepared:" <> fingerprint}
+        end)
+
+      snapshot = %{
+        "version" => 1,
+        "kind" => AuditJournal.snapshot_kind(),
+        "source" => snapshot_source(48, 0),
+        "pending_manifest" => manifest,
+        "terminals" => %{}
+      }
+
+      assert {:ok, _} = AuditJournal.admit_snapshot(snapshot)
+      assert {:error, :capacity_exhausted} = Core.restore(snapshot, records)
+    end
+
+    test "fails closed when occupancy cannot fit the snapshot" do
+      {:ok, state} = Core.new()
+
+      state =
+        Enum.reduce(1..32, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      state =
+        Enum.reduce(40..55, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 48
+      pre = Core.show(state)
+      assert {:error, :capacity_exhausted} = Core.compact(state, snapshot_source(48, 1))
+      assert Core.show(state) == pre
+    end
+  end
+
+  defp snapshot_source(frames, offset) do
+    %{
+      "committed_digest" => String.duplicate("ab", 32),
+      "committed_frames" => frames,
+      "committed_offset" => offset
+    }
+  end
+
+  defp mixed_journal do
+    {:ok, grant1} = AuditJournal.admit_intent(grant_facts(1))
+    {:ok, revoke1} = AuditJournal.admit_intent(revoke_facts(1))
+    {:ok, grant2} = AuditJournal.admit_intent(grant_facts(2))
+    {:ok, revoke2} = AuditJournal.admit_intent(revoke_facts(2))
+
+    delivered = delivered_record(grant1, @t2)
+    rejected = rejected_record(revoke1, @t1)
+    prepared_pending = prepared_record(grant2)
+    applied_pending = applied_record(revoke2, @t1)
+
+    records = [
+      prepared_record(grant1),
+      applied_record(grant1, @t1),
+      delivered,
+      prepared_record(revoke1),
+      rejected,
+      prepared_pending,
+      prepared_record(revoke2),
+      applied_pending
+    ]
+
+    {:ok, state} = Core.fold(records)
+    {state, delivered, rejected, prepared_pending, applied_pending}
+  end
+
+  defp pending_byte_size(records) do
+    Enum.reduce(records, 0, fn record, acc ->
+      {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+      acc + byte_size(bytes)
+    end)
+  end
+
   defp grant_lifecycle do
     {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
 

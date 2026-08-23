@@ -1,6 +1,7 @@
 defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
   @moduledoc """
-  Exact-parent security regression for P1C-B1 audit-journal contract and reducer.
+  Exact-parent security regression for P1C-B1/B2C1 audit-journal contract,
+  reducer, and pure snapshot compact/restore.
 
   Parent (modules absent) fails to load/call these APIs. Candidate must pass.
   """
@@ -165,6 +166,168 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
     assert {:error, :malformed} = Core.fold(List.duplicate(prepared, max_records + 1))
   end
 
+  test "security regression: compact restore rejects substituted and cross-operation pending" do
+    {:ok, grant} = AuditJournal.admit_intent(grant_absent())
+    {:ok, revoke} = AuditJournal.admit_intent(revoke_facts())
+    prepared_grant = prepared_record(grant)
+    applied_grant = applied_record(grant)
+    delivered = delivered_record(grant)
+    prepared_revoke = prepared_record(revoke)
+    applied_revoke = applied_record(revoke)
+
+    assert {:ok, state} =
+             Core.fold([
+               prepared_grant,
+               applied_grant,
+               delivered,
+               prepared_revoke,
+               applied_revoke
+             ])
+
+    source = %{
+      "committed_digest" => String.duplicate("ab", 32),
+      "committed_frames" => 5,
+      "committed_offset" => 10
+    }
+
+    assert {:ok, compacted, snapshot, pending} = Core.compact(state, source)
+    assert length(pending) == 2
+
+    substituted =
+      Enum.map(pending, fn
+        %{"record_type" => "effect_applied"} = record ->
+          Map.put(record, "occurred_at", "2026-08-20T12:00:09Z")
+
+        record ->
+          record
+      end)
+
+    assert {:error, :pending_mismatch} = Core.restore(snapshot, substituted)
+
+    {:ok, other} = AuditJournal.admit_intent(other_grant())
+    assert {:error, :cross_operation} =
+             Core.restore(snapshot, [prepared_record(other) | tl(pending)])
+
+    assert {:ok, restored} = Core.restore(snapshot, pending)
+    assert {:ok, ^restored, :idempotent} = Core.append(restored, delivered)
+
+    other_delivered = Map.put(delivered, "occurred_at", "2026-08-20T12:00:09Z")
+    assert {:error, :operation_conflict} = Core.append(restored, other_delivered)
+
+    pre = Core.show(compacted)
+    bad_source = Map.put(source, "committed_digest", :not_hex)
+    assert {:error, :malformed} = Core.compact(compacted, bad_source)
+    assert Core.show(compacted) == pre
+  end
+
+  test "security regression: compact of 48 pending fails closed without dropping identity" do
+    {:ok, state} = Core.new()
+
+    state =
+      Enum.reduce(1..32, state, fn n, acc ->
+        {:ok, intent} = AuditJournal.admit_intent(grant_n(n))
+        {:ok, next} = Core.append(acc, prepared_record(intent))
+        next
+      end)
+
+    state =
+      Enum.reduce(40..55, state, fn n, acc ->
+        {:ok, intent} = AuditJournal.admit_intent(revoke_n(n))
+        {:ok, next} = Core.append(acc, prepared_record(intent))
+        next
+      end)
+
+    assert Core.capacity(state)["used_entries"] == 48
+    pre = Core.show(state)
+
+    source = %{
+      "committed_digest" => String.duplicate("ab", 32),
+      "committed_frames" => 48,
+      "committed_offset" => 1
+    }
+
+    assert {:error, :capacity_exhausted} = Core.compact(state, source)
+    assert Core.show(state) == pre
+  end
+
+  test "security regression: extra terminal evidence fails closed" do
+    {:ok, grant} = AuditJournal.admit_intent(grant_absent())
+    {:ok, revoke} = AuditJournal.admit_intent(revoke_facts())
+
+    assert {:ok, state} =
+             Core.fold([prepared_record(grant), applied_record(grant), delivered_record(grant)])
+
+    {:ok, extra_bytes} = AuditJournal.canonical_record_bytes(prepared_record(revoke))
+    oid = grant["operation_id"]
+
+    tampered =
+      put_in(state, ["operations", oid, "records", "effect_rejected"], extra_bytes)
+
+    pre = Core.show(tampered)
+    source = compact_source(3, 10)
+    assert {:error, :malformed} = Core.compact(tampered, source)
+    assert Core.show(tampered) == pre
+  end
+
+  test "security regression: terminal and pending cross-operation state keys fail closed" do
+    {:ok, grant} = AuditJournal.admit_intent(grant_absent())
+    {:ok, other} = AuditJournal.admit_intent(other_grant())
+
+    assert {:ok, state} =
+             Core.fold([
+               prepared_record(grant),
+               applied_record(grant),
+               delivered_record(grant),
+               prepared_record(other)
+             ])
+
+    {:ok, foreign_prepared} = AuditJournal.canonical_record_bytes(prepared_record(other))
+    {:ok, grant_prepared} = AuditJournal.canonical_record_bytes(prepared_record(grant))
+    grant_oid = grant["operation_id"]
+    other_oid = other["operation_id"]
+    source = compact_source(4, 10)
+
+    terminal_tampered =
+      put_in(state, ["operations", grant_oid, "records", "prepared"], foreign_prepared)
+
+    terminal_pre = Core.show(terminal_tampered)
+    assert {:error, :cross_operation} = Core.compact(terminal_tampered, source)
+    assert Core.show(terminal_tampered) == terminal_pre
+
+    pending_tampered =
+      put_in(state, ["operations", other_oid, "records", "prepared"], grant_prepared)
+
+    pending_pre = Core.show(pending_tampered)
+    assert {:error, :cross_operation} = Core.compact(pending_tampered, source)
+    assert Core.show(pending_tampered) == pending_pre
+  end
+
+  test "security regression: restore of 48 pending records exceeds hard occupancy" do
+    records =
+      Enum.map(1..48, fn n ->
+        {:ok, intent} = AuditJournal.admit_intent(grant_n(n))
+        prepared_record(intent)
+      end)
+
+    manifest =
+      Map.new(records, fn record ->
+        {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+        {:ok, fingerprint} = AuditJournal.record_fingerprint(bytes)
+        {record["operation_id"], "prepared:" <> fingerprint}
+      end)
+
+    snapshot = %{
+      "version" => 1,
+      "kind" => AuditJournal.snapshot_kind(),
+      "source" => compact_source(48, 0),
+      "pending_manifest" => manifest,
+      "terminals" => %{}
+    }
+
+    assert {:ok, _} = AuditJournal.admit_snapshot(snapshot)
+    assert {:error, :capacity_exhausted} = Core.restore(snapshot, records)
+  end
+
   test "security regression: byte caps precede UTF-8 and grammar scans" do
     assert {:ok, _intent} = AuditJournal.admit_intent(grant_absent())
 
@@ -174,6 +337,14 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
              grant_absent()
              |> Map.put("authority_key", oversized_invalid_utf8)
              |> AuditJournal.admit_intent()
+  end
+
+  defp compact_source(frames, offset) do
+    %{
+      "committed_digest" => String.duplicate("ab", 32),
+      "committed_frames" => frames,
+      "committed_offset" => offset
+    }
   end
 
   defp grant_absent do
@@ -227,5 +398,75 @@ defmodule Arbor.Security.AuditJournalCoreSecurityRegressionTest do
         "after_fingerprint" => intent["after_fingerprint"]
       }
     }
+  end
+
+  defp delivered_record(intent) do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "record_type" => "delivered",
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => "2026-08-20T12:00:02Z"
+    }
+  end
+
+  defp revoke_facts do
+    %{
+      "version" => 1,
+      "kind" => AuditJournal.intent_kind(),
+      "operation" => "capability_revoke",
+      "effect_class" => "authority_reduce",
+      "authority_namespace" => "capability",
+      "authority_key" => @cap_id,
+      "before_fence" => %{
+        "kind" => "live",
+        "record_id" => "rec_1",
+        "generation" => 3,
+        "revision" => 1,
+        "capability_digest" => @digest
+      },
+      "after_fingerprint" => %{"kind" => "tombstone", "generation" => 3},
+      "audit" => %{
+        "event_type" => "capability_revoked",
+        "data" => %{
+          "capability_id" => @cap_id,
+          "principal_id" => "agent_a",
+          "resource_uri" => "arbor://fs/read/x"
+        }
+      },
+      "prepared_at" => @prepared_at
+    }
+  end
+
+  defp other_grant do
+    grant_absent()
+    |> Map.put("authority_key", "cap_" <> String.duplicate("b", 32))
+    |> put_in(["audit", "data", "capability_id"], "cap_" <> String.duplicate("b", 32))
+  end
+
+  defp grant_n(n) do
+    cap_id = cap_id(n)
+
+    grant_absent()
+    |> Map.put("authority_key", cap_id)
+    |> put_in(["audit", "data", "capability_id"], cap_id)
+  end
+
+  defp revoke_n(n) do
+    cap_id = cap_id(n)
+
+    revoke_facts()
+    |> Map.put("authority_key", cap_id)
+    |> put_in(["audit", "data", "capability_id"], cap_id)
+  end
+
+  defp cap_id(n) do
+    hex =
+      n
+      |> Integer.to_string(16)
+      |> String.downcase()
+      |> String.pad_leading(32, "0")
+
+    "cap_" <> hex
   end
 end

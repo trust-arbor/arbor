@@ -3,8 +3,8 @@ defmodule Arbor.Security.AuditJournalCore do
   Pure CRC reducer for the v1 Security authority-mutation audit journal.
 
   Folds admitted append records, enforces prepared -> effect_applied -> delivered
-  or prepared -> effect_rejected, exact duplicate/conflict semantics, and
-  static-floor capacity accounting.
+  or prepared -> effect_rejected, exact duplicate/conflict semantics, static-floor
+  capacity accounting, and pure snapshot compact/restore.
 
   Returns data and errors only. No effects, IO, time, processes, ETS, logging,
   signals, or store/facade calls.
@@ -31,6 +31,7 @@ defmodule Arbor.Security.AuditJournalCore do
           | :record_too_large
           | :soft_capacity_exhausted
           | :capacity_exhausted
+          | :pending_mismatch
 
   @spec new() :: {:ok, state()}
   def new do
@@ -77,6 +78,34 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp fold_records(_state, _improper_tail, _count, _max_records), do: {:error, :malformed}
 
+  @spec compact(term(), term()) ::
+          {:ok, state(), map(), [map()]} | {:error, fold_error()}
+  def compact(state, source) do
+    with :ok <- valid_state(state),
+         {:ok, snapshot, pending, operations} <- build_compact_snapshot(state, source),
+         {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(snapshot)) do
+      finish_compact(state, snapshot, pending, operations, snap_bytes)
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @spec restore(term(), term()) :: {:ok, state()} | {:error, fold_error()}
+  def restore(snapshot, pending_records) do
+    with {:ok, admitted} <- map_admit(AuditJournal.admit_snapshot(snapshot)),
+         {:ok, snap_bytes} <- map_bytes(AuditJournal.canonical_snapshot_bytes(admitted)),
+         {:ok, supplied} <- admit_pending_list(pending_records),
+         :ok <- match_pending_entries(supplied, admitted) do
+      install_restored(admitted, supplied, snap_bytes)
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
   @spec show(state()) :: map()
   def show(state) when is_map(state) do
     operations =
@@ -88,7 +117,7 @@ defmodule Arbor.Security.AuditJournalCore do
           "operation_id" => operation_id,
           "status" => op["status"],
           "effect_class" => op["effect_class"],
-          "intent_sha256" => intent_sha256(op["intent"])
+          "intent_sha256" => op_intent_sha256(op)
         }
       end)
 
@@ -159,7 +188,8 @@ defmodule Arbor.Security.AuditJournalCore do
     with true <- state["version"] == @version,
          true <- is_map(state["operations"]),
          true <- is_integer(state["entry_count"]) and state["entry_count"] >= 0,
-         true <- is_integer(state["byte_count"]) and state["byte_count"] >= 0 do
+         true <- is_integer(state["byte_count"]) and state["byte_count"] >= 0,
+         :ok <- valid_snapshot_fields(state) do
       :ok
     else
       _ -> {:error, :malformed}
@@ -167,6 +197,22 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp valid_state(_state), do: {:error, :malformed}
+
+  defp valid_snapshot_fields(state) do
+    case Map.fetch(state, "snapshot") do
+      :error ->
+        :ok
+
+      {:ok, snapshot} when is_map(snapshot) and not is_struct(snapshot) ->
+        case state["snapshot_bytes"] do
+          bytes when is_integer(bytes) and bytes >= 0 -> :ok
+          _invalid -> {:error, :malformed}
+        end
+
+      _invalid ->
+        {:error, :malformed}
+    end
+  end
 
   defp map_admit({:ok, record}), do: {:ok, record}
   defp map_admit({:error, :cross_operation}), do: {:error, :cross_operation}
@@ -210,14 +256,14 @@ defmodule Arbor.Security.AuditJournalCore do
   defp continue_operation(state, op, record, bytes, limits) do
     record_type = record["record_type"]
 
-    case Map.fetch(op["records"], record_type) do
-      {:ok, ^bytes} ->
+    case stored_identity(op, record_type, bytes) do
+      :idempotent ->
         {:ok, state, :idempotent}
 
-      {:ok, _other} ->
+      :conflict ->
         {:error, :operation_conflict}
 
-      :error ->
+      :absent ->
         cond do
           op["status"] in @terminals ->
             {:error, :post_terminal}
@@ -233,6 +279,30 @@ defmodule Arbor.Security.AuditJournalCore do
               {:ok, put_next(state, op, record, bytes)}
             end
         end
+    end
+  end
+
+  defp stored_identity(op, record_type, bytes) do
+    records = Map.get(op, "records", %{})
+    fingerprints = Map.get(op, "fingerprints", %{})
+
+    cond do
+      Map.has_key?(records, record_type) ->
+        if records[record_type] == bytes, do: :idempotent, else: :conflict
+
+      Map.has_key?(fingerprints, record_type) ->
+        fingerprint_identity(fingerprints[record_type], bytes)
+
+      true ->
+        :absent
+    end
+  end
+
+  defp fingerprint_identity(stored, bytes) do
+    case AuditJournal.record_fingerprint(bytes) do
+      {:ok, ^stored} -> :idempotent
+      {:ok, _other} -> :conflict
+      {:error, _reason} -> :conflict
     end
   end
 
@@ -313,6 +383,10 @@ defmodule Arbor.Security.AuditJournalCore do
     }
   end
 
+  defp op_intent_sha256(%{"intent_sha256" => sha256}) when is_binary(sha256), do: sha256
+  defp op_intent_sha256(%{"intent" => intent}), do: intent_sha256(intent)
+  defp op_intent_sha256(_op), do: String.duplicate("0", 64)
+
   defp intent_sha256(intent) when is_map(intent) do
     case AuditJournal.canonical_intent_bytes(intent) do
       {:ok, bytes} ->
@@ -322,6 +396,658 @@ defmodule Arbor.Security.AuditJournalCore do
         String.duplicate("0", 64)
     end
   end
+
+  defp intent_sha256(_intent), do: String.duplicate("0", 64)
+
+  defp build_compact_snapshot(state, source) do
+    with {:ok, pending_ops, terminal_ops} <- partition_operations(state["operations"]),
+         {:ok, pending_manifest, pending_records} <- compact_pending(pending_ops),
+         {:ok, terminals, compacted_terminals} <- compact_terminals(terminal_ops) do
+      snapshot = %{
+        "version" => @version,
+        "kind" => AuditJournal.snapshot_kind(),
+        "source" => source,
+        "pending_manifest" => pending_manifest,
+        "terminals" => terminals
+      }
+
+      case map_admit(AuditJournal.admit_snapshot(snapshot)) do
+        {:ok, admitted} ->
+          operations = Map.merge(pending_ops, compacted_terminals)
+          {:ok, admitted, pending_records, operations}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  defp finish_compact(_state, snapshot, pending, operations, snap_bytes) do
+    limits = AuditJournal.limits()
+    pending_n = length(pending)
+
+    case sum_record_bytes(pending) do
+      {:ok, pending_bytes} ->
+        used_entries = 1 + pending_n
+        used_bytes = snap_bytes + pending_bytes
+
+        finish_compact_occupancy(
+          snapshot,
+          pending,
+          operations,
+          snap_bytes,
+          used_entries,
+          used_bytes,
+          limits
+        )
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp finish_compact_occupancy(
+         snapshot,
+         pending,
+         operations,
+         snap_bytes,
+         used_entries,
+         used_bytes,
+         limits
+       ) do
+    if occupancy_exceeded?(used_entries, used_bytes, limits) do
+      {:error, :capacity_exhausted}
+    else
+      next = %{
+        "version" => @version,
+        "operations" => operations,
+        "entry_count" => used_entries,
+        "byte_count" => used_bytes,
+        "snapshot" => snapshot,
+        "snapshot_bytes" => snap_bytes
+      }
+
+      {:ok, next, snapshot, pending}
+    end
+  end
+
+  defp sum_record_bytes(records) do
+    Enum.reduce_while(records, {:ok, 0}, fn record, {:ok, acc} ->
+      case AuditJournal.canonical_record_bytes(record) do
+        {:ok, bytes} -> {:cont, {:ok, acc + byte_size(bytes)}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp partition_operations(operations) when is_map(operations) do
+    sorted = Enum.sort_by(operations, fn {operation_id, _op} -> operation_id end)
+
+    Enum.reduce_while(sorted, {:ok, %{}, %{}}, fn {operation_id, op}, {:ok, pending, terminals} ->
+      case op["status"] do
+        status when status in @pending_statuses ->
+          {:cont, {:ok, Map.put(pending, operation_id, op), terminals}}
+
+        status when status in @terminals ->
+          {:cont, {:ok, pending, Map.put(terminals, operation_id, op)}}
+
+        _other ->
+          {:halt, {:error, :malformed}}
+      end
+    end)
+  end
+
+  defp compact_pending(pending_ops) do
+    pending_ops
+    |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
+    |> Enum.reduce_while({:ok, %{}, []}, fn {operation_id, op}, {:ok, manifest, records} ->
+      case compact_pending_op(operation_id, op) do
+        {:ok, compact, decoded} ->
+          {:cont, {:ok, Map.put(manifest, operation_id, compact), records ++ decoded}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+  end
+
+  defp compact_pending_op(operation_id, op) do
+    with :ok <- require_pending_shape(op),
+         {:ok, decoded, fingerprints} <- decode_pending_records(operation_id, op),
+         :ok <- validate_pending_lifecycle(operation_id, op, decoded),
+         {:ok, compact} <- pending_compact_string(op["status"], fingerprints) do
+      {:ok, compact, decoded}
+    end
+  end
+
+  defp require_pending_shape(%{"intent" => intent, "records" => records} = op)
+       when is_map(intent) and is_map(records) do
+    required = pending_record_types(op["status"])
+    stored = records |> Map.keys() |> Enum.sort()
+
+    if stored == Enum.sort(required) and Enum.all?(required, &is_binary(records[&1])) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp require_pending_shape(_op), do: {:error, :malformed}
+
+  defp pending_record_types("prepared"), do: ["prepared"]
+  defp pending_record_types("effect_applied"), do: ["prepared", "effect_applied"]
+  defp pending_record_types(_status), do: []
+
+  defp decode_pending_records(operation_id, op) do
+    types = pending_record_types(op["status"])
+
+    case Enum.reduce_while(types, {:ok, {[], %{}}}, fn type, acc ->
+           decode_pending_type(operation_id, op, type, acc)
+         end) do
+      {:ok, {records, fingerprints}} -> {:ok, records, fingerprints}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp decode_pending_type(operation_id, op, type, {:ok, {records, fingerprints}}) do
+    case decode_bound_record(operation_id, type, op["records"][type]) do
+      {:ok, record, fingerprint} ->
+        next_records = records ++ [record]
+        next_fingerprints = Map.put(fingerprints, type, fingerprint)
+        {:cont, {:ok, {next_records, next_fingerprints}}}
+
+      {:error, _} = err ->
+        {:halt, err}
+    end
+  end
+
+  defp validate_pending_lifecycle(operation_id, op, decoded) do
+    prepared = Enum.find(decoded, &(&1["record_type"] == "prepared"))
+
+    with true <- is_map(prepared),
+         :ok <- bind_decoded_record(operation_id, "prepared", prepared),
+         :ok <- bind_intent(op, prepared) do
+      validate_pending_status(op, prepared, decoded)
+    else
+      {:error, _} = err -> err
+      _other -> {:error, :malformed}
+    end
+  end
+
+  defp validate_pending_status(%{"status" => "prepared"}, _prepared, _decoded), do: :ok
+
+  defp validate_pending_status(%{"status" => "effect_applied"}, prepared, decoded) do
+    applied = Enum.find(decoded, &(&1["record_type"] == "effect_applied"))
+
+    if is_map(applied) and after_match_record?(prepared, applied) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp validate_pending_status(_op, _prepared, _decoded), do: {:error, :malformed}
+
+  defp pending_compact_string("prepared", %{"prepared" => prepared}) do
+    {:ok, "prepared:" <> prepared}
+  end
+
+  defp pending_compact_string("effect_applied", %{
+         "prepared" => prepared,
+         "effect_applied" => applied
+       }) do
+    {:ok, "prepared:" <> prepared <> "|effect_applied:" <> applied}
+  end
+
+  defp pending_compact_string(_status, _fingerprints), do: {:error, :malformed}
+
+  defp compact_terminals(terminal_ops) do
+    terminal_ops
+    |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
+    |> Enum.reduce_while({:ok, %{}, %{}}, fn {operation_id, op}, {:ok, manifest, compacted} ->
+      case compact_terminal_op(operation_id, op) do
+        {:ok, compact, next_op} ->
+          next_manifest = Map.put(manifest, operation_id, compact)
+          next_ops = Map.put(compacted, operation_id, next_op)
+          {:cont, {:ok, next_manifest, next_ops}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+  end
+
+  defp compact_terminal_op(operation_id, op) do
+    with :ok <- require_terminal_status(op),
+         {:ok, fingerprints, intent_sha256} <- terminal_identity(operation_id, op),
+         {:ok, compact} <-
+           terminal_compact_string(
+             op["status"],
+             op["effect_class"],
+             intent_sha256,
+             fingerprints
+           ) do
+      next = %{
+        "status" => op["status"],
+        "effect_class" => op["effect_class"],
+        "intent_sha256" => intent_sha256,
+        "fingerprints" => fingerprints
+      }
+
+      {:ok, compact, next}
+    end
+  end
+
+  defp require_terminal_status(%{"status" => status, "effect_class" => effect_class})
+       when status in @terminals and
+              effect_class in ["authority_increase", "authority_reduce"],
+       do: :ok
+
+  defp require_terminal_status(_op), do: {:error, :malformed}
+
+  defp terminal_record_types("delivered"), do: ["prepared", "effect_applied", "delivered"]
+  defp terminal_record_types("effect_rejected"), do: ["prepared", "effect_rejected"]
+  defp terminal_record_types(_status), do: []
+
+  defp terminal_identity(operation_id, %{"records" => records} = op) when is_map(records) do
+    types = terminal_record_types(op["status"])
+
+    with :ok <- require_exact_types(records, types),
+         {:ok, decoded, fingerprints} <- decode_terminal_records(operation_id, records, types),
+         :ok <- validate_terminal_lifecycle(op, decoded),
+         {:ok, intent_sha256} <- intent_sha256_from_prepared(op, decoded) do
+      {:ok, fingerprints, intent_sha256}
+    end
+  end
+
+  defp terminal_identity(_operation_id, %{"fingerprints" => fingerprints} = op)
+       when is_map(fingerprints) do
+    with :ok <- require_exact_types(fingerprints, terminal_record_types(op["status"])),
+         :ok <- require_fingerprint_values(fingerprints),
+         {:ok, intent_sha256} <- terminal_intent_sha256(op) do
+      {:ok, fingerprints, intent_sha256}
+    end
+  end
+
+  defp terminal_identity(_operation_id, _op), do: {:error, :malformed}
+
+  defp decode_terminal_records(operation_id, records, types) do
+    Enum.reduce_while(types, {:ok, {%{}, %{}}}, fn type, {:ok, {decoded, fingerprints}} ->
+      case decode_bound_record(operation_id, type, records[type]) do
+        {:ok, record, fingerprint} ->
+          next_decoded = Map.put(decoded, type, record)
+          next_fingerprints = Map.put(fingerprints, type, fingerprint)
+          {:cont, {:ok, {next_decoded, next_fingerprints}}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, {decoded, fingerprints}} -> {:ok, decoded, fingerprints}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp validate_terminal_lifecycle(op, decoded) do
+    prepared = decoded["prepared"]
+
+    with true <- is_map(prepared),
+         :ok <- bind_intent(op, prepared) do
+      validate_terminal_status(op["status"], prepared, decoded)
+    else
+      {:error, _} = err -> err
+      _other -> {:error, :malformed}
+    end
+  end
+
+  defp validate_terminal_status("delivered", prepared, decoded) do
+    applied = decoded["effect_applied"]
+    delivered = decoded["delivered"]
+
+    if is_map(applied) and is_map(delivered) and after_match_record?(prepared, applied) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp validate_terminal_status("effect_rejected", _prepared, decoded) do
+    if is_map(decoded["effect_rejected"]) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp validate_terminal_status(_status, _prepared, _decoded), do: {:error, :malformed}
+
+  defp intent_sha256_from_prepared(op, decoded) do
+    prepared = decoded["prepared"]
+
+    with true <- is_map(prepared),
+         :ok <- bind_intent(op, prepared),
+         {:ok, bytes} <- AuditJournal.canonical_intent_bytes(prepared["intent"]) do
+      {:ok, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
+    else
+      {:error, _} = err -> err
+      _other -> {:error, :malformed}
+    end
+  end
+
+  defp require_exact_types(map, expected) when is_map(map) do
+    actual = map |> Map.keys() |> Enum.sort()
+
+    if actual == Enum.sort(expected) and Enum.all?(expected, &is_binary(Map.get(map, &1))) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp require_exact_types(_map, _expected), do: {:error, :malformed}
+
+  defp require_fingerprint_values(fingerprints) do
+    if Enum.all?(fingerprints, fn {_type, sha} -> valid_fingerprint?(sha) end) do
+      :ok
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp valid_fingerprint?(sha) when is_binary(sha) and byte_size(sha) == 64 do
+    Regex.match?(~r/\A[0-9a-f]{64}\z/, sha)
+  end
+
+  defp valid_fingerprint?(_sha), do: false
+
+  defp decode_bound_record(operation_id, type, bytes) do
+    with {:ok, record, canonical} <- decode_stored_record(bytes),
+         :ok <- bind_decoded_record(operation_id, type, record),
+         {:ok, fingerprint} <- AuditJournal.record_fingerprint(canonical) do
+      {:ok, record, fingerprint}
+    end
+  end
+
+  defp bind_decoded_record(operation_id, type, record) when is_map(record) do
+    cond do
+      record["operation_id"] != operation_id -> {:error, :cross_operation}
+      record["record_type"] != type -> {:error, :malformed}
+      true -> :ok
+    end
+  end
+
+  defp bind_decoded_record(_operation_id, _type, _record), do: {:error, :malformed}
+
+  defp bind_intent(op, prepared) do
+    intent = prepared["intent"]
+
+    cond do
+      not is_map(intent) -> {:error, :malformed}
+      intent["effect_class"] != op["effect_class"] -> {:error, :malformed}
+      true -> bind_stored_intent(op["intent"], intent)
+    end
+  end
+
+  defp bind_stored_intent(stored, decoded) when is_map(stored) do
+    with {:ok, left} <- AuditJournal.canonical_intent_bytes(stored),
+         {:ok, right} <- AuditJournal.canonical_intent_bytes(decoded) do
+      if left == right, do: :ok, else: {:error, :malformed}
+    else
+      {:error, _} -> {:error, :malformed}
+    end
+  end
+
+  defp bind_stored_intent(nil, _decoded), do: :ok
+  defp bind_stored_intent(_stored, _decoded), do: {:error, :malformed}
+
+  defp after_match_record?(prepared, applied) do
+    get_in(prepared, ["intent", "after_fingerprint"]) ===
+      get_in(applied, ["observation", "after_fingerprint"])
+  end
+
+  defp terminal_intent_sha256(%{"intent_sha256" => sha256})
+       when is_binary(sha256) and byte_size(sha256) == 64,
+       do: {:ok, sha256}
+
+  defp terminal_intent_sha256(%{"intent" => intent}) when is_map(intent) do
+    case AuditJournal.canonical_intent_bytes(intent) do
+      {:ok, bytes} -> {:ok, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
+      {:error, _reason} -> {:error, :malformed}
+    end
+  end
+
+  defp terminal_intent_sha256(_op), do: {:error, :malformed}
+
+  defp terminal_compact_string(
+         "delivered",
+         effect_class,
+         intent_sha256,
+         %{
+           "prepared" => prepared,
+           "effect_applied" => applied,
+           "delivered" => delivered
+         }
+       )
+       when effect_class in ["authority_increase", "authority_reduce"] do
+    {:ok,
+     "delivered|" <>
+       effect_class <>
+       "|" <>
+       intent_sha256 <>
+       "|prepared:" <> prepared <> "|effect_applied:" <> applied <> "|delivered:" <> delivered}
+  end
+
+  defp terminal_compact_string(
+         "effect_rejected",
+         effect_class,
+         intent_sha256,
+         %{
+           "prepared" => prepared,
+           "effect_rejected" => rejected
+         }
+       )
+       when effect_class in ["authority_increase", "authority_reduce"] do
+    {:ok,
+     "effect_rejected|" <>
+       effect_class <>
+       "|" <> intent_sha256 <> "|prepared:" <> prepared <> "|effect_rejected:" <> rejected}
+  end
+
+  defp terminal_compact_string(_status, _effect_class, _intent_sha256, _fingerprints),
+    do: {:error, :malformed}
+
+  defp decode_stored_record(bytes) when is_binary(bytes) do
+    with {:ok, decoded} <- decode_json(bytes),
+         {:ok, record} <- map_admit(AuditJournal.admit_record(decoded)),
+         {:ok, canonical} <- map_bytes(AuditJournal.canonical_record_bytes(record)),
+         true <- canonical == bytes do
+      {:ok, record, canonical}
+    else
+      false -> {:error, :malformed}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp decode_stored_record(_bytes), do: {:error, :malformed}
+
+  defp decode_json(bytes) do
+    case Jason.decode(bytes) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, :malformed}
+    end
+  end
+
+  defp admit_pending_list(records) when is_list(records) do
+    max = AuditJournal.limits().hard_entry_cap
+    admit_pending_members(records, [], 0, max, MapSet.new())
+  end
+
+  defp admit_pending_list(_records), do: {:error, :malformed}
+
+  defp admit_pending_members([], acc, _count, _max, _seen), do: {:ok, Enum.reverse(acc)}
+
+  defp admit_pending_members(_records, _acc, count, max, _seen) when count >= max,
+    do: {:error, :malformed}
+
+  defp admit_pending_members([record | tail], acc, count, max, seen) do
+    with {:ok, admitted} <- map_admit(AuditJournal.admit_record(record)),
+         {:ok, bytes} <- map_bytes(AuditJournal.canonical_record_bytes(admitted)),
+         :ok <- require_pending_type(admitted),
+         {:ok, seen} <- remember_pending(seen, admitted) do
+      admit_pending_members(tail, [{admitted, bytes} | acc], count + 1, max, seen)
+    end
+  end
+
+  defp admit_pending_members(_improper, _acc, _count, _max, _seen), do: {:error, :malformed}
+
+  defp require_pending_type(%{"record_type" => type}) when type in ["prepared", "effect_applied"],
+    do: :ok
+
+  defp require_pending_type(_record), do: {:error, :pending_mismatch}
+
+  defp remember_pending(seen, record) do
+    key = {record["operation_id"], record["record_type"]}
+
+    if MapSet.member?(seen, key) do
+      {:error, :pending_mismatch}
+    else
+      {:ok, MapSet.put(seen, key)}
+    end
+  end
+
+  defp match_pending_entries(supplied, snapshot) do
+    expected =
+      snapshot
+      |> AuditJournal.snapshot_pending_entries()
+      |> Enum.map(&pending_tuple/1)
+
+    supplied_tuples =
+      Enum.map(supplied, fn {record, bytes} ->
+        fingerprint =
+          case AuditJournal.record_fingerprint(bytes) do
+            {:ok, sha256} -> sha256
+            {:error, _reason} -> nil
+          end
+
+        {record["operation_id"], record["record_type"], fingerprint}
+      end)
+
+    compare_pending_tuples(supplied_tuples, expected)
+  end
+
+  defp pending_tuple(entry) do
+    {entry["operation_id"], entry["record_type"], entry["sha256"]}
+  end
+
+  defp compare_pending_tuples(supplied, expected) do
+    cond do
+      supplied == expected ->
+        :ok
+
+      length(supplied) != length(expected) ->
+        {:error, :pending_mismatch}
+
+      MapSet.new(supplied) == MapSet.new(expected) ->
+        {:error, :pending_mismatch}
+
+      true ->
+        zip_pending_tuples(supplied, expected)
+    end
+  end
+
+  defp zip_pending_tuples(supplied, expected) do
+    supplied
+    |> Enum.zip(expected)
+    |> Enum.reduce_while(:ok, fn
+      {{oid, type, sha}, {oid, type, sha}}, :ok ->
+        {:cont, :ok}
+
+      {{oid, type, _sha}, {oid, type, _other}}, :ok ->
+        {:halt, {:error, :pending_mismatch}}
+
+      {{oid, _type, _sha}, {expected_oid, _expected_type, _expected_sha}}, :ok
+      when oid != expected_oid ->
+        {:halt, {:error, :cross_operation}}
+
+      {_supplied, _expected}, :ok ->
+        {:halt, {:error, :pending_mismatch}}
+    end)
+  end
+
+  defp occupancy_exceeded?(used_entries, used_bytes, limits) do
+    used_entries > limits.hard_entry_cap or used_bytes > limits.hard_byte_cap
+  end
+
+  defp install_restored(snapshot, supplied, snap_bytes) do
+    pending_n = length(supplied)
+
+    pending_bytes =
+      Enum.reduce(supplied, 0, fn {_record, bytes}, acc -> acc + byte_size(bytes) end)
+
+    used_entries = 1 + pending_n
+    used_bytes = snap_bytes + pending_bytes
+    limits = AuditJournal.limits()
+
+    if occupancy_exceeded?(used_entries, used_bytes, limits) do
+      {:error, :capacity_exhausted}
+    else
+      finish_restore(snapshot, supplied, snap_bytes, used_entries, used_bytes)
+    end
+  end
+
+  defp finish_restore(snapshot, supplied, snap_bytes, used_entries, used_bytes) do
+    with {:ok, state} <- install_terminals(empty_state(), snapshot),
+         {:ok, state} <- install_pending(state, supplied) do
+      {:ok,
+       state
+       |> Map.put("entry_count", used_entries)
+       |> Map.put("byte_count", used_bytes)
+       |> Map.put("snapshot", snapshot)
+       |> Map.put("snapshot_bytes", snap_bytes)}
+    end
+  end
+
+  defp install_terminals(state, snapshot) do
+    snapshot
+    |> AuditJournal.snapshot_terminal_entries()
+    |> Enum.reduce_while({:ok, state}, fn entry, {:ok, acc} ->
+      op = %{
+        "status" => entry["status"],
+        "effect_class" => entry["effect_class"],
+        "intent_sha256" => entry["intent_sha256"],
+        "fingerprints" => entry["fingerprints"]
+      }
+
+      next = put_in(acc, ["operations", entry["operation_id"]], op)
+      {:cont, {:ok, next}}
+    end)
+  end
+
+  defp install_pending(state, supplied) do
+    Enum.reduce_while(supplied, {:ok, state}, fn {record, bytes}, {:ok, acc} ->
+      case install_pending_record(acc, record, bytes) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp install_pending_record(state, %{"record_type" => "prepared"} = record, bytes) do
+    {:ok, put_new_prepared(state, record, bytes)}
+  end
+
+  defp install_pending_record(state, %{"record_type" => "effect_applied"} = record, bytes) do
+    op = Map.get(state["operations"], record["operation_id"])
+
+    if is_map(op) and after_match?(op, record) do
+      {:ok, put_next(state, op, record, bytes)}
+    else
+      {:error, :malformed}
+    end
+  end
+
+  defp install_pending_record(_state, _record, _bytes), do: {:error, :pending_mismatch}
 
   defp pending_ops(state) do
     ops =

@@ -5,6 +5,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   Wire kinds:
   - intent: `arbor.security.authority_mutation_intent.v1`
   - record: `arbor.security.authority_mutation_record.v1`
+  - snapshot: `arbor.security.audit_journal_snapshot.v1`
 
   Pure only: no IO, time, randomness, processes, ETS, logging, signals, or
   store/facade calls. Time and identifiers enter as validated data.
@@ -13,6 +14,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @version 1
   @intent_kind "arbor.security.authority_mutation_intent.v1"
   @record_kind "arbor.security.authority_mutation_record.v1"
+  @snapshot_kind "arbor.security.audit_journal_snapshot.v1"
   @intent_domain "arbor.security.authority_mutation_intent.v1" <> <<0>>
   @record_domain "arbor.security.authority_mutation_record.v1" <> <<0>>
 
@@ -84,6 +86,24 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @applied_order @applied_keys
   @delivered_order @delivered_keys
 
+  @snapshot_keys ~w(version kind source pending_manifest terminals)
+  @snapshot_source_keys ~w(committed_digest committed_frames committed_offset)
+  @snapshot_order @snapshot_keys
+  @snapshot_source_order @snapshot_source_keys
+  @snapshot_max_keys 5
+  @sha_group "([0-9a-f]{64})"
+  @pending_compact_re ~r/\Aprepared:([0-9a-f]{64})(?:\|effect_applied:([0-9a-f]{64}))?\z/
+  @terminal_delivered_re Regex.compile!(
+                           "\\Adelivered\\|(authority_increase|authority_reduce)\\|" <>
+                             "#{@sha_group}\\|prepared:#{@sha_group}\\|" <>
+                             "effect_applied:#{@sha_group}\\|delivered:#{@sha_group}\\z"
+                         )
+  @terminal_rejected_re Regex.compile!(
+                          "\\Aeffect_rejected\\|(authority_increase|authority_reduce)\\|" <>
+                            "#{@sha_group}\\|prepared:#{@sha_group}\\|" <>
+                            "effect_rejected:#{@sha_group}\\z"
+                        )
+
   @forbidden_names MapSet.new(~w(
     capability token secret password private_key issuer_signature signing_key
     bearer credentials callback metadata terms prose note reason_text
@@ -102,7 +122,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
                       @grant_data_keys ++
                       @revoke_data_keys ++
                       @applied_observation_keys ++
-                      @rejected_observation_keys ++ MapSet.to_list(@forbidden_names)
+                      @rejected_observation_keys ++
+                      @snapshot_keys ++
+                      @snapshot_source_keys ++ MapSet.to_list(@forbidden_names)
                   )
   @max_wire_key_bytes @wire_key_names |> Enum.map(&byte_size/1) |> Enum.max()
 
@@ -145,6 +167,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @spec record_kind() :: String.t()
   def record_kind, do: @record_kind
 
+  @spec snapshot_kind() :: String.t()
+  def snapshot_kind, do: @snapshot_kind
+
   @spec intent_domain() :: binary()
   def intent_domain, do: @intent_domain
 
@@ -182,6 +207,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     %{
       max_intent_bytes: @max_intent_bytes,
       max_record_bytes: @max_record_bytes,
+      max_snapshot_bytes: @max_record_bytes,
       hard_entry_cap: @hard_entry_cap,
       max_fold_records: @max_fold_records,
       reserve_entries: @reserve_entries,
@@ -214,7 +240,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
         grant_audit_data: length(@grant_data_keys),
         revoke_audit_data: length(@revoke_data_keys),
         applied_observation: length(@applied_observation_keys),
-        rejected_observation: length(@rejected_observation_keys)
+        rejected_observation: length(@rejected_observation_keys),
+        snapshot: @snapshot_max_keys,
+        snapshot_source: length(@snapshot_source_keys)
       }
     }
   end
@@ -276,6 +304,336 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     _ -> {:error, :malformed}
   catch
     _, _ -> {:error, :malformed}
+  end
+
+  @spec admit_snapshot(term()) :: {:ok, map()} | {:error, error()}
+  def admit_snapshot(input) do
+    do_admit_snapshot(input)
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @spec canonical_snapshot_bytes(term()) :: {:ok, binary()} | {:error, error()}
+  def canonical_snapshot_bytes(input) do
+    with {:ok, snapshot} <- admit_snapshot(input) do
+      encode_snapshot(snapshot)
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  @spec record_fingerprint(term()) :: {:ok, String.t()} | {:error, error()}
+  def record_fingerprint(bytes) when is_binary(bytes) do
+    if byte_size(bytes) > @max_record_bytes do
+      {:error, :record_too_large}
+    else
+      {:ok, fingerprint_hex(bytes)}
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  def record_fingerprint(_bytes), do: {:error, :malformed}
+
+  @spec snapshot_pending_entries(term()) :: [map()]
+  def snapshot_pending_entries(%{"pending_manifest" => manifest}) when is_map(manifest) do
+    manifest
+    |> Enum.sort_by(fn {operation_id, _compact} -> operation_id end)
+    |> Enum.flat_map(&expand_pending_compact/1)
+  end
+
+  def snapshot_pending_entries(_snapshot), do: []
+
+  @spec snapshot_terminal_entries(term()) :: [map()]
+  def snapshot_terminal_entries(%{"terminals" => terminals}) when is_map(terminals) do
+    terminals
+    |> Enum.sort_by(fn {operation_id, _compact} -> operation_id end)
+    |> Enum.flat_map(&expand_terminal_compact/1)
+  end
+
+  def snapshot_terminal_entries(_snapshot), do: []
+
+  # ---------------------------------------------------------------------------
+  # Snapshot
+  # ---------------------------------------------------------------------------
+
+  defp do_admit_snapshot(input) do
+    with :ok <- budget_ok(input, 0, 0),
+         :ok <- snapshot_string_budget(input),
+         {:ok, attrs} <- admit_object(input, @snapshot_keys, @snapshot_max_keys),
+         :ok <- require_exact_keys(attrs, @snapshot_keys),
+         {:ok, version} <- admit_version(Map.fetch!(attrs, "version")),
+         {:ok, kind} <- admit_exact(Map.fetch!(attrs, "kind"), @snapshot_kind, "kind"),
+         {:ok, source} <- admit_snapshot_source(Map.fetch!(attrs, "source")),
+         {:ok, pending_manifest} <-
+           admit_pending_manifest(Map.fetch!(attrs, "pending_manifest")),
+         {:ok, terminals} <- admit_terminals(Map.fetch!(attrs, "terminals")),
+         :ok <- reject_manifest_overlap(pending_manifest, terminals) do
+      admitted = %{
+        "version" => version,
+        "kind" => kind,
+        "source" => source,
+        "pending_manifest" => pending_manifest,
+        "terminals" => terminals
+      }
+
+      case encode_snapshot(admitted) do
+        {:ok, _bytes} -> {:ok, admitted}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  defp admit_snapshot_source(value) do
+    with {:ok, attrs} <-
+           admit_object(value, @snapshot_source_keys, length(@snapshot_source_keys)),
+         :ok <- require_exact_keys(attrs, @snapshot_source_keys),
+         {:ok, digest} <- admit_hex64(Map.fetch!(attrs, "committed_digest"), "committed_digest"),
+         {:ok, frames} <-
+           admit_snapshot_frames(Map.fetch!(attrs, "committed_frames"), "committed_frames"),
+         {:ok, offset} <-
+           admit_snapshot_offset(Map.fetch!(attrs, "committed_offset"), "committed_offset") do
+      {:ok,
+       %{
+         "committed_digest" => digest,
+         "committed_frames" => frames,
+         "committed_offset" => offset
+       }}
+    end
+  end
+
+  defp admit_snapshot_frames(value, _field)
+       when is_integer(value) and value >= 0 and value <= @hard_entry_cap,
+       do: {:ok, value}
+
+  defp admit_snapshot_frames(value, _field) when is_float(value), do: {:error, :float_not_allowed}
+
+  defp admit_snapshot_frames(value, _field) when is_integer(value) and value < 0,
+    do: {:error, :integer_out_of_range}
+
+  defp admit_snapshot_frames(value, _field)
+       when is_integer(value) and value > @max_json_safe_int,
+       do: {:error, :integer_out_of_range}
+
+  defp admit_snapshot_frames(_value, field), do: {:error, {:invalid_field, field}}
+
+  defp admit_snapshot_offset(value, _field)
+       when is_integer(value) and value >= 0 and value <= @max_json_safe_int,
+       do: {:ok, value}
+
+  defp admit_snapshot_offset(value, _field) when is_float(value), do: {:error, :float_not_allowed}
+
+  defp admit_snapshot_offset(value, _field) when is_integer(value),
+    do: {:error, :integer_out_of_range}
+
+  defp admit_snapshot_offset(_value, field), do: {:error, {:invalid_field, field}}
+
+  defp admit_pending_manifest(value), do: admit_compact_map(value, &admit_pending_compact/1)
+
+  defp admit_terminals(value), do: admit_compact_map(value, &admit_terminal_compact/1)
+
+  defp admit_compact_map(%_{}, _parser), do: {:error, :struct_not_allowed}
+
+  defp admit_compact_map(value, parser) when is_map(value) do
+    if map_size(value) > @hard_entry_cap do
+      {:error, :malformed}
+    else
+      admit_compact_map_keys(value, parser)
+    end
+  end
+
+  defp admit_compact_map([], _parser), do: {:error, :invalid_field}
+  defp admit_compact_map([_head | _tail], _parser), do: {:error, :invalid_field}
+  defp admit_compact_map(_value, _parser), do: {:error, :invalid_field}
+
+  defp admit_compact_map_keys(value, parser) do
+    keys = Map.keys(value)
+
+    cond do
+      Enum.any?(keys, &is_atom/1) ->
+        {:error, :atom_key_not_allowed}
+
+      not Enum.all?(keys, &is_binary/1) ->
+        {:error, :invalid_object}
+
+      not Enum.all?(keys, &String.valid?/1) ->
+        {:error, :invalid_utf8}
+
+      true ->
+        reduce_compact_map(value, parser)
+    end
+  end
+
+  defp reduce_compact_map(value, parser) do
+    Enum.reduce_while(value, {:ok, %{}}, fn {key, compact}, {:ok, acc} ->
+      with {:ok, operation_id} <- admit_hex64(key, "operation_id"),
+           {:ok, admitted_compact} <- parser.(compact) do
+        {:cont, {:ok, Map.put(acc, operation_id, admitted_compact)}}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp admit_pending_compact(value) when is_binary(value) do
+    with :ok <- require_utf8(value),
+         true <- Regex.match?(@pending_compact_re, value) do
+      {:ok, value}
+    else
+      {:error, _} = err -> err
+      false -> {:error, :invalid_field}
+    end
+  end
+
+  defp admit_pending_compact(_value), do: {:error, :invalid_field}
+
+  defp admit_terminal_compact(value) when is_binary(value) do
+    with :ok <- require_utf8(value),
+         true <-
+           Regex.match?(@terminal_delivered_re, value) or
+             Regex.match?(@terminal_rejected_re, value) do
+      {:ok, value}
+    else
+      {:error, _} = err -> err
+      false -> {:error, :invalid_field}
+    end
+  end
+
+  defp admit_terminal_compact(_value), do: {:error, :invalid_field}
+
+  defp require_utf8(value) when is_binary(value) do
+    if String.valid?(value), do: :ok, else: {:error, :invalid_utf8}
+  end
+
+  defp reject_manifest_overlap(pending, terminals) do
+    overlap = Map.keys(pending) -- (Map.keys(pending) -- Map.keys(terminals))
+
+    if overlap == [] do
+      :ok
+    else
+      {:error, {:invalid_field, "operation_id"}}
+    end
+  end
+
+  defp snapshot_string_budget(value) do
+    case walk_snapshot_strings(value) do
+      :ok -> :ok
+      {:error, _} = err -> err
+    end
+  end
+
+  defp walk_snapshot_strings(map) when is_map(map) and not is_struct(map) do
+    Enum.reduce_while(map, :ok, fn {key, nested}, :ok ->
+      with :ok <- walk_snapshot_binary(key),
+           :ok <- walk_snapshot_strings(nested) do
+        {:cont, :ok}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp walk_snapshot_strings(list) when is_list(list) do
+    Enum.reduce_while(list, :ok, fn nested, :ok ->
+      case walk_snapshot_strings(nested) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp walk_snapshot_strings(value) when is_binary(value), do: walk_snapshot_binary(value)
+  defp walk_snapshot_strings(_value), do: :ok
+
+  defp walk_snapshot_binary(value) when is_binary(value) do
+    if byte_size(value) > @max_record_bytes do
+      {:error, :record_too_large}
+    else
+      :ok
+    end
+  end
+
+  defp walk_snapshot_binary(_value), do: :ok
+
+  defp expand_pending_compact({operation_id, compact}) when is_binary(compact) do
+    case Regex.run(@pending_compact_re, compact, capture: :all_but_first) do
+      [prepared] ->
+        [pending_entry(operation_id, "prepared", prepared)]
+
+      [prepared, nil] ->
+        [pending_entry(operation_id, "prepared", prepared)]
+
+      [prepared, applied] ->
+        [
+          pending_entry(operation_id, "prepared", prepared),
+          pending_entry(operation_id, "effect_applied", applied)
+        ]
+
+      _other ->
+        []
+    end
+  end
+
+  defp expand_pending_compact(_pair), do: []
+
+  defp pending_entry(operation_id, record_type, sha256) do
+    %{
+      "operation_id" => operation_id,
+      "record_type" => record_type,
+      "sha256" => sha256
+    }
+  end
+
+  defp expand_terminal_compact({operation_id, compact}) when is_binary(compact) do
+    cond do
+      captured = Regex.run(@terminal_delivered_re, compact, capture: :all_but_first) ->
+        [effect_class, intent_sha256, prepared, applied, delivered] = captured
+
+        [
+          %{
+            "operation_id" => operation_id,
+            "status" => "delivered",
+            "effect_class" => effect_class,
+            "intent_sha256" => intent_sha256,
+            "fingerprints" => %{
+              "prepared" => prepared,
+              "effect_applied" => applied,
+              "delivered" => delivered
+            }
+          }
+        ]
+
+      captured = Regex.run(@terminal_rejected_re, compact, capture: :all_but_first) ->
+        [effect_class, intent_sha256, prepared, rejected] = captured
+
+        [
+          %{
+            "operation_id" => operation_id,
+            "status" => "effect_rejected",
+            "effect_class" => effect_class,
+            "intent_sha256" => intent_sha256,
+            "fingerprints" => %{
+              "prepared" => prepared,
+              "effect_rejected" => rejected
+            }
+          }
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp expand_terminal_compact(_pair), do: []
+
+  defp fingerprint_hex(bytes) do
+    Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
   end
 
   # ---------------------------------------------------------------------------
@@ -729,6 +1087,10 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     encode_ordered(record, @delivered_order, @max_record_bytes, :record_too_large)
   end
 
+  defp encode_snapshot(snapshot) do
+    encode_ordered(snapshot, @snapshot_order, @max_record_bytes, :record_too_large)
+  end
+
   defp encode_ordered(map, order, max_bytes, too_large) do
     encoded = Jason.encode(ordered_object(map, order))
 
@@ -756,7 +1118,16 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   defp canonicalize("data", value), do: audit_data_object(value)
   defp canonicalize("intent", value), do: ordered_object(value, @intent_stored_order)
   defp canonicalize("observation", value), do: observation_object(value)
+  defp canonicalize("source", value), do: ordered_object(value, @snapshot_source_order)
+  defp canonicalize("pending_manifest", value), do: ordered_sorted_map(value)
+  defp canonicalize("terminals", value), do: ordered_sorted_map(value)
   defp canonicalize(_key, value), do: value
+
+  defp ordered_sorted_map(map) when is_map(map) do
+    map
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Jason.OrderedObject.new()
+  end
 
   defp expectation_object(%{"kind" => "absent"}),
     do: ordered_object(%{"kind" => "absent"}, ["kind"])
