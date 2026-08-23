@@ -1844,6 +1844,30 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     refute Core.aggregate_deadline_interrupted?(true, 1, 500, 1_000)
   end
 
+  test "prelaunch_probe_timeout_capacity? converts only closed probe timeout after residual exhaustion" do
+    assert Core.prelaunch_probe_timeout_capacity?(:probe_timeout, 0)
+    assert Core.prelaunch_probe_timeout_capacity?(:probe_timeout, -1)
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_timeout, 1)
+
+    assert Core.prelaunch_probe_timeout_capacity?(":probe_timeout", 0)
+    refute Core.prelaunch_probe_timeout_capacity?(":probe_timeout", 1)
+
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_failed, 0)
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_nonzero_exit, 0)
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_cancelled, 0)
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_command_failed, 0)
+    refute Core.prelaunch_probe_timeout_capacity?(:operation_deadline_exceeded, 0)
+    refute Core.prelaunch_probe_timeout_capacity?(:deadline_exhausted, 0)
+    refute Core.prelaunch_probe_timeout_capacity?("probe_timeout", 0)
+
+    refute Core.prelaunch_probe_timeout_capacity?(
+             {:test_execution_failed, "x", :probe_timeout},
+             0
+           )
+
+    refute Core.prelaunch_probe_timeout_capacity?(:probe_timeout, "0")
+  end
+
   test "malformed batch plan fails closed at admission" do
     assert {:error, :invalid_test_batch_plan} =
              Core.admit_test_batches([%{not: :a_batch}], 10_000, 1_000)

@@ -760,6 +760,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def aggregate_deadline_interrupted?(_runner, _remaining, _budget, _operation), do: false
 
   @doc """
+  True only for a closed prelaunch Apple Container probe timeout after the
+  shared aggregate deadline is already exhausted.
+
+  The Mix child never launched. Positive residual, every other probe error,
+  and launched-child results remain validation failures. Never inspects
+  stdout/stderr/reason text for the word timeout.
+  """
+  @spec prelaunch_probe_timeout_capacity?(term(), integer()) :: boolean()
+  def prelaunch_probe_timeout_capacity?(:probe_timeout, remaining_ms_after)
+      when is_integer(remaining_ms_after) and remaining_ms_after <= 0,
+      do: true
+
+  def prelaunch_probe_timeout_capacity?(":probe_timeout", remaining_ms_after)
+      when is_integer(remaining_ms_after) and remaining_ms_after <= 0,
+      do: true
+
+  def prelaunch_probe_timeout_capacity?(_reason, _remaining_ms_after), do: false
+
+  @doc """
   Pure next-step decision for sequential batch tests under dual budgets.
 
   `remaining_ms` is the aggregate test-stage budget remaining. Each child is

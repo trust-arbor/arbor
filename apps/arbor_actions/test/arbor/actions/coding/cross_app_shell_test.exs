@@ -433,6 +433,256 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(opts, :timeout) == 5_000
   end
 
+  test "security regression: prelaunch probe_timeout with exhausted aggregate budget hands off unstarted suffix",
+       %{worktree: worktree} do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+          Agent.update(clock_agent, fn _ -> 10_000 end)
+          # Live Mix.invoke_spawn_capable/4 inspects spawn-capable errors.
+          {:error, ":probe_timeout"}
+
+        other ->
+          flunk("must not retry or launch a later child: #{inspect(other)}")
+      end
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert {:ok, _} = Jason.encode(check)
+    assert handoff["schema_version"] == 3
+    assert handoff["phase"] == "runtime"
+    assert handoff["available_budget_ms"] == 0
+    assert handoff["interrupted_batch"] == nil
+    refute Map.has_key?(handoff, "required_budget_ms")
+    assert handoff["completed_batch_count"] == 0
+    assert handoff["completed_file_count"] == 0
+    assert handoff["unstarted_batch_count"] == 2
+    assert handoff["unstarted_file_count"] == length(paths)
+
+    assert handoff["unstarted_batches"] == [
+             compact_capacity_batch(batch1),
+             compact_capacity_batch(batch2)
+           ]
+
+    refute Map.has_key?(hd(handoff["unstarted_batches"]), "paths")
+
+    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert received == batch1.paths
+    assert Keyword.get(opts, :timeout) == 5_000
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "prelaunch probe_timeout with remaining aggregate budget stays a test execution failure",
+       %{
+         worktree: worktree
+       } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, _batch2]} = Core.partition_test_batches(paths)
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+          {:error, :probe_timeout}
+
+        other ->
+          flunk("must not retry or launch a later child: #{inspect(other)}")
+      end
+    end)
+
+    assert {:execution_error, {:test_execution_failed, label, :probe_timeout}} =
+             catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000))
+
+    assert label == batch1.label
+    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert received == batch1.paths
+    assert Keyword.get(opts, :timeout) == 5_000
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "later-batch prelaunch probe_timeout with exhausted budget hands off remaining unstarted suffix",
+       %{worktree: worktree} do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+          Agent.update(clock_agent, fn t -> t + 1_000 end)
+          {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
+
+        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+          Agent.update(clock_agent, fn _ -> 10_000 end)
+          {:error, :probe_timeout}
+
+        other ->
+          flunk("must not retry or launch a later child: #{inspect(other)}")
+      end
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert handoff["phase"] == "runtime"
+    assert handoff["completed_batch_count"] == 1
+    assert handoff["interrupted_batch"] == nil
+    assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
+    refute Map.has_key?(hd(handoff["unstarted_batches"]), "paths")
+
+    assert_receive {:mix_invocation, ["test", "--" | received1], opts1}
+    assert received1 == batch1.paths
+    assert Keyword.get(opts1, :timeout) == 5_000
+    assert_receive {:mix_invocation, ["test", "--" | received2], opts2}
+    assert received2 == batch2.paths
+    assert Keyword.get(opts2, :timeout) == 4_000
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "exhausted residual does not convert other probe or deadline errors into capacity", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, _batch2]} = Core.partition_test_batches(paths)
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Enum.each([:probe_failed, :operation_deadline_exceeded], fn injected_reason ->
+      Agent.update(clock_agent, fn _ -> 0 end)
+
+      Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+        send(parent, {:mix_invocation, args, opts, injected_reason})
+
+        case args do
+          ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+            Agent.update(clock_agent, fn _ -> 10_000 end)
+            {:error, injected_reason}
+
+          other ->
+            flunk("must not retry or launch a later child: #{inspect(other)}")
+        end
+      end)
+
+      assert {:execution_error, {:test_execution_failed, label, ^injected_reason}} =
+               catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000))
+
+      assert label == batch1.label
+      assert_receive {:mix_invocation, ["test", "--" | received], opts, ^injected_reason}
+      assert received == batch1.paths
+      assert Keyword.get(opts, :timeout) == 5_000
+    end)
+
+    refute_received {:mix_invocation, _, _, _}
+  end
+
+  test "equal-ceiling prelaunch probe_timeout with exhausted residual is unstarted capacity", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+          Agent.update(clock_agent, fn _ -> 5_000 end)
+          {:error, :probe_timeout}
+
+        other ->
+          flunk("must not retry or launch a later child: #{inspect(other)}")
+      end
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 5_000)
+
+    refute check["passed"]
+    refute check["reason"] == "tests_timed_out"
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert handoff["phase"] == "runtime"
+    assert handoff["interrupted_batch"] == nil
+
+    assert handoff["unstarted_batches"] == [
+             compact_capacity_batch(batch1),
+             compact_capacity_batch(batch2)
+           ]
+
+    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert received == batch1.paths
+    assert Keyword.get(opts, :timeout) == 5_000
+    refute_received {:mix_invocation, _, _}
+  end
+
   test "exact runner timed_out flag times out; text-only timeout string does not", %{
     worktree: worktree
   } do
@@ -2115,6 +2365,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         "defmodule #{Macro.camelize(app)}Test do\nend\n"
       )
     end
+  end
+
+  defp compact_capacity_batch(batch) when is_map(batch) do
+    %{
+      "index" => batch.index,
+      "total" => batch.total,
+      "count" => batch.count,
+      "label" => batch.label,
+      "inventory_sha256" => batch.inventory_sha256
+    }
   end
 
   defp write_numbered_tests!(worktree, app, count)

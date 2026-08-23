@@ -931,22 +931,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       :complete ->
         Core.aggregate_test_check(Enum.reverse(acc))
 
-      {:timeout, batch, _rest} ->
+      {:timeout, _batch, _rest} ->
         # Budget already exhausted — do not launch this or any later child.
         # Preserve the exact unstarted suffix for the operator/CI handoff.
-        completed_batches = Enum.take(all_batches, batch.index - 1)
-
-        case Core.capacity_handoff(
-               :runtime,
-               0,
-               operation_timeout,
-               completed_batches,
-               nil,
-               remaining_batches
-             ) do
-          {:ok, check} -> check
-          {:error, reason} -> throw({:execution_error, {:invalid_capacity_handoff, reason}})
-        end
+        emit_runtime_unstarted_handoff(all_batches, remaining_batches, operation_timeout)
 
       {:run, batch, budget_ms, rest} ->
         mix_opts =
@@ -1039,13 +1027,36 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             end
 
           {:error, reason} ->
-            # Bound the error with the deterministic batch inventory label.
-            throw({:execution_error, {:test_execution_failed, batch.label, reason}})
+            remaining_after = deadline - monotonic_ms()
+
+            if Core.prelaunch_probe_timeout_capacity?(reason, remaining_after) do
+              emit_runtime_unstarted_handoff(all_batches, [batch | rest], operation_timeout)
+            else
+              # Bound the error with the deterministic batch inventory label.
+              throw({:execution_error, {:test_execution_failed, batch.label, reason}})
+            end
         end
 
       {:error, reason} ->
         # Malformed step input must never silently complete as success.
         throw({:execution_error, {:invalid_test_step, reason}})
+    end
+  end
+
+  defp emit_runtime_unstarted_handoff(all_batches, remaining_batches, operation_timeout) do
+    [batch | _rest] = remaining_batches
+    completed_batches = Enum.take(all_batches, batch.index - 1)
+
+    case Core.capacity_handoff(
+           :runtime,
+           0,
+           operation_timeout,
+           completed_batches,
+           nil,
+           remaining_batches
+         ) do
+      {:ok, check} -> check
+      {:error, reason} -> throw({:execution_error, {:invalid_capacity_handoff, reason}})
     end
   end
 
