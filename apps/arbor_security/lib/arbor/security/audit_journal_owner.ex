@@ -173,7 +173,7 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   def handle_call(:pending_operations, _from, state) do
-    {:reply, {:ok, AuditJournalCore.pending_operations(state.core)}, state}
+    {:reply, build_pending_operations(state), state}
   end
 
   if Mix.env() == :test do
@@ -293,7 +293,7 @@ defmodule Arbor.Security.AuditJournalOwner do
   end
 
   defp build_status(state) do
-    case AuditJournalCore.pending_summary(state.core, injected_now()) do
+    case core_pending_summary(state) do
       {:ok, summary} ->
         shown = AuditJournalCore.show(state.core)
         availability = state.availability
@@ -317,12 +317,26 @@ defmodule Arbor.Security.AuditJournalOwner do
            "capacity" => AuditJournalCore.capacity(state.core)
          }}
 
-      {:error, :malformed} ->
-        {:error, :journal_unavailable}
+      {:error, :journal_unavailable} = err ->
+        err
     end
   end
 
-  defp injected_now do
+  defp build_pending_operations(state) do
+    case core_pending_summary(state) do
+      {:ok, summary} -> {:ok, summary["operations"]}
+      {:error, :journal_unavailable} = err -> err
+    end
+  end
+
+  defp core_pending_summary(state) do
+    case AuditJournalCore.pending_summary(state.core, sampled_wall_clock()) do
+      {:ok, summary} -> {:ok, summary}
+      {:error, :malformed} -> {:error, :journal_unavailable}
+    end
+  end
+
+  defp sampled_wall_clock do
     DateTime.utc_now()
     |> DateTime.truncate(:second)
     |> Calendar.strftime("%Y-%m-%dT%H:%M:%SZ")

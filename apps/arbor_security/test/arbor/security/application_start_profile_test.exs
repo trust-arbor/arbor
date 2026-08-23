@@ -95,12 +95,18 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
 
     children = Supervisor.which_children(Arbor.Security.Supervisor)
 
-    ids = Enum.map(children, &elem(&1, 0))
-    owner_index = Enum.find_index(ids, &(&1 == Arbor.Security.AuditJournalOwner))
-    broker_index = Enum.find_index(ids, &(&1 == Arbor.Security.DeliveryReceiptBroker))
+    # Supervisor.which_children/1 is reverse start order. Reverse first so
+    # owner_index < broker_index documents the rest_for_one invariant.
+    start_ids =
+      children
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.reverse()
+
+    owner_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.AuditJournalOwner))
+    broker_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.DeliveryReceiptBroker))
     assert is_integer(owner_index)
     assert is_integer(broker_index)
-    assert owner_index > broker_index
+    assert owner_index < broker_index
 
     Enum.each(@named_stores, fn name ->
       assert {^name, _pid, :worker, [Arbor.Security.AuthorityStore]} =

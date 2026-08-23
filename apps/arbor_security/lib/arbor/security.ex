@@ -2735,7 +2735,8 @@ defmodule Arbor.Security do
   @doc """
   Bounded JSON-clean pending operations in the Security audit journal.
 
-  Each item is `{operation_id, status, effect_class, intent_sha256}` only.
+  Each item is a bounded JSON-clean string-keyed map whose only keys are
+  `"operation_id"`, `"status"`, `"effect_class"`, and `"intent_sha256"`.
   """
   @spec audit_journal_pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
   def audit_journal_pending_operations, do: AuditJournalOwner.pending_operations()

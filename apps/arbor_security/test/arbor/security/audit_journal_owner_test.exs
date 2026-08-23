@@ -205,6 +205,12 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     refute Map.has_key?(hd(pending), "intent")
   end
 
+  test "security regression: malformed Core makes pending query fail closed", %{name: name} do
+    assert {:ok, pid} = Owner.start_link(mode: :ephemeral, name: name)
+    :sys.replace_state(pid, &Map.put(&1, :core, %{}))
+    assert {:error, :journal_unavailable} = Owner.pending_operations(pid)
+  end
+
   test "commit-uncertain poisons and never acknowledges success", %{name: name} do
     root = unique_root()
     {prepared, applied, _delivered} = grant_lifecycle()

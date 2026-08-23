@@ -264,9 +264,13 @@ defmodule Arbor.Security.AuditJournalCoreTest do
       assert Core.capacity(a)["used_entries"] == 3
     end
 
+    test "security regression: pending_operations/1 fail-open projector is not exported" do
+      Code.ensure_loaded!(Core)
+      refute function_exported?(Core, :pending_operations, 1)
+    end
+
     test "pending_summary empty is zero count and zero age" do
       assert {:ok, state} = Core.new()
-      assert Core.pending_operations(state) == []
 
       assert {:ok,
               %{
@@ -284,7 +288,6 @@ defmodule Arbor.Security.AuditJournalCoreTest do
       assert summary["pending_count"] == 1
       assert summary["oldest_pending_age_seconds"] == 10
       assert hd(summary["operations"])["status"] == "prepared"
-      assert Core.pending_operations(prepared_state) == summary["operations"]
 
       assert {:ok, zero} = Core.pending_summary(prepared_state, "2026-08-20T11:00:00Z")
       assert zero["oldest_pending_age_seconds"] == 0
@@ -301,12 +304,14 @@ defmodule Arbor.Security.AuditJournalCoreTest do
       assert {:ok, done} = Core.pending_summary(delivered_state, "2026-08-20T12:00:10Z")
       assert done["pending_count"] == 0
       assert done["oldest_pending_age_seconds"] == 0
-      assert Core.pending_operations(delivered_state) == []
+      assert done["operations"] == []
 
       {:ok, intent} = AuditJournal.admit_intent(revoke_facts(1))
       rejected = rejected_record(intent, @t1)
       assert {:ok, rejected_state} = Core.fold([prepared_record(intent), rejected])
-      assert Core.pending_operations(rejected_state) == []
+      assert {:ok, rejected_summary} = Core.pending_summary(rejected_state, "2026-08-20T12:00:10Z")
+      assert rejected_summary["pending_count"] == 0
+      assert rejected_summary["operations"] == []
     end
 
     test "pending_summary malformed now fails closed without changing fold semantics" do

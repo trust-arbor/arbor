@@ -122,17 +122,6 @@ defmodule Arbor.Security.AuditJournalCore do
     }
   end
 
-  @spec pending_operations(state()) :: [map()]
-  def pending_operations(state) when is_map(state) do
-    state
-    |> show()
-    |> Map.get("operations", [])
-    |> Enum.filter(&(&1["status"] in @pending_statuses))
-    |> Enum.take(AuditJournal.limits().hard_entry_cap)
-  end
-
-  def pending_operations(_state), do: []
-
   @spec pending_summary(term(), term()) :: {:ok, map()} | {:error, :malformed}
   def pending_summary(state, now) do
     with :ok <- valid_state(state),
