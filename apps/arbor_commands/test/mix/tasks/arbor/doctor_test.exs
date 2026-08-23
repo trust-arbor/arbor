@@ -237,4 +237,62 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       assert opts[:json] == true
     end
   end
+
+  describe "write_env_key/3 — export-prefixed assignments" do
+    setup do
+      path = Path.join(System.tmp_dir!(), "doctor-env-#{System.unique_integer([:positive])}.env")
+      on_exit(fn -> File.rm(path) end)
+      %{path: path}
+    end
+
+    test "updates an export-prefixed key in place instead of appending a duplicate",
+         %{path: path} do
+      # config/runtime.exs strips a leading "export " when loading .env, so both
+      # forms are live. Matching only the bare form appended a SECOND assignment
+      # and left the file with two entries for one key.
+      File.write!(path, "export ARBOR_DEFAULT_PROVIDER=openrouter\n")
+
+      Doctor.write_env_key(path, "ARBOR_DEFAULT_PROVIDER", "opencode_zen")
+
+      content = File.read!(path)
+
+      assignments =
+        for line <- String.split(content, "\n"),
+            String.contains?(line, "ARBOR_DEFAULT_PROVIDER="),
+            do: String.trim(line)
+
+      assert length(assignments) == 1, "expected one assignment, got: #{inspect(assignments)}"
+      assert hd(assignments) == "export ARBOR_DEFAULT_PROVIDER=opencode_zen"
+    end
+
+    test "updates a bare key in place and keeps it bare", %{path: path} do
+      File.write!(path, "ARBOR_DEFAULT_PROVIDER=openrouter\n")
+
+      Doctor.write_env_key(path, "ARBOR_DEFAULT_PROVIDER", "opencode_zen")
+
+      assert File.read!(path) =~ "ARBOR_DEFAULT_PROVIDER=opencode_zen"
+      refute File.read!(path) =~ "openrouter"
+      refute File.read!(path) =~ "export ARBOR_DEFAULT_PROVIDER"
+    end
+
+    test "appends when the key is genuinely absent", %{path: path} do
+      File.write!(path, "export SOMETHING_ELSE=1\n")
+
+      Doctor.write_env_key(path, "ARBOR_DEFAULT_PROVIDER", "opencode_zen")
+
+      content = File.read!(path)
+      assert content =~ "SOMETHING_ELSE=1"
+      assert content =~ "ARBOR_DEFAULT_PROVIDER=opencode_zen"
+    end
+
+    test "ignores a commented assignment and appends a live one", %{path: path} do
+      File.write!(path, "#export ARBOR_DEFAULT_PROVIDER=old\n")
+
+      Doctor.write_env_key(path, "ARBOR_DEFAULT_PROVIDER", "opencode_zen")
+
+      content = File.read!(path)
+      assert content =~ "#export ARBOR_DEFAULT_PROVIDER=old"
+      assert content =~ "\nARBOR_DEFAULT_PROVIDER=opencode_zen"
+    end
+  end
 end

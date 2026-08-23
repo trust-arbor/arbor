@@ -641,7 +641,8 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   defp return, do: :ok
 
-  defp write_env_key(env_path, key, value) do
+  @doc false
+  def write_env_key(env_path, key, value) do
     content = File.read!(env_path)
 
     if has_env_key?(content, key) do
@@ -649,12 +650,10 @@ defmodule Mix.Tasks.Arbor.Doctor do
         content
         |> String.split("\n")
         |> Enum.map_join("\n", fn line ->
-          trimmed = String.trim(line)
-
-          if not String.starts_with?(trimmed, "#") and String.starts_with?(trimmed, key <> "=") do
-            "#{key}=#{value}"
-          else
-            line
+          case env_key_line(line, key) do
+            {:match, "export " <> _} -> "export #{key}=#{value}"
+            {:match, _} -> "#{key}=#{value}"
+            :no_match -> line
           end
         end)
 
@@ -668,10 +667,26 @@ defmodule Mix.Tasks.Arbor.Doctor do
   defp has_env_key?(content, key) do
     content
     |> String.split("\n")
-    |> Enum.any?(fn line ->
-      trimmed = String.trim(line)
-      not String.starts_with?(trimmed, "#") and String.starts_with?(trimmed, key <> "=")
-    end)
+    |> Enum.any?(fn line -> match?({:match, _}, env_key_line(line, key)) end)
+  end
+
+  # `.env` assignments may carry an `export ` prefix — `config/runtime.exs`
+  # strips it when loading (`String.replace_leading("export ", "")`), so both
+  # forms are live. Matching only the bare form made `has_env_key?/2` miss an
+  # existing `export ARBOR_DEFAULT_PROVIDER=...` and APPEND a second
+  # assignment, leaving the file with two entries for one key.
+  #
+  # Returns `{:match, trimmed_line}` so the caller can preserve whichever
+  # prefix the line already used.
+  defp env_key_line(line, key) do
+    trimmed = String.trim(line)
+
+    cond do
+      String.starts_with?(trimmed, "#") -> :no_match
+      String.starts_with?(trimmed, key <> "=") -> {:match, trimmed}
+      String.starts_with?(trimmed, "export " <> key <> "=") -> {:match, trimmed}
+      true -> :no_match
+    end
   end
 
   # ── Health Check Table ────────────────────────────────────────────────
