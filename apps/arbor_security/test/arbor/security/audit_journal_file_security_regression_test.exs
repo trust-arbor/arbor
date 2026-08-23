@@ -252,11 +252,12 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     arm_compact_inject(:compact_rewrite_source_same_size)
     result = apply(AuditJournalFile, :compact, [handle])
     AuditJournalFile.__test_inject__(:clear)
-    assert {:error, {:not_published, reason}} = result
+    assert {:error, {:source_invalid, reason}} = result
     assert reason in [:digest_mismatch, :source_tip_mismatch, :core_mismatch]
     refute compact_published?(handle.path, before)
     refute_candidate_file(handle)
     assert_old_handle_fd_invalid(handle)
+    refute match?({:ok, _}, AuditJournalFile.open(root: root))
   end
 
   test "security regression: source inode replacement does not publish snapshot", %{root: root} do
@@ -268,12 +269,13 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     arm_compact_inject(:compact_replace_source_inode)
     result = apply(AuditJournalFile, :compact, [handle])
     AuditJournalFile.__test_inject__(:clear)
-    assert {:error, {:not_published, reason}} = result
+    assert {:error, {:source_invalid, reason}} = result
     assert reason in [:identity_changed, :size_mismatch, :source_tip_mismatch]
     on_disk = File.read!(handle.path)
     refute snapshot_payload?(on_disk)
     refute_candidate_file(handle)
     assert_old_handle_fd_invalid(handle)
+    refute match?({:ok, _}, AuditJournalFile.open(root: root))
   end
 
   test "security regression: candidate substitution does not rename attacker bytes", %{root: root} do
@@ -297,6 +299,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
 
     assert File.read!(handle.path) == before
     refute_candidate_file(handle)
+    assert :ok = :file.sync(handle.fd)
   end
 
   test "security regression: post-rename failure is publish_uncertain not a definite miss", %{
@@ -381,6 +384,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     assert {:error, {:not_published, _reason}} = result
     assert File.read!(handle.path) == before
     refute_candidate_file(handle)
+    assert :ok = :file.sync(handle.fd)
   end
 
   test "security regression: open of snapshot-first log restores compacted core", %{root: root} do

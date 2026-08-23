@@ -104,6 +104,17 @@ defmodule Arbor.Security.AuditJournalFile do
           | :symlink_rejected
           | :core_mismatch
 
+  @type source_invalid_reason ::
+          :identity_changed
+          | :size_mismatch
+          | :digest_mismatch
+          | :source_tip_mismatch
+          | :core_mismatch
+          | :insecure_mode
+          | :not_regular
+          | :hardlink_rejected
+          | :symlink_rejected
+
   @spec open(keyword()) :: {:ok, t()} | {:error, term()}
   def open(opts) when is_list(opts) do
     with :ok <- reject_unknown_opts(opts),
@@ -164,10 +175,21 @@ defmodule Arbor.Security.AuditJournalFile do
 
   def append(_handle, _raw), do: {:error, :closed}
 
+  @doc """
+  Publishes a snapshot-plus-pending replacement of the bound log.
+
+  Result classes:
+  - `{:ok, handle}` — candidate renamed and rebound
+  - `{:error, :closed}` — handle is closed or not a live file handle
+  - `{:error, {:not_published, reason}}` — rename did not occur; source is intact
+  - `{:error, {:source_invalid, reason}}` — source identity or tip was lost before rename
+  - `{:error, {:publish_uncertain, reason}}` — rename or post-rename proof is ambiguous
+  """
   @spec compact(t()) ::
           {:ok, t()}
           | {:error, :closed}
           | {:error, {:not_published, not_published_reason()}}
+          | {:error, {:source_invalid, source_invalid_reason()}}
           | {:error, {:publish_uncertain, publish_uncertain_reason()}}
   def compact(%__MODULE__{closed?: true}), do: {:error, :closed}
 
@@ -702,16 +724,30 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp finish_not_published(handle, cand_path, cand_identity, err) do
+  defp finish_not_published(handle, cand_path, cand_identity, {:error, {:not_published, reason}}) do
     unlink_candidate_if_ours(cand_path, cand_identity)
 
-    case rebuild_and_prove_source(handle) do
-      :ok ->
-        err
+    proof =
+      case rebuild_and_prove_source(handle) do
+        :ok -> :ok
+        {:error, proof_reason} -> {:error, map_source_tip(proof_reason)}
+      end
 
-      {:error, _reason} ->
+    interpret_source_reproof(handle, proof, reason)
+  end
+
+  defp interpret_source_reproof(handle, proof, original_reason) do
+    case AuditJournalFileCore.classify_source_reproof(proof, original_reason) do
+      {:not_published, reason} ->
+        {:error, {:not_published, reason}}
+
+      {:source_invalid, proof_reason} ->
         invalidate(handle)
-        err
+        {:error, {:source_invalid, proof_reason}}
+
+      {:error, :malformed} ->
+        invalidate(handle)
+        {:error, {:publish_uncertain, :replay_mismatch}}
     end
   end
 

@@ -608,6 +608,150 @@ defmodule Arbor.Security.AuditJournalCoreTest do
     end
   end
 
+  describe "compaction_reclaims_occupancy?" do
+    test "empty and pending-only journals do not reclaim" do
+      assert {:ok, empty} = Core.new()
+      refute Core.compaction_reclaims_occupancy?(empty)
+
+      state =
+        Enum.reduce(1..32, empty, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      refute Core.compaction_reclaims_occupancy?(state)
+
+      state =
+        Enum.reduce(33..48, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 48
+      refute Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "delivered terminals at the soft cap reclaim" do
+      {:ok, state} = Core.new()
+
+      state =
+        Enum.reduce(1..8, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, acc} = Core.append(acc, prepared_record(intent))
+          {:ok, acc} = Core.append(acc, applied_record(intent, @t1))
+          {:ok, acc} = Core.append(acc, delivered_record(intent, @t2))
+          acc
+        end)
+
+      state =
+        Enum.reduce(9..16, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 32
+      assert Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "delivered terminals filling the hard cap reclaim" do
+      {:ok, state} = Core.new()
+
+      state =
+        Enum.reduce(1..32, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      state =
+        Enum.reduce(1..8, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+          {:ok, acc} = Core.append(acc, applied_record(intent, @t1))
+          {:ok, acc} = Core.append(acc, delivered_record(intent, @t2))
+          acc
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 48
+      assert Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "rejected reserve terminals filling the hard cap reclaim" do
+      {:ok, state} = Core.new()
+
+      state =
+        Enum.reduce(1..16, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+          {:ok, acc} = Core.append(acc, prepared_record(intent))
+          {:ok, acc} = Core.append(acc, rejected_record(intent, @t1))
+          acc
+        end)
+
+      state =
+        Enum.reduce(17..32, state, fn n, acc ->
+          {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+          {:ok, next} = Core.append(acc, prepared_record(intent))
+          next
+        end)
+
+      assert Core.capacity(state)["used_entries"] == 48
+      assert Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "already compacted state does not reclaim again" do
+      {state, _delivered, _rejected, _prepared_pending, _applied_pending} = mixed_journal()
+      assert Core.compaction_reclaims_occupancy?(state)
+      assert {:ok, compacted, _snapshot, _pending} = Core.compact(state, snapshot_source(8, 99))
+      refute Core.compaction_reclaims_occupancy?(compacted)
+    end
+
+    test "malformed pending with inflated occupancy does not reclaim" do
+      state = %{
+        "version" => 1,
+        "operations" => %{"x" => %{"status" => "prepared"}},
+        "entry_count" => 10,
+        "byte_count" => 0
+      }
+
+      refute Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "malformed terminal with inflated occupancy does not reclaim" do
+      state = %{
+        "version" => 1,
+        "operations" => %{
+          "x" => %{"status" => "delivered", "effect_class" => "authority_increase"}
+        },
+        "entry_count" => 10,
+        "byte_count" => 0
+      }
+
+      refute Core.compaction_reclaims_occupancy?(state)
+    end
+
+    test "tampered pending or terminal in an otherwise reclaimable journal does not reclaim" do
+      {state, _delivered, _rejected, prepared_pending, _applied_pending} = mixed_journal()
+      assert Core.compaction_reclaims_occupancy?(state)
+
+      pending_id = prepared_pending["operation_id"]
+      bad_pending = put_in(state, ["operations", pending_id], %{"status" => "prepared"})
+      refute Core.compaction_reclaims_occupancy?(bad_pending)
+
+      {delivered_id, _op} =
+        Enum.find(state["operations"], fn {_id, op} -> op["status"] == "delivered" end)
+
+      bad_terminal =
+        put_in(state, ["operations", delivered_id], %{
+          "status" => "delivered",
+          "effect_class" => "authority_increase"
+        })
+
+      refute Core.compaction_reclaims_occupancy?(bad_terminal)
+    end
+  end
+
   defp snapshot_source(frames, offset) do
     %{
       "committed_digest" => String.duplicate("ab", 32),

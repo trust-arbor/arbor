@@ -692,6 +692,16 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
       assert {:error, :malformed} = FileCore.classify_publish_phase(:sync, "eio")
     end
 
+    test "classify_source_reproof splits re-proven miss from lost source" do
+      assert {:not_published, :sync_failed} = FileCore.classify_source_reproof(:ok, :sync_failed)
+
+      assert {:source_invalid, :digest_mismatch} =
+               FileCore.classify_source_reproof({:error, :digest_mismatch}, :sync_failed)
+
+      assert {:error, :malformed} = FileCore.classify_source_reproof(:ok, "sync_failed")
+      assert {:error, :malformed} = FileCore.classify_source_reproof({:error, "eio"}, :sync_failed)
+    end
+
     test "encode_compacted returns malformed for snapshots through canonical_snapshot_bytes" do
       deep = Enum.reduce(1..6, "x", fn _i, acc -> %{"k" => acc} end)
 

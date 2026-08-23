@@ -314,6 +314,307 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     refute Process.whereis(name)
   end
 
+  test "durable soft-capacity reclaimable terminals publish once and retry", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, before} = Owner.status(pid)
+    assert before["entry_count"] == 32
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, :idempotent} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    assert status["entry_count"] == 10
+    assert status["committed_frames"] == 10
+    assert status["capacity"]["used_entries"] == 10
+    assert status["pending_count"] == 9
+    assert status["last_error"] == "none"
+    assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+    assert Jason.encode!(status)
+  end
+
+  test "durable hard-capacity reserve reclaimable terminals publish once", %{name: name} do
+    root = unique_root()
+    extra = revoke_prepared(33)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_hard_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    assert status["entry_count"] == 18
+    assert status["committed_frames"] == 18
+    assert status["pending_count"] == 17
+    assert extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+    revoke_ids = Enum.map(17..32, fn n -> revoke_prepared(n)["operation_id"] end)
+    pending_ids = Enum.map(pending, & &1["operation_id"])
+    assert Enum.all?(revoke_ids, &(&1 in pending_ids))
+  end
+
+  test "unreclaimable soft and hard capacity do not publish", %{name: name} do
+    root = unique_root()
+    extra_grant = prepared(33)
+    extra_revoke = revoke_prepared(99)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_unreclaimable_soft(pid)
+    assert {:ok, before} = Owner.status(pid)
+    assert {:error, :soft_capacity_exhausted} = Owner.append(pid, extra_grant)
+    assert {:ok, after_soft} = Owner.status(pid)
+    assert after_soft["committed_frames"] == before["committed_frames"]
+    assert after_soft["last_error"] == "none"
+    refute File.exists?(candidate_path(root))
+    :ok = GenServer.stop(pid)
+
+    hard_name = :"#{name}_hard"
+    on_exit(fn -> stop_named(hard_name) end)
+    assert {:ok, hard} = Owner.start_link(mode: :durable, root: unique_root(), name: hard_name)
+    fill_unreclaimable_hard(hard)
+    assert {:ok, hard_before} = Owner.status(hard)
+    assert {:error, :capacity_exhausted} = Owner.append(hard, extra_revoke)
+    assert {:ok, hard_after} = Owner.status(hard)
+    assert hard_after["committed_frames"] == hard_before["committed_frames"]
+    assert hard_after["last_error"] == "none"
+  end
+
+  test "not_published keeps the old log and permits later retry", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    before = File.read!(log_path(root))
+    assert {:ok, before_status} = Owner.status(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_sync_error, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    assert {:error, :soft_capacity_exhausted} = result
+    refute match?({:ok, _}, result)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["serving"] == true
+    assert status["poisoned"] == false
+    assert status["committed_frames"] == before_status["committed_frames"]
+    assert status["last_error"] == "none"
+    assert File.read!(log_path(root)) == before
+    refute File.exists?(candidate_path(root))
+    assert {:ok, :committed} = Owner.append(pid, extra)
+  end
+
+  test "source_invalid poisons immediately and restart does not invent extra", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_rewrite_source_same_size)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:not_committed, :source_invalid}} = result
+    assert {:error, :journal_poisoned} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["poisoned"] == true
+    assert status["serving"] == false
+    assert status["last_error"] == "not_committed"
+    refute status["last_error"] == "source_invalid"
+    refute inspect(status) =~ "digest_mismatch"
+    refute inspect(status) =~ "eio"
+    :ok = GenServer.stop(pid)
+
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    try do
+      started = Owner.start_link(mode: :durable, root: root, name: name)
+
+      case started do
+        {:ok, restarted} ->
+          assert {:ok, pending} = Owner.pending_operations(restarted)
+          refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+          assert {:ok, after_status} = Owner.status(restarted)
+          assert after_status["serving"] == true
+          assert after_status["poisoned"] == false
+
+        {:error, {:journal_open_failed, _reason}} ->
+          refute Process.whereis(name)
+      end
+    after
+      Process.flag(:trap_exit, previous_trap_exit)
+    end
+  end
+
+  test "publish_uncertain poisons as commit_uncertain", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_dir_sync, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:commit_uncertain, :dir_sync_failed}} = result
+    assert {:error, :journal_poisoned} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["poisoned"] == true
+    assert status["last_error"] == "commit_uncertain"
+    refute inspect(status) =~ "eio"
+  end
+
+  test "retry write_error after compact poisons and keeps compacted occupancy", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :write_error, :injected_write)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:not_committed, :injected_write}} = result
+    assert {:error, :journal_poisoned} = Owner.append(pid, extra)
+    assert {:ok, status} = Owner.status(pid)
+    assert status["poisoned"] == true
+    assert status["serving"] == false
+    assert status["last_error"] == "not_committed"
+    assert status["entry_count"] == 9
+    assert status["committed_frames"] == 9
+    assert status["capacity"]["used_entries"] == 9
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "retry partial_write after compact poisons; restart is torn without extra", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :partial_write, 3)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    refute match?({:ok, _}, result)
+    assert {:error, {:not_committed, :write_failed}} = result
+    assert {:ok, status} = Owner.status(pid)
+    assert status["poisoned"] == true
+    assert status["entry_count"] == 9
+    assert status["committed_frames"] == 9
+    :ok = GenServer.stop(pid)
+
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, restarted} = Owner.status(name)
+    assert restarted["torn_tail"] == true
+    assert restarted["serving"] == false
+    assert {:ok, pending} = Owner.pending_operations(name)
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "conflict and malformed at unreclaimable cap never compact", %{name: name} do
+    root = unique_root()
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_unreclaimable_soft(pid)
+    {:ok, intent} = AuditJournal.admit_intent(grant_facts(1))
+    applied = applied_record(intent, @t1)
+    assert {:ok, :committed} = Owner.append(pid, applied)
+    assert {:ok, before} = Owner.status(pid)
+    other = Map.put(applied, "occurred_at", "2026-08-20T12:00:09Z")
+    assert {:ok, _} = AuditJournal.admit_record(other)
+    assert {:error, :operation_conflict} = Owner.append(pid, other)
+    assert {:error, :malformed} = Owner.append(pid, %{"nope" => true})
+    assert {:ok, after_status} = Owner.status(pid)
+    assert after_status["committed_frames"] == before["committed_frames"]
+    refute File.exists?(candidate_path(root))
+  end
+
+  test "ephemeral capacity never creates a compact candidate", %{name: name} do
+    root = unique_root()
+    assert {:ok, pid} = Owner.start_link(mode: :ephemeral, name: name)
+
+    for n <- 1..32 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+
+    assert {:error, :soft_capacity_exhausted} = Owner.append(pid, prepared(33))
+    refute File.exists?(log_path(root))
+    refute File.exists?(candidate_path(root))
+  end
+
+  test "restart after clean compact plus retry replays the extra record", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    assert {:ok, before} = Owner.status(pid)
+    assert {:ok, pending} = Owner.pending_operations(pid)
+    :ok = GenServer.stop(pid)
+
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, after_status} = Owner.status(name)
+    assert {:ok, after_pending} = Owner.pending_operations(name)
+    assert after_status["serving"] == true
+    assert after_status["poisoned"] == false
+    assert after_status["entry_count"] == before["entry_count"]
+    assert after_status["committed_frames"] == before["committed_frames"]
+    assert after_pending == pending
+    assert extra["operation_id"] in Enum.map(after_pending, & &1["operation_id"])
+  end
+
+  test "restart after interior corruption of compacted log fails closed", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, :committed} = Owner.append(pid, extra)
+    :ok = GenServer.stop(pid)
+
+    path = log_path(root)
+    File.write!(path, flip_byte(File.read!(path), 40))
+    File.chmod!(path, 0o600)
+
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    try do
+      assert {:error, {:journal_open_failed, _reason}} =
+               Owner.start_link(mode: :durable, root: root, name: name)
+    after
+      Process.flag(:trap_exit, previous_trap_exit)
+    end
+
+    refute Process.whereis(name)
+  end
+
+  test "restart after pre-publication miss does not invent extra", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert {:ok, before} = Owner.status(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_sync_error, :eio)
+    assert {:error, :soft_capacity_exhausted} = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    :ok = GenServer.stop(pid)
+
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, after_status} = Owner.status(name)
+    assert {:ok, pending} = Owner.pending_operations(name)
+    assert after_status["committed_frames"] == before["committed_frames"]
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
+  test "restart after post-publication uncertainty does not invent extra", %{name: name} do
+    root = unique_root()
+    extra = prepared(17)
+    assert {:ok, pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    fill_soft_reclaimable(pid)
+    assert :ok = Owner.__test_inject__(pid, :compact_dir_sync, :eio)
+    result = Owner.append(pid, extra)
+    assert :ok = Owner.__test_inject__(pid, :clear)
+    assert {:error, {:commit_uncertain, :dir_sync_failed}} = result
+    :ok = GenServer.stop(pid)
+
+    assert {:ok, _pid} = Owner.start_link(mode: :durable, root: root, name: name)
+    assert {:ok, after_status} = Owner.status(name)
+    assert {:ok, pending} = Owner.pending_operations(name)
+    assert after_status["poisoned"] == false
+    assert after_status["entry_count"] == 9
+    assert after_status["committed_frames"] == 9
+    refute extra["operation_id"] in Enum.map(pending, & &1["operation_id"])
+  end
+
   defp unique_name, do: :"aj_owner_#{System.unique_integer([:positive])}"
 
   defp stop_named(name) do
@@ -359,6 +660,54 @@ defmodule Arbor.Security.AuditJournalOwnerTest do
     {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
     prepared_record(intent)
   end
+
+  defp revoke_prepared(n) do
+    {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+    prepared_record(intent)
+  end
+
+  defp fill_soft_reclaimable(pid) do
+    for n <- 1..8 do
+      {:ok, intent} = AuditJournal.admit_intent(grant_facts(n))
+      assert {:ok, :committed} = Owner.append(pid, prepared_record(intent))
+      assert {:ok, :committed} = Owner.append(pid, applied_record(intent, @t1))
+      assert {:ok, :committed} = Owner.append(pid, delivered_record(intent, @t2))
+    end
+
+    for n <- 9..16 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+  end
+
+  defp fill_hard_reclaimable(pid) do
+    for n <- 1..16 do
+      {:ok, intent} = AuditJournal.admit_intent(revoke_facts(n))
+      assert {:ok, :committed} = Owner.append(pid, prepared_record(intent))
+      assert {:ok, :committed} = Owner.append(pid, rejected_record(intent, @t1))
+    end
+
+    for n <- 17..32 do
+      assert {:ok, :committed} = Owner.append(pid, revoke_prepared(n))
+    end
+  end
+
+  defp fill_unreclaimable_soft(pid) do
+    for n <- 1..32 do
+      assert {:ok, :committed} = Owner.append(pid, prepared(n))
+    end
+  end
+
+  defp fill_unreclaimable_hard(pid) do
+    fill_unreclaimable_soft(pid)
+
+    for n <- 1..16 do
+      assert {:ok, :committed} = Owner.append(pid, revoke_prepared(n))
+    end
+  end
+
+  defp log_path(root), do: Path.join(root, "audit_journal.v1.log")
+
+  defp candidate_path(root), do: Path.join(root, ".audit_journal.v1.log.compact")
 
   defp grant_facts(n) do
     cap_id = cap_id(n)
