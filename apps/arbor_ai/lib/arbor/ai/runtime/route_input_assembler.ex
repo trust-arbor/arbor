@@ -27,6 +27,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   reviewed Application profile and production readers.
   """
 
+  require Logger
+
   alias Arbor.AI.ProviderControlPlane
   alias Arbor.AI.RouteConcurrency
   alias Arbor.AI.RouteConcurrencyCore
@@ -932,6 +934,16 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
         {:ok, failures}
 
       {:error, :unavailable} ->
+        # `status/0` distinguishes :replaying from {:blocked, reason}, but the
+        # snapshot call collapses both to :unavailable — so the operator sees a
+        # route assembly failure with no way to tell "still warming up" from
+        # "parked on a failed commit". Log the service's own view here; without
+        # it the only symptom is every heartbeat failing for an opaque reason.
+        Logger.warning(
+          "[RouteInputAssembler] route failure evidence unavailable; " <>
+            "evidence status: #{inspect(safe_evidence_status())}"
+        )
+
         {:error, :route_failure_evidence_unavailable}
 
       {:error, :malformed} ->
@@ -940,6 +952,14 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
       _ ->
         {:error, :route_failure_evidence_malformed}
     end
+  end
+
+  defp safe_evidence_status do
+    Arbor.AI.provider_route_evidence_status()
+  rescue
+    e -> {:status_unavailable, Exception.message(e)}
+  catch
+    k, r -> {:status_unavailable, {k, r}}
   end
 
   defp read_quota_evidence(decision_time) do

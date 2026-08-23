@@ -29,6 +29,18 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
   use Mix.Task
 
+  # `config/runtime.exs` is applied by the `app.config` task, which `mix run`
+  # and `mix test` invoke for you. A custom task that starts applications
+  # itself does NOT get it — so every runtime-configured value was nil here.
+  #
+  # Concretely: `provider_usage_ledger_target` is set in runtime.exs, so
+  # without this `ProviderRouteEvidence` initialized with no target, parked at
+  # {:blocked, :target_unset}, and every route assembly failed. The eval then
+  # reported `Avg heartbeats: 0.0` while still printing "Successful: 1",
+  # because nothing crashed. `mix run` on the same machine worked, which made
+  # this look like host contention rather than missing config.
+  @requirements ["app.config"]
+
   @shortdoc "Run v3 real-bug memory ablation eval"
 
   @switches [
