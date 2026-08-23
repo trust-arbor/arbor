@@ -13,6 +13,10 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
   @moduletag :fast
   @moduletag :security_regression
 
+  # A model that exists only in this suite's fixture catalog. Transport
+  # behaviour must not depend on the live free tier's rotating membership.
+  @fixture_model "fixture-admitted-free"
+
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
   alias Arbor.LLM.Message
   alias Arbor.LLM.OpenCodeZen
@@ -38,6 +42,38 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
 
     Application.put_env(:arbor_llm, :opencode_zen_acknowledgement_path, ack_path)
     File.rm(ack_path)
+
+    # These tests exercise the TRANSPORT (headers, credentials, admission
+    # enforcement), not which models the live free tier currently serves. Pin a
+    # fixture catalog so they stay valid as the real catalog rotates — coupling
+    # them to shipped ids is what made them fail wholesale when the fabricated
+    # catalog was replaced with measured evidence.
+    fixture_path =
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-fixture-#{System.unique_integer([:positive])}.json"
+      )
+
+    File.write!(
+      fixture_path,
+      JSON.encode!(%{
+        "version" => 1,
+        "models" => [
+          %{
+            "id" => @fixture_model,
+            "status" => "admitted",
+            "context_window" => 131_072,
+            "evidence" => %{
+              "tier1" => %{"passed" => true},
+              "tier2" => %{"passed" => true}
+            }
+          }
+        ]
+      })
+    )
+
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, fixture_path)
+    on_exit(fn -> File.rm(fixture_path) end)
 
     on_exit(fn ->
       File.rm(ack_path)
@@ -178,24 +214,38 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
   end
 
   test "a missing admission catalog denies even after a previously successful load" do
-    source = Application.app_dir(:arbor_llm, "priv/opencode_zen/admission.json")
-
+    # Write a fixture rather than copying the shipped catalog: this test is
+    # about fail-closed behaviour when the file disappears, not about which
+    # models the live free tier currently admits.
     path =
       Path.join(
         System.tmp_dir!(),
         "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
       )
 
-    File.cp!(source, path)
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "version" => 1,
+        "models" => [
+          %{
+            "id" => @fixture_model,
+            "status" => "admitted",
+            "evidence" => %{"tier1" => %{"passed" => true}, "tier2" => %{"passed" => true}}
+          }
+        ]
+      })
+    )
+
     on_exit(fn -> File.rm(path) end)
     Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
 
-    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
-    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
+    assert OpenCodeZen.admit_model(@fixture_model) == :ok
+    assert OpenCodeZen.admitted_ids() == [@fixture_model]
 
     File.rm!(path)
 
-    assert OpenCodeZen.admit_model("glm-4.6-flash") ==
+    assert OpenCodeZen.admit_model(@fixture_model) ==
              {:error, :opencode_zen_admission_unreadable}
 
     assert OpenCodeZen.admitted_ids() == []
@@ -215,7 +265,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
       "version" => 1,
       "models" => [
         %{
-          "id" => "glm-4.6-flash",
+          "id" => @fixture_model,
           "evidence" => %{
             "tier1" => %{"passed" => true},
             "tier2" => %{"passed" => true}
@@ -227,14 +277,14 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     empty = %{"version" => 1, "models" => []}
 
     :ok = OpenCodeZen.persist_admission(admitted)
-    assert OpenCodeZen.admitted_ids() == ["glm-4.6-flash"]
-    assert OpenCodeZen.admit_model("glm-4.6-flash") == :ok
+    assert OpenCodeZen.admitted_ids() == [@fixture_model]
+    assert OpenCodeZen.admit_model(@fixture_model) == :ok
 
     :ok = OpenCodeZen.persist_admission(empty)
     assert OpenCodeZen.admitted_ids() == []
 
-    assert OpenCodeZen.admit_model("glm-4.6-flash") ==
-             {:error, {:opencode_zen_model_not_admitted, "glm-4.6-flash"}}
+    assert OpenCodeZen.admit_model(@fixture_model) ==
+             {:error, {:opencode_zen_model_not_admitted, @fixture_model}}
   end
 
   test "security regression: live evaluation does not open a VM-wide admission bypass for concurrent requests",
@@ -398,7 +448,7 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
   defp opencode_request do
     %Request{
       provider: "opencode_zen",
-      model: "glm-4.6-flash",
+      model: @fixture_model,
       messages: [%Message{role: :user, content: "hello"}]
     }
   end

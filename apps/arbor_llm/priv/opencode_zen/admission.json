@@ -1,73 +1,141 @@
 {
   "version": 1,
   "provider": "opencode_zen",
-  "recorded_at": "2026-08-21",
+  "recorded_at": "2026-08-23",
   "eval": {
-    "tier1": "mechanical_tool_call",
-    "tier2": "mix arbor.eval.task --max-heartbeats 3 --bug glob_wildcard --variants bare"
+    "tier1": "mechanical_tool_call \u2014 live request through Arbor's own adapter, verdict by AdmissionCore.well_formed_tool_call?/1",
+    "tier2": "mix arbor.eval.task \u2014 real agent against a real bug; NOT YET RUN, see note"
   },
+  "note": "Candidates discovered live from GET /zen/v1/models filtered by the -free convention, NOT from this file (that circularity is how the previous fabricated catalog survived). Tier 1 was measured live on 2026-08-23. Tier 2 has not run: the arbor.eval.task harness does not currently start on the .42 VM. Because admission requires BOTH tiers, nothing is admitted yet \u2014 that is deliberate and fail-closed. Do not mark tier2 passed without running it.",
   "models": [
     {
-      "id": "glm-4.6-flash",
-      "status": "admitted",
-      "context_window": 131072,
-      "max_output_tokens": 8192,
+      "id": "x-preview-f-free",
+      "status": "tier1_passed_tier2_pending",
+      "context_window": 1000000,
       "evidence": {
         "tier1": {
           "passed": true,
           "eval": "mechanical_tool_call",
-          "score": 1.0,
-          "at": "2026-08-21"
+          "at": "2026-08-23"
         },
         "tier2": {
-          "passed": true,
-          "eval": "arbor.eval.task",
-          "score": 1.0,
-          "at": "2026-08-21",
-          "heartbeats_to_proposal": 3,
-          "proposal_submitted": true
+          "passed": false,
+          "skipped": true,
+          "reason": "harness_unavailable",
+          "at": "2026-08-23"
         }
-      }
+      },
+      "reason": "tier2_not_run"
     },
     {
-      "id": "nemotron-3-nano-free",
+      "id": "nemotron-3-ultra-free",
+      "status": "tier1_passed_tier2_pending",
+      "evidence": {
+        "tier1": {
+          "passed": true,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23"
+        },
+        "tier2": {
+          "passed": false,
+          "skipped": true,
+          "reason": "harness_unavailable",
+          "at": "2026-08-23"
+        }
+      },
+      "reason": "tier2_not_run"
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "status": "tier1_passed_tier2_pending",
+      "evidence": {
+        "tier1": {
+          "passed": true,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23"
+        },
+        "tier2": {
+          "passed": false,
+          "skipped": true,
+          "reason": "harness_unavailable",
+          "at": "2026-08-23"
+        }
+      },
+      "reason": "tier2_not_run"
+    },
+    {
+      "id": "laguna-s-2.1-free",
       "status": "rejected",
-      "reason": "tier1_no_tool_call",
-      "context_window": 131072,
+      "reason": "no_well_formed_tool_call",
       "evidence": {
         "tier1": {
           "passed": false,
           "eval": "mechanical_tool_call",
-          "score": 0.0,
-          "at": "2026-08-21",
-          "reason": "response contained no well-formed tool call"
-        },
-        "tier2": {
-          "skipped": true,
-          "reason": "tier1_failed"
+          "at": "2026-08-23"
+        }
+      }
+    },
+    {
+      "id": "hy3-free",
+      "status": "rejected",
+      "reason": "tool_call_request_rejected_400",
+      "evidence": {
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23",
+          "note": "plain completion succeeds; 400s when tools are supplied"
+        }
+      }
+    },
+    {
+      "id": "deepseek-v4-flash-free",
+      "status": "rejected",
+      "reason": "tool_call_request_rejected_400",
+      "evidence": {
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23"
+        }
+      }
+    },
+    {
+      "id": "muse-spark-1.2-contributor-free",
+      "status": "rejected",
+      "reason": "tool_call_request_rejected_400",
+      "evidence": {
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23"
         }
       }
     },
     {
       "id": "big-pickle",
       "status": "rejected",
-      "reason": "ua_gated",
+      "reason": "ua_gated_429",
       "evidence": {
-        "http_status": 429,
-        "error": "FreeUsageLimitError",
-        "at": "2026-08-21",
-        "note": "relay returns 429 unless User-Agent is opencode/latest; Arbor does not spoof a third-party client UA"
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23",
+          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason. Arbor does not spoof opencode/latest."
+        }
       }
     },
     {
       "id": "mimo-v2.5-free",
       "status": "rejected",
-      "reason": "ua_gated",
+      "reason": "ua_gated_429",
       "evidence": {
-        "http_status": 429,
-        "error": "FreeUsageLimitError",
-        "at": "2026-08-21",
-        "note": "relay returns 429 unless User-Agent is opencode/latest; Arbor does not spoof a third-party client UA"
+        "tier1": {
+          "passed": false,
+          "eval": "mechanical_tool_call",
+          "at": "2026-08-23",
+          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason."
+        }
       }
     }
   ]
