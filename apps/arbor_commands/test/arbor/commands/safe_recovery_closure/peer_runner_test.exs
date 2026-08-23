@@ -40,8 +40,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     refute "e0b3_fixture" in Enum.map(sample["pre_start"]["applications"], & &1["name"])
   end
 
-  test "current arbor_security starts in the real peer with only the ephemeral authority root" do
-    root = fixture_release!(security_closure?: true)
+  test "security regression: current arbor_security starts in the real peer with an ephemeral root" do
+    root = fixture_release!(include_security_apps?: true)
     on_exit(fn -> File.rm_rf!(root) end)
 
     assert {:ok, sample} =
@@ -67,6 +67,36 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     assert_receive {:safe_recovery_authority_root_created, authority_root}
     refute File.exists?(authority_root)
     refute inspect(reason) =~ authority_root
+  end
+
+  test "real peer rejects missing and malformed ephemeral authority roots without disclosure" do
+    root = fixture_release!()
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:error, {:peer_measure_failed, :ephemeral_authority_root_missing}} =
+             PeerRunner.__test_authority_root_validation__(root, :missing)
+
+    assert {:error, {:peer_measure_failed, :ephemeral_authority_root_unsafe}} =
+             PeerRunner.__test_authority_root_validation__(root, :wrong_prefix)
+  end
+
+  test "security regression: measuring caller death still removes the exact authority root" do
+    release_root = fixture_release!()
+    on_exit(fn -> File.rm_rf!(release_root) end)
+    observer = self()
+
+    {caller, caller_mon} =
+      spawn_monitor(fn ->
+        PeerRunner.__test_measure__(release_root, ["e0b3_fixture"], observer)
+      end)
+
+    assert_receive {:safe_recovery_authority_root_created, authority_root}, 10_000
+    assert_receive {:safe_recovery_peer_control_started, control}, 10_000
+    control_mon = Process.monitor(control)
+    Process.exit(caller, :kill)
+    assert_receive {:DOWN, ^caller_mon, :process, ^caller, :killed}, 10_000
+    assert_receive {:DOWN, ^control_mon, :process, ^control, _reason}, 10_000
+    assert_eventually_removed(authority_root)
   end
 
   test "authority-root identity replacement makes cleanup fail closed without path disclosure" do
@@ -141,14 +171,14 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
 
     File.write!(Path.join(ebin, "Elixir.E0B3Fixture.beam"), bin)
 
-    closure_roots =
-      if Keyword.get(opts, :security_closure?, false) do
+    application_roots =
+      if Keyword.get(opts, :include_security_apps?, false) do
         [:arbor_kernel_runtime, :arbor_security]
       else
         [:arbor_kernel_runtime]
       end
 
-    copy_application_closure!(root, closure_roots)
+    copy_application_deps!(root, application_roots)
 
     release_dir = Path.join(root, "releases/0.1.0")
     File.mkdir_p!(release_dir)
@@ -171,9 +201,9 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     root
   end
 
-  defp copy_application_closure!(release_root, roots) do
+  defp copy_application_deps!(release_root, roots) do
     roots
-    |> Enum.reduce(MapSet.new(), &collect_application_closure!/2)
+    |> Enum.reduce(MapSet.new(), &collect_application_deps!/2)
     |> MapSet.delete(:kernel)
     |> MapSet.delete(:stdlib)
     |> Enum.each(fn app ->
@@ -184,7 +214,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     end)
   end
 
-  defp collect_application_closure!(app, seen) do
+  defp collect_application_deps!(app, seen) do
     if MapSet.member?(seen, app) do
       seen
     else
@@ -195,7 +225,7 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
           properties
           |> Keyword.get(:applications, [])
           |> Kernel.++(Keyword.get(properties, :included_applications, []))
-          |> Enum.reduce(seen, &collect_application_closure!/2)
+          |> Enum.reduce(seen, &collect_application_deps!/2)
 
         :missing ->
           seen
@@ -221,4 +251,17 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     |> List.to_string()
     |> Path.join("ebin")
   end
+
+  defp assert_eventually_removed(path, attempts \\ 200)
+
+  defp assert_eventually_removed(path, attempts) when attempts > 0 do
+    if File.exists?(path) do
+      Process.sleep(25)
+      assert_eventually_removed(path, attempts - 1)
+    else
+      refute File.exists?(path)
+    end
+  end
+
+  defp assert_eventually_removed(path, 0), do: refute(File.exists?(path))
 end

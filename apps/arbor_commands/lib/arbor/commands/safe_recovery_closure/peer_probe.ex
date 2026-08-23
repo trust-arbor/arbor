@@ -24,6 +24,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   @max_names 512
   @max_modules 4_096
   @max_authority_root_bytes 4_096
+  # Keep these paired with PeerRunner's generated prefix and 32-byte token
+  # (64 lowercase hexadecimal characters).
   @authority_root_prefix "arbor-e0b3-security-"
   @authority_root_token_hex_bytes 64
 
@@ -52,6 +54,28 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
     end
 
     def __test_measure__(_), do: {:error, :invalid_selected}
+
+    @doc false
+    @spec __test_authority_root_validation__(:missing | :wrong_prefix) :: {:error, term()}
+    def __test_authority_root_validation__(:missing) do
+      System.delete_env("ARBOR_SECURITY_STATE_DIR")
+      install_ephemeral_authority_root()
+    end
+
+    def __test_authority_root_validation__(:wrong_prefix) do
+      case System.fetch_env("ARBOR_SECURITY_STATE_DIR") do
+        {:ok, root} ->
+          System.put_env("ARBOR_SECURITY_STATE_DIR", root <> "-wrong-prefix")
+          install_ephemeral_authority_root()
+
+        :error ->
+          {:error, :ephemeral_authority_root_missing}
+      end
+    end
+
+    @doc false
+    @spec __test_install_ephemeral_authority_root__() :: :ok | {:error, term()}
+    def __test_install_ephemeral_authority_root__, do: install_ephemeral_authority_root()
   end
 
   defp measure_selected(selected) do

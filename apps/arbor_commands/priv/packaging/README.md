@@ -337,7 +337,9 @@ peer-local final authority-root override before selected applications
 start. After bounded peer shutdown the manager recursively removes only
 the identity-bound root it created; removal uncertainty fails the
 measurement closed. The path is not closure evidence or an error detail,
-and the manager VM's Application configuration is never changed.
+and the manager VM's Application configuration is never changed. The
+root-owning manager monitors the measuring caller and remains alive long
+enough to cancel and reap the peer before cleanup if that caller exits.
 
 This measurement-only root lets the production-built `arbor_security`
 exercise its durable startup path without writing operator state. It does
