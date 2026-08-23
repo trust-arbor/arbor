@@ -551,14 +551,20 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp finish_reopened_fd(handle, ctx, fd, identity) do
-    case compact_replay_guard() do
-      :ok ->
-        finish_published_open(handle, ctx, fd, identity)
+  if Mix.env() == :test do
+    defp finish_reopened_fd(handle, ctx, fd, identity) do
+      case compact_replay_guard() do
+        :ok ->
+          finish_published_open(handle, ctx, fd, identity)
 
-      {:error, reason} ->
-        _ = close_io_silent(fd)
-        {:error, :published_replay, reason}
+        {:error, reason} ->
+          _ = close_io_silent(fd)
+          {:error, :published_replay, reason}
+      end
+    end
+  else
+    defp finish_reopened_fd(handle, ctx, fd, identity) do
+      finish_published_open(handle, ctx, fd, identity)
     end
   end
 
@@ -1031,9 +1037,6 @@ defmodule Arbor.Security.AuditJournalFile do
 
     @spec compact_reopen_guard() :: :ok | {:error, atom()}
     defp compact_reopen_guard, do: :ok
-
-    @spec compact_replay_guard() :: :ok | {:error, atom()}
-    defp compact_replay_guard, do: :ok
   end
 
   defp finish_open(fd, root, path, identity) do
