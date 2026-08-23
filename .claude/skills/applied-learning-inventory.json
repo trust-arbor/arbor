@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 669,
+  "entry_count": 670,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8241,8 +8241,21 @@
       "source_incident": "found 2026-08-23 while inspecting task steering",
       "always_loaded": false,
       "content_sha256": "0e6ea3a724f146e847b5daafe7300debd04e782276dd08b90af89d5ee60a6150"
+    },
+    {
+      "source_ordinal": 670,
+      "source_kind": "post-migration",
+      "slug": "load-modules-before-installing-erlang-call-trace-patterns",
+      "title": "Load modules before installing Erlang call trace patterns.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-load-modules-before-installing-erlang-call-trace-patterns",
+      "source_date": "2026-08-23",
+      "source_incident": "found 2026-08-23 during P1A-1 cross-app validation",
+      "always_loaded": false,
+      "content_sha256": "5365ebf6e75e83f3769d585d9934a39f9fd088426e510eb21584be3d41acbc19"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 208
+  "post_migration_entry_count": 209
 }

@@ -837,3 +837,14 @@ and cascaded into 220 `:authority_root_unconfigured` failures).
 <!-- applied-learning: hot-reload-updates-modules-not-running-child-processes -->
 <a id="applied-learning-hot-reload-updates-modules-not-running-child-processes"></a>
 **Hot code reload updates modules; it does NOT restart supervised children or migrate their state.** A child started before a child-spec change keeps the args it was given at boot, so new code that pattern-matches on a field the old args never set fails on every call. Comparing loaded-vs-on-disk module md5 reports "not stale" and sends you the wrong way: the CODE is current, the PROCESS is not. Found 2026-08-21 — `Arbor.Historian.EventLog.ETS` started at 07:44; commit `d43f01758` added `mode: :projection` to its child spec at 12:19. Modules were hot-reloaded and every md5 matched disk, but the running process still had `mode: nil`, so the `%{mode: :projection}` clause never matched and every hot projection returned `:projection_mode_required`. Durable writes still succeeded, so it degraded silently into "every read falls through to the durable store" plus a generic warning whose real reason was swallowed. Diagnose by STATE, not by module: `:sys.get_state/1` the running child and compare the fields the new code matches against what the current child spec would pass. To size blast radius after a batch of commits: `git log --since="<server start>" --name-only --format="" -- 'apps/*/lib/**/application.ex' 'apps/*/lib/**/supervisor.ex' | sort -u` — anything listed is stale in the running system until that child restarts.
+
+<!-- applied-learning: load-modules-before-installing-erlang-call-trace-patterns -->
+<a id="applied-learning-load-modules-before-installing-erlang-call-trace-patterns"></a>
+**Load modules before installing Erlang call trace patterns.**
+`:erlang.trace_pattern/3` returns zero for an unloaded module and does not
+retroactively attach when the module loads later. A call-tracing test must
+`Code.ensure_loaded!/1` each target before installing patterns, and it must
+drain trace delivery before terminating the tracer. Otherwise randomized test
+order can make a security regression pass or fail according to which module an
+earlier test happened to load (found 2026-08-23 during P1A-1 cross-app
+validation).
