@@ -46,6 +46,16 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @max_output_bytes Arbor.Shell.max_output_bytes_limit()
   @untrusted_diagnostic_output_limit 2_048
   @untrusted_omission_marker "\n...[omitted]...\n"
+  # Max incomplete UTF-8 sequence; interior windows inspect only this many extra bytes.
+  @utf8_boundary_allowance 3
+  # Local three-window policy (sanitize-then-drop, 2048 ceiling, timeout authority)
+  # rather than a CrossApp call. Head/tail each take 1/share of the post-marker
+  # content budget; lookback keeps a little context before the first anchor.
+  @excerpt_head_share 8
+  @excerpt_anchor_lookback 64
+  # Byte-level anchors: ExUnit numbered failure, Mix compilation banner, or
+  # uncaught BEAM/Mix exception heading. Erlang :re is PCRE in byte mode.
+  @diagnostic_anchor_pattern ~r/  [0-9]+\) [^\n]+\([A-Z][A-Za-z0-9_.]*\)|== Compilation error|\*\* \([A-Z][A-Za-z0-9_.]*\)/
   @schema_project_mix_file "apps/arbor_persistence/mix.exs"
   @schema_bootstrap_repo "Arbor.Persistence.Repo"
   @schema_bootstrap_tasks ["ecto.create", "ecto.migrate"]
@@ -321,18 +331,27 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   Closed child diagnostic. `output_bytes` / `output_sha256` cover the complete
   path-normalized binary unchanged. Only `untrusted_diagnostic_output` is
   sanitized and byte-bounded.
+
+  Sanitize first, then bound. For a truncated child, a nonzero `exit_code` or
+  `timed_out == true` may keep a small startup head, the first stable
+  structural diagnostic anchor, and a small final tail. Successful output
+  (`exit_code == 0` and `timed_out == false`) and failed output without an
+  anchor keep the uniform head/tail excerpt. Exit code and `timed_out` are
+  the only success/failure authorities; output prose is not.
   """
   @spec child_diagnostic(integer() | nil, boolean(), binary()) :: map()
   def child_diagnostic(exit_code, timed_out, path_normalized)
       when (is_integer(exit_code) or is_nil(exit_code)) and is_boolean(timed_out) and
              is_binary(path_normalized) do
+    sanitized = sanitize_untrusted_output(path_normalized)
+
     %{
       "exit_code" => exit_code,
       "timed_out" => timed_out,
       "output_bytes" => byte_size(path_normalized),
       "output_sha256" => sha256(path_normalized),
       "untrusted_diagnostic_output" =>
-        bound_untrusted_output(sanitize_untrusted_output(path_normalized))
+        bound_untrusted_output(sanitized, exit_code, timed_out)
     }
   end
 
@@ -526,7 +545,36 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
     for <<byte <- binary>>, byte == 9 or byte == 10 or byte >= 32, into: <<>>, do: <<byte>>
   end
 
-  defp bound_untrusted_output(binary) when is_binary(binary) do
+  # Exit code and timed_out are the only authorities for the failure-aware
+  # path; never infer success or failure from output prose.
+  defp bound_untrusted_output(binary, exit_code, timed_out)
+       when is_binary(binary) and (is_integer(exit_code) or is_nil(exit_code)) and
+              is_boolean(timed_out) do
+    size = byte_size(binary)
+
+    cond do
+      size <= @untrusted_diagnostic_output_limit ->
+        binary
+
+      not failure_aware_child?(exit_code, timed_out) ->
+        bound_head_tail_output(binary)
+
+      true ->
+        case find_first_diagnostic_anchor(binary) do
+          {:ok, anchor_start} ->
+            bound_failure_aware_output(binary, min(anchor_start, size))
+
+          :none ->
+            bound_head_tail_output(binary)
+        end
+    end
+  end
+
+  defp failure_aware_child?(_exit_code, true), do: true
+  defp failure_aware_child?(0, false), do: false
+  defp failure_aware_child?(_exit_code, false), do: true
+
+  defp bound_head_tail_output(binary) when is_binary(binary) do
     size = byte_size(binary)
 
     if size <= @untrusted_diagnostic_output_limit do
@@ -541,6 +589,168 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
       tail = take_valid_utf8_suffix(binary_part(binary, size - tail_length, tail_length))
       head <> marker <> tail
     end
+  end
+
+  defp find_first_diagnostic_anchor(binary) when is_binary(binary) do
+    case Regex.run(@diagnostic_anchor_pattern, binary, return: :index) do
+      [{offset, _length} | _] -> {:ok, offset}
+      _other -> :none
+    end
+  end
+
+  defp bound_failure_aware_output(binary, anchor_start)
+       when is_binary(binary) and is_integer(anchor_start) and anchor_start >= 0 do
+    size = byte_size(binary)
+
+    if size <= @untrusted_diagnostic_output_limit do
+      binary
+    else
+      build_failure_centered_excerpt(binary, size, min(anchor_start, size))
+    end
+  end
+
+  defp build_failure_centered_excerpt(binary, size, anchor_start)
+       when is_binary(binary) and is_integer(size) and is_integer(anchor_start) do
+    marker = @untrusted_omission_marker
+    marker_bytes = byte_size(marker)
+    content_budget = @untrusted_diagnostic_output_limit - 2 * marker_bytes
+
+    head_budget = div(content_budget, @excerpt_head_share)
+    tail_budget = div(content_budget, @excerpt_head_share)
+    middle_budget = content_budget - head_budget - tail_budget
+
+    lookback = min(@excerpt_anchor_lookback, div(middle_budget, @excerpt_head_share))
+    raw_middle_start = max(0, anchor_start - lookback)
+    middle_end = min(size, raw_middle_start + middle_budget)
+
+    middle_start =
+      if middle_end - raw_middle_start < middle_budget and raw_middle_start > 0 do
+        max(0, middle_end - middle_budget)
+      else
+        raw_middle_start
+      end
+
+    head_end = min(head_budget, middle_start)
+    tail_start = max(middle_end, size - tail_budget)
+
+    head_text =
+      if head_end > 0 do
+        nonempty_window(take_valid_utf8_prefix(binary_part(binary, 0, head_end)))
+      else
+        nil
+      end
+
+    middle_text =
+      nonempty_window(
+        repair_sanitized_interior_window(binary, middle_start, middle_end - middle_start)
+      )
+
+    tail_text =
+      if tail_start < size do
+        nonempty_window(
+          take_valid_utf8_suffix(binary_part(binary, tail_start, size - tail_start))
+        )
+      else
+        nil
+      end
+
+    head_gap? = head_text != nil and middle_text != nil and middle_start > head_end
+    tail_gap? = tail_text != nil and middle_text != nil and tail_start > middle_end
+
+    parts = []
+    parts = if head_text != nil, do: [head_text | parts], else: parts
+    parts = if head_gap?, do: [marker | parts], else: parts
+    parts = if middle_text != nil, do: [middle_text | parts], else: parts
+    parts = if tail_gap?, do: [marker | parts], else: parts
+    parts = if tail_text != nil, do: [tail_text | parts], else: parts
+
+    parts
+    |> Enum.reverse()
+    |> IO.iodata_to_binary()
+  end
+
+  defp nonempty_window(<<>>), do: nil
+  defp nonempty_window(text) when is_binary(text), do: text
+
+  # Leading and trailing partials are dropped independently: suffix's
+  # whole-slice String.valid?/1 walk can erase an interior diagnostic when
+  # both window edges split multibyte codepoints.
+  defp repair_sanitized_interior_window(_binary, _start_offset, length_budget)
+       when is_integer(length_budget) and length_budget <= 0 do
+    ""
+  end
+
+  defp repair_sanitized_interior_window(binary, start_offset, length_budget)
+       when is_binary(binary) and is_integer(start_offset) and start_offset >= 0 and
+              is_integer(length_budget) and length_budget > 0 do
+    size = byte_size(binary)
+    start = min(start_offset, size)
+    available = size - start
+
+    if available <= 0 do
+      ""
+    else
+      take = min(available, length_budget + @utf8_boundary_allowance)
+
+      binary
+      |> binary_part(start, take)
+      |> drop_leading_incomplete_utf8()
+      |> take_valid_utf8_prefix()
+      |> take_bounded_utf8_prefix(length_budget)
+    end
+  end
+
+  defp repair_sanitized_interior_window(_binary, _start_offset, _length_budget), do: ""
+
+  defp drop_leading_incomplete_utf8(binary) when is_binary(binary) do
+    drop_leading_incomplete_utf8(binary, 0)
+  end
+
+  defp drop_leading_incomplete_utf8(<<>>, _skipped), do: <<>>
+
+  defp drop_leading_incomplete_utf8(binary, skipped)
+       when skipped > @utf8_boundary_allowance do
+    binary
+  end
+
+  defp drop_leading_incomplete_utf8(binary, skipped) do
+    case :unicode.characters_to_binary(binary, :utf8, :utf8) do
+      valid when is_binary(valid) ->
+        binary
+
+      {:incomplete, good, _rest} when is_binary(good) and good != <<>> ->
+        binary
+
+      {:error, good, _rest} when is_binary(good) and good != <<>> ->
+        binary
+
+      {:error, _good, <<_drop, rest::binary>>} ->
+        drop_leading_incomplete_utf8(rest, skipped + 1)
+
+      {:incomplete, <<>>, _rest} ->
+        <<_drop, rest::binary>> = binary
+        drop_leading_incomplete_utf8(rest, skipped + 1)
+
+      _other ->
+        <<>>
+    end
+  end
+
+  defp take_bounded_utf8_prefix(_text, max_bytes)
+       when is_integer(max_bytes) and max_bytes <= 0 do
+    ""
+  end
+
+  defp take_bounded_utf8_prefix(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) and byte_size(text) <= max_bytes do
+    text
+  end
+
+  defp take_bounded_utf8_prefix(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) do
+    text
+    |> binary_part(0, max_bytes)
+    |> take_valid_utf8_prefix()
   end
 
   # Drop invalid sequences and continue so a valid suffix after bad bytes

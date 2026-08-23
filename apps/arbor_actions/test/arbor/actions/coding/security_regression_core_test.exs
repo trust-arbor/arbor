@@ -414,6 +414,182 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
     refute diagnostic["output_sha256"] == sha256(excerpt)
   end
 
+  test "security regression: failed diagnostic excerpt retains a middle ExUnit failure block" do
+    startup = "Running ExUnit with mix...\nSeed: 424242\nMax cases: 8\n"
+
+    noise_before =
+      Enum.map_join(1..300, fn i -> "starting line #{i} dependency warmup ok\n" end)
+
+    failure_block =
+      "\n\n" <>
+        "  1) test security regression keeps the diagnostic (Arbor.Security.GateTest)\n" <>
+        "     apps/arbor_security/test/gate_test.exs:42:1\n" <>
+        "     code: assert Gate.allow?(forged) == false\n" <>
+        "     lhs:  true\n" <>
+        "     rhs:  false\n" <>
+        "     stacktrace:\n" <>
+        "       apps/arbor_security/lib/gate.ex:88: Arbor.Security.Gate.allow?/1\n"
+
+    noise_after = Enum.map_join(1..200, fn i -> "trailing pass line #{i} ok\n" end)
+
+    summary =
+      "\nFinished in 1.2 seconds\n12 tests, 1 failure\nRandomized with seed 424242\n"
+
+    raw = startup <> noise_before <> failure_block <> noise_after <> summary
+
+    assert byte_size(raw) > Core.untrusted_diagnostic_output_limit() * 5
+    {anchor_offset, _} = :binary.match(raw, "  1) test security regression keeps the diagnostic")
+
+    old_half =
+      div(
+        Core.untrusted_diagnostic_output_limit() - byte_size(Core.untrusted_omission_marker()),
+        2
+      )
+
+    assert anchor_offset > old_half
+    assert anchor_offset < byte_size(raw) - old_half
+
+    failed = Core.child_diagnostic(1, false, raw)
+    assert_failure_aware_exunit_excerpt(failed, raw)
+
+    timed = Core.child_diagnostic(0, true, raw)
+    assert_failure_aware_exunit_excerpt(timed, raw)
+
+    success = Core.child_diagnostic(0, false, raw)
+    success_excerpt = success["untrusted_diagnostic_output"]
+    assert success["output_bytes"] == byte_size(raw)
+    assert success["output_sha256"] == sha256(raw)
+    refute success["output_sha256"] == sha256(success_excerpt)
+    assert String.contains?(success_excerpt, "Seed: 424242")
+    assert String.contains?(success_excerpt, "Randomized with seed 424242")
+    refute String.contains?(success_excerpt, "Gate.allow?(forged)")
+    refute String.contains?(success_excerpt, "Arbor.Security.GateTest")
+    assert byte_size(success_excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert String.valid?(success_excerpt)
+    assert jason_object?(success)
+  end
+
+  test "security regression: failure-aware excerpt keeps a middle anchor when both window edges split UTF-8" do
+    # lookback 64 ≡ 1 (mod 3) and middle budget 1512 ≡ 0 (mod 3) match the
+    # module attributes. A 3-byte pre-anchor run ending on a character
+    # boundary therefore splits both computed middle-window edges.
+    lookback = 64
+    middle_budget = 1512
+    header = "Running ExUnit...\nSeed: 424242\nMax cases: 8\n"
+    before = String.duplicate("測", 800)
+
+    failure_block =
+      "  1) test utf8 window keeps the diagnostic (Arbor.Security.Utf8WindowTest)\n" <>
+        "     apps/arbor_security/test/utf8_window_test.exs:7:1\n" <>
+        "     code: assert Gate.allow?(forged) == false\n" <>
+        "     lhs:  true\n" <>
+        "     rhs:  false\n"
+
+    after_noise = String.duplicate("測", 800)
+    footer = "\n12 tests, 1 failure\nRandomized with seed 424242\n"
+    raw = header <> before <> failure_block <> after_noise <> footer
+
+    assert rem(lookback, 3) == 1
+    assert rem(middle_budget, 3) == 0
+    assert rem(byte_size(before), 3) == 0
+    {anchor_offset, _} = :binary.match(raw, "  1) test utf8 window keeps the diagnostic")
+    raw_middle = binary_part(raw, anchor_offset - lookback, middle_budget)
+    refute String.valid?(raw_middle)
+
+    diagnostic = Core.child_diagnostic(1, false, raw)
+    excerpt = diagnostic["untrusted_diagnostic_output"]
+
+    assert diagnostic["output_bytes"] == byte_size(raw)
+    assert diagnostic["output_sha256"] == sha256(raw)
+    refute diagnostic["output_sha256"] == sha256(excerpt)
+    assert String.contains?(excerpt, "Gate.allow?(forged)")
+    assert String.contains?(excerpt, "Arbor.Security.Utf8WindowTest")
+    assert String.contains?(excerpt, "測")
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert jason_object?(diagnostic)
+    refute String.contains?(excerpt, <<0xEF, 0xBF, 0xBD>>)
+    refute String.contains?(excerpt, <<0>>)
+  end
+
+  test "security regression: failed diagnostic excerpt retains compilation-error and uncaught-exception anchors" do
+    raw_compile =
+      "Compiling apps/foo/lib/foo.ex...\n" <>
+        String.duplicate("noise compile line\n", 300) <>
+        "== Compilation error in file apps/foo/lib/foo.ex ==\n" <>
+        "    ** (CompileError) apps/foo/lib/foo.ex:12: undefined function do_thing/0\n" <>
+        String.duplicate("trailing noise compile line\n", 200) <>
+        "\n\n** (Mix) Compile error\n"
+
+    compile_diag = Core.child_diagnostic(1, false, raw_compile)
+    compile_excerpt = compile_diag["untrusted_diagnostic_output"]
+    assert String.contains?(compile_excerpt, "== Compilation error")
+    assert String.contains?(compile_excerpt, "CompileError")
+    assert String.contains?(compile_excerpt, "do_thing/0")
+    assert String.valid?(compile_excerpt)
+    assert byte_size(compile_excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert jason_object?(compile_diag)
+    assert compile_diag["output_bytes"] == byte_size(raw_compile)
+    assert compile_diag["output_sha256"] == sha256(raw_compile)
+
+    raw_exc =
+      "Starting task...\n" <>
+        String.duplicate("noise exc line\n", 300) <>
+        "** (RuntimeError) boom widget failed unexpectedly\n" <>
+        "    (foo 0.1.0) lib/foo/runtime.ex:7: Foo.Runtime.run/1\n" <>
+        String.duplicate("trailing noise exc line\n", 200)
+
+    exc_diag = Core.child_diagnostic(1, false, raw_exc)
+    exc_excerpt = exc_diag["untrusted_diagnostic_output"]
+    assert String.contains?(exc_excerpt, "** (RuntimeError) boom widget failed unexpectedly")
+    assert String.contains?(exc_excerpt, "Foo.Runtime.run/1")
+    assert String.valid?(exc_excerpt)
+    assert byte_size(exc_excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert jason_object?(exc_diag)
+    assert exc_diag["output_bytes"] == byte_size(raw_exc)
+    assert exc_diag["output_sha256"] == sha256(raw_exc)
+  end
+
+  test "security regression: failed output without a structural anchor keeps head/tail" do
+    raw =
+      "HEAD-LINE-START\n" <>
+        String.duplicate("noise line without anchor marker\n", 400) <>
+        "the assertion failed after a timeout\n" <>
+        String.duplicate("more noise line without structure\n", 400) <>
+        "TAIL-LINE-END\n"
+
+    diagnostic = Core.child_diagnostic(2, false, raw)
+    excerpt = diagnostic["untrusted_diagnostic_output"]
+
+    assert String.contains?(excerpt, "HEAD-LINE-START")
+    assert String.contains?(excerpt, "TAIL-LINE-END")
+    assert String.contains?(excerpt, Core.untrusted_omission_marker())
+    refute String.contains?(excerpt, "the assertion failed after a timeout")
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert jason_object?(diagnostic)
+    assert diagnostic["output_bytes"] == byte_size(raw)
+    assert diagnostic["output_sha256"] == sha256(raw)
+  end
+
+  defp assert_failure_aware_exunit_excerpt(diagnostic, raw) do
+    excerpt = diagnostic["untrusted_diagnostic_output"]
+    assert diagnostic["output_bytes"] == byte_size(raw)
+    assert diagnostic["output_sha256"] == sha256(raw)
+    refute diagnostic["output_sha256"] == sha256(excerpt)
+    assert String.contains?(excerpt, "Seed: 424242")
+    assert String.contains?(excerpt, "Gate.allow?(forged)")
+    assert String.contains?(excerpt, "Arbor.Security.GateTest")
+    assert String.contains?(excerpt, "lhs:  true")
+    assert String.contains?(excerpt, "12 tests, 1 failure")
+    assert String.contains?(excerpt, "Randomized with seed 424242")
+    assert byte_size(excerpt) <= Core.untrusted_diagnostic_output_limit()
+    assert String.valid?(excerpt)
+    refute String.contains?(excerpt, <<0>>)
+    assert jason_object?(diagnostic)
+    assert length(String.split(excerpt, Core.untrusted_omission_marker())) == 3
+  end
+
   defp completed_leg(counts, exit_code \\ 0) do
     {:ok, normalized} =
       Core.validate_artifact({Core.artifact_tag(), Core.artifact_version(), counts})
