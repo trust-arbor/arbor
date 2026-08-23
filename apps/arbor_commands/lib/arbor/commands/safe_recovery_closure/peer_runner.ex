@@ -121,7 +121,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
           run_managed_peer(
             caller,
             caller_mon,
-            token,
             cookie,
             paths,
             release_root,
@@ -152,7 +151,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
   defp run_managed_peer(
          caller,
          caller_mon,
-         token,
          cookie,
          paths,
          release_root,
@@ -187,7 +185,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
       await_managed_peer(
         caller,
         caller_mon,
-        token,
         runner,
         runner_mon,
         cancel_ref,
@@ -215,7 +212,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
   defp await_managed_peer(
          caller,
          caller_mon,
-         token,
          runner,
          runner_mon,
          cancel_ref,
@@ -243,21 +239,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
         await_managed_peer(
           caller,
           caller_mon,
-          token,
-          runner,
-          runner_mon,
-          cancel_ref,
-          true,
-          monotonic_ms() + worker_budget_ms()
-        )
-
-      {^token, :cancel} when not cancelled? ->
-        send(runner, {cancel_ref, :cancel})
-
-        await_managed_peer(
-          caller,
-          caller_mon,
-          token,
           runner,
           runner_mon,
           cancel_ref,
@@ -274,7 +255,6 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunner do
           await_managed_peer(
             caller,
             caller_mon,
-            token,
             runner,
             runner_mon,
             cancel_ref,
