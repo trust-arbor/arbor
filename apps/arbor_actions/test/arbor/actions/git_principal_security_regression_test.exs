@@ -171,6 +171,7 @@ defmodule Arbor.Actions.GitPrincipalSecurityRegressionTest do
         tracer_loop(parent, [])
       end)
 
+    Code.ensure_loaded!(Arbor.Shell)
     :erlang.trace_pattern({Arbor.Shell, :execute, 2}, true, [])
     :erlang.trace_pattern({Arbor.Shell, :execute_direct, 3}, true, [])
     :erlang.trace_pattern({Arbor.Shell, :authorize_and_execute, 3}, true, [])
@@ -178,7 +179,7 @@ defmodule Arbor.Actions.GitPrincipalSecurityRegressionTest do
 
     try do
       result = fun.()
-      send(tracer, :done)
+      send(tracer, {:drain, self()})
 
       receive do
         {:host_shell_calls, calls} -> {calls, result}
@@ -199,7 +200,22 @@ defmodule Arbor.Actions.GitPrincipalSecurityRegressionTest do
       when fun in [:execute, :execute_direct, :authorize_and_execute] ->
         tracer_loop(parent, [fun | acc])
 
-      :done ->
+      {:drain, tracee} ->
+        delivery_ref = :erlang.trace_delivered(tracee)
+        drain_tracer(parent, acc, tracee, delivery_ref)
+    after
+      1_000 ->
+        send(parent, {:host_shell_calls, Enum.reverse(acc)})
+    end
+  end
+
+  defp drain_tracer(parent, acc, tracee, delivery_ref) do
+    receive do
+      {:trace, _pid, :call, {Arbor.Shell, fun, _args}}
+      when fun in [:execute, :execute_direct, :authorize_and_execute] ->
+        drain_tracer(parent, [fun | acc], tracee, delivery_ref)
+
+      {:trace_delivered, ^tracee, ^delivery_ref} ->
         send(parent, {:host_shell_calls, Enum.reverse(acc)})
     after
       1_000 ->
