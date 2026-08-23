@@ -47,10 +47,10 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
   @impl Mix.Task
   def run(args) do
     # Start required apps (orchestrator must come before agent — provides EventRegistry + Session)
-    {:ok, _} = Application.ensure_all_started(:arbor_memory)
-    {:ok, _} = Application.ensure_all_started(:arbor_ai)
-    {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
-    {:ok, _} = Application.ensure_all_started(:arbor_agent)
+    for app <- [:arbor_memory, :arbor_ai, :arbor_orchestrator, :arbor_agent] do
+      start_or_raise!(app)
+    end
+
     _ = Application.ensure_all_started(:arbor_persistence_ecto)
 
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
@@ -102,6 +102,31 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
   end
 
   # -- Parsers --
+
+  # A bare `{:ok, _} =` match turned any startup failure into a MatchError whose
+  # message was the raw error tuple — which is how a 5s ActionRegistry
+  # :lock_core timeout on a slow VM presented as an unreadable crash rather than
+  # "the orchestrator did not start". Name the app and the reason.
+  defp start_or_raise!(app) do
+    case Application.ensure_all_started(app) do
+      {:ok, _started} ->
+        :ok
+
+      {:error,
+       {failed_app, {:bad_return, {_mfa, {:EXIT, {:timeout, {GenServer, :call, [name | _]}}}}}}} ->
+        Mix.raise("""
+        Could not start #{inspect(app)}: #{inspect(failed_app)} timed out calling #{inspect(name)}.
+
+        This is usually slow-hardware startup, not a code fault — registry lock
+        does disk-backed module loading. Raise the budget with:
+
+          config :arbor_kernel_runtime, registry_lock_core_timeout: 120_000
+        """)
+
+      {:error, reason} ->
+        Mix.raise("Could not start #{inspect(app)}: #{inspect(reason)}")
+    end
+  end
 
   defp parse_variants(nil), do: [:bare, :full]
 

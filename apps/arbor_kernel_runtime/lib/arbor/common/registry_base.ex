@@ -256,7 +256,31 @@ defmodule Arbor.Common.RegistryBase do
 
       @impl Arbor.Contracts.Handler.Registry
       def lock_core do
-        GenServer.call(__MODULE__, :lock_core)
+        lock_core(lock_core_timeout())
+      end
+
+      @doc """
+      Lock the core registry, allowing an explicit timeout.
+
+      This runs `pt_snapshot/0`, which calls `Code.ensure_loaded?/1` for every
+      registered entry — that can load BEAM files from disk, so on slower
+      hardware it legitimately exceeds `GenServer.call/2`'s 5s default. That
+      default was inherited, not chosen: on the `.42` VM it timed out and took
+      `Arbor.Orchestrator.Application.start/2` down with it, which made
+      `mix arbor.eval.task` unrunnable there while working fine on a laptop.
+
+      Configure with `config :arbor_kernel_runtime, registry_lock_core_timeout: ms`.
+      """
+      @spec lock_core(timeout()) :: :ok | {:error, term()}
+      def lock_core(timeout) do
+        GenServer.call(__MODULE__, :lock_core, timeout)
+      catch
+        :exit, {:timeout, _} = reason ->
+          {:error, {:lock_core_timeout, reason}}
+      end
+
+      defp lock_core_timeout do
+        Application.get_env(:arbor_kernel_runtime, :registry_lock_core_timeout, 60_000)
       end
 
       @impl Arbor.Contracts.Handler.Registry
