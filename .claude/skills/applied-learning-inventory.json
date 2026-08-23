@@ -1479,7 +1479,7 @@
       "anchor": "applied-learning-coding-plan-uses-reviewed-task-class-identifiers-not-informal-scope-labels",
       "source_date": "2026-07-10",
       "source_incident": "found 2026-07-10 when a Phase 6 dogfood dispatch failed normalization before startup).",
-      "content_sha256": "ff7197b283adf6817fe8b40aa07f77706c911c7b89761e9309c2bce89fcab613",
+      "content_sha256": "d3d7740010b14fa087e2749a014099866c7de85317a378565aea8002178ecc45",
       "always_loaded": false
     },
     {
@@ -7095,7 +7095,7 @@
       "anchor": "applied-learning-build-structured-coding-work-packet-digests-with-the-contract-helper",
       "source_date": "2026-07-29",
       "source_incident": "found 2026-07-29 redispatching the interaction-wait correction).",
-      "content_sha256": "334595a2d5f8acb20732304222151bbbdd064024eed50061f3ee338b210131e2",
+      "content_sha256": "40c1dc482102b70a235489d122328458fc3f5573c9f3375d17be4593c8c585c6",
       "always_loaded": false
     },
     {

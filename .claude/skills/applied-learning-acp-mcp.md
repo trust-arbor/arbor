@@ -69,7 +69,9 @@ remainder. Found 2026-08-16 when C3c0.5 Pi design turns died at 32s on
 canonical order; generic lexicographic JSON key sorting produces a different
 digest even when every value is identical, so coding preflight correctly rejects
 it as `digest_mismatch`. Normalize the packet, call the helper, and relay that
-exact digest (found 2026-07-29 redispatching the interaction-wait correction).
+exact digest. The helper returns `{:ok, digest}`, not a bare string; pattern-match
+the tuple before placing the digest in a plan (reinforced 2026-08-23 during the
+P1C-B2C3 correction). Found 2026-07-29 redispatching the interaction-wait correction.
 When invoking this pure helper from the shell, use `./bin/mix run --no-start -e`;
 plain `mix run` boots the full umbrella before evaluating the expression and can
 spend the MCP request window waiting on unrelated runtime services (reinforced
@@ -219,6 +221,14 @@ instead of treating a worker's `_build_*` directory as mode-agnostic (found
 the current reviewed set is `default`, `security_regression`, `contract_change`,
 `frontend_visual`, `docs_only`, `cross_app`, and `database_migration` (found
 2026-07-10 when a Phase 6 dogfood dispatch failed normalization before startup).
+Classify a follow-up by the behavior it introduces, not by the ancestry of the
+feature it touches: a fixture/documentation correction on top of a security fix is
+normally `default`/direct, because `security_regression` requires a mandatory design
+turn and identical test bytes that fail the follow-up's immediate parent. Its
+`requested_paths` are exact regression-test selectors, not a write-scope list;
+supplying production paths is rejected as `invalid_security_regression_paths`
+(found 2026-08-23 after a B2C3 correction was first over-classified, then correctly
+redispatched without salvaging its task-owned dirty design worktree).
 
 <!-- applied-learning: structured-coding-dispatch-requires-the-task-kind-envelope -->
 <a id="applied-learning-structured-coding-dispatch-requires-the-task-kind-envelope"></a>
