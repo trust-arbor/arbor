@@ -9,7 +9,7 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
   """
 
   @max_capacity_retry_successors 3
-  @max_visited 4
+  @max_visited @max_capacity_retry_successors + 1
   @max_lineage_id_bytes 256
   @oid_pattern ~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
@@ -204,7 +204,7 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
         {:error, :not_found}
 
       is_binary(child_id) and child_id != "" ->
-        with :ok <- child_pointer_consistent?(record, child_id, records) do
+        with :ok <- ensure_child_pointer(record, child_id, records) do
           walk_from(child_id, task_id, principal_id, workspace_id, records, states, proof, visited)
         end
 
@@ -256,7 +256,7 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
     end
   end
 
-  defp child_pointer_consistent?(parent, child_id, records) do
+  defp ensure_child_pointer(parent, child_id, records) do
     case Map.fetch(records, child_id) do
       {:ok, child} ->
         if child.predecessor_id === parent.attestation_id and
@@ -281,11 +281,11 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
   defp first_hop_archive_authorized?(record, proof) do
     Map.get(record, :predecessor_id) in [nil, ""] and
       Map.get(record, :successor_id) in [nil, ""] and
-      valid_legacy_proof?(proof) and
+      valid_archive_proof?(proof) and
       proof_matches_record?(proof, record)
   end
 
-  defp valid_legacy_proof?(proof) when is_map(proof) and not is_struct(proof) do
+  defp valid_archive_proof?(proof) when is_map(proof) and not is_struct(proof) do
     keys = proof |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort()
 
     keys == @proof_keys and
@@ -307,7 +307,7 @@ defmodule Arbor.Actions.Coding.ReviewAttestationSuccessorCore do
       valid_selected_tests?(proof["selected_tests"])
   end
 
-  defp valid_legacy_proof?(_proof), do: false
+  defp valid_archive_proof?(_proof), do: false
 
   defp proof_matches_record?(proof, record) do
     material = record.material

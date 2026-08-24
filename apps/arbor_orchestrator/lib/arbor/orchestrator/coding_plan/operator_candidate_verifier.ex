@@ -434,10 +434,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
 
         result =
           try do
-            with {:ok, workspace_lifecycle} <-
-                   activate_workspace(workspace, request),
-                 {:ok, request} <-
+            with {:ok, request} <-
                    bind_security_regression_attestation(request, reviewed),
+                 {:ok, workspace_lifecycle} <-
+                   activate_workspace(workspace, request),
                  {:ok, security} <- security_facade(),
                  {:ok, authority} <-
                    acquire_guarded_signing_authority(guard, security, request.agent_id) do

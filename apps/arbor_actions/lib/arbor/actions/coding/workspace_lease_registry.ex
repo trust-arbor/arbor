@@ -682,6 +682,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   Unused originals are returned as-is. Claimed capacity-authorized leaves mint
   or reuse one successor. Ordinary claimed originals without a marker or valid
   first-hop archive proof remain non-reclaimable.
+
+  Admission is allowed against an inactive retained workspace using exact
+  `task_id` plus `principal_id`. Opaque attestation and workspace ids are not
+  authority. Live-owner PID is not retained-path authority.
   """
   @spec admit_security_regression_operator_attestation(String.t(), map() | nil, map() | keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -1504,11 +1508,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     caller = %{caller | owner_pid: from_pid}
 
     with {:ok, start} <- fetch_review_attestation(state, attestation_id),
-         {:ok, lease} <- fetch_authorized(state, start.workspace_id, caller),
-         :ok <- ensure_record_authority(start, lease, caller),
-         {:ok, input} <- successor_walk_input(state, start, proof, caller),
+         {:ok, admission} <- fetch_admission_subject(state, start.workspace_id, caller),
+         :ok <- ensure_admission_record_authority(start, admission, caller),
+         {:ok, input} <-
+           successor_walk_input(state, start, proof, admission_subject(admission)),
          {:ok, decision} <- ReviewAttestationSuccessorCore.walk(input) do
-      admit_successor_decision(state, decision, lease, caller)
+      admit_successor_decision(state, decision, admission_subject(admission), caller)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -3614,7 +3619,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
   end
 
-  defp successor_walk_input(state, start, proof, caller) do
+  defp successor_walk_input(state, start, proof, subject) do
     records =
       state.review_attestations
       |> Enum.filter(fn {_id, record} ->
@@ -3628,14 +3633,59 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     ReviewAttestationSuccessorCore.new(%{
       start_id: start.attestation_id,
-      caller_task_id: caller.task_id || start.task_id,
-      caller_principal_id: caller.principal_id || start.principal_id,
-      caller_workspace_id: start.workspace_id,
+      caller_task_id: subject.task_id,
+      caller_principal_id: subject.principal_id,
+      caller_workspace_id: subject.workspace_id,
       records: records,
       states: states,
       proof: proof
     })
   end
+
+  defp fetch_admission_subject(state, workspace_id, caller) do
+    case Map.fetch(state.leases, workspace_id) do
+      {:ok, lease} ->
+        if authorized?(lease, caller),
+          do: {:ok, {:active, lease}},
+          else: {:error, :not_authorized}
+
+      :error ->
+        case Map.fetch(state.retained_by_id, workspace_id) do
+          {:ok, %{lifecycle: :retained} = retained} ->
+            if principal_task_match?(retained, caller),
+              do: {:ok, {:retained, retained}},
+              else: {:error, :not_authorized}
+
+          {:ok, _other} ->
+            {:error, :not_authorized}
+
+          :error ->
+            {:error, :not_found}
+        end
+    end
+  end
+
+  defp ensure_admission_record_authority(record, {:active, lease}, caller) do
+    if record.task_id == lease.task_id and record.principal_id == lease.principal_id and
+         record.workspace_id == lease.workspace_id and authorized?(lease, caller) do
+      :ok
+    else
+      {:error, :not_authorized}
+    end
+  end
+
+  defp ensure_admission_record_authority(record, {:retained, retained}, caller) do
+    if record.task_id == retained.task_id and record.principal_id == retained.principal_id and
+         record.workspace_id == retained.workspace_id and
+         principal_task_match?(retained, caller) do
+      :ok
+    else
+      {:error, :not_authorized}
+    end
+  end
+
+  defp admission_subject({:active, lease}), do: lease
+  defp admission_subject({:retained, retained}), do: retained
 
   defp admit_successor_decision(state, {:use, attestation_id}, _lease, _caller) do
     {:reply, {:ok, %{review_attestation_id: attestation_id}}, state}

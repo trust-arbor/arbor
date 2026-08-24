@@ -323,6 +323,31 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
 
     assert leaked == {:error, :validator_execution_failed}
     refute inspect(leaked) =~ "must-not-leak"
+
+    set_responses([
+      {:ok, inspection()},
+      {:error, %RuntimeError{message: "must-not-leak"}}
+    ])
+
+    leaked_exception =
+      Arbor.Orchestrator.verify_coding_candidate(
+        candidate(program!("default")),
+        valid_opts(authority!())
+      )
+
+    assert leaked_exception == {:error, :validator_execution_failed}
+    refute inspect(leaked_exception) =~ "must-not-leak"
+
+    set_responses([{:ok, inspection()}, {:error, "credential must-not-leak"}])
+
+    leaked_credential =
+      Arbor.Orchestrator.verify_coding_candidate(
+        candidate(program!("default")),
+        valid_opts(authority!())
+      )
+
+    assert leaked_credential == {:error, :validator_execution_failed}
+    refute inspect(leaked_credential) =~ "must-not-leak"
   end
 
   test "security regression: caller path, tree, action, parameters, and executor overrides are impossible" do

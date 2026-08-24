@@ -713,10 +713,11 @@ defmodule Arbor.Actions do
   @doc """
   Admit an operator security-regression review attestation for verification.
 
-  Walks from the supplied locator (normally the council-issued original) to a
-  bound unused token or mints one successor from a capacity-authorized leaf.
-  `proof` is `nil` or a closed host-archive map; a caller capacity boolean is
-  never accepted. Authority is exact `task_id` plus `principal_id`.
+  Unused originals are returned. Claimed capacity-authorized leaves mint or
+  reuse one successor. Admission may target a retained inactive workspace via
+  exact `task_id` plus `principal_id`; opaque attestation and workspace ids are
+  not authority. `proof` is `nil` or a closed host-archive map; a caller
+  capacity boolean is never accepted.
   """
   @spec admit_security_regression_operator_attestation(String.t(), map() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}

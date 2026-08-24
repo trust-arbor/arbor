@@ -1381,6 +1381,47 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     assert Agent.get(attestations, & &1[original].successor_id) == nil
   end
 
+  test "security regression: admission denial emits no reactivation and a later valid capacity proof retries",
+       ctx do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    original = "review_attestation_operator_test"
+    seed_claimed_original!(attestations, original, ctx.agent_id)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    write_terminal_status!(ctx, original, "passed")
+
+    assert {:error, :attestation_already_claimed} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    refute_received {:operator_candidate_workspace_reactivated, _, _, _}
+
+    refute_received {:operator_candidate_executor, "coding_security_regression_validate", _, _, _,
+                     _}
+
+    write_capacity_terminal!(ctx, original)
+
+    assert {:ok, _report} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert_receive {:operator_candidate_workspace_reactivated, @workspace_id, @task_id,
+                    principal_id}
+
+    assert principal_id == ctx.agent_id
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _, _, _, _}
+
+    assert_receive {:operator_candidate_executor, "coding_security_regression_validate", params,
+                    _opts, _authority, {:ok, _signed}}
+
+    bound = params["review_attestation_id"] || params[:review_attestation_id]
+    assert is_binary(bound)
+    assert String.starts_with?(bound, "review_attestation_")
+    refute bound == original
+  end
+
   test "security regression: two consecutive capacity retries walk from the original id", ctx do
     {:ok, attestations} = Agent.start_link(fn -> %{} end)
     original = "review_attestation_operator_test"

@@ -2893,6 +2893,83 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
   end
 
+  test "security regression: retained inactive admission authorizes exact task/principal lineage only and preserves one-use successor claim",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/retained_inactive_admission_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.RetainedInactiveAdmissionTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+    claim_and_release!(original, fixture)
+    proof = capacity_proof(fixture, issued)
+    workspace_id = fixture.lease.workspace_id
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(workspace_id, :retain, fixture.context)
+
+    assert_retained_inactive!(workspace_id, fixture.context)
+
+    denials = [
+      [principal_id: fixture.context.agent_id],
+      [task_id: fixture.context.task_id],
+      [task_id: "task_other", principal_id: fixture.context.agent_id],
+      [task_id: fixture.context.task_id, principal_id: "agent_other"]
+    ]
+
+    for opts <- denials do
+      assert {:error, :not_authorized} =
+               apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+                 original,
+                 proof,
+                 opts
+               ])
+
+      assert_retained_inactive!(workspace_id, fixture.context)
+      assert_original_claimed_without_successor!(original)
+    end
+
+    assert {:ok, %{review_attestation_id: successor}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               admit_opts(fixture)
+             ])
+
+    assert is_binary(successor)
+    assert String.starts_with?(successor, "review_attestation_")
+    refute successor == original
+    assert_retained_inactive!(workspace_id, fixture.context)
+
+    assert {:ok, _} =
+             Arbor.Actions.reactivate_retained_coding_workspace(
+               workspace_id,
+               fixture.context.task_id,
+               fixture.context.agent_id
+             )
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(successor, fixture.context)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(successor, fixture.context)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+  end
+
   test "security regression: capacity retry table denies success, failure, mutation, provenance, forged proof, and exhausted budget",
        %{tmp_dir: tmp_dir} do
     fixture = leased_project(tmp_dir, valid_module())
@@ -3645,6 +3722,23 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
   defp admit_opts(fixture) do
     [task_id: fixture.context.task_id, principal_id: fixture.context.agent_id]
+  end
+
+  defp assert_retained_inactive!(workspace_id, context) do
+    assert {:error, :not_found} =
+             WorkspaceLeaseRegistry.inspect_lease(workspace_id, context)
+
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    retained = Map.fetch!(state.retained_by_id, workspace_id)
+    assert retained.lifecycle == :retained
+    refute Map.has_key?(state.leases, workspace_id)
+  end
+
+  defp assert_original_claimed_without_successor!(original) do
+    state = :sys.get_state(WorkspaceLeaseRegistry)
+    assert Map.fetch!(state.attestation_states, original) == :claimed
+    record = Map.fetch!(state.review_attestations, original)
+    assert Map.get(record, :successor_id) in [nil, ""]
   end
 
   defp claim_and_release!(attestation_id, fixture) do

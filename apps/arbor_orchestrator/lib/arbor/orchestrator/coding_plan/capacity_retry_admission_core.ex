@@ -3,8 +3,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CapacityRetryAdmissionCore do
   Pure projection of host-owned archived task/validation evidence into a closed
   security-regression capacity-retry proof.
 
-  Missing archives are handled by the operator shell as `:absent`. This module
-  never reads the filesystem or trusts a caller-supplied capacity boolean.
+  The operator shell treats a missing terminal archive as a nil first-hop proof
+  (`{:ok, nil}`). This module is invoked only with a present host archive body
+  and never reads the filesystem or trusts a caller-supplied capacity boolean.
   """
 
   alias Arbor.Orchestrator.CodingPlan.ValidationCapacityTerminal

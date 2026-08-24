@@ -1,11 +1,11 @@
 defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   @moduledoc false
 
+  alias Arbor.Common.SafeAtom
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingPlan.{
     CandidateVerificationCore,
-    ValidationProgram,
-    ValidatorFailureProjection
+    ValidationProgram
   }
   alias Arbor.Orchestrator.Config
 
@@ -13,6 +13,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   @max_id_bytes 256
   @max_path_bytes 4_096
   @allowed_option_keys [:agent_id, :caller_id, :signing_authority, :task_id]
+
+  @allowlist [
+    :attestation_already_claimed,
+    :attestation_lease_mismatch,
+    :attestation_not_claimed,
+    :attestation_revoked,
+    :capacity_retry_denied,
+    :invalid_capacity_retry_proof,
+    :invalid_review_attestation_id,
+    :not_authorized,
+    :not_found,
+    :retry_budget_exhausted,
+    :reviewed_material_changed,
+    :successor_lineage_mismatch
+  ]
+
+  @action_failed_pattern ~r/\AAction [A-Za-z0-9_.]+ failed: :([a-z0-9_]+)\z/
 
   @type verification_error ::
           :candidate_verification_failed
@@ -234,7 +251,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   defp execute(executor, action, params, workdir, opts, :validator_execution_failed) do
     case executor.execute_structured(action, params, workdir, opts) do
       {:ok, result} -> {:ok, result}
-      {:error, reason} -> ValidatorFailureProjection.project(reason)
+      {:error, reason} -> project_validator_failure(reason)
       _unexpected -> {:error, :validator_execution_failed}
     end
   rescue
@@ -332,4 +349,36 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
 
   defp valid_oid?(value),
     do: is_binary(value) and Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, value)
+
+  defp project_validator_failure(reason) when is_atom(reason) do
+    case SafeAtom.to_allowed(reason, @allowlist) do
+      {:ok, code} -> {:error, {:validator_rejected, code}}
+      _ -> {:error, :validator_execution_failed}
+    end
+  end
+
+  defp project_validator_failure(reason) when is_binary(reason) do
+    cond do
+      match_allowlisted_binary?(reason) ->
+        {:ok, code} = SafeAtom.to_allowed(reason, @allowlist)
+        {:error, {:validator_rejected, code}}
+
+      captured = Regex.run(@action_failed_pattern, reason, capture: :all_but_first) ->
+        [name] = captured
+
+        case SafeAtom.to_allowed(name, @allowlist) do
+          {:ok, code} -> {:error, {:validator_rejected, code}}
+          _ -> {:error, :validator_execution_failed}
+        end
+
+      true ->
+        {:error, :validator_execution_failed}
+    end
+  end
+
+  defp project_validator_failure(_reason), do: {:error, :validator_execution_failed}
+
+  defp match_allowlisted_binary?(reason) do
+    match?({:ok, _code}, SafeAtom.to_allowed(reason, @allowlist))
+  end
 end
