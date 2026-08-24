@@ -1285,8 +1285,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       near_misses = [
         {:deletion, ["test", "--warnings-as-errors", path], :unsupported_mix_command},
         {:reordering, ["test", "--", path, "--warnings-as-errors"], :option_shaped_test_path},
-        {:duplicate,
-         ["test", "--warnings-as-errors", "--warnings-as-errors", "--", path],
+        {:duplicate, ["test", "--warnings-as-errors", "--warnings-as-errors", "--", path],
          :unsupported_mix_command},
         {:option_shaped, ["test", "--warnings-as-errors", "--", "--trace"],
          :option_shaped_test_path},

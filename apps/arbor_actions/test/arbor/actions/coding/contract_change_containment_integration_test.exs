@@ -53,7 +53,6 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
              Shell.execute_spawn_capable(@mix_wrapper, argv, spawn_preflight_opts())
   end
 
-
   defp spawn_preflight_opts do
     [
       cwd: @worktree,
