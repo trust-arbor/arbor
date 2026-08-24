@@ -2996,10 +2996,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     denials = [
       {:success_status, Map.put(proof, "terminal_status", "passed")},
       {:behavioral_failure, Map.put(proof, "validation_reason", "candidate_tests_failed")},
-      {:mutated_commit,
-       Map.put(proof, "attested_candidate_commit", String.duplicate("b", 40))},
-      {:mutated_tree,
-       Map.put(proof, "attested_candidate_tree_oid", String.duplicate("c", 40))},
+      {:mutated_commit, Map.put(proof, "attested_candidate_commit", String.duplicate("b", 40))},
+      {:mutated_tree, Map.put(proof, "attested_candidate_tree_oid", String.duplicate("c", 40))},
       {:mutated_diff, Map.put(proof, "attested_diff_sha256", String.duplicate("d", 64))},
       {:mutated_tests,
        Map.put(proof, "selected_tests", [
@@ -3023,6 +3021,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       refute match?({:ok, _}, result)
     end
 
+    # Child callers ensure the active lease owner's PID cannot mask either lineage denial.
     assert {:error, :not_authorized} =
              Task.async(fn ->
                apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
@@ -3180,6 +3179,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              WorkspaceLeaseRegistry.claim_review_attestation(s2, fixture.context)
 
     fixture2 = leased_project(tmp_dir, valid_module())
+
     write_candidate_test(fixture2, test_path, """
     defmodule Tiny.TwoConsecutiveCapacityStaleTest do
       use ExUnit.Case
