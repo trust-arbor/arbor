@@ -25,11 +25,19 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   @detached_identity_capture_attempts 5
 
+  @opaque_review_paths [
+    "apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json",
+    "apps/arbor_commands/priv/packaging/source_coupling_baseline.v1.json"
+  ]
+
   @fingerprint_max_manifest_bytes 16 * 1024 * 1024
   @fingerprint_max_path_bytes 4 * 1024 * 1024
   @fingerprint_max_paths 20_000
   @fingerprint_max_content_bytes 256 * 1024 * 1024
   @fingerprint_chunk_bytes 64 * 1024
+
+  @doc false
+  def opaque_review_paths, do: @opaque_review_paths
 
   @doc false
   def resolve_repo_root(path) when is_binary(path) do
@@ -1030,12 +1038,13 @@ defmodule Arbor.Actions.Coding.Workspace do
          {:ok, head_commit} <- ensure_commit_is_exact_head(requested_commit, head_commit),
          {:ok, base_ref} <- require_base_commit(base_commit),
          {:ok, diff} <- committed_diff(worktree_path, base_ref, head_commit),
-         {:ok, files} <- committed_files(worktree_path, base_ref, head_commit) do
+         {:ok, files} <- committed_files(worktree_path, base_ref, head_commit),
+         :ok <- require_material_files(diff.files, files) do
       {:ok,
        %{
          commit_hash: head_commit,
          base_ref: base_ref,
-         diff: diff,
+         diff: diff.diff,
          files: files
        }}
     end
@@ -1065,19 +1074,18 @@ defmodule Arbor.Actions.Coding.Workspace do
          :ok <- require_prior_commit(repo_path, worktree_path, prior_commit),
          :ok <- require_distinct_prior_commit(prior_commit, change.commit_hash),
          :ok <- require_prior_ancestor(repo_path, worktree_path, prior_commit, change.commit_hash),
-         {:ok, delta_diff} <-
+         {:ok, delta} <-
            committed_delta_diff(repo_path, worktree_path, prior_commit, change.commit_hash),
          {:ok, delta_files} <-
            committed_delta_files(repo_path, worktree_path, prior_commit, change.commit_hash),
-         {:ok, delta_ranges} <- DeltaRanges.parse(delta_diff),
-         :ok <- require_delta_range_files(delta_ranges, delta_files),
+         :ok <- require_material_files(delta.files, delta_files),
          :ok <- verify_materialized_head(worktree_path, change.commit_hash) do
       {:ok,
        Map.merge(change, %{
          prior_candidate_commit: prior_commit,
-         delta_diff: delta_diff,
+         delta_diff: delta.diff,
          delta_files: delta_files,
-         delta_ranges: delta_ranges
+         delta_ranges: delta.ranges
        })}
     end
   end
@@ -1123,19 +1131,16 @@ defmodule Arbor.Actions.Coding.Workspace do
     do: {:error, :invalid_security_regression_material_args}
 
   @doc false
-  @spec committed_diff(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  @spec committed_diff(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def committed_diff(worktree_path, base_commit, head_commit)
       when is_binary(worktree_path) and is_binary(base_commit) and is_binary(head_commit) do
-    case git(worktree_path, [
-           "diff",
-           "--find-renames",
-           "--no-ext-diff",
-           "#{base_commit}..#{head_commit}"
-         ]) do
-      {:ok, diff} when diff != "" -> {:ok, diff}
-      {:ok, _empty} -> {:error, :empty_commit_diff}
-      {:error, reason} -> {:error, {:diff_failed, reason}}
-    end
+    materialize_review_diff(
+      fn args -> git(worktree_path, args) end,
+      base_commit,
+      head_commit,
+      :empty_commit_diff,
+      :diff_failed
+    )
   end
 
   def committed_diff(_, _, _), do: {:error, :invalid_committed_change_args}
@@ -1148,17 +1153,16 @@ defmodule Arbor.Actions.Coding.Workspace do
     case git(worktree_path, [
            "diff",
            "--name-only",
+           "-z",
            "--find-renames",
-           "#{base_commit}..#{head_commit}"
+           "#{base_commit}..#{head_commit}",
+           "--"
          ]) do
       {:ok, output} ->
-        files =
-          output
-          |> String.split("\n", trim: true)
-          |> Enum.map(&String.trim/1)
-          |> Enum.reject(&(&1 == ""))
-
-        if files == [], do: {:error, :empty_commit_file_list}, else: {:ok, files}
+        case parse_changed_files(output) do
+          {:ok, files} -> {:ok, files}
+          {:error, _reason} -> {:error, :invalid_commit_files}
+        end
 
       {:error, reason} ->
         {:error, {:files_failed, reason}}
@@ -1220,17 +1224,13 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp committed_delta_diff(repo_path, worktree_path, prior_commit, candidate_commit) do
-    case lease_git(repo_path, worktree_path, [
-           "diff",
-           "--find-renames",
-           "--no-ext-diff",
-           "--no-textconv",
-           "#{prior_commit}..#{candidate_commit}"
-         ]) do
-      {:ok, diff} when diff != "" -> {:ok, diff}
-      {:ok, _empty} -> {:error, :empty_delta_diff}
-      {:error, _reason} -> {:error, :delta_diff_failed}
-    end
+    materialize_review_diff(
+      fn args -> lease_git(repo_path, worktree_path, args) end,
+      prior_commit,
+      candidate_commit,
+      :empty_delta_diff,
+      :delta_diff_failed
+    )
   end
 
   defp committed_delta_files(repo_path, worktree_path, prior_commit, candidate_commit) do
@@ -1241,12 +1241,12 @@ defmodule Arbor.Actions.Coding.Workspace do
            "--find-renames",
            "#{prior_commit}..#{candidate_commit}"
          ]) do
-      {:ok, output} -> parse_delta_files(output)
+      {:ok, output} -> parse_changed_files(output)
       {:error, _reason} -> {:error, :delta_files_failed}
     end
   end
 
-  defp parse_delta_files(output) when is_binary(output) do
+  defp parse_changed_files(output) when is_binary(output) do
     files = String.split(output, <<0>>, trim: true)
 
     with true <- files != [],
@@ -1259,16 +1259,93 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
   end
 
-  defp parse_delta_files(_), do: {:error, :invalid_delta_files}
+  defp parse_changed_files(_), do: {:error, :invalid_delta_files}
 
   defp valid_delta_file?(path) do
     match?({:ok, _}, Arbor.Actions.Coding.ReviewTree.validate_repo_relative_path(path))
   end
 
-  defp require_delta_range_files(delta_ranges, delta_files) do
-    if Enum.all?(Map.keys(delta_ranges), &(&1 in delta_files)),
+  defp require_material_files(parsed_files, listed_files) do
+    if parsed_files == listed_files,
       do: :ok,
-      else: {:error, :delta_ranges_not_in_files}
+      else: {:error, :materialized_files_mismatch}
+  end
+
+  defp materialize_review_diff(runner, from_commit, to_commit, empty_error, command_error) do
+    with :ok <- verify_opaque_attributes_if_needed(runner, from_commit, to_commit),
+         {:ok, ordinary} <- runner.(ordinary_diff_args(from_commit, to_commit)),
+         {:ok, opaque} <- runner.(opaque_diff_args(from_commit, to_commit)),
+         false <- ordinary == "" and opaque == "",
+         {:ok, material} <-
+           DeltaRanges.parse_material(ordinary, opaque, @opaque_review_paths) do
+      {:ok, Map.put(material, :diff, ordinary <> opaque)}
+    else
+      true -> {:error, empty_error}
+      {:error, reason} when reason in [:lease_git_failed] -> {:error, command_error}
+      {:error, _reason} = error -> error
+      _ -> {:error, command_error}
+    end
+  end
+
+  defp ordinary_diff_args(from_commit, to_commit) do
+    [
+      "diff",
+      "--full-index",
+      "--find-renames",
+      "--no-ext-diff",
+      "--no-textconv",
+      "#{from_commit}..#{to_commit}",
+      "--",
+      "."
+      | Enum.map(@opaque_review_paths, &":(top,literal,exclude)#{&1}")
+    ]
+  end
+
+  defp opaque_diff_args(from_commit, to_commit) do
+    [
+      "diff",
+      "--full-index",
+      "--find-renames",
+      "--no-ext-diff",
+      "--no-textconv",
+      "#{from_commit}..#{to_commit}",
+      "--"
+      | Enum.map(@opaque_review_paths, &":(top,literal)#{&1}")
+    ]
+  end
+
+  defp verify_opaque_attributes(runner) do
+    args = ["check-attr", "--cached", "-z", "diff", "--" | @opaque_review_paths]
+
+    with {:ok, output} <- runner.(args),
+         records <- :binary.split(output, <<0>>, [:global]),
+         true <- List.last(records) == "",
+         fields <- Enum.drop(records, -1),
+         true <- rem(length(fields), 3) == 0,
+         triples <- Enum.chunk_every(fields, 3),
+         expected <- Enum.map(@opaque_review_paths, &[&1, "diff", "unset"]),
+         true <- triples == expected do
+      :ok
+    else
+      _ -> {:error, :invalid_opaque_review_attributes}
+    end
+  end
+
+  defp verify_opaque_attributes_if_needed(runner, from_commit, to_commit) do
+    args = [
+      "diff",
+      "--name-only",
+      "-z",
+      "#{from_commit}..#{to_commit}",
+      "--"
+      | Enum.map(@opaque_review_paths, &":(top,literal)#{&1}")
+    ]
+
+    case runner.(args) do
+      {:ok, ""} -> :ok
+      {:ok, _changed} -> verify_opaque_attributes(runner)
+      {:error, _reason} -> {:error, :invalid_opaque_review_attributes}
+    end
   end
 
   defp lease_git(repo_path, worktree_path, args) do

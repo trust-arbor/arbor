@@ -16,6 +16,8 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
   @max_path_bytes 1024
   @max_content_bytes 262_144
+  @max_range_source_bytes 1_048_576
+  @max_range_bytes 65_536
   @max_query_bytes 256
   @max_search_limit 100
   @default_search_limit 20
@@ -27,6 +29,9 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
   @doc false
   def max_content_bytes, do: @max_content_bytes
+
+  @doc false
+  def max_range_bytes, do: @max_range_bytes
 
   @doc false
   def max_query_bytes, do: @max_query_bytes
@@ -157,6 +162,63 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   end
 
   def read_blob(_, _, _, _), do: {:error, :invalid_read_args}
+
+  @doc false
+  @spec read_blob_range(String.t(), String.t(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def read_blob_range(repo_path, commit, path, byte_offset, byte_limit)
+      when is_binary(repo_path) and is_binary(commit) and is_binary(path) and
+             is_integer(byte_offset) and byte_offset >= 0 and is_integer(byte_limit) and
+             byte_limit > 0 and byte_limit <= @max_range_bytes do
+    with {:ok, content} <-
+           Arbor.Actions.Git.read_bounded_blob_at_commit(
+             repo_path,
+             commit,
+             path,
+             @max_range_source_bytes
+           ),
+         :ok <- reject_binary(content),
+         :ok <- require_utf8(content),
+         :ok <- require_range_offset(content, byte_offset),
+         {:ok, chunk} <- utf8_range_chunk(content, byte_offset, byte_limit) do
+      next_offset = byte_offset + byte_size(chunk)
+
+      {:ok,
+       %{
+         content: chunk,
+         requested_byte_offset: byte_offset,
+         byte_offset: byte_offset,
+         next_byte_offset: next_offset,
+         total_size: byte_size(content),
+         eof: next_offset == byte_size(content)
+       }}
+    end
+  end
+
+  def read_blob_range(_, _, _, _, _), do: {:error, :invalid_read_range}
+
+  defp require_range_offset(content, offset) when offset <= byte_size(content) do
+    prefix = binary_part(content, 0, offset)
+    if String.valid?(prefix), do: :ok, else: {:error, :invalid_utf8_boundary}
+  end
+
+  defp require_range_offset(_content, _offset), do: {:error, :byte_offset_out_of_range}
+
+  defp utf8_range_chunk(content, offset, limit) do
+    available = byte_size(content) - offset
+    requested = min(available, limit)
+    trim_range_to_utf8(content, offset, requested)
+  end
+
+  defp trim_range_to_utf8(content, offset, length) do
+    chunk = binary_part(content, offset, length)
+
+    cond do
+      String.valid?(chunk) -> {:ok, chunk}
+      length == 0 -> {:error, :invalid_utf8_boundary}
+      true -> trim_range_to_utf8(content, offset, length - 1)
+    end
+  end
 
   @doc false
   @spec search_tree(String.t(), String.t(), String.t(), pos_integer(), keyword()) ::
@@ -429,6 +491,16 @@ defmodule Arbor.Actions.Coding.ReviewTree do
           type: :string,
           required: true,
           doc: "Repo-relative path of a tracked blob in the selected tree"
+        ],
+        byte_offset: [
+          type: :integer,
+          required: false,
+          doc: "Optional zero-based byte offset for a bounded snapshot read"
+        ],
+        byte_limit: [
+          type: :integer,
+          required: false,
+          doc: "Optional byte limit for a bounded snapshot read (maximum 65536)"
         ]
       ]
 
@@ -440,7 +512,9 @@ defmodule Arbor.Actions.Coding.ReviewTree do
       %{
         review_snapshot_id: :control,
         revision: :control,
-        path: {:control, requires: [:path_traversal]}
+        path: {:control, requires: [:path_traversal]},
+        byte_offset: :control,
+        byte_limit: :control
       }
     end
 
@@ -472,15 +546,18 @@ defmodule Arbor.Actions.Coding.ReviewTree do
              {:ok, tree_oid} <-
                require_tree_oid(ReviewTree.tree_oid_for_revision(snapshot, revision)),
              {:ok, repo_path} <- require_repo_path(map_value(snapshot, :repo_path)),
-             {:ok, content} <- ReviewTree.read_blob(repo_path, tree_oid, path) do
-          %{
-            review_snapshot_id: review_snapshot_id,
-            revision: Atom.to_string(revision),
-            commit: commit,
-            path: path,
-            content: content,
-            size: byte_size(content)
-          }
+             {:ok, read_mode} <- normalize_read_mode(params),
+             {:ok, content_result} <-
+               read_content(repo_path, tree_oid, commit, path, read_mode) do
+          Map.merge(
+            %{
+              review_snapshot_id: review_snapshot_id,
+              revision: Atom.to_string(revision),
+              commit: commit,
+              path: path
+            },
+            content_result
+          )
         end
 
       case result do
@@ -512,6 +589,38 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
     defp require_repo_path(path) when is_binary(path) and path != "", do: {:ok, path}
     defp require_repo_path(_), do: {:error, :invalid_snapshot}
+
+    defp normalize_read_mode(params) do
+      offset_present? = has_param?(params, :byte_offset)
+      limit_present? = has_param?(params, :byte_limit)
+
+      if offset_present? or limit_present? do
+        offset = map_value(params, :byte_offset) || 0
+        limit = map_value(params, :byte_limit) || ReviewTree.max_range_bytes()
+
+        if is_integer(offset) and offset >= 0 and is_integer(limit) and limit > 0 and
+             limit <= ReviewTree.max_range_bytes(),
+           do: {:ok, {:range, offset, limit}},
+           else: {:error, :invalid_read_range}
+      else
+        {:ok, :whole}
+      end
+    end
+
+    defp read_content(repo_path, tree_oid, _commit, path, :whole) do
+      with {:ok, content} <- ReviewTree.read_blob(repo_path, tree_oid, path) do
+        {:ok, %{content: content, size: byte_size(content)}}
+      end
+    end
+
+    defp read_content(repo_path, _tree_oid, commit, path, {:range, offset, limit}) do
+      with {:ok, result} <- ReviewTree.read_blob_range(repo_path, commit, path, offset, limit) do
+        {:ok, Map.put(result, :size, byte_size(result.content))}
+      end
+    end
+
+    defp has_param?(params, key),
+      do: Map.has_key?(params, key) or Map.has_key?(params, Atom.to_string(key))
 
     defp map_value(map, key), do: ReviewTree.map_param(map, key)
     defp caller_opts(context), do: ReviewTree.caller_context_opts(context)

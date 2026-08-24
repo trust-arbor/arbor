@@ -247,6 +247,104 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
                read_candidate(snap, fixture.context, "invalid_utf8.txt")
     end
 
+    test "authorized byte ranges page through an immutable large single-line snapshot", %{
+      tmp_dir: tmp_dir
+    } do
+      fixture = build_review_fixture(tmp_dir, prefix: "large_range")
+      path = "generated/payload.json"
+      full_path = Path.join(fixture.lease.worktree_path, path)
+      content = "{" <> String.duplicate("x", 828_400) <> "}\n"
+      assert byte_size(content) == 828_403
+
+      File.mkdir_p!(Path.dirname(full_path))
+      File.write!(full_path, content)
+      git!(fixture.lease.worktree_path, ["add", "--", path])
+      git!(fixture.lease.worktree_path, ["commit", "-m", "add large generated payload"])
+      candidate = git!(fixture.lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, snapshot} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 candidate,
+                 fixture.context
+               )
+
+      assert {:error, :content_too_large} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snapshot.review_snapshot_id,
+                   revision: "candidate",
+                   path: path
+                 },
+                 fixture.context
+               )
+
+      assert {:ok, first} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snapshot.review_snapshot_id,
+                   revision: "candidate",
+                   path: path,
+                   byte_offset: 0,
+                   byte_limit: ReviewTree.max_range_bytes()
+                 },
+                 fixture.context
+               )
+
+      assert first.commit == candidate
+      assert first.byte_offset == 0
+      assert first.next_byte_offset == ReviewTree.max_range_bytes()
+      assert first.total_size == byte_size(content)
+      assert first.size == ReviewTree.max_range_bytes()
+      assert first.eof == false
+      assert first.content == binary_part(content, 0, ReviewTree.max_range_bytes())
+
+      File.write!(full_path, "live worktree mutation")
+
+      last_offset = byte_size(content) - 17
+
+      assert {:ok, last} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snapshot.review_snapshot_id,
+                   revision: "candidate",
+                   path: path,
+                   byte_offset: last_offset,
+                   byte_limit: 64
+                 },
+                 fixture.context
+               )
+
+      assert last.content == binary_part(content, last_offset, 17)
+      assert last.next_byte_offset == byte_size(content)
+      assert last.eof == true
+      assert Workspace.json_clean?(last)
+
+      assert {:error, :invalid_read_range} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snapshot.review_snapshot_id,
+                   revision: "candidate",
+                   path: path,
+                   byte_offset: 0,
+                   byte_limit: ReviewTree.max_range_bytes() + 1
+                 },
+                 fixture.context
+               )
+
+      assert {:error, :byte_offset_out_of_range} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snapshot.review_snapshot_id,
+                   revision: "candidate",
+                   path: path,
+                   byte_offset: byte_size(content) + 1,
+                   byte_limit: 1
+                 },
+                 fixture.context
+               )
+    end
+
     test "security regression: blob size is checked before loading content" do
       parent = self()
 

@@ -12,6 +12,32 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
   def max_diff_bytes, do: @max_diff_bytes
 
   @doc false
+  def max_line_number, do: @max_line_number
+
+  @doc false
+  @spec parse_material(String.t(), String.t(), [String.t()]) ::
+          {:ok, %{ranges: %{String.t() => [[pos_integer()]]}, files: [String.t()]}}
+          | {:error, atom()}
+  def parse_material(ordinary_diff, opaque_diff, opaque_paths)
+      when is_binary(ordinary_diff) and is_binary(opaque_diff) and is_list(opaque_paths) do
+    combined = ordinary_diff <> opaque_diff
+
+    with :ok <- validate_diff(combined),
+         :ok <- validate_opaque_paths(opaque_paths),
+         {:ok, ordinary_ranges} <- parse_optional_ordinary(ordinary_diff),
+         {:ok, ordinary_files} <- ordinary_files(ordinary_diff),
+         {:ok, opaque} <- parse_optional_opaque(opaque_diff, MapSet.new(opaque_paths)),
+         :ok <- require_disjoint_files(ordinary_files, opaque.files),
+         files <- ordinary_files ++ opaque.files,
+         :ok <- validate_material_bounds(combined, files),
+         {:ok, ranges} <- merge_material_ranges(ordinary_ranges, opaque.ranges) do
+      {:ok, %{ranges: ranges, files: Enum.sort(files)}}
+    end
+  end
+
+  def parse_material(_, _, _), do: {:error, :invalid_unified_diff}
+
+  @doc false
   @spec parse(String.t()) ::
           {:ok, %{String.t() => [[pos_integer()]]}} | {:error, atom()}
   def parse(diff) when is_binary(diff) do
@@ -221,4 +247,265 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
 
   defp validate_terminal_state(%{seen_file?: true} = state), do: require_complete_file(state)
   defp validate_terminal_state(_), do: {:error, :malformed_unified_diff}
+
+  defp validate_opaque_paths(paths) do
+    if paths != [] and paths == Enum.sort(paths) and paths == Enum.uniq(paths) and
+         Enum.all?(paths, &match?({:ok, _}, validate_path(&1))) do
+      :ok
+    else
+      {:error, :invalid_opaque_paths}
+    end
+  end
+
+  defp parse_optional_ordinary(""), do: {:ok, %{}}
+  defp parse_optional_ordinary(diff), do: parse(diff)
+
+  defp ordinary_files(""), do: {:ok, []}
+
+  defp ordinary_files(diff) do
+    diff
+    |> String.split("\n", trim: false)
+    |> Enum.reduce_while({:ok, nil, []}, fn line, {:ok, current, files} ->
+      case {line, current} do
+        {"diff --git " <> rest, nil} ->
+          case parse_header_paths(rest) do
+            {:ok, old_path, new_path} -> {:cont, {:ok, {old_path, new_path, nil}, files}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+
+        {"diff --git " <> rest, {old_path, new_path, nil}} when old_path != new_path ->
+          case parse_header_paths(rest) do
+            {:ok, next_old, next_new} ->
+              {:cont, {:ok, {next_old, next_new, nil}, [new_path | files]}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+
+        {"+++ /dev/null", {old_path, _new_path, _old_marker}} ->
+          {:cont, {:ok, nil, [old_path | files]}}
+
+        {"+++ b/" <> path, {_old_path, new_path, _old_marker}} ->
+          with {:ok, path} <- validate_path(path),
+               true <- path == new_path do
+            {:cont, {:ok, nil, [path | files]}}
+          else
+            _ -> {:halt, {:error, :malformed_unified_diff}}
+          end
+
+        {"--- " <> marker, {old_path, new_path, nil}} ->
+          expected = if marker == "/dev/null", do: :dev_null, else: old_path
+
+          case parse_old_path(marker) do
+            {:ok, ^expected} ->
+              {:cont, {:ok, {old_path, new_path, expected}, files}}
+
+            _ ->
+              {:halt, {:error, :malformed_unified_diff}}
+          end
+
+        {"diff --git " <> _rest, _current} ->
+          {:halt, {:error, :malformed_unified_diff}}
+
+        {_line, _current} ->
+          {:cont, {:ok, current, files}}
+      end
+    end)
+    |> case do
+      {:ok, nil, files} ->
+        validate_file_list(Enum.reverse(files))
+
+      {:ok, {old_path, new_path, nil}, files} when old_path != new_path ->
+        validate_file_list(Enum.reverse([new_path | files]))
+
+      {:ok, _current, _files} ->
+        {:error, :malformed_unified_diff}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp parse_header_paths(rest) do
+    case String.split(rest, " ", parts: 2) do
+      ["a/" <> old_path, "b/" <> new_path] ->
+        with {:ok, old_path} <- validate_path(old_path),
+             {:ok, new_path} <- validate_path(new_path) do
+          {:ok, old_path, new_path}
+        end
+
+      _ ->
+        {:error, :malformed_unified_diff}
+    end
+  end
+
+  defp parse_optional_opaque("", _allowed), do: {:ok, %{files: [], ranges: %{}}}
+
+  defp parse_optional_opaque(diff, allowed) do
+    diff
+    |> String.split("\n", trim: false)
+    |> Enum.reduce_while({:ok, nil, [], %{}}, fn line, {:ok, current, files, ranges} ->
+      case parse_opaque_line(line, current, allowed, files, ranges) do
+        {:ok, next, next_files, next_ranges} ->
+          {:cont, {:ok, next, next_files, next_ranges}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, nil, files, ranges} when files != [] ->
+        with {:ok, files} <- validate_file_list(Enum.reverse(files)) do
+          {:ok, %{files: files, ranges: ranges}}
+        end
+
+      {:ok, _current, _files, _ranges} ->
+        {:error, :malformed_binary_marker}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp parse_opaque_line("", current, _allowed, files, ranges),
+    do: {:ok, current, files, ranges}
+
+  defp parse_opaque_line("diff --git " <> rest, nil, allowed, files, ranges) do
+    with {:ok, path, path} <- parse_header_paths(rest),
+         true <- MapSet.member?(allowed, path) do
+      {:ok, %{path: path, kind: :modified, index: nil}, files, ranges}
+    else
+      false -> {:error, :unapproved_binary_marker_path}
+      {:ok, _, _} -> {:error, :opaque_rename_not_supported}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp parse_opaque_line("new file mode 100644", %{kind: :modified} = current, _, files, ranges),
+    do: {:ok, %{current | kind: :added}, files, ranges}
+
+  defp parse_opaque_line(
+         "deleted file mode 100644",
+         %{kind: :modified} = current,
+         _,
+         files,
+         ranges
+       ),
+       do: {:ok, %{current | kind: :deleted}, files, ranges}
+
+  defp parse_opaque_line("index " <> value, %{index: nil} = current, _, files, ranges) do
+    with {:ok, index} <- parse_opaque_index(value, current.kind) do
+      {:ok, %{current | index: index}, files, ranges}
+    end
+  end
+
+  defp parse_opaque_line(
+         "Binary files " <> marker,
+         %{path: path, kind: kind, index: index},
+         _allowed,
+         files,
+         ranges
+       )
+       when not is_nil(index) do
+    with :ok <- validate_binary_marker(marker, path, kind) do
+      ranges =
+        if kind in [:modified, :added],
+          do: Map.put(ranges, path, [[1, @max_line_number]]),
+          else: ranges
+
+      {:ok, nil, [path | files], ranges}
+    end
+  end
+
+  defp parse_opaque_line("GIT binary patch", _current, _allowed, _files, _ranges),
+    do: {:error, :binary_unified_diff}
+
+  defp parse_opaque_line("diff --git " <> _rest, _current, _allowed, _files, _ranges),
+    do: {:error, :malformed_binary_marker}
+
+  defp parse_opaque_line(_line, _current, _allowed, _files, _ranges),
+    do: {:error, :malformed_binary_marker}
+
+  defp parse_opaque_index(value, :modified) do
+    case Regex.run(~r/\A([0-9a-f]+)\.\.([0-9a-f]+) 100644\z/, value) do
+      [_, old_oid, new_oid] ->
+        validate_opaque_oids(old_oid, new_oid, :modified)
+
+      _ ->
+        {:error, :malformed_binary_index}
+    end
+  end
+
+  defp parse_opaque_index(value, kind) when kind in [:added, :deleted] do
+    case Regex.run(~r/\A([0-9a-f]+)\.\.([0-9a-f]+)\z/, value) do
+      [_, old_oid, new_oid] -> validate_opaque_oids(old_oid, new_oid, kind)
+      _ -> {:error, :malformed_binary_index}
+    end
+  end
+
+  defp validate_opaque_oids(old_oid, new_oid, kind) do
+    width = byte_size(old_oid)
+    old_zero? = all_zero_oid?(old_oid)
+    new_zero? = all_zero_oid?(new_oid)
+
+    valid? =
+      width in [40, 64] and byte_size(new_oid) == width and
+        case kind do
+          :modified -> not old_zero? and not new_zero? and old_oid != new_oid
+          :added -> old_zero? and not new_zero?
+          :deleted -> not old_zero? and new_zero?
+        end
+
+    if valid?,
+      do: {:ok, %{old_oid: old_oid, new_oid: new_oid}},
+      else: {:error, :malformed_binary_index}
+  end
+
+  defp all_zero_oid?(oid), do: oid == String.duplicate("0", byte_size(oid))
+
+  defp validate_binary_marker(marker, path, :modified),
+    do: exact_marker(marker, "a/#{path}", "b/#{path}")
+
+  defp validate_binary_marker(marker, path, :added),
+    do: exact_marker(marker, "/dev/null", "b/#{path}")
+
+  defp validate_binary_marker(marker, path, :deleted),
+    do: exact_marker(marker, "a/#{path}", "/dev/null")
+
+  defp exact_marker(marker, old_path, new_path) do
+    if marker == "#{old_path} and #{new_path} differ",
+      do: :ok,
+      else: {:error, :binary_marker_path_mismatch}
+  end
+
+  defp validate_file_list(files) do
+    if files != [] and files == Enum.uniq(files) and Enum.all?(files, &is_binary/1),
+      do: {:ok, files},
+      else: {:error, :invalid_unified_diff_files}
+  end
+
+  defp require_disjoint_files(left, right) do
+    if MapSet.disjoint?(MapSet.new(left), MapSet.new(right)),
+      do: :ok,
+      else: {:error, :duplicate_unified_diff_file}
+  end
+
+  defp validate_material_bounds(diff, files) do
+    hunk_count =
+      diff
+      |> String.split("\n", trim: false)
+      |> Enum.count(&String.starts_with?(&1, "@@ "))
+
+    cond do
+      length(files) > @max_files -> {:error, :too_many_unified_diff_files}
+      hunk_count > @max_hunks -> {:error, :too_many_unified_diff_hunks}
+      true -> :ok
+    end
+  end
+
+  defp merge_material_ranges(left, right) do
+    if MapSet.disjoint?(MapSet.new(Map.keys(left)), MapSet.new(Map.keys(right))),
+      do: {:ok, Map.merge(left, right)},
+      else: {:error, :duplicate_unified_diff_file}
+  end
 end

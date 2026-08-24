@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.Workspace.DeltaRanges
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
   alias Arbor.Contracts.Security.AuthContext
@@ -10,6 +11,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   @moduletag :fast
   @owner_operation_timeout 10_000
   @owner_hold_timeout 30_000
+
+  test "opaque review attributes match the closed runtime path set" do
+    expected =
+      Enum.map_join(Workspace.opaque_review_paths(), "\n", &"/#{&1} -diff") <> "\n"
+
+    assert File.read!(repository_attributes_path()) == expected
+  end
 
   describe "discovery and canonical URIs" do
     test "workspace lease actions are discoverable under the coding category" do
@@ -2603,6 +2611,119 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
     end
 
+    test "security regression: generated single-line rework stays bounded and reviewable", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      payload_path = hd(Workspace.opaque_review_paths())
+      envelope_path = "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json"
+
+      attributes_path = repository_attributes_path()
+
+      if File.exists?(attributes_path) do
+        File.cp!(attributes_path, Path.join(repo, ".gitattributes"))
+        git!(repo, ["add", ".gitattributes"])
+        git!(repo, ["commit", "-m", "classify canonical generated artifacts"])
+      end
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/generated-artifact-security-regression",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      payload_file = Path.join(lease.worktree_path, payload_path)
+      envelope_file = Path.join(lease.worktree_path, envelope_path)
+      File.mkdir_p!(Path.dirname(payload_file))
+
+      old_payload = "{" <> String.duplicate("x", 828_400) <> "}\n"
+      new_payload = "{" <> String.duplicate("y", 828_400) <> "}\n"
+      assert byte_size(old_payload) == 828_403
+      assert byte_size(new_payload) == 828_403
+
+      File.write!(payload_file, old_payload)
+      File.write!(envelope_file, ~s({"version":1,"state":"old"}\n))
+      git!(lease.worktree_path, ["add", "--", payload_path, envelope_path])
+      git!(lease.worktree_path, ["commit", "-m", "seed generated artifacts"])
+      prior = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      old_oid = git!(lease.worktree_path, ["rev-parse", "#{prior}:#{payload_path}"])
+
+      File.write!(payload_file, new_payload)
+      File.write!(envelope_file, ~s({"version":1,"state":"new"}\n))
+      git!(lease.worktree_path, ["add", "--", payload_path, envelope_path])
+      git!(lease.worktree_path, ["commit", "-m", "rework generated artifacts"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      new_oid = git!(lease.worktree_path, ["rev-parse", "#{head}:#{payload_path}"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, prior_commit: prior},
+                 %{}
+               )
+
+      assert change.base_ref == lease.base_commit
+      assert change.prior_candidate_commit == prior
+      assert change.commit_hash == head
+      assert byte_size(change.diff) < DeltaRanges.max_diff_bytes()
+      assert byte_size(change.delta_diff) < DeltaRanges.max_diff_bytes()
+      refute change.diff =~ String.duplicate("y", 128)
+      refute change.delta_diff =~ String.duplicate("x", 128)
+      refute change.delta_diff =~ String.duplicate("y", 128)
+
+      assert change.delta_diff =~ "index #{old_oid}..#{new_oid} 100644"
+
+      assert change.delta_diff =~
+               "Binary files a/#{payload_path} and b/#{payload_path} differ"
+
+      assert change.delta_diff =~ "--- a/#{envelope_path}"
+      assert change.delta_diff =~ "+++ b/#{envelope_path}"
+      assert change.files == Enum.sort([payload_path, envelope_path])
+      assert change.delta_files == Enum.sort([payload_path, envelope_path])
+      assert change.delta_ranges[payload_path] == [[1, 10_000_000]]
+      assert change.delta_ranges[envelope_path] == [[1, 1]]
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "real Git opaque additions and deletions use strict bounded markers", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      path = hd(Workspace.opaque_review_paths())
+      File.cp!(repository_attributes_path(), Path.join(repo, ".gitattributes"))
+      git!(repo, ["add", ".gitattributes"])
+      git!(repo, ["commit", "-m", "classify generated artifacts"])
+      base = git!(repo, ["rev-parse", "HEAD"])
+
+      full_path = Path.join(repo, path)
+      File.mkdir_p!(Path.dirname(full_path))
+      File.write!(full_path, "generated\n")
+      git!(repo, ["add", "--", path])
+      git!(repo, ["commit", "-m", "add generated artifact"])
+      added = git!(repo, ["rev-parse", "HEAD"])
+      added_oid = git!(repo, ["rev-parse", "#{added}:#{path}"])
+
+      assert {:ok, added_material} = Workspace.committed_diff(repo, base, added)
+      assert added_material.files == [path]
+      assert added_material.ranges == %{path => [[1, 10_000_000]]}
+      assert added_material.diff =~ "new file mode 100644"
+      assert added_material.diff =~ "index #{String.duplicate("0", 40)}..#{added_oid}"
+      assert added_material.diff =~ "Binary files /dev/null and b/#{path} differ"
+
+      git!(repo, ["rm", "--", path])
+      git!(repo, ["commit", "-m", "delete generated artifact"])
+      deleted = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, deleted_material} = Workspace.committed_diff(repo, added, deleted)
+      assert deleted_material.files == [path]
+      assert deleted_material.ranges == %{}
+      assert deleted_material.diff =~ "deleted file mode 100644"
+      assert deleted_material.diff =~ "index #{added_oid}..#{String.duplicate("0", 40)}"
+      assert deleted_material.diff =~ "Binary files a/#{path} and /dev/null differ"
+    end
+
     test "rejects missing, invalid, equal, and non-ancestor prior commits", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
 
@@ -2973,6 +3094,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   defp worktree_registered?(repo_root, worktree_path) do
     git!(repo_root, ["worktree", "list", "--porcelain"])
     |> String.contains?(worktree_path)
+  end
+
+  defp repository_attributes_path do
+    Path.expand("../../../../../..", __DIR__)
+    |> Path.join(".gitattributes")
   end
 
   defp git!(path, args) do
