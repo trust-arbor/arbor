@@ -26,6 +26,7 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
 
     assert argv == @contract_change_preflight_argv
 
+    # {:error, :apple_container_unit_owner_required} means the reviewed argv passed mix-shape admission and stopped at the public owner gate.
     assert {:error, :apple_container_unit_owner_required} =
              Shell.execute_spawn_capable(@mix_wrapper, argv, spawn_preflight_opts())
   end

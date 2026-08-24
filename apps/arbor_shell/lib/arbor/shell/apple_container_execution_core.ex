@@ -1054,9 +1054,12 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   end
 
   # Exact ContractChange preflight only. Mix `do` commas stay inside tokens.
-  # Do not parse generic `mix do`.
-  defp match_reviewed_mix_shape(@contract_change_preflight_argv),
-    do: {:ok, @contract_change_preflight_argv}
+  # Do not parse generic `mix do`. Whole-list == is structural/value equality:
+  # runtime-built binaries with these exact bytes remain admitted.
+  defp match_reviewed_mix_shape(args)
+       when is_list(args) and length(args) == 7 and args == @contract_change_preflight_argv do
+    {:ok, @contract_change_preflight_argv}
+  end
 
   defp match_reviewed_mix_shape(_args), do: {:error, :unsupported_mix_command}
 
