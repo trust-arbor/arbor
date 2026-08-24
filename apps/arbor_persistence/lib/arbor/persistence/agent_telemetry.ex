@@ -17,6 +17,15 @@ defmodule Arbor.Persistence.AgentTelemetry do
   @doc """
   Insert one telemetry event.
 
+  Supported event types and their data maps:
+
+  - `:turn_completed` -- `%{input_tokens, output_tokens, cached_tokens, cost,
+    duration_ms, provider, model}`
+  - `:tool_call` -- `%{tool_name, result: :ok | :error | :gated, duration_ms}`
+  - `:routing_decision` -- `%{decision: :classified | :rerouted | :tokenized |
+    :blocked, sensitivity, provider, model}`
+  - `:compaction` -- `%{utilization, tokens_before, tokens_after}`
+
   Returns `{:error, :repo_unavailable}` when the Repo process is not running.
   """
   @spec persist_event(String.t(), atom(), map()) ::

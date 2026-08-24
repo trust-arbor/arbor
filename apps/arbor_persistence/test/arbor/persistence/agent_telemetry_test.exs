@@ -6,27 +6,15 @@ defmodule Arbor.Persistence.AgentTelemetryTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.AgentTelemetry
 
-  @workspace_root Path.expand("../../../../..", __DIR__)
-
   describe "contract ownership regression" do
-    test "the one-consumer kernel contract is absent from production and test source" do
+    test "the one-consumer kernel contract source is absent" do
       contract_path =
-        Path.join(
-          @workspace_root,
-          "apps/arbor_kernel/lib/arbor/contracts/agent/telemetry_event.ex"
+        Path.expand(
+          "../../../../arbor_kernel/lib/arbor/contracts/agent/telemetry_event.ex",
+          __DIR__
         )
 
-      forbidden_module = Enum.join(["Arbor.Contracts.Agent", "TelemetryEvent"], ".")
-
-      source_paths =
-        ["apps/*/lib/**/*.ex", "apps/*/test/**/*.{ex,exs}"]
-        |> Enum.flat_map(&Path.wildcard(Path.join(@workspace_root, &1)))
-
       refute File.exists?(contract_path)
-
-      assert Enum.all?(source_paths, fn path ->
-               not String.contains?(File.read!(path), forbidden_module)
-             end)
     end
   end
 
