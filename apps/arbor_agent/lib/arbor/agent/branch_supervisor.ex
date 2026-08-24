@@ -133,17 +133,19 @@ defmodule Arbor.Agent.BranchSupervisor do
   @doc """
   Get the PIDs of all child processes for an agent.
 
-  Returns a map with keys :host, :executor, :session (session may be nil).
+  Returns a map with keys :host, :executor, :session, and :heartbeat_service
+  (session and heartbeat_service may be nil).
   """
   @spec child_pids(String.t()) :: %{
           host: pid() | nil,
           executor: pid() | nil,
-          session: pid() | nil
+          session: pid() | nil,
+          heartbeat_service: pid() | nil
         }
   def child_pids(agent_id) do
     case whereis(agent_id) do
       nil ->
-        %{host: nil, executor: nil, session: nil}
+        %{host: nil, executor: nil, session: nil, heartbeat_service: nil}
 
       sup_pid ->
         children = Supervisor.which_children(sup_pid)
@@ -151,7 +153,8 @@ defmodule Arbor.Agent.BranchSupervisor do
         %{
           host: find_child_pid(children, :host),
           executor: find_child_pid(children, :executor),
-          session: find_child_pid(children, :session)
+          session: find_child_pid(children, :session),
+          heartbeat_service: find_child_pid(children, :heartbeat_service)
         }
     end
   end
@@ -278,7 +281,7 @@ defmodule Arbor.Agent.BranchSupervisor do
       # as Session — extracted from the shared session_opts.
       service_opts =
         heartbeat_opts
-        |> Keyword.put_new(:heartbeat_dot, session_opts[:heartbeat_dot])
+        |> copy_session_projection(session_opts)
 
       child = %{
         id: :heartbeat_service,
@@ -292,6 +295,15 @@ defmodule Arbor.Agent.BranchSupervisor do
       children
     end
   end
+
+  defp copy_session_projection(heartbeat_opts, session_opts) when is_list(session_opts) do
+    heartbeat_opts
+    |> Keyword.put_new(:heartbeat_dot, Keyword.get(session_opts, :heartbeat_dot))
+    |> Keyword.put_new(:config, Keyword.get(session_opts, :config, %{}))
+    |> Keyword.put_new(:tenant_context, Keyword.get(session_opts, :tenant_context))
+  end
+
+  defp copy_session_projection(heartbeat_opts, _session_opts), do: heartbeat_opts
 
   defp find_child_pid(children, id) do
     case Enum.find(children, fn {child_id, _, _, _} -> child_id == id end) do

@@ -763,6 +763,37 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
   end
 
+  describe "destroy tears down leftover principal authority" do
+    @tag :security_regression
+    test "destroy removes trust profile, capabilities, identity, and signing key" do
+      assert {:ok, profile} =
+               Lifecycle.create("Destroy Authority Probe", template: "test_agent")
+
+      agent_id = profile.agent_id
+
+      assert {:ok, _trust} = Arbor.Trust.get_trust_profile(agent_id)
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      assert caps != []
+
+      assert {:ok, :authorized} =
+               Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :execute)
+
+      assert {:ok, :active} = Arbor.Security.identity_status(agent_id)
+      assert {:ok, _pub} = Arbor.Security.lookup_public_key(agent_id)
+
+      assert :ok = Lifecycle.destroy(agent_id)
+
+      assert {:error, :not_found} = Arbor.Trust.get_trust_profile(agent_id)
+      assert {:error, :not_found} = Arbor.Security.identity_status(agent_id)
+      assert {:error, :not_found} = Arbor.Security.lookup_public_key(agent_id)
+
+      authorize =
+        Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :execute)
+
+      refute match?({:ok, :authorized}, authorize)
+    end
+  end
+
   # --- helpers ---
 
   defp assert_eventually(assertion, attempts \\ 50)

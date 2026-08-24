@@ -131,13 +131,7 @@ defmodule Arbor.Actions.SessionExecution do
       if actions == [] do
         {:ok, %{has_action_results: false, percepts: [], tool_turn: tool_turn}}
       else
-        results =
-          Arbor.Actions.SessionMemory.bridge(
-            Arbor.Actions,
-            :execute_batch,
-            [actions, [agent_id: agent_id, context: context]],
-            []
-          )
+        results = run_execute_batch(actions, agent_id, context)
 
         percepts =
           Enum.map(List.wrap(results), fn {spec, result} ->
@@ -164,6 +158,25 @@ defmodule Arbor.Actions.SessionExecution do
            percepts: percepts,
            tool_turn: tool_turn + 1
          }}
+      end
+    end
+
+    defp run_execute_batch(actions, agent_id, context) do
+      batch_context =
+        if is_map(context) and not is_struct(context), do: context, else: %{}
+
+      try do
+        Arbor.Actions.execute_batch(actions, agent_id: agent_id, context: batch_context)
+      rescue
+        e ->
+          Logger.warning("[SessionExecution] execute_batch raised: #{Exception.message(e)}")
+
+          Enum.map(actions, &{&1, {:error, {:action_crashed, Exception.message(e)}}})
+      catch
+        :exit, reason ->
+          Logger.warning("[SessionExecution] execute_batch exited: #{inspect(reason)}")
+
+          Enum.map(actions, &{&1, {:error, {:action_crashed, inspect(reason)}}})
       end
     end
 

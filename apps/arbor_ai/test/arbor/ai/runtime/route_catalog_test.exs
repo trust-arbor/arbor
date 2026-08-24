@@ -86,3 +86,57 @@ defmodule Arbor.AI.Runtime.RouteCatalogTest do
     assert hd(c.providers).id == :xai_oauth
   end
 end
+
+defmodule Arbor.AI.Runtime.RouteCatalogEvalOverlayTest do
+  use ExUnit.Case, async: false
+
+  alias Arbor.AI.Runtime.RouteCatalog
+  alias Arbor.Contracts.LLM.ProviderEntry
+
+  @moduletag :fast
+
+  setup do
+    prior = Application.fetch_env(:arbor_ai, :eval_route_catalog_overlays)
+
+    on_exit(fn ->
+      case prior do
+        {:ok, value} -> Application.put_env(:arbor_ai, :eval_route_catalog_overlays, value)
+        :error -> Application.delete_env(:arbor_ai, :eval_route_catalog_overlays)
+      end
+    end)
+
+    :ok
+  end
+
+  test "eval overlay replaces synthesized :legacy with the pinned provider" do
+    # Intern the atom so SafeAtom.to_existing/1 can see it.
+    _ = :opencode_zen
+    unknown = "x-preview-f-free-eval-overlay"
+
+    assert hd(RouteCatalog.entry(unknown).providers).id == :legacy
+
+    Application.put_env(:arbor_ai, :eval_route_catalog_overlays, %{
+      unknown => %{provider: "opencode_zen", auth: "none"}
+    })
+
+    assert [
+             %ProviderEntry{
+               id: :opencode_zen,
+               ref: ^unknown,
+               auth: :none,
+               runtimes: [:arbor],
+               pricing: nil
+             }
+           ] = RouteCatalog.entry(unknown).providers
+  end
+
+  test "eval overlay does not override the reviewed OAuth exact ids" do
+    _ = :opencode_zen
+
+    Application.put_env(:arbor_ai, :eval_route_catalog_overlays, %{
+      "gpt-5.6-sol" => %{provider: "opencode_zen", auth: "none"}
+    })
+
+    assert hd(RouteCatalog.entry("gpt-5.6-sol").providers).id == :openai_oauth
+  end
+end

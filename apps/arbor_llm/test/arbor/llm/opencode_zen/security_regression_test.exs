@@ -390,6 +390,112 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
     assert %{received?: false} = Task.await(server, 2_000)
   end
 
+  test "security regression: eval probe pin is agent-keyed, not Application env or VM-global",
+       %{ack_path: ack_path} do
+    :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
+    assert File.exists?(ack_path)
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-zen-admission-#{System.unique_integer([:positive])}.json"
+      )
+
+    File.write!(path, JSON.encode!(%{"version" => 1, "models" => []}) <> "\n")
+    on_exit(fn -> File.rm(path) end)
+    Application.put_env(:arbor_llm, :opencode_zen_admission_path, path)
+
+    candidate = "unadmitted-eval-pin"
+    other = "unadmitted-eval-pin-other"
+    eval_agent = "agent_eval_zen_pin_#{System.unique_integer([:positive])}"
+    other_agent = "agent_eval_zen_other_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      OpenCodeZen.unregister_eval_probes(eval_agent)
+      OpenCodeZen.unregister_eval_probes(other_agent)
+    end)
+
+    assert OpenCodeZen.admit_model(candidate) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    prior = Application.fetch_env(:arbor_llm, :eval_opencode_zen_probe_ids)
+
+    on_exit(fn ->
+      case prior do
+        {:ok, value} -> Application.put_env(:arbor_llm, :eval_opencode_zen_probe_ids, value)
+        :error -> Application.delete_env(:arbor_llm, :eval_opencode_zen_probe_ids)
+      end
+    end)
+
+    Application.put_env(:arbor_llm, :eval_opencode_zen_probe_ids, [candidate])
+
+    assert OpenCodeZen.admit_model(candidate) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    assert OpenCodeZen.admit_model(candidate, agent_id: eval_agent) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    assert :ok = OpenCodeZen.register_eval_probes(eval_agent, [candidate])
+    assert OpenCodeZen.admit_model(candidate, agent_id: eval_agent) == :ok
+
+    assert OpenCodeZen.admit_model(candidate) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    assert OpenCodeZen.admit_model(candidate, agent_id: other_agent) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    assert OpenCodeZen.admit_model(other, agent_id: eval_agent) ==
+             {:error, {:opencode_zen_model_not_admitted, other}}
+
+    child =
+      Task.async(fn ->
+        OpenCodeZen.admit_model(candidate, agent_id: eval_agent)
+      end)
+
+    assert Task.await(child, 2_000) == :ok
+
+    child_without_principal =
+      Task.async(fn -> OpenCodeZen.admit_model(candidate) end)
+
+    assert Task.await(child_without_principal, 2_000) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    {denied_url, denied_server} = start_capture_server()
+    request = %{opencode_request() | model: candidate}
+
+    denied =
+      Adapter.complete(request,
+        base_url: denied_url,
+        receive_timeout: 1_000
+      )
+
+    assert denied == {:error, {:opencode_zen_model_not_admitted, candidate}}
+    assert %{received?: false} = Task.await(denied_server, 2_000)
+
+    {url, server} = start_capture_server()
+
+    result =
+      Adapter.complete(request,
+        agent_id: eval_agent,
+        base_url: url,
+        receive_timeout: 2_000
+      )
+
+    refute match?({:error, {:opencode_zen_model_not_admitted, _}}, result)
+    assert %{received?: true} = Task.await(server, 2_000)
+
+    assert :ok = OpenCodeZen.unregister_eval_probes(eval_agent)
+
+    assert OpenCodeZen.admit_model(candidate, agent_id: eval_agent) ==
+             {:error, {:opencode_zen_model_not_admitted, candidate}}
+
+    assert OpenCodeZen.register_eval_probes("system", [candidate]) ==
+             {:error, :invalid_eval_probe_registration}
+
+    assert OpenCodeZen.register_eval_probes("", [candidate]) ==
+             {:error, :invalid_eval_probe_registration}
+  end
+
   test "unreadable admission catalog fails closed with a named error", %{ack_path: ack_path} do
     :ok = OpenCodeZen.Disclosure.persist("2026-08-21T00:00:00Z")
     assert File.exists?(ack_path)

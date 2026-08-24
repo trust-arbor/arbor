@@ -53,7 +53,11 @@ defmodule Arbor.Actions.SessionLlmTest do
     test "no recalled memories → no stray system-context message" do
       {:ok, result} =
         SessionLlm.BuildPrompt.run(
-          %{mode: "turn", messages: [%{"role" => "user", "content" => "hi"}], recalled_memories: []},
+          %{
+            mode: "turn",
+            messages: [%{"role" => "user", "content" => "hi"}],
+            recalled_memories: []
+          },
           %{}
         )
 
@@ -151,6 +155,9 @@ defmodule Arbor.Actions.SessionLlmTest do
       assert result.heartbeat_prompt =~ "Respond with valid JSON"
       assert result.heartbeat_prompt =~ "memory_notes"
       assert result.heartbeat_prompt =~ "proposal_decisions"
+      assert result.heartbeat_prompt =~ "\"proposals\""
+      assert result.heartbeat_prompt =~ "must execute this beat"
+      refute result.heartbeat_prompt =~ "do not invent"
     end
   end
 

@@ -210,7 +210,8 @@ defmodule Arbor.Actions.SessionLlm do
       - "concerns": list of current concerns (strings)
       - "curiosity": list of things you're curious about (strings)
       - "identity_insights": list of {category, content, confidence} self-discoveries
-      - "proposal_decisions": list of {proposal_id, decision} where decision is accept/reject/defer
+      - "proposal_decisions": list of {proposal_id, decision} where decision is accept/reject/defer for items already in the queue
+      - "proposals": list of {kind, content} — authored submissions. For a bug-fix analysis use kind "fix" (function name, root cause, recommended change). Put analysis here; use "actions" and "decompositions" for work that must execute this beat.
       """
     end
 
@@ -435,6 +436,8 @@ defmodule Arbor.Actions.SessionLlm do
       advances a goal. Populate the "actions" field with at least one action — for example,
       use "file.read" to examine source code, or "shell.execute" to run diagnostics.
       Do not just think — act. Report progress via goal_updates.
+      When you know the root cause and the code change, add a proposals
+      entry {kind: "fix", content: "..."} and return empty actions.
 
       Available action names (use exact dot-path format):
         file.read, file.write, file.list
@@ -464,6 +467,9 @@ defmodule Arbor.Actions.SessionLlm do
 
       If you can already identify a concrete action to take, include it in the "actions"
       array (same action names) alongside your decompositions.
+
+      When investigation is done, add a proposals entry {kind: "fix", content: analysis}
+      (function name, root cause, recommended code change) and return an empty "actions" array.
       """
     end
 
@@ -520,7 +526,9 @@ defmodule Arbor.Actions.SessionLlm do
 
       #{items}
 
-      Continue working toward your goal. Use the "actions" array for more actions, or return empty actions if done.
+      Continue working toward your goal. Use the "actions" array for more actions.
+      If the results are enough to name the root cause and the code change, add
+      a proposals entry {kind: "fix", content: analysis} and return empty actions.
       """
     end
 

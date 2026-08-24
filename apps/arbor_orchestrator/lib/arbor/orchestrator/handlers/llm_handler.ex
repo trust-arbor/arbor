@@ -1300,7 +1300,28 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         timeout_ms -> Keyword.put(opts, :timeout, timeout_ms)
       end
 
-    put_trusted_provider_usage_context(opts)
+    opts
+    |> put_trusted_provider_usage_context()
+    |> put_trusted_agent_id()
+  end
+
+  # OpenCode Zen eval probe lookup is keyed by execution principal. Delete any
+  # caller-supplied :agent_id, then re-derive from owner-issued RunAuthorization
+  # so a graph/tool cannot smuggle another principal onto admit_model/2.
+  defp put_trusted_agent_id(opts) when is_list(opts) do
+    opts = Keyword.delete(opts, :agent_id)
+
+    case Keyword.get(opts, :run_authorization) do
+      %RunAuthorization{execution_principal: principal} ->
+        if valid_route_principal?(principal) do
+          Keyword.put(opts, :agent_id, principal)
+        else
+          opts
+        end
+
+      _ ->
+        opts
+    end
   end
 
   # Private attribution for ReqLLM Usage telemetry. Built only from immutable

@@ -115,6 +115,50 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
              task_id: authority.task_id,
              correlation_id: "run_direct_corr"
            }
+
+    assert opts[:agent_id] == authority.execution_principal
+  end
+
+  @tag :security_regression
+  test "security regression: caller-supplied agent_id is dropped without RunAuthorization" do
+    node = build_node(%{})
+
+    graph =
+      %Graph{
+        id: "usage-graph-agent-id-omit",
+        nodes: %{node.id => node},
+        edges: [],
+        attrs: %{"goal" => "usage"}
+      }
+      |> Arbor.Orchestrator.IR.Compiler.compile!()
+
+    node = Map.fetch!(graph.nodes, node.id)
+    context = build_context()
+
+    assert %{status: :success} =
+             LlmHandler.execute(node, context, graph,
+               run_id: "run_agent_omit",
+               agent_id: "agent_attacker"
+             )
+
+    assert [{_request, opts}] = RecordingDispatcher.calls()
+    refute Keyword.has_key?(opts, :agent_id)
+  end
+
+  @tag :security_regression
+  test "security regression: trusted RunAuthorization agent_id overwrites caller-supplied agent_id" do
+    {node, graph, authority, context} = build_authority_fixture("overwrite_agent")
+
+    assert %{status: :success} =
+             LlmHandler.execute(node, context, graph,
+               run_authorization: authority,
+               run_id: "run_trusted_agent",
+               agent_id: "agent_attacker"
+             )
+
+    assert [{_request, opts}] = RecordingDispatcher.calls()
+    assert opts[:agent_id] == authority.execution_principal
+    refute opts[:agent_id] == "agent_attacker"
   end
 
   # On base e976, Keyword.put only overwrote when trusted derivation produced a
@@ -279,6 +323,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
     assert ctx.task_id == "task_tool_usage"
     assert ctx.correlation_id == "run_tool_corr"
     refute ctx.principal_id == "agent_attacker"
+    assert complete_opts[:agent_id] == "agent_tool_usage"
   end
 
   defp build_authority_fixture(suffix) do

@@ -1020,7 +1020,9 @@ defmodule Arbor.Agent.Lifecycle do
           agent_id: agent_id,
           signing_authority_bootstrap: heartbeat_bootstrap,
           heartbeat_config: heartbeat_config,
-          heartbeat_dot: Keyword.get(session_opts, :heartbeat_dot)
+          heartbeat_dot: Keyword.get(session_opts, :heartbeat_dot),
+          config: Keyword.get(session_opts, :config, %{}),
+          tenant_context: Keyword.get(session_opts, :tenant_context)
         ]
       else
         nil
@@ -1163,20 +1165,25 @@ defmodule Arbor.Agent.Lifecycle do
     # Executor and left the BranchSupervisor running, so the HeartbeatService kept beating on the
     # identity that deregister_identity (below) then removed → orphaned {:unauthorized,
     # :unknown_identity} heartbeats flooding the orchestrator (2026-07-04 node crash). Ordering is
-    # load-bearing: kill the heartbeat BEFORE deregistering its identity, else it beats identity-less.
+    # load-bearing: kill the heartbeat BEFORE removing its authority, else it beats identity-less.
     stop(agent_id)
 
-    # Clean up memory
-    Arbor.Memory.cleanup_for_agent(agent_id)
+    cleanup_results = [
+      cleanup_agent_authority(agent_id),
+      safe_cleanup(fn -> Arbor.Memory.cleanup_for_agent(agent_id) end),
+      safe_cleanup(fn -> Arbor.Security.delete_signing_key(agent_id) end),
+      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id) end),
+      safe_cleanup(fn -> ProfileStore.delete_profile(agent_id) end)
+    ]
 
-    # Clean up signing key
-    Arbor.Security.delete_signing_key(agent_id)
+    errors = Enum.reject(cleanup_results, &(&1 == :ok))
 
-    # Remove identity from registry
-    Arbor.Security.deregister_identity(agent_id)
-
-    # Remove profile from store (and legacy JSON)
-    ProfileStore.delete_profile(agent_id)
+    if errors != [] do
+      Logger.error("[Lifecycle] destroy cleanup was incomplete",
+        agent_id: agent_id,
+        cleanup_errors: inspect(errors)
+      )
+    end
 
     dual_emit_lifecycle(:destroyed, %{agent_id: agent_id})
     :ok

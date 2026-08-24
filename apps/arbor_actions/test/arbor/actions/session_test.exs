@@ -137,6 +137,62 @@ defmodule Arbor.Actions.SessionTest do
       assert length(result.new_intents) == 1
       assert length(result.proposal_decisions) == 1
       assert length(result.identity_insights) == 1
+      assert result.fix_proposal == nil
+      assert result.proposals == []
+    end
+
+    test "extracts authored proposals list and legacy fix_proposal string" do
+      json =
+        Jason.encode!(%{
+          "proposals" => [
+            %{
+              "kind" => "fix",
+              "content" => "authorizes_resource?/2 does not strip /** before prefix match"
+            }
+          ]
+        })
+
+      assert {:ok, result} = Session.ProcessResults.run(%{raw_content: json}, %{})
+
+      assert result.proposals == [
+               %{
+                 "kind" => "fix",
+                 "content" => "authorizes_resource?/2 does not strip /** before prefix match"
+               }
+             ]
+
+      assert result.fix_proposal ==
+               "authorizes_resource?/2 does not strip /** before prefix match"
+
+      legacy =
+        Jason.encode!(%{
+          "fix_proposal" => "  glob suffix is treated as a literal segment  "
+        })
+
+      assert {:ok, legacy_result} = Session.ProcessResults.run(%{raw_content: legacy}, %{})
+      assert legacy_result.fix_proposal == "glob suffix is treated as a literal segment"
+      assert hd(legacy_result.proposals)["kind"] == "fix"
+
+      blank = Jason.encode!(%{"proposals" => [%{"kind" => "fix", "content" => "   "}]})
+      assert {:ok, blank_result} = Session.ProcessResults.run(%{raw_content: blank}, %{})
+      assert blank_result.proposals == []
+      assert blank_result.fix_proposal == nil
+
+      mixed =
+        Jason.encode!(%{
+          "proposals" => [
+            %{"kind" => "plan", "content" => "open a branch after the analysis"},
+            %{
+              "kind" => "fix",
+              "content" => "strip /** then prefix-match"
+            }
+          ],
+          "fix_proposal" => "legacy scalar should lose to the list"
+        })
+
+      assert {:ok, mixed_result} = Session.ProcessResults.run(%{raw_content: mixed}, %{})
+      assert length(mixed_result.proposals) == 2
+      assert mixed_result.fix_proposal == "strip /** then prefix-match"
     end
 
     test "filters invalid actions" do

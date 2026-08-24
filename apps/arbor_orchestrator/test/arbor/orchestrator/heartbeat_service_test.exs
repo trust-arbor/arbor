@@ -119,6 +119,60 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
                state.heartbeat_in_flight == false and state.heartbeat_last_completed_at != nil
              end)
 
+      state = HeartbeatService.get_state(pid)
+      assert %DateTime{} = state.heartbeat_last_completed_at
+      assert state.heartbeat_last_result == fake_result
+
+      GenServer.stop(pid)
+    end
+
+    test "heartbeat_llm_content prefers last_response over the dead-letter llm.content key" do
+      body = String.duplicate("a", 2273)
+
+      assert HeartbeatService.heartbeat_llm_content(%{
+               context: %{"last_response" => body, "llm.content" => nil}
+             }) == body
+
+      assert HeartbeatService.heartbeat_llm_content(%{context: %{"llm.content" => "legacy"}}) ==
+               "legacy"
+
+      assert HeartbeatService.heartbeat_llm_content(%{context: %{}}) == nil
+    end
+
+    test "engine initial_values include session memory keys and copied session config" do
+      parent = self()
+
+      {:ok, pid} =
+        start_test_service(
+          config: %{
+            "system_prompt" => "find the glob wildcard bug",
+            "llm_provider" => "opencode_zen",
+            "llm_model" => "x-preview-f-free"
+          },
+          identity_checker: fn _ -> true end,
+          engine_runner: fn _graph, opts ->
+            send(parent, {:hb_values, Keyword.get(opts, :initial_values, %{})})
+
+            {:ok,
+             %{
+               final_outcome: %{status: :success},
+               context: %{
+                 "__completed_nodes__" => ["start"],
+                 "last_response" => "ok"
+               }
+             }}
+          end
+        )
+
+      send(pid, :heartbeat)
+
+      assert_receive {:hb_values, values}, 2_000
+      assert values["session.is_heartbeat"] == true
+      assert is_list(values["session.goals"])
+      assert Map.has_key?(values, "session.pending_proposals")
+      assert values["session.system_prompt"] == "find the glob wildcard bug"
+      assert values["session.llm_provider"] == "opencode_zen"
+
       GenServer.stop(pid)
     end
 
@@ -144,6 +198,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
                state.heartbeat_last_error
 
       assert state.heartbeat_last_completed_at == nil
+      assert state.heartbeat_last_result == nil
 
       GenServer.stop(pid)
     end

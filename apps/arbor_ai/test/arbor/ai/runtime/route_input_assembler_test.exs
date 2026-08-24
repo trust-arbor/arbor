@@ -480,7 +480,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
 
     test "non-OAuth catalog skips OAuth snapshot reader even when it would be unavailable" do
       # Zero exact OAuth candidates: irrelevant snapshot evidence must not be
-      # required or invoked. Assembly succeeds via non-OAuth readiness path.
+      # required or invoked. Arbor HTTP uses HttpRouteObservation, not OAuth
+      # health/catalog and not ACP readiness.
       model = model_entry("model-a", :grok)
       snap_calls = :counters.new(1, [])
 
@@ -503,8 +504,11 @@ defmodule Arbor.AI.Runtime.RouteInputAssemblerTest do
       assert :counters.get(snap_calls, 1) == 0
       assert [obs] = input.observations
       assert obs.provider == "grok"
+      assert obs.source == "arbor_http_route"
+      assert obs.runtime == "arbor"
       refute obs.source == "arbor_oauth_catalog"
       refute obs.source == "arbor_oauth_health"
+      refute obs.source == "acp_provider_readiness"
     end
 
     test "present and absent membership from one snapshot and one health read" do

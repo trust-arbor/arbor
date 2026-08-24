@@ -62,6 +62,68 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor.Core do
     |> maybe_add_wm_proposals(result_ctx)
     |> maybe_add_decomposition_proposals(result_ctx)
     |> maybe_add_identity_proposals(agent_id, result_ctx)
+    |> maybe_add_authored_proposals(result_ctx)
+  end
+
+  @doc false
+  def maybe_add_authored_proposals(proposals, result_ctx) do
+    authored = authored_proposal_entries(result_ctx)
+
+    authored_props =
+      Enum.map(authored, fn entry ->
+        %{
+          type: :insight,
+          content: entry.content,
+          metadata: %{kind: entry.kind}
+        }
+      end)
+
+    authored_props ++ proposals
+  end
+
+  defp authored_proposal_entries(result_ctx) do
+    from_list =
+      result_ctx
+      |> Map.get("session.proposals", Map.get(result_ctx, :proposals, []))
+      |> List.wrap()
+      |> Enum.flat_map(&normalize_authored_entry/1)
+
+    if from_list != [] do
+      from_list
+    else
+      case legacy_fix_proposal_text(result_ctx) do
+        text when is_binary(text) and text != "" -> [%{kind: "fix", content: text}]
+        _ -> []
+      end
+    end
+  end
+
+  defp normalize_authored_entry(%{"kind" => kind, "content" => content})
+       when is_binary(kind) and is_binary(content) do
+    kind = String.trim(kind)
+    content = String.trim(content)
+
+    if kind != "" and content != "" do
+      [%{kind: kind, content: content}]
+    else
+      []
+    end
+  end
+
+  defp normalize_authored_entry(%{kind: kind, content: content})
+       when is_binary(kind) and is_binary(content) do
+    normalize_authored_entry(%{"kind" => kind, "content" => content})
+  end
+
+  defp normalize_authored_entry(_), do: []
+
+  defp legacy_fix_proposal_text(result_ctx) do
+    case Map.get(result_ctx, "session.fix_proposal") || Map.get(result_ctx, :fix_proposal) do
+      text when is_binary(text) -> String.trim(text)
+      %{"content" => text} when is_binary(text) -> String.trim(text)
+      %{"text" => text} when is_binary(text) -> String.trim(text)
+      _ -> nil
+    end
   end
 
   @doc false

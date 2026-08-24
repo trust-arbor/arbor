@@ -111,5 +111,24 @@ defmodule Arbor.Actions.SessionExecutionTest do
 
       assert result.has_action_results == false
     end
+
+    test "JSON-shaped file.read yields a percept instead of swallowing FunctionClauseError" do
+      assert {:ok, result} =
+               SessionExecution.ExecuteActions.run(
+                 %{
+                   agent_id: "agent_test_json_file_read",
+                   actions: [
+                     %{
+                       "type" => "file.read",
+                       "params" => %{"path" => "/tmp/arbor_eval_missing.ex"}
+                     }
+                   ]
+                 },
+                 %{}
+               )
+
+      assert result.has_action_results == true
+      assert length(result.percepts) == 1
+    end
   end
 end

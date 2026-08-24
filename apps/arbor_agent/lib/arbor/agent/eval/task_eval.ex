@@ -15,8 +15,12 @@ defmodule Arbor.Agent.Eval.TaskEval do
       TaskEval.run(bug: :glob_wildcard, model: "anthropic/claude-3-5-haiku-latest")
   """
 
-  alias Arbor.Agent.Eval.{BugCase, ProposalScorer}
+  alias Arbor.Agent.BranchSupervisor
+  alias Arbor.Agent.Eval.{BugCase, ProposalScorer, ProviderRoutePin}
+  alias Arbor.Agent.Lifecycle
   alias Arbor.Agent.Manager
+  alias Arbor.Contracts.Session.HeartbeatResult
+  alias Arbor.LLM.OpenCodeZen
 
   require Logger
 
@@ -24,6 +28,13 @@ defmodule Arbor.Agent.Eval.TaskEval do
   @default_model "openrouter/anthropic/claude-3-5-haiku-latest"
   @default_provider :openrouter
   @default_variants [:bare, :full]
+  # Signals are observability, not lifecycle tracking. Count admitted
+  # HeartbeatService completions (last_completed_at) instead.
+  @heartbeat_poll_ms 250
+  # Gap between *counted* HeartbeatService completions. Failed beats (503)
+  # do not reset it. Zen call+followup can each take ~3 minutes, and a 503
+  # plus retry of the next beat can exceed 5 minutes while still in flight.
+  @heartbeat_wait_ms 720_000
 
   @variant_dots %{
     bare: "heartbeat-bare.dot",
@@ -114,45 +125,41 @@ defmodule Arbor.Agent.Eval.TaskEval do
       Process.put(:eval_agent_id, agent_id)
       Logger.info("[TaskEval] Agent #{agent_id} started for variant #{variant}")
 
+      register_eval_zen_probes!(agent_id, model, provider)
+
+      # Diagnostician has no fs/read. The glob bug lives in the eval worktree;
+      # without a path-scoped grant, file.read is unauthorized even after the
+      # JSON-params execute_batch fix.
+      grant_eval_worktree_access!(agent_id, worktree_path)
+
+      # Diagnostician baseline is :ask. Heartbeat exec nodes (prune_stale_intents)
+      # then wait 60s for a human and the beat is counted as a failure.
+      relax_eval_trust!(agent_id)
+
       # Seed the bug goal
       seed_bug_goal(agent_id, bug)
 
-      # Subscribe to heartbeat signals
-      heartbeat_ref = make_ref()
-      parent = self()
+      case heartbeat_loop(agent_id, bug, max_heartbeats, council?) do
+        {:error, reason} ->
+          {:error, reason}
 
-      {:ok, sub_id} =
-        safe_subscribe("agent.*", fn signal ->
-          if signal_is_heartbeat?(signal, agent_id) do
-            send(parent, {heartbeat_ref, :heartbeat, signal})
-          end
+        result when is_map(result) ->
+          elapsed = System.monotonic_time(:millisecond) - trial_start
 
-          :ok
-        end)
-
-      # Run heartbeat monitor loop
-      result = heartbeat_loop(agent_id, bug, heartbeat_ref, max_heartbeats, council?)
-
-      # Unsubscribe
-      safe_unsubscribe(sub_id)
-
-      elapsed = System.monotonic_time(:millisecond) - trial_start
-
-      {:ok,
-       Map.merge(result, %{
-         variant: variant,
-         agent_id: agent_id,
-         duration_ms: elapsed,
-         model: model,
-         provider: provider
-       })}
+          {:ok,
+           Map.merge(result, %{
+             variant: variant,
+             agent_id: agent_id,
+             duration_ms: elapsed,
+             model: model,
+             provider: provider
+           })}
+      end
     after
-      # Cleanup agent
       cleanup_id = Process.get(:eval_agent_id)
 
       if cleanup_id do
-        safe_stop_agent(cleanup_id)
-        safe_cleanup_memory(cleanup_id)
+        cleanup_eval_principal(cleanup_id)
       end
 
       Process.delete(:eval_agent_id)
@@ -165,8 +172,9 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   # -- Heartbeat Loop --
 
-  defp heartbeat_loop(agent_id, bug, ref, max_heartbeats, council?) do
-    do_heartbeat_loop(agent_id, bug, ref, max_heartbeats, council?, %{
+  defp heartbeat_loop(agent_id, bug, max_heartbeats, council?) do
+    do_heartbeat_loop(agent_id, bug, max_heartbeats, council?, %{
+      agent_id: agent_id,
       heartbeat_count: 0,
       heartbeats: [],
       proposal_submitted: false,
@@ -176,74 +184,142 @@ defmodule Arbor.Agent.Eval.TaskEval do
       judge_verdict: nil,
       file_reads: 0,
       unique_files: MapSet.new(),
-      total_actions: 0
+      total_actions: 0,
+      last_completed_at: nil,
+      wait_deadline_ms: System.monotonic_time(:millisecond) + @heartbeat_wait_ms
     })
   end
 
-  defp do_heartbeat_loop(_agent_id, bug, _ref, max, _council?, state)
+  defp do_heartbeat_loop(_agent_id, bug, max, _council?, state)
        when state.heartbeat_count >= max do
-    # Timed out — score whatever we have
     finalize_trial(state, bug)
   end
 
-  defp do_heartbeat_loop(agent_id, bug, ref, max, council?, state) do
-    # Wait for next heartbeat signal (generous timeout — heartbeats can be slow)
-    receive do
-      {^ref, :heartbeat, signal} ->
-        hb_data = signal.data || %{}
-        hb_num = state.heartbeat_count + 1
+  defp do_heartbeat_loop(agent_id, bug, max, council?, state) do
+    remaining = state.wait_deadline_ms - System.monotonic_time(:millisecond)
 
-        actions = extract_actions(hb_data)
+    if remaining <= 0 do
+      Logger.warning("[TaskEval] Heartbeat timeout after 12 minutes")
 
-        Logger.info(
-          "[TaskEval] Heartbeat #{hb_num}/#{max} — " <>
-            "actions=#{length(actions)}, mode=#{hb_data[:cognitive_mode]}"
-        )
+      case wait_timeout_result(state.heartbeat_count) do
+        {:error, reason} = error ->
+          Logger.error("[TaskEval] Infrastructure failure: #{inspect(reason)}")
+          error
 
-        # Accumulate metrics from this heartbeat
-        new_state = accumulate_heartbeat(state, hb_data, hb_num)
+        :finalize ->
+          finalize_trial(state, bug)
+      end
+    else
+      case poll_heartbeat(heartbeat_service_pid(agent_id), state.last_completed_at) do
+        {:ok, completed_at, hb_data} ->
+          admit_observed_heartbeat(agent_id, bug, max, council?, state, completed_at, hb_data)
 
-        # Check for proposal submission (agent used proposal.submit tool)
-        if proposal_submitted?(agent_id, hb_data) do
-          proposal_text = extract_proposal_text(agent_id, hb_data)
-          score = ProposalScorer.score(proposal_text, bug)
-
-          council_verdict =
-            if council? do
-              case ProposalScorer.council_evaluate(proposal_text, bug) do
-                {:ok, verdict} -> verdict
-                _ -> nil
-              end
-            end
-
-          # Same deep-eval opt-in: an LLM-as-judge rubric verdict (Verdict struct)
-          # complementing the keyword `score` and the council vote.
-          judge_verdict =
-            if council? do
-              case ProposalScorer.judge_score(proposal_text, bug) do
-                {:ok, verdict} -> verdict
-                _ -> nil
-              end
-            end
-
-          new_state
-          |> Map.merge(%{
-            proposal_submitted: true,
-            proposal_text: proposal_text,
-            proposal_quality: score,
-            council_verdict: council_verdict,
-            judge_verdict: judge_verdict
-          })
-          |> finalize_trial(bug)
-        else
-          do_heartbeat_loop(agent_id, bug, ref, max, council?, new_state)
-        end
-    after
-      # 5 minutes per heartbeat is very generous
-      300_000 ->
-        Logger.warning("[TaskEval] Heartbeat timeout after 5 minutes")
-        finalize_trial(state, bug)
+        :none ->
+          Process.sleep(min(@heartbeat_poll_ms, remaining))
+          do_heartbeat_loop(agent_id, bug, max, council?, state)
+      end
     end
+  end
+
+  defp admit_observed_heartbeat(agent_id, bug, max, council?, state, completed_at, hb_data) do
+    hb_num = state.heartbeat_count + 1
+    actions = extract_actions(hb_data)
+
+    Logger.info(
+      "[TaskEval] Heartbeat #{hb_num}/#{max} — " <>
+        "actions=#{length(actions)}, mode=#{hb_data[:cognitive_mode]}"
+    )
+
+    new_state =
+      state
+      |> accumulate_heartbeat(hb_data, hb_num)
+      |> Map.put(:last_completed_at, completed_at)
+      |> Map.put(:wait_deadline_ms, System.monotonic_time(:millisecond) + @heartbeat_wait_ms)
+
+    if proposal_submitted?(agent_id, hb_data) do
+      proposal_text = extract_proposal_text(agent_id, hb_data)
+      score = ProposalScorer.score(proposal_text, bug)
+
+      council_verdict =
+        if council? do
+          case ProposalScorer.council_evaluate(proposal_text, bug) do
+            {:ok, verdict} -> verdict
+            _ -> nil
+          end
+        end
+
+      judge_verdict =
+        if council? do
+          case ProposalScorer.judge_score(proposal_text, bug) do
+            {:ok, verdict} -> verdict
+            _ -> nil
+          end
+        end
+
+      new_state
+      |> Map.merge(%{
+        proposal_submitted: true,
+        proposal_text: proposal_text,
+        proposal_quality: score,
+        council_verdict: council_verdict,
+        judge_verdict: judge_verdict
+      })
+      |> finalize_trial(bug)
+    else
+      do_heartbeat_loop(agent_id, bug, max, council?, new_state)
+    end
+  end
+
+  @doc false
+  @spec poll_heartbeat(pid() | nil, DateTime.t() | nil) ::
+          {:ok, DateTime.t(), map()} | :none
+  def poll_heartbeat(nil, _last_seen), do: :none
+
+  def poll_heartbeat(server, last_seen) when is_pid(server) do
+    # HeartbeatService.get_state/1 is GenServer.call(server, :get_state).
+    # Call the contract directly so arbor_agent tests can use a stub owner
+    # without depending on arbor_orchestrator.
+    case GenServer.call(server, :get_state, 1_000) do
+      %{heartbeat_last_completed_at: %DateTime{} = at} = hb_state ->
+        if at != last_seen do
+          {:ok, at, heartbeat_payload(hb_state)}
+        else
+          :none
+        end
+
+      _ ->
+        :none
+    end
+  rescue
+    _ -> :none
+  catch
+    :exit, _ -> :none
+  end
+
+  defp heartbeat_service_pid(agent_id) do
+    case BranchSupervisor.child_pids(agent_id) do
+      %{heartbeat_service: pid} when is_pid(pid) -> pid
+      _ -> nil
+    end
+  end
+
+  defp heartbeat_payload(%{heartbeat_last_result: result, agent_id: agent_id}) do
+    ctx = Map.get(result, :context) || %{}
+    proposals = List.wrap(Map.get(ctx, "session.proposals") || [])
+
+    result
+    |> then(&HeartbeatResult.from_result_ctx(%{agent_id: agent_id}, &1))
+    |> HeartbeatResult.to_signal_data()
+    |> Map.put(:proposals, proposals)
+    |> Map.put(
+      :fix_proposal,
+      authored_fix_text(%{
+        proposals: proposals,
+        fix_proposal: Map.get(ctx, "session.fix_proposal")
+      })
+    )
+  rescue
+    _ -> %{}
   end
 
   defp accumulate_heartbeat(state, hb_data, hb_num) do
@@ -323,6 +399,102 @@ defmodule Arbor.Agent.Eval.TaskEval do
     ]
 
     Manager.start_agent(model_config, opts)
+  end
+
+  defp register_eval_zen_probes!(agent_id, model, provider) do
+    ids = ProviderRoutePin.build(model, provider).probe_ids
+
+    case OpenCodeZen.register_eval_probes(agent_id, ids) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[TaskEval] could not register zen probes: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  @doc false
+  def wait_timeout_result(heartbeat_count)
+      when is_integer(heartbeat_count) and heartbeat_count <= 0 do
+    {:error, :eval_infrastructure_timeout}
+  end
+
+  def wait_timeout_result(heartbeat_count) when is_integer(heartbeat_count) do
+    :finalize
+  end
+
+  @doc false
+  def cleanup_eval_principal(agent_id) when is_binary(agent_id) do
+    _ = OpenCodeZen.unregister_eval_probes(agent_id)
+    revoke_eval_grants()
+    destroy_eval_agent(agent_id)
+    safe_cleanup_memory(agent_id)
+    :ok
+  end
+
+  @doc false
+  def worktree_fs_resources(worktree_path) when is_binary(worktree_path) do
+    trimmed = worktree_path |> Path.expand() |> String.trim_leading("/")
+
+    [
+      "arbor://fs/read/#{trimmed}/**",
+      "arbor://fs/list/#{trimmed}/**"
+    ]
+  end
+
+  defp grant_eval_worktree_access!(agent_id, worktree_path) do
+    ids =
+      Enum.flat_map(worktree_fs_resources(worktree_path), fn resource ->
+        case Arbor.Security.grant_capability_id(principal: agent_id, resource: resource) do
+          {:ok, id} ->
+            [id]
+
+          {:error, reason} ->
+            Logger.warning("[TaskEval] could not grant #{resource}: #{inspect(reason)}")
+            []
+        end
+      end)
+
+    Process.put(:eval_grant_ids, ids)
+    :ok
+  end
+
+  defp revoke_eval_grants do
+    for id <- List.wrap(Process.get(:eval_grant_ids, [])) do
+      _ = Arbor.Security.revoke(id)
+    end
+
+    Process.delete(:eval_grant_ids)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp relax_eval_trust!(agent_id) do
+    case Arbor.Trust.get_trust_profile(agent_id) do
+      {:ok, profile} ->
+        rules =
+          Map.put(
+            profile.rules || %{},
+            "arbor://action/session_goals/prune_stale_intents",
+            :auto
+          )
+
+        case Arbor.Trust.ensure_trust_profile(agent_id, baseline: :allow, rules: rules) do
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("[TaskEval] could not relax eval trust: #{inspect(reason)}")
+            :ok
+        end
+
+      {:error, reason} ->
+        Logger.warning("[TaskEval] no trust profile to relax: #{inspect(reason)}")
+        :ok
+    end
   end
 
   defp seed_bug_goal(agent_id, bug) do
@@ -421,38 +593,54 @@ defmodule Arbor.Agent.Eval.TaskEval do
 
   # -- Proposal Detection --
 
-  # Heartbeat proposal types that are NOT bug fix proposals
-  @heartbeat_proposal_types [
-    :thought,
-    :concern,
-    :curiosity,
-    :identity,
-    :intent,
-    :cognitive_mode,
-    :goal,
-    :goal_update
-  ]
-
-  defp proposal_submitted?(_agent_id, hb_data) do
-    # Only check for explicit proposal.submit tool call actions.
-    # Do NOT check pending proposals — heartbeat creates :thought/:goal/etc.
-    # proposals on every cycle, which are not bug fix submissions.
-    actions = extract_actions(hb_data)
-    Enum.any?(actions, &proposal_action?/1)
+  @doc false
+  def proposal_submitted?(agent_id, hb_data) do
+    # Authored submissions live in heartbeat JSON `proposals: [%{kind, content}]`
+    # (legacy: `fix_proposal` string). Do NOT treat :thought/:goal/etc. as a
+    # bug-fix submission — those fire every cycle.
+    present_text?(authored_fix_text(hb_data)) or
+      Enum.any?(extract_actions(hb_data), &proposal_action?/1) or
+      get_fix_proposals(agent_id) != []
   end
 
   defp extract_proposal_text(agent_id, hb_data) do
-    # Try bug-fix proposals from memory (exclude heartbeat types)
-    case get_fix_proposals(agent_id) do
-      [proposal | _] ->
-        Map.get(proposal, :content, "")
+    cond do
+      present_text?(authored_fix_text(hb_data)) ->
+        authored_fix_text(hb_data)
 
-      [] ->
-        # Fall back to extracting from heartbeat thinking/response
-        Map.get(hb_data, :agent_thinking, "") ||
-          Map.get(hb_data, "agent_thinking", "")
+      true ->
+        case get_fix_proposals(agent_id) do
+          [proposal | _] ->
+            Map.get(proposal, :content, "")
+
+          [] ->
+            Map.get(hb_data, :agent_thinking, "") ||
+              Map.get(hb_data, "agent_thinking", "")
+        end
     end
   end
+
+  @eval_fix_kinds ~w(fix bug_fix fix_proposal)
+
+  defp authored_fix_text(hb_data) when is_map(hb_data) do
+    from_list =
+      hb_data
+      |> Map.get(:proposals, Map.get(hb_data, "proposals", []))
+      |> List.wrap()
+      |> Enum.find_value(fn item ->
+        kind = to_string(Map.get(item, :kind) || Map.get(item, "kind") || "")
+        content = Map.get(item, :content) || Map.get(item, "content")
+
+        if kind in @eval_fix_kinds and present_text?(content), do: content
+      end)
+
+    from_list || hb_data[:fix_proposal] || hb_data["fix_proposal"]
+  end
+
+  defp authored_fix_text(_), do: nil
+
+  defp present_text?(text) when is_binary(text), do: String.trim(text) != ""
+  defp present_text?(_), do: false
 
   defp get_pending_proposals(nil), do: []
 
@@ -463,14 +651,22 @@ defmodule Arbor.Agent.Eval.TaskEval do
     end
   end
 
-  # Get only non-heartbeat proposals (potential bug fix submissions)
+  # Authored eval submissions persist as Memory.Proposal type :insight with
+  # metadata.kind in @eval_fix_kinds. Generic :insight/:learning from
+  # InsightDetector must not count as a bug-fix delivery.
   defp get_fix_proposals(agent_id) do
     agent_id
     |> get_pending_proposals()
-    |> Enum.reject(fn p ->
-      Map.get(p, :type) in @heartbeat_proposal_types
-    end)
+    |> Enum.filter(&authored_eval_fix?/1)
   end
+
+  defp authored_eval_fix?(proposal) when is_map(proposal) do
+    type = Map.get(proposal, :type)
+    kind = proposal |> Map.get(:metadata, %{}) |> then(&(&1[:kind] || &1["kind"]))
+    type == :insight and to_string(kind || "") in @eval_fix_kinds
+  end
+
+  defp authored_eval_fix?(_), do: false
 
   # -- Action Helpers --
 
@@ -518,34 +714,6 @@ defmodule Arbor.Agent.Eval.TaskEval do
     |> extract_actions()
     |> Enum.filter(&file_read_action?/1)
     |> Enum.map(&extract_file_path/1)
-  end
-
-  # -- Signal Helpers --
-
-  defp signal_is_heartbeat?(signal, agent_id) do
-    to_string(signal.type) == "heartbeat_complete" and
-      get_in_signal(signal, :agent_id) == agent_id
-  end
-
-  defp get_in_signal(signal, key) do
-    data = signal.data || %{}
-    Map.get(data, key) || Map.get(data, to_string(key))
-  end
-
-  defp safe_subscribe(pattern, handler) do
-    Arbor.Signals.subscribe(pattern, handler)
-  rescue
-    _ -> {:ok, "noop_sub"}
-  catch
-    :exit, _ -> {:ok, "noop_sub"}
-  end
-
-  defp safe_unsubscribe(sub_id) do
-    Arbor.Signals.unsubscribe(sub_id)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   # -- Persistence --
@@ -687,8 +855,8 @@ defmodule Arbor.Agent.Eval.TaskEval do
     :exit, _ -> nil
   end
 
-  defp safe_stop_agent(agent_id) do
-    Manager.stop_agent(agent_id)
+  defp destroy_eval_agent(agent_id) do
+    Lifecycle.destroy(agent_id)
   rescue
     _ -> :ok
   catch

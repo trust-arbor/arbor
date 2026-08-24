@@ -141,7 +141,7 @@ defmodule Arbor.Actions.Session do
 
   defmodule ProcessResults do
     @moduledoc """
-    Parse and validate LLM JSON response into 10 typed output fields.
+    Parse and validate LLM JSON response into typed output fields.
 
     ## Parameters
 
@@ -152,7 +152,8 @@ defmodule Arbor.Actions.Session do
     ## Returns
 
     Map with validated fields: actions, goal_updates, new_goals, memory_notes,
-    concerns, curiosity, decompositions, new_intents, proposal_decisions, identity_insights
+    concerns, curiosity, decompositions, new_intents, proposal_decisions,
+    identity_insights, proposals, fix_proposal
     """
     use Jido.Action,
       name: "session_process_results",
@@ -183,7 +184,9 @@ defmodule Arbor.Actions.Session do
              new_intents: validated_list(parsed, "new_intents", &is_map/1),
              proposal_decisions:
                validated_list(parsed, "proposal_decisions", &valid_proposal_decision?/1),
-             identity_insights: validated_list(parsed, "identity_insights", &is_map/1)
+             identity_insights: validated_list(parsed, "identity_insights", &is_map/1),
+             proposals: extract_authored_proposals(parsed),
+             fix_proposal: extract_fix_proposal(parsed)
            }}
 
         _ ->
@@ -198,7 +201,9 @@ defmodule Arbor.Actions.Session do
              decompositions: [],
              new_intents: [],
              proposal_decisions: [],
-             identity_insights: []
+             identity_insights: [],
+             proposals: [],
+             fix_proposal: nil
            }}
       end
     end
@@ -222,6 +227,63 @@ defmodule Arbor.Actions.Session do
          do: true
 
     defp valid_proposal_decision?(_), do: false
+
+    @eval_fix_kinds ~w(fix bug_fix fix_proposal)
+
+    defp extract_authored_proposals(parsed) when is_map(parsed) do
+      from_list = validated_list(parsed, "proposals", &valid_authored_proposal?/1)
+
+      if from_list != [] do
+        from_list
+      else
+        case extract_legacy_fix_proposal(parsed) do
+          nil -> []
+          text -> [%{"kind" => "fix", "content" => text}]
+        end
+      end
+    end
+
+    defp valid_authored_proposal?(%{"kind" => kind, "content" => content})
+         when is_binary(kind) and is_binary(content) do
+      String.trim(kind) != "" and nonempty_trim(content) != nil
+    end
+
+    defp valid_authored_proposal?(_), do: false
+
+    defp extract_fix_proposal(parsed) when is_map(parsed) do
+      authored = extract_authored_proposals(parsed)
+
+      Enum.find_value(authored, fn item ->
+        kind = item["kind"] || item[:kind]
+
+        if to_string(kind) in @eval_fix_kinds do
+          nonempty_trim(item["content"] || item[:content] || "")
+        end
+      end)
+    end
+
+    defp extract_legacy_fix_proposal(parsed) when is_map(parsed) do
+      case Map.get(parsed, "fix_proposal") do
+        text when is_binary(text) ->
+          nonempty_trim(text)
+
+        %{"content" => text} when is_binary(text) ->
+          nonempty_trim(text)
+
+        %{"text" => text} when is_binary(text) ->
+          nonempty_trim(text)
+
+        _ ->
+          nil
+      end
+    end
+
+    defp nonempty_trim(text) do
+      case String.trim(text) do
+        "" -> nil
+        trimmed -> trimmed
+      end
+    end
 
     defp extract_json(text) do
       case Regex.run(~r/```(?:json)?\s*\n?(.*?)\n?```/s, text) do

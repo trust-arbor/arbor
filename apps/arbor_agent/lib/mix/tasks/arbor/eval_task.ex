@@ -29,6 +29,8 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
   use Mix.Task
 
+  alias Arbor.Agent.Eval.ProviderRoutePin
+
   # Scope the ProviderRouter to the model under test.
   #
   # A heartbeat's llm_call runs in router mode, where — as LlmHandler puts it —
@@ -44,41 +46,39 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
   # profile to be measured for entry into it. Same shape as the candidate
   # discovery circularity fixed in 5af3bd57c, one layer up.
   #
-  # Pinning the profile to {model, provider} keeps the real assembly path
-  # (readiness, evidence, budgets, concurrency all still apply) and only
-  # narrows WHICH destination it may choose. Scoped to this eval process, which
-  # exits when the run ends.
+  # Pinning the profile to {model, provider} is not enough: the policy maps
+  # (`provider_route_concurrency_limits`, `provider_spend_ceilings_usd`,
+  # `subscription_capacity_states`) are a second per-provider allowlist.
+  # `RouteConcurrency` reads limits at init, so a provider with a scoreboard
+  # row but no policy row fails as `:unconfigured_route` →
+  # `:no_eligible_routes`. Write those rows here too — eval-scoped, merged
+  # into the loaded maps, same values as the reviewed profile. This is not a
+  # production promotion.
+  #
+  # Pin BEFORE the apps start. ProviderRouteReadiness caches the route set at
+  # boot and fails closed with `:route_set_changed` if it changes underneath.
   defp pin_provider_route!(model, provider) when is_binary(model) and model != "" do
-    provider_id = to_string(provider)
-
-    profile = %{
-      enabled: true,
-      task_registry: %{"default" => %{requirements: %{}}},
-      default_task_class: "default",
-      catalog_model_ids: [model],
-      scoreboard: [
+    pin =
+      ProviderRoutePin.build(
+        model,
+        provider,
         %{
-          model: model,
-          provider: provider_id,
-          runtime: "arbor",
-          # This is the model being MEASURED — the scoreboard here is a routing
-          # input, not evidence of quality. Tier 2's verdict is the trial
-          # result, never these numbers.
-          score: 1.0,
-          dangerous_misses: 0,
-          format_failure_rate: 0.0,
-          variance: 0.0,
-          marginal_cost: 0.0,
-          latency_ms: 1.0,
-          eval_run_ref: "eval-under-test",
-          last_verified: DateTime.utc_now() |> DateTime.to_iso8601()
-        }
-      ]
-    }
+          concurrency: Application.get_env(:arbor_ai, :provider_route_concurrency_limits, %{}),
+          ceilings: Application.get_env(:arbor_ai, :provider_spend_ceilings_usd, %{}),
+          capacity: Application.get_env(:arbor_ai, :subscription_capacity_states, %{})
+        },
+        now: DateTime.utc_now()
+      )
 
-    Application.put_env(:arbor_ai, :provider_route_profile, profile)
+    Application.put_env(:arbor_ai, :provider_route_profile, pin.profile)
+    Application.put_env(:arbor_ai, :provider_route_concurrency_limits, pin.concurrency)
+    Application.put_env(:arbor_ai, :provider_spend_ceilings_usd, pin.ceilings)
+    Application.put_env(:arbor_ai, :subscription_capacity_states, pin.capacity)
+    Application.put_env(:arbor_ai, :eval_route_catalog_overlays, pin.catalog_overlays)
 
-    Mix.shell().info("  Route pinned to #{provider_id}/#{model} for this eval.\n")
+    Mix.shell().info(
+      "  Route pinned to #{to_string(provider)}/#{model} for this eval (policy rows included).\n"
+    )
   end
 
   defp pin_provider_route!(_model, _provider), do: :ok
@@ -120,14 +120,36 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
     # underneath it. Pinning after startup therefore produced five consecutive
     # heartbeat failures and a disabled heartbeat — the gate behaving correctly
     # against a profile swapped out from under it.
-    pin_provider_route!(opts[:model], parse_provider(opts[:provider]))
+    #
+    # Resolve the default model *before* pinning. `opts[:model]` is nil on the
+    # documented no-arg invocation, and `pin_provider_route!/2` no-ops then —
+    # production routing would override the eval model.
+    {model, provider} = resolve_pin_target(opts)
+    pin_provider_route!(model, provider)
+
+    # Dev/prod journal is Postgres with start_store: false — it expects
+    # `mix arbor.start` to already own the named store. This Mix task is a
+    # dedicated BEAM; using that config made every heartbeat fail
+    # `:journal_unavailable`, including after a successful LLM call.
+    # Volatile ETS is honest for a short-lived eval process.
+    Application.put_env(:arbor_orchestrator, :run_journal, [])
+
+    # Persistence first so QueryableStore/Repo exist before orchestrator
+    # and agent profile writes. Starting it last raced sqlite/Postgres
+    # connections and surfaced as `database is locked`.
+    _ = Application.ensure_all_started(:arbor_persistence_ecto)
+
+    # This Mix task is a dedicated BEAM, but arbor_agent still starts Bootstrap
+    # and Reconciler. Those would auto-start persisted agents into the eval
+    # route pin (scoreboard, policy rows, catalog overlays). Disable both
+    # before app start. OpenCode Zen probe ids are registered per eval
+    # principal after TaskEval starts the agent — not as Application env.
+    isolate_eval_agent_runtime!()
 
     # Start required apps (orchestrator must come before agent — provides EventRegistry + Session)
     for app <- [:arbor_memory, :arbor_ai, :arbor_orchestrator, :arbor_agent] do
       start_or_raise!(app)
     end
-
-    _ = Application.ensure_all_started(:arbor_persistence_ecto)
 
     await_provider_route_evidence!()
 
@@ -135,8 +157,6 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
     bug = parse_bug(opts[:bug])
     max_heartbeats = opts[:max_heartbeats] || 15
     reps = opts[:reps] || 1
-    model = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
-    provider = parse_provider(opts[:provider])
     council? = opts[:council] || false
     tag = opts[:tag]
 
@@ -199,13 +219,10 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
         :ok
 
       :timeout ->
-        # Report the service's own status. A replay failure parks it at
-        # {:blocked, reason}; without printing that, the symptom is an
-        # unexplained 0-heartbeat run.
-        Mix.shell().error("""
+        Mix.raise("""
         Provider route evidence did not become ready within #{div(timeout_ms, 1000)}s.
         Status: #{inspect(safe_evidence_status())}
-        Heartbeats will fail route assembly and every trial will report 0 heartbeats.
+        Refusing to score a 0-heartbeat run as a successful trial.
         """)
     end
   end
@@ -279,6 +296,28 @@ defmodule Mix.Tasks.Arbor.Eval.Task do
 
   defp parse_provider(nil), do: :openrouter
   defp parse_provider(str), do: String.to_existing_atom(str)
+
+  @doc false
+  def resolve_pin_target(opts) when is_list(opts) do
+    model = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
+    provider = parse_provider(opts[:provider])
+    {model, provider}
+  end
+
+  defp isolate_eval_agent_runtime! do
+    Application.put_env(:arbor_agent, :bootstrap_enabled, false)
+
+    reconciler = Application.get_env(:arbor_agent, Arbor.Agent.Reconciler, [])
+
+    reconciler =
+      if is_list(reconciler) do
+        Keyword.put(reconciler, :enabled, false)
+      else
+        [enabled: false]
+      end
+
+    Application.put_env(:arbor_agent, Arbor.Agent.Reconciler, reconciler)
+  end
 
   # -- Output --
 

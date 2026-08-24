@@ -42,6 +42,9 @@ defmodule Arbor.LLM.OpenCodeZen do
   @base_url "https://opencode.ai/zen/v1"
   @probe_ids_key {__MODULE__, :probe_ids}
   @probe_opt :opencode_zen_probe_ids
+  @eval_probes_table :arbor_llm_opencode_zen_eval_probes
+  @max_eval_probe_ids 32
+  @max_probe_id_bytes 512
 
   @spec provider() :: String.t()
   def provider, do: @provider
@@ -200,6 +203,77 @@ defmodule Arbor.LLM.OpenCodeZen do
 
   def carry_probe_authorization(opts), do: opts
 
+  @doc false
+  # Eval-scoped probe pin keyed by the execution principal. Heartbeat/Engine
+  # workers do not inherit Mix-task process dictionary, so `with_probe_models/2`
+  # never reaches `admit_model/2` on that path. Do not use Application env:
+  # that pin is VM-global and would admit the model for every other agent in
+  # the same BEAM (including Bootstrap/Reconciler auto-starts).
+  @spec register_eval_probes(String.t(), [String.t()]) ::
+          :ok | {:error, :invalid_eval_probe_registration}
+  def register_eval_probes(agent_id, ids)
+      when is_binary(agent_id) and is_list(ids) do
+    if valid_eval_principal?(agent_id) do
+      case sanitize_probe_ids(ids) do
+        [] ->
+          unregister_eval_probes(agent_id)
+
+        cleaned ->
+          table = ensure_eval_probes_table()
+          true = :ets.insert(table, {agent_id, cleaned})
+          :ok
+      end
+    else
+      {:error, :invalid_eval_probe_registration}
+    end
+  end
+
+  def register_eval_probes(_agent_id, _ids), do: {:error, :invalid_eval_probe_registration}
+
+  @doc false
+  @spec unregister_eval_probes(term()) :: :ok
+  def unregister_eval_probes(agent_id) when is_binary(agent_id) do
+    case :ets.whereis(@eval_probes_table) do
+      :undefined ->
+        :ok
+
+      tid ->
+        :ets.delete(tid, agent_id)
+        :ok
+    end
+  end
+
+  def unregister_eval_probes(_agent_id), do: :ok
+
+  @doc false
+  @spec ensure_eval_probes_table() :: :ets.table()
+  def ensure_eval_probes_table do
+    case :ets.whereis(@eval_probes_table) do
+      :undefined ->
+        try do
+          :ets.new(@eval_probes_table, [
+            :named_table,
+            :public,
+            :set,
+            read_concurrency: true,
+            write_concurrency: true
+          ])
+        rescue
+          ArgumentError ->
+            case :ets.whereis(@eval_probes_table) do
+              :undefined ->
+                raise "OpenCode Zen eval probe table missing after create race"
+
+              tid ->
+                tid
+            end
+        end
+
+      tid ->
+        tid
+    end
+  end
+
   defp load_admission do
     case File.read(admission_path()) do
       {:ok, contents} ->
@@ -224,17 +298,72 @@ defmodule Arbor.LLM.OpenCodeZen do
   end
 
   defp probe_authorized?(id, opts) do
+    id in keyword_probe_ids(opts) or id in process_probe_ids() or
+      id in eval_probe_ids(eval_probe_principal(opts))
+  end
+
+  defp keyword_probe_ids(opts) do
     case Keyword.get(opts, @probe_opt) do
-      ids when is_list(ids) ->
-        id in ids
+      ids when is_list(ids) -> ids
+      _ -> []
+    end
+  end
+
+  defp process_probe_ids do
+    case Process.get(@probe_ids_key, []) do
+      ids when is_list(ids) -> ids
+      _ -> []
+    end
+  end
+
+  defp eval_probe_principal(opts) when is_list(opts) do
+    case Keyword.get(opts, :agent_id) do
+      agent_id when is_binary(agent_id) ->
+        if valid_eval_principal?(agent_id), do: agent_id, else: nil
 
       _ ->
-        case Process.get(@probe_ids_key, []) do
-          ids when is_list(ids) -> id in ids
-          _ -> false
+        nil
+    end
+  end
+
+  defp eval_probe_principal(_opts), do: nil
+
+  defp eval_probe_ids(agent_id) when is_binary(agent_id) do
+    case :ets.whereis(@eval_probes_table) do
+      :undefined ->
+        []
+
+      tid ->
+        case :ets.lookup(tid, agent_id) do
+          [{^agent_id, ids}] when is_list(ids) -> Enum.filter(ids, &is_binary/1)
+          _ -> []
         end
     end
   end
+
+  defp eval_probe_ids(_agent_id), do: []
+
+  defp valid_eval_principal?(agent_id) when is_binary(agent_id) do
+    byte_size(agent_id) > byte_size("agent_") and byte_size(agent_id) <= 256 and
+      String.valid?(agent_id) and String.starts_with?(agent_id, "agent_") and
+      String.trim(agent_id) == agent_id and not String.match?(agent_id, ~r/[\x00-\x1F\x7F]/)
+  end
+
+  defp valid_eval_principal?(_), do: false
+
+  defp sanitize_probe_ids(ids) when is_list(ids) do
+    ids
+    |> Enum.filter(&valid_probe_id?/1)
+    |> Enum.take(@max_eval_probe_ids)
+    |> Enum.uniq()
+  end
+
+  defp valid_probe_id?(id) when is_binary(id) do
+    id != "" and byte_size(id) <= @max_probe_id_bytes and String.valid?(id) and
+      not String.contains?(id, <<0>>)
+  end
+
+  defp valid_probe_id?(_), do: false
 
   defp restore_probe_ids(nil), do: Process.delete(@probe_ids_key)
   defp restore_probe_ids(ids), do: Process.put(@probe_ids_key, ids)

@@ -5,6 +5,8 @@ defmodule Arbor.LLM.Application do
 
   @impl true
   def start(_type, _args) do
+    _ = Arbor.LLM.OpenCodeZen.ensure_eval_probes_table()
+
     children = [
       Arbor.LLM.OAuth.Login.PendingStore,
       Arbor.LLM.OAuth.RecoveryProofStore,

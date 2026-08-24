@@ -92,7 +92,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
         response_length: String.length(response),
         turn_count: ContextBuilder.get_turn_count(state)
       },
-      state.tenant_context
+      Map.get(state, :tenant_context)
     )
   end
 
@@ -106,7 +106,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
       :agent,
       :heartbeat_complete,
       HeartbeatResult.to_signal_data(hr),
-      state.tenant_context
+      Map.get(state, :tenant_context)
     )
   end
 

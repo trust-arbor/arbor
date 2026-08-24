@@ -36,6 +36,31 @@ defmodule Arbor.Orchestrator.Session.BuildersRuntimeTest do
     }
   end
 
+  defp heartbeat_service_session_like do
+    %{
+      agent_id: "agent_test_heartbeat",
+      signer: nil,
+      signing_authority: nil,
+      session_id: "heartbeat:agent_test_heartbeat",
+      adapters: %{},
+      config: %{"stream" => false, "system_prompt" => "fix the glob"},
+      pid: nil
+    }
+  end
+
+  describe "build_heartbeat_values/1 — HeartbeatService session-like map" do
+    test "keeps the heartbeat marker and session memory keys" do
+      values = Builders.build_heartbeat_values(heartbeat_service_session_like())
+
+      assert values["session.is_heartbeat"] == true
+      assert is_list(values["session.goals"])
+      assert Map.has_key?(values, "session.pending_proposals")
+      assert Map.has_key?(values, "session.working_memory")
+      assert values["session.system_prompt"] == "fix the glob"
+      assert values["session.messages"] == []
+    end
+  end
+
   describe "build_heartbeat_values/1 — runtime axis inheritance" do
     test "inherits llm_runtime :acp from session config" do
       values = Builders.build_heartbeat_values(minimal_state(config: %{"llm_runtime" => :acp}))

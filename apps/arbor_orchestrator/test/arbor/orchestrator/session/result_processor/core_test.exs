@@ -46,6 +46,59 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor.CoreTest do
       assert :intent in types
       assert :identity in types
     end
+
+    test "promotes session.proposals to :insight entries keyed by kind" do
+      ctx = %{
+        "session.proposals" => [
+          %{
+            "kind" => "fix",
+            "content" => "authorizes_resource?/2 never strips the /** glob before prefix matching"
+          }
+        ]
+      }
+
+      assert [%{type: :insight, content: content, metadata: %{kind: "fix"}}] =
+               Core.generate_heartbeat_proposals(
+                 "agent_1",
+                 %{cognitive_mode: :plan_execution},
+                 ctx
+               )
+
+      assert content =~ "authorizes_resource"
+    end
+
+    test "a non-fix kind is still an :insight — new kinds are data, not code" do
+      ctx = %{
+        "session.proposals" => [
+          %{"kind" => "plan", "content" => "commit the glob strip on a hand/ branch"}
+        ]
+      }
+
+      assert [%{type: :insight, content: content, metadata: %{kind: "plan"}}] =
+               Core.generate_heartbeat_proposals(
+                 "agent_1",
+                 %{cognitive_mode: :plan_execution},
+                 ctx
+               )
+
+      assert content =~ "glob strip"
+    end
+
+    test "legacy session.fix_proposal still promotes as kind fix" do
+      ctx = %{
+        "session.fix_proposal" =>
+          "authorizes_resource?/2 never strips the /** glob before prefix matching"
+      }
+
+      assert [%{type: :insight, content: content, metadata: %{kind: "fix"}}] =
+               Core.generate_heartbeat_proposals(
+                 "agent_1",
+                 %{cognitive_mode: :plan_execution},
+                 ctx
+               )
+
+      assert content =~ "authorizes_resource"
+    end
   end
 
   describe "maybe_add_cognitive_mode_proposal/3" do

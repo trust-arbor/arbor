@@ -18,8 +18,12 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   that could wildcard-match sibling models). When there are zero OAuth
   candidates the snapshot is not read. Catalog membership for arbor OAuth
   routes is composed via `ProviderModelCatalogObservation`; non-arbor OAuth
-  runtimes never borrow catalog evidence or relabel as arbor. Route
-  selection never refreshes credentials or calls
+  runtimes never borrow catalog evidence or relabel as arbor.
+
+  Non-OAuth `:arbor` HTTP routes (API key or keyless) emit
+  `arbor_http_route` observations from the admitted ModelEntry. They do
+  **not** go through ACP readiness — that source is `:acp` runtime only.
+  Route selection never refreshes credentials or calls
   `Arbor.LLM.oauth_model_catalog`.
 
   Injectable `profile`/`clock`/readers are a **test seam only**. Production
@@ -33,6 +37,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   alias Arbor.AI.RouteConcurrency
   alias Arbor.AI.RouteConcurrencyCore
   alias Arbor.AI.Runtime.RouteCatalog
+  alias Arbor.AI.Runtime.HttpRouteObservation
   alias Arbor.AI.Runtime.OAuthHealthObservation
   alias Arbor.AI.Runtime.ProviderModelCatalogObservation
   alias Arbor.AI.Runtime.ProviderRouter
@@ -595,16 +600,20 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
     end
   end
 
-  defp default_observation_reader(providers, decision_time, catalog, opts) do
+  defp default_observation_reader(_providers, decision_time, catalog, opts) do
     with {:ok, route_failures} <- read_route_failures(decision_time),
          {:ok, quota_status} <- read_quota_evidence(decision_time),
          {:ok, concurrency_snap} <- read_concurrency_snapshot() do
       # Exact OAuth candidates first — only then read catalog snapshot evidence.
       # Zero candidates: skip the irrelevant reader. Non-empty: one bounded
       # snapshot, fail-closed on unavailable/malformed.
+      #
+      # Split remaining catalog entries by runtime. `:arbor` HTTP is a local
+      # API/keyless route; ACP readiness is only for `:acp`.
       candidates = oauth_route_candidates(catalog)
-      non_oauth_providers = Enum.reject(providers, &OAuthHealthObservation.oauth_route?/1)
-      planned = length(candidates) + length(non_oauth_providers)
+      http_candidates = arbor_http_candidates(catalog)
+      acp_providers = acp_providers_from_catalog(catalog)
+      planned = length(candidates) + length(http_candidates) + length(acp_providers)
 
       if planned > @max_observations do
         {:error, :invalid_observation}
@@ -614,7 +623,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
           emit_default_observations(
             candidates,
-            non_oauth_providers,
+            http_candidates,
+            acp_providers,
             catalog_snap,
             health_reader,
             route_failures,
@@ -629,7 +639,8 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp emit_default_observations(
          candidates,
-         non_oauth_providers,
+         http_candidates,
+         acp_providers,
          catalog_snap,
          health_reader,
          route_failures,
@@ -662,28 +673,100 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
         {:error, reason}
 
       {:ok, {oauth_attrs, _health_cache}} ->
-        Enum.reduce_while(non_oauth_providers, {:ok, oauth_attrs}, fn provider, {:ok, acc} ->
-          with {:ok, provider_key} <- provider_key(provider),
-               {:ok, base} <- non_oauth_base_observation(provider, decision_time) do
-            failure = Map.get(route_failures, provider_key)
-            quota = Map.get(quota_status, provider_key)
-
-            attrs =
-              base
-              |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
-              |> overlay_route_concurrency(concurrency_snap)
-
-            {:cont, {:ok, [attrs | acc]}}
-          else
-            :error -> {:halt, {:error, :invalid_observation}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-        end)
-        |> case do
-          {:ok, list} -> {:ok, Enum.reverse(list)}
-          error -> error
+        with {:ok, with_http} <-
+               emit_http_observations(
+                 http_candidates,
+                 oauth_attrs,
+                 route_failures,
+                 quota_status,
+                 concurrency_snap,
+                 decision_time
+               ),
+             {:ok, with_acp} <-
+               emit_acp_observations(
+                 acp_providers,
+                 with_http,
+                 route_failures,
+                 quota_status,
+                 concurrency_snap,
+                 decision_time
+               ) do
+          {:ok, Enum.reverse(with_acp)}
         end
     end
+  end
+
+  defp emit_http_observations(
+         http_candidates,
+         acc,
+         route_failures,
+         quota_status,
+         concurrency_snap,
+         decision_time
+       ) do
+    Enum.reduce_while(http_candidates, {:ok, acc}, fn candidate, {:ok, acc} ->
+      case emit_http_candidate(
+             candidate,
+             route_failures,
+             quota_status,
+             concurrency_snap,
+             decision_time
+           ) do
+        {:ok, attrs} -> {:cont, {:ok, [attrs | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp emit_http_candidate(
+         candidate,
+         route_failures,
+         quota_status,
+         concurrency_snap,
+         decision_time
+       ) do
+    with {:ok, base} <- HttpRouteObservation.from_candidate(candidate, decision_time),
+         {:ok, provider_key} <- provider_key(candidate.provider) do
+      failure = Map.get(route_failures, provider_key)
+      quota = Map.get(quota_status, provider_key)
+
+      attrs =
+        base
+        |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
+        |> overlay_route_concurrency(concurrency_snap)
+
+      {:ok, attrs}
+    else
+      :error -> {:error, :invalid_observation}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp emit_acp_observations(
+         acp_providers,
+         acc,
+         route_failures,
+         quota_status,
+         concurrency_snap,
+         decision_time
+       ) do
+    Enum.reduce_while(acp_providers, {:ok, acc}, fn provider, {:ok, acc} ->
+      with {:ok, provider_key} <- provider_key(provider),
+           {:ok, base} <- non_oauth_base_observation(provider, decision_time) do
+        failure = Map.get(route_failures, provider_key)
+        quota = Map.get(quota_status, provider_key)
+
+        attrs =
+          base
+          |> RouteEvidenceOverlay.overlay(failure, quota, decision_time)
+          |> overlay_route_concurrency(concurrency_snap)
+
+        {:cont, {:ok, [attrs | acc]}}
+      else
+        :error -> {:halt, {:error, :invalid_observation}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp emit_oauth_candidate(
@@ -782,6 +865,40 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
   end
 
   defp oauth_route_candidates(_), do: []
+
+  # In-BEAM HTTP routes that are not OAuth. Keyless/API-key providers live here.
+  defp arbor_http_candidates(catalog) when is_list(catalog) do
+    candidates =
+      for %ModelEntry{providers: providers} <- catalog,
+          is_list(providers),
+          %ProviderEntry{} = pe <- providers,
+          not OAuthHealthObservation.oauth_route?(pe.id),
+          runtime <- List.wrap(pe.runtimes),
+          runtime == :arbor do
+        %{
+          provider: Atom.to_string(pe.id),
+          ref: pe.ref,
+          runtime: "arbor",
+          auth: pe.auth
+        }
+      end
+
+    Enum.uniq_by(candidates, &{&1.provider, &1.ref, &1.runtime})
+  end
+
+  defp arbor_http_candidates(_), do: []
+
+  defp acp_providers_from_catalog(catalog) when is_list(catalog) do
+    for %ModelEntry{providers: providers} <- catalog,
+        is_list(providers),
+        %ProviderEntry{} = pe <- providers,
+        :acp in List.wrap(pe.runtimes) do
+      Atom.to_string(pe.id)
+    end
+    |> Enum.uniq()
+  end
+
+  defp acp_providers_from_catalog(_), do: []
 
   defp canonical_oauth_route_order(routes) do
     Enum.filter(["openai_oauth", "xai_oauth"], &(&1 in routes))
@@ -915,7 +1032,7 @@ defmodule Arbor.AI.Runtime.RouteInputAssembler do
 
   defp overlay_route_concurrency(attrs, _snap), do: attrs
 
-  # Non-OAuth readiness only — OAuth rows come from admitted ModelEntry candidates.
+  # ACP runtime only — arbor HTTP uses HttpRouteObservation.
   defp non_oauth_base_observation(provider, decision_time) do
     envelope =
       Arbor.AI.AcpSession.Readiness.Internal.observe(provider, nil,

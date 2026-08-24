@@ -2519,20 +2519,73 @@ defmodule Arbor.Actions do
     child_context = batch_child_context!(context)
 
     Enum.map(List.wrap(action_specs), fn spec ->
-      type = Map.get(spec, "type") || Map.get(spec, :type, "")
-      params = Map.get(spec, "params") || Map.get(spec, :params, %{})
-
       result =
-        case name_to_module(type) do
-          {:ok, module} ->
-            authorize_and_execute(agent_id, module, params, child_context)
-
-          {:error, :unknown_action} ->
-            {:error, {:unknown_action, type}}
+        try do
+          dispatch_batch_spec(spec, agent_id, child_context)
+        rescue
+          e ->
+            {:error, {:action_crashed, Exception.message(e)}}
+        catch
+          :exit, reason ->
+            {:error, {:action_crashed, inspect(reason)}}
         end
 
       {spec, result}
     end)
+  end
+
+  defp dispatch_batch_spec(spec, agent_id, child_context) when is_map(spec) do
+    type = Map.get(spec, "type") || Map.get(spec, :type, "")
+
+    case name_to_module(to_string(type)) do
+      {:ok, module} ->
+        authorize_and_execute(
+          agent_id,
+          module,
+          normalize_batch_params(spec, module),
+          child_context
+        )
+
+      {:error, :unknown_action} ->
+        {:error, {:unknown_action, type}}
+    end
+  end
+
+  defp dispatch_batch_spec(_spec, _agent_id, _child_context), do: {:error, :invalid_action_spec}
+
+  # LLM JSON (ProcessResults) produces string-keyed params. Action run/2 clauses
+  # match atom keys from the Jido schema. Heartbeats then FunctionClauseError'd
+  # inside the batch, SessionMemory.bridge swallowed it to [], and the followup
+  # prompt was the 18-char "No action results."
+  defp normalize_batch_params(spec, module) do
+    nested = Map.get(spec, "params") || Map.get(spec, :params) || %{}
+    nested = if is_map(nested) and not is_struct(nested), do: nested, else: %{}
+
+    lifted =
+      spec
+      |> Map.drop([
+        "type",
+        :type,
+        "params",
+        :params,
+        "name",
+        :name,
+        "reasoning",
+        :reasoning,
+        "description",
+        :description
+      ])
+      |> Map.merge(nested)
+
+    Arbor.Common.SafeAtom.atomize_keys(lifted, batch_schema_keys(module))
+  end
+
+  defp batch_schema_keys(module) do
+    if function_exported?(module, :schema, 0) do
+      Keyword.keys(module.schema())
+    else
+      []
+    end
   end
 
   # Batch-selected children inherit authenticated identity/provenance and the

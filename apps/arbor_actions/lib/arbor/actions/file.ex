@@ -166,29 +166,35 @@ defmodule Arbor.Actions.File do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
-    def run(%{path: path} = params, context) do
-      with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
-           {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read) do
-        Actions.emit_started(__MODULE__, params)
-        encoding = params[:encoding] || :utf8
+    def run(params, context) when is_map(params) do
+      path = params[:path] || params["path"]
+      encoding = params[:encoding] || params["encoding"] || :utf8
 
-        case File.read(safe_path) do
-          {:ok, content} ->
-            content = maybe_decode_content(content, encoding)
+      if is_binary(path) and path != "" do
+        with {:ok, safe_path} <- Arbor.Actions.File.validate_path(path, context),
+             {:ok, safe_path} <- Arbor.Actions.File.authorize_file_op(context, safe_path, :read) do
+          Actions.emit_started(__MODULE__, params)
 
-            result = %{
-              path: safe_path,
-              content: content,
-              size: byte_size(content)
-            }
+          case File.read(safe_path) do
+            {:ok, content} ->
+              content = maybe_decode_content(content, encoding)
 
-            Actions.emit_completed(__MODULE__, %{path: safe_path, size: byte_size(content)})
-            {:ok, result}
+              result = %{
+                path: safe_path,
+                content: content,
+                size: byte_size(content)
+              }
 
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            {:error, "Failed to read file '#{safe_path}': #{format_posix_error(reason)}"}
+              Actions.emit_completed(__MODULE__, %{path: safe_path, size: byte_size(content)})
+              {:ok, result}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, "Failed to read file '#{safe_path}': #{format_posix_error(reason)}"}
+          end
         end
+      else
+        {:error, "File.Read requires a path"}
       end
     end
 

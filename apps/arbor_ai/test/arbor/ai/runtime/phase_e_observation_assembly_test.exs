@@ -85,6 +85,30 @@ defmodule Arbor.AI.Runtime.PhaseEObservationAssemblyTest do
     assert obs.requested_model_id == "m1"
   end
 
+  test "arbor HTTP keyless route is arbor_http_route, never ACP readiness" do
+    model = model_entry("x-preview-f-free", :opencode_zen, :arbor)
+
+    assert {:ok, input} =
+             RouteInputAssembler.assemble(
+               profile: enabled_profile([model]),
+               clock: fn -> @now end,
+               budget_reader: fn providers, dt ->
+                 {:ok, Enum.map(providers, &budget(&1, dt))}
+               end
+             )
+
+    obs = hd(input.observations)
+    assert obs.provider == "opencode_zen"
+    assert obs.source == "arbor_http_route"
+    refute obs.source == "acp_provider_readiness"
+    refute obs.source == "arbor_oauth_health"
+    assert obs.runtime == "arbor"
+    assert obs.requested_model_id == "x-preview-f-free"
+    assert obs.model_catalog_membership == "present"
+    assert obs.availability == "available"
+    assert ProviderObservation.valid?(obs)
+  end
+
   test "non-OAuth default reader produces bounded acp_provider_readiness envelope" do
     # Production default observation_reader — no injected observation evidence.
     # Use a known registered ACP provider (grok); readiness returns a bounded

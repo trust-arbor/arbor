@@ -11,29 +11,29 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   # ── Session state accessors (contract-aware) ──────────────────────
 
   def get_messages(%{session_state: %{messages: msgs}} = _state) when is_list(msgs), do: msgs
-  def get_messages(state), do: state.messages
+  def get_messages(state), do: Map.get(state, :messages, [])
 
   def get_turn_count(%{session_state: %{turn_count: tc}} = _state)
       when is_integer(tc),
       do: tc
 
-  def get_turn_count(state), do: state.turn_count
+  def get_turn_count(state), do: Map.get(state, :turn_count, 0)
 
   def get_working_memory(%{session_state: %{working_memory: wm}} = _state) when is_map(wm),
     do: wm
 
-  def get_working_memory(state), do: state.working_memory
+  def get_working_memory(state), do: Map.get(state, :working_memory, %{})
 
   def get_goals(%{session_state: %{goals: goals}} = _state) when is_list(goals), do: goals
-  def get_goals(state), do: state.goals
+  def get_goals(state), do: Map.get(state, :goals, [])
 
   def get_cognitive_mode(%{session_state: %{cognitive_mode: cm}} = _state) when is_atom(cm),
     do: cm
 
-  def get_cognitive_mode(state), do: state.cognitive_mode
+  def get_cognitive_mode(state), do: Map.get(state, :cognitive_mode, :reflection)
 
   def get_phase(%{session_state: %{phase: phase}} = _state) when is_atom(phase), do: phase
-  def get_phase(state), do: state.phase
+  def get_phase(state), do: Map.get(state, :phase, :idle)
 
   # ── Compactor construction ───────────────────────────────────────
 
@@ -74,14 +74,14 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
       "session.goals" => get_goals(state),
       "session.cognitive_mode" => to_string(get_cognitive_mode(state)),
       "session.phase" => to_string(get_phase(state)),
-      "session.session_type" => to_string(state.session_type),
-      "session.trace_id" => state.trace_id,
-      "session.config" => state.config,
-      "session.signal_topic" => state.signal_topic
+      "session.session_type" => to_string(Map.get(state, :session_type, :primary)),
+      "session.trace_id" => Map.get(state, :trace_id),
+      "session.config" => Map.get(state, :config, %{}),
+      "session.signal_topic" => Map.get(state, :signal_topic)
     }
 
     # Inject LLM config from session config so compute nodes can read them
-    config = state.config || %{}
+    config = Map.get(state, :config) || %{}
 
     base
     |> maybe_put("session.llm_provider", config["llm_provider"] || config[:llm_provider])
@@ -122,7 +122,7 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
       "session.provider_options",
       config["provider_options"] || config[:provider_options]
     )
-    |> maybe_put("session.tenant_context", state.tenant_context)
+    |> maybe_put("session.tenant_context", Map.get(state, :tenant_context))
   end
 
   @doc false

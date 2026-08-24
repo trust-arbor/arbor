@@ -30,6 +30,33 @@ defmodule Arbor.Orchestrator.Session.ContextBuilderRuntimeTest do
     }
   end
 
+  # The production HeartbeatService used to pass only these keys. session_base_values
+  # KeyError'd on :session_type/:turn_count/etc., HeartbeatService rescued to %{},
+  # and every beat ran with no goals or system prompt.
+  defp heartbeat_service_session_like do
+    %{
+      agent_id: "agent_test_heartbeat",
+      signer: nil,
+      signing_authority: nil,
+      session_id: "heartbeat:agent_test_heartbeat",
+      adapters: %{},
+      config: %{"stream" => false, "system_prompt" => "fix the glob"},
+      pid: nil
+    }
+  end
+
+  describe "session_base_values/1 — HeartbeatService session-like map" do
+    test "does not raise, and projects agent id plus session config" do
+      values = ContextBuilder.session_base_values(heartbeat_service_session_like())
+
+      assert values["session.agent_id"] == "agent_test_heartbeat"
+      assert values["session.session_id"] == "heartbeat:agent_test_heartbeat"
+      assert values["session.goals"] == []
+      assert values["session.turn_count"] == 0
+      assert values["session.system_prompt"] == "fix the glob"
+    end
+  end
+
   describe "session_base_values/1 — runtime axis (Phase 2d)" do
     test "defaults llm_runtime to :arbor when not set in config" do
       values = ContextBuilder.session_base_values(minimal_state())

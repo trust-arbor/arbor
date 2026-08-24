@@ -14,6 +14,18 @@ defmodule Arbor.Actions.FileTest do
       assert result.size == 13
     end
 
+    test "accepts JSON string keys from ProcessResults / execute_batch", %{tmp_dir: tmp_dir} do
+      path = create_file(tmp_dir, "json.txt", "from json")
+
+      assert {:ok, result} = FileActions.Read.run(%{"path" => path}, %{})
+      assert result.content == "from json"
+    end
+
+    test "returns an error instead of FunctionClauseError when path is missing" do
+      assert {:error, message} = FileActions.Read.run(%{}, %{})
+      assert message =~ "requires a path"
+    end
+
     test "returns error for non-existent file" do
       assert {:error, message} = FileActions.Read.run(%{path: "/nonexistent_file_12345.txt"}, %{})
       assert message =~ "file not found"

@@ -139,6 +139,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_disabled_reason: nil,
       heartbeat_last_error: nil,
       heartbeat_last_completed_at: nil,
+      heartbeat_last_result: nil,
+      # Session LLM/system-prompt config. HeartbeatService is a sibling of
+      # Session, not a reader of Session state; Lifecycle copies this at start.
+      session_config: Keyword.get(opts, :config, %{}) || %{},
+      tenant_context: Keyword.get(opts, :tenant_context),
       engine_runner: Keyword.get(opts, :engine_runner, &Engine.run/2),
       orchestrator_authorizer:
         Keyword.get(
@@ -281,7 +286,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   defp handle_heartbeat_success(state, result) do
     completed = Map.get(result.context, "__completed_nodes__", [])
-    llm_content = Map.get(result.context, "llm.content")
+    llm_content = heartbeat_llm_content(result)
 
     Logger.info(
       "[HeartbeatService] Heartbeat completed for #{state.agent_id}: " <>
@@ -299,7 +304,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
        | heartbeat_in_flight: false,
          heartbeat_failures: 0,
          heartbeat_last_error: nil,
-         heartbeat_last_completed_at: DateTime.utc_now()
+         heartbeat_last_completed_at: DateTime.utc_now(),
+         heartbeat_last_result: result
      }}
   end
 
@@ -510,23 +516,25 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp build_heartbeat_values(state) do
     if Code.ensure_loaded?(Arbor.Orchestrator.Session.Builders) do
       try do
-        # Builders.build_heartbeat_values expects a Session-like state map.
-        # We provide the minimal subset it needs.
-        session_like = %{
-          agent_id: state.agent_id,
-          signer: state.signer,
-          signing_authority: state.signing_authority,
-          session_id: "heartbeat:#{state.agent_id}",
-          adapters: %{},
-          config: %{"stream" => false},
-          pid: nil
-        }
-
-        apply(Arbor.Orchestrator.Session.Builders, :build_heartbeat_values, [session_like])
+        apply(Arbor.Orchestrator.Session.Builders, :build_heartbeat_values, [
+          session_projection(state)
+        ])
       rescue
-        _ -> %{}
+        e ->
+          Logger.warning(
+            "[HeartbeatService] build_heartbeat_values failed for #{state.agent_id}: " <>
+              Exception.message(e)
+          )
+
+          %{}
       catch
-        :exit, _ -> %{}
+        kind, reason ->
+          Logger.warning(
+            "[HeartbeatService] build_heartbeat_values failed for #{state.agent_id}: " <>
+              inspect({kind, reason})
+          )
+
+          %{}
       end
     else
       %{}
@@ -536,31 +544,75 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp build_engine_opts(state, values) do
     if Code.ensure_loaded?(Arbor.Orchestrator.Session.Builders) do
       try do
-        session_like = %{
-          agent_id: state.agent_id,
-          signer: state.signer,
-          signing_authority: state.signing_authority,
-          session_id: "heartbeat:#{state.agent_id}",
-          adapters: %{},
-          config: %{"stream" => false},
-          pid: nil
-        }
-
         apply(Arbor.Orchestrator.Session.Builders, :build_engine_opts, [
-          session_like,
+          session_projection(state),
           values,
           [source: :heartbeat]
         ])
         |> Keyword.put(:spawning_pid, self())
       rescue
-        _ -> default_engine_opts(state)
+        e ->
+          Logger.warning(
+            "[HeartbeatService] build_engine_opts failed for #{state.agent_id}: " <>
+              Exception.message(e)
+          )
+
+          default_engine_opts(state)
       catch
-        :exit, _ -> default_engine_opts(state)
+        kind, reason ->
+          Logger.warning(
+            "[HeartbeatService] build_engine_opts failed for #{state.agent_id}: " <>
+              inspect({kind, reason})
+          )
+
+          default_engine_opts(state)
       end
     else
       default_engine_opts(state)
     end
   end
+
+  # Session.Builders / ResultProcessor expect a Session-shaped map. HeartbeatService
+  # is a sibling, not Session, so project the fields those functions actually read.
+  # A too-thin map used to KeyError in session_base_values, get rescued to %{}, and
+  # every heartbeat ran with no goals/prompt context — LlmHandler still answered,
+  # HeartbeatService logged content=nil because it read the dead-letter `llm.content`.
+  defp session_projection(state) do
+    config =
+      (Map.get(state, :session_config) || %{})
+      |> Map.put("stream", false)
+
+    %{
+      agent_id: state.agent_id,
+      session_id: "heartbeat:#{state.agent_id}",
+      signer: state.signer,
+      signing_authority: state.signing_authority,
+      adapters: %{},
+      config: config,
+      pid: nil,
+      tenant_context: Map.get(state, :tenant_context),
+      session_type: :primary,
+      trace_id: nil,
+      signal_topic: "heartbeat:#{state.agent_id}",
+      turn_count: 0,
+      working_memory: %{},
+      goals: [],
+      cognitive_mode: :reflection,
+      phase: :idle,
+      messages: [],
+      compactor: nil,
+      discovered_tools: MapSet.new()
+    }
+  end
+
+  # LlmHandler writes `last_response`. `llm.content` is a retired alias kept only
+  # as fallback (see Session.Persistence heartbeat entry).
+  @doc false
+  def heartbeat_llm_content(%{context: ctx}) when is_map(ctx) do
+    Map.get(ctx, "last_response") || Map.get(ctx, "llm.content")
+  end
+
+  def heartbeat_llm_content(_), do: nil
 
   defp default_engine_opts(state) do
     [
@@ -577,15 +629,26 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp apply_heartbeat_result(state, result) do
     if Code.ensure_loaded?(Arbor.Orchestrator.Session.Builders) do
       try do
-        session_like = %{
-          agent_id: state.agent_id
-        }
-
-        apply(Arbor.Orchestrator.Session.Builders, :apply_heartbeat_result, [session_like, result])
+        apply(Arbor.Orchestrator.Session.Builders, :apply_heartbeat_result, [
+          session_projection(state),
+          result
+        ])
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[HeartbeatService] apply_heartbeat_result failed for #{state.agent_id}: " <>
+              Exception.message(e)
+          )
+
+          :ok
       catch
-        :exit, _ -> :ok
+        kind, reason ->
+          Logger.warning(
+            "[HeartbeatService] apply_heartbeat_result failed for #{state.agent_id}: " <>
+              inspect({kind, reason})
+          )
+
+          :ok
       end
     end
 
@@ -719,12 +782,26 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp emit_heartbeat_completed_signal(state, result) do
     if Code.ensure_loaded?(Arbor.Orchestrator.Session.Builders) do
       try do
-        session_like = %{agent_id: state.agent_id}
-        apply(Arbor.Orchestrator.Session.Builders, :emit_heartbeat_signal, [session_like, result])
+        apply(Arbor.Orchestrator.Session.Builders, :emit_heartbeat_signal, [
+          session_projection(state),
+          result
+        ])
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[HeartbeatService] heartbeat_complete emit failed for #{state.agent_id}: " <>
+              Exception.message(e)
+          )
+
+          :ok
       catch
-        :exit, _ -> :ok
+        kind, reason ->
+          Logger.warning(
+            "[HeartbeatService] heartbeat_complete emit failed for #{state.agent_id}: " <>
+              inspect({kind, reason})
+          )
+
+          :ok
       end
     end
   end

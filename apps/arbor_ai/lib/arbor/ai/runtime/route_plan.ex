@@ -42,6 +42,8 @@ defmodule Arbor.AI.Runtime.RoutePlan do
           | :unsupported_route_params
           | :route_decision_failed
 
+  require Logger
+
   @doc """
   Decide and map an executable primary route plus ordered fallbacks.
 
@@ -58,7 +60,8 @@ defmodule Arbor.AI.Runtime.RoutePlan do
       {:error, {:invalid_route_input, _reason}} ->
         {:error, :invalid_route_input}
 
-      {:error, {:no_eligible_routes, _summary}} ->
+      {:error, {:no_eligible_routes, summary}} ->
+        Logger.warning("[RoutePlan] no_eligible_routes #{inspect(summary)}")
         {:error, :no_eligible_routes}
 
       {:error, reason}

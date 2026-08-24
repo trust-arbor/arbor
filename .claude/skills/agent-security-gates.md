@@ -646,6 +646,15 @@ another one. It doubles as user documentation — anyone standing up agents need
   `allow_opencode_zen_egress: true` deliberately, show the disclosure, and do
   not send a credential. Do not spoof `User-Agent: opencode/latest` to unlock
   UA-gated models.
+- **Eval probe pins are per-principal, not Application env.** Heartbeat
+  workers do not inherit Mix-task process dictionary, so
+  `with_probe_models/2` never reaches `admit_model/2` on that path. Pinning
+  via `:eval_opencode_zen_probe_ids` admitted the model for every other
+  agent in the same BEAM (including Bootstrap/Reconciler auto-starts).
+  `TaskEval` registers probe ids against the eval `agent_id`; `admit_model/2`
+  looks them up only when dispatch opts carry that principal from
+  `RunAuthorization`. Unregister on teardown. This is measurement, not an
+  `admission.json` write (found 2026-08-23 closing the Codex leftover).
 
 ## Applied Learning: Security Gates
 
