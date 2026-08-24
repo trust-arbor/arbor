@@ -589,6 +589,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     drop_security_dormant_nodes(graph)
   end
 
+  defp rewrite_profile_flow(graph, %Plan{validation_profile: "contract_change"}) do
+    drop_security_dormant_nodes(graph)
+  end
+
   defp rewrite_profile_flow(
          graph,
          %Plan{validation_profile: "security_regression"} = plan
@@ -1261,6 +1265,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     do: rewrite_review_route(graph, "binding", "default")
 
   defp rewrite_review_route(graph, "human_required", "cross_app"),
+    do: rewrite_review_route(graph, "human_required", "default")
+
+  # contract_change keeps default review-route semantics (does not weaken review).
+  defp rewrite_review_route(graph, "none", "contract_change"),
+    do: rewrite_review_route(graph, "none", "default")
+
+  defp rewrite_review_route(graph, "binding", "contract_change"),
+    do: rewrite_review_route(graph, "binding", "default")
+
+  defp rewrite_review_route(graph, "human_required", "contract_change"),
     do: rewrite_review_route(graph, "human_required", "default")
 
   defp rewrite_review_route(_graph, "none", "security_regression"),

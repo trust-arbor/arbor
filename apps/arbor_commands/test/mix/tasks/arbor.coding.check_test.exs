@@ -337,7 +337,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
   end
 
   test "all verification profiles preserve reports and gate order in JSON and human modes" do
-    for profile <- ~w[default cross_app security_regression] do
+    for profile <- ~w[default cross_app security_regression contract_change] do
       path = write_plan!(Plan.to_map(valid_plan!(profile)))
       on_exit(fn -> File.rm(path) end)
       expected = verification_report(profile)
@@ -691,6 +691,11 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
   end
 
   defp valid_plan!(profile \\ "default", wall_clock_ms \\ 900_000) do
+    checkpoint_policy =
+      if Plan.design_checkpoint_required?("default", profile),
+        do: "design_required",
+        else: "direct"
+
     work_packet = %{
       "version" => 1,
       "success_criteria" => ["verification command reports canonical status"],
@@ -700,7 +705,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
         "apps/arbor_commands/lib/mix/tasks/arbor.coding.check.ex"
       ],
       "required_evidence" => ["verification report"],
-      "checkpoint_policy" => "direct"
+      "checkpoint_policy" => checkpoint_policy
     }
 
     {:ok, work_packet_digest} = WorkPacket.digest(work_packet)
@@ -797,6 +802,13 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
       "coding.validation.security_regression.attestation",
       "coding.validation.security_regression.candidate",
       "coding.validation.security_regression.base"
+    ]
+  end
+
+  defp expected_gate_ids("contract_change") do
+    [
+      "coding.validation.contract_change.preflight",
+      "coding.validation.contract_change.tests"
     ]
   end
 

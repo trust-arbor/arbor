@@ -51,6 +51,27 @@ defmodule Arbor.Orchestrator.ActionsExecutorSchemaWorkdirInjectionTest do
       refute Map.has_key?(params, "cwd")
     end
 
+    test "strict ContractChange.Validate (neither key) receives neither injected key", %{
+      workdir: workdir
+    } do
+      {module, params} =
+        capture_invocation(
+          "coding_contract_change_validate",
+          %{"workspace_id" => "ws_test"},
+          workdir
+        )
+
+      assert module == Arbor.Actions.Coding.ContractChange.Validate
+
+      assert Map.get(params, :workspace_id) == "ws_test" or
+               Map.get(params, "workspace_id") == "ws_test"
+
+      refute Map.has_key?(params, :workdir)
+      refute Map.has_key?(params, "workdir")
+      refute Map.has_key?(params, :cwd)
+      refute Map.has_key?(params, "cwd")
+    end
+
     test "strict SecurityRegression.Validate (neither key) receives neither injected key", %{
       workdir: workdir
     } do

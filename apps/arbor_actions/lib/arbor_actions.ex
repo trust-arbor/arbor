@@ -988,6 +988,33 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.SecurityRegression.Core.maximum_stage_timeout()
   end
 
+  @doc """
+  Reviewed hard maximum for a contract-change per-child Mix timeout in
+  milliseconds.
+
+  Bound to the intensive Shell spawn-capable ceiling. Coding-plan profiles bind
+  plan wall-clock against this Actions-owned value when compiling `param.timeout`.
+  """
+  @spec contract_change_maximum_timeout_ms() :: pos_integer()
+  def contract_change_maximum_timeout_ms do
+    Arbor.Actions.Coding.ContractChange.Core.maximum_timeout()
+  end
+
+  @doc """
+  Reviewed hard maximum for the contract-change whole-validation stage budget
+  in milliseconds.
+
+  Derived as exactly two sequential intensive child ceilings (preflight then
+  exact-file contract tests). Coding-plan profiles bind plan wall-clock against
+  this Actions-owned value when compiling `param.stage_timeout`; callers must
+  not import `Arbor.Actions.Coding.ContractChange.Core` directly or restate the
+  product.
+  """
+  @spec contract_change_maximum_stage_timeout_ms() :: pos_integer()
+  def contract_change_maximum_stage_timeout_ms do
+    Arbor.Actions.Coding.ContractChange.Core.maximum_stage_timeout()
+  end
+
   @approval_payload_keys [
     :content,
     "content",
@@ -2133,6 +2160,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.ReviewedValidation,
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
+        Arbor.Actions.Coding.ContractChange.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
         Arbor.Actions.Coding.DependencyBaselineAdmission,
@@ -3272,6 +3300,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
+    Arbor.Actions.Coding.ContractChange.Validate =>
+      "arbor://action/coding/contract_change/validate",
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
     Arbor.Actions.Coding.DependencyBaselineAdmission =>

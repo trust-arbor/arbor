@@ -1,8 +1,15 @@
 defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Actions.Coding.ContractChange.Core
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
-  alias Arbor.Orchestrator.CodingPlan.{CandidateVerificationCore, Profiles, ValidationProgram}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    CandidateVerificationCore,
+    Profiles,
+    ValidationCapacityTerminal,
+    ValidationProgram
+  }
 
   @moduletag :fast
 
@@ -26,6 +33,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       "coding.validation.security_regression.attestation",
       "coding.validation.security_regression.candidate",
       "coding.validation.security_regression.base"
+    ],
+    "contract_change" => [
+      "coding.validation.contract_change.preflight",
+      "coding.validation.contract_change.tests"
     ]
   }
 
@@ -33,7 +44,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     for {profile, result} <- [
           {"default", default_result()},
           {"cross_app", cross_result()},
-          {"security_regression", security_result("security_regression_validated")}
+          {"security_regression", security_result("security_regression_validated")},
+          {"contract_change", contract_result()}
         ] do
       assert {:ok, report} = verify(profile, result)
       assert report["version"] == 1
@@ -57,7 +69,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       {"cross_app", cross_failure(:test), "tests_failed"},
       {"security_regression", security_result("candidate_tests_failed"),
        "candidate_tests_failed"},
-      {"security_regression", security_result("base_tests_passed"), "base_tests_passed"}
+      {"security_regression", security_result("base_tests_passed"), "base_tests_passed"},
+      {"contract_change", contract_failure(:preflight), "preflight_failed"},
+      {"contract_change", contract_failure(:test), "tests_failed"},
+      {"contract_change", contract_surface_missing_result(), "contract_surface_missing"}
     ]
 
     for {profile, result, failure_code} <- cases do
@@ -89,6 +104,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       {"default", default_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_capacity_result(), "validation_capacity_exceeded"},
       {"cross_app", cross_timeout_result(), "tests_timed_out"},
+      {"contract_change", contract_capacity_result(:test), "validation_capacity_exceeded"},
+      {"contract_change", contract_capacity_result(:preflight), "validation_capacity_exceeded"},
       {"security_regression", security_result("validation_capacity_exceeded"),
        "validation_capacity_exceeded"},
       {"security_regression", security_result("candidate_setup_failed"),
@@ -206,6 +223,398 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert "validation_evidence_invalid" in Enum.map(missing_excerpt["diagnostics"], & &1["code"])
   end
 
+  test "contract_change timeout and one-handoff capacity evidence is blocked" do
+    assert_invalid_evidence("contract_change", contract_timeout_result())
+
+    assert {:ok, test_capacity} = verify("contract_change", contract_capacity_result(:test))
+    assert test_capacity["status"] == "blocked"
+
+    assert "validation_capacity_exceeded" in Enum.map(test_capacity["diagnostics"], & &1["code"])
+
+    assert {:ok, preflight_capacity} =
+             verify("contract_change", contract_capacity_result(:preflight))
+
+    assert preflight_capacity["status"] == "blocked"
+
+    both = contract_capacity_result(:test)
+
+    both =
+      Map.put(
+        both,
+        :preflight,
+        Map.put(both.preflight, "capacity_handoff", contract_capacity_handoff(:preflight))
+      )
+
+    assert_invalid_evidence("contract_change", both)
+  end
+
+  test "security regression: contract_change rejects preflight_timed_out and tests_timed_out speculative forms" do
+    assert_invalid_evidence("contract_change", contract_timeout_result())
+    assert_invalid_evidence("contract_change", contract_preflight_timeout_result())
+  end
+
+  test "security regression: ContractChange and default Mix.Compile containment producers match terminal admission" do
+    assert {:ok, default_report} = verify("default", default_containment_result())
+    assert default_report["status"] == "blocked"
+
+    assert "validation_containment_failure" in Enum.map(
+             default_report["diagnostics"],
+             & &1["code"]
+           )
+
+    default_terminal = %{
+      "status" => "validation_failed",
+      "canonical_status" => "validation_failed",
+      "validation" => [
+        %{
+          "reason" => "validation_containment_failure",
+          "passed" => false,
+          "exit_code" => 0,
+          "termination" => containment_termination()
+        }
+      ]
+    }
+
+    assert {:ok, normalized_default} =
+             ValidationCapacityTerminal.normalize_result(default_terminal, :terminal)
+
+    assert :ok = ValidationCapacityTerminal.validate_consistency(normalized_default, :terminal)
+
+    {:ok, check} =
+      Core.check_from_projection(
+        Core.feedback_from_result(%{exit_code: 0, stdout: "ok", stderr: ""}),
+        %{
+          exit_code: 0,
+          passed: false,
+          reason: "validation_containment_failure",
+          termination: containment_termination()
+        },
+        :preflight,
+        %{
+          completed: [],
+          current: Core.preflight_batch(Core.inventory_sha256(Core.preflight_argv())),
+          unstarted: [
+            Core.tests_batch(
+              1,
+              Core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+            )
+          ],
+          per_batch_budget_ms: 10_000
+        }
+      )
+
+    evidence =
+      Core.show(%{
+        changed_files: ["apps/arbor_kernel/lib/arbor/contracts/foo.ex"],
+        test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+        checks: %{
+          preflight: check,
+          test: Core.skipped_check("validation_containment_failure")
+        },
+        base_commit: @base_oid
+      })
+
+    cv_result =
+      Map.merge(evidence, %{
+        validated_tree_oid: @sha1,
+        validated_head: @candidate_commit,
+        feedback_json: "ignored feedback json"
+      })
+
+    assert {:ok, contract_report} = verify("contract_change", cv_result)
+    assert contract_report["status"] == "blocked"
+
+    assert "validation_containment_failure" in Enum.map(
+             contract_report["diagnostics"],
+             & &1["code"]
+           )
+
+    contract_terminal = %{
+      "status" => "validation_failed",
+      "canonical_status" => "validation_failed",
+      "validation" => [
+        %{
+          "passed" => evidence.passed,
+          "reason" => evidence.reason,
+          "preflight" => evidence.preflight,
+          "test" => evidence.test
+        }
+      ]
+    }
+
+    assert {:ok, normalized_contract} =
+             ValidationCapacityTerminal.normalize_result(contract_terminal, :terminal)
+
+    assert :ok =
+             ValidationCapacityTerminal.validate_consistency(normalized_contract, :terminal)
+  end
+
+  test "security regression: contract_change contradictory containment envelopes are invalid evidence" do
+    report_passed = Map.put(contract_containment_result(:preflight), :passed, true)
+    assert_invalid_evidence("contract_change", report_passed)
+  end
+
+  test "contract_change exit-zero containment is blocked with a five-key envelope" do
+    result = contract_containment_result(:preflight)
+    assert result.preflight["exit_code"] == 0
+    assert result.preflight["termination"]["containment_failure"] == true
+
+    assert {:ok, report} = verify("contract_change", result)
+    assert report["status"] == "blocked"
+    assert "validation_containment_failure" in Enum.map(report["diagnostics"], & &1["code"])
+    refute "validation_capacity_exceeded" in Enum.map(report["diagnostics"], & &1["code"])
+
+    four_key =
+      put_in(result.preflight["termination"], %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      })
+
+    assert_invalid_evidence("contract_change", four_key)
+
+    false_flag =
+      put_in(result.preflight["termination"]["containment_failure"], false)
+
+    assert_invalid_evidence("contract_change", false_flag)
+  end
+
+  test "contract_change interrupted capacity is blocked and forged extras fail closed" do
+    assert {:ok, preflight} =
+             verify("contract_change", contract_interrupted_capacity_result(:preflight))
+
+    assert preflight["status"] == "blocked"
+    assert "validation_capacity_exceeded" in Enum.map(preflight["diagnostics"], & &1["code"])
+
+    assert {:ok, tests} = verify("contract_change", contract_interrupted_capacity_result(:test))
+    assert tests["status"] == "blocked"
+    assert "validation_capacity_exceeded" in Enum.map(tests["diagnostics"], & &1["code"])
+
+    mixed = contract_containment_result(:preflight)
+
+    mixed =
+      put_in(
+        mixed.preflight["capacity_handoff"],
+        contract_capacity_handoff(:preflight)
+      )
+
+    assert_invalid_evidence("contract_change", mixed)
+
+    passed_with_extra =
+      contract_result()
+      |> Map.put(:preflight, Map.put(cross_check(), "termination", containment_termination()))
+
+    assert_invalid_evidence("contract_change", passed_with_extra)
+
+    for version <- [1, 2] do
+      historical = contract_capacity_result(:test)
+
+      historical =
+        put_in(historical.test["capacity_handoff"], historical_capacity_handoff(version))
+
+      assert_invalid_evidence("contract_change", historical)
+    end
+  end
+
+  test "security regression: contract_change contradictory capacity envelopes are invalid evidence" do
+    report_passed = Map.put(contract_capacity_result(:preflight), :passed, true)
+    assert_invalid_evidence("contract_change", report_passed)
+
+    check_passed =
+      contract_capacity_result(:preflight)
+      |> put_in([:preflight, "passed"], true)
+
+    assert_invalid_evidence("contract_change", check_passed)
+
+    test_passed =
+      contract_capacity_result(:test)
+      |> put_in([:test, "passed"], true)
+
+    assert_invalid_evidence("contract_change", test_passed)
+
+    skipped_exit =
+      contract_capacity_result(:preflight)
+      |> put_in([:test, "exit_code"], 0)
+
+    assert_invalid_evidence("contract_change", skipped_exit)
+
+    paths =
+      Enum.map(1..80, fn i ->
+        n = String.pad_leading(Integer.to_string(i), 3, "0")
+        "apps/arbor_kernel/test/arbor/contracts/file_#{n}_test.exs"
+      end)
+
+    wide = Map.put(contract_capacity_result(:test), :test_paths, paths)
+    assert {:ok, report} = verify("contract_change", wide)
+    assert report["status"] == "blocked"
+    assert "validation_capacity_exceeded" in Enum.map(report["diagnostics"], & &1["code"])
+
+    wide_pass = Map.put(contract_result(), :test_paths, paths)
+    assert {:ok, passed} = verify("contract_change", wide_pass)
+    assert passed["status"] == "passed"
+  end
+
+  test "security regression: producer-valid max ContractChange inventories remain consumer-valid under the 1 MiB feedback ceiling" do
+    # Parent b2a6fc8df326945881891e5162edd7cc94cbc5e5 copies Core.show/1 inventories
+    # into feedback_json, so a 2,000×1,024 + 256×1,024 producer-valid result exceeds
+    # CandidateVerificationCore's 1 MiB ceiling and adapt_contract_change/1 yields
+    # validation_evidence_invalid. Checkpoint e7ea50333f4405802005696aaaa9ead2d68ad4c6
+    # already projects that feedback_json, but still fails here: evidence_ref/1 encodes
+    # the raw inventories and exceeds the 256,000-byte canonical evidence ceiling.
+    # This candidate closes the second boundary with compact inventory summaries.
+    files = Enum.map(1..2_000, &max_contract_changed_path/1)
+    tests = Enum.map(1..256, &max_contract_test_path/1)
+    assert byte_size(hd(files)) == 1_024
+    assert byte_size(hd(tests)) == 1_024
+
+    assert {:ok, inventories} = Core.admit_transport_inventories(files, tests)
+    passed_check = Core.completed_check(%{"passed" => true, "exit_code" => 0})
+
+    evidence =
+      Core.show(%{
+        changed_files: inventories.changed_files,
+        test_paths: inventories.test_paths,
+        checks: %{preflight: passed_check, test: passed_check},
+        base_commit: @base_oid
+      })
+      |> Map.put(:validated_tree_oid, @sha1)
+      |> Map.put(:validated_head, @candidate_commit)
+
+    assert evidence.changed_files == inventories.changed_files
+    assert evidence.test_paths == inventories.test_paths
+    assert {:ok, projection} = Core.feedback_projection(evidence)
+    json = Jason.encode!(projection)
+    assert byte_size(json) <= 1_048_576
+
+    result = Map.put(evidence, :feedback_json, json)
+    assert {:ok, report} = verify("contract_change", result)
+    assert report["status"] == "passed", inspect(report)
+    assert String.match?(report["evidence_ref"], ~r/\Asha256:[0-9a-f]{64}\z/)
+  end
+
+  test "adapter-maximal inventories bind evidence_ref under the 256,000-byte canonical ceiling" do
+    contract_files = Enum.map(1..2_000, &max_contract_changed_path/1)
+    contract_tests = Enum.map(1..2_000, &max_contract_test_path/1)
+    assert byte_size(hd(contract_files)) == 1_024
+    assert byte_size(List.last(contract_files)) == 1_024
+    assert byte_size(hd(contract_tests)) == 1_024
+    assert length(contract_files) == 2_000
+    assert length(contract_tests) == 2_000
+
+    contract = %{
+      contract_result()
+      | changed_files: contract_files,
+        test_paths: contract_tests
+    }
+
+    cross_files = Enum.map(1..2_000, &max_contract_changed_path/1)
+    cross_apps = Enum.map(1..256, &max_cross_app_id/1)
+    cross_tests = Enum.map(1..256, &max_contract_test_path/1)
+    assert byte_size(hd(cross_apps)) == 64
+    assert byte_size(hd(cross_tests)) == 1_024
+
+    cross = %{
+      cross_result()
+      | changed_files: cross_files,
+        changed_apps: cross_apps,
+        affected_apps: cross_apps,
+        test_paths: cross_tests
+    }
+
+    security_paths = Enum.map(1..256, &max_security_test_path/1)
+    assert byte_size(hd(security_paths)) == 1_024
+
+    security =
+      put_security_tests(security_result("security_regression_validated"), security_paths)
+
+    for {profile, result} <- [
+          {"contract_change", contract},
+          {"cross_app", cross},
+          {"security_regression", security}
+        ] do
+      assert {:ok, report} = verify(profile, result)
+      assert report["status"] == "passed", inspect(report)
+      assert String.match?(report["evidence_ref"], ~r/\Asha256:[0-9a-f]{64}\z/)
+
+      assert {:ok, string_report} = verify(profile, stringify_json(result))
+      assert string_report == report
+    end
+  end
+
+  test "one-entry inventory change changes evidence_ref" do
+    contract_files = Enum.map(1..2_000, &max_contract_changed_path/1)
+    contract_tests = Enum.map(1..2_000, &max_contract_test_path/1)
+
+    contract = %{
+      contract_result()
+      | changed_files: contract_files,
+        test_paths: contract_tests
+    }
+
+    flipped_contract_files =
+      List.replace_at(contract_files, -1, flip_padded_byte(List.last(contract_files)))
+
+    flipped_contract = %{contract | changed_files: flipped_contract_files}
+
+    assert_evidence_changes("contract_change", contract, [flipped_contract])
+
+    cross_files = Enum.map(1..2_000, &max_contract_changed_path/1)
+    cross_apps = Enum.map(1..256, &max_cross_app_id/1)
+    cross_tests = Enum.map(1..256, &max_contract_test_path/1)
+
+    cross = %{
+      cross_result()
+      | changed_files: cross_files,
+        changed_apps: cross_apps,
+        affected_apps: cross_apps,
+        test_paths: cross_tests
+    }
+
+    flipped_cross_files =
+      List.replace_at(cross_files, -1, flip_padded_byte(List.last(cross_files)))
+
+    flipped_cross = %{cross | changed_files: flipped_cross_files}
+
+    assert_evidence_changes("cross_app", cross, [flipped_cross])
+
+    security_paths = Enum.map(1..256, &max_security_test_path/1)
+
+    security =
+      put_security_tests(security_result("security_regression_validated"), security_paths)
+
+    flipped_security =
+      security
+      |> Map.update!(:attested_selected_tests, fn tests ->
+        List.update_at(tests, -1, &Map.put(&1, :blob_sha256, @digest))
+      end)
+      |> Map.update!(:source_hashes, fn hashes ->
+        List.update_at(hashes, -1, &Map.put(&1, :sha256, @digest))
+      end)
+
+    assert_evidence_changes("security_regression", security, [flipped_security])
+  end
+
+  test "contract_change rejects a valid handoff attached to the wrong stage" do
+    swapped =
+      contract_interrupted_capacity_result(:test)
+      |> put_in([:test, "capacity_handoff"], contract_interrupted_handoff(:preflight))
+
+    assert_invalid_evidence("contract_change", swapped)
+
+    swapped_preflight =
+      contract_interrupted_capacity_result(:preflight)
+      |> put_in([:preflight, "capacity_handoff"], contract_interrupted_handoff(:test))
+
+    assert_invalid_evidence("contract_change", swapped_preflight)
+
+    three_batch =
+      contract_capacity_result(:preflight)
+      |> put_in([:preflight, "capacity_handoff"], three_batch_structural_handoff())
+
+    assert_invalid_evidence("contract_change", three_batch)
+  end
+
   test "capacity handoff is closed, bounded evidence and malformed handoffs fail closed" do
     result = cross_capacity_result()
     assert {:ok, report} = verify("cross_app", result)
@@ -265,7 +674,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     for {profile, result} <- [
           {"default", default_result()},
           {"cross_app", cross_result()},
-          {"security_regression", security_result("security_regression_validated")}
+          {"security_regression", security_result("security_regression_validated")},
+          {"contract_change", contract_result()}
         ] do
       assert {:ok, atom_report} = verify(profile, result)
       assert {:ok, string_report} = verify(profile, stringify_json(result))
@@ -277,7 +687,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     for {profile, result} <- [
           {"default", default_result()},
           {"cross_app", cross_result()},
-          {"security_regression", security_result("security_regression_validated")}
+          {"security_regression", security_result("security_regression_validated")},
+          {"contract_change", contract_result()}
         ] do
       raw = stringify_json(result)
       assert {:ok, raw_report} = verify(profile, raw)
@@ -537,6 +948,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     default = default_result()
     cross = cross_result()
     security = security_result("security_regression_validated")
+    contract = contract_result()
 
     cases = [
       {"default", %{passed: true, exit_code: 0, validated_tree_oid: @sha1}},
@@ -549,6 +961,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       {"cross_app", put_in(cross, [:compile, "passed"], "true")},
       {"cross_app", put_in(cross, [:xref, "reason"], "convenient_reason")},
       {"cross_app", Map.put(cross, :changed_files, Enum.map(1..2_001, &"file#{&1}"))},
+      {"contract_change",
+       Map.put(contract, :test_paths, Enum.map(1..2_001, &max_contract_test_path/1))},
       {"cross_app", Map.put(cross, :changed_files, ["z.ex", "a.ex"])},
       {"cross_app", Map.put(cross, :changed_apps, ["alpha", "alpha"])},
       {"security_regression", Map.put(security, :reason, "arbitrary_failure")},
@@ -605,6 +1019,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
                  @observed_at
                )
     end
+  end
+
+  test "forged cross_app evidence cannot satisfy the contract_change adapter" do
+    assert {:ok, report} = verify("contract_change", cross_result())
+    assert report["status"] == "blocked"
+    assert "validation_evidence_invalid" in Enum.map(report["diagnostics"], & &1["code"])
   end
 
   test "validates the closed program and injected timestamp before adapting evidence" do
@@ -802,6 +1222,194 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     })
   end
 
+  defp contract_result do
+    %{
+      passed: true,
+      reason: "contract_change_validated",
+      base_commit: @base_oid,
+      changed_files: ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
+      test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+      preflight: cross_check(),
+      test: cross_check(),
+      validated_tree_oid: @sha1,
+      validated_head: @candidate_commit,
+      feedback_json: "ignored feedback json"
+    }
+  end
+
+  defp contract_failure(:preflight) do
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "preflight_failed",
+      preflight: cross_check(passed: false, exit_code: 1, reason: "preflight_failed"),
+      test: skipped_check("preflight_failed")
+    })
+  end
+
+  defp contract_failure(:test) do
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "tests_failed",
+      test: cross_check(passed: false, exit_code: 1, reason: "tests_failed")
+    })
+  end
+
+  defp contract_surface_missing_result do
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "contract_surface_missing",
+      changed_files: ["apps/arbor_dashboard/lib/arbor/dashboard.ex"],
+      test_paths: [],
+      preflight: skipped_check("contract_surface_missing"),
+      test: skipped_check("contract_surface_missing")
+    })
+  end
+
+  defp contract_timeout_result do
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "tests_timed_out",
+      test: cross_check(passed: false, exit_code: nil, reason: "tests_timed_out")
+    })
+  end
+
+  defp contract_preflight_timeout_result do
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "preflight_timed_out",
+      preflight: cross_check(passed: false, exit_code: nil, reason: "preflight_timed_out"),
+      test: skipped_check("preflight_timed_out")
+    })
+  end
+
+  defp contract_capacity_result(:preflight) do
+    check = contract_capacity_check(:preflight)
+
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_capacity_exceeded",
+      preflight: Map.put(check, "capacity_handoff", contract_capacity_handoff(:preflight)),
+      test: skipped_check("validation_capacity_exceeded")
+    })
+  end
+
+  defp contract_capacity_result(:test) do
+    check = contract_capacity_check(:test)
+
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_capacity_exceeded",
+      test: Map.put(check, "capacity_handoff", contract_capacity_handoff(:test))
+    })
+  end
+
+  defp contract_capacity_check(:preflight) do
+    cross_check(passed: false, exit_code: nil, reason: "validation_capacity_exceeded")
+  end
+
+  defp contract_capacity_check(:test) do
+    cross_check(passed: false, exit_code: nil, reason: "validation_capacity_exceeded")
+  end
+
+  defp contract_containment_result(:preflight) do
+    check =
+      cross_check(passed: false, exit_code: 0, reason: "validation_containment_failure")
+      |> Map.put("termination", containment_termination())
+
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_containment_failure",
+      preflight: check,
+      test: skipped_check("validation_containment_failure")
+    })
+  end
+
+  defp contract_interrupted_capacity_result(:preflight) do
+    check =
+      cross_check(passed: false, exit_code: 0, reason: "validation_capacity_exceeded")
+      |> Map.put("capacity_handoff", contract_interrupted_handoff(:preflight))
+
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_capacity_exceeded",
+      preflight: check,
+      test: skipped_check("validation_capacity_exceeded")
+    })
+  end
+
+  defp contract_interrupted_capacity_result(:test) do
+    check =
+      cross_check(passed: false, exit_code: 0, reason: "validation_capacity_exceeded")
+      |> Map.put("capacity_handoff", contract_interrupted_handoff(:test))
+
+    contract_result()
+    |> Map.merge(%{
+      passed: false,
+      reason: "validation_capacity_exceeded",
+      test: check
+    })
+  end
+
+  defp contract_interrupted_handoff(stage) do
+    core = Arbor.Actions.Coding.ContractChange.Core
+    preflight = core.preflight_batch(core.inventory_sha256(core.preflight_argv()))
+
+    tests =
+      core.tests_batch(
+        1,
+        core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+      )
+
+    plan =
+      case stage do
+        :preflight -> %{completed: [], interrupted: preflight, unstarted: [tests]}
+        :test -> %{completed: [preflight], interrupted: tests, unstarted: []}
+      end
+
+    {:ok, check} = core.capacity_check(:runtime, 10_000, plan)
+    Map.fetch!(check, "capacity_handoff")
+  end
+
+  defp containment_termination do
+    %{
+      "timed_out" => false,
+      "killed" => true,
+      "output_limit_exceeded" => false,
+      "cancelled" => false,
+      "containment_failure" => true
+    }
+  end
+
+  defp contract_capacity_handoff(stage) do
+    core = Arbor.Actions.Coding.ContractChange.Core
+    preflight = core.preflight_batch(core.inventory_sha256(core.preflight_argv()))
+
+    tests =
+      core.tests_batch(
+        1,
+        core.inventory_sha256(["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"])
+      )
+
+    plan =
+      case stage do
+        :preflight -> %{completed: [], unstarted: [preflight, tests]}
+        :test -> %{completed: [preflight], unstarted: [tests]}
+      end
+
+    phase = if stage == :preflight, do: :structural, else: :runtime
+    {:ok, check} = core.capacity_check(phase, 10_000, plan)
+    Map.fetch!(check, "capacity_handoff")
+  end
+
   defp cross_check(opts \\ []) do
     %{
       "status" => Keyword.get(opts, :status, "completed"),
@@ -819,6 +1427,42 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
 
   defp skipped_check(reason),
     do: cross_check(status: "skipped", passed: false, exit_code: nil, reason: reason)
+
+  defp three_batch_structural_handoff do
+    inventory = @digest
+
+    batches =
+      Enum.map(1..3, fn index ->
+        %{
+          "index" => index,
+          "total" => 3,
+          "count" => 1,
+          "label" => "batch-#{index}-of-3-n1-#{inventory}",
+          "inventory_sha256" => inventory
+        }
+      end)
+
+    {:ok, plan_digest} = ValidationCapacityHandoff.ordered_plan_digest(batches)
+
+    {:ok, handoff} =
+      ValidationCapacityHandoff.normalize(%{
+        "schema_version" => ValidationCapacityHandoff.schema_version(),
+        "phase" => "structural",
+        "available_budget_ms" => 0,
+        "per_batch_budget_ms" => 1_000,
+        "completed_batch_count" => 0,
+        "completed_file_count" => 0,
+        "unstarted_batch_count" => 3,
+        "unstarted_file_count" => 3,
+        "total_batch_count" => 3,
+        "total_file_count" => 3,
+        "ordered_plan_sha256" => plan_digest,
+        "interrupted_batch" => nil,
+        "unstarted_batches" => batches
+      })
+
+    handoff
+  end
 
   defp capacity_handoff, do: capacity_handoff(:structural)
 
@@ -1059,6 +1703,47 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       :attested_selected_tests,
       Enum.map(paths, &%{path: &1, blob_sha256: @other_digest})
     )
+  end
+
+  defp max_contract_changed_path(i) do
+    index = String.pad_leading(Integer.to_string(i), 4, "0")
+    prefix = "apps/arbor_kernel/lib/arbor/contracts/"
+    suffix = "_#{index}.ex"
+    prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
+  end
+
+  defp max_contract_test_path(i) do
+    index = String.pad_leading(Integer.to_string(i), 4, "0")
+    prefix = "apps/arbor_kernel/test/arbor/contracts/"
+    suffix = "_#{index}_test.exs"
+    prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
+  end
+
+  defp max_cross_app_id(i) do
+    index = String.pad_leading(Integer.to_string(i), 3, "0")
+    suffix = "_#{index}"
+    String.duplicate("a", 64 - byte_size(suffix)) <> suffix
+  end
+
+  defp max_security_test_path(i) do
+    index = String.pad_leading(Integer.to_string(i), 3, "0")
+    prefix = "test/"
+    suffix = "_#{index}_test.exs"
+    prefix <> String.duplicate("a", 1_024 - byte_size(prefix) - byte_size(suffix)) <> suffix
+  end
+
+  defp flip_padded_byte(path) when is_binary(path) do
+    case :binary.match(path, "aa") do
+      {start, _} ->
+        <<prefix::binary-size(start), _byte, rest::binary>> = path
+        flipped = prefix <> "b" <> rest
+        assert flipped != path
+        assert byte_size(flipped) == byte_size(path)
+        flipped
+
+      :nomatch ->
+        flunk("expected a padded ASCII region in #{inspect(path)}")
+    end
   end
 
   defp stringify_json(map) when is_map(map) do

@@ -78,20 +78,9 @@ defmodule Arbor.Actions.TestMixShell do
       # Optional test-only: return a trusted canned Shell result (with exact
       # termination flags) without running Mix. Used to prove Mix.Compile
       # capacity projection from flags, not exit-code heuristics.
-      case Process.get({__MODULE__, :canned_spawn_result}) do
+      case pop_canned_spawn_result() do
         canned when is_map(canned) ->
-          Process.delete({__MODULE__, :canned_spawn_result})
-
-          {:ok,
-           canned
-           |> Map.put_new(:duration_ms, System.monotonic_time(:millisecond) - started_at)
-           |> Map.put_new(:stdout, Map.get(canned, :stdout, ""))
-           |> Map.put_new(:stderr, Map.get(canned, :stderr, ""))
-           |> Map.put_new(:timed_out, false)
-           |> Map.put_new(:killed, false)
-           |> Map.put_new(:output_truncated, false)
-           |> Map.put_new(:output_limit_exceeded, false)
-           |> Map.put_new(:cancelled, false)}
+          {:ok, normalize_canned_spawn_result(canned, started_at)}
 
         _ ->
           # Optional test-only: sleep for the full allocated child timeout then
@@ -176,7 +165,51 @@ defmodule Arbor.Actions.TestMixShell do
   end
 
   @doc false
-  def clear_canned_spawn_result, do: Process.delete({__MODULE__, :canned_spawn_result})
+  def set_canned_spawn_results(results) when is_list(results) do
+    Process.put({__MODULE__, :canned_spawn_results}, results)
+    :ok
+  end
+
+  @doc false
+  def clear_canned_spawn_result do
+    Process.delete({__MODULE__, :canned_spawn_result})
+    Process.delete({__MODULE__, :canned_spawn_results})
+    :ok
+  end
+
+  defp pop_canned_spawn_result do
+    case Process.get({__MODULE__, :canned_spawn_results}) do
+      [next | rest] ->
+        Process.put({__MODULE__, :canned_spawn_results}, rest)
+        next
+
+      [] ->
+        Process.delete({__MODULE__, :canned_spawn_results})
+        Process.get({__MODULE__, :canned_spawn_result})
+
+      nil ->
+        case Process.get({__MODULE__, :canned_spawn_result}) do
+          canned when is_map(canned) ->
+            Process.delete({__MODULE__, :canned_spawn_result})
+            canned
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp normalize_canned_spawn_result(canned, started_at) when is_map(canned) do
+    canned
+    |> Map.put_new(:duration_ms, System.monotonic_time(:millisecond) - started_at)
+    |> Map.put_new(:stdout, Map.get(canned, :stdout, ""))
+    |> Map.put_new(:stderr, Map.get(canned, :stderr, ""))
+    |> Map.put_new(:timed_out, false)
+    |> Map.put_new(:killed, false)
+    |> Map.put_new(:output_truncated, false)
+    |> Map.put_new(:output_limit_exceeded, false)
+    |> Map.put_new(:cancelled, false)
+  end
 
   defp maybe_mutate_worktree(cwd) when is_binary(cwd) do
     case Process.get({__MODULE__, :mutate_worktree}) do

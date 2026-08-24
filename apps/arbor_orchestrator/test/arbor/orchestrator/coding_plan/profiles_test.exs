@@ -10,7 +10,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
   @known_ids Plan.profile_ids()
 
-  @executable_ids ~w[cross_app default security_regression]
+  @executable_ids ~w[contract_change cross_app default security_regression]
   @unsupported_ids @known_ids -- @executable_ids
 
   describe "declarations" do
@@ -371,6 +371,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert {:ok, 120_000} = Profiles.validation_stage_timeout(security, 120_000)
 
+      assert {:ok, contract_change} = Profiles.fetch_executable("contract_change")
+      contract_stage = Arbor.Actions.contract_change_maximum_stage_timeout_ms()
+
+      assert contract_change["validation_strategy"]["action"] ==
+               "coding_contract_change_validate"
+
+      assert contract_change["validation_strategy"]["result_adapter"] == "contract_change_v1"
+      assert contract_change["validation_strategy"]["runs_source_compatibility_evidence"] == true
+      assert contract_change["validation_strategy"]["runs_contract_rules_preflight"] == true
+      assert contract_change["validation_strategy"]["claims_semantic_compatibility"] == false
+      assert contract_change["validation_strategy"]["claims_consumer_api_compatibility"] == false
+      assert contract_change["validation_strategy"]["selects_downstream_dependents"] == false
+      assert contract_change["review_strategy"]["binding"] == true
+      assert {:ok, nil} = Profiles.validation_test_stage_timeout(contract_change, 900_000)
+      assert {:ok, 900_000} = Profiles.validation_stage_timeout(contract_change, 900_000)
+
+      assert {:ok, ^contract_stage} =
+               Profiles.validation_stage_timeout(contract_change, 9_000_000)
+
       # Partial/malformed aggregate declarations fail closed — never coerced to nil.
       missing_source =
         update_in(
@@ -491,7 +510,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
     test "declares unsupported profiles with precise missing enforcement reasons" do
       expected_reason_terms = %{
-        "contract_change" => ["CONTRACT_RULES", "compatibility review"],
         "frontend_visual" => ["Playwright", "desktop/mobile visual evidence"],
         "docs_only" => [
           "documentation-validation action contract",

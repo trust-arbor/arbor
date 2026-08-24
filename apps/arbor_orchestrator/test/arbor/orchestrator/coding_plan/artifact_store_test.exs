@@ -3,8 +3,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   import Bitwise
 
+  alias Arbor.Actions.Coding.ContractChange.Core
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
   alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper, ValidationCapacityTerminal}
+
+  @kernel_test "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
 
   @compilation_seal_filename ".coding-compilation-seal.json"
   @compilation_publication_barrier_key {ArtifactStore, :compilation_publication_barrier}
@@ -1228,6 +1231,179 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_terminal_evidence(root, "task_coding_capacity", mismatched, [])
   end
 
+  test "security regression: ArtifactStore rejects contradictory ContractChange capacity and persists canonical two-batch v3",
+       %{root: root} do
+    File.mkdir_p!(root)
+
+    unstarted = contract_change_capacity_terminal(root, contract_change_unstarted_report())
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               root,
+               "task_contract_unstarted",
+               unstarted,
+               []
+             )
+
+    archived =
+      root
+      |> Path.join("coding-terminal-evidence.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    handoff =
+      get_in(archived, [
+        "validation_outputs",
+        Access.at(0),
+        "preflight",
+        "capacity_handoff"
+      ])
+
+    assert handoff["schema_version"] == 3
+    assert handoff["total_batch_count"] == 2
+    assert Enum.map(handoff["unstarted_batches"], & &1["index"]) == [1, 2]
+    refute Map.has_key?(handoff["unstarted_batches"] |> hd(), "paths")
+    refute archived |> Jason.encode!() =~ "\"paths\""
+
+    interrupted_root = Path.join(root, "interrupted")
+    File.mkdir_p!(interrupted_root)
+
+    interrupted =
+      contract_change_capacity_terminal(
+        interrupted_root,
+        contract_change_interrupted_test_report()
+      )
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               interrupted_root,
+               "task_contract_interrupted",
+               interrupted,
+               []
+             )
+
+    interrupted_archived =
+      interrupted_root
+      |> Path.join("coding-terminal-evidence.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    interrupted_handoff =
+      get_in(interrupted_archived, [
+        "validation_outputs",
+        Access.at(0),
+        "test",
+        "capacity_handoff"
+      ])
+
+    assert interrupted_handoff["schema_version"] == 3
+    assert interrupted_handoff["interrupted_batch"]["index"] == 2
+    assert interrupted_handoff["interrupted_batch"]["total"] == 2
+    refute Map.has_key?(interrupted_handoff["interrupted_batch"], "paths")
+
+    contradictory_root = Path.join(root, "contradictory")
+    File.mkdir_p!(contradictory_root)
+
+    contradictory =
+      contract_change_capacity_terminal(
+        contradictory_root,
+        Map.put(contract_change_unstarted_report(), "passed", true)
+      )
+
+    assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
+             ArtifactStore.archive_terminal_evidence(
+               contradictory_root,
+               "task_contract_contradictory",
+               contradictory,
+               []
+             )
+
+    check_passed = contract_change_unstarted_report()
+
+    check_passed =
+      Map.put(check_passed, "preflight", Map.put(check_passed["preflight"], "passed", true))
+
+    check_root = Path.join(root, "check_passed")
+    File.mkdir_p!(check_root)
+
+    assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
+             ArtifactStore.archive_terminal_evidence(
+               check_root,
+               "task_contract_check_passed",
+               contract_change_capacity_terminal(check_root, check_passed),
+               []
+             )
+
+    report_level = contract_change_unstarted_report()
+
+    report_level =
+      Map.put(report_level, "capacity_handoff", report_level["preflight"]["capacity_handoff"])
+
+    report_root = Path.join(root, "report_level")
+    File.mkdir_p!(report_root)
+
+    assert {:error, {:invalid_terminal_result, :capacity_handoff}} =
+             ArtifactStore.archive_terminal_evidence(
+               report_root,
+               "task_contract_report_handoff",
+               contract_change_capacity_terminal(report_root, report_level),
+               []
+             )
+  end
+
+  test "security regression: ArtifactStore rejects ContractChange containment with report passed=true and archives honest preflight/test containment",
+       %{root: root} do
+    File.mkdir_p!(root)
+
+    preflight_root = Path.join(root, "containment_preflight")
+    File.mkdir_p!(preflight_root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               preflight_root,
+               "task_contract_containment_preflight",
+               contract_change_failed_terminal(
+                 preflight_root,
+                 contract_change_containment_report()
+               ),
+               []
+             )
+
+    test_root = Path.join(root, "containment_test")
+    File.mkdir_p!(test_root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               test_root,
+               "task_contract_containment_test",
+               contract_change_failed_terminal(
+                 test_root,
+                 contract_change_test_owned_containment_report()
+               ),
+               []
+             )
+
+    contradictory_root = Path.join(root, "containment_contradictory")
+    File.mkdir_p!(contradictory_root)
+    evidence_path = Path.join(contradictory_root, "coding-terminal-evidence.json")
+
+    contradictory =
+      contract_change_failed_terminal(
+        contradictory_root,
+        Map.put(contract_change_containment_report(), "passed", true)
+      )
+
+    assert {:error, {:invalid_terminal_result, :containment_evidence_mismatch}} =
+             ArtifactStore.archive_terminal_evidence(
+               contradictory_root,
+               "task_contract_containment_passed",
+               contradictory,
+               []
+             )
+
+    refute File.exists?(evidence_path)
+  end
+
   test "archive-read verifies historical schema-v1/v2 and live v3; live write rejects v1/v2", %{
     root: root
   } do
@@ -1948,6 +2124,123 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         }
       }
     ]
+  end
+
+  defp contract_change_failed_terminal(root, report) do
+    terminal_result(root)
+    |> Map.put("status", "validation_failed")
+    |> Map.put("canonical_status", "validation_failed")
+    |> Map.put(
+      "outcome",
+      terminal_outcome("validation_failed", "failed", "validation", "validator", "same_session")
+    )
+    |> Map.put("validation", [report])
+  end
+
+  defp contract_change_containment_report do
+    check =
+      Map.put(
+        Core.completed_check(%{"passed" => false, "exit_code" => 0},
+          reason: "validation_containment_failure"
+        ),
+        "termination",
+        %{
+          "timed_out" => false,
+          "killed" => true,
+          "output_limit_exceeded" => false,
+          "cancelled" => false,
+          "containment_failure" => true
+        }
+      )
+
+    %{
+      "passed" => false,
+      "reason" => "validation_containment_failure",
+      "preflight" => check,
+      "test" => Core.skipped_check("validation_containment_failure")
+    }
+  end
+
+  defp contract_change_test_owned_containment_report do
+    check =
+      Map.put(
+        Core.completed_check(%{"passed" => false, "exit_code" => 0},
+          reason: "validation_containment_failure"
+        ),
+        "termination",
+        %{
+          "timed_out" => false,
+          "killed" => true,
+          "output_limit_exceeded" => false,
+          "cancelled" => false,
+          "containment_failure" => true
+        }
+      )
+
+    %{
+      "passed" => false,
+      "reason" => "validation_containment_failure",
+      "preflight" => Core.completed_check(%{"passed" => true, "exit_code" => 0}),
+      "test" => check
+    }
+  end
+
+  defp contract_change_capacity_terminal(root, report) do
+    terminal_result(root)
+    |> Map.put("status", "validation_capacity_exceeded")
+    |> Map.put("canonical_status", "validation_capacity_exceeded")
+    |> Map.put(
+      "outcome",
+      terminal_outcome(
+        "validation_capacity_exceeded",
+        "requires_input",
+        "validation",
+        "validator",
+        "after_external_change"
+      )
+    )
+    |> Map.put("validation", [report])
+  end
+
+  defp contract_change_unstarted_report do
+    {:ok, check} =
+      Core.capacity_check(:structural, 10_000, %{
+        completed: [],
+        unstarted: [contract_preflight_batch(), contract_tests_batch()]
+      })
+
+    %{
+      "passed" => false,
+      "reason" => "validation_capacity_exceeded",
+      "preflight" => check,
+      "test" => Core.skipped_check("validation_capacity_exceeded")
+    }
+  end
+
+  defp contract_change_interrupted_test_report do
+    {:ok, check} =
+      Core.capacity_check(:runtime, 10_000, %{
+        completed: [contract_preflight_batch()],
+        interrupted: contract_tests_batch(),
+        unstarted: []
+      })
+
+    launched = Map.put(check, "exit_code", 0)
+
+    %{
+      "passed" => false,
+      "reason" => "validation_capacity_exceeded",
+      "preflight" => Core.completed_check(%{"passed" => true, "exit_code" => 0}),
+      "test" => launched
+    }
+  end
+
+  defp contract_preflight_batch do
+    Core.preflight_batch(Core.inventory_sha256(Core.preflight_argv()))
+  end
+
+  defp contract_tests_batch do
+    Core.tests_batch(1, Core.inventory_sha256([@kernel_test]))
   end
 
   defp terminal_control(overrides \\ %{}) do

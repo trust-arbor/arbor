@@ -35,6 +35,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   Never passes raw directories or shell-joined globs.
   """
 
+  alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.Parser
   alias Arbor.Actions.Coding.Workspace
@@ -45,8 +46,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @base_mix_exs_max_file_bytes 64_000
   # Full lowercase hex commit OIDs only (SHA-1 40 or SHA-256 64) — lease authority.
   @full_commit_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
-  # Match Mix snapshot entry ceiling for base ls-tree manifests.
-  @max_blob_manifest_entries 50_000
 
   @doc "Execute cross-app validation against a leased workspace."
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
@@ -384,73 +383,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
        when is_binary(worktree_path) and is_binary(base_commit) do
     with :ok <- validate_full_commit_oid(base_commit),
          {:ok, listing} <- git(worktree_path, ["ls-tree", "-r", "-z", base_commit]) do
-      parse_ls_tree_blob_manifest(listing)
+      BlobManifest.parse_ls_tree_z(listing)
     else
       {:error, reason} -> {:error, {:base_blob_manifest_failed, reason}}
     end
   end
 
   defp load_base_blob_manifest(_, _), do: {:error, :invalid_base_blob_manifest_input}
-
-  defp parse_ls_tree_blob_manifest(listing) when is_binary(listing) do
-    listing
-    |> split_z()
-    |> Enum.reduce_while({:ok, [], 0}, fn entry, {:ok, acc, count} ->
-      next = count + 1
-
-      cond do
-        entry == "" ->
-          {:cont, {:ok, acc, count}}
-
-        next > @max_blob_manifest_entries ->
-          {:halt, {:error, :blob_manifest_too_large}}
-
-        true ->
-          case parse_ls_tree_entry(entry) do
-            {:ok, compact} ->
-              {:cont, {:ok, [compact | acc], next}}
-
-            {:error, _} = error ->
-              {:halt, error}
-          end
-      end
-    end)
-    |> case do
-      {:ok, entries, _count} ->
-        {:ok, Enum.sort_by(entries, & &1.path)}
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  # git ls-tree -z -r lines: "<mode> <type> <oid>\\t<path>"
-  defp parse_ls_tree_entry(entry) when is_binary(entry) do
-    case :binary.split(entry, "\t", [:global]) do
-      [meta, path] when path != "" ->
-        case String.split(meta, " ", parts: 3) do
-          [mode, "blob", oid] when mode in ["100644", "100755", "120000"] ->
-            if Regex.match?(@full_commit_oid_re, oid) do
-              {:ok, %{path: path, mode: mode, oid: oid}}
-            else
-              {:error, {:invalid_base_blob_oid, path}}
-            end
-
-          [_mode, "commit", _oid] ->
-            {:error, {:unsupported_base_gitlink, path}}
-
-          [_mode, "tree", _oid] ->
-            # -r should not emit trees; fail closed if it does.
-            {:error, {:unexpected_base_tree_entry, path}}
-
-          _ ->
-            {:error, {:invalid_base_ls_tree_entry, path}}
-        end
-
-      _ ->
-        {:error, :invalid_base_ls_tree_entry}
-    end
-  end
 
   # Base inventory: commit-bound tree only. Never File.read the mutable worktree.
   # Requires a validated full lease base OID — no short-OID cat-file fallback.

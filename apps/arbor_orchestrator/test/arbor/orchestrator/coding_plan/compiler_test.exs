@@ -1708,6 +1708,117 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
            ]
   end
 
+  test "contract_change rewrites validate to coding_reviewed_validation pin and binds the dedicated URI",
+       ctx do
+    plan =
+      v2_plan!(%{
+        "validation_profile" => "contract_change",
+        "checkpoint_policy" => "design_required"
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    validate = node_attrs(graph, "validate")
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "coding_contract_change_validate"
+    assert validate["param.pinned_profile_id"] == "contract_change"
+    assert validate["context_keys"] == "workspace_id"
+    refute Map.has_key?(validate, "param.warnings_as_errors")
+    refute Map.has_key?(validate, "param.test_stage_timeout")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
+    assert pinned["timeout"] == 900_000
+    assert pinned["stage_timeout"] == 900_000
+    assert validate["param.stage_timeout"] == 900_000
+    assert validate["timeout_budget.param"] == "stage_timeout"
+
+    assert "coding_reviewed_validation" in compilation.manifest["action_names"]
+    refute "coding_contract_change_validate" in compilation.manifest["action_names"]
+    refute "coding_cross_app_validate" in compilation.manifest["action_names"]
+    refute "mix_compile" in compilation.manifest["action_names"]
+    refute "mix_test" in compilation.manifest["action_names"]
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn action ->
+             action["name"] == "coding_contract_change_validate"
+           end)
+
+    assert "arbor://action/coding/contract_change/validate" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+
+    refute Map.has_key?(graph.nodes, "hoist_review_attestation_id")
+    refute Map.has_key?(graph.nodes, "route_validated_review")
+    refute Map.has_key?(graph.nodes, "prep_review_validation_profile")
+
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    assert auto_proceed_target(graph) == "route_publish"
+  end
+
+  test "contract_change human_required review does not weaken review routing", ctx do
+    plan =
+      v2_plan!(%{
+        "validation_profile" => "contract_change",
+        "review_profile" => "human_required",
+        "checkpoint_policy" => "design_required"
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    assert auto_proceed_target(graph) == "route_human_review"
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    refute Map.has_key?(graph.nodes, "route_validated_review")
+
+    validate = node_attrs(graph, "validate")
+    assert validate["action"] == "coding_reviewed_validation"
+    assert validate["param.pinned_action"] == "coding_contract_change_validate"
+    assert validate["param.pinned_profile_id"] == "contract_change"
+    assert is_binary(validate["param.pinned_params_json"])
+    assert validate["timeout_budget.param"] == "stage_timeout"
+    assert is_integer(validate["param.stage_timeout"]) and validate["param.stage_timeout"] > 0
+  end
+
+  test "security regression: default task_class plus contract_change cannot compile a direct checkpoint",
+       ctx do
+    plan = %{v2_plan!() | validation_profile: "contract_change"}
+
+    assert {:error,
+            {:invalid_plan,
+             {:invalid_field, "work_packet.checkpoint_policy",
+              {:required_for_validation_profile, "contract_change", "design_required"}}}} =
+             compile(plan, ctx)
+  end
+
+  test "security regression: default plus contract_change compiles with design_required and keeps specialized validation",
+       ctx do
+    plan =
+      v2_plan!(%{
+        "validation_profile" => "contract_change",
+        "checkpoint_policy" => "design_required"
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+    validate = node_attrs(graph, "validate")
+
+    assert plan.task_class == "default"
+    assert plan.validation_profile == "contract_change"
+    assert validate["param.pinned_profile_id"] == "contract_change"
+    assert compilation.initial_values["coding_plan_checkpoint_policy"] == "design_required"
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    assert auto_proceed_target(graph) == "route_publish"
+  end
+
+  test "security regression: ordinary default version-2 plans still compile with a direct checkpoint",
+       ctx do
+    plan = v2_plan!()
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    assert plan.task_class == "default"
+    assert plan.validation_profile == "default"
+    assert compilation.initial_values["coding_plan_checkpoint_policy"] == "direct"
+  end
+
   test "cross_app validation timeout never exceeds the plan wall-clock budget", ctx do
     plan =
       plan!(%{

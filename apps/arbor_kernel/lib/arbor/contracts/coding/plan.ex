@@ -56,7 +56,7 @@ defmodule Arbor.Contracts.Coding.Plan do
   @review_profiles ~w(binding human_required none)
   @workspace_modes ~w(isolated)
   @permission_modes ~w(default deny)
-  @design_required_task_classes ~w(
+  @design_required_profiles ~w(
     security_regression
     contract_change
     cross_app
@@ -163,10 +163,18 @@ defmodule Arbor.Contracts.Coding.Plan do
   @spec supported_schema_versions() :: [pos_integer()]
   def supported_schema_versions, do: @supported_schema_versions
 
-  @doc "Return whether the task class requires a reviewed design checkpoint."
+  @doc "Return whether a profile id requires a reviewed design checkpoint."
   @spec design_checkpoint_required?(term()) :: boolean()
-  def design_checkpoint_required?(task_class),
-    do: task_class in @design_required_task_classes
+  def design_checkpoint_required?(profile),
+    do: profile in @design_required_profiles
+
+  @doc """
+  Return whether either normalized task class or validation profile requires a
+  reviewed design checkpoint.
+  """
+  @spec design_checkpoint_required?(term(), term()) :: boolean()
+  def design_checkpoint_required?(task_class, validation_profile),
+    do: design_checkpoint_required?(task_class) or design_checkpoint_required?(validation_profile)
 
   @doc "Return all coding profile IDs accepted by this contract."
   @spec profile_ids() :: [String.t()]
@@ -176,10 +184,16 @@ defmodule Arbor.Contracts.Coding.Plan do
   Construct and validate a coding plan.
 
   Version omission selects the latest schema. Version 2 additionally requires
-  an exact `work_packet` and matching `work_packet_digest`. Explicit version 1
-  remains accepted for archived compatibility data. All omitted policy fields
-  are filled with canonical defaults. Known enum atoms are accepted for
-  ergonomic keyword construction and are normalized to strings.
+  an exact `work_packet` and matching `work_packet_digest`. Version 2 requires
+  `work_packet.checkpoint_policy=design_required` when either `task_class` or
+  `validation_profile` is a design-required high-risk profile. A missing
+  `design_required` policy names the firing field as `required_for_task_class`
+  or `required_for_validation_profile`; when both fields are high-risk,
+  `task_class` wins. Explicit version 1 remains accepted for archived
+  compatibility data even when those fields are high-risk. All omitted policy
+  fields are filled with canonical defaults.
+  Known enum atoms are accepted for ergonomic keyword construction and are
+  normalized to strings.
   """
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
@@ -194,16 +208,16 @@ defmodule Arbor.Contracts.Coding.Plan do
            normalize_nonblank_string(Map.get(attrs, :base_ref, @default_base_ref), "base_ref"),
          {:ok, task_class} <-
            normalize_enum(Map.get(attrs, :task_class, "default"), @profile_ids, "task_class"),
-         :ok <- validate_checkpoint_policy(task_class, work_packet),
-         {:ok, workspace_policy} <-
-           normalize_workspace_policy(Map.get(attrs, :workspace_policy, %{})),
-         {:ok, worker} <- fetch_worker(attrs),
          {:ok, validation_profile} <-
            normalize_enum(
              Map.get(attrs, :validation_profile, "default"),
              @profile_ids,
              "validation_profile"
            ),
+         :ok <- validate_checkpoint_policy(task_class, validation_profile, work_packet),
+         {:ok, workspace_policy} <-
+           normalize_workspace_policy(Map.get(attrs, :workspace_policy, %{})),
+         {:ok, worker} <- fetch_worker(attrs),
          {:ok, review_profile} <-
            normalize_enum(
              Map.get(attrs, :review_profile, "binding"),
@@ -337,20 +351,27 @@ defmodule Arbor.Contracts.Coding.Plan do
   defp validate_work_packet_digest(_supplied_digest, _expected_digest),
     do: {:error, {:invalid_field, "work_packet_digest", :digest_mismatch}}
 
-  defp validate_checkpoint_policy(_task_class, nil), do: :ok
+  defp validate_checkpoint_policy(_task_class, _validation_profile, nil), do: :ok
 
-  defp validate_checkpoint_policy(task_class, packet)
-       when task_class in @design_required_task_classes do
-    if packet["checkpoint_policy"] == "design_required" do
-      :ok
-    else
-      {:error,
-       {:invalid_field, "work_packet.checkpoint_policy",
-        {:required_for_task_class, task_class, "design_required"}}}
+  defp validate_checkpoint_policy(task_class, validation_profile, packet) do
+    cond do
+      packet["checkpoint_policy"] == "design_required" ->
+        :ok
+
+      design_checkpoint_required?(task_class) ->
+        {:error,
+         {:invalid_field, "work_packet.checkpoint_policy",
+          {:required_for_task_class, task_class, "design_required"}}}
+
+      design_checkpoint_required?(validation_profile) ->
+        {:error,
+         {:invalid_field, "work_packet.checkpoint_policy",
+          {:required_for_validation_profile, validation_profile, "design_required"}}}
+
+      true ->
+        :ok
     end
   end
-
-  defp validate_checkpoint_policy(_task_class, _packet), do: :ok
 
   defp normalize_workspace_policy(value) do
     with {:ok, attrs} <- normalize_object(value, @workspace_fields, ["workspace_policy"]),

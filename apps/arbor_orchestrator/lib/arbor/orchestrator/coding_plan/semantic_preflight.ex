@@ -153,8 +153,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       present, `param.test_stage_timeout` must match exactly.
     * `:validation_stage_timeout_ms` — optional positive integer for profiles
       with a reviewed whole-validation stage ceiling (cross_app,
-      security_regression). When present, `param.stage_timeout` must match
-      exactly. Required for security_regression.
+      security_regression, contract_change). When present, `param.stage_timeout`
+      must match exactly. Required for security_regression and contract_change.
     * `:checkpoint_policy` — `\"direct\"` (default) or `\"design_required\"`.
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
@@ -2284,7 +2284,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_terminal_timeout_budget_bindings(errors, graph, policy) do
     validation_param =
-      if policy["validation_profile"] in ["cross_app", "security_regression"],
+      if policy["validation_profile"] in ["cross_app", "security_regression", "contract_change"],
         do: "stage_timeout",
         else: "timeout"
 
@@ -3996,6 +3996,51 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ) do
     [
       error("security_validator_parameter_violation", "validate", %{
+        "missing_validation_stage_timeout_ms" =>
+          not (is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0),
+        "got_stage" => validation_stage_timeout_ms
+      })
+      | errors
+    ]
+  end
+
+  defp check_profile_bindings(
+         errors,
+         graph,
+         %{"validation_profile" => "contract_change"},
+         _review,
+         validation_timeout_ms,
+         _validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
+       )
+       when is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
+    check_validation_parameters(
+      errors,
+      graph,
+      %{
+        "param.pinned_action" => "coding_contract_change_validate",
+        "param.pinned_profile_id" => "contract_change",
+        "param.pinned_params" => %{
+          "timeout" => validation_timeout_ms,
+          "stage_timeout" => validation_stage_timeout_ms
+        },
+        "param.stage_timeout" => validation_stage_timeout_ms
+      },
+      "validation_parameter_violation"
+    )
+  end
+
+  defp check_profile_bindings(
+         errors,
+         _graph,
+         %{"validation_profile" => "contract_change"},
+         _review,
+         _validation_timeout_ms,
+         _validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms
+       ) do
+    [
+      error("validation_parameter_violation", "validate", %{
         "missing_validation_stage_timeout_ms" =>
           not (is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0),
         "got_stage" => validation_stage_timeout_ms

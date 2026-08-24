@@ -204,9 +204,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
 
       # Facade core action that is absent from the stale locked registry is still present.
       assert "coding_cross_app_validate" in names
+      assert "coding_contract_change_validate" in names
 
       assert {:ok, validate} = ActionCatalog.fetch(snapshot, "coding_cross_app_validate")
       assert validate["module"] == Atom.to_string(Arbor.Actions.Coding.CrossApp.Validate)
+
+      assert {:ok, contract_change} =
+               ActionCatalog.fetch(snapshot, "coding_contract_change_validate")
+
+      assert contract_change["module"] ==
+               Atom.to_string(Arbor.Actions.Coding.ContractChange.Validate)
 
       props = get_in(validate, ["parameters_schema", "properties"]) || %{}
       assert Map.has_key?(props, "workspace_id")

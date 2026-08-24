@@ -121,6 +121,25 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
        }}
     end
 
+    defp execute("coding_contract_change_validate", _params, _opts, _config) do
+      check = cross_check()
+
+      {:ok,
+       %{
+         "passed" => true,
+         "reason" => "contract_change_validated",
+         "base_commit" => String.duplicate("c", 40),
+         "changed_files" => ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
+         "test_paths" => ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+         "preflight" => check,
+         "test" => check,
+         "validated_tree_oid" =>
+           Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest.candidate_tree_oid(),
+         "validated_head" => String.duplicate("b", 40),
+         "feedback_json" => Jason.encode!(%{"passed" => true})
+       }}
+    end
+
     defp execute("coding_security_regression_validate", _params, _opts, _config) do
       candidate = security_leg(0, 1, 0)
       base = security_leg(1, 0, 1)
@@ -580,7 +599,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
   end
 
   test "product and operator surfaces preserve the same gate IDs for every profile", ctx do
-    for profile <- ~w[default cross_app security_regression] do
+    for profile <- ~w[default cross_app security_regression contract_change] do
       plan = plan!(profile)
       program = compiled_program!(plan)
       request = request(ctx.agent_id, profile)
@@ -1033,6 +1052,46 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
              program["static_parameters"]
   end
 
+  test "contract_change validator is invoked with owner-bound workspace_id", ctx do
+    plan = plan!("contract_change")
+    program = compiled_program!(plan)
+
+    assert {:ok, report} =
+             verify_operator(plan, request(ctx.agent_id, "contract_change"))
+
+    assert report["status"] == "passed"
+    assert report["profile"] == "contract_change"
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _inspect_params,
+                    _inspect_opts, _authority, {:ok, _signed_request}}
+
+    assert_receive {:operator_candidate_executor, action, params, _validation_opts, _authority,
+                    {:ok, _signed_request}}
+
+    assert action == "coding_contract_change_validate"
+    assert params["workspace_id"] == @workspace_id
+
+    assert Map.take(params, Map.keys(program["static_parameters"])) ==
+             program["static_parameters"]
+
+    refute Map.has_key?(params, "path")
+    refute Map.has_key?(params, "review_attestation_id")
+  end
+
+  test "contract_change human_required compiled plan remains operator-verifiable", ctx do
+    plan = Map.put(plan!("contract_change"), "review_profile", "human_required")
+
+    assert {:ok, report} =
+             verify_operator(plan, request(ctx.agent_id, "contract_change"))
+
+    assert report["status"] == "passed"
+    assert report["profile"] == "contract_change"
+    assert report["provenance"]["review_profile"] == "human_required"
+
+    assert Enum.map(report["diagnostics"], & &1["gate_id"]) ==
+             expected_gate_ids("contract_change")
+  end
+
   test "workspace, task, and principal mismatches fail before validation", ctx do
     configure_executor(:normal, workspace_id: "workspace_owned_by_another_task")
 
@@ -1137,6 +1196,11 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
   end
 
   defp plan!(profile, wall_clock_ms \\ 900_000, repo_root \\ nil) do
+    checkpoint_policy =
+      if Plan.design_checkpoint_required?("default", profile),
+        do: "design_required",
+        else: "direct"
+
     work_packet = %{
       "version" => 1,
       "success_criteria" => ["candidate verification passes"],
@@ -1146,7 +1210,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
         "apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan/operator_candidate_verifier.ex"
       ],
       "required_evidence" => ["normalized verification report"],
-      "checkpoint_policy" => "direct"
+      "checkpoint_policy" => checkpoint_policy
     }
 
     {:ok, work_packet_digest} = WorkPacket.digest(work_packet)
@@ -1262,6 +1326,13 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
       "coding.validation.security_regression.attestation",
       "coding.validation.security_regression.candidate",
       "coding.validation.security_regression.base"
+    ]
+  end
+
+  defp expected_gate_ids("contract_change") do
+    [
+      "coding.validation.contract_change.preflight",
+      "coding.validation.contract_change.tests"
     ]
   end
 

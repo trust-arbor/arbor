@@ -195,7 +195,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       for resource_uri <- [
             "arbor://action/mix/compile",
             "arbor://action/coding/cross_app/validate",
-            "arbor://action/coding/security_regression/validate"
+            "arbor://action/coding/security_regression/validate",
+            "arbor://action/coding/contract_change/validate"
           ] do
         assert Arbor.Trust.effective_mode(agent_id, resource_uri, []) == :ask,
                "expected nested validator to remain approval-gated: #{resource_uri}"

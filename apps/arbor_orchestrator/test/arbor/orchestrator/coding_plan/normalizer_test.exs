@@ -234,6 +234,100 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       end
     end
 
+    test "security regression: default plus contract_change cannot bypass design_required with a direct checkpoint" do
+      assert {:error,
+              {:invalid_field, "work_packet.checkpoint_policy",
+               {:required_for_validation_profile, "contract_change", "design_required"}}} =
+               Normalizer.normalize_task(
+                 v2_direct_task(%{
+                   "task_class" => "default",
+                   "validation_profile" => "contract_change",
+                   "checkpoint_policy" => "direct"
+                 })
+               )
+    end
+
+    test "security regression: default plus contract_change is admitted with design_required" do
+      assert {:ok, plan} =
+               Normalizer.normalize_task(
+                 v2_direct_task(%{
+                   "task_class" => "default",
+                   "validation_profile" => "contract_change",
+                   "checkpoint_policy" => "design_required"
+                 })
+               )
+
+      assert plan.task_class == "default"
+      assert plan.validation_profile == "contract_change"
+      assert plan.work_packet["checkpoint_policy"] == "design_required"
+    end
+
+    test "security regression: explicit version 1 high-risk validation_profile is rejected at admission" do
+      for profile <-
+            ~w(security_regression contract_change cross_app database_migration frontend_visual) do
+        task = %{
+          "kind" => "coding_change",
+          "plan" => %{
+            "version" => 1,
+            "task" => "high-risk change",
+            "repo_root" => "/workspace/arbor",
+            "task_class" => "default",
+            "validation_profile" => profile,
+            "worker" => %{"provider" => "grok"}
+          }
+        }
+
+        assert {:error, {:legacy_coding_plan_not_allowed_for_validation_profile, ^profile}} =
+                 Normalizer.normalize_task(task)
+      end
+    end
+
+    test "security regression: both high-risk version-1 fields emit the task_class legacy tag" do
+      task = %{
+        "kind" => "coding_change",
+        "plan" => %{
+          "version" => 1,
+          "task" => "high-risk change",
+          "repo_root" => "/workspace/arbor",
+          "task_class" => "contract_change",
+          "validation_profile" => "cross_app",
+          "worker" => %{"provider" => "grok"}
+        }
+      }
+
+      assert {:error, {:legacy_coding_plan_not_allowed_for_task_class, "contract_change"}} =
+               Normalizer.normalize_task(task)
+    end
+
+    test "security regression: ordinary default version-1 and version-2 plans remain admitted" do
+      v1_task = %{
+        "kind" => "coding_change",
+        "plan" => %{
+          "version" => 1,
+          "task" => "ordinary default change",
+          "repo_root" => "/workspace/arbor",
+          "worker" => %{"provider" => "grok"}
+        }
+      }
+
+      assert {:ok, v1_plan} = Normalizer.normalize_task(v1_task)
+      assert v1_plan.version == 1
+      assert v1_plan.task_class == "default"
+      assert v1_plan.validation_profile == "default"
+
+      assert {:ok, v2_plan} = Normalizer.normalize_task(v2_direct_task(%{}))
+      assert v2_plan.version == 2
+      assert v2_plan.task_class == "default"
+      assert v2_plan.validation_profile == "default"
+      assert v2_plan.work_packet["checkpoint_policy"] == "direct"
+
+      assert {:ok, legacy_plan} = Normalizer.normalize_task(@legacy_task)
+      assert legacy_plan.version == 2
+      assert legacy_plan.task_class == "default"
+      assert legacy_plan.validation_profile == "default"
+      assert legacy_plan.work_packet["checkpoint_policy"] == "direct"
+    end
+
     test "returns Plan validation errors without losing detail" do
       task = %{
         "kind" => "coding_change",
@@ -264,6 +358,17 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
 
       assert {:error, {:coding_plan_review_profile_not_allowed, "none"}} =
                Normalizer.normalize_task(task)
+    end
+
+    test "rejects none review for a contract_change planner task" do
+      assert {:error, {:coding_plan_review_profile_not_allowed, "none"}} =
+               Normalizer.normalize_task(
+                 v2_direct_task(%{
+                   "validation_profile" => "contract_change",
+                   "checkpoint_policy" => "design_required",
+                   "review_profile" => "none"
+                 })
+               )
     end
 
     test "accepts binding and human-required direct review profiles" do
@@ -405,5 +510,38 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       assert MapSet.disjoint?(MapSet.new(plan_keys), MapSet.new(@authority_keys))
       assert {:ok, _json} = plan |> Plan.to_map() |> Jason.encode()
     end
+  end
+
+  defp v2_direct_task(overrides) do
+    packet =
+      %{
+        "version" => 1,
+        "success_criteria" => ["focused tests pass"],
+        "non_goals" => [],
+        "constraints" => [],
+        "architecture_refs" => [],
+        "required_evidence" => [],
+        "checkpoint_policy" => "direct"
+      }
+      |> Map.merge(Map.take(overrides, ["checkpoint_policy"]))
+
+    plan_overrides = Map.drop(overrides, ["checkpoint_policy"])
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    %{
+      "kind" => "coding_change",
+      "plan" =>
+        Map.merge(
+          %{
+            "version" => 2,
+            "task" => "test",
+            "repo_root" => "/workspace/arbor",
+            "worker" => %{"provider" => "grok"},
+            "work_packet" => packet,
+            "work_packet_digest" => digest
+          },
+          plan_overrides
+        )
+    }
   end
 end

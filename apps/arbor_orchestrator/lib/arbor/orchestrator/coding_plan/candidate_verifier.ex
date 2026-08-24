@@ -275,6 +275,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
         "cross_app" ->
           %{"workspace_id" => candidate.workspace_id}
 
+        "contract_change" ->
+          %{"workspace_id" => candidate.workspace_id}
+
         "security_regression" ->
           %{"review_attestation_id" => candidate.review_attestation_id}
       end

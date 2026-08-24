@@ -41,6 +41,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # Security-regression whole-stage hard max: exactly two sequential intensive
   # child ceilings (candidate then base). Actions facade only — never restate.
   @security_regression_stage_timeout_max_ms Arbor.Actions.security_regression_maximum_stage_timeout_ms()
+  # Contract-change whole-stage hard max: exactly two intensive children
+  # (compile/xref/census preflight then exact-file tests). Actions facade only.
+  # Compile/xref are source-compatibility evidence; binding council owns
+  # semantic / consumer API compatibility.
+  @contract_change_stage_timeout_max_ms Arbor.Actions.contract_change_maximum_stage_timeout_ms()
 
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
@@ -2034,25 +2039,40 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
               },
               %{
                 "id" => "contract_change",
-                "executable" => false,
+                "executable" => true,
                 "template_version" => @template_version,
                 "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
-                  "required_enforcement" =>
-                    "contract_rules_preflight_and_consumer_api_compatibility"
+                  "action" => "coding_contract_change_validate",
+                  "authority_parameter" => "workspace_id",
+                  "authority_source" => "workspace_id",
+                  "context_keys" => ["workspace_id"],
+                  "result_adapter" => "contract_change_v1",
+                  "static_parameters" => %{},
+                  "timeout_budget_param" => "stage_timeout",
+                  "timeout_budget_source" => "budgets.wall_clock_ms",
+                  # Intensive Shell profile: per-op child ceiling only.
+                  "timeout_max_ms" => @spawn_capable_intensive_max_timeout_ms,
+                  "stage_timeout_budget_source" => "budgets.wall_clock_ms",
+                  # Whole two-child stage max from Actions facade (2 × intensive).
+                  "stage_timeout_max_ms" => @contract_change_stage_timeout_max_ms,
+                  # Compile/xref are source-compatibility evidence only.
+                  "runs_contract_rules_preflight" => true,
+                  "runs_source_compatibility_evidence" => true,
+                  "claims_semantic_compatibility" => false,
+                  "claims_consumer_api_compatibility" => false,
+                  "selects_downstream_dependents" => false
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
                   @semantic_policy_base
                   |> Map.put("validation_profile", "contract_change")
+                  |> Map.put("action_placements", @cross_app_action_placements)
                   |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
-                  ),
-                "unsupported_reason" =>
-                  "No registered action enforces CONTRACT_RULES preflight and consumer/API " <>
-                    "compatibility review for contract changes."
+                  )
               },
               %{
                 "id" => "frontend_visual",

@@ -423,6 +423,70 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       end
     end
 
+    test "security regression: default task_class cannot bypass design_required via a high-risk validation_profile" do
+      required = ~w(
+        security_regression
+        contract_change
+        cross_app
+        database_migration
+        frontend_visual
+      )
+
+      for profile <- required do
+        direct_attrs = Map.put(v2_attrs("default", "direct"), :validation_profile, profile)
+
+        assert {:error,
+                {:invalid_field, "work_packet.checkpoint_policy",
+                 {:required_for_validation_profile, ^profile, "design_required"}}} =
+                 Plan.new(direct_attrs)
+
+        design_attrs =
+          Map.put(v2_attrs("default", "design_required"), :validation_profile, profile)
+
+        assert {:ok, plan} = Plan.new(design_attrs)
+        assert plan.task_class == "default"
+        assert plan.validation_profile == profile
+        assert plan.work_packet["checkpoint_policy"] == "design_required"
+      end
+    end
+
+    test "security regression: both high-risk fields emit the task_class checkpoint tag" do
+      attrs = Map.put(v2_attrs("contract_change", "direct"), :validation_profile, "cross_app")
+
+      assert {:error,
+              {:invalid_field, "work_packet.checkpoint_policy",
+               {:required_for_task_class, "contract_change", "design_required"}}} =
+               Plan.new(attrs)
+    end
+
+    test "security regression: archived version 1 remains readable with a high-risk validation_profile" do
+      required = ~w(
+        security_regression
+        contract_change
+        cross_app
+        database_migration
+        frontend_visual
+      )
+
+      for profile <- required do
+        assert {:ok, plan} =
+                 Plan.new(Map.put(@minimal_attrs, :validation_profile, profile))
+
+        assert plan.version == 1
+        assert plan.task_class == "default"
+        assert plan.validation_profile == profile
+      end
+    end
+
+    test "security regression: design_checkpoint_required? evaluates each profile and both fields" do
+      refute Plan.design_checkpoint_required?("default")
+      refute Plan.design_checkpoint_required?("docs_only")
+      assert Plan.design_checkpoint_required?("contract_change")
+      assert Plan.design_checkpoint_required?("default", "contract_change")
+      refute Plan.design_checkpoint_required?("default", "docs_only")
+      refute Plan.design_checkpoint_required?("default", "default")
+    end
+
     test "round-trips the canonical version 2 map through JSON" do
       assert {:ok, plan} = Plan.new(v2_attrs("docs_only", "design_required"))
       canonical = Plan.to_map(plan)

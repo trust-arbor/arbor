@@ -68,6 +68,8 @@ required_capabilities:
   resource: "arbor://action/coding/security_regression/validate"
 - description: "Validate compile, xref evidence, and downstream tests for cross-app changes"
   resource: "arbor://action/coding/cross_app/validate"
+- description: "Validate CONTRACT_RULES preflight and bounded contract tests for contract changes"
+  resource: "arbor://action/coding/contract_change/validate"
 - description: "Acquire, inspect, retain, and release isolated coding workspaces"
   resource: "arbor://action/coding/workspace/**"
 - description: "Verify the host-installed Linux dependency baseline before opening a coding worker"
@@ -111,6 +113,7 @@ trust_preset:
     "arbor://action/coding/worker_terminal/parse": auto
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
+    "arbor://action/coding/contract_change/validate": ask
     "arbor://action/coding/workspace": auto
     "arbor://action/coding/dependency_baseline/check": auto
     "arbor://action/coding/review_tree/read": auto

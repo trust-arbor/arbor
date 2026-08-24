@@ -32,6 +32,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     status passed exit_code reason stdout_excerpt stderr_excerpt stdout_truncated stderr_truncated
     stdout_sha256 stderr_sha256
   ]
+  @contract_fields ~w[
+    passed reason base_commit changed_files test_paths preflight test validated_tree_oid
+    validated_head feedback_json
+  ]a
   @security_fields ~w[
     passed reason base_commit candidate_fingerprint test_paths source_hashes candidate base diagnostics
     evidence_type attested_base_commit attested_candidate_commit attested_candidate_tree_oid
@@ -45,6 +49,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @security_diagnostic_fields ~w[
     exit_code timed_out output_bytes output_sha256 untrusted_diagnostic_output
   ]
+  # Post-adapter evidence-map list keys used only for digest projection, not
+  # producer-envelope field names. security_regression_v1 uses the adapted
+  # selected_tests key rather than attested_selected_tests.
+  @inventory_summary_keys %{
+    "contract_change_v1" => ["changed_files", "test_paths"],
+    "cross_app_v1" => ["changed_files", "changed_apps", "affected_apps", "test_paths"],
+    "security_regression_v1" => ["selected_tests"]
+  }
   @max_untrusted_diagnostic_bytes 2_048
 
   @gates %{
@@ -59,6 +71,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
       "coding.validation.security_regression.attestation",
       "coding.validation.security_regression.candidate",
       "coding.validation.security_regression.base"
+    ],
+    "contract_change" => [
+      "coding.validation.contract_change.preflight",
+      "coding.validation.contract_change.tests"
     ]
   }
 
@@ -83,6 +99,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
 
   @security_domain_failures ~w[candidate_tests_failed base_tests_passed]
   @cross_domain_failures ~w[compile_failed xref_failed test_compile_failed tests_failed]
+  @contract_domain_failures ~w[contract_surface_missing preflight_failed tests_failed]
 
   # Closed success-path ReviewedValidation wrapper only. Nested validator
   # evidence is emitted solely with interaction_outcome=""; denied/rework carry
@@ -158,6 +175,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   defp adapt_recovered("mix_compile_v1", result), do: adapt_default(result)
   defp adapt_recovered("cross_app_v1", result), do: adapt_cross_app(result)
   defp adapt_recovered("security_regression_v1", result), do: adapt_security(result)
+  defp adapt_recovered("contract_change_v1", result), do: adapt_contract_change(result)
   defp adapt_recovered(_adapter, _result), do: :error
 
   # Recover the exact compiler-pinned validator envelope from either:
@@ -601,6 +619,239 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   defp cross_stage_failure_code(:xref), do: "xref_failed"
   defp cross_stage_failure_code(:test_compile), do: "test_compile_failed"
   defp cross_stage_failure_code(:test), do: "tests_failed"
+
+  defp adapt_contract_change(result) do
+    with {:ok, values, _style} <- exact_envelope(result, @contract_fields),
+         true <- is_boolean(values.passed),
+         true <- is_binary(values.reason),
+         true <- valid_oid?(values.base_commit),
+         true <- bounded_string_list?(values.changed_files, @max_path_list, @max_path_bytes),
+         true <- bounded_string_list?(values.test_paths, @max_path_list, @max_path_bytes),
+         true <- ordered_unique?(values.changed_files),
+         true <- ordered_unique?(values.test_paths),
+         {:ok, preflight} <- adapt_contract_check(:preflight, values.preflight),
+         {:ok, test} <- adapt_contract_check(:test, values.test),
+         true <- valid_contract_sequence?(preflight, test),
+         expected_reason <- contract_reason(preflight, test),
+         true <- values.reason == expected_reason,
+         true <- values.passed == (preflight["passed"] == true and test["passed"] == true),
+         true <- valid_oid?(values.validated_tree_oid),
+         true <- valid_oid?(values.validated_head),
+         true <- bounded_binary?(values.feedback_json, @max_feedback_json_bytes) do
+      evidence = %{
+        "adapter" => "contract_change_v1",
+        "candidate_tree_oid" => values.validated_tree_oid,
+        "validated_head" => values.validated_head,
+        "base_commit" => values.base_commit,
+        "passed" => values.passed,
+        "reason" => values.reason,
+        "changed_files" => values.changed_files,
+        "test_paths" => values.test_paths,
+        "checks" => [preflight, test]
+      }
+
+      status =
+        cond do
+          values.passed -> "passed"
+          values.reason in @contract_domain_failures -> "failed"
+          true -> "blocked"
+        end
+
+      {:ok, evidence,
+       %{
+         status: status,
+         gates: Enum.map([preflight, test], &contract_gate/1)
+       }}
+    else
+      _other -> :error
+    end
+  end
+
+  defp adapt_contract_check(stage, check) do
+    with true <- is_map(check) and not is_struct(check),
+         {:ok, fields} <- contract_check_fields(check),
+         {:ok, values} <- exact_string_object(check, fields),
+         true <- values["status"] in ["completed", "skipped"],
+         true <- is_boolean(values["passed"]),
+         true <- valid_optional_exit_code?(values["exit_code"]),
+         true <- is_nil(values["reason"]) or bounded_text?(values["reason"], 64),
+         true <- bounded_binary?(values["stdout_excerpt"], 8_192),
+         true <- bounded_binary?(values["stderr_excerpt"], 8_192),
+         true <- is_boolean(values["stdout_truncated"]),
+         true <- is_boolean(values["stderr_truncated"]),
+         true <- valid_sha256?(values["stdout_sha256"]),
+         true <- valid_sha256?(values["stderr_sha256"]),
+         {:ok, extra} <- normalize_contract_extra(values),
+         true <- valid_contract_check_semantics?(stage, values, extra) do
+      projection = %{
+        "status" => values["status"],
+        "passed" => values["passed"],
+        "exit_code" => values["exit_code"],
+        "reason" => values["reason"],
+        "stdout_truncated" => values["stdout_truncated"],
+        "stderr_truncated" => values["stderr_truncated"],
+        "stdout_sha256" => values["stdout_sha256"],
+        "stderr_sha256" => values["stderr_sha256"]
+      }
+
+      {:ok, put_contract_extra(projection, extra)}
+    else
+      _other -> :error
+    end
+  end
+
+  defp contract_check_fields(check) do
+    has_handoff? = Map.has_key?(check, "capacity_handoff")
+    has_termination? = Map.has_key?(check, "termination")
+
+    cond do
+      has_handoff? and has_termination? ->
+        :error
+
+      has_handoff? ->
+        {:ok, @cross_check_fields ++ ["capacity_handoff"]}
+
+      has_termination? ->
+        {:ok, @cross_check_fields ++ ["termination"]}
+
+      true ->
+        {:ok, @cross_check_fields}
+    end
+  end
+
+  defp normalize_contract_extra(values) do
+    cond do
+      Map.has_key?(values, "capacity_handoff") ->
+        with {:ok, handoff} <- normalize_capacity(values["capacity_handoff"]),
+             true <- is_map(handoff) do
+          {:ok, {:capacity, handoff}}
+        else
+          _other -> :error
+        end
+
+      Map.has_key?(values, "termination") ->
+        with {:ok, termination} <-
+               ValidationCapacityTerminal.normalize_containment_termination(values["termination"]) do
+          {:ok, {:containment, termination}}
+        else
+          _other -> :error
+        end
+
+      true ->
+        {:ok, nil}
+    end
+  end
+
+  defp put_contract_extra(projection, {:capacity, handoff}),
+    do: Map.put(projection, "capacity_handoff", handoff)
+
+  defp put_contract_extra(projection, {:containment, termination}),
+    do: Map.put(projection, "termination", termination)
+
+  defp put_contract_extra(projection, nil), do: projection
+
+  defp valid_contract_check_semantics?(:preflight, values, extra) do
+    tuple = {values["status"], values["passed"], values["exit_code"], values["reason"]}
+
+    case {tuple, extra} do
+      {{"completed", true, 0, nil}, nil} ->
+        true
+
+      {{"completed", false, code, "preflight_failed"}, nil}
+      when is_integer(code) and code != 0 ->
+        true
+
+      {{"completed", false, code, "validation_capacity_exceeded"}, {:capacity, handoff}}
+      when (is_nil(code) or is_integer(code)) and is_map(handoff) ->
+        ValidationCapacityTerminal.contract_handoff_matches_stage?(:preflight, handoff)
+
+      {{"completed", false, code, "validation_containment_failure"}, {:containment, termination}}
+      when is_integer(code) and is_map(termination) ->
+        true
+
+      {{"skipped", false, nil, "contract_surface_missing"}, nil} ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp valid_contract_check_semantics?(:test, values, extra) do
+    tuple = {values["status"], values["passed"], values["exit_code"], values["reason"]}
+
+    case {tuple, extra} do
+      {{"completed", true, 0, nil}, nil} ->
+        true
+
+      {{"completed", false, code, "tests_failed"}, nil} when is_integer(code) and code != 0 ->
+        true
+
+      {{"completed", false, code, "validation_capacity_exceeded"}, {:capacity, handoff}}
+      when (is_nil(code) or is_integer(code)) and is_map(handoff) ->
+        ValidationCapacityTerminal.contract_handoff_matches_stage?(:test, handoff)
+
+      {{"completed", false, code, "validation_containment_failure"}, {:containment, termination}}
+      when is_integer(code) and is_map(termination) ->
+        true
+
+      {{"skipped", false, nil, reason}, nil}
+      when reason in [
+             "contract_surface_missing",
+             "preflight_failed",
+             "validation_capacity_exceeded",
+             "validation_containment_failure"
+           ] ->
+        true
+
+      _other ->
+        false
+    end
+  end
+
+  defp valid_contract_check_semantics?(_stage, _values, _capacity), do: false
+
+  # At most one stage may carry capacity/containment evidence. A passed
+  # preflight may carry neither. Mixed extras fail closed via the remaining
+  # clauses.
+  defp valid_contract_sequence?(preflight, test) do
+    cond do
+      preflight["status"] == "skipped" and preflight["reason"] == "contract_surface_missing" ->
+        skipped_for?(test, "contract_surface_missing") and
+          not has_terminal_evidence?(preflight) and not has_terminal_evidence?(test)
+
+      not preflight["passed"] ->
+        skipped_for?(test, preflight["reason"] || "preflight_failed") and
+          not has_terminal_evidence?(test)
+
+      has_terminal_evidence?(preflight) ->
+        false
+
+      true ->
+        true
+    end
+  end
+
+  defp has_terminal_evidence?(check) when is_map(check) do
+    Map.has_key?(check, "capacity_handoff") or Map.has_key?(check, "termination")
+  end
+
+  defp has_terminal_evidence?(_check), do: false
+
+  defp contract_reason(preflight, test) do
+    cond do
+      not preflight["passed"] -> preflight["reason"] || "preflight_failed"
+      not test["passed"] -> test["reason"] || "tests_failed"
+      true -> "contract_change_validated"
+    end
+  end
+
+  defp contract_gate(%{"passed" => true}), do: {:passed, "validation_passed"}
+
+  defp contract_gate(%{"reason" => reason}) when is_binary(reason),
+    do: {:blocked, reason}
+
+  defp contract_gate(_check), do: {:blocked, "preflight_failed"}
 
   defp adapt_security(result) do
     with {:ok, values, style} <- exact_envelope(result, @security_fields),
@@ -1074,17 +1325,48 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   end
 
   defp evidence_ref(evidence) do
-    encoded = evidence |> canonical_json() |> Jason.encode_to_iodata!()
+    with {:ok, digest_evidence} <- project_inventory_summaries(evidence) do
+      encoded = digest_evidence |> canonical_json() |> Jason.encode_to_iodata!()
 
-    if :erlang.iolist_size(encoded) <= @max_evidence_bytes do
-      {:ok, "sha256:" <> sha256(encoded)}
-    else
-      :error
+      if :erlang.iolist_size(encoded) <= @max_evidence_bytes do
+        {:ok, "sha256:" <> sha256(encoded)}
+      else
+        :error
+      end
     end
   rescue
     _error -> :error
   catch
     _kind, _reason -> :error
+  end
+
+  defp project_inventory_summaries(evidence) when is_map(evidence) and not is_struct(evidence) do
+    case Map.fetch(@inventory_summary_keys, evidence["adapter"]) do
+      :error ->
+        {:ok, evidence}
+
+      {:ok, keys} ->
+        Enum.reduce_while(keys, {:ok, evidence}, fn key, {:ok, acc} ->
+          case Map.fetch(acc, key) do
+            {:ok, list} when is_list(list) ->
+              {:cont, {:ok, Map.put(acc, key, inventory_summary(list))}}
+
+            _other ->
+              {:halt, :error}
+          end
+        end)
+    end
+  end
+
+  defp project_inventory_summaries(_evidence), do: :error
+
+  defp inventory_summary(list) when is_list(list) do
+    encoded = list |> canonical_json() |> Jason.encode_to_iodata!()
+
+    %{
+      "count" => length(list),
+      "sha256" => sha256(encoded)
+    }
   end
 
   defp canonical_json(value) when is_map(value) and not is_struct(value) do

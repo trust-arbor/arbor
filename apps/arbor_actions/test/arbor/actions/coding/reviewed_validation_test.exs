@@ -24,6 +24,11 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     end
   end
 
+  defmodule AutoAllPolicy do
+    @moduledoc false
+    def confirmation_mode(_principal_id, _resource_uri, _opts), do: :auto
+  end
+
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     {:ok, _} = Application.ensure_all_started(:arbor_security)
@@ -42,7 +47,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
       identity_verification: Application.get_env(:arbor_security, :identity_verification),
       approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms),
       orchestrator_approval_timeout:
-        Application.get_env(:arbor_orchestrator, :approval_timeout_ms)
+        Application.get_env(:arbor_orchestrator, :approval_timeout_ms),
+      nested_runner: Application.get_env(:arbor_actions, :reviewed_validation_nested_runner)
     }
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
@@ -71,6 +77,12 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
         :approval_timeout_ms,
         previous.orchestrator_approval_timeout
       )
+
+      restore_env(
+        :arbor_actions,
+        :reviewed_validation_nested_runner,
+        previous.nested_runner
+      )
     end)
 
     :ok
@@ -88,7 +100,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     assert MixAction.Compile in deps
     assert Arbor.Actions.Coding.CrossApp.Validate in deps
     assert Arbor.Actions.Coding.SecurityRegression.Validate in deps
-    assert length(deps) == 3
+    assert Arbor.Actions.Coding.ContractChange.Validate in deps
+    assert length(deps) == 4
     assert deps == Enum.sort_by(deps, &Atom.to_string/1)
 
     assert {:ok, names} = Arbor.Actions.execution_dependencies(ReviewedValidation)
@@ -97,7 +110,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              Enum.sort([
                "mix_compile",
                "coding_cross_app_validate",
-               "coding_security_regression_validate"
+               "coding_security_regression_validate",
+               "coding_contract_change_validate"
              ])
   end
 
@@ -155,6 +169,47 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              )
 
     assert reason3 =~ "pinned_action_profile_mismatch" or reason3 =~ "not_a_profile"
+
+    # Security regression: forged contract_change profile/action pairs cannot
+    # select another validator.
+    assert {:error, reason4} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_cross_app_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_pin"
+               },
+               %{agent_id: "agent_pin", allow_pipeline_internal: true}
+             )
+
+    assert reason4 =~ "pinned_action_profile_mismatch" or reason4 =~ "contract_change"
+
+    assert {:error, reason5} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "cross_app",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_pin"
+               },
+               %{agent_id: "agent_pin", allow_pipeline_internal: true}
+             )
+
+    assert reason5 =~ "pinned_action_profile_mismatch" or reason5 =~ "cross_app"
+
+    assert {:error, reason6} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "default",
+                 pinned_params_json: ~s({"timeout":1000}),
+                 path: "/tmp"
+               },
+               %{agent_id: "agent_pin", allow_pipeline_internal: true}
+             )
+
+    assert reason6 =~ "pinned_action_profile_mismatch" or reason6 =~ "default"
   end
 
   test "allowed_validator_module admits only closed names" do
@@ -165,6 +220,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
 
     assert ReviewedValidation.allowed_validator_names() ==
              Enum.sort([
+               "coding_contract_change_validate",
                "coding_cross_app_validate",
                "coding_security_regression_validate",
                "mix_compile"
@@ -373,25 +429,31 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     parent = self()
     nested_attempts = :counters.new(1, [])
 
+    # Serialize the assertion callback: async delivery can race counters.add/get
+    # across the two nested mix_compile start events.
     assert {:ok, sub_id} =
-             Arbor.Signals.subscribe("action.started", fn signal ->
-               name = signal.data[:action] || signal.data["action"]
+             Arbor.Signals.subscribe(
+               "action.started",
+               fn signal ->
+                 name = signal.data[:action] || signal.data["action"]
 
-               if name == "mix_compile" do
-                 :counters.add(nested_attempts, 1, 1)
+                 if name == "mix_compile" do
+                   :counters.add(nested_attempts, 1, 1)
 
-                 if :counters.get(nested_attempts, 1) == 1 do
+                   if :counters.get(nested_attempts, 1) == 1 do
+                     params = signal.data[:params] || signal.data["params"] || %{}
+                     timeout = params[:timeout] || params["timeout"]
+                     Agent.update(seen, fn _ -> timeout end)
+                   end
+
                    params = signal.data[:params] || signal.data["params"] || %{}
-                   timeout = params[:timeout] || params["timeout"]
-                   Agent.update(seen, fn _ -> timeout end)
+                   send(parent, {:nested_started, params[:timeout] || params["timeout"]})
                  end
 
-                 params = signal.data[:params] || signal.data["params"] || %{}
-                 send(parent, {:nested_started, params[:timeout] || params["timeout"]})
-               end
-
-               :ok
-             end)
+                 :ok
+               end,
+               async: false
+             )
 
     on_exit(fn -> Arbor.Signals.unsubscribe(sub_id) end)
 
@@ -491,6 +553,213 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
     assert Agent.get(seen, & &1) == 222_222
     assert :counters.get(nested_attempts, 1) == 1
   end
+
+  test "security regression: contract_change inventories over 64 are transported without generic widening" do
+    previous_policy = Application.get_env(:arbor_trust, :policy_module)
+    previous_runner = Application.get_env(:arbor_actions, :reviewed_validation_nested_runner)
+    Application.put_env(:arbor_trust, :policy_module, AutoAllPolicy)
+
+    on_exit(fn ->
+      restore_env(:arbor_trust, :policy_module, previous_policy)
+      restore_env(:arbor_actions, :reviewed_validation_nested_runner, previous_runner)
+    end)
+
+    agent_id = unique_agent("inventory")
+    grant_reviewed_validation!(agent_id)
+
+    assert {:ok, cap} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: "arbor://action/coding/contract_change/validate",
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+
+    changed_files =
+      Enum.map(1..70, fn i ->
+        "apps/arbor_kernel/lib/arbor/contracts/file_#{pad3(i)}.ex"
+      end)
+
+    test_paths =
+      Enum.map(1..80, fn i ->
+        "apps/arbor_kernel/test/arbor/contracts/file_#{pad3(i)}_test.exs"
+      end)
+
+    decoy = Enum.map(1..80, &"extra-#{&1}")
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok,
+         %{
+           passed: true,
+           reason: "contract_change_validated",
+           changed_files: changed_files,
+           test_paths: test_paths,
+           decoy: decoy
+         }}
+      end
+    )
+
+    assert {:ok, payload} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_inventory"
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert length(payload["changed_files"]) == 70
+    assert payload["changed_files"] == Enum.sort(changed_files)
+    assert length(payload["test_paths"]) == 80
+    assert payload["test_paths"] == Enum.sort(test_paths)
+    assert length(payload["decoy"]) == 64
+    refute "extra-65" in payload["decoy"]
+
+    files_2000 =
+      Enum.map(1..2_000, fn i ->
+        "apps/arbor_kernel/lib/arbor/contracts/bound_#{i}.ex"
+      end)
+
+    tests_256 =
+      Enum.map(1..256, fn i ->
+        "apps/arbor_kernel/test/arbor/contracts/bound_#{pad3(i)}_test.exs"
+      end)
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok, %{changed_files: files_2000, test_paths: tests_256, decoy: decoy}}
+      end
+    )
+
+    assert {:ok, bound_payload} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_inventory"
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert length(bound_payload["changed_files"]) == 2_000
+    assert length(bound_payload["test_paths"]) == 256
+    assert length(bound_payload["decoy"]) == 64
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok, %{changed_files: "not-a-list", test_paths: test_paths}}
+      end
+    )
+
+    assert {:error, non_list_reason} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_inventory"
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert non_list_reason =~ "invalid_contract_inventory"
+
+    over_tests =
+      Enum.map(1..257, fn i ->
+        "apps/arbor_kernel/test/arbor/contracts/over_#{pad3(i)}_test.exs"
+      end)
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok, %{changed_files: changed_files, test_paths: over_tests}}
+      end
+    )
+
+    assert {:error, reason} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_inventory"
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert reason =~ "nested_contract_inventory_exceeds_bound" or reason =~ "too_many_paths"
+
+    over_files =
+      Enum.map(1..2001, fn i ->
+        "apps/arbor_kernel/lib/arbor/contracts/over_#{i}.ex"
+      end)
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok, %{changed_files: over_files, test_paths: test_paths}}
+      end
+    )
+
+    assert {:error, over_files_reason} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "coding_contract_change_validate",
+                 pinned_profile_id: "contract_change",
+                 pinned_params_json: ~s({"timeout":1000,"stage_timeout":2000}),
+                 workspace_id: "ws_inventory"
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert over_files_reason =~ "nested_contract_inventory_exceeds_bound" or
+             over_files_reason =~ "too_many_paths"
+
+    assert {:ok, mix_cap} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: "arbor://action/mix/compile",
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(mix_cap.id) end)
+
+    Application.put_env(
+      :arbor_actions,
+      :reviewed_validation_nested_runner,
+      fn _agent_id, _module, _params, _context ->
+        {:ok, %{passed: true, decoy: decoy}}
+      end
+    )
+
+    assert {:ok, mix_payload} =
+             ReviewedValidation.run(
+               %{
+                 pinned_action: "mix_compile",
+                 pinned_profile_id: "default",
+                 pinned_params_json: ~s({"timeout":1000,"warnings_as_errors":true}),
+                 path: System.tmp_dir!()
+               },
+               build_context(agent_id, build_signer(agent_id))
+             )
+
+    assert length(mix_payload["decoy"]) == 64
+  end
+
+  defp pad3(i), do: String.pad_leading(Integer.to_string(i), 3, "0")
 
   defp public_run(agent_id, params, context) do
     Arbor.Actions.authorize_and_execute(

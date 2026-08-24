@@ -1040,18 +1040,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp valid_v2_direct_task(plan_overrides \\ %{}) do
-    packet = %{
-      "version" => 1,
-      "success_criteria" => ["focused tests pass"],
-      "non_goals" => ["expand execution authority"],
-      "constraints" => ["preserve existing behavior"],
-      "architecture_refs" => [
-        "apps/arbor_orchestrator/lib/arbor/orchestrator/coding_task_executor.ex"
-      ],
-      "required_evidence" => ["focused test output"],
-      "checkpoint_policy" => "direct"
-    }
+    packet =
+      %{
+        "version" => 1,
+        "success_criteria" => ["focused tests pass"],
+        "non_goals" => ["expand execution authority"],
+        "constraints" => ["preserve existing behavior"],
+        "architecture_refs" => [
+          "apps/arbor_orchestrator/lib/arbor/orchestrator/coding_task_executor.ex"
+        ],
+        "required_evidence" => ["focused test output"],
+        "checkpoint_policy" => "direct"
+      }
+      |> Map.merge(Map.take(plan_overrides, ["checkpoint_policy"]))
 
+    plan_overrides = Map.drop(plan_overrides, ["checkpoint_policy"])
     {:ok, packet_digest} = WorkPacket.digest(packet)
 
     valid_direct_task(
@@ -1067,9 +1070,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp verification_task("security_regression") do
-    valid_direct_task(%{
+    valid_v2_direct_task(%{
       "validation_profile" => "security_regression",
+      "checkpoint_policy" => "design_required",
       "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+    })
+  end
+
+  defp verification_task(profile) when profile in ~w(cross_app contract_change) do
+    valid_v2_direct_task(%{
+      "validation_profile" => profile,
+      "checkpoint_policy" => "design_required"
     })
   end
 
@@ -1622,15 +1633,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp last_opts, do: last_run() |> elem(1)
-
-  defp collect_auth_calls(acc \\ []) do
-    receive do
-      {:coding_auth_call, agent_id, resource, action, opts} ->
-        collect_auth_calls([{agent_id, resource, action, opts} | acc])
-    after
-      10 -> Enum.reverse(acc)
-    end
-  end
 
   defp ensure_uri_registry! do
     unless Process.whereis(Arbor.Security.UriRegistry) do
@@ -2892,8 +2894,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, _result} =
                CodingTaskExecutor.run(
                  "agent_1",
-                 valid_direct_task(%{
+                 valid_v2_direct_task(%{
                    "validation_profile" => "cross_app",
+                   "checkpoint_policy" => "design_required",
                    "budgets" => %{
                      "wall_clock_ms" => wall_clock_ms,
                      "inactivity_timeout_ms" => 120_000
@@ -2936,8 +2939,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, _result} =
                CodingTaskExecutor.run(
                  "agent_1",
-                 valid_direct_task(%{
+                 valid_v2_direct_task(%{
                    "validation_profile" => "cross_app",
+                   "checkpoint_policy" => "design_required",
                    "budgets" => %{
                      "wall_clock_ms" => wall_clock_ms,
                      "inactivity_timeout_ms" => 120_000

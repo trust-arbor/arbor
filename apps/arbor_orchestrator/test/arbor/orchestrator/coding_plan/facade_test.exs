@@ -100,6 +100,28 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     assert Arbor.Orchestrator.coding_pipeline_logs_root() == Config.coding_pipeline_logs_root()
   end
 
+  test "security regression: default plus contract_change cannot compile a direct checkpoint" do
+    attrs = v2_contract_change_attrs("direct")
+
+    assert {:error,
+            {:invalid_field, "work_packet.checkpoint_policy",
+             {:required_for_validation_profile, "contract_change", "design_required"}}} =
+             Arbor.Orchestrator.compile_coding_plan(attrs)
+
+    refute_received {:coding_plan_compile_called, _, _}
+  end
+
+  test "security regression: default plus contract_change is admitted with design_required" do
+    attrs = v2_contract_change_attrs("design_required")
+
+    assert {:ok, _result} = Arbor.Orchestrator.compile_coding_plan(attrs)
+
+    assert_receive {:coding_plan_compile_called, %Plan{} = plan, _opts}
+    assert plan.task_class == "default"
+    assert plan.validation_profile == "contract_change"
+    assert plan.work_packet["checkpoint_policy"] == "design_required"
+  end
+
   test "accepts keyword input supported by Plan.new/1" do
     attrs = [
       version: 1,
@@ -509,6 +531,31 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
       "task" => "Compile a reviewed plan",
       "repo_root" => "/tmp/repo",
       "worker" => %{"provider" => "grok"}
+    }
+  end
+
+  defp v2_contract_change_attrs(checkpoint_policy) do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => [],
+      "constraints" => [],
+      "architecture_refs" => [],
+      "required_evidence" => [],
+      "checkpoint_policy" => checkpoint_policy
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    %{
+      "version" => 2,
+      "task" => "Close the design-checkpoint bypass",
+      "repo_root" => "/tmp/repo",
+      "task_class" => "default",
+      "validation_profile" => "contract_change",
+      "worker" => %{"provider" => "grok"},
+      "work_packet" => packet,
+      "work_packet_digest" => digest
     }
   end
 

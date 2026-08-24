@@ -56,7 +56,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
   Legacy flat tasks are upgraded to canonical version 2 plans with a
   deterministic direct-checkpoint work packet. Direct plans are validated
   without key or value coercion, cannot select the legacy-only `none` review
-  profile, and cannot admit high-risk work through explicit version 1.
+  profile, and cannot admit high-risk work through explicit version 1 when
+  either `task_class` or `validation_profile` is a design-required high-risk
+  profile. Version 1 rejection tags identify the firing field:
+  `legacy_coding_plan_not_allowed_for_task_class` or
+  `legacy_coding_plan_not_allowed_for_validation_profile`.
   """
   @spec normalize_task(term()) :: {:ok, Plan.t()} | {:error, term()}
   def normalize_task(task) when is_map(task) and not is_struct(task) do
@@ -139,11 +143,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
     end
   end
 
-  defp reject_high_risk_legacy_plan(%Plan{version: 1, task_class: task_class}) do
-    if Plan.design_checkpoint_required?(task_class) do
-      {:error, {:legacy_coding_plan_not_allowed_for_task_class, task_class}}
-    else
-      :ok
+  defp reject_high_risk_legacy_plan(%Plan{version: 1} = plan) do
+    cond do
+      Plan.design_checkpoint_required?(plan.task_class) ->
+        {:error, {:legacy_coding_plan_not_allowed_for_task_class, plan.task_class}}
+
+      Plan.design_checkpoint_required?(plan.validation_profile) ->
+        {:error,
+         {:legacy_coding_plan_not_allowed_for_validation_profile, plan.validation_profile}}
+
+      true ->
+        :ok
     end
   end
 

@@ -68,6 +68,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
     ]
 
   alias Arbor.Actions
+  alias Arbor.Actions.Coding.ContractChange.Core, as: ContractChangeCore
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
@@ -81,13 +82,15 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
   @allowed_validators %{
     "mix_compile" => Arbor.Actions.Mix.Compile,
     "coding_cross_app_validate" => Arbor.Actions.Coding.CrossApp.Validate,
-    "coding_security_regression_validate" => Arbor.Actions.Coding.SecurityRegression.Validate
+    "coding_security_regression_validate" => Arbor.Actions.Coding.SecurityRegression.Validate,
+    "coding_contract_change_validate" => Arbor.Actions.Coding.ContractChange.Validate
   }
 
   @profile_owned_actions %{
     "default" => "mix_compile",
     "cross_app" => "coding_cross_app_validate",
-    "security_regression" => "coding_security_regression_validate"
+    "security_regression" => "coding_security_regression_validate",
+    "contract_change" => "coding_contract_change_validate"
   }
 
   def taint_roles do
@@ -154,7 +157,15 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
            auth_context = put_signed_request(context, signed_request) do
         case authorize_validation(agent_id, resource, nested_params, auth_context, pin) do
           :authorized ->
-            execute_nested_once(agent_id, module, nested_params, auth_context, nil, "")
+            execute_nested_once(
+              agent_id,
+              module,
+              nested_params,
+              auth_context,
+              nil,
+              "",
+              pin.profile_id
+            )
 
           {:pending_approval, request_id} ->
             await_and_decide(
@@ -163,7 +174,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
               module,
               nested_params,
               auth_context,
-              approval_timeout_ms
+              approval_timeout_ms,
+              pin.profile_id
             )
 
           {:error, reason} ->
@@ -379,13 +391,22 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
          module,
          nested_params,
          context,
-         approval_timeout_ms
+         approval_timeout_ms,
+         profile_id
        ) do
     with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id),
          {:ok, decision} <- await_decision(agent_id, request_id, approval_timeout_ms) do
       case decision do
         :approve ->
-          execute_nested_once(agent_id, module, nested_params, context, request_id, "")
+          execute_nested_once(
+            agent_id,
+            module,
+            nested_params,
+            context,
+            request_id,
+            "",
+            profile_id
+          )
 
         {:deny, note} ->
           {:ok, control_payload("denied", request_id, note)}
@@ -456,7 +477,15 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
 
   # -- nested execute once ---------------------------------------------------
 
-  defp execute_nested_once(agent_id, module, nested_params, context, request_id, note) do
+  defp execute_nested_once(
+         agent_id,
+         module,
+         nested_params,
+         context,
+         request_id,
+         note,
+         profile_id
+       ) do
     resource = Actions.canonical_uri_for(module, nested_params)
 
     with {:ok, fresh_sr} <- fresh_signed_request(resource, context) do
@@ -478,9 +507,16 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
         end)
         |> Map.put(:allow_pipeline_internal, true)
 
-      case Actions.authorize_and_execute(agent_id, module, nested_params, retry_context) do
+      runner =
+        Application.get_env(
+          :arbor_actions,
+          :reviewed_validation_nested_runner,
+          &Actions.authorize_and_execute/4
+        )
+
+      case runner.(agent_id, module, nested_params, retry_context) do
         {:ok, result} when is_map(result) and not is_struct(result) ->
-          {:ok, merge_nested_success(result, request_id, note)}
+          merge_nested_success(result, request_id, note, profile_id)
 
         {:ok, :pending_approval, retry_id} ->
           {:error, "still requires approval after grant: #{retry_id}"}
@@ -498,7 +534,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
     end
   end
 
-  defp merge_nested_success(result, request_id, note)
+  defp merge_nested_success(result, request_id, note, profile_id)
        when is_map(result) and not is_struct(result) do
     base = %{
       "interaction_outcome" => "",
@@ -506,20 +542,59 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       "note" => note || ""
     }
 
-    # Project nested fields as string keys for Engine context.
-    nested =
-      result
-      |> Enum.reduce(%{}, fn {k, v}, acc ->
-        key = if is_atom(k), do: Atom.to_string(k), else: k
+    case project_nested_result(result, profile_id) do
+      {:ok, nested} -> {:ok, Map.merge(nested, base)}
+      {:error, reason} -> {:error, format_error(reason)}
+    end
+  end
 
-        if is_binary(key) do
-          Map.put(acc, key, json_clean_value(v))
-        else
-          acc
-        end
-      end)
+  defp project_nested_result(result, "contract_change") do
+    {files, rest} = pop_inventory(result, :changed_files)
+    {tests, rest} = pop_inventory(rest, :test_paths)
 
-    Map.merge(nested, base)
+    with {:ok, inventories} <- ContractChangeCore.admit_transport_inventories(files, tests) do
+      nested = json_clean_object(rest)
+
+      {:ok,
+       nested
+       |> Map.put("changed_files", inventories.changed_files)
+       |> Map.put("test_paths", inventories.test_paths)}
+    else
+      {:error, :too_many_paths} -> {:error, :nested_contract_inventory_exceeds_bound}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp project_nested_result(result, _profile_id), do: {:ok, json_clean_object(result)}
+
+  defp pop_inventory(result, key) when is_atom(key) do
+    string_key = Atom.to_string(key)
+
+    cond do
+      is_map_key(result, key) ->
+        {inventory_or_empty(Map.get(result, key)), Map.delete(result, key)}
+
+      is_map_key(result, string_key) ->
+        {inventory_or_empty(Map.get(result, string_key)), Map.delete(result, string_key)}
+
+      true ->
+        {[], result}
+    end
+  end
+
+  defp inventory_or_empty(value) when is_list(value), do: value
+  defp inventory_or_empty(_value), do: :invalid_inventory
+
+  defp json_clean_object(result) when is_map(result) and not is_struct(result) do
+    Enum.reduce(result, %{}, fn {k, v}, acc ->
+      key = if is_atom(k), do: Atom.to_string(k), else: k
+
+      if is_binary(key) do
+        Map.put(acc, key, json_clean_value(v))
+      else
+        acc
+      end
+    end)
   end
 
   defp control_payload(outcome, request_id, note)

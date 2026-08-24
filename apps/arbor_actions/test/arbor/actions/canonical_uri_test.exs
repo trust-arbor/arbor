@@ -122,6 +122,18 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert "arbor://action/coding/cross_app/validate" in Actions.action_namespace_uri_prefixes()
     end
 
+    test "contract-change validator is registered under its exact canonical URI" do
+      validator = Arbor.Actions.Coding.ContractChange.Validate
+
+      assert validator in Actions.all_actions()
+      assert {:ok, ^validator} = Actions.name_to_module("coding_contract_change_validate")
+
+      assert Actions.canonical_uri_for(validator, %{}) ==
+               "arbor://action/coding/contract_change/validate"
+
+      assert "arbor://action/coding/contract_change/validate" in Actions.action_namespace_uri_prefixes()
+    end
+
     test "review ledger decision action is registered under its exact canonical URI" do
       action = Arbor.Actions.Consensus.DecideReview
 
@@ -166,6 +178,14 @@ defmodule Arbor.Actions.CanonicalUriTest do
                graduation_eligible: false
              } =
                profile_by_uri["arbor://action/coding/security_regression/validate"]
+
+      assert %CapabilityProfile{
+               owner: :arbor_actions,
+               effect_class: :process_spawn,
+               default_approval: :require_human,
+               graduation_eligible: false
+             } =
+               profile_by_uri["arbor://action/coding/contract_change/validate"]
     end
 
     test "generated action namespace profiles are visible to the trust registry" do

@@ -5,8 +5,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
 
   @moduletag :fast
 
-  @executable_ids ~w[cross_app default security_regression]
-  @unsupported_ids ~w[contract_change database_migration docs_only frontend_visual]
+  @executable_ids ~w[contract_change cross_app default security_regression]
+  @unsupported_ids ~w[database_migration docs_only frontend_visual]
 
   describe "build/2" do
     test "builds exact deterministic JSON-clean descriptors for every executable profile" do
@@ -47,6 +47,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
              "timeout" => 120_000,
              "stage_timeout" => 120_000
            }
+         }},
+        {"contract_change", 900_000,
+         %{
+           "version" => 1,
+           "profile_id" => "contract_change",
+           "action" => "coding_contract_change_validate",
+           "result_adapter" => "contract_change_v1",
+           "context_keys" => ["workspace_id"],
+           "static_parameters" => %{
+             "timeout" => 900_000,
+             "stage_timeout" => 900_000
+           }
          }}
       ]
 
@@ -77,6 +89,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
          %{
            "timeout" => 1_200_000,
            "stage_timeout" => 1_500_000
+         }},
+        {"contract_change", 120_000, %{"timeout" => 120_000, "stage_timeout" => 120_000}},
+        {"contract_change", 1_500_000,
+         %{
+           "timeout" => 1_200_000,
+           "stage_timeout" => 1_500_000
+         }},
+        {"contract_change", 9_000_000,
+         %{
+           "timeout" => 1_200_000,
+           "stage_timeout" => Arbor.Actions.contract_change_maximum_stage_timeout_ms()
          }},
         {"cross_app", 120_000,
          %{
@@ -262,6 +285,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
           "output_prefix" => "validation",
           "param.pinned_action" => "coding_security_regression_validate",
           "param.pinned_profile_id" => "security_regression"
+        },
+        "contract_change" => %{
+          "action" => "coding_reviewed_validation",
+          "context_keys" => "workspace_id",
+          "output_prefix" => "validation",
+          "param.pinned_action" => "coding_contract_change_validate",
+          "param.pinned_profile_id" => "contract_change"
         }
       }
 

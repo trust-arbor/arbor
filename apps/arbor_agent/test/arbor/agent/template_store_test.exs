@@ -322,6 +322,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       refute "arbor://action/coding/produce_reviewable_change" in resources
       assert "arbor://action/coding/security_regression/validate" in resources
       assert "arbor://action/coding/cross_app/validate" in resources
+      assert "arbor://action/coding/contract_change/validate" in resources
       assert "arbor://action/coding/workspace/**" in resources
       assert "arbor://action/coding/dependency_baseline/check" in resources
       assert "arbor://action/coding/review_tree/read" in resources
@@ -371,6 +372,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       refute Map.has_key?(preset["rules"], "arbor://action/coding/produce_reviewable_change")
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/cross_app/validate"] == "ask"
+      assert preset["rules"]["arbor://action/coding/contract_change/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
 
       assert preset["rules"]["arbor://action/coding/dependency_baseline/check"] == "auto"

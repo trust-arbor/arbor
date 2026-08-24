@@ -49,7 +49,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
     assert Code.ensure_loaded?(FakeExecutor)
     assert function_exported?(FakeExecutor, :execute_structured, 4)
 
-    for profile_id <- ~w[default cross_app security_regression] do
+    for profile_id <- ~w[default cross_app security_regression contract_change] do
       Process.put(:candidate_verifier_calls, [])
       program = program!(profile_id)
       set_responses([{:ok, inspection()}, {:ok, %{"raw_secret" => "must-not-return"}}])
@@ -97,6 +97,37 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
     end
   end
 
+  test "ordinary immutable contract_change candidate is verified with owner-bound workspace_id" do
+    authority = authority!()
+    program = program!("contract_change")
+    set_responses([{:ok, inspection()}, {:ok, contract_result(@sha1)}])
+
+    assert {:ok, report} =
+             Arbor.Orchestrator.verify_coding_candidate(
+               candidate(program),
+               valid_opts(authority)
+             )
+
+    assert report["status"] == "passed"
+    assert report["profile"] == "contract_change"
+    assert report["candidate_ref"] == "git-tree:" <> @sha1
+
+    assert Enum.map(report["diagnostics"], & &1["gate_id"]) == [
+             "coding.validation.contract_change.preflight",
+             "coding.validation.contract_change.tests"
+           ]
+
+    assert Enum.all?(report["diagnostics"], &(&1["decision"] == "passed"))
+
+    [_inspect, {action, params, workdir, _opts}] = calls()
+    assert action == "coding_contract_change_validate"
+    assert workdir == @worktree
+    assert params == expected_validator_params(program)
+    refute Map.has_key?(params, "path")
+    refute Map.has_key?(params, "review_attestation_id")
+    assert params["workspace_id"] == @workspace_id
+  end
+
   test "owner-observed pre-validation tree reaches the core and drift blocks the report" do
     set_responses([{:ok, inspection()}, {:ok, default_result(@sha256)}])
 
@@ -120,6 +151,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
     security = candidate(program!("security_regression"))
     default = candidate(program!("default"))
     cross_app = candidate(program!("cross_app"))
+    contract_change = candidate(program!("contract_change"))
 
     assert {:error, :review_attestation_required} =
              Arbor.Orchestrator.verify_coding_candidate(
@@ -127,7 +159,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
                valid_opts(authority!())
              )
 
-    for non_security <- [default, cross_app] do
+    for non_security <- [default, cross_app, contract_change] do
       assert {:error, :review_attestation_forbidden} =
                Arbor.Orchestrator.verify_coding_candidate(
                  Map.put(non_security, "review_attestation_id", @attestation_id),
@@ -369,10 +401,39 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
       case program["profile_id"] do
         "default" -> %{"path" => @worktree, "workspace_id" => @workspace_id}
         "cross_app" -> %{"workspace_id" => @workspace_id}
+        "contract_change" -> %{"workspace_id" => @workspace_id}
         "security_regression" -> %{"review_attestation_id" => @attestation_id}
       end
 
     Map.merge(bound, program["static_parameters"])
+  end
+
+  defp contract_result(validated_tree_oid) do
+    check = %{
+      "status" => "completed",
+      "passed" => true,
+      "exit_code" => 0,
+      "reason" => nil,
+      "stdout_excerpt" => "ok",
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => @digest,
+      "stderr_sha256" => @other_digest
+    }
+
+    %{
+      passed: true,
+      reason: "contract_change_validated",
+      base_commit: @head,
+      changed_files: ["apps/arbor_kernel/lib/arbor/contracts/coding/plan.ex"],
+      test_paths: ["apps/arbor_kernel/test/arbor/contracts/admission_test.exs"],
+      preflight: check,
+      test: check,
+      validated_tree_oid: validated_tree_oid,
+      validated_head: @head,
+      feedback_json: "ignored feedback json"
+    }
   end
 
   defp default_result(validated_tree_oid) do

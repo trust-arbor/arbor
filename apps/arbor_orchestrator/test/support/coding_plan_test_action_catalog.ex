@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.CodingPlanTestActionCatalog do
     Arbor.Actions.Coding.DesignCheckpoint.Load,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
+    Arbor.Actions.Coding.ContractChange.Validate,
     Arbor.Actions.Coding.ReviewTree.Read,
     Arbor.Actions.Coding.ReviewTree.Search,
     Arbor.Actions.Coding.SubmitReviewReport,

@@ -59,6 +59,32 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            )
   end
 
+  test "contract_change binding and human_required graphs pass semantic preflight", ctx do
+    assert {:ok, profile} = Profiles.fetch_executable("contract_change")
+
+    for review_profile <- ~w[binding human_required] do
+      plan = contract_change_v2_plan!(review_profile)
+      assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+
+      assert :ok =
+               preflight(graph, profile["semantic_policy"],
+                 review_profile: review_profile,
+                 checkpoint_policy: "design_required",
+                 checkpoint_work_packet_json: packet_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      refute has_edge?(
+               parse!(compilation.dot_source),
+               "route_after_commit",
+               "route_publish",
+               "context.submit_review=false"
+             )
+    end
+  end
+
   test "direct preflight callers fail closed without the normalized plan rework threshold", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
@@ -558,6 +584,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     cases = [
       {plan!(), "default"},
       {plan!(%{"validation_profile" => "cross_app"}), "cross_app"},
+      {plan!(%{"validation_profile" => "contract_change"}), "contract_change"},
       {security_plan!(), "security_regression"}
     ]
 
@@ -2720,6 +2747,28 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       "version" => 2,
       "work_packet" => packet,
       "work_packet_digest" => digest
+    })
+  end
+
+  defp contract_change_v2_plan!(review_profile) do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["execution authority"],
+      "constraints" => ["touch only owned files"],
+      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => "design_required"
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    plan!(%{
+      "version" => 2,
+      "work_packet" => packet,
+      "work_packet_digest" => digest,
+      "validation_profile" => "contract_change",
+      "review_profile" => review_profile
     })
   end
 

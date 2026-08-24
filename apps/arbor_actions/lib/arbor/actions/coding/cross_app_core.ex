@@ -13,6 +13,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   optional aggregate-deadline interrupted batch descriptor.
   """
 
+  alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @default_timeout 300_000
@@ -422,29 +423,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Paths are sorted and bounded; the full manifests are never returned.
   """
   @spec diff_blob_manifests(term(), term()) :: {:ok, [String.t()]} | {:error, term()}
-  def diff_blob_manifests(base_manifest, candidate_manifest)
-      when is_list(base_manifest) and is_list(candidate_manifest) do
-    with {:ok, base_map} <- manifest_to_map(base_manifest),
-         {:ok, cand_map} <- manifest_to_map(candidate_manifest) do
-      paths =
-        MapSet.union(MapSet.new(Map.keys(base_map)), MapSet.new(Map.keys(cand_map)))
-        |> MapSet.to_list()
-        |> Enum.sort()
-
-      changed =
-        Enum.filter(paths, fn path ->
-          Map.get(base_map, path) != Map.get(cand_map, path)
-        end)
-
-      if length(changed) > @max_changed_files do
-        {:error, :too_many_changed_files}
-      else
-        {:ok, changed}
-      end
-    end
-  end
-
-  def diff_blob_manifests(_, _), do: {:error, :invalid_blob_manifest}
+  def diff_blob_manifests(base_manifest, candidate_manifest),
+    do: BlobManifest.diff_blob_manifests(base_manifest, candidate_manifest)
 
   @doc false
   def max_changed_files, do: @max_changed_files
@@ -2217,65 +2197,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       removed_apps: [],
       edge_changed_apps: []
     }
-  end
-
-  defp manifest_to_map(entries) when is_list(entries) do
-    if length(entries) > @max_changed_files * 25 do
-      # Hard fail before allocating a huge map; full umbrellas stay well under
-      # this (max_changed_files is 2_000; 50_000 matches Mix snapshot ceiling).
-      {:error, :blob_manifest_too_large}
-    else
-      Enum.reduce_while(entries, {:ok, %{}, MapSet.new()}, fn entry, {:ok, acc, seen} ->
-        case normalize_manifest_entry(entry) do
-          {:ok, path, mode, oid} ->
-            if MapSet.member?(seen, path) do
-              {:halt, {:error, {:duplicate_blob_manifest_path, path}}}
-            else
-              {:cont, {:ok, Map.put(acc, path, {mode, oid}), MapSet.put(seen, path)}}
-            end
-
-          {:error, _} = error ->
-            {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, map, _seen} -> {:ok, map}
-        {:error, _} = error -> error
-      end
-    end
-  end
-
-  defp normalize_manifest_entry(%{path: path, mode: mode, oid: oid})
-       when is_binary(path) and is_binary(mode) and is_binary(oid) do
-    normalize_manifest_fields(path, mode, oid)
-  end
-
-  defp normalize_manifest_entry(%{"path" => path, "mode" => mode, "oid" => oid})
-       when is_binary(path) and is_binary(mode) and is_binary(oid) do
-    normalize_manifest_fields(path, mode, oid)
-  end
-
-  defp normalize_manifest_entry(_), do: {:error, :invalid_blob_manifest_entry}
-
-  defp normalize_manifest_fields(path, mode, oid) do
-    trimmed = String.trim(path)
-
-    cond do
-      trimmed == "" or String.contains?(trimmed, <<0>>) ->
-        {:error, :invalid_blob_manifest_path}
-
-      String.starts_with?(trimmed, "/") or String.contains?(trimmed, "..") ->
-        {:error, :invalid_blob_manifest_path}
-
-      mode not in ["100644", "100755", "120000"] ->
-        {:error, {:unsupported_blob_manifest_mode, mode}}
-
-      not Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid) ->
-        {:error, :invalid_blob_manifest_oid}
-
-      true ->
-        {:ok, trimmed, mode, oid}
-    end
   end
 
   defp known_apps_from_graph(graph) when is_map(graph) do
