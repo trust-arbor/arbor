@@ -2,14 +2,13 @@ defmodule Arbor.Persistence.AgentTelemetry do
   @moduledoc """
   Durable telemetry events behind the `Arbor.Persistence` public facade.
 
-  Owns repository availability, contract-to-schema conversion, adapter
-  detection, SQL, row mapping, and placeholder construction. The Common
-  store calls this only through `Arbor.Persistence`.
+  Owns repository availability, event attribute construction, adapter detection,
+  SQL, row mapping, and placeholder construction. The Common store calls this
+  only through `Arbor.Persistence`.
   """
 
   require Logger
 
-  alias Arbor.Contracts.Agent.TelemetryEvent
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.TelemetryEvent, as: TelemetryEventSchema
 
@@ -25,8 +24,14 @@ defmodule Arbor.Persistence.AgentTelemetry do
   def persist_event(agent_id, event_type, data)
       when is_binary(agent_id) and is_atom(event_type) and is_map(data) do
     with {:ok, _repo} <- available_repo() do
-      event = TelemetryEvent.new(agent_id, event_type, data)
-      attrs = TelemetryEventSchema.from_contract(event)
+      attrs = %{
+        id: generate_id(),
+        agent_id: agent_id,
+        event_type: to_string(event_type),
+        timestamp: DateTime.utc_now(),
+        data: stringify_data(data)
+      }
+
       changeset = TelemetryEventSchema.changeset(%TelemetryEventSchema{}, attrs)
 
       case Repo.insert(changeset) do
@@ -236,4 +241,19 @@ defmodule Arbor.Persistence.AgentTelemetry do
   end
 
   defp normalize_data(_), do: %{}
+
+  defp generate_id do
+    "tevt_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  # Ensure all keys and atom values are strings for JSON serialization.
+  defp stringify_data(data) when is_map(data) do
+    Map.new(data, fn
+      {key, value} when is_atom(value) -> {to_string(key), to_string(value)}
+      {key, value} when is_map(value) -> {to_string(key), stringify_data(value)}
+      {key, value} -> {to_string(key), value}
+    end)
+  end
+
+  defp stringify_data(other), do: other
 end

@@ -17,10 +17,10 @@ defmodule Arbor.Persistence.Schemas.TelemetryEvent do
   @valid_event_types ~w(turn_completed tool_call routing_decision compaction)
 
   schema "telemetry_events" do
-    field :agent_id, :string
-    field :event_type, :string
-    field :timestamp, :utc_datetime_usec
-    field :data, :map, default: %{}
+    field(:agent_id, :string)
+    field(:event_type, :string)
+    field(:timestamp, :utc_datetime_usec)
+    field(:data, :map, default: %{})
 
     timestamps()
   end
@@ -38,29 +38,4 @@ defmodule Arbor.Persistence.Schemas.TelemetryEvent do
     |> validate_required(@required_fields)
     |> validate_inclusion(:event_type, @valid_event_types)
   end
-
-  @doc """
-  Convert a `TelemetryEvent` contract struct to schema attrs.
-  """
-  @spec from_contract(Arbor.Contracts.Agent.TelemetryEvent.t()) :: map()
-  def from_contract(%{} = event) do
-    %{
-      id: event.id,
-      agent_id: event.agent_id,
-      event_type: to_string(event.event_type),
-      timestamp: event.timestamp,
-      data: stringify_data(event.data)
-    }
-  end
-
-  # Ensure all keys and atom values are strings for JSON serialization
-  defp stringify_data(data) when is_map(data) do
-    Map.new(data, fn
-      {k, v} when is_atom(v) -> {to_string(k), to_string(v)}
-      {k, v} when is_map(v) -> {to_string(k), stringify_data(v)}
-      {k, v} -> {to_string(k), v}
-    end)
-  end
-
-  defp stringify_data(other), do: other
 end

@@ -6,6 +6,30 @@ defmodule Arbor.Persistence.AgentTelemetryTest do
   alias Arbor.Persistence
   alias Arbor.Persistence.AgentTelemetry
 
+  @workspace_root Path.expand("../../../../..", __DIR__)
+
+  describe "contract ownership regression" do
+    test "the one-consumer kernel contract is absent from production and test source" do
+      contract_path =
+        Path.join(
+          @workspace_root,
+          "apps/arbor_kernel/lib/arbor/contracts/agent/telemetry_event.ex"
+        )
+
+      forbidden_module = Enum.join(["Arbor.Contracts.Agent", "TelemetryEvent"], ".")
+
+      source_paths =
+        ["apps/*/lib/**/*.ex", "apps/*/test/**/*.{ex,exs}"]
+        |> Enum.flat_map(&Path.wildcard(Path.join(@workspace_root, &1)))
+
+      refute File.exists?(contract_path)
+
+      assert Enum.all?(source_paths, fn path ->
+               not String.contains?(File.read!(path), forbidden_module)
+             end)
+    end
+  end
+
   describe "facade delegates" do
     test "public facade matches the implementation when the repo is down" do
       assert Persistence.persist_event("agent_x", :turn_completed, %{input_tokens: 1}) ==
@@ -27,6 +51,9 @@ defmodule Arbor.Persistence.AgentTelemetryTest do
       else
         assert {:error, :repo_unavailable} =
                  AgentTelemetry.persist_event("agent_x", :tool_call, %{tool_name: "file.read"})
+
+        assert {:error, :repo_unavailable} =
+                 Persistence.persist_event("agent_x", :tool_call, %{tool_name: "file.read"})
 
         assert AgentTelemetry.load_lifetime("agent_x") == nil
         assert {:error, :repo_unavailable} = AgentTelemetry.query_events("agent_x")
