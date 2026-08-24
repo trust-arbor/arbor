@@ -3687,13 +3687,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp admission_subject({:active, lease}), do: lease
   defp admission_subject({:retained, retained}), do: retained
 
-  defp admit_successor_decision(state, {:use, attestation_id}, _lease, _caller) do
+  defp admit_successor_decision(state, {:use, attestation_id}, _subject, _caller) do
     {:reply, {:ok, %{review_attestation_id: attestation_id}}, state}
   end
 
-  defp admit_successor_decision(state, {:mint_from, parent_id}, lease, _caller) do
+  defp admit_successor_decision(state, {:mint_from, parent_id}, subject, _caller) do
     with {:ok, parent} <- fetch_review_attestation(state, parent_id),
-         :ok <- verify_review_material(lease, parent.material) do
+         :ok <- verify_review_material(subject, parent.material) do
       child_id = generate_review_attestation_id()
 
       child = %{

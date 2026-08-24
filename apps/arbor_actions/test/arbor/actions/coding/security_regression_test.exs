@@ -3024,18 +3024,24 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
 
     assert {:error, :not_authorized} =
-             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
-               original,
-               proof,
-               [task_id: "task_other", principal_id: fixture.context.agent_id]
-             ])
+             Task.async(fn ->
+               apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+                 original,
+                 proof,
+                 [task_id: "task_other", principal_id: fixture.context.agent_id]
+               ])
+             end)
+             |> Task.await(10_000)
 
     assert {:error, :not_authorized} =
-             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
-               original,
-               proof,
-               [task_id: fixture.context.task_id, principal_id: "agent_other"]
-             ])
+             Task.async(fn ->
+               apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+                 original,
+                 proof,
+                 [task_id: fixture.context.task_id, principal_id: "agent_other"]
+               ])
+             end)
+             |> Task.await(10_000)
 
     assert {:error, :attestation_already_claimed} =
              apply(Arbor.Actions, :admit_security_regression_operator_attestation, [

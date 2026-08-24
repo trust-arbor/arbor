@@ -350,6 +350,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   defp valid_oid?(value),
     do: is_binary(value) and Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, value)
 
+  # Security boundary: arbitrary terms, maps, credentials, and inspect dumps
+  # collapse to :validator_execution_failed without copying the original value.
+  @spec project_validator_failure(term()) ::
+          {:error, {:validator_rejected, atom()}} | {:error, :validator_execution_failed}
   defp project_validator_failure(reason) when is_atom(reason) do
     case SafeAtom.to_allowed(reason, @allowlist) do
       {:ok, code} -> {:error, {:validator_rejected, code}}
