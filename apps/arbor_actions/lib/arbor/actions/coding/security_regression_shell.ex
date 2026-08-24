@@ -51,13 +51,15 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
                WorkspaceLeaseRegistry.finalize_review_attestation(
                  input.review_attestation_id,
                  caller
-               ) do
-          {:ok,
-           bind_attestation_evidence(
-             evidence,
-             finalized_material,
-             claim.council_decision_digest
-           )}
+               ),
+             bound <-
+               bind_attestation_evidence(
+                 evidence,
+                 finalized_material,
+                 claim.council_decision_digest
+               ),
+             :ok <- maybe_record_capacity(bound, input.review_attestation_id, caller) do
+          {:ok, bound}
         end
 
       cleanup = WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id, caller)
@@ -119,6 +121,43 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
       review_attestation_digest: material.canonical_digest,
       council_decision_digest: council_decision_digest
     })
+  end
+
+  defp maybe_record_capacity(evidence, attestation_id, caller) do
+    if capacity_evidence?(evidence) do
+      WorkspaceLeaseRegistry.record_review_attestation_capacity(
+        attestation_id,
+        %{
+          "reason" => "validation_capacity_exceeded",
+          "passed" => false,
+          "termination" => Core.capacity_termination()
+        },
+        caller
+      )
+    else
+      :ok
+    end
+  end
+
+  defp capacity_evidence?(evidence) when is_map(evidence) do
+    with {:ok, reason} <- fetch_evidence_field(evidence, :reason),
+         {:ok, passed} <- fetch_evidence_field(evidence, :passed),
+         {:ok, termination} <- fetch_evidence_field(evidence, :termination) do
+      reason === "validation_capacity_exceeded" and passed === false and
+        termination === Core.capacity_termination()
+    else
+      _ -> false
+    end
+  end
+
+  defp capacity_evidence?(_evidence), do: false
+
+  defp fetch_evidence_field(map, key) when is_atom(key) do
+    case {Map.fetch(map, key), Map.fetch(map, Atom.to_string(key))} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      _missing_or_ambiguous -> :error
+    end
   end
 
   defp run_candidate(resource, input, sources, candidate_fingerprint, stage_deadline) do

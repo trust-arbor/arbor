@@ -2,7 +2,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
   @moduledoc false
 
   alias Arbor.Contracts.Security.SigningAuthority
-  alias Arbor.Orchestrator.CodingPlan.{CandidateVerificationCore, ValidationProgram}
+  alias Arbor.Orchestrator.CodingPlan.{
+    CandidateVerificationCore,
+    ValidationProgram,
+    ValidatorFailureProjection
+  }
   alias Arbor.Orchestrator.Config
 
   @inspect_action "coding_workspace_inspect"
@@ -25,6 +29,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
           | :review_attestation_required
           | :signing_authority_principal_mismatch
           | :validator_execution_failed
+          | {:validator_rejected, atom()}
           | :workspace_inspection_failed
 
   @doc false
@@ -225,6 +230,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifier do
 
   defp maybe_append_caller(opts, nil), do: opts
   defp maybe_append_caller(opts, caller_id), do: opts ++ [caller_id: caller_id]
+
+  defp execute(executor, action, params, workdir, opts, :validator_execution_failed) do
+    case executor.execute_structured(action, params, workdir, opts) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> ValidatorFailureProjection.project(reason)
+      _unexpected -> {:error, :validator_execution_failed}
+    end
+  rescue
+    _exception -> {:error, :validator_execution_failed}
+  catch
+    _kind, _reason -> {:error, :validator_execution_failed}
+  end
 
   defp execute(executor, action, params, workdir, opts, failure) do
     case executor.execute_structured(action, params, workdir, opts) do

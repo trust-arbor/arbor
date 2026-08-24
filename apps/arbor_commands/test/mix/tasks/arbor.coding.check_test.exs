@@ -487,6 +487,23 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
     assert error["detail"] == "{:approval_cleanup_unconfirmed, :workspace_inspection_failed}"
   end
 
+  test "safe_invoke redacts arbitrary nested failure terms instead of inspect" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    checker = fn _plan, _opts -> {:error, %{token: "must-not-leak"}} end
+
+    assert {:error, error} =
+             Check.execute(
+               ["--plan", path, "--static"],
+               readiness_checker: checker
+             )
+
+    assert error["reason"] == "check_failed"
+    assert error["detail"] == "redacted"
+    refute inspect(error) =~ "must-not-leak"
+  end
+
   test "safe_invoke surfaces rescued exceptions and exits as distinguishable detail" do
     path = write_plan!(Plan.to_map(valid_plan!()))
     on_exit(fn -> File.rm(path) end)
@@ -498,8 +515,8 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
              )
 
     assert exception_error["reason"] == "check_failed"
-    assert exception_error["detail"] =~ "RuntimeError"
-    assert exception_error["detail"] =~ "injected_check_exception"
+    assert exception_error["detail"] == "redacted"
+    refute inspect(exception_error) =~ "injected_check_exception"
 
     assert {:error, exit_error} =
              Check.execute(
@@ -509,6 +526,24 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert exit_error["reason"] == "check_failed"
     assert exit_error["detail"] == "{:exit, :injected_check_exit}"
+  end
+
+  test "security regression: command failure detail redacts exception messages and never leaks exception fields" do
+    path = write_plan!(Plan.to_map(valid_plan!()))
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:error, error} =
+             Check.execute(
+               ["--plan", path, "--static"],
+               readiness_checker: fn _plan, _opts ->
+                 raise RuntimeError, message: "cli-exception-secret-token"
+               end
+             )
+
+    assert error["reason"] == "check_failed"
+    assert error["detail"] == "redacted"
+    refute inspect(error) =~ "cli-exception-secret-token"
+    refute error["detail"] =~ "RuntimeError"
   end
 
   test "security regression: timeout cancels through requester death before remote PID is known" do

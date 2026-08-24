@@ -23,6 +23,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     @manifest_filename
   ]
   @terminal_evidence_filename "coding-terminal-evidence.json"
+  @archived_terminal_required_keys MapSet.new(~w(
+    schema_version
+    task_id
+    terminal_status
+    canonical_status
+    outcome
+    compiled_workflow
+    steering_history
+    validation_outputs
+    review_verdict
+  ))
+  @archived_terminal_optional_keys MapSet.new(~w(
+    workspace_release
+    branch_lifecycle
+    verification_report
+    candidate
+  ))
+  @compiled_workflow_keys MapSet.new(~w(
+    coding_plan_path
+    coding_pipeline_path
+    compile_manifest_path
+    graph_hash
+    compiler_version
+  ))
   @task_terminal_filename "coding-task-terminal.json"
   @adoption_evidence_prefix "coding-adoption-evidence-"
   @reconciliation_directory "coding-reconciliation"
@@ -189,6 +213,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     _ -> {:error, :coding_compilation_provenance_unavailable}
   catch
     _, _ -> {:error, :coding_compilation_provenance_unavailable}
+  end
+
+  @doc """
+  Read the host-owned coding terminal evidence for one hashed task root.
+
+  The file must be a mode-`0600` regular file named `coding-terminal-evidence.json`.
+  Missing, unreadable, or bad-mode files are unavailable. A present body that
+  fails JSON, shape, or schema validation is invalid.
+  """
+  @spec read_terminal_evidence(String.t(), String.t()) ::
+          {:ok, map()}
+          | {:error, :coding_terminal_evidence_unavailable | :invalid_coding_terminal_evidence}
+  def read_terminal_evidence(base_root, task_id) do
+    case acquire_terminal_evidence_bytes(base_root, task_id) do
+      {:ok, encoded} ->
+        decode_and_validate_terminal_evidence(encoded, task_id)
+
+      {:error, :coding_terminal_evidence_unavailable} ->
+        {:error, :coding_terminal_evidence_unavailable}
+    end
   end
 
   @doc "Archive the closed, deterministic terminal evidence for a coding task."
@@ -733,6 +777,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
+  defp acquire_terminal_evidence_bytes(base_root, task_id) do
+    with :ok <- validate_terminal_task_id(task_id),
+         {:ok, base_root} <- normalize_compilation_base(base_root),
+         {:ok, task_root} <- compilation_task_root(base_root, task_id),
+         path = Path.join(task_root, @terminal_evidence_filename),
+         {:ok, encoded} <-
+           read_compilation_file(path, task_root, @max_terminal_evidence_bytes) do
+      {:ok, encoded}
+    else
+      _ -> {:error, :coding_terminal_evidence_unavailable}
+    end
+  rescue
+    _ -> {:error, :coding_terminal_evidence_unavailable}
+  catch
+    _, _ -> {:error, :coding_terminal_evidence_unavailable}
+  end
+
+  defp decode_and_validate_terminal_evidence(encoded, task_id) do
+    with {:ok, body} <- Jason.decode(encoded),
+         true <- is_map(body) and not is_struct(body),
+         true <- Enum.all?(Map.keys(body), &is_binary/1),
+         :ok <- validate_archived_terminal_evidence(body, task_id) do
+      {:ok, body}
+    else
+      _ -> {:error, :invalid_coding_terminal_evidence}
+    end
+  rescue
+    _ -> {:error, :invalid_coding_terminal_evidence}
+  catch
+    _, _ -> {:error, :invalid_coding_terminal_evidence}
+  end
+
   defp read_compilation_file(path, task_root, max_bytes) do
     with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} <- File.lstat(path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
@@ -1252,6 +1328,117 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         is_binary(value) and String.valid?(value) and String.trim(value) != ""
       end
     )
+  end
+
+  defp validate_archived_terminal_evidence(body, task_id)
+       when is_map(body) and is_binary(task_id) do
+    keys = Map.keys(body) |> MapSet.new()
+    allowed = MapSet.union(@archived_terminal_required_keys, @archived_terminal_optional_keys)
+
+    with true <- MapSet.subset?(keys, allowed),
+         true <- MapSet.subset?(@archived_terminal_required_keys, keys),
+         true <- body["schema_version"] === 1,
+         true <- body["task_id"] === task_id,
+         true <- OutcomeMapper.terminal_status?(body["terminal_status"]),
+         true <- OutcomeMapper.terminal_status?(body["canonical_status"]),
+         true <-
+           OutcomeMapper.compatible_with_status?(body["outcome"], body["canonical_status"]),
+         :ok <- validate_archived_compiled_workflow(body["compiled_workflow"]),
+         {:ok, _controls} <-
+           TaskTerminalArchiveCore.validate_control_history(task_id, body["steering_history"]),
+         :ok <- validate_archived_validation_outputs(body["validation_outputs"]),
+         :ok <- validate_archived_review_verdict(body["review_verdict"]),
+         :ok <-
+           validate_archived_optional_descriptor(
+             body,
+             "workspace_release",
+             WorkspaceReleaseDescriptor
+           ),
+         :ok <-
+           validate_archived_optional_descriptor(
+             body,
+             "branch_lifecycle",
+             BranchLifecycleDescriptor
+           ),
+         :ok <- validate_archived_optional_verification_report(body),
+         :ok <- validate_archived_optional_candidate(body, task_id) do
+      :ok
+    else
+      _ -> {:error, :invalid_coding_terminal_evidence}
+    end
+  end
+
+  defp validate_archived_terminal_evidence(_body, _task_id),
+    do: {:error, :invalid_coding_terminal_evidence}
+
+  defp validate_archived_compiled_workflow(workflow)
+       when is_map(workflow) and not is_struct(workflow) do
+    keys = Map.keys(workflow) |> MapSet.new()
+
+    with true <- keys == @compiled_workflow_keys,
+         :ok <- validate_terminal_path(workflow["coding_plan_path"]),
+         :ok <- validate_terminal_path(workflow["coding_pipeline_path"]),
+         :ok <- validate_terminal_path(workflow["compile_manifest_path"]),
+         :ok <- validate_terminal_hash(workflow["graph_hash"]),
+         :ok <- required_terminal_string(workflow, "compiler_version") |> discard_value() do
+      :ok
+    else
+      _ -> {:error, :invalid_coding_terminal_evidence}
+    end
+  end
+
+  defp validate_archived_compiled_workflow(_workflow),
+    do: {:error, :invalid_coding_terminal_evidence}
+
+  defp validate_archived_validation_outputs(outputs) when is_list(outputs),
+    do: validate_json_value(outputs, [])
+
+  defp validate_archived_validation_outputs(_outputs),
+    do: {:error, :invalid_coding_terminal_evidence}
+
+  defp validate_archived_review_verdict(review) when is_map(review) and not is_struct(review),
+    do: validate_json_object(review, :invalid_terminal_review)
+
+  defp validate_archived_review_verdict(_review),
+    do: {:error, :invalid_coding_terminal_evidence}
+
+  defp validate_archived_optional_descriptor(body, key, contract) do
+    case Map.fetch(body, key) do
+      :error ->
+        :ok
+
+      {:ok, value} ->
+        if contract.valid?(value), do: :ok, else: {:error, :invalid_coding_terminal_evidence}
+    end
+  end
+
+  defp validate_archived_optional_verification_report(body) do
+    case Map.fetch(body, "verification_report") do
+      :error ->
+        :ok
+
+      {:ok, report} ->
+        if VerificationReport.valid?(report),
+          do: :ok,
+          else: {:error, :invalid_coding_terminal_evidence}
+    end
+  end
+
+  defp validate_archived_optional_candidate(body, task_id) do
+    case Map.fetch(body, "candidate") do
+      :error ->
+        :ok
+
+      {:ok, candidate} when is_map(candidate) and not is_struct(candidate) ->
+        if complete_terminal_candidate?(candidate) and candidate["task_id"] === task_id do
+          :ok
+        else
+          {:error, :invalid_coding_terminal_evidence}
+        end
+
+      _other ->
+        {:error, :invalid_coding_terminal_evidence}
+    end
   end
 
   defp terminal_review_verdict(result) do

@@ -906,25 +906,25 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
      }}
   end
 
-  # Bounded, JSON-safe representation of an underlying failure. Preserves atom
-  # names and nested tuples (e.g. {:approval_cleanup_unconfirmed, ...}) so the
-  # first fault remains diagnosable without expanding the stable "reason" enum.
+  # Bounded, JSON-safe representation of an underlying failure. Allowlisted
+  # atoms, validator-rejected tuples, two-atom tuples, and bounded UTF-8
+  # binaries stay diagnosable. Exception structs and other terms are redacted.
   defp bounded_failure_detail(detail) when is_atom(detail), do: Atom.to_string(detail)
+
+  defp bounded_failure_detail({:validator_rejected, code}) when is_atom(code) do
+    "validator_rejected:" <> Atom.to_string(code)
+  end
+
+  defp bounded_failure_detail({left, right}) when is_atom(left) and is_atom(right) do
+    "{:#{left}, :#{right}}"
+  end
 
   defp bounded_failure_detail(detail) when is_binary(detail) do
     text = if String.valid?(detail), do: detail, else: "invalid_utf8"
     truncate_utf8_bytes(text, @max_failure_detail_bytes)
   end
 
-  defp bounded_failure_detail(%{__exception__: true} = exception) do
-    bounded_failure_detail({exception.__struct__, Exception.message(exception)})
-  end
-
-  defp bounded_failure_detail(detail) do
-    detail
-    |> inspect(limit: 20, printable_limit: @max_failure_detail_bytes, structs: false, width: 80)
-    |> truncate_utf8_bytes(@max_failure_detail_bytes)
-  end
+  defp bounded_failure_detail(_detail), do: "redacted"
 
   defp truncate_utf8_bytes(bin, max_bytes)
        when is_binary(bin) and is_integer(max_bytes) and max_bytes >= 0 do

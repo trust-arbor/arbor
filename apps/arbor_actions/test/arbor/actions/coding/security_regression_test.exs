@@ -2676,7 +2676,8 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     refute first_digest == second_digest
   end
 
-  test "owner death removes its private attestation records", %{tmp_dir: tmp_dir} do
+  test "security regression: owner-death retain keeps attestations; reused drop cleans them",
+       %{tmp_dir: tmp_dir} do
     repo = create_base_project(Path.join(tmp_dir, "owner-death-repo"), valid_module())
     server = :"attestation_owner_death_#{System.unique_integer([:positive])}"
 
@@ -2689,6 +2690,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     task_id = "task-owner-death"
     principal_id = "agent-owner-death"
     parent = self()
+    worktree_base = Path.join(tmp_dir, "owner-death-worktrees")
 
     owner =
       spawn(fn ->
@@ -2699,7 +2701,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
               branch: "test/attestation-owner-death",
               task_id: task_id,
               principal_id: principal_id,
-              worktree_base_dir: Path.join(tmp_dir, "owner-death-worktrees")
+              worktree_base_dir: worktree_base
             },
             server: server
           )
@@ -2733,20 +2735,800 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
             server: server
           )
 
-        send(parent, {:attested_owner, id})
+        send(parent, {:attested_owner, id, lease.workspace_id})
         Process.sleep(:infinity)
       end)
 
-    assert_receive {:attested_owner, id}, 5_000
+    assert_receive {:attested_owner, owned_id, owned_workspace_id}, 5_000
     Process.exit(owner, :kill)
 
     assert_eventually(fn ->
-      WorkspaceLeaseRegistry.claim_review_attestation(id,
-        server: server,
-        task_id: task_id,
-        principal_id: principal_id
-      ) == {:error, :not_found}
+      match?(
+        {:ok, _},
+        WorkspaceLeaseRegistry.reactivate_retained_by_lineage(
+          owned_workspace_id,
+          task_id,
+          principal_id,
+          server: server
+        )
+      )
     end)
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(owned_id,
+               server: server,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id,
+               server: server,
+               task_id: task_id,
+               principal_id: principal_id
+             )
+
+    reused_branch = "test/attestation-owner-death-reused"
+    {:ok, reused_path} = Arbor.Actions.coding_worktree_path(worktree_base, reused_branch)
+    File.mkdir_p!(worktree_base)
+    git!(repo, ["worktree", "add", "-b", reused_branch, reused_path])
+
+    reused_owner =
+      spawn(fn ->
+        {:ok, lease} =
+          WorkspaceLeaseRegistry.acquire(
+            %{
+              repo_path: repo,
+              branch: reused_branch,
+              task_id: task_id <> "-reused",
+              principal_id: principal_id,
+              worktree_base_dir: worktree_base
+            },
+            server: server
+          )
+
+        test_path = "test/owner_death_reused_test.exs"
+        path = Path.join(lease.worktree_path, test_path)
+
+        File.write!(path, """
+        defmodule Tiny.OwnerDeathReusedTest do
+          use ExUnit.Case
+          test "ok", do: assert(true)
+        end
+        """)
+
+        git!(lease.worktree_path, ["add", test_path])
+        git!(lease.worktree_path, ["commit", "-m", "reused owner death"])
+
+        {:ok, material} =
+          Workspace.materialize_security_regression_material(
+            lease.worktree_path,
+            lease.workspace_id,
+            lease.base_commit,
+            [test_path]
+          )
+
+        {:ok, %{review_attestation_id: id}} =
+          WorkspaceLeaseRegistry.issue_review_attestation(
+            lease.workspace_id,
+            material,
+            String.duplicate("b", 64),
+            server: server
+          )
+
+        send(parent, {:attested_reused_owner, id})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:attested_reused_owner, reused_id}, 5_000
+    Process.exit(reused_owner, :kill)
+
+    assert_eventually(fn ->
+      state = :sys.get_state(server)
+      not Map.has_key?(state.review_attestations, reused_id)
+    end)
+  end
+
+  test "security regression: claimed original cannot be reclaimed and only a capacity-authorized successor can be claimed",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/claim_capacity_retry_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.ClaimCapacityRetryTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+    claim_and_release!(original, fixture)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    assert {:error, :attestation_already_claimed} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               nil,
+               admit_opts(fixture)
+             ])
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
+
+    proof = capacity_proof(fixture, issued)
+
+    assert {:ok, %{review_attestation_id: successor}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               admit_opts(fixture)
+             ])
+
+    assert is_binary(successor)
+    assert String.starts_with?(successor, "review_attestation_")
+    refute successor == original
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(successor, fixture.context)
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(successor, fixture.context)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
+  end
+
+  test "security regression: capacity retry table denies success, failure, mutation, provenance, forged proof, and exhausted budget",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/capacity_retry_table_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CapacityRetryTableTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+    claim_and_release!(original, fixture)
+    proof = capacity_proof(fixture, issued)
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    denials = [
+      {:success_status, Map.put(proof, "terminal_status", "passed")},
+      {:behavioral_failure, Map.put(proof, "validation_reason", "candidate_tests_failed")},
+      {:mutated_commit,
+       Map.put(proof, "attested_candidate_commit", String.duplicate("b", 40))},
+      {:mutated_tree,
+       Map.put(proof, "attested_candidate_tree_oid", String.duplicate("c", 40))},
+      {:mutated_diff, Map.put(proof, "attested_diff_sha256", String.duplicate("d", 64))},
+      {:mutated_tests,
+       Map.put(proof, "selected_tests", [
+         %{"path" => "test/forged.exs", "blob_sha256" => String.duplicate("e", 64)}
+       ])},
+      {:extra_capacity_key, Map.put(proof, "capacity", true)},
+      {:atom_keys, %{kind: "archived_security_regression_capacity"}},
+      {:forged_digest, Map.put(proof, "review_attestation_digest", String.duplicate("f", 64))},
+      {:missing_proof, nil}
+    ]
+
+    for {_name, bad_proof} <- denials do
+      result =
+        apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+          original,
+          bad_proof,
+          admit_opts(fixture)
+        ])
+
+      assert match?({:error, reason} when is_atom(reason), result)
+      refute match?({:ok, _}, result)
+    end
+
+    assert {:error, :not_authorized} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               [task_id: "task_other", principal_id: fixture.context.agent_id]
+             ])
+
+    assert {:error, :not_authorized} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               [task_id: fixture.context.task_id, principal_id: "agent_other"]
+             ])
+
+    assert {:error, :attestation_already_claimed} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               Map.put(proof, "workspace_id", "workspace_other"),
+               admit_opts(fixture)
+             ])
+
+    mint_until_exhausted!(original, proof, fixture)
+  end
+
+  test "security regression: concurrent capacity retry issues at most one successor and that successor is one-use",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/capacity_retry_concurrency_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CapacityRetryConcurrencyTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+    claim_and_release!(original, fixture)
+    proof = capacity_proof(fixture, issued)
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    results =
+      for _ <- 1..2 do
+        Task.async(fn ->
+          apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+            original,
+            proof,
+            admit_opts(fixture)
+          ])
+        end)
+      end
+      |> Enum.map(&Task.await(&1, 10_000))
+
+    oks = for {:ok, %{review_attestation_id: id}} <- results, do: id
+    assert length(Enum.uniq(oks)) == 1
+    [successor] = Enum.uniq(oks)
+
+    claims =
+      for _ <- 1..2 do
+        Task.async(fn ->
+          WorkspaceLeaseRegistry.claim_review_attestation(successor, fixture.context)
+        end)
+      end
+      |> Enum.map(&Task.await(&1, 10_000))
+
+    assert Enum.count(claims, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(claims, &match?({:error, :attestation_already_claimed}, &1)) == 1
+
+    for {:ok, %{resource: resource}} <- claims do
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+    end
+  end
+
+  test "security regression: two consecutive capacity retries walk from the original id and keep each token one-use",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/two_consecutive_capacity_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.TwoConsecutiveCapacityTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+    claim_and_release!(original, fixture)
+    proof = capacity_proof(fixture, issued)
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    assert function_exported?(
+             WorkspaceLeaseRegistry,
+             :record_review_attestation_capacity,
+             3
+           )
+
+    assert {:ok, %{review_attestation_id: s1}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               admit_opts(fixture)
+             ])
+
+    claim_and_release!(s1, fixture)
+
+    assert :ok =
+             apply(WorkspaceLeaseRegistry, :record_review_attestation_capacity, [
+               s1,
+               closed_capacity_evidence(),
+               fixture.context
+             ])
+
+    assert {:ok, %{review_attestation_id: s2}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               admit_opts(fixture)
+             ])
+
+    refute s1 == original
+    refute s2 == original
+    refute s2 == s1
+
+    claim_and_release!(s2, fixture)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(original, fixture.context)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(s1, fixture.context)
+
+    assert {:error, :attestation_already_claimed} =
+             WorkspaceLeaseRegistry.claim_review_attestation(s2, fixture.context)
+
+    fixture2 = leased_project(tmp_dir, valid_module())
+    write_candidate_test(fixture2, test_path, """
+    defmodule Tiny.TwoConsecutiveCapacityStaleTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued2 = issued_attestation(fixture2, [test_path])
+    original2 = issued2.review_attestation_id
+    claim_and_release!(original2, fixture2)
+    proof2 = capacity_proof(fixture2, issued2)
+
+    assert {:ok, %{review_attestation_id: stale_s1}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original2,
+               proof2,
+               admit_opts(fixture2)
+             ])
+
+    claim_and_release!(stale_s1, fixture2)
+
+    assert {:error, :capacity_retry_denied} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original2,
+               proof2,
+               admit_opts(fixture2)
+             ])
+  end
+
+  test "security regression: shell records capacity marker on atom-key passed false evidence",
+       %{tmp_dir: tmp_dir} do
+    fixture = regression_fixture(tmp_dir)
+    stage_timeout = 30_000
+    {:ok, clock_agent} = Agent.start_link(fn -> :first end)
+
+    Application.put_env(:arbor_actions, :security_regression_monotonic_ms, fn ->
+      Agent.get_and_update(clock_agent, fn
+        :first -> {0, stage_timeout}
+        ms -> {ms, ms}
+      end)
+    end)
+
+    params =
+      fixture
+      |> attested_params(["test/security_regression_test.exs"])
+      |> Map.put(:stage_timeout, stage_timeout)
+
+    assert {:ok, result} = Validate.run(params, fixture.context)
+    refute result.passed
+    assert result.reason == "validation_capacity_exceeded"
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    assert {:ok, %{review_attestation_id: successor}} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               params.review_attestation_id,
+               nil,
+               admit_opts(fixture)
+             ])
+
+    refute successor == params.review_attestation_id
+  end
+
+  test "security regression: malformed retry_index and lineage pointers fail closed",
+       %{tmp_dir: tmp_dir} do
+    core = Arbor.Actions.Coding.ReviewAttestationSuccessorCore
+    assert Code.ensure_loaded?(core)
+
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/malformed_lineage_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.MalformedLineageTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+
+    base_record = %{
+      attestation_id: original,
+      workspace_id: fixture.lease.workspace_id,
+      task_id: fixture.context.task_id,
+      principal_id: fixture.context.agent_id,
+      material: issued.material,
+      council_decision_digest: issued.council_decision_digest,
+      predecessor_id: nil,
+      successor_id: nil,
+      retry_index: 0,
+      origin: :council_issued,
+      capacity_evidence: nil
+    }
+
+    valid_params = %{
+      start_id: original,
+      caller_task_id: fixture.context.task_id,
+      caller_principal_id: fixture.context.agent_id,
+      caller_workspace_id: fixture.lease.workspace_id,
+      records: %{original => base_record},
+      states: %{original => :claimed},
+      proof: nil
+    }
+
+    assert {:ok, _input} = apply(core, :new, [valid_params])
+
+    for bad_index <- [-1, 4, "0", nil] do
+      bad = put_in(valid_params, [:records, original, :retry_index], bad_index)
+      assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [bad])
+    end
+
+    missing_index = update_in(valid_params, [:records, original], &Map.delete(&1, :retry_index))
+    assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [missing_index])
+
+    child_id = "review_attestation_" <> String.duplicate("c", 32)
+
+    parent = %{base_record | successor_id: child_id}
+
+    child = %{
+      base_record
+      | attestation_id: child_id,
+        predecessor_id: "review_attestation_" <> String.duplicate("d", 32),
+        successor_id: nil,
+        retry_index: 1,
+        origin: :capacity_retry
+    }
+
+    mismatched = %{
+      valid_params
+      | records: %{original => parent, child_id => child},
+        states: %{original => :claimed, child_id => :claimed}
+    }
+
+    assert {:ok, input} = apply(core, :new, [mismatched])
+    assert {:error, :successor_lineage_mismatch} = apply(core, :walk, [input])
+
+    child_ok_pred = %{child | predecessor_id: original, retry_index: 2}
+
+    wrong_increment = %{
+      valid_params
+      | records: %{original => parent, child_id => child_ok_pred},
+        states: %{original => :claimed, child_id => :claimed}
+    }
+
+    assert {:ok, input} = apply(core, :new, [wrong_increment])
+    assert {:error, :successor_lineage_mismatch} = apply(core, :walk, [input])
+  end
+
+  test "security regression: owned retain plus reactivation preserves attestation lineage; reused retain and retained settlement clean records and workspace indexes",
+       %{tmp_dir: tmp_dir} do
+    repo = create_base_project(Path.join(tmp_dir, "retain-lifecycle-repo"), valid_module())
+    server = :"attestation_retain_lifecycle_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       name: server,
+       linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+    )
+
+    worktree_base = Path.join(tmp_dir, "retain-lifecycle-worktrees")
+    principal_id = "agent-retain-lifecycle"
+
+    {owned_id, owned_workspace_id, owned_task_id} =
+      acquire_issue_on_server!(
+        repo,
+        worktree_base,
+        server,
+        principal_id,
+        "task-retain-preserve",
+        "test/retain-owned_test.exs",
+        "test/attestation-retain-owned"
+      )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(owned_workspace_id, :retain,
+               server: server,
+               task_id: owned_task_id,
+               principal_id: principal_id
+             )
+
+    state = :sys.get_state(server)
+    assert attestation_indexed?(state, owned_workspace_id, owned_id)
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.reactivate_retained_by_lineage(
+               owned_workspace_id,
+               owned_task_id,
+               principal_id,
+               server: server
+             )
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(owned_id,
+               server: server,
+               task_id: owned_task_id,
+               principal_id: principal_id
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id,
+               server: server,
+               task_id: owned_task_id,
+               principal_id: principal_id
+             )
+
+    reused_branch = "test/attestation-reused-retain"
+    {:ok, reused_path} = Arbor.Actions.coding_worktree_path(worktree_base, reused_branch)
+    File.mkdir_p!(worktree_base)
+    git!(repo, ["worktree", "add", "-b", reused_branch, reused_path])
+
+    reused_task_id = "task-retain-reused"
+
+    {:ok, reused_lease} =
+      WorkspaceLeaseRegistry.acquire(
+        %{
+          repo_path: repo,
+          branch: reused_branch,
+          task_id: reused_task_id,
+          principal_id: principal_id,
+          worktree_base_dir: worktree_base
+        },
+        server: server
+      )
+
+    {reused_id, reused_workspace_id} =
+      issue_on_lease!(
+        reused_lease,
+        server,
+        reused_task_id,
+        principal_id,
+        "test/retain-reused_test.exs",
+        "Tiny.RetainReusedTest"
+      )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(reused_workspace_id, :retain,
+               server: server,
+               task_id: reused_task_id,
+               principal_id: principal_id
+             )
+
+    reused_state = :sys.get_state(server)
+    assert attestation_cleaned?(reused_state, reused_workspace_id, reused_id)
+    refute Map.has_key?(reused_state.retained_by_id, reused_workspace_id)
+
+    {settle_id, settle_workspace_id, settle_task_id} =
+      acquire_issue_on_server!(
+        repo,
+        worktree_base,
+        server,
+        principal_id,
+        "task-retain-settle",
+        "test/retain-settle_test.exs",
+        "test/attestation-retain-settle"
+      )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(settle_workspace_id, :retain,
+               server: server,
+               task_id: settle_task_id,
+               principal_id: principal_id
+             )
+
+    settle_retained = :sys.get_state(server)
+    assert attestation_indexed?(settle_retained, settle_workspace_id, settle_id)
+
+    assert {:ok, _receipt} =
+             WorkspaceLeaseRegistry.settle_task_workspaces(settle_task_id, principal_id,
+               server: server
+             )
+
+    settled_state = :sys.get_state(server)
+    assert attestation_cleaned?(settled_state, settle_workspace_id, settle_id)
+    refute Map.has_key?(settled_state.retained_by_id, settle_workspace_id)
+  end
+
+  test "security regression: malformed capacity-evidence keys deny without crashing WorkspaceLeaseRegistry",
+       %{tmp_dir: tmp_dir} do
+    server = :"capacity_evidence_keys_#{System.unique_integer([:positive])}"
+
+    pid =
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server,
+         linux_dependency_baseline_materializer: Arbor.Actions.TestLinuxBaselineMaterializer}
+      )
+
+    fixture = leased_project_on_server(tmp_dir, valid_module(), server)
+    test_path = "test/malformed_capacity_key_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.MalformedCapacityKeyTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation_on_server(fixture, [test_path], server)
+    claim_and_release_on_server!(issued.review_attestation_id, fixture, server)
+
+    bad = Map.put(closed_capacity_evidence(), %{}, true)
+
+    core_result =
+      try do
+        {:ok, Arbor.Actions.Coding.ReviewAttestationSuccessorCore.valid_capacity_evidence?(bad)}
+      rescue
+        _exception -> :raised
+      end
+
+    assert core_result == {:ok, false}
+
+    result =
+      try do
+        WorkspaceLeaseRegistry.record_review_attestation_capacity(
+          issued.review_attestation_id,
+          bad,
+          server_caller_opts(fixture, server)
+        )
+      catch
+        :exit, _reason -> :exited
+      end
+
+    assert result == {:error, :capacity_retry_denied}
+    assert Process.alive?(pid)
+  end
+
+  test "security regression: malformed predecessor and successor identifiers fail closed during core construction without minting",
+       %{tmp_dir: tmp_dir} do
+    core = Arbor.Actions.Coding.ReviewAttestationSuccessorCore
+    assert Code.ensure_loaded?(core)
+
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/malformed_optional_lineage_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.MalformedOptionalLineageTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    issued = issued_attestation(fixture, [test_path])
+    original = issued.review_attestation_id
+
+    base_record = %{
+      attestation_id: original,
+      workspace_id: fixture.lease.workspace_id,
+      task_id: fixture.context.task_id,
+      principal_id: fixture.context.agent_id,
+      material: issued.material,
+      council_decision_digest: issued.council_decision_digest,
+      predecessor_id: nil,
+      successor_id: nil,
+      retry_index: 0,
+      origin: :council_issued,
+      capacity_evidence: closed_capacity_evidence()
+    }
+
+    valid_params = %{
+      start_id: original,
+      caller_task_id: fixture.context.task_id,
+      caller_principal_id: fixture.context.agent_id,
+      caller_workspace_id: fixture.lease.workspace_id,
+      records: %{original => base_record},
+      states: %{original => :claimed},
+      proof: nil
+    }
+
+    assert {:ok, input} = apply(core, :new, [valid_params])
+    assert {:ok, {:mint_from, ^original}} = apply(core, :walk, [input])
+
+    malformed_values = [
+      :atom,
+      1,
+      [],
+      {:tuple, :id},
+      self(),
+      %{},
+      "",
+      " ",
+      <<0xFF>>,
+      String.duplicate("a", 257)
+    ]
+
+    for value <- malformed_values, field <- [:predecessor_id, :successor_id] do
+      bad = put_in(valid_params, [:records, original, field], value)
+      assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [bad])
+    end
+
+    ambiguous_predecessor =
+      update_in(valid_params, [:records, original], fn record ->
+        Map.put(record, "predecessor_id", original)
+      end)
+
+    assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [ambiguous_predecessor])
+
+    ambiguous_successor =
+      update_in(valid_params, [:records, original], fn record ->
+        Map.put(record, "successor_id", original)
+      end)
+
+    assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [ambiguous_successor])
+
+    atom_successor = put_in(valid_params, [:records, original, :successor_id], :atom)
+    assert {:error, :invalid_capacity_retry_proof} = apply(core, :new, [atom_successor])
+  end
+
+  test "security regression: a passing Validate.run does not record capacity or mint a successor",
+       %{tmp_dir: tmp_dir} do
+    passing = regression_fixture(tmp_dir)
+    passing_params = attested_params(passing, ["test/security_regression_test.exs"])
+
+    assert {:ok, passed} = Validate.run(passing_params, passing.context)
+    assert passed.passed
+
+    assert function_exported?(
+             Arbor.Actions,
+             :admit_security_regression_operator_attestation,
+             3
+           )
+
+    assert {:error, :attestation_already_claimed} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               passing_params.review_attestation_id,
+               nil,
+               admit_opts(passing)
+             ])
   end
 
   defp regression_fixture(tmp_dir) do
@@ -2785,6 +3567,140 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_actions, key, value)
+
+  defp issued_attestation(fixture, test_paths) do
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        test_paths
+      )
+
+    digest = :crypto.hash(:sha256, "council-approved") |> Base.encode16(case: :lower)
+
+    {:ok, canonical} =
+      Arbor.Actions.Coding.SecurityRegression.Attestation.new(material, digest)
+
+    {:ok, %{review_attestation_id: id}} =
+      WorkspaceLeaseRegistry.issue_review_attestation(
+        fixture.lease.workspace_id,
+        material,
+        digest,
+        fixture.context
+      )
+
+    %{
+      review_attestation_id: id,
+      material: canonical,
+      council_decision_digest: digest
+    }
+  end
+
+  defp capacity_proof(fixture, issued) do
+    material = issued.material
+
+    %{
+      "kind" => "archived_security_regression_capacity",
+      "task_id" => fixture.context.task_id,
+      "principal_id" => fixture.context.agent_id,
+      "workspace_id" => fixture.lease.workspace_id,
+      "terminal_status" => "validation_capacity_exceeded",
+      "canonical_status" => "validation_capacity_exceeded",
+      "review_attestation_digest" => material.canonical_digest,
+      "council_decision_digest" => issued.council_decision_digest,
+      "attested_base_commit" => material.base_commit,
+      "attested_candidate_commit" => material.candidate_commit,
+      "attested_candidate_tree_oid" => material.candidate_tree_oid,
+      "attested_diff_sha256" => material.diff_sha256,
+      "selected_tests" =>
+        material.selected_tests
+        |> Enum.sort_by(& &1.path)
+        |> Enum.map(fn test ->
+          %{"path" => test.path, "blob_sha256" => test.blob_sha256}
+        end),
+      "validation_reason" => "validation_capacity_exceeded",
+      "passed" => false,
+      "termination" => %{
+        "timed_out" => true,
+        "killed" => false,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      }
+    }
+  end
+
+  defp closed_capacity_evidence do
+    %{
+      "reason" => "validation_capacity_exceeded",
+      "passed" => false,
+      "termination" => %{
+        "timed_out" => true,
+        "killed" => false,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      }
+    }
+  end
+
+  defp admit_opts(fixture) do
+    [task_id: fixture.context.task_id, principal_id: fixture.context.agent_id]
+  end
+
+  defp claim_and_release!(attestation_id, fixture) do
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(attestation_id, fixture.context)
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+  end
+
+  defp mint_until_exhausted!(original, proof, fixture) do
+    ids =
+      Enum.reduce(1..3, [], fn _i, acc ->
+        parent = List.first(acc) || original
+
+        if parent != original do
+          claim_and_release!(parent, fixture)
+
+          assert :ok =
+                   apply(WorkspaceLeaseRegistry, :record_review_attestation_capacity, [
+                     parent,
+                     closed_capacity_evidence(),
+                     fixture.context
+                   ])
+        end
+
+        assert {:ok, %{review_attestation_id: successor}} =
+                 apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+                   original,
+                   proof,
+                   admit_opts(fixture)
+                 ])
+
+        [successor | acc]
+      end)
+
+    last = hd(ids)
+    claim_and_release!(last, fixture)
+
+    assert :ok =
+             apply(WorkspaceLeaseRegistry, :record_review_attestation_capacity, [
+               last,
+               closed_capacity_evidence(),
+               fixture.context
+             ])
+
+    assert {:error, :retry_budget_exhausted} =
+             apply(Arbor.Actions, :admit_security_regression_operator_attestation, [
+               original,
+               proof,
+               admit_opts(fixture)
+             ])
+  end
 
   defp attested_params(fixture, test_paths) do
     {:ok, material} =
@@ -2911,6 +3827,171 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
 
     :ok
+  end
+
+  defp acquire_issue_on_server!(
+         repo,
+         worktree_base,
+         server,
+         principal_id,
+         task_id,
+         relative_path,
+         branch
+       ) do
+    {:ok, lease} =
+      WorkspaceLeaseRegistry.acquire(
+        %{
+          repo_path: repo,
+          branch: branch,
+          task_id: task_id,
+          principal_id: principal_id,
+          worktree_base_dir: worktree_base
+        },
+        server: server
+      )
+
+    module_name = "Tiny.Retain#{System.unique_integer([:positive])}Test"
+
+    {id, workspace_id} =
+      issue_on_lease!(lease, server, task_id, principal_id, relative_path, module_name)
+
+    {id, workspace_id, task_id}
+  end
+
+  defp issue_on_lease!(lease, server, task_id, principal_id, relative_path, module_name) do
+    path = Path.join(lease.worktree_path, relative_path)
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    defmodule #{module_name} do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    git!(lease.worktree_path, ["add", relative_path])
+    git!(lease.worktree_path, ["commit", "-m", "attestation candidate"])
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        lease.worktree_path,
+        lease.workspace_id,
+        lease.base_commit,
+        [relative_path]
+      )
+
+    {:ok, %{review_attestation_id: id}} =
+      WorkspaceLeaseRegistry.issue_review_attestation(
+        lease.workspace_id,
+        material,
+        String.duplicate("a", 64),
+        server: server,
+        task_id: task_id,
+        principal_id: principal_id
+      )
+
+    {id, lease.workspace_id}
+  end
+
+  defp attestation_indexed?(state, workspace_id, id) do
+    Map.has_key?(state.review_attestations, id) and
+      Map.has_key?(state.attestation_states, id) and
+      MapSet.member?(
+        Map.get(state.attestation_by_workspace, workspace_id, MapSet.new()),
+        id
+      )
+  end
+
+  defp attestation_cleaned?(state, workspace_id, id) do
+    not Map.has_key?(state.review_attestations, id) and
+      not Map.has_key?(state.attestation_states, id) and
+      not Map.has_key?(state.attestation_by_workspace, workspace_id)
+  end
+
+  defp leased_project_on_server(tmp_dir, base_module, server) do
+    repo =
+      create_base_project(
+        Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}"),
+        base_module
+      )
+
+    task_id = "task_security_regression_#{System.unique_integer([:positive])}"
+    principal_id = "agent_security_regression_#{System.unique_integer([:positive])}"
+    context = %{task_id: task_id, agent_id: principal_id, server: server}
+
+    {:ok, lease} =
+      WorkspaceLeaseRegistry.acquire(
+        %{
+          repo_path: repo,
+          branch: "test/security-#{System.unique_integer([:positive])}",
+          task_id: task_id,
+          principal_id: principal_id,
+          worktree_base_dir: Path.join(tmp_dir, "worktrees-#{System.unique_integer([:positive])}")
+        },
+        server: server
+      )
+
+    on_exit(fn ->
+      _ =
+        WorkspaceLeaseRegistry.release(lease.workspace_id, :remove,
+          server: server,
+          task_id: task_id,
+          principal_id: principal_id
+        )
+    end)
+
+    %{repo: repo, lease: lease, context: context}
+  end
+
+  defp issued_attestation_on_server(fixture, test_paths, server) do
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        test_paths
+      )
+
+    digest = :crypto.hash(:sha256, "council-approved") |> Base.encode16(case: :lower)
+
+    {:ok, canonical} =
+      Arbor.Actions.Coding.SecurityRegression.Attestation.new(material, digest)
+
+    {:ok, %{review_attestation_id: id}} =
+      WorkspaceLeaseRegistry.issue_review_attestation(
+        fixture.lease.workspace_id,
+        material,
+        digest,
+        server_caller_opts(fixture, server)
+      )
+
+    %{
+      review_attestation_id: id,
+      material: canonical,
+      council_decision_digest: digest
+    }
+  end
+
+  defp claim_and_release_on_server!(attestation_id, fixture, server) do
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(
+               attestation_id,
+               server_caller_opts(fixture, server)
+             )
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               server_caller_opts(fixture, server)
+             )
+  end
+
+  defp server_caller_opts(fixture, server) do
+    [
+      server: server,
+      task_id: fixture.context.task_id,
+      principal_id: fixture.context.agent_id
+    ]
   end
 
   defp git!(path, args) do

@@ -140,6 +140,16 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
        }}
     end
 
+    defp execute("coding_security_regression_validate", _params, _opts, %{
+           mode: :validator_attestation_claimed
+         }),
+         do: {:error, :attestation_already_claimed}
+
+    defp execute("coding_security_regression_validate", _params, _opts, %{
+           mode: :validator_secret_map
+         }),
+         do: {:error, %{token: "must-not-leak"}}
+
     defp execute("coding_security_regression_validate", _params, _opts, _config) do
       candidate = security_leg(0, 1, 0)
       base = security_leg(1, 0, 1)
@@ -257,6 +267,133 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
   end
 
   defmodule TestResourceFacade do
+    def admit_security_regression_operator_attestation(attestation_id, proof, opts) do
+      config =
+        Application.fetch_env!(
+          :arbor_orchestrator,
+          :operator_candidate_verifier_test_resource
+        )
+
+      send(config.observer, {:operator_candidate_admit, attestation_id, proof, opts})
+
+      case Map.get(config, :admit_error) do
+        nil ->
+          admit_from_config(config, attestation_id, proof, opts)
+
+        reason ->
+          {:error, reason}
+      end
+    end
+
+    defp admit_from_config(config, attestation_id, proof, opts) do
+      case Map.get(config, :attestations) do
+        pid when is_pid(pid) ->
+          Agent.get_and_update(pid, fn state ->
+            admit_from_state(state, attestation_id, proof, opts, config)
+          end)
+
+        _missing ->
+          {:ok, %{review_attestation_id: attestation_id}}
+      end
+    end
+
+
+    defp admit_from_state(state, attestation_id, proof, opts, config) do
+      task_id = Keyword.get(opts, :task_id)
+      principal_id = Keyword.get(opts, :principal_id)
+
+      case Map.fetch(state, attestation_id) do
+        :error ->
+          {{:error, :not_found}, state}
+
+        {:ok, record} ->
+          if record.task_id == task_id and record.principal_id == principal_id and
+               record.workspace_id == config.workspace_id do
+            walk_state(state, attestation_id, proof, MapSet.new())
+          else
+            {{:error, :not_authorized}, state}
+          end
+      end
+    end
+
+    defp walk_state(state, id, proof, seen) do
+      cond do
+        MapSet.member?(seen, id) ->
+          {{:error, :successor_lineage_mismatch}, state}
+
+        MapSet.size(seen) >= 4 ->
+          {{:error, :retry_budget_exhausted}, state}
+
+        true ->
+          case Map.fetch(state, id) do
+            :error ->
+              {{:error, :not_found}, state}
+
+            {:ok, record} ->
+              decide_test_node(state, id, record, proof, MapSet.put(seen, id))
+          end
+      end
+    end
+
+    defp decide_test_node(state, id, record, proof, seen) do
+      cond do
+        record.status == :available ->
+          {{:ok, %{review_attestation_id: id}}, state}
+
+        record.status == :revoked ->
+          {{:error, :attestation_revoked}, state}
+
+        is_binary(record.successor_id) ->
+          walk_state(state, record.successor_id, proof, seen)
+
+        record.retry_index >= 3 ->
+          {{:error, :retry_budget_exhausted}, state}
+
+        record.capacity_evidence != nil or first_hop_proof?(record, proof) ->
+          mint_test_successor(state, id, record)
+
+        record.predecessor_id == nil ->
+          {{:error, :attestation_already_claimed}, state}
+
+        true ->
+          {{:error, :capacity_retry_denied}, state}
+      end
+    end
+
+    defp first_hop_proof?(record, proof) when is_map(proof) do
+      record.predecessor_id == nil and record.successor_id == nil and
+        proof["kind"] == "archived_security_regression_capacity" and
+        proof["terminal_status"] == "validation_capacity_exceeded"
+    end
+
+    defp first_hop_proof?(_record, _proof), do: false
+
+    defp mint_test_successor(state, parent_id, parent) do
+      child_id =
+        "review_attestation_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+      parent = %{parent | successor_id: child_id}
+
+      child = %{
+        status: :available,
+        predecessor_id: parent_id,
+        successor_id: nil,
+        retry_index: parent.retry_index + 1,
+        origin: :capacity_retry,
+        capacity_evidence: nil,
+        task_id: parent.task_id,
+        principal_id: parent.principal_id,
+        workspace_id: parent.workspace_id
+      }
+
+      state =
+        state
+        |> Map.put(parent_id, parent)
+        |> Map.put(child_id, child)
+
+      {{:ok, %{review_attestation_id: child_id}}, state}
+    end
+
     def coding_resource_inventory(opts) do
       config =
         Application.fetch_env!(
@@ -427,6 +564,37 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
       Process.sleep(delay)
       Arbor.Security.close_signing_authority(authority)
+    end
+  end
+
+  defmodule TestTerminalEvidenceStore do
+    def read_task_compilation(base_root, task_id) do
+      ArtifactStore.read_task_compilation(base_root, task_id)
+    end
+
+    def read_terminal_evidence(base_root, task_id) do
+      case Application.get_env(
+             :arbor_orchestrator,
+             :operator_candidate_verifier_test_terminal_read
+           ) do
+        :raise ->
+          raise "stub-terminal-reader-secret"
+
+        :exit ->
+          exit(:stub_terminal_reader_exit)
+
+        :unexpected_ok ->
+          {:ok, ["not-an-object"]}
+
+        :unexpected_error ->
+          {:error, :enoent}
+
+        :other ->
+          :not_a_result_tuple
+
+        _default ->
+          ArtifactStore.read_terminal_evidence(base_root, task_id)
+      end
     end
   end
 
@@ -1147,6 +1315,211 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     assert report["profile"] == "security_regression"
   end
 
+  test "security regression: legacy archived capacity binds a fresh successor without replaying the original",
+       ctx do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    original = "review_attestation_operator_test"
+    seed_claimed_original!(attestations, original, ctx.agent_id)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    write_capacity_terminal!(ctx, original)
+
+    assert {:ok, _report} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _inspect_params,
+                    _inspect_opts, _inspect_authority, {:ok, _inspect_signed}}
+
+    assert_receive {:operator_candidate_executor, "coding_security_regression_validate", params,
+                    _opts, _authority, {:ok, _signed}}
+
+    bound = params["review_attestation_id"] || params[:review_attestation_id]
+    assert is_binary(bound)
+    assert String.starts_with?(bound, "review_attestation_")
+    refute bound == original
+  end
+
+  test "security regression: non-capacity and mismatched archives cannot reclaim the original",
+       ctx do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    original = "review_attestation_operator_test"
+    seed_claimed_original!(attestations, original, ctx.agent_id)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    write_terminal_status!(ctx, original, "passed")
+
+    assert {:error, :attestation_already_claimed} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    refute_received {:operator_candidate_executor, "coding_security_regression_validate", _, _, _,
+                     _}
+
+    assert Agent.get(attestations, & &1[original].successor_id) == nil
+
+    write_terminal_status!(ctx, original, "validation_failed")
+
+    assert {:error, :attestation_already_claimed} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    archive_reviewed_plan!(plan)
+    write_capacity_terminal!(ctx, original, task_id: "task_other")
+
+    assert {:error, :invalid_capacity_retry_proof} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    write_capacity_terminal!(ctx, original, candidate_workspace_id: "workspace_other")
+
+    assert {:error, :invalid_capacity_retry_proof} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert Agent.get(attestations, & &1[original].successor_id) == nil
+  end
+
+  test "security regression: two consecutive capacity retries walk from the original id", ctx do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    original = "review_attestation_operator_test"
+    seed_claimed_original!(attestations, original, ctx.agent_id)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    write_capacity_terminal!(ctx, original)
+
+    assert {:ok, _first} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _, _, _, _}
+
+    assert_receive {:operator_candidate_executor, "coding_security_regression_validate",
+                    first_params, _opts, _authority, {:ok, _signed}}
+
+    s1 = first_params["review_attestation_id"] || first_params[:review_attestation_id]
+    refute s1 == original
+
+    Agent.update(attestations, fn state ->
+      Map.update!(state, s1, fn record ->
+        %{record | status: :claimed, capacity_evidence: %{"reason" => "validation_capacity_exceeded"}}
+      end)
+    end)
+
+    assert {:ok, _second} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert_receive {:operator_candidate_executor, "coding_workspace_inspect", _, _, _, _}
+
+    assert_receive {:operator_candidate_executor, "coding_security_regression_validate",
+                    second_params, _opts2, _authority2, {:ok, _signed2}}
+
+    s2 = second_params["review_attestation_id"] || second_params[:review_attestation_id]
+    refute s2 == original
+    refute s2 == s1
+
+    Agent.update(attestations, fn state ->
+      Map.update!(state, s2, fn record ->
+        %{record | status: :claimed, capacity_evidence: nil}
+      end)
+    end)
+
+    assert {:error, :capacity_retry_denied} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+  end
+
+  test "security regression: unexpected terminal-evidence reader results fail closed as invalid proof",
+       ctx do
+    previous_store = Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store)
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_plan_artifact_store,
+      TestTerminalEvidenceStore
+    )
+
+    on_exit(fn ->
+      restore_env(:arbor_orchestrator, :coding_plan_artifact_store, previous_store)
+      Application.delete_env(:arbor_orchestrator, :operator_candidate_verifier_test_terminal_read)
+    end)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    configure_resource(:retained)
+
+    for mode <- [:unexpected_ok, :unexpected_error, :other, :raise, :exit] do
+      Application.put_env(
+        :arbor_orchestrator,
+        :operator_candidate_verifier_test_terminal_read,
+        mode
+      )
+
+      result = Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+      assert result == {:error, :invalid_capacity_retry_proof}
+      refute inspect(result) =~ "stub-terminal-reader-secret"
+    end
+  end
+
+  test "security regression: admit_bound_attestation redacts nested facade errors and never leaks secrets",
+       ctx do
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+
+    configure_resource(:retained, admit_error: %{token: "admit-bound-secret-token"})
+
+    secret_map_result =
+      Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    assert secret_map_result == {:error, :capacity_retry_denied}
+    refute inspect(secret_map_result) =~ "admit-bound-secret-token"
+
+    configure_resource(:retained,
+      admit_error: {:git, %{stderr: "admit-bound-secret-token"}}
+    )
+
+    git_result = Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+    assert git_result == {:error, :capacity_retry_denied}
+    refute inspect(git_result) =~ "admit-bound-secret-token"
+  end
+
+  test "security regression: nested validator rejections stay allowlisted and secrets do not leak",
+       ctx do
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    configure_executor(:validator_attestation_claimed)
+
+    assert {:error, {:validator_rejected, :attestation_already_claimed}} =
+             verify_operator(plan, request)
+
+    configure_executor(:validator_secret_map)
+
+    result = verify_operator(plan, request)
+    assert result == {:error, :validator_execution_failed}
+    refute inspect(result) =~ "must-not-leak"
+  end
+
+  test "security regression: registry restart without in-memory predecessor fail-closes retry",
+       ctx do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    write_capacity_terminal!(ctx, request["review_attestation_id"])
+
+    assert {:error, :not_found} =
+             Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+
+    refute_received {:operator_candidate_executor, "coding_security_regression_validate", _, _, _,
+                     _}
+  end
+
   defp configure_executor(mode, overrides \\ []) do
     config =
       %{
@@ -1254,6 +1627,170 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
   defp verify_operator(plan, request) do
     archive_reviewed_plan!(plan)
     Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+  end
+
+  defp seed_claimed_original!(agent, original, principal_id) do
+    Agent.update(agent, fn _ ->
+      %{
+        original => %{
+          status: :claimed,
+          predecessor_id: nil,
+          successor_id: nil,
+          retry_index: 0,
+          origin: :council_issued,
+          capacity_evidence: nil,
+          task_id: @task_id,
+          principal_id: principal_id,
+          workspace_id: @workspace_id
+        }
+      }
+    end)
+  end
+
+  defp write_capacity_terminal!(_ctx, original, overrides \\ []) do
+    task_id = Keyword.get(overrides, :task_id, @task_id)
+    root = prepare_terminal_root!()
+
+    result =
+      capacity_terminal_result(root)
+      |> maybe_put_candidate_override(Keyword.get(overrides, :candidate_workspace_id))
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, task_id, result, [])
+
+    original
+  end
+
+  defp write_terminal_status!(_ctx, original, status) do
+    root = prepare_terminal_root!()
+    _ = File.rm(Path.join(root, "coding-terminal-evidence.json"))
+
+    {terminal_status, outcome, validation} =
+      case status do
+        "validation_failed" ->
+          {"validation_failed",
+           %{
+             "version" => 1,
+             "disposition" => "failed",
+             "code" => "validation_failed",
+             "phase" => "validation",
+             "origin" => "validator",
+             "retry" => "same_session"
+           }, [%{"command" => "mix test", "passed" => false}]}
+
+        _other ->
+          {"change_committed",
+           %{
+             "version" => 1,
+             "disposition" => "succeeded",
+             "code" => "change_committed",
+             "phase" => "commit",
+             "origin" => "arbor",
+             "retry" => "none"
+           }, [%{"command" => "mix test", "passed" => true}]}
+      end
+
+    result = %{
+      "status" => terminal_status,
+      "canonical_status" => terminal_status,
+      "outcome" => outcome,
+      "validation" => validation,
+      "review" => %{},
+      "artifacts" => compiled_workflow_artifacts(root)
+    }
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, @task_id, result, [])
+
+    original
+  end
+
+  defp prepare_terminal_root! do
+    root = task_artifact_root(@task_id)
+    File.mkdir_p!(root)
+    {:ok, canonical} = SafePath.resolve_real(root)
+    canonical
+  end
+
+  defp capacity_terminal_result(root) do
+    digest = String.duplicate("d", 64)
+    source_digest = String.duplicate("e", 64)
+    path = "apps/arbor_orchestrator/test/operator_candidate_security_regression_test.exs"
+
+    %{
+      "status" => "validation_capacity_exceeded",
+      "canonical_status" => "validation_capacity_exceeded",
+      "outcome" => %{
+        "version" => 1,
+        "disposition" => "requires_input",
+        "code" => "validation_capacity_exceeded",
+        "phase" => "validation",
+        "origin" => "validator",
+        "retry" => "after_external_change"
+      },
+      "validation" => [
+        %{
+          "passed" => false,
+          "reason" => "validation_capacity_exceeded",
+          "evidence_type" => "reviewed_regression_evidence",
+          "candidate_fingerprint" => digest,
+          "review_attestation_digest" => digest,
+          "council_decision_digest" => source_digest,
+          "attested_base_commit" => String.duplicate("c", 40),
+          "attested_candidate_commit" => String.duplicate("b", 40),
+          "attested_candidate_tree_oid" => @candidate_tree_oid,
+          "attested_diff_sha256" => digest,
+          "attested_selected_tests" => [
+            %{"path" => path, "blob_sha256" => source_digest}
+          ],
+          "candidate" => %{
+            "completed" => false,
+            "status" => "stage_timeout",
+            "exit_code" => nil,
+            "timed_out" => true
+          },
+          "base" => %{
+            "completed" => false,
+            "status" => "not_run",
+            "exit_code" => nil,
+            "timed_out" => false
+          },
+          "termination" => %{
+            "timed_out" => true,
+            "killed" => false,
+            "output_limit_exceeded" => false,
+            "cancelled" => false
+          }
+        }
+      ],
+      "review" => %{},
+      "artifacts" => compiled_workflow_artifacts(root)
+    }
+  end
+
+  defp compiled_workflow_artifacts(root) do
+    %{
+      "coding_plan_path" => Path.join(root, "coding-plan.json"),
+      "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
+      "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
+      "graph_hash" => String.duplicate("a", 64),
+      "compiler_version" => "coding-plan-1"
+    }
+  end
+
+  defp maybe_put_candidate_override(result, nil), do: result
+
+  defp maybe_put_candidate_override(result, workspace_id) do
+    repo_path = Path.dirname(result["artifacts"]["coding_plan_path"])
+
+    result
+    |> Map.put("workspace_id", workspace_id)
+    |> Map.put("repo_path", repo_path)
+    |> Map.put("branch", "test/operator-candidate")
+    |> Map.put("base_commit", String.duplicate("c", 40))
+    |> Map.put("commit_hash", String.duplicate("b", 40))
+    |> Map.put("branch_provenance", "created")
+    |> Map.put("evidence_ref", "refs/arbor/evidence/operator-candidate")
   end
 
   defp archive_reviewed_plan!(plan) do

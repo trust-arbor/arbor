@@ -666,6 +666,100 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
            ]
   end
 
+  test "security regression: read_terminal_evidence admits production bodies and denies skeletal or contradictory files",
+       %{base: base} do
+    File.mkdir_p!(base)
+    {:ok, base} = Arbor.Common.SafePath.resolve_real(base)
+
+    task_id = "task_coding_read_valid"
+    task_root = compilation_task_root(base, task_id)
+    File.mkdir_p!(task_root)
+    {:ok, task_root} = Arbor.Common.SafePath.resolve_real(task_root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               task_root,
+               task_id,
+               terminal_result(task_root),
+               []
+             )
+
+    assert {:ok, body} = ArtifactStore.read_terminal_evidence(base, task_id)
+    assert body["schema_version"] == 1
+    assert body["task_id"] == task_id
+    assert body["terminal_status"] == "change_committed"
+    assert body["compiled_workflow"]["compiler_version"] == "coding-plan-1"
+
+    skeletal_id = "task_coding_read_skeletal"
+    skeletal_root = compilation_task_root(base, skeletal_id)
+    File.mkdir_p!(skeletal_root)
+    skeletal_path = Path.join(skeletal_root, "coding-terminal-evidence.json")
+
+    File.write!(
+      skeletal_path,
+      Jason.encode!(%{
+        "schema_version" => 1,
+        "task_id" => skeletal_id,
+        "terminal_status" => "validation_capacity_exceeded",
+        "canonical_status" => "validation_capacity_exceeded",
+        "validation_outputs" => []
+      })
+    )
+
+    File.chmod!(skeletal_path, 0o600)
+
+    assert {:error, :invalid_coding_terminal_evidence} =
+             ArtifactStore.read_terminal_evidence(base, skeletal_id)
+
+    contradictory_id = "task_coding_read_contradictory"
+    contradictory_root = compilation_task_root(base, contradictory_id)
+    File.mkdir_p!(contradictory_root)
+    {:ok, contradictory_root} = Arbor.Common.SafePath.resolve_real(contradictory_root)
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_terminal_evidence(
+               contradictory_root,
+               contradictory_id,
+               terminal_result(contradictory_root),
+               []
+             )
+
+    evidence_path = Path.join(contradictory_root, "coding-terminal-evidence.json")
+    {:ok, archived} = Jason.decode(File.read!(evidence_path))
+
+    contradictory =
+      archived
+      |> Map.put("terminal_status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+
+    File.rm!(evidence_path)
+    File.write!(evidence_path, Jason.encode!(contradictory))
+    File.chmod!(evidence_path, 0o600)
+
+    assert {:error, :invalid_coding_terminal_evidence} =
+             ArtifactStore.read_terminal_evidence(base, contradictory_id)
+
+    malformed_id = "task_coding_read_malformed_json"
+    malformed_root = compilation_task_root(base, malformed_id)
+    File.mkdir_p!(malformed_root)
+    malformed_path = Path.join(malformed_root, "coding-terminal-evidence.json")
+    File.write!(malformed_path, "{not-json")
+    File.chmod!(malformed_path, 0o600)
+
+    assert {:error, :invalid_coding_terminal_evidence} =
+             ArtifactStore.read_terminal_evidence(base, malformed_id)
+
+    list_id = "task_coding_read_top_level_list"
+    list_root = compilation_task_root(base, list_id)
+    File.mkdir_p!(list_root)
+    list_path = Path.join(list_root, "coding-terminal-evidence.json")
+    File.write!(list_path, Jason.encode!([%{"schema_version" => 1, "task_id" => list_id}]))
+    File.chmod!(list_path, 0o600)
+
+    assert {:error, :invalid_coding_terminal_evidence} =
+             ArtifactStore.read_terminal_evidence(base, list_id)
+  end
+
   test "persists verification reports, rejects forged status pairs, and accepts legacy v1", %{
     root: root
   } do

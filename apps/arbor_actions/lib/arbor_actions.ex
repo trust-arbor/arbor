@@ -711,6 +711,30 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Admit an operator security-regression review attestation for verification.
+
+  Walks from the supplied locator (normally the council-issued original) to a
+  bound unused token or mints one successor from a capacity-authorized leaf.
+  `proof` is `nil` or a closed host-archive map; a caller capacity boolean is
+  never accepted. Authority is exact `task_id` plus `principal_id`.
+  """
+  @spec admit_security_regression_operator_attestation(String.t(), map() | nil, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def admit_security_regression_operator_attestation(attestation_id, proof, opts \\ [])
+
+  def admit_security_regression_operator_attestation(attestation_id, proof, opts)
+      when is_binary(attestation_id) and (is_map(proof) or is_nil(proof)) and is_list(opts) do
+    WorkspaceLeaseRegistry.admit_security_regression_operator_attestation(
+      attestation_id,
+      proof,
+      opts
+    )
+  end
+
+  def admit_security_regression_operator_attestation(_attestation_id, _proof, _opts),
+    do: {:error, :invalid_capacity_retry_proof}
+
+  @doc """
   Point-in-time Linux dependency-baseline admission for a coding plan base_ref.
 
   Resolves `base_ref` with the same workspace resolver used by acquisition,

@@ -128,6 +128,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     as: RetainedReconciliationIdentity
 
   alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
+  alias Arbor.Actions.Coding.ReviewAttestationSuccessorCore
   alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
   alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: LifecycleStatus
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
@@ -662,6 +663,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc """
+  Record Actions-owned capacity evidence on a claimed review attestation.
+
+  Does not unclaim. Success, behavioral failure, and malformed termination
+  envelopes are denied. Opaque attestation ids are not authority.
+  """
+  @spec record_review_attestation_capacity(String.t(), map(), map() | keyword()) ::
+          :ok | {:error, term()}
+  def record_review_attestation_capacity(attestation_id, evidence, opts \\ %{})
+      when is_binary(attestation_id) and is_map(evidence) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:record_review_attestation_capacity, attestation_id, evidence, caller}, server_opts)
+  end
+
+  @doc """
+  Admit an operator security-regression attestation, walking to a bound token.
+
+  Unused originals are returned as-is. Claimed capacity-authorized leaves mint
+  or reuse one successor. Ordinary claimed originals without a marker or valid
+  first-hop archive proof remain non-reclaimable.
+  """
+  @spec admit_security_regression_operator_attestation(String.t(), map() | nil, map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def admit_security_regression_operator_attestation(attestation_id, proof, opts \\ %{})
+      when is_binary(attestation_id) and (is_map(proof) or is_nil(proof)) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call(
+      {:admit_security_regression_operator_attestation, attestation_id, proof, caller},
+      server_opts
+    )
+  end
+
+  @doc """
   Open a commit-bound review snapshot for an active workspace lease.
 
   Requires the same authority as lease inspect/release (live owner process, or
@@ -1082,12 +1115,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         if authorized?(lease, caller) do
           case cleanup_workspace_validation_resources(state, lease.workspace_id) do
             {:ok, state} ->
+              release_mode = publish_release_mode(mode, caller)
+
               state =
                 state
-                |> cleanup_workspace_attestations(lease.workspace_id)
+                |> maybe_cleanup_workspace_attestations(lease.workspace_id, release_mode)
                 |> cleanup_workspace_review_snapshots(lease.workspace_id)
-
-              release_mode = publish_release_mode(mode, caller)
 
               case do_release(state, lease, release_mode) do
                 {:ok, result, state} -> {:reply, {:ok, result}, state}
@@ -1358,8 +1391,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          :ok <- ensure_material_matches_lease(canonical, lease),
          :ok <- verify_review_material(lease, canonical),
          true <- valid_digest?(council_decision_digest) do
-      attestation_id =
-        "review_attestation_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      attestation_id = generate_review_attestation_id()
 
       record = %{
         attestation_id: attestation_id,
@@ -1367,7 +1399,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         material: canonical,
         council_decision_digest: council_decision_digest,
         task_id: lease.task_id,
-        principal_id: lease.principal_id
+        principal_id: lease.principal_id,
+        predecessor_id: nil,
+        successor_id: nil,
+        retry_index: 0,
+        origin: :council_issued,
+        capacity_evidence: nil
       }
 
       state = put_review_attestation(state, record)
@@ -1431,6 +1468,48 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       :available -> {:reply, {:error, :attestation_not_claimed}, state}
       :revoked -> {:reply, {:error, :attestation_revoked}, state}
       nil -> {:reply, {:error, :attestation_revoked}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:record_review_attestation_capacity, attestation_id, evidence, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, record} <- fetch_review_attestation(state, attestation_id),
+         :claimed <- Map.get(state.attestation_states, attestation_id),
+         {:ok, lease} <- fetch_authorized(state, record.workspace_id, caller),
+         :ok <- ensure_record_authority(record, lease, caller),
+         :ok <- verify_review_material(lease, record.material),
+         true <- ReviewAttestationSuccessorCore.valid_capacity_evidence?(evidence) do
+      record = %{record | capacity_evidence: closed_capacity_evidence(evidence)}
+      {:reply, :ok, put_review_attestation(state, record)}
+    else
+      :available -> {:reply, {:error, :attestation_not_claimed}, state}
+      :revoked -> {:reply, {:error, :attestation_revoked}, state}
+      nil -> {:reply, {:error, :attestation_revoked}, state}
+      false -> {:reply, {:error, :capacity_retry_denied}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:admit_security_regression_operator_attestation, attestation_id, proof, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, start} <- fetch_review_attestation(state, attestation_id),
+         {:ok, lease} <- fetch_authorized(state, start.workspace_id, caller),
+         :ok <- ensure_record_authority(start, lease, caller),
+         {:ok, input} <- successor_walk_input(state, start, proof, caller),
+         {:ok, decision} <- ReviewAttestationSuccessorCore.walk(input) do
+      admit_successor_decision(state, decision, lease, caller)
+    else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -3259,14 +3338,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             end
 
           {:ok, state} ->
-            state =
-              state
-              |> cleanup_workspace_attestations(workspace_id)
-              |> cleanup_workspace_review_snapshots(workspace_id)
+            state = cleanup_workspace_review_snapshots(state, workspace_id)
 
             case Map.get(state.leases, workspace_id) do
               nil ->
-                {:noreply, state}
+                {:noreply, cleanup_workspace_attestations(state, workspace_id)}
 
               lease ->
                 {:noreply, apply_owner_death_workspace_policy(state, lease)}
@@ -3285,11 +3361,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         retain_on_owner_death(state, lease, :owner_terminated)
 
       lease.cleanup_armed != true ->
-        drop_lease(state, lease)
+        drop_lease_and_attestations(state, lease)
 
       lease.ownership == :reused ->
         # Reused paths are never deletion authority.
-        drop_lease(state, lease)
+        drop_lease_and_attestations(state, lease)
 
       lease.ownership == :owned ->
         # Unexpected owner termination is not evidence that an external ACP
@@ -3297,7 +3373,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         retain_on_owner_death(state, lease, :owner_terminated)
 
       true ->
-        drop_lease(state, lease)
+        drop_lease_and_attestations(state, lease)
     end
   end
 
@@ -3344,8 +3420,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       put_lease(state, lease)
     else
-      # Path already gone (common teardown race): drop the lease only.
-      drop_lease(state, lease)
+      # Path already gone (common teardown race): drop the lease and its
+      # attestations. Preserve only on actual retain.
+      drop_lease_and_attestations(state, lease)
     end
   end
 
@@ -3443,10 +3520,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case Map.get(state.leases, workspace_id) do
       %{owner_death_quarantine_state: quarantine_state} = lease
       when quarantine_state in [:validation_cleanup_pending, :validation_cleanup_dormant] ->
-        state =
-          state
-          |> cleanup_workspace_attestations(workspace_id)
-          |> cleanup_workspace_review_snapshots(workspace_id)
+        state = cleanup_workspace_review_snapshots(state, workspace_id)
 
         lease =
           lease
@@ -3497,26 +3571,118 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp valid_digest?(digest), do: is_binary(digest) and Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
 
   defp put_review_attestation(state, record) do
+    record = ensure_attestation_lineage_fields(record)
+
     ids =
       state.attestation_by_workspace
       |> Map.get(record.workspace_id, MapSet.new())
       |> MapSet.put(record.attestation_id)
+
+    existing_status = Map.get(state.attestation_states, record.attestation_id, :available)
 
     %{
       state
       | review_attestations: Map.put(state.review_attestations, record.attestation_id, record),
         attestation_by_workspace:
           Map.put(state.attestation_by_workspace, record.workspace_id, ids),
-        attestation_states: Map.put(state.attestation_states, record.attestation_id, :available)
+        attestation_states:
+          Map.put(state.attestation_states, record.attestation_id, existing_status)
     }
   end
 
   defp fetch_review_attestation(state, attestation_id) do
     case Map.fetch(state.review_attestations, attestation_id) do
-      {:ok, record} -> {:ok, record}
+      {:ok, record} -> {:ok, ensure_attestation_lineage_fields(record)}
       :error -> {:error, :not_found}
     end
   end
+
+  defp ensure_attestation_lineage_fields(record) when is_map(record) do
+    record
+    |> Map.put_new(:predecessor_id, nil)
+    |> Map.put_new(:successor_id, nil)
+    |> Map.put_new(:retry_index, 0)
+    |> Map.put_new(:origin, :council_issued)
+    |> Map.put_new(:capacity_evidence, nil)
+  end
+
+  defp closed_capacity_evidence(_evidence) do
+    %{
+      "reason" => "validation_capacity_exceeded",
+      "passed" => false,
+      "termination" => ReviewAttestationSuccessorCore.capacity_termination()
+    }
+  end
+
+  defp successor_walk_input(state, start, proof, caller) do
+    records =
+      state.review_attestations
+      |> Enum.filter(fn {_id, record} ->
+        ensure_attestation_lineage_fields(record).workspace_id === start.workspace_id
+      end)
+      |> Map.new(fn {id, record} ->
+        {id, ensure_attestation_lineage_fields(record)}
+      end)
+
+    states = Map.take(state.attestation_states, Map.keys(records))
+
+    ReviewAttestationSuccessorCore.new(%{
+      start_id: start.attestation_id,
+      caller_task_id: caller.task_id || start.task_id,
+      caller_principal_id: caller.principal_id || start.principal_id,
+      caller_workspace_id: start.workspace_id,
+      records: records,
+      states: states,
+      proof: proof
+    })
+  end
+
+  defp admit_successor_decision(state, {:use, attestation_id}, _lease, _caller) do
+    {:reply, {:ok, %{review_attestation_id: attestation_id}}, state}
+  end
+
+  defp admit_successor_decision(state, {:mint_from, parent_id}, lease, _caller) do
+    with {:ok, parent} <- fetch_review_attestation(state, parent_id),
+         :ok <- verify_review_material(lease, parent.material) do
+      child_id = generate_review_attestation_id()
+
+      child = %{
+        attestation_id: child_id,
+        workspace_id: parent.workspace_id,
+        material: parent.material,
+        council_decision_digest: parent.council_decision_digest,
+        task_id: parent.task_id,
+        principal_id: parent.principal_id,
+        predecessor_id: parent.attestation_id,
+        successor_id: nil,
+        retry_index: Map.get(parent, :retry_index, 0) + 1,
+        origin: :capacity_retry,
+        capacity_evidence: nil
+      }
+
+      parent = %{parent | successor_id: child_id}
+
+      state =
+        state
+        |> put_review_attestation(parent)
+        |> put_review_attestation(child)
+
+      {:reply, {:ok, %{review_attestation_id: child_id}}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp generate_review_attestation_id do
+    "review_attestation_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+  end
+
+  defp maybe_cleanup_workspace_attestations(state, _workspace_id, :retain), do: state
+  defp maybe_cleanup_workspace_attestations(state, _workspace_id, {:publish, _commit, :retain}),
+    do: state
+
+  defp maybe_cleanup_workspace_attestations(state, workspace_id, _mode),
+    do: cleanup_workspace_attestations(state, workspace_id)
 
   defp ensure_attestation_available(state, attestation_id) do
     case Map.get(state.attestation_states, attestation_id) do
@@ -5745,7 +5911,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           |> Map.put(:active, false)
           |> Map.put(:status, "removed")
 
-        {:ok, result, drop_retained(state, retained)}
+        {:ok, result, drop_retained_and_attestations(state, retained)}
 
       {:error, reason} ->
         {:error, {:marker_delete_failed, reason}, state}
@@ -5913,7 +6079,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           :ok ->
             case delete_retained_marker(state2, reserved) do
               :ok ->
-                {:ok, drop_retained(state2, reserved)}
+                {:ok, drop_retained_and_attestations(state2, reserved)}
 
               {:error, reason} ->
                 # The path is gone and registration is absent, but preserve
@@ -5937,7 +6103,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp do_release(state, lease, :retain) when lease.ownership == :reused do
-    state = drop_lease(state, lease)
+    state =
+      state
+      |> cleanup_workspace_attestations(lease.workspace_id)
+      |> drop_lease(lease)
+
     # A reused path never becomes deletion authority and never gets a timer.
     Process.demonitor(lease.owner_ref, [:flush])
 
@@ -6568,7 +6738,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case delete_retained_marker(state, retained) do
       :ok ->
         cancel_expiry(Map.get(retained, :expiry_ref))
-        {:ok, Map.put(result, :status, "discarded"), drop_retained(state, retained)}
+        {:ok, Map.put(result, :status, "discarded"),
+         drop_retained_and_attestations(state, retained)}
 
       {:error, reason} ->
         # Branch/worktree settled; marker-delete failure must schedule on the
@@ -6621,7 +6792,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case delete_retained_marker(state, retained) do
       :ok ->
         cancel_expiry(Map.get(retained, :expiry_ref))
-        state = drop_retained(state, retained)
+        state = drop_retained_and_attestations(state, retained)
 
         result =
           retained
@@ -6749,6 +6920,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     {:ok, result, state}
   end
 
+  defp drop_lease_and_attestations(state, lease) do
+    state
+    |> cleanup_workspace_attestations(lease.workspace_id)
+    |> drop_lease(lease)
+  end
+
+  defp drop_retained_and_attestations(state, retained) do
+    state
+    |> cleanup_workspace_attestations(retained.workspace_id)
+    |> drop_retained(retained)
+  end
+
   defp drop_lease(state, lease) do
     cancel_owner_death_retry(lease)
 
@@ -6774,6 +6957,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
   end
 
+  # Non-destructive index drop for reactivation. Terminal retained end uses
+  # drop_retained_and_attestations/2.
   defp drop_retained(state, retained) do
     %{
       state
@@ -7011,7 +7196,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
               |> Map.put(:active, false)
               |> Map.put(:status, "removed")
 
-            {:ok, result, drop_retained(state2, reserved)}
+            {:ok, result, drop_retained_and_attestations(state2, reserved)}
 
           {:error, reason} ->
             state3 =

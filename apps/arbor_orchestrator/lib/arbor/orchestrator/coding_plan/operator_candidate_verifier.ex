@@ -4,7 +4,11 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.VerificationReport
   alias Arbor.Contracts.Security.SigningAuthority
-  alias Arbor.Orchestrator.CodingPlan.{CandidateVerifier, ValidationProgram}
+  alias Arbor.Orchestrator.CodingPlan.{
+    CandidateVerifier,
+    CapacityRetryAdmissionCore,
+    ValidationProgram
+  }
   alias Arbor.Orchestrator.Config
 
   @authority_purpose :coding_candidate_operator
@@ -34,6 +38,19 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
                            @cancellation_scheduler_margin_ms
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
   @work_packet_digest_pattern ~r/\Asha256:[0-9a-f]{64}\z/
+  @operator_attestation_errors [
+    :not_found,
+    :not_authorized,
+    :attestation_already_claimed,
+    :attestation_revoked,
+    :attestation_not_claimed,
+    :capacity_retry_denied,
+    :invalid_capacity_retry_proof,
+    :retry_budget_exhausted,
+    :successor_lineage_mismatch,
+    :reviewed_material_changed,
+    :attestation_lease_mismatch
+  ]
 
   @doc false
   @spec cancellation_grace_ms() :: pos_integer()
@@ -419,6 +436,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
           try do
             with {:ok, workspace_lifecycle} <-
                    activate_workspace(workspace, request),
+                 {:ok, request} <-
+                   bind_security_regression_attestation(request, reviewed),
                  {:ok, security} <- security_facade(),
                  {:ok, authority} <-
                    acquire_guarded_signing_authority(guard, security, request.agent_id) do
@@ -1002,6 +1021,119 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifier do
       "validation_program" => validation_program
     }
     |> maybe_put("review_attestation_id", request.review_attestation_id)
+  end
+
+  defp bind_security_regression_attestation(request, reviewed) do
+    program = reviewed.validation_program
+
+    cond do
+      not is_map(program) ->
+        {:ok, request}
+
+      program["profile_id"] != "security_regression" ->
+        {:ok, request}
+
+      not is_binary(request.review_attestation_id) ->
+        {:ok, request}
+
+      true ->
+        admit_bound_attestation(request)
+    end
+  end
+
+  defp admit_bound_attestation(request) do
+    facade = Config.coding_reconciliation_resource_facade()
+
+    cond do
+      not (is_atom(facade) and Code.ensure_loaded?(facade) and
+             function_exported?(
+               facade,
+               :admit_security_regression_operator_attestation,
+               3
+             )) ->
+        {:ok, request}
+
+      true ->
+        with {:ok, proof} <- load_capacity_proof(request) do
+          case apply(facade, :admit_security_regression_operator_attestation, [
+                 request.review_attestation_id,
+                 proof,
+                 [task_id: request.task_id, principal_id: request.agent_id]
+               ]) do
+            {:ok, %{review_attestation_id: bound_id}} when is_binary(bound_id) ->
+              {:ok, %{request | review_attestation_id: bound_id}}
+
+            {:ok, %{"review_attestation_id" => bound_id}} when is_binary(bound_id) ->
+              {:ok, %{request | review_attestation_id: bound_id}}
+
+            {:error, reason} ->
+              project_operator_attestation_error(reason)
+
+            _other ->
+              {:error, :capacity_retry_denied}
+          end
+        end
+    end
+  rescue
+    _ -> {:error, :capacity_retry_denied}
+  catch
+    _, _ -> {:error, :capacity_retry_denied}
+  end
+
+  defp project_operator_attestation_error(reason) when reason in @operator_attestation_errors,
+    do: {:error, reason}
+
+  defp project_operator_attestation_error(_reason), do: {:error, :capacity_retry_denied}
+
+  defp load_capacity_proof(request) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not (is_atom(store) and Code.ensure_loaded?(store) and
+             function_exported?(store, :read_terminal_evidence, 2)) ->
+        {:ok, nil}
+
+      true ->
+        case apply(store, :read_terminal_evidence, [
+               Config.coding_pipeline_logs_root(),
+               request.task_id
+             ]) do
+          {:ok, archive} ->
+            project_capacity_proof(archive, request)
+
+          {:error, :coding_terminal_evidence_unavailable} ->
+            {:ok, nil}
+
+          {:error, :invalid_coding_terminal_evidence} ->
+            {:error, :invalid_capacity_retry_proof}
+
+          _other ->
+            {:error, :invalid_capacity_retry_proof}
+        end
+    end
+  rescue
+    _ -> {:error, :invalid_capacity_retry_proof}
+  catch
+    _, _ -> {:error, :invalid_capacity_retry_proof}
+  end
+
+  defp project_capacity_proof(archive, request) do
+    case CapacityRetryAdmissionCore.new(%{
+           archive: archive,
+           task_id: request.task_id,
+           principal_id: request.agent_id,
+           workspace_id: request.workspace_id
+         }) do
+      {:ok, input} ->
+        case CapacityRetryAdmissionCore.admit(input) do
+          {:ok, proof} -> {:ok, proof}
+          {:error, :not_capacity} -> {:ok, nil}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp normalize_verification_result({:ok, report}, provenance) do

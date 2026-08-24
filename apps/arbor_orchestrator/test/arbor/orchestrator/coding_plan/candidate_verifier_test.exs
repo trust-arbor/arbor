@@ -295,6 +295,36 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerifierTest do
     refute inspect(report) =~ "must-not-return"
   end
 
+  test "security regression: nested validator rejections stay allowlisted and secrets do not leak" do
+    set_responses([{:ok, inspection()}, {:error, :attestation_already_claimed}])
+
+    assert Arbor.Orchestrator.verify_coding_candidate(
+             candidate(program!("default")),
+             valid_opts(authority!())
+           ) == {:error, {:validator_rejected, :attestation_already_claimed}}
+
+    set_responses([
+      {:ok, inspection()},
+      {:error, "Action mix_compile failed: :not_authorized"}
+    ])
+
+    assert Arbor.Orchestrator.verify_coding_candidate(
+             candidate(program!("default")),
+             valid_opts(authority!())
+           ) == {:error, {:validator_rejected, :not_authorized}}
+
+    set_responses([{:ok, inspection()}, {:error, %{token: "must-not-leak"}}])
+
+    leaked =
+      Arbor.Orchestrator.verify_coding_candidate(
+        candidate(program!("default")),
+        valid_opts(authority!())
+      )
+
+    assert leaked == {:error, :validator_execution_failed}
+    refute inspect(leaked) =~ "must-not-leak"
+  end
+
   test "security regression: caller path, tree, action, parameters, and executor overrides are impossible" do
     program = program!("default")
     valid_candidate = candidate(program)
