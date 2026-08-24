@@ -1045,6 +1045,16 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp match_reviewed_mix_shape(["run" | _rest]), do: {:error, :unsupported_mix_command}
 
+  # Exact ContractChange test child only. Ordered prefix is
+  # test, --warnings-as-errors, -- plus one or more relative paths.
+  # Reuse validate_test_paths/1. Do not teach parse_test_args this flag.
+  # Must precede the generic test parser. Preserve caller argv bytes.
+  defp match_reviewed_mix_shape(["test", "--warnings-as-errors", "--" | paths] = args) do
+    with {:ok, _validated_paths} <- validate_test_paths(paths) do
+      {:ok, args}
+    end
+  end
+
   defp match_reviewed_mix_shape(["test" | rest]) do
     parse_test_args(rest, [])
   end

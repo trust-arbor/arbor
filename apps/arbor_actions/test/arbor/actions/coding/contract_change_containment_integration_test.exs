@@ -31,6 +31,29 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
              Shell.execute_spawn_capable(@mix_wrapper, argv, spawn_preflight_opts())
   end
 
+  test "security regression: ContractChange.Core.test_argv cannot drift from public Shell Apple Container containment" do
+    paths = [
+      "apps/arbor_kernel/test/arbor/contracts/admission_test.exs",
+      "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+    ]
+
+    assert {:ok, argv} = Core.test_argv(paths)
+    assert argv == Core.test_argv_prefix() ++ Enum.sort(paths)
+
+    assert argv == [
+             "test",
+             "--warnings-as-errors",
+             "--",
+             "apps/arbor_kernel/test/arbor/contracts/admission_test.exs",
+             "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+           ]
+
+    # {:error, :apple_container_unit_owner_required} means the reviewed argv passed mix-shape admission and stopped at the public owner gate.
+    assert {:error, :apple_container_unit_owner_required} =
+             Shell.execute_spawn_capable(@mix_wrapper, argv, spawn_preflight_opts())
+  end
+
+
   defp spawn_preflight_opts do
     [
       cwd: @worktree,

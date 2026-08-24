@@ -1235,4 +1235,72 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       end
     end
   end
+
+  describe "public spawn facade: ContractChange test argv containment" do
+    @contract_change_test_path "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
+    @contract_change_test_argv [
+      "test",
+      "--warnings-as-errors",
+      "--",
+      @contract_change_test_path
+    ]
+    @contract_change_test_argv_two_paths [
+      "test",
+      "--warnings-as-errors",
+      "--",
+      @contract_change_test_path,
+      "apps/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs"
+    ]
+
+    @tag :security_regression
+    test "security regression: ContractChange Apple Container containment admits only the exact test argv to the public owner check" do
+      # {:error, :apple_container_unit_owner_required} means the reviewed argv passed mix-shape admission and stopped at the public owner gate.
+      assert {:error, :apple_container_unit_owner_required} =
+               Shell.execute_spawn_capable(
+                 @mix_wrapper,
+                 @contract_change_test_argv,
+                 valid_opts()
+               )
+
+      assert {:ok, spec} = Core.new(valid_request(%{args: @contract_change_test_argv}))
+      assert spec.plan.command_args == @contract_change_test_argv
+
+      assert {:error, :apple_container_unit_owner_required} =
+               Shell.execute_spawn_capable(
+                 @mix_wrapper,
+                 @contract_change_test_argv_two_paths,
+                 valid_opts()
+               )
+
+      assert {:ok, two_path_spec} =
+               Core.new(valid_request(%{args: @contract_change_test_argv_two_paths}))
+
+      assert two_path_spec.plan.command_args == @contract_change_test_argv_two_paths
+    end
+
+    @tag :security_regression
+    test "security regression: ContractChange mix test --warnings-as-errors near-misses stay fail-closed" do
+      path = @contract_change_test_path
+
+      near_misses = [
+        {:deletion, ["test", "--warnings-as-errors", path], :unsupported_mix_command},
+        {:reordering, ["test", "--", path, "--warnings-as-errors"], :option_shaped_test_path},
+        {:duplicate,
+         ["test", "--warnings-as-errors", "--warnings-as-errors", "--", path],
+         :unsupported_mix_command},
+        {:option_shaped, ["test", "--warnings-as-errors", "--", "--trace"],
+         :option_shaped_test_path},
+        {:empty_path, ["test", "--warnings-as-errors", "--"], :empty_test_paths},
+        {:flag_extension, ["test", "--warnings-as-errors", "--trace", "--", path],
+         :unsupported_mix_command},
+        {:comma_encoding, ["test", "--warnings-as-errors,", "--", path], :unsupported_mix_command}
+      ]
+
+      for {kind, args, reason} <- near_misses do
+        assert {:error, ^reason} =
+                 Shell.execute_spawn_capable(@mix_wrapper, args, valid_opts()),
+               inspect({kind, reason})
+      end
+    end
+  end
 end
