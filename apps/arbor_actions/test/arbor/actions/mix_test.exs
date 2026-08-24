@@ -10,6 +10,9 @@ defmodule Arbor.Actions.MixTest do
 
   use Arbor.Actions.ActionCase, async: false
   @moduletag :slow
+  # These tests execute real nested Mix processes. Keep ExUnit's owner timeout
+  # aligned with the product-owned Mix operation budget rather than its 60s default.
+  @moduletag timeout: Arbor.Actions.Mix.mix_timeout()
 
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Config
