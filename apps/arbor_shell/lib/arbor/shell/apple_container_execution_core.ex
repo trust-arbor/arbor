@@ -138,6 +138,17 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
   @xref_formats MapSet.new(["stats", "cycles", "linked"])
 
+  # Exact ContractChange preflight only. Mix `do` commas stay inside tokens.
+  @contract_change_preflight_argv [
+    "do",
+    "compile",
+    "--warnings-as-errors,",
+    "xref",
+    "graph,",
+    "arbor.contracts.census",
+    "--fail-on-violation"
+  ]
+
   @type execution_spec :: %{
           plan: AppleContainerPlanCore.plan(),
           timeout_ms: pos_integer(),
@@ -1041,6 +1052,11 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   defp match_reviewed_mix_shape(["format" | rest]) do
     parse_format_args(rest, [])
   end
+
+  # Exact ContractChange preflight only. Mix `do` commas stay inside tokens.
+  # Do not parse generic `mix do`.
+  defp match_reviewed_mix_shape(@contract_change_preflight_argv),
+    do: {:ok, @contract_change_preflight_argv}
 
   defp match_reviewed_mix_shape(_args), do: {:error, :unsupported_mix_command}
 

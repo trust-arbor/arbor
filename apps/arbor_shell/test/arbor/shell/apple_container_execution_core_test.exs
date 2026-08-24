@@ -1168,4 +1168,71 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                Shell.execute_spawn_capable("mix", ["test"], [])
     end
   end
+
+  describe "public spawn facade: ContractChange preflight containment" do
+    @contract_change_preflight_argv [
+      "do",
+      "compile",
+      "--warnings-as-errors,",
+      "xref",
+      "graph,",
+      "arbor.contracts.census",
+      "--fail-on-violation"
+    ]
+
+    @tag :security_regression
+    test "security regression: ContractChange Apple Container containment admits only the exact preflight argv to the public owner check" do
+      assert {:error, :apple_container_unit_owner_required} =
+               Shell.execute_spawn_capable(
+                 @mix_wrapper,
+                 @contract_change_preflight_argv,
+                 valid_opts()
+               )
+    end
+
+    @tag :security_regression
+    test "security regression: ContractChange mix do near-misses stay unsupported_mix_command" do
+      near_misses = [
+        {:deletion, Enum.drop(@contract_change_preflight_argv, -1)},
+        {:substitution,
+         [
+           "do",
+           "test",
+           "--warnings-as-errors,",
+           "xref",
+           "graph,",
+           "arbor.contracts.census",
+           "--fail-on-violation"
+         ]},
+        {:comma_encoding,
+         [
+           "do",
+           "compile",
+           "--warnings-as-errors",
+           "xref",
+           "graph",
+           "arbor.contracts.census",
+           "--fail-on-violation"
+         ]},
+        {:reordering,
+         [
+           "do",
+           "xref",
+           "graph,",
+           "compile",
+           "--warnings-as-errors,",
+           "arbor.contracts.census",
+           "--fail-on-violation"
+         ]},
+        {:extension, @contract_change_preflight_argv ++ ["test"]},
+        {:forbidden_generalization, ["do", "compile"]}
+      ]
+
+      for {kind, args} <- near_misses do
+        assert {:error, :unsupported_mix_command} =
+                 Shell.execute_spawn_capable(@mix_wrapper, args, valid_opts()),
+               inspect(kind)
+      end
+    end
+  end
 end
