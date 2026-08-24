@@ -113,7 +113,7 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
             %{
               files: [^path],
               ranges: %{^path => [[1, 10_000_000]]}
-            }} = DeltaRanges.parse_material("", modified, [path])
+            }} = DeltaRanges.parse_material_subset("", modified, [path])
 
     added_path = "generated/new-payload.json"
 
@@ -128,7 +128,7 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
             %{
               files: [^added_path],
               ranges: %{^added_path => [[1, 10_000_000]]}
-            }} = DeltaRanges.parse_material("", added, [added_path])
+            }} = DeltaRanges.parse_material_subset("", added, [added_path])
   end
 
   test "opaque deletion remains visible but range-free" do
@@ -144,7 +144,7 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
     """
 
     assert {:ok, %{files: [^path], ranges: %{}}} =
-             DeltaRanges.parse_material("", deleted, [path])
+             DeltaRanges.parse_material_subset("", deleted, [path])
   end
 
   test "merges ordinary and opaque ranges under one aggregate ceiling" do
@@ -176,12 +176,84 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
                 "generated/payload.json" => [[1, 10_000_000]],
                 "lib/example.ex" => [[1, 2]]
               }
-            }} = DeltaRanges.parse_material(ordinary, opaque, [opaque_path])
+            }} = DeltaRanges.parse_material_subset(ordinary, opaque, [opaque_path])
 
     padding = String.duplicate("x", DeltaRanges.max_diff_bytes() - byte_size(opaque) + 1)
 
     assert {:error, :unified_diff_too_large} =
-             DeltaRanges.parse_material(padding, opaque, [opaque_path])
+             DeltaRanges.parse_material_subset(padding, opaque, [opaque_path])
+  end
+
+  test "ordinary metadata-only mode and rename records emit files without ranges" do
+    mode_only = """
+    diff --git a/script.sh b/script.sh
+    old mode 100644
+    new mode 100755
+    """
+
+    assert {:ok, %{files: ["script.sh"], ranges: %{}}} =
+             DeltaRanges.parse_material_subset(mode_only, "", ["generated/payload.json"])
+
+    rename_only = """
+    diff --git a/old-name.ex b/new-name.ex
+    similarity index 100%
+    rename from old-name.ex
+    rename to new-name.ex
+    """
+
+    assert {:ok, %{files: ["new-name.ex"], ranges: %{}}} =
+             DeltaRanges.parse_material_subset(rename_only, "", ["generated/payload.json"])
+  end
+
+  test "ordinary content records reject incomplete or malformed metadata protocols" do
+    incomplete_mode = """
+    diff --git a/script.sh b/script.sh
+    old mode 100644
+    --- a/script.sh
+    +++ b/script.sh
+    @@ -1 +1 @@
+    -old
+    +new
+    """
+
+    assert {:error, :malformed_unified_diff} =
+             DeltaRanges.parse_material_subset(
+               incomplete_mode,
+               "",
+               ["generated/payload.json"]
+             )
+
+    incomplete_rename = """
+    diff --git a/old-name.ex b/new-name.ex
+    similarity index 90%
+    rename from old-name.ex
+    --- a/old-name.ex
+    +++ b/new-name.ex
+    @@ -1 +1 @@
+    -old
+    +new
+    """
+
+    assert {:error, :malformed_unified_diff} =
+             DeltaRanges.parse_material_subset(
+               incomplete_rename,
+               "",
+               ["generated/payload.json"]
+             )
+
+    malformed_similarity = """
+    diff --git a/old-name.ex b/new-name.ex
+    similarity index 100%%
+    rename from old-name.ex
+    rename to new-name.ex
+    """
+
+    assert {:error, :malformed_unified_diff} =
+             DeltaRanges.parse_material_subset(
+               malformed_similarity,
+               "",
+               ["generated/payload.json"]
+             )
   end
 
   test "opaque markers fail closed on path, index, mode, quoting, patch, and NUL confusion" do
@@ -201,7 +273,7 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
           {"Binary files \"a/#{path}\" and \"b/#{path}\" differ\n", :binary_marker_path_mismatch}
         ] do
       assert {:error, ^reason} =
-               DeltaRanges.parse_material("", valid_prefix <> suffix, [path])
+               DeltaRanges.parse_material_subset("", valid_prefix <> suffix, [path])
     end
 
     malformed_index = """
@@ -211,25 +283,86 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
     """
 
     assert {:error, :malformed_binary_index} =
-             DeltaRanges.parse_material("", malformed_index, [path])
+             DeltaRanges.parse_material_subset("", malformed_index, [path])
 
     wrong_mode = String.replace(valid_prefix, "100644", "100755")
 
     assert {:error, :malformed_binary_index} =
-             DeltaRanges.parse_material(
+             DeltaRanges.parse_material_subset(
                "",
                wrong_mode <> "Binary files a/#{path} and b/#{path} differ\n",
                [path]
              )
 
     assert {:error, :binary_unified_diff} =
-             DeltaRanges.parse_material("", valid_prefix <> <<0>>, [path])
+             DeltaRanges.parse_material_subset("", valid_prefix <> <<0>>, [path])
 
     assert {:error, :unapproved_binary_marker_path} =
-             DeltaRanges.parse_material(
+             DeltaRanges.parse_material_subset(
                "",
                valid_prefix <> "Binary files a/#{path} and b/#{path} differ\n",
                ["generated/other.json"]
              )
+  end
+
+  test "opaque parser rejects incomplete, duplicate, renamed, and contradictory records" do
+    path = "generated/payload.json"
+    other_path = "generated/other.json"
+    old_oid = String.duplicate("1", 40)
+    new_oid = String.duplicate("2", 40)
+    new_oid_64 = String.duplicate("2", 64)
+    zero_oid = String.duplicate("0", 40)
+    header = "diff --git a/#{path} b/#{path}\n"
+    marker = "Binary files a/#{path} and b/#{path} differ\n"
+    valid = header <> "index #{old_oid}..#{new_oid} 100644\n" <> marker
+
+    assert {:error, :malformed_binary_marker} =
+             DeltaRanges.parse_material_subset("", header <> marker, [path])
+
+    assert {:error, :malformed_binary_marker} =
+             DeltaRanges.parse_material_subset("", valid <> marker, [path])
+
+    assert {:error, :opaque_rename_not_supported} =
+             DeltaRanges.parse_material_subset(
+               "",
+               "diff --git a/#{path} b/#{other_path}\n",
+               Enum.sort([path, other_path])
+             )
+
+    assert {:error, :malformed_binary_index} =
+             DeltaRanges.parse_material_subset(
+               "",
+               header <> "index #{old_oid}..#{new_oid_64} 100644\n" <> marker,
+               [path]
+             )
+
+    assert {:error, :malformed_binary_index} =
+             DeltaRanges.parse_material_subset(
+               "",
+               header <>
+                 "new file mode 100644\n" <>
+                 "index #{zero_oid}..#{new_oid} 100644\n" <>
+                 "Binary files /dev/null and b/#{path} differ\n",
+               [path]
+             )
+
+    assert {:error, :malformed_binary_marker} =
+             DeltaRanges.parse_material_subset(
+               "",
+               header <> "index #{old_oid}..#{new_oid} 100644\n",
+               [path]
+             )
+
+    assert {:error, :invalid_unified_diff} =
+             DeltaRanges.parse_material_subset("", valid <> <<0xFF>>, [path])
+
+    ordinary =
+      "diff --git a/#{path} b/#{path}\n" <>
+        "--- a/#{path}\n" <>
+        "+++ b/#{path}\n" <>
+        "@@ -1 +1 @@\n-old\n+new\n"
+
+    assert {:error, :duplicate_unified_diff_file} =
+             DeltaRanges.parse_material_subset(ordinary, valid, [path])
   end
 end

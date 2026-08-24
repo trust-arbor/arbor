@@ -15,27 +15,26 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
   def max_line_number, do: @max_line_number
 
   @doc false
-  @spec parse_material(String.t(), String.t(), [String.t()]) ::
+  @spec parse_material_subset(String.t(), String.t(), [String.t()]) ::
           {:ok, %{ranges: %{String.t() => [[pos_integer()]]}, files: [String.t()]}}
           | {:error, atom()}
-  def parse_material(ordinary_diff, opaque_diff, opaque_paths)
+  def parse_material_subset(ordinary_diff, opaque_diff, opaque_paths)
       when is_binary(ordinary_diff) and is_binary(opaque_diff) and is_list(opaque_paths) do
     combined = ordinary_diff <> opaque_diff
 
     with :ok <- validate_diff(combined),
          :ok <- validate_opaque_paths(opaque_paths),
-         {:ok, ordinary_ranges} <- parse_optional_ordinary(ordinary_diff),
-         {:ok, ordinary_files} <- ordinary_files(ordinary_diff),
+         {:ok, ordinary} <- parse_optional_ordinary(ordinary_diff),
          {:ok, opaque} <- parse_optional_opaque(opaque_diff, MapSet.new(opaque_paths)),
-         :ok <- require_disjoint_files(ordinary_files, opaque.files),
-         files <- ordinary_files ++ opaque.files,
+         :ok <- require_disjoint_files(ordinary.files, opaque.files),
+         files <- ordinary.files ++ opaque.files,
          :ok <- validate_material_bounds(combined, files),
-         {:ok, ranges} <- merge_material_ranges(ordinary_ranges, opaque.ranges) do
+         {:ok, ranges} <- merge_material_ranges(ordinary.ranges, opaque.ranges) do
       {:ok, %{ranges: ranges, files: Enum.sort(files)}}
     end
   end
 
-  def parse_material(_, _, _), do: {:error, :invalid_unified_diff}
+  def parse_material_subset(_, _, _), do: {:error, :invalid_unified_diff}
 
   @doc false
   @spec parse(String.t()) ::
@@ -76,16 +75,33 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
       seen_file?: false,
       old_path: nil,
       new_path: :pending,
+      header_old_path: nil,
+      header_new_path: nil,
+      old_mode: nil,
+      rename_from: nil,
+      current_recorded?: false,
+      parsed_files: [],
       ranges: %{}
     }
   end
 
   defp parse_line("diff --git " <> rest, state) do
     with :ok <- require_complete_file(state),
-         :ok <- validate_diff_header(rest),
+         {:ok, header_old_path, header_new_path} <- parse_header_paths(rest),
          :ok <- require_file_capacity(state) do
       {:ok,
-       %{state | files: state.files + 1, seen_file?: true, old_path: nil, new_path: :pending}}
+       %{
+         state
+         | files: state.files + 1,
+           seen_file?: true,
+           old_path: nil,
+           new_path: :pending,
+           header_old_path: header_old_path,
+           header_new_path: header_new_path,
+           old_mode: nil,
+           rename_from: nil,
+           current_recorded?: false
+       }}
     end
   end
 
@@ -93,7 +109,8 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
   defp parse_line("GIT binary patch", _state), do: {:error, :binary_unified_diff}
 
   defp parse_line("--- " <> path, %{seen_file?: true, old_path: nil, new_path: :pending} = state) do
-    with {:ok, old_path} <- parse_old_path(path) do
+    with {:ok, old_path} <- parse_old_path(path),
+         :ok <- require_old_marker_matches_header(old_path, state.header_old_path) do
       {:ok, %{state | old_path: old_path}}
     end
   end
@@ -103,10 +120,79 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
          %{seen_file?: true, old_path: old_path, new_path: :pending} = state
        )
        when not is_nil(old_path) do
-    with {:ok, new_path} <- parse_new_path(path) do
+    with {:ok, new_path} <- parse_new_path(path),
+         :ok <- require_new_marker_matches_header(new_path, state.header_new_path) do
+      parsed_path = if is_binary(new_path), do: new_path, else: state.header_old_path
+      state = record_current_path(state, parsed_path)
+
       {:ok, %{state | new_path: new_path}}
     end
   end
+
+  defp parse_line("old mode " <> mode, %{old_path: nil, new_path: :pending} = state) do
+    with :ok <- validate_ordinary_mode(mode) do
+      {:ok, %{state | old_mode: mode}}
+    end
+  end
+
+  defp parse_line(
+         "new mode " <> mode,
+         %{old_path: nil, new_path: :pending, old_mode: old_mode} = state
+       )
+       when is_binary(old_mode) do
+    with :ok <- validate_ordinary_mode(mode),
+         true <- old_mode != mode do
+      state = record_current_path(state, state.header_new_path)
+
+      {:ok,
+       %{
+         state
+         | old_mode: nil
+       }}
+    else
+      _ -> {:error, :malformed_unified_diff}
+    end
+  end
+
+  defp parse_line("similarity index " <> percent, %{old_path: nil, new_path: :pending} = state) do
+    if Regex.match?(~r/\A(?:0|[1-9][0-9]?|100)%\z/, percent),
+      do: {:ok, state},
+      else: {:error, :malformed_unified_diff}
+  end
+
+  defp parse_line("rename from " <> path, %{old_path: nil, new_path: :pending} = state) do
+    with {:ok, path} <- validate_path(path),
+         true <- path == state.header_old_path do
+      {:ok, %{state | rename_from: path}}
+    else
+      _ -> {:error, :malformed_unified_diff}
+    end
+  end
+
+  defp parse_line(
+         "rename to " <> path,
+         %{old_path: nil, new_path: :pending, rename_from: rename_from} = state
+       )
+       when is_binary(rename_from) do
+    with {:ok, path} <- validate_path(path),
+         true <- path == state.header_new_path do
+      state = record_current_path(state, path)
+
+      {:ok,
+       %{
+         state
+         | rename_from: nil
+       }}
+    else
+      _ -> {:error, :malformed_unified_diff}
+    end
+  end
+
+  defp parse_line("old mode " <> _mode, _state), do: {:error, :malformed_unified_diff}
+  defp parse_line("new mode " <> _mode, _state), do: {:error, :malformed_unified_diff}
+  defp parse_line("similarity index " <> _percent, _state), do: {:error, :malformed_unified_diff}
+  defp parse_line("rename from " <> _path, _state), do: {:error, :malformed_unified_diff}
+  defp parse_line("rename to " <> _path, _state), do: {:error, :malformed_unified_diff}
 
   defp parse_line("@@ " <> hunk, %{new_path: nil} = state) do
     with {:ok, nil} <- parse_hunk(hunk),
@@ -131,15 +217,6 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
   defp parse_line("--- " <> _path, _state), do: {:error, :malformed_unified_diff}
   defp parse_line("+++ " <> _path, _state), do: {:error, :malformed_unified_diff}
   defp parse_line(_line, state), do: {:ok, state}
-
-  defp validate_diff_header(rest) do
-    cond do
-      rest == "" -> {:error, :malformed_unified_diff}
-      String.contains?(rest, "\"") -> {:error, :quoted_unified_diff_path}
-      not String.contains?(rest, " b/") -> {:error, :malformed_unified_diff}
-      true -> :ok
-    end
-  end
 
   defp parse_old_path("/dev/null"), do: {:ok, :dev_null}
 
@@ -231,9 +308,24 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
     end
   end
 
-  defp require_complete_file(%{old_path: nil, new_path: :pending}), do: :ok
+  defp require_complete_file(%{seen_file?: false, old_path: nil, new_path: :pending}), do: :ok
 
-  defp require_complete_file(%{old_path: old_path, new_path: new_path})
+  defp require_complete_file(%{
+         seen_file?: true,
+         old_path: nil,
+         new_path: :pending,
+         current_recorded?: true,
+         old_mode: nil,
+         rename_from: nil
+       }),
+       do: :ok
+
+  defp require_complete_file(%{
+         old_path: old_path,
+         new_path: new_path,
+         old_mode: nil,
+         rename_from: nil
+       })
        when not is_nil(old_path) and new_path != :pending,
        do: :ok
 
@@ -257,86 +349,53 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
     end
   end
 
-  defp parse_optional_ordinary(""), do: {:ok, %{}}
-  defp parse_optional_ordinary(diff), do: parse(diff)
+  defp parse_optional_ordinary(""), do: {:ok, %{files: [], ranges: %{}}}
 
-  defp ordinary_files(""), do: {:ok, []}
-
-  defp ordinary_files(diff) do
-    diff
-    |> String.split("\n", trim: false)
-    |> Enum.reduce_while({:ok, nil, []}, fn line, {:ok, current, files} ->
-      case {line, current} do
-        {"diff --git " <> rest, nil} ->
-          case parse_header_paths(rest) do
-            {:ok, old_path, new_path} -> {:cont, {:ok, {old_path, new_path, nil}, files}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-
-        {"diff --git " <> rest, {old_path, new_path, nil}} when old_path != new_path ->
-          case parse_header_paths(rest) do
-            {:ok, next_old, next_new} ->
-              {:cont, {:ok, {next_old, next_new, nil}, [new_path | files]}}
-
-            {:error, reason} ->
-              {:halt, {:error, reason}}
-          end
-
-        {"+++ /dev/null", {old_path, _new_path, _old_marker}} ->
-          {:cont, {:ok, nil, [old_path | files]}}
-
-        {"+++ b/" <> path, {_old_path, new_path, _old_marker}} ->
-          with {:ok, path} <- validate_path(path),
-               true <- path == new_path do
-            {:cont, {:ok, nil, [path | files]}}
-          else
-            _ -> {:halt, {:error, :malformed_unified_diff}}
-          end
-
-        {"--- " <> marker, {old_path, new_path, nil}} ->
-          expected = if marker == "/dev/null", do: :dev_null, else: old_path
-
-          case parse_old_path(marker) do
-            {:ok, ^expected} ->
-              {:cont, {:ok, {old_path, new_path, expected}, files}}
-
-            _ ->
-              {:halt, {:error, :malformed_unified_diff}}
-          end
-
-        {"diff --git " <> _rest, _current} ->
-          {:halt, {:error, :malformed_unified_diff}}
-
-        {_line, _current} ->
-          {:cont, {:ok, current, files}}
-      end
-    end)
-    |> case do
-      {:ok, nil, files} ->
-        validate_file_list(Enum.reverse(files))
-
-      {:ok, {old_path, new_path, nil}, files} when old_path != new_path ->
-        validate_file_list(Enum.reverse([new_path | files]))
-
-      {:ok, _current, _files} ->
-        {:error, :malformed_unified_diff}
-
-      {:error, _reason} = error ->
-        error
+  defp parse_optional_ordinary(diff) do
+    with :ok <- validate_diff(diff),
+         {:ok, state} <- parse_lines(String.split(diff, "\n", trim: false)),
+         :ok <- validate_terminal_state(state),
+         {:ok, files} <- validate_file_list(Enum.reverse(state.parsed_files)),
+         true <- length(files) == state.files do
+      {:ok, %{files: files, ranges: state.ranges}}
+    else
+      false -> {:error, :malformed_unified_diff}
+      {:error, _reason} = error -> error
     end
   end
 
   defp parse_header_paths(rest) do
-    case String.split(rest, " ", parts: 2) do
-      ["a/" <> old_path, "b/" <> new_path] ->
-        with {:ok, old_path} <- validate_path(old_path),
-             {:ok, new_path} <- validate_path(new_path) do
-          {:ok, old_path, new_path}
-        end
+    if String.contains?(rest, "\"") do
+      {:error, :quoted_unified_diff_path}
+    else
+      case String.split(rest, " ", parts: 2) do
+        ["a/" <> old_path, "b/" <> new_path] ->
+          with {:ok, old_path} <- validate_path(old_path),
+               {:ok, new_path} <- validate_path(new_path) do
+            {:ok, old_path, new_path}
+          end
 
-      _ ->
-        {:error, :malformed_unified_diff}
+        _ ->
+          {:error, :malformed_unified_diff}
+      end
     end
+  end
+
+  defp require_old_marker_matches_header(:dev_null, _header_path), do: :ok
+  defp require_old_marker_matches_header(path, path), do: :ok
+  defp require_old_marker_matches_header(_, _), do: {:error, :malformed_unified_diff}
+
+  defp require_new_marker_matches_header(nil, _header_path), do: :ok
+  defp require_new_marker_matches_header(path, path), do: :ok
+  defp require_new_marker_matches_header(_, _), do: {:error, :malformed_unified_diff}
+
+  defp validate_ordinary_mode(mode) when mode in ["100644", "100755"], do: :ok
+  defp validate_ordinary_mode(_), do: {:error, :malformed_unified_diff}
+
+  defp record_current_path(%{current_recorded?: true} = state, _path), do: state
+
+  defp record_current_path(state, path) do
+    %{state | parsed_files: [path | state.parsed_files], current_recorded?: true}
   end
 
   defp parse_optional_opaque("", _allowed), do: {:ok, %{files: [], ranges: %{}}}

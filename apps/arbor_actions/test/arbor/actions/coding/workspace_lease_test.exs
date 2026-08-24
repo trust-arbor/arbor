@@ -11,6 +11,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   @moduletag :fast
   @owner_operation_timeout 10_000
   @owner_hold_timeout 30_000
+  @opaque_review_paths [
+    "apps/arbor_commands/priv/packaging/safe_recovery_artifact.payload.v1.json",
+    "apps/arbor_commands/priv/packaging/source_coupling_baseline.v1.json"
+  ]
 
   test "opaque review attributes match the closed runtime path set" do
     expected =
@@ -2615,7 +2619,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       tmp_dir: tmp_dir
     } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
-      payload_path = hd(Workspace.opaque_review_paths())
+      payload_path = hd(@opaque_review_paths)
       envelope_path = "apps/arbor_commands/priv/packaging/safe_recovery_artifact.v1.json"
 
       attributes_path = repository_attributes_path()
@@ -2689,6 +2693,47 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
     end
 
+    @tag :security_regression
+    test "security regression: opaque changes fail closed for missing or wrong attributes",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      [changed_path, classified_path] = @opaque_review_paths
+
+      for {suffix, changed_rule} <- [{"missing", ""}, {"wrong", "/#{changed_path} diff\n"}] do
+        repo = create_git_repo(Path.join(tmp_dir, "repo_#{suffix}"))
+
+        File.write!(
+          Path.join(repo, ".gitattributes"),
+          "/#{classified_path} -diff\n" <> changed_rule
+        )
+
+        git!(repo, ["add", ".gitattributes"])
+        git!(repo, ["commit", "-m", "misclassify generated artifacts"])
+
+        assert {:ok, lease} =
+                 Workspace.Acquire.run(
+                   %{
+                     repo_path: repo,
+                     branch_name: "test/#{suffix}-opaque-attribute",
+                     worktree_base_dir: Path.join(tmp_dir, "worktrees_#{suffix}")
+                   },
+                   %{}
+                 )
+
+        changed_file = Path.join(lease.worktree_path, changed_path)
+        File.mkdir_p!(Path.dirname(changed_file))
+        File.write!(changed_file, "generated\n")
+        git!(lease.worktree_path, ["add", "--", changed_path])
+        git!(lease.worktree_path, ["commit", "-m", "change unclassified generated artifact"])
+
+        assert {:error, :invalid_opaque_review_attributes} =
+                 Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+        _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+      end
+    end
+
     test "real Git opaque additions and deletions use strict bounded markers", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       path = hd(Workspace.opaque_review_paths())
@@ -2705,7 +2750,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       added = git!(repo, ["rev-parse", "HEAD"])
       added_oid = git!(repo, ["rev-parse", "#{added}:#{path}"])
 
-      assert {:ok, added_material} = Workspace.committed_diff(repo, base, added)
+      assert {:ok, added_material} = Workspace.committed_diff_material(repo, base, added)
       assert added_material.files == [path]
       assert added_material.ranges == %{path => [[1, 10_000_000]]}
       assert added_material.diff =~ "new file mode 100644"
@@ -2716,12 +2761,70 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       git!(repo, ["commit", "-m", "delete generated artifact"])
       deleted = git!(repo, ["rev-parse", "HEAD"])
 
-      assert {:ok, deleted_material} = Workspace.committed_diff(repo, added, deleted)
+      assert {:ok, deleted_material} = Workspace.committed_diff_material(repo, added, deleted)
       assert deleted_material.files == [path]
       assert deleted_material.ranges == %{}
       assert deleted_material.diff =~ "deleted file mode 100644"
       assert deleted_material.diff =~ "index #{added_oid}..#{String.duplicate("0", 40)}"
       assert deleted_material.diff =~ "Binary files a/#{path} and /dev/null differ"
+    end
+
+    test "real Git mode-only ordinary changes remain materializable", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      File.write!(Path.join(repo, "script.sh"), "#!/bin/sh\n")
+      git!(repo, ["add", "script.sh"])
+      git!(repo, ["commit", "-m", "add script"])
+      base = git!(repo, ["rev-parse", "HEAD"])
+
+      git!(repo, ["update-index", "--chmod=+x", "script.sh"])
+      git!(repo, ["commit", "-m", "make script executable"])
+      head = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, material} = Workspace.committed_diff_material(repo, base, head)
+      assert material.files == ["script.sh"]
+      assert material.ranges == %{}
+      assert material.diff =~ "old mode 100644"
+      assert material.diff =~ "new mode 100755"
+    end
+
+    test "real Git rename and mode metadata with content record each file once", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      File.write!(Path.join(repo, "old-name.sh"), "line one\nline two\nline three\n")
+      git!(repo, ["add", "old-name.sh"])
+      git!(repo, ["commit", "-m", "add original script"])
+      base = git!(repo, ["rev-parse", "HEAD"])
+
+      git!(repo, ["mv", "old-name.sh", "new-name.sh"])
+      File.write!(Path.join(repo, "new-name.sh"), "line one\nchanged two\nline three\n")
+      git!(repo, ["add", "new-name.sh"])
+      git!(repo, ["commit", "-m", "rename and edit script"])
+      renamed = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, rename_material} =
+               Workspace.committed_diff_material(repo, base, renamed)
+
+      assert rename_material.files == ["new-name.sh"]
+      assert rename_material.ranges == %{"new-name.sh" => [[1, 3]]}
+      assert rename_material.diff =~ "rename from old-name.sh"
+      assert rename_material.diff =~ "rename to new-name.sh"
+      assert rename_material.diff =~ "+++ b/new-name.sh"
+
+      File.write!(Path.join(repo, "new-name.sh"), "line one\nchanged again\nline three\n")
+      git!(repo, ["add", "new-name.sh"])
+      git!(repo, ["update-index", "--chmod=+x", "new-name.sh"])
+      git!(repo, ["commit", "-m", "change script mode and content"])
+      mode_and_content = git!(repo, ["rev-parse", "HEAD"])
+
+      assert {:ok, mode_material} =
+               Workspace.committed_diff_material(repo, renamed, mode_and_content)
+
+      assert mode_material.files == ["new-name.sh"]
+      assert mode_material.ranges == %{"new-name.sh" => [[1, 3]]}
+      assert mode_material.diff =~ "old mode 100644"
+      assert mode_material.diff =~ "new mode 100755"
+      assert mode_material.diff =~ "+++ b/new-name.sh"
     end
 
     test "rejects missing, invalid, equal, and non-ancestor prior commits", %{tmp_dir: tmp_dir} do

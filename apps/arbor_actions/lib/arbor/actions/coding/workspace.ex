@@ -1037,7 +1037,7 @@ defmodule Arbor.Actions.Coding.Workspace do
          {:ok, head_commit} <- require_head_commit(inspection),
          {:ok, head_commit} <- ensure_commit_is_exact_head(requested_commit, head_commit),
          {:ok, base_ref} <- require_base_commit(base_commit),
-         {:ok, diff} <- committed_diff(worktree_path, base_ref, head_commit),
+         {:ok, diff} <- committed_diff_material(worktree_path, base_ref, head_commit),
          {:ok, files} <- committed_files(worktree_path, base_ref, head_commit),
          :ok <- require_material_files(diff.files, files) do
       {:ok,
@@ -1131,8 +1131,9 @@ defmodule Arbor.Actions.Coding.Workspace do
     do: {:error, :invalid_security_regression_material_args}
 
   @doc false
-  @spec committed_diff(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def committed_diff(worktree_path, base_commit, head_commit)
+  @spec committed_diff_material(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def committed_diff_material(worktree_path, base_commit, head_commit)
       when is_binary(worktree_path) and is_binary(base_commit) and is_binary(head_commit) do
     materialize_review_diff(
       fn args -> git(worktree_path, args) end,
@@ -1143,7 +1144,7 @@ defmodule Arbor.Actions.Coding.Workspace do
     )
   end
 
-  def committed_diff(_, _, _), do: {:error, :invalid_committed_change_args}
+  def committed_diff_material(_, _, _), do: {:error, :invalid_committed_change_args}
 
   @doc false
   @spec committed_files(String.t(), String.t(), String.t()) ::
@@ -1159,9 +1160,13 @@ defmodule Arbor.Actions.Coding.Workspace do
            "--"
          ]) do
       {:ok, output} ->
-        case parse_changed_files(output) do
-          {:ok, files} -> {:ok, files}
-          {:error, _reason} -> {:error, :invalid_commit_files}
+        if output == "" do
+          {:error, :empty_commit_file_list}
+        else
+          case parse_changed_files(output) do
+            {:ok, files} -> {:ok, files}
+            {:error, _reason} -> {:error, :invalid_commit_files}
+          end
         end
 
       {:error, reason} ->
@@ -1239,7 +1244,8 @@ defmodule Arbor.Actions.Coding.Workspace do
            "--name-only",
            "-z",
            "--find-renames",
-           "#{prior_commit}..#{candidate_commit}"
+           "#{prior_commit}..#{candidate_commit}",
+           "--"
          ]) do
       {:ok, output} -> parse_changed_files(output)
       {:error, _reason} -> {:error, :delta_files_failed}
@@ -1247,9 +1253,11 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp parse_changed_files(output) when is_binary(output) do
-    files = String.split(output, <<0>>, trim: true)
+    records = :binary.split(output, <<0>>, [:global])
 
-    with true <- files != [],
+    with true <- List.last(records) == "",
+         files <- Enum.drop(records, -1),
+         true <- files != [],
          true <- files == Enum.sort(files),
          true <- files == Enum.uniq(files),
          true <- Enum.all?(files, &valid_delta_file?/1) do
@@ -1266,7 +1274,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp require_material_files(parsed_files, listed_files) do
-    if parsed_files == listed_files,
+    if Enum.sort(parsed_files) == Enum.sort(listed_files),
       do: :ok,
       else: {:error, :materialized_files_mismatch}
   end
@@ -1275,12 +1283,11 @@ defmodule Arbor.Actions.Coding.Workspace do
     with :ok <- verify_opaque_attributes_if_needed(runner, from_commit, to_commit),
          {:ok, ordinary} <- runner.(ordinary_diff_args(from_commit, to_commit)),
          {:ok, opaque} <- runner.(opaque_diff_args(from_commit, to_commit)),
-         false <- ordinary == "" and opaque == "",
+         :ok <- require_nonempty_material(ordinary, opaque, empty_error),
          {:ok, material} <-
-           DeltaRanges.parse_material(ordinary, opaque, @opaque_review_paths) do
+           DeltaRanges.parse_material_subset(ordinary, opaque, @opaque_review_paths) do
       {:ok, Map.put(material, :diff, ordinary <> opaque)}
     else
-      true -> {:error, empty_error}
       {:error, reason} when reason in [:lease_git_failed] -> {:error, command_error}
       {:error, _reason} = error -> error
       _ -> {:error, command_error}
@@ -1347,6 +1354,9 @@ defmodule Arbor.Actions.Coding.Workspace do
       {:error, _reason} -> {:error, :invalid_opaque_review_attributes}
     end
   end
+
+  defp require_nonempty_material("", "", empty_error), do: {:error, empty_error}
+  defp require_nonempty_material(_ordinary, _opaque, _empty_error), do: :ok
 
   defp lease_git(repo_path, worktree_path, args) do
     case lease_git_result(repo_path, worktree_path, args) do

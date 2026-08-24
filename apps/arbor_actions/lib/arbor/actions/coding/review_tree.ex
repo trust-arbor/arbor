@@ -8,6 +8,9 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   Git plumbing. They never accept arbitrary refs/commits and never read the
   live worktree.
 
+  `Read` also supports bounded `byte_offset`/`byte_limit` paging for large
+  opaque generated artifacts without placing the complete blob in action output.
+
   | Action | Canonical URI |
   |--------|---------------|
   | `Read` | `arbor://action/coding/review_tree/read` |
@@ -16,6 +19,8 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
   @max_path_bytes 1024
   @max_content_bytes 262_144
+  # The two closed opaque artifacts are currently below this fixed source cap.
+  # Range reads keep the complete source local and return at most 64 KiB.
   @max_range_source_bytes 1_048_576
   @max_range_bytes 65_536
   @max_query_bytes 256
@@ -186,7 +191,6 @@ defmodule Arbor.Actions.Coding.ReviewTree do
       {:ok,
        %{
          content: chunk,
-         requested_byte_offset: byte_offset,
          byte_offset: byte_offset,
          next_byte_offset: next_offset,
          total_size: byte_size(content),
@@ -211,12 +215,14 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   end
 
   defp trim_range_to_utf8(content, offset, length) do
-    chunk = binary_part(content, offset, length)
-
-    cond do
-      String.valid?(chunk) -> {:ok, chunk}
-      length == 0 -> {:error, :invalid_utf8_boundary}
-      true -> trim_range_to_utf8(content, offset, length - 1)
+    0..min(length, 3)
+    |> Enum.find_value(fn trim ->
+      chunk = binary_part(content, offset, length - trim)
+      if String.valid?(chunk), do: {:ok, chunk}
+    end)
+    |> case do
+      nil -> {:error, :invalid_utf8_boundary}
+      result -> result
     end
   end
 
@@ -468,6 +474,10 @@ defmodule Arbor.Actions.Coding.ReviewTree do
     non-empty `task_id` plus principal/agent id). Opaque `review_snapshot_id`
     alone is never enough. Paths must be repo-relative; absolute paths,
     traversal, `.git` segments, and binary/non-UTF-8 content are rejected.
+    Large snapshot blobs can be paged with `byte_offset` and `byte_limit`;
+    each action result remains bounded to 65,536 content bytes.
+    Each page is one separately authorized action; pipeline step guards bound
+    repeated tool calls rather than mutable counters in the immutable snapshot.
     """
 
     use Jido.Action,
@@ -495,7 +505,8 @@ defmodule Arbor.Actions.Coding.ReviewTree do
         byte_offset: [
           type: :integer,
           required: false,
-          doc: "Optional zero-based byte offset for a bounded snapshot read"
+          doc:
+            "Optional zero-based UTF-8 boundary offset for a bounded snapshot read; must not exceed the blob size"
         ],
         byte_limit: [
           type: :integer,
