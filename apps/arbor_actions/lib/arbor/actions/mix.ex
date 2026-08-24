@@ -957,11 +957,18 @@ defmodule Arbor.Actions.Mix do
   #
   # Pre-execution binding also publishes the attested source-inventory manifest
   # into the owner-issued runner directory before candidate code starts.
+  #
+  # When `:expected_tree_oid` is present it is owner-derived control data: admit
+  # it, recapture the prelaunch tree, and fail closed before inventory publish
+  # or spawn when the recapture differs. Never adopt the recapture as identity.
   defp execute_prepared_mix(prepared, args, deadline_ms, bind_tree?, opts) do
     try do
       with {:ok, _} <- remaining_timeout(deadline_ms),
+           {:ok, expected_tree} <-
+             admit_expected_tree_oid(Keyword.get(opts, :expected_tree_oid)),
            {:ok, before_binding} <-
              maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms, include_paths: true),
+           :ok <- assert_expected_tree(before_binding, expected_tree, bind_tree?),
            {:ok, inventory_meta} <-
              publish_or_verify_source_inventory(prepared, before_binding, opts),
            {:ok, rem_after_bind} <- remaining_timeout(deadline_ms),
@@ -2686,6 +2693,33 @@ defmodule Arbor.Actions.Mix do
        do: :ok
 
   defp assert_tree_stable(_before, _after), do: {:error, :validation_tree_mutated}
+
+  # Owner-derived expected tree identity. Atom-key Keyword only; string keys
+  # never admit an oid. Absent/nil preserves callers with no prior freeze.
+  @expected_tree_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
+
+  defp admit_expected_tree_oid(nil), do: {:ok, nil}
+
+  defp admit_expected_tree_oid(oid) when is_binary(oid) do
+    if Regex.match?(@expected_tree_oid_re, oid) do
+      {:ok, oid}
+    else
+      {:error, :invalid_expected_tree_oid}
+    end
+  end
+
+  defp admit_expected_tree_oid(_oid), do: {:error, :invalid_expected_tree_oid}
+
+  defp assert_expected_tree(_binding, nil, _bind_tree?), do: :ok
+
+  defp assert_expected_tree(_binding, _expected, false),
+    do: {:error, :expected_tree_requires_binding}
+
+  defp assert_expected_tree(%{tree_oid: actual}, expected, true)
+       when is_binary(expected) and actual == expected,
+       do: :ok
+
+  defp assert_expected_tree(_binding, _expected, true), do: {:error, :expected_tree_mismatch}
 
   # Publish the attested source-inventory into the owner-issued runner directory
   # before candidate code starts. Existing regular file must be byte-identical.

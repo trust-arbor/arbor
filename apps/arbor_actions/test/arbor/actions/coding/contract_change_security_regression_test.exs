@@ -27,6 +27,7 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
   alias Arbor.Actions.Coding.ContractChange.Validate
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Actions.TestMixShell
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -250,6 +251,80 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
     assert is_nil(TestMixShell.last_invocation())
   end
 
+  # Parent 83a0a1f55cab9ed8f48d41c9a8ad72b4c9bb74ae reports
+  # {:ok, %{passed: true}} after A→B→A because Mix recaptures B as its
+  # before-binding and the outer freeze/postflight both observe A.
+  # Finding af4ee64fa1820d69ff61db6add1586ba3d1c77951c08b1703112747c0e61eff0
+  test "security regression: ABA tree-binding bypass cannot validate under the frozen candidate identity",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_contract_repo(tmp_dir)
+    change_kernel_contract!(fixture)
+
+    rel = "apps/arbor_kernel/lib/arbor/contracts/foo.ex"
+    frozen_path = Path.join(fixture.lease.worktree_path, rel)
+    frozen_bytes = File.read!(frozen_path)
+
+    alternate = """
+    defmodule Arbor.Contracts.Foo do
+      def value, do: :aba_alternate
+    end
+    """
+
+    assert alternate != frozen_bytes
+
+    previous_freeze = Application.get_env(:arbor_actions, :contract_change_after_candidate_freeze)
+    previous_runner = Application.get_env(:arbor_actions, :contract_change_mix_runner)
+
+    Application.put_env(:arbor_actions, :contract_change_after_candidate_freeze, fn path,
+                                                                                    _freeze ->
+      File.write!(Path.join(path, rel), alternate)
+      :ok
+    end)
+
+    Application.put_env(:arbor_actions, :contract_change_mix_runner, fn path, args, opts ->
+      result = MixAction.run_mix(path, args, opts)
+      File.write!(frozen_path, frozen_bytes)
+      result
+    end)
+
+    TestMixShell.clear_canned_spawn_result()
+    TestMixShell.clear_last_invocation()
+
+    TestMixShell.set_canned_spawn_results([
+      spawn_result(),
+      spawn_result()
+    ])
+
+    on_exit(fn ->
+      restore_env(:contract_change_after_candidate_freeze, previous_freeze)
+      restore_env(:contract_change_mix_runner, previous_runner)
+      TestMixShell.clear_canned_spawn_result()
+      TestMixShell.clear_last_invocation()
+    end)
+
+    outcome = run_validate(fixture)
+
+    case outcome do
+      {:ok, result} ->
+        refute result.passed
+        refute result.reason == "contract_change_validated"
+
+        flunk(
+          "validator reported success for frozen candidate after ABA swap: #{inspect(result.reason)}"
+        )
+
+      {:error, {:preflight_execution_failed, reason}} ->
+        refute setup_or_timeout_reason?(reason), inspect(reason)
+        assert expected_tree_mismatch_reason?(reason), inspect(reason)
+
+      {:error, reason} ->
+        refute setup_or_timeout_reason?(reason), inspect(reason)
+        flunk("unexpected fail-closed reason after ABA swap: #{inspect(reason)}")
+    end
+
+    assert is_nil(TestMixShell.last_invocation())
+  end
+
   test "ordinary nonzero exit with flags false stays a domain failure", %{tmp_dir: tmp_dir} do
     fixture = leased_contract_repo(tmp_dir)
     change_kernel_contract!(fixture)
@@ -346,6 +421,40 @@ defmodule Arbor.Actions.Coding.ContractChangeSecurityRegressionTest do
       containment_failure: Keyword.get(flags, :containment_failure, false)
     }
   end
+
+  defp expected_tree_mismatch_reason?(reason) when is_binary(reason) do
+    reason == ":expected_tree_mismatch" or String.contains?(reason, "expected_tree_mismatch")
+  end
+
+  defp expected_tree_mismatch_reason?(:expected_tree_mismatch), do: true
+  defp expected_tree_mismatch_reason?(_reason), do: false
+
+  defp setup_or_timeout_reason?(reason) when is_tuple(reason) do
+    reason
+    |> Tuple.to_list()
+    |> Enum.any?(&setup_or_timeout_reason?/1)
+  end
+
+  defp setup_or_timeout_reason?(reason) when is_binary(reason) do
+    reason == ":operation_deadline_exceeded" or
+      String.contains?(reason, "operation_deadline_exceeded")
+  end
+
+  defp setup_or_timeout_reason?(reason)
+       when reason in [
+              :operation_deadline_exceeded,
+              :workspace_not_found,
+              :workspace_unauthorized,
+              :invalid_task_principal,
+              :worktree_missing,
+              :missing_worktree_path
+            ],
+       do: true
+
+  defp setup_or_timeout_reason?(_reason), do: false
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_actions, key, value)
 
   defp expected_containment_termination do
     %{

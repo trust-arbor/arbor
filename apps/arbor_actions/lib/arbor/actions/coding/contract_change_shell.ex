@@ -33,7 +33,16 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
   @doc false
   @spec run_mix_children(String.t(), [String.t()], pos_integer(), pos_integer(), map()) ::
           {:ok, map()} | {:error, term()}
-  def run_mix_children(worktree_path, test_paths, timeout, stage_timeout, resource)
+  @spec run_mix_children(String.t(), [String.t()], pos_integer(), pos_integer(), map(), term()) ::
+          {:ok, map()} | {:error, term()}
+  def run_mix_children(
+        worktree_path,
+        test_paths,
+        timeout,
+        stage_timeout,
+        resource,
+        expected_tree_oid \\ nil
+      )
       when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) and
              is_integer(stage_timeout) and is_map(resource) do
     try do
@@ -44,7 +53,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
           test_args,
           timeout,
           stage_deadline(stage_timeout),
-          resource
+          resource,
+          expected_tree_oid
         )
       end
     catch
@@ -56,6 +66,7 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
     with {:ok, lease} <- resolve_lease(input.workspace_id, context),
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
          {:ok, freeze} <- MixAction.committable_app_mix_inventory(worktree_path),
+         {:ok, expected_tree_oid} <- admit_frozen_tree_oid(Map.get(freeze, :tree_oid)),
          :ok <- invoke_after_candidate_freeze_hook(worktree_path, freeze),
          {:ok, base_manifest} <- load_base_blob_manifest(worktree_path, base_commit),
          {:ok, changed_files} <-
@@ -64,7 +75,7 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
          {:ok, freeze_paths} <- BlobManifest.paths(Map.fetch!(freeze, :blob_manifest)),
          {:ok, admitted?} <-
            Core.admit_contract_surface(changed_files, base_paths, freeze_paths) do
-      before_binding = %{head: freeze.head, tree_oid: freeze.tree_oid}
+      before_binding = %{head: freeze.head, tree_oid: expected_tree_oid}
 
       with {:ok, checks, test_paths} <-
              maybe_run_validation(
@@ -74,7 +85,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
                worktree_path,
                changed_files,
                freeze_paths,
-               validation_deadline
+               validation_deadline,
+               expected_tree_oid
              ),
            {:ok, after_binding} <- MixAction.committable_tree_binding(worktree_path),
            :ok <- assert_validation_tree_stable(before_binding, after_binding) do
@@ -102,7 +114,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
          _worktree_path,
          _changed_files,
          _freeze_paths,
-         _validation_deadline
+         _validation_deadline,
+         _expected_tree_oid
        ) do
     skipped = Core.skipped_check("contract_surface_missing")
     {:ok, %{preflight: skipped, test: skipped}, []}
@@ -115,7 +128,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
          worktree_path,
          changed_files,
          freeze_paths,
-         validation_deadline
+         validation_deadline,
+         expected_tree_oid
        ) do
     with {:ok, test_paths} <- Core.select_contract_tests(changed_files, freeze_paths),
          :ok <- verify_selected_tests(worktree_path, freeze_paths, test_paths),
@@ -132,7 +146,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
                  test_args,
                  input.timeout,
                  validation_deadline,
-                 resource
+                 resource,
+                 expected_tree_oid
                )
              end,
              validation_resource_opts(input.timeout, validation_deadline)
@@ -149,7 +164,15 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
     end
   end
 
-  defp run_checks(worktree_path, test_paths, test_args, timeout, validation_deadline, resource) do
+  defp run_checks(
+         worktree_path,
+         test_paths,
+         test_args,
+         timeout,
+         validation_deadline,
+         resource,
+         expected_tree_oid
+       ) do
     preflight_sha = Core.inventory_sha256(Core.preflight_argv())
     tests_sha = Core.inventory_sha256(test_paths)
     preflight_batch = Core.preflight_batch(preflight_sha)
@@ -182,7 +205,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
               current: preflight_batch,
               unstarted: [tests_batch],
               per_batch_budget_ms: timeout
-            }
+            },
+            expected_tree_oid
           )
 
         cond do
@@ -202,7 +226,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
               resource,
               preflight,
               preflight_batch,
-              tests_batch
+              tests_batch,
+              expected_tree_oid
             )
         end
     end
@@ -216,7 +241,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
          resource,
          preflight,
          preflight_batch,
-         tests_batch
+         tests_batch,
+         expected_tree_oid
        ) do
     case remaining_ms(timeout, validation_deadline) do
       remaining when remaining <= 0 ->
@@ -245,14 +271,24 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
               current: tests_batch,
               unstarted: [],
               per_batch_budget_ms: timeout
-            }
+            },
+            expected_tree_oid
           )
 
         {:ok, %{preflight: preflight, test: test}}
     end
   end
 
-  defp run_mix_check(path, args, timeout, resource, validation_deadline, stage, plan) do
+  defp run_mix_check(
+         path,
+         args,
+         timeout,
+         resource,
+         validation_deadline,
+         stage,
+         plan,
+         expected_tree_oid
+       ) do
     case remaining_ms(timeout, validation_deadline) do
       remaining when remaining <= 0 ->
         unstarted_capacity_check(plan, :prelaunch)
@@ -265,7 +301,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
             validation_resource: resource,
             timeout: remaining,
             env: @mix_env,
-            resource_profile: :intensive
+            resource_profile: :intensive,
+            expected_tree_oid: expected_tree_oid
           )
 
         case result do
@@ -437,9 +474,23 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
     runner =
       Application.get_env(:arbor_actions, :contract_change_mix_runner, &MixAction.run_mix/3)
 
-    opts = Keyword.put(opts, :resource_profile, :intensive)
+    opts =
+      opts
+      |> Keyword.put(:resource_profile, :intensive)
+      |> Keyword.put(:expected_tree_oid, Keyword.get(opts, :expected_tree_oid))
+
     runner.(path, args, opts)
   end
+
+  defp admit_frozen_tree_oid(oid) when is_binary(oid) do
+    if Regex.match?(@full_commit_oid_re, oid) do
+      {:ok, oid}
+    else
+      {:error, :invalid_expected_tree_oid}
+    end
+  end
+
+  defp admit_frozen_tree_oid(_oid), do: {:error, :invalid_expected_tree_oid}
 
   defp verify_selected_tests(worktree_path, freeze_paths, test_paths) do
     freeze_set = MapSet.new(freeze_paths)
