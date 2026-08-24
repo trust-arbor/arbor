@@ -135,14 +135,31 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       @artifact_tag #{artifact_tag}
       @artifact_version #{artifact_version}
       @artifact_path_key {__MODULE__, :owner_artifact_path}
+      @aggregate_key {__MODULE__, :owner_aggregate_counts}
+      @aggregate_keys [
+        :excluded,
+        :executed,
+        :invalid,
+        :max_failures_reached,
+        :passed,
+        :setup_failures,
+        :skipped,
+        :suite_completed,
+        :suite_started,
+        :test_failures,
+        :total
+      ]
 
       # Capture the owner-issued result path before Mix.Task.run may replace
       # System.argv with the selected test paths.
       # Path checks stay in function bodies — remote calls such as
       # String.starts_with?/2 are not valid Elixir guards (OTP/Elixir 1.19).
+      # Aggregate reset happens only here: later init/suite_finished cycles
+      # in this invocation hydrate and accumulate the stored 11-key map.
       def store_artifact_path!(path) when is_binary(path) do
         if valid_owner_artifact_path?(path) do
           :persistent_term.put(@artifact_path_key, path)
+          :persistent_term.put(@aggregate_key, empty_aggregate())
           :ok
         else
           raise "security-regression runner missing artifact path argument"
@@ -167,21 +184,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
               raise "security-regression runner missing stored artifact path"
           end
 
-        {:ok,
-         %{
-           artifact_path: artifact_path,
-           excluded: 0,
-           executed: 0,
-           invalid: 0,
-           max_failures_reached: false,
-           passed: 0,
-           setup_failures: 0,
-           skipped: 0,
-           suite_completed: false,
-           suite_started: false,
-           test_failures: 0,
-           total: 0
-         }}
+        {:ok, Map.merge(stored_aggregate!(), %{artifact_path: artifact_path})}
       end
 
       def handle_cast({:suite_started, _opts}, state) do
@@ -254,6 +257,13 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
         completed = %{state | suite_completed: true}
         # Counts only in the published artifact — never re-export artifact_path.
         counts = Map.drop(completed, [:artifact_path])
+
+        unless valid_aggregate?(counts) do
+          raise "security-regression runner invalid stored aggregate"
+        end
+
+        :persistent_term.put(@aggregate_key, counts)
+
         artifact = {@artifact_tag, @artifact_version, counts}
         bytes = :erlang.term_to_binary(artifact, [:deterministic])
 
@@ -276,6 +286,56 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Formatter do
       end
 
       defp valid_owner_artifact_path?(_path), do: false
+
+      defp empty_aggregate do
+        %{
+          excluded: 0,
+          executed: 0,
+          invalid: 0,
+          max_failures_reached: false,
+          passed: 0,
+          setup_failures: 0,
+          skipped: 0,
+          suite_completed: false,
+          suite_started: false,
+          test_failures: 0,
+          total: 0
+        }
+      end
+
+      defp stored_aggregate! do
+        case :persistent_term.get(@aggregate_key, :missing) do
+          :missing ->
+            raise "security-regression runner missing stored aggregate"
+
+          counts ->
+            if valid_aggregate?(counts) do
+              counts
+            else
+              raise "security-regression runner invalid stored aggregate"
+            end
+        end
+      end
+
+      defp valid_aggregate?(counts) when is_map(counts) do
+        Enum.sort(Map.keys(counts)) == Enum.sort(@aggregate_keys) and
+          is_boolean(counts.suite_started) and
+          is_boolean(counts.suite_completed) and
+          is_boolean(counts.max_failures_reached) and
+          is_integer(counts.excluded) and counts.excluded >= 0 and
+          is_integer(counts.executed) and counts.executed >= 0 and
+          is_integer(counts.invalid) and counts.invalid >= 0 and
+          is_integer(counts.passed) and counts.passed >= 0 and
+          is_integer(counts.setup_failures) and counts.setup_failures >= 0 and
+          is_integer(counts.skipped) and counts.skipped >= 0 and
+          is_integer(counts.test_failures) and counts.test_failures >= 0 and
+          is_integer(counts.total) and counts.total >= 0 and
+          counts.executed == counts.passed + counts.test_failures and
+          counts.total ==
+            counts.executed + counts.skipped + counts.excluded + counts.invalid
+      end
+
+      defp valid_aggregate?(_counts), do: false
 
       defp increment(state, key), do: Map.update!(state, key, &(&1 + 1))
 

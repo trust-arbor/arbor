@@ -2510,6 +2510,58 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert {:ok, _} = WorkspaceLeaseRegistry.claim_review_attestation(id, fixture.context)
   end
 
+  test "security regression: materialize attests sorted union of requested and changed _test.exs",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    extra = "test/a_union_changed_test.exs"
+    requested = "test/z_union_requested_test.exs"
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n"
+    )
+
+    write_candidate_test(fixture, extra, """
+    defmodule Tiny.AUnionChangedTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    write_candidate_test(fixture, requested, """
+    defmodule Tiny.ZUnionRequestedTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    assert {:ok, material} =
+             Workspace.materialize_security_regression_material(
+               fixture.lease.worktree_path,
+               fixture.lease.workspace_id,
+               fixture.lease.base_commit,
+               [requested]
+             )
+
+    assert Enum.map(material.selected_tests, & &1.path) == [extra, requested]
+
+    extra_digest =
+      :crypto.hash(:sha256, File.read!(Path.join(fixture.lease.worktree_path, extra)))
+      |> Base.encode16(case: :lower)
+
+    requested_digest =
+      :crypto.hash(:sha256, File.read!(Path.join(fixture.lease.worktree_path, requested)))
+      |> Base.encode16(case: :lower)
+
+    assert material.selected_tests == [
+             %{path: extra, blob_sha256: extra_digest},
+             %{path: requested, blob_sha256: requested_digest}
+           ]
+
+    refute Enum.any?(material.selected_tests, &(&1.path == "lib/security.ex"))
+    refute Enum.any?(material.selected_tests, &(&1.path == "test/test_helper.exs"))
+  end
+
   test "security regression: materialize returns path-aware missing-selector error", %{
     tmp_dir: tmp_dir
   } do

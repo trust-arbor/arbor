@@ -1098,8 +1098,11 @@ defmodule Arbor.Actions.Coding.Workspace do
              is_list(test_paths) do
     with {:ok, change} <- materialize_committed_change(worktree_path, base_commit),
          :ok <- validate_selected_test_paths(test_paths),
+         {:ok, effective_paths} <-
+           effective_security_regression_test_paths(test_paths, change.files),
          {:ok, tree_oid} <- git_oid(worktree_path, "#{change.commit_hash}^{tree}"),
-         {:ok, selected_tests} <- git_test_blobs(worktree_path, change.commit_hash, test_paths),
+         {:ok, selected_tests} <-
+           git_test_blobs(worktree_path, change.commit_hash, effective_paths),
          :ok <- verify_materialized_head(worktree_path, change.commit_hash),
          {:ok, material} <-
            Arbor.Actions.Coding.SecurityRegression.Attestation.new(%{
@@ -1297,6 +1300,15 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp valid_selected_test_path?(_), do: false
+
+  defp effective_security_regression_test_paths(requested, files)
+       when is_list(requested) and is_list(files) do
+    extra = Enum.filter(files, &valid_selected_test_path?/1)
+    {:ok, Enum.sort(Enum.uniq(requested ++ extra))}
+  end
+
+  defp effective_security_regression_test_paths(_requested, _files),
+    do: {:error, :invalid_selected_test_paths}
 
   defp git_oid(path, revision) do
     case git(path, ["rev-parse", "--verify", revision]) do

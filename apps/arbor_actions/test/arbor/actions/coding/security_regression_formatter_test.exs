@@ -176,6 +176,71 @@ defmodule Arbor.Actions.Coding.SecurityRegression.FormatterTest do
     :code.delete(mod)
   end
 
+  test "security regression: two init/suite_finished cycles aggregate totals on one owner artifact" do
+    module_name =
+      "ArborSecurityRegressionFormatter.M" <>
+        (:crypto.strong_rand_bytes(16) |> Base.encode16(case: :upper))
+
+    assert {:ok, source} = Formatter.runner_source(module_name)
+    module_ast = extract_defmodule_ast!(source)
+
+    compiled =
+      try do
+        Code.compile_quoted(module_ast)
+      rescue
+        error ->
+          flunk(
+            "generated security-regression runner failed to compile: #{Exception.message(error)}"
+          )
+      end
+
+    assert [{mod, _beam} | _] = compiled
+    assert mod == String.to_existing_atom("Elixir." <> module_name)
+
+    suffix = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+    artifact_dir = Path.join(System.tmp_dir!(), "sr-agg-" <> suffix)
+    File.mkdir_p!(artifact_dir)
+    artifact = Path.join(artifact_dir, "result.etf")
+
+    on_exit(fn ->
+      File.rm_rf(artifact_dir)
+      :code.purge(mod)
+      :code.delete(mod)
+    end)
+
+    passing_test = %ExUnit.Test{state: nil, name: :one, module: __MODULE__, tags: %{}}
+
+    assert :ok = mod.store_artifact_path!(artifact)
+
+    assert {:ok, state} = mod.init([])
+    assert {:noreply, state} = mod.handle_cast({:suite_started, []}, state)
+    assert {:noreply, state} = mod.handle_cast({:test_finished, passing_test}, state)
+    assert {:noreply, _state} = mod.handle_cast({:suite_finished, {0, 0}}, state)
+
+    assert {:ok, counts} = decode_formatter_artifact(artifact)
+    assert counts["total"] == 1
+    assert counts["passed"] == 1
+    assert counts["executed"] == 1
+
+    assert {:ok, state} = mod.init([])
+    assert state.total == 1
+    assert {:noreply, state} = mod.handle_cast({:suite_started, []}, state)
+    assert {:noreply, state} = mod.handle_cast({:test_finished, passing_test}, state)
+    assert {:noreply, _state} = mod.handle_cast({:suite_finished, {0, 0}}, state)
+
+    assert {:ok, counts} = decode_formatter_artifact(artifact)
+    assert counts["total"] == 2
+    assert counts["passed"] == 2
+    assert counts["executed"] == 2
+    assert counts["suite_started"] == true
+    assert counts["suite_completed"] == true
+  end
+
+  defp decode_formatter_artifact(artifact) when is_binary(artifact) do
+    assert {:ok, bytes} = File.read(artifact)
+    Core.validate_artifact(:erlang.binary_to_term(bytes, [:safe]))
+  end
+
   defp extract_mix_test_run_args!(source) when is_binary(source) do
     assert {:ok, ast} = Code.string_to_quoted(source)
     args_ast = find_selected_test_run_args(ast)
