@@ -30,7 +30,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
       ],
       timeout: [
         type: :non_neg_integer,
-        doc: "Per-revision timeout in milliseconds (1,000 to standard Shell spawn-capable max)"
+        doc: "Per-revision timeout in milliseconds (1,000 to intensive Shell spawn-capable max)"
       ],
       stage_timeout: [
         type: :non_neg_integer,

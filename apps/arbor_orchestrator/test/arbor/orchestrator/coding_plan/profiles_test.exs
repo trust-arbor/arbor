@@ -188,6 +188,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, security} = Profiles.fetch_executable("security_regression")
       assert security["executable"]
 
+      security_timeout = Arbor.Actions.security_regression_maximum_timeout_ms()
       security_stage_ceiling = Arbor.Actions.security_regression_maximum_stage_timeout_ms()
 
       assert security["validation_strategy"] == %{
@@ -199,14 +200,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "static_parameters" => %{},
                "timeout_budget_param" => "stage_timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
-               "timeout_max_ms" => 600_000,
+               "timeout_max_ms" => security_timeout,
                "stage_timeout_budget_source" => "budgets.wall_clock_ms",
                "stage_timeout_max_ms" => security_stage_ceiling,
                "two_revision" => true
              }
 
-      assert security_stage_ceiling == 1_200_000
-      assert security_stage_ceiling == 2 * Arbor.Shell.spawn_capable_max_timeout_ms()
+      assert security_timeout == Profiles.security_regression_timeout_max_ms()
+      assert security_stage_ceiling == Profiles.security_regression_stage_timeout_max_ms()
 
       assert security["semantic_policy"]["validation_profile"] == "security_regression"
 
@@ -357,11 +358,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       assert {:ok, nil} = Profiles.validation_test_stage_timeout(security, 900_000)
       assert {:ok, nil} = Profiles.validation_stage_timeout(default, 900_000)
 
-      # security_regression binds a whole-stage ceiling of two sequential children.
-      assert {:ok, 600_000} = Profiles.validation_timeout(security, 900_000)
-      assert {:ok, 600_000} = Profiles.validation_timeout(security, 1_500_000)
+      # security_regression binds a whole-stage ceiling of two sequential intensive children.
+      assert security_timeout == intensive_ceiling
+      assert security_stage_ceiling == 2 * intensive_ceiling
+      assert {:ok, 900_000} = Profiles.validation_timeout(security, 900_000)
+      assert {:ok, ^intensive_ceiling} = Profiles.validation_timeout(security, 1_500_000)
       assert {:ok, 900_000} = Profiles.validation_stage_timeout(security, 900_000)
-      assert {:ok, 1_200_000} = Profiles.validation_stage_timeout(security, 1_500_000)
+      assert {:ok, 1_500_000} = Profiles.validation_stage_timeout(security, 1_500_000)
+
+      assert {:ok, ^security_stage_ceiling} =
+               Profiles.validation_stage_timeout(security, security_stage_ceiling + 100_000)
+
       assert {:ok, 120_000} = Profiles.validation_stage_timeout(security, 120_000)
 
       # Partial/malformed aggregate declarations fail closed — never coerced to nil.
@@ -448,9 +455,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
       assert cross_app["validation_strategy"]["timeout_max_ms"] > standard_ceiling
 
-      # Default compile and CrossApp use intensive containment; security keeps standard.
+      # Default compile, CrossApp, and security_regression use intensive containment.
       assert default["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
-      assert security["validation_strategy"]["timeout_max_ms"] == standard_ceiling
+      assert security["validation_strategy"]["timeout_max_ms"] == intensive_ceiling
 
       drifted_source =
         put_in(

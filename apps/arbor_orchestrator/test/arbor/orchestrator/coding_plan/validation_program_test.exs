@@ -70,13 +70,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         {"default", 1_500_000, %{"timeout" => 1_200_000, "warnings_as_errors" => true}},
         {"security_regression", 900_000,
          %{
-           "timeout" => 600_000,
+           "timeout" => 900_000,
            "stage_timeout" => 900_000
          }},
         {"security_regression", 1_500_000,
          %{
-           "timeout" => 600_000,
-           "stage_timeout" => 1_200_000
+           "timeout" => 1_200_000,
+           "stage_timeout" => 1_500_000
          }},
         {"cross_app", 120_000,
          %{

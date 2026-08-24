@@ -966,7 +966,7 @@ defmodule Arbor.Actions do
   Reviewed hard maximum for a security-regression per-revision Mix child timeout
   in milliseconds.
 
-  Bound to the standard Shell spawn-capable ceiling. Coding-plan profiles bind
+  Bound to the intensive Shell spawn-capable ceiling. Coding-plan profiles bind
   plan wall-clock against this Actions-owned value when compiling `param.timeout`.
   """
   @spec security_regression_maximum_timeout_ms() :: pos_integer()
@@ -978,7 +978,7 @@ defmodule Arbor.Actions do
   Reviewed hard maximum for the security-regression whole-validation stage budget
   in milliseconds.
 
-  Derived as exactly two sequential standard child ceilings (candidate then base).
+  Derived as exactly two sequential intensive child ceilings (candidate then base).
   Coding-plan profiles bind plan wall-clock against this Actions-owned value when
   compiling `param.stage_timeout`; callers must not import
   `Arbor.Actions.Coding.SecurityRegression.Core` directly or restate the product.

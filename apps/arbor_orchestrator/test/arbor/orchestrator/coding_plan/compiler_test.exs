@@ -1471,7 +1471,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["param.pinned_profile_id"] == "security_regression"
     assert validate["context_keys"] == "review_attestation_id"
     assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
-    assert pinned["timeout"] == 600_000
+    assert {:ok, intensive} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    assert intensive == Arbor.Actions.security_regression_maximum_timeout_ms()
+    assert pinned["timeout"] == 900_000
+    assert pinned["timeout"] == min(intensive, plan.budgets["wall_clock_ms"])
     assert pinned["stage_timeout"] == plan.budgets["wall_clock_ms"]
     assert pinned["stage_timeout"] == 900_000
     # ExecHandler clamps the compiler-selected stage_timeout binding.
@@ -1585,6 +1588,34 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert "arbor://action/coding/security_regression/validate" in compilation.execution_manifest[
              "capability_uris"
            ]
+  end
+
+  test "security regression pins intensive per-revision timeout and two-revision stage to wall",
+       ctx do
+    timeout_max = Arbor.Actions.security_regression_maximum_timeout_ms()
+    stage_max = Arbor.Actions.security_regression_maximum_stage_timeout_ms()
+    wall = timeout_max + 300_000
+
+    plan =
+      plan!(%{
+        "validation_profile" => "security_regression",
+        "requested_paths" => [
+          "apps/arbor_shell/test/shell_security_test.exs",
+          "apps/arbor_security/test/security_regression_test.exs"
+        ],
+        "budgets" => %{"wall_clock_ms" => wall}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+    assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
+
+    assert {:ok, intensive} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    assert timeout_max == intensive
+    assert stage_max == 2 * intensive
+    assert pinned["timeout"] == timeout_max
+    assert pinned["stage_timeout"] == min(stage_max, wall)
+    assert validate["param.stage_timeout"] == pinned["stage_timeout"]
   end
 
   test "security regression rejects the legacy none review profile", ctx do

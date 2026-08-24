@@ -359,6 +359,9 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
   # Production default is MixAction.run_mix/3. Tests may install a hermetic
   # :security_regression_mix_runner that still enforces contained env + tree
   # binding without resolving the host Mix wrapper from BEAM ancestry.
+  # System-owned capacity for every contained Mix revision (candidate and base).
+  # Not caller-controlled; never on the Jido schema. Shell validates the closed
+  # profile atom. run_mix/3 is the single chokepoint — do not rely on run_leg/7.
   defp run_mix(path, args, opts) do
     runner =
       Application.get_env(
@@ -367,6 +370,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
         &MixAction.run_mix/3
       )
 
+    opts = Keyword.put(opts, :resource_profile, :intensive)
     runner.(path, args, opts)
   end
 

@@ -9,8 +9,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   @default_timeout 300_000
   @minimum_timeout 1_000
-  # Derived from Shell spawn-capable ceiling so action limits cannot exceed admission.
-  @maximum_timeout Arbor.Shell.spawn_capable_max_timeout_ms()
+  # Every contained Mix child uses Shell :intensive, so the per-revision cap is
+  # the intensive spawn-capable ceiling (not the standard default). Fail closed
+  # at compile time if the Shell intensive bound is missing or non-positive.
+  @maximum_timeout (case Arbor.Shell.spawn_capable_max_timeout_ms(:intensive) do
+                      {:ok, ms} when is_integer(ms) and ms > 0 ->
+                        ms
+
+                      other ->
+                        raise CompileError,
+                          description:
+                            "security_regression maximum_timeout requires a positive Shell intensive spawn-capable ceiling; got #{inspect(other)}"
+                    end)
   # Exactly two sequential revisions (candidate then base); never multiplies Shell ceilings.
   @sequential_revisions 2
   @maximum_stage_timeout @sequential_revisions * @maximum_timeout

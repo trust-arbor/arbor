@@ -13,10 +13,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @template_version "coding-change-v1"
   @contract_profile_ids Plan.profile_ids()
   # Shared Shell spawn-capable ceilings — must not drift above unit admission.
-  # `:standard` remains for security_regression contained stages.
-  @spawn_capable_max_timeout_ms Arbor.Shell.spawn_capable_max_timeout_ms()
-  # `:intensive` is reviewed for default Mix.Compile and cross_app contained
-  # validation stages (per-operation Mix child ceiling; hard max 1_200_000 ms).
+  # `:intensive` is reviewed for default Mix.Compile, cross_app, and
+  # security_regression contained stages (per-operation Mix child ceiling).
   @spawn_capable_intensive_max_timeout_ms (case Arbor.Shell.spawn_capable_max_timeout_ms(
                                                   :intensive
                                                 ) do
@@ -37,7 +35,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # pre-test children + aggregate test-stage max). Never import CrossApp.Core
   # or restate the numeric product here.
   @cross_app_stage_timeout_max_ms Arbor.Actions.cross_app_maximum_stage_timeout_ms()
-  # Security-regression whole-stage hard max: exactly two sequential standard
+  # Security-regression per-revision Mix child hard max from Actions facade
+  # (intensive Shell spawn-capable ceiling). Never restate the number.
+  @security_regression_timeout_max_ms Arbor.Actions.security_regression_maximum_timeout_ms()
+  # Security-regression whole-stage hard max: exactly two sequential intensive
   # child ceilings (candidate then base). Actions facade only — never restate.
   @security_regression_stage_timeout_max_ms Arbor.Actions.security_regression_maximum_stage_timeout_ms()
 
@@ -2010,10 +2011,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "static_parameters" => %{},
                   "timeout_budget_param" => "stage_timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
-                  # Standard Shell profile: per-revision Mix child ceiling only.
-                  "timeout_max_ms" => @spawn_capable_max_timeout_ms,
+                  # Intensive per-revision Mix child ceiling from Actions facade.
+                  "timeout_max_ms" => @security_regression_timeout_max_ms,
                   "stage_timeout_budget_source" => "budgets.wall_clock_ms",
-                  # Whole two-revision stage max from Actions facade (2 × standard child).
+                  # Whole two-revision stage max from Actions facade (2 × intensive child).
                   "stage_timeout_max_ms" => @security_regression_stage_timeout_max_ms,
                   "two_revision" => true
                 },
@@ -2385,6 +2386,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @doc false
   def cross_app_stage_timeout_max_ms, do: @cross_app_stage_timeout_max_ms
+
+  @doc false
+  def security_regression_timeout_max_ms, do: @security_regression_timeout_max_ms
 
   @doc false
   def security_regression_stage_timeout_max_ms, do: @security_regression_stage_timeout_max_ms

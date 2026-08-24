@@ -581,7 +581,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     refute result.context["validation_observed_at"] == "synthetic-final-time"
   end
 
-  test "default plan budget pins the standard validator timeout", ctx do
+  test "default plan budget pins the intensive validator timeout", ctx do
     assert {{:ok, result}, calls} = run_fixture(:auto_success, ctx)
 
     assert result.context["status"] == "change_committed",
@@ -594,8 +594,8 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert validator_args["pinned_action"] == "coding_security_regression_validate"
     assert validator_args["pinned_profile_id"] == "security_regression"
     assert {:ok, pinned} = Jason.decode(validator_args["pinned_params_json"])
-    assert pinned["timeout"] == 600_000
-    # Whole-stage budget is min(2 × standard child, wall_clock); wall is 900_000.
+    assert pinned["timeout"] == 900_000
+    # Whole-stage budget is min(2 × intensive child, wall_clock); wall is 900_000.
     assert pinned["stage_timeout"] == 900_000
     assert validator_args["stage_timeout"] == 900_000
 

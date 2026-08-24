@@ -19,7 +19,11 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
     assert {:ok, %{timeout: 300_000}} =
              Core.new(%{review_attestation_id: "review_attestation_opaque"})
 
-    assert Core.maximum_timeout() == Arbor.Shell.spawn_capable_max_timeout_ms()
+    assert {:ok, intensive} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    assert intensive == 1_200_000
+    assert Core.maximum_timeout() == intensive
+    assert Core.maximum_timeout() == Arbor.Actions.security_regression_maximum_timeout_ms()
+    assert Core.maximum_timeout() > Arbor.Shell.spawn_capable_max_timeout_ms()
 
     assert {:ok, %{timeout: 600_000}} =
              Core.new(%{
@@ -27,7 +31,19 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
                timeout: "600000"
              })
 
-    for invalid <- ["600001", "999", "0600000", "600000ms", " 600000"] do
+    assert {:ok, %{timeout: ^intensive}} =
+             Core.new(%{
+               review_attestation_id: "review_attestation_opaque",
+               timeout: intensive
+             })
+
+    assert {:ok, %{timeout: ^intensive}} =
+             Core.new(%{
+               review_attestation_id: "review_attestation_opaque",
+               timeout: Integer.to_string(intensive)
+             })
+
+    for invalid <- [Integer.to_string(intensive + 1), "999", "0600000", "600000ms", " 600000"] do
       assert {:error, :invalid_timeout} =
                Core.new(%{
                  review_attestation_id: "review_attestation_opaque",
@@ -61,14 +77,19 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
                stage_timeout: "12000"
              })
 
-    assert Core.maximum_stage_timeout() == 2 * Core.maximum_timeout()
-    assert Core.maximum_stage_timeout() == 2 * Arbor.Shell.spawn_capable_max_timeout_ms()
-    assert Core.maximum_stage_timeout() == 1_200_000
+    assert {:ok, intensive} = Arbor.Shell.spawn_capable_max_timeout_ms(:intensive)
+    stage_max = 2 * intensive
 
-    assert {:ok, %{stage_timeout: 1_200_000}} =
+    assert Core.maximum_stage_timeout() == 2 * Core.maximum_timeout()
+    assert Core.maximum_stage_timeout() == stage_max
+
+    assert Core.maximum_stage_timeout() ==
+             Arbor.Actions.security_regression_maximum_stage_timeout_ms()
+
+    assert {:ok, %{stage_timeout: ^stage_max}} =
              Core.new(%{
                review_attestation_id: "review_attestation_opaque",
-               stage_timeout: 1_200_000
+               stage_timeout: stage_max
              })
   end
 

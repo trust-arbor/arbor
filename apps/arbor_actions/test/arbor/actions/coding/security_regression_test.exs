@@ -1539,7 +1539,10 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert {:error, :not_found} =
              Validate.run(%{review_attestation_id: "review_attestation_missing"}, fixture.context)
 
-    for invalid_timeout <- ["600001", "not-an-integer"] do
+    for invalid_timeout <- [
+          Integer.to_string(Arbor.Actions.Coding.SecurityRegression.Core.maximum_timeout() + 1),
+          "not-an-integer"
+        ] do
       assert {:error, :invalid_timeout} =
                Validate.run(
                  %{
