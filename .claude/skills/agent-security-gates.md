@@ -752,6 +752,10 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
 <a id="applied-learning-opaque-identifiers-in-capability-uris-must-not-become-uri-syntax"></a>
 **Opaque identifiers interpolated into capability URIs must not become URI syntax.** A caller-supplied task id such as `**` can turn an intended exact grant like `arbor://agent/task/adopt/<task-id>` into a recursive wildcard capability. Before constructing a scoped capability URI, either encode/digest the opaque id into one safe segment or enforce a bounded single-segment alphabet; reject `/`, `*`, traversal segments, whitespace/control bytes, and invalid UTF-8 before any grant occurs (found 2026-07-21 while reviewing post-terminal coding-task adoption).
 
+<!-- applied-learning: local-oidc-http-issuers-need-allow-http-wired-through-runtime-config -->
+<a id="applied-learning-local-oidc-http-issuers-need-allow-http-wired-through-runtime-config"></a>
+**Local OIDC HTTP issuers need `allow_http` wired through runtime config.** Discovery and AuthCodeFlow reject `http://` unless the provider map has `allow_http: true`. Setting `OIDC_ISSUER=http://localhost:8080` alone yields dashboard 502 `{:invalid_issuer, :scheme_not_allowed}`. `Arbor.Security.OIDC.Config.allow_http?/2` is the single resolver; `runtime.exs` and CLI fallbacks must call it. Production stays fail-closed unless `OIDC_ALLOW_HTTP=true`; non-prod loopback HTTP (`localhost` / `127.0.0.1` / `::1`) defaults open (found 2026-08-24 launching local Zitadel).
+
 <!-- applied-learning: telemetry-bridged-security-audits-are-observations-not-sync-mutations -->
 <a id="applied-learning-telemetry-bridged-security-audits-are-observations-not-sync-mutations"></a>
 **Telemetry-bridged security audits are observations, not sync mutations.**
