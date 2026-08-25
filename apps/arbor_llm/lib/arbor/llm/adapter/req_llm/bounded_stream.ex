@@ -513,8 +513,24 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       state = if termination_data?(decoded), do: %{state | terminal?: true}, else: state
       decode_and_emit(event, state)
     else
-      {:error, reason} -> {:error, {:invalid_stream_json, reason}, state}
+      {:error, reason} ->
+        log_json_rejection(reason, data, json_limits)
+        {:error, {:invalid_stream_json, reason}, state}
     end
+  end
+
+  # A rejected event previously surfaced only as `{:invalid_json, :malformed}`,
+  # which cannot distinguish a genuinely bad payload from a limit this stream
+  # happened to exceed. Record the LIMITS in force and the shape of the data —
+  # never its full contents, which carry model output.
+  defp log_json_rejection(reason, data, json_limits) do
+    require Logger
+
+    Logger.warning(
+      "[BoundedStream] SSE event rejected: #{inspect(reason)} " <>
+        "bytes=#{byte_size(data)} limits=#{inspect(json_limits)} " <>
+        "head=#{inspect(binary_part(data, 0, min(80, byte_size(data))))}"
+    )
   end
 
   # SSE strips one leading space after the colon; extra surrounding whitespace

@@ -11,8 +11,20 @@ defmodule Arbor.Agent.MessageFacade do
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Session.UserMessage
 
+  # The DEFAULT stays conservative. The CEILING is separate and larger: a human
+  # chat turn waits on a model, and the ceiling previously equalled the default
+  # — a strong sign it was never chosen as a bound, just inherited from it.
+  #
+  # `validate_timeout/1` REJECTS anything above the ceiling rather than clamping,
+  # so `mix arbor.agent chat`'s own 60s default was an outright
+  # `:invalid_timeout`. And 30s is genuinely too short here: the keyless
+  # free-tier model takes 20–23s for the LLM call alone, before turn overhead,
+  # so a real first reply was abandoned mid-flight as `:delivery_ambiguous`
+  # while the turn was still running.
+  #
+  # Still bounded — an unbounded delivery ties up a caller indefinitely.
   @default_timeout_ms 30_000
-  @max_timeout_ms 30_000
+  @max_timeout_ms 120_000
   @max_id_bytes 256
   @max_content_bytes 32_768
   @max_engagement_id_bytes 256

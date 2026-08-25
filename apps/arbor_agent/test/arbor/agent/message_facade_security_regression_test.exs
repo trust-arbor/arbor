@@ -1695,7 +1695,10 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
         {caller, target, %{good | content: String.duplicate("a", 32_769)}, [], :invalid_content},
         {caller, target, "not a struct", [], :invalid_message},
         {caller, target, good, [timeout: 0], :invalid_timeout},
-        {caller, target, good, [timeout: 30_001], :invalid_timeout},
+        # One millisecond above MessageFacade's @max_timeout_ms. If that ceiling
+        # moves, this must move with it — the case is testing the boundary, not
+        # the number.
+        {caller, target, good, [timeout: 120_001], :invalid_timeout},
         {caller, target, good, [timeout: -1], :invalid_timeout},
         {caller, target, good, [timeout: "fast"], :invalid_timeout},
         {caller, target, good, [unknown: true], :invalid_opts},

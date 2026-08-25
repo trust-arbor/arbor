@@ -563,7 +563,7 @@ defmodule Mix.Tasks.Arbor.Agent do
   # larger rather than clamping, so the CLI's 60s default was an outright
   # `:invalid_timeout`. That bound looks sized for agent-to-agent delivery, not
   # a human chat turn waiting on an LLM.
-  @authenticated_delivery_max_ms 30_000
+  @authenticated_delivery_max_ms 120_000
 
   # Deliver a terminal turn through the AUTHENTICATED path, proving the operator
   # by SIGNING with the key `mix arbor.user.init` wrote.
