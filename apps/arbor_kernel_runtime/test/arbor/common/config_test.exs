@@ -20,7 +20,7 @@ defmodule Arbor.Common.ConfigTest do
   end
 
   test "test config deep-merges base Common keys with the environment override" do
-    assert Config.tool_catalog_enabled?() == true
+    assert Config.tool_catalog_enabled?() == false
     assert Config.start_children?() == false
     assert is_list(Config.hands())
     assert Config.hands()[:sandbox_image] == "claude-sandbox"
