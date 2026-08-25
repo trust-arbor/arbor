@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 680,
+  "entry_count": 681,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -333,7 +333,7 @@
     {
       "source_ordinal": 28,
       "slug": "hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
-      "title": "Hysun's estimates run 2–4x conservative; the real constraint is decision bandwidth, not implementation speed.",
+      "title": "Hysun's estimates run 2\u20134x conservative; the real constraint is decision bandwidth, not implementation speed.",
       "topic": "testing-live-runtime",
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
@@ -362,7 +362,7 @@
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-don-t-prematurely-cap-max-tokens",
       "source_date": "2026-07-01",
-      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` → `session.max_tokens`); prefer leaving it unset over guessing a low number.",
+      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` \u2192 `session.max_tokens`); prefer leaving it unset over guessing a low number.",
       "content_sha256": "3dbb4dbbc6bba30169343fa26a1772fe2f11eddfa848e9869dfb011e62b9dc3a",
       "always_loaded": true
     },
@@ -861,7 +861,7 @@
     {
       "source_ordinal": 72,
       "slug": "trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
-      "title": "Trust-policy rules match by URI PREFIX, not glob — never write `/",
+      "title": "Trust-policy rules match by URI PREFIX, not glob \u2014 never write `/",
       "topic": "security-gates",
       "destination": ".claude/skills/agent-security-gates.md",
       "anchor": "applied-learning-trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
@@ -8384,8 +8384,21 @@
       "source_incident": "found 2026-08-24 launching local Zitadel",
       "always_loaded": false,
       "content_sha256": "10dc0bd82fd58a4399b958a82510bf5529ee88e06c708d864f2c4e642e27cf43"
+    },
+    {
+      "source_ordinal": 681,
+      "source_kind": "post-migration",
+      "slug": "a-streaming-tool-call-can-lose-argument-bytes-before-your-code-sees-it",
+      "title": "A streaming tool call can lose argument bytes before your code sees it.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-a-streaming-tool-call-can-lose-argument-bytes-before-your-code-sees-it",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 debugging the onboarding chat chain",
+      "always_loaded": false,
+      "content_sha256": "9a1fc3508eb57b4a60067870674dc4ccc0a239ccc929fe73f4d7a249e3c5eb79"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 219
+  "post_migration_entry_count": 220
 }
