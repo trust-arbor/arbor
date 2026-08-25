@@ -137,12 +137,20 @@ defmodule Arbor.Actions.SessionLlm do
       # Re-establish the migration-lost memory-in-turn wiring (2026-07-04 memory-system audit): the
       # old reasoning prompt opened with a "## Your Current State" memory section, and the DOT-pipeline
       # rewrite kept that only in heartbeat mode — so the agent remembered during autonomous heartbeats
-      # but forgot during conversation. Inject query-relevant recall as a leading system-context message
-      # so cross-session memory reaches the turn. Empty recall → unchanged (no stray system message).
+      # but forgot during conversation. Empty recall → unchanged.
+      #
+      # Recall attaches to the USER turn, not a system message. Recalled memories
+      # are query-relevant and therefore change EVERY turn, so putting them in the
+      # system prompt would invalidate the cacheable prefix on each request —
+      # `APIAgent` already splits prompts this way ("stable system prompt
+      # (identity, self-knowledge, tools — cacheable)" vs "volatile context
+      # (goals, WM, KG, timing — changes each query)"). It also keeps exactly one
+      # system message: a leading second one is rejected outright by
+      # OpenAI-compatible providers.
       final_messages =
         case format_recalled_memories(recalled) do
           "" -> timestamped
-          section -> [%{"role" => "system", "content" => section} | timestamped]
+          section -> prepend_to_last_user(timestamped, section)
         end
 
       {:ok, %{user_prompt: List.last(timestamped)["content"] || "", messages: final_messages}}
@@ -380,6 +388,33 @@ defmodule Arbor.Actions.SessionLlm do
         end)
 
       "## Active Intents\n#{items}"
+    end
+
+    # Attach the recalled section to the last user message, so the volatile part
+    # of the prompt travels with the query it is relevant to and the cacheable
+    # prefix stays byte-identical across turns.
+    defp prepend_to_last_user(messages, section) do
+      case last_user_index(messages) do
+        nil ->
+          messages ++ [%{"role" => "user", "content" => section}]
+
+        index ->
+          List.update_at(messages, index, fn message ->
+            body = to_string(message["content"] || "")
+            Map.put(message, "content", section <> "\n\n---\n\n" <> body)
+          end)
+      end
+    end
+
+    defp last_user_index(messages) do
+      messages
+      |> Enum.with_index()
+      |> Enum.filter(fn {message, _index} -> message["role"] in ["user", :user] end)
+      |> List.last()
+      |> case do
+        {_message, index} -> index
+        nil -> nil
+      end
     end
 
     defp format_recalled_memories([]), do: ""

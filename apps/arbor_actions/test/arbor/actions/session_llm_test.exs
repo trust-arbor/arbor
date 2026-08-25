@@ -27,7 +27,7 @@ defmodule Arbor.Actions.SessionLlmTest do
     # Regression for the 2026-07-04 memory-system audit + the migration that dropped memory from the
     # turn path: the DOT-pipeline rewrite kept recalled memory only in heartbeat mode, so agents
     # remembered during autonomous heartbeats but forgot during conversation. build_turn now injects
-    # query-relevant recall as a leading system-context section. This fails on the pre-fix build_turn.
+    # query-relevant recall into the user turn. This fails on the pre-fix build_turn.
     test "injects recalled memories as a system-context section" do
       {:ok, result} =
         SessionLlm.BuildPrompt.run(
@@ -42,8 +42,12 @@ defmodule Arbor.Actions.SessionLlmTest do
           %{}
         )
 
+      # Same guard as before — recalled memory must REACH the turn. It now rides
+      # the user message rather than a system one: recall changes every turn, so
+      # in the system prompt it would invalidate the cacheable prefix each
+      # request (see the stable/volatile split in APIAgent).
       assert Enum.any?(result.messages, fn m ->
-               m["role"] == "system" and String.contains?(m["content"] || "", "Relevant memories") and
+               m["role"] == "user" and String.contains?(m["content"] || "", "Relevant memories") and
                  String.contains?(m["content"] || "", "Hysun prefers verify-before-fix")
              end)
 
@@ -280,6 +284,29 @@ defmodule Arbor.Actions.SessionLlmTest do
   describe "BuildPrompt — error handling" do
     test "returns error for unknown mode" do
       assert {:error, _} = SessionLlm.BuildPrompt.run(%{mode: "unknown"}, %{})
+    end
+  end
+
+  describe "recalled memories placement (prompt caching)" do
+    test "recall introduces no system message, keeping the cacheable prefix stable" do
+      assert {:ok, result} =
+               SessionLlm.BuildPrompt.run(
+                 %{
+                   mode: "turn",
+                   messages: [%{"role" => "user", "content" => "what is my lucky number?"}],
+                   recalled_memories: [%{"content" => "User's lucky number is 7734"}]
+                 },
+                 %{}
+               )
+
+      # A second system message is also rejected outright by OpenAI-compatible
+      # providers ("Context should have at most one system message, found 2").
+      refute Enum.any?(result.messages, &(&1["role"] == "system")),
+             "recall must not introduce a system message: #{inspect(result.messages)}"
+
+      assert [%{"role" => "user", "content" => content}] = result.messages
+      assert content =~ "7734"
+      assert content =~ "what is my lucky number?"
     end
   end
 end
