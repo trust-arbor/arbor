@@ -1,14 +1,18 @@
 defmodule Arbor.KernelRuntime.ApplicationTest do
   @moduledoc """
-  K4B: `Arbor.KernelRuntime.Application` nests the existing Common, Signals,
-  and Monitor Application start MFAs as `:one_for_one` supervisor children,
-  in that order, without flattening or altering their own supervision
-  strategies. This test proves the composed lifecycle in both the disabled
-  (test-default) gate state, and hermetically flipped to enabled.
+  P1A-2: `Arbor.KernelRuntime.Application` starts the boot-profile binding
+  owner first under `:rest_for_one`, then nests Common, Signals, and Monitor
+  Application start MFAs in that order without flattening their strategies.
+  Owner death tears down later children. Missing or `:full` keeps those
+  nested applications after the owner; `:activation_only` starts only the
+  owner; unknown start profiles fail closed.
 
-  P1A: a closed start profile is read from `Arbor.KernelRuntime.Config`.
-  Missing or `:full` keeps those three nested applications. `:activation_only`
-  starts none of them. Unknown or malformed values fail closed at start.
+  Malformed `:kernel_runtime` namespace values raise `ArgumentError`
+  from Config. `children_for_profile_safe/0` remaps that raise to
+  `{:error, {:boot_profile_binding_failed, :malformed_stage_zero}}`
+  so `Application.start` fails closed as a binding error, later
+  rest_for_one children never start, and the VM-lifetime freeze is
+  not replaced.
   """
   use ExUnit.Case, async: false
 
@@ -33,14 +37,17 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   ]
   @config_sections [:common, :signals, :monitor, :kernel_runtime]
   @full_child_ids MapSet.new([
+                    Arbor.KernelRuntime.BootProfileBinding,
                     Arbor.Common.Application,
                     Arbor.Signals.Application,
                     Arbor.Monitor.Application
                   ])
+  @activation_only_child_ids MapSet.new([Arbor.KernelRuntime.BootProfileBinding])
   @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
 
   test "the runtime supervisor owns the three nested application supervisors" do
     assert Process.whereis(Arbor.KernelRuntime.Supervisor)
+    assert Process.whereis(Arbor.KernelRuntime.BootProfileBinding)
     assert Process.whereis(Arbor.Common.Supervisor)
     assert Process.whereis(Arbor.Signals.Supervisor)
     assert Process.whereis(Arbor.Monitor.Supervisor)
@@ -54,7 +61,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     on_exit(fn -> restore_test_runtime(config_before) end)
 
     stop_runtime()
-    Application.delete_env(:arbor_kernel, :kernel_runtime)
+    drop_start_profile()
 
     assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
     assert_nested_supervisors()
@@ -80,7 +87,8 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
 
     assert {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
     assert Process.whereis(Arbor.KernelRuntime.Supervisor)
-    assert runtime_child_ids() == MapSet.new()
+    assert Process.whereis(Arbor.KernelRuntime.BootProfileBinding)
+    assert runtime_child_ids() == @activation_only_child_ids
     refute Process.whereis(Arbor.Common.Supervisor)
     refute Process.whereis(Arbor.Signals.Supervisor)
     refute Process.whereis(Arbor.Monitor.Supervisor)
@@ -203,6 +211,24 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     |> Supervisor.which_children()
     |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
     |> MapSet.new()
+  end
+
+  defp drop_start_profile do
+    current = Application.get_env(:arbor_kernel, :kernel_runtime, []) || []
+
+    value =
+      cond do
+        is_list(current) and Keyword.keyword?(current) ->
+          Keyword.delete(current, :start_profile)
+
+        is_map(current) ->
+          Map.delete(current, :start_profile)
+
+        true ->
+          current
+      end
+
+    Application.put_env(:arbor_kernel, :kernel_runtime, value)
   end
 
   defp put_section(section, updates) do

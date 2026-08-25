@@ -36,7 +36,8 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.Core do
 
   @admitted_children MapSet.new([
                        "Arbor.Common.Extension.Activation",
-                       "Arbor.Common.Extension.ProtectedRegistry"
+                       "Arbor.Common.Extension.ProtectedRegistry",
+                       "Arbor.KernelRuntime.BootProfileBinding"
                      ])
 
   @facility_ids MapSet.new([

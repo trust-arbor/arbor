@@ -31,7 +31,8 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
 
       assert document["children"] == [
                "Arbor.Common.Extension.Activation",
-               "Arbor.Common.Extension.ProtectedRegistry"
+               "Arbor.Common.Extension.ProtectedRegistry",
+               "Arbor.KernelRuntime.BootProfileBinding"
              ]
 
       assert document["facilities"] == []
@@ -44,8 +45,10 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
       assert {:ok, document} = Core.project(current_start_candidate())
       assert document["evidence_status"] == "conformant"
       assert document["architecture_status"] == "blocked"
+
       assert document["children"] == [
                "Arbor.Common.Application",
+               "Arbor.KernelRuntime.BootProfileBinding",
                "Arbor.Monitor.Application",
                "Arbor.Signals.Application"
              ]
@@ -122,6 +125,7 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
              ]
 
       assert document["facilities"] == ["oauth_and_network_pools", "shell_execution_backends"]
+
       assert Enum.map(document["findings"], & &1["subject"]) ==
                ["oauth_and_network_pools", "shell_execution_backends"]
     end
@@ -256,7 +260,8 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
       "profile" => Core.profile_name(),
       "children" => [
         "Arbor.Common.Extension.Activation",
-        "Arbor.Common.Extension.ProtectedRegistry"
+        "Arbor.Common.Extension.ProtectedRegistry",
+        "Arbor.KernelRuntime.BootProfileBinding"
       ],
       "facilities" => []
     }
@@ -269,6 +274,7 @@ defmodule Arbor.KernelRuntime.ActivationOnlyProfile.CoreTest do
       "profile" => Core.profile_name(),
       "children" => [
         "Arbor.Common.Application",
+        "Arbor.KernelRuntime.BootProfileBinding",
         "Arbor.Signals.Application",
         "Arbor.Monitor.Application"
       ],

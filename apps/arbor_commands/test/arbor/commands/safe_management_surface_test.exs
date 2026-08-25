@@ -247,15 +247,19 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
 
     assert config =~ ~r/kernel_runtime:\s*\[\n\s+start_profile: :full/
 
-    application =
-      File.read!(
-        Path.expand(
-          "../../../../../apps/arbor_kernel_runtime/lib/arbor/kernel_runtime/application.ex",
-          __DIR__
-        )
-      )
+    child_ids =
+      Arbor.KernelRuntime.Supervisor
+      |> Supervisor.which_children()
+      |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
+      |> MapSet.new()
 
-    assert application =~ "defp children_for_profile(:full), do: {:ok, @full_children}"
+    assert child_ids ==
+             MapSet.new([
+               Arbor.KernelRuntime.BootProfileBinding,
+               Arbor.Common.Application,
+               Arbor.Signals.Application,
+               Arbor.Monitor.Application
+             ])
 
     shell =
       File.read!(Path.expand("../../../lib/arbor/commands/safe_management_surface.ex", __DIR__))

@@ -64,6 +64,47 @@ config :arbor_security,
   event_log_adapter: Arbor.Historian.Adapters.SecurityEventLog
 
 config :arbor_kernel, common: [start_children: false]
+
+boot_profile_fixture_dir =
+  Path.expand("../apps/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
+
+config :arbor_kernel,
+  kernel_runtime: [
+    start_profile: :full,
+    boot_profile: [
+      manifest_bytes:
+        File.read!(Path.join(boot_profile_fixture_dir, "boot_profile_manifest.json")),
+      signature_bytes:
+        File.read!(Path.join(boot_profile_fixture_dir, "boot_profile_signature.json")),
+      trusted_signers: [
+        %{
+          "signer_id" => "installer.arbor",
+          "key_id" => "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395",
+          "public_key" => "347f4f2c0221027fb01086e2d5b8ee0264ae43ddb99aea3dacf04ce0331f89b8"
+        }
+      ],
+      expected_release_id: "arbor.platform.release.1",
+      expected_profile_id: "safe_recovery",
+      expected_revocation_input_id: "revocation.platform.1",
+      expected_payload_digests: [
+        %{
+          "id" => "payload.kernel",
+          "sha256" => "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        %{
+          "id" => "payload.kernel_runtime",
+          "sha256" => "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ],
+      min_boot_epoch: 1,
+      revoked_signer_key_ids: [],
+      revoked_platform_key_ids: []
+    ]
+  ]
+
+config :arbor_kernel_runtime,
+  boot_profile_clock_mfa: {Arbor.KernelRuntime.BootProfileBinding.Testing, :now, []}
+
 config :arbor_persistence, start_children: false
 config :arbor_ai, start_children: false
 
