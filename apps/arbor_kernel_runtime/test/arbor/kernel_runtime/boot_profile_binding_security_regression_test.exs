@@ -597,18 +597,16 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
 
     lib_root = Path.expand("../../../lib", __DIR__)
 
-    put_files =
+    identity_slot_files =
       lib_root
       |> Path.join("**/*.ex")
       |> Path.wildcard()
+      |> Enum.sort()
       |> Enum.filter(fn path ->
-        contents = File.read!(path)
-
-        String.contains?(contents, "@table :arbor_kernel_runtime_boot_profile_binding") and
-          String.contains?(contents, ":ets.new(@table")
+        production_source_has_identity_slot_atom?(File.read!(path))
       end)
 
-    assert put_files == [binding]
+    assert identity_slot_files == [binding]
   end
 
   @doc false
@@ -684,6 +682,29 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
     rescue
       ArgumentError -> :rejected
     end
+  end
+
+  defp production_source_has_identity_slot_atom?(source) do
+    atom = :arbor_kernel_runtime_boot_profile_binding
+
+    case Code.string_to_quoted(source) do
+      {:ok, ast} ->
+        identity_slot_atom_in_ast?(ast, atom)
+
+      {:error, _} ->
+        String.contains?(source, ":arbor_kernel_runtime_boot_profile_binding") or
+          String.contains?(source, "\"arbor_kernel_runtime_boot_profile_binding\"")
+    end
+  end
+
+  defp identity_slot_atom_in_ast?(ast, atom) do
+    {_, found?} =
+      Macro.prewalk(ast, false, fn
+        ^atom, _found -> {atom, true}
+        other, found -> {other, found}
+      end)
+
+    found?
   end
 
   defp fixture_manifest_bytes,
