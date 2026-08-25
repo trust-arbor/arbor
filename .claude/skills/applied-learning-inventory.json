@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 682,
+  "entry_count": 683,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8410,8 +8410,21 @@
       "source_incident": "found 2026-08-25 fixing memory recall on the onboarding path",
       "always_loaded": false,
       "content_sha256": "6de33c9b46f0f7c6777e5ae1cfb61fe6737ccad5895e4299f007bc86a54aba5c"
+    },
+    {
+      "source_ordinal": 683,
+      "source_kind": "post-migration",
+      "slug": "a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action",
+      "title": "A tool's capability URI must reflect its maximum effect, not its default action.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 auditing the memory tool surface",
+      "always_loaded": false,
+      "content_sha256": "bb9dc6e826d5cc19de1174024b734555cddcd3d805719369ce5d804eea804961"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 221
+  "post_migration_entry_count": 222
 }
