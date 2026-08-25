@@ -1096,7 +1096,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp git_list_test_paths(worktree_path, selected_dirs) when is_list(selected_dirs) do
     # Pathspecs are the already-validated selected dirs only (bounded by selection).
     with {:ok, tracked} <-
-           git(worktree_path, ["ls-files", "-z", "--" | selected_dirs]),
+           git(worktree_path, ["ls-files", "--cached", "-z", "--" | selected_dirs]),
+         {:ok, deleted} <-
+           git(worktree_path, ["ls-files", "--deleted", "-z", "--" | selected_dirs]),
          {:ok, untracked} <-
            git(worktree_path, [
              "ls-files",
@@ -1114,8 +1116,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       if length(raw_entries) > Core.max_git_inventory_entries() do
         {:error, :too_many_git_inventory_entries}
       else
+        # A coding candidate is an unstaged committable tree. Cached paths that
+        # the candidate deleted remain in `git ls-files --cached`; subtract
+        # only Git's exact deleted inventory. Any other post-enumeration ENOENT
+        # still fails closed in the lstat verification below.
+        deleted = deleted |> split_z() |> MapSet.new()
+
         paths =
           raw_entries
+          |> Enum.reject(&MapSet.member?(deleted, &1))
           |> Enum.filter(&String.ends_with?(&1, "_test.exs"))
           |> Enum.uniq()
           |> Enum.sort()

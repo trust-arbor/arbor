@@ -889,3 +889,12 @@ outlived `Arbor.Actions.MixTest`'s default timeout in CrossApp batch 18).
 <!-- applied-learning: a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it -->
 <a id="applied-learning-a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it"></a>
 **A canary must assert its invariant, not the implementation that satisfies it.** The C1 continuity canary exists to prove a fact planted in session 1 reaches the session 3 prompt. Its main test asserts exactly that (`rendered(messages) =~ "Postgres"`) and kept passing when recall moved from a leading system message onto the user turn for prompt caching. But a SIBLING test in the same file pinned the placement — `assert [%{"role" => "system"} | rest] = messages` — and went red on a change that preserved the invariant perfectly (2026-08-25). Two rules follow. When a canary breaks, first ask whether the invariant broke or only the mechanism did; if the mechanism, re-point the assertion rather than reverting the change or deleting the test. And when changing a cross-cutting behaviour like prompt assembly, grep for every test asserting that behaviour, not just the module's own test file — this one lived in `canary/`, and a targeted run of `session_llm_test.exs` was green while it was red.
+
+<!-- applied-learning: enumerate-candidate-tests-from-the-working-tree-not-the-index-alone -->
+<a id="applied-learning-enumerate-candidate-tests-from-the-working-tree-not-the-index-alone"></a>
+**Enumerate candidate tests from the committable working tree, not the Git index alone.**
+`git ls-files --cached` includes tracked tests deleted by an unstaged coding
+candidate. Subtract the exact `git ls-files --deleted` inventory before lstat and
+batching, while still failing closed on any other `ENOENT` after enumeration.
+Found 2026-08-25 when cross-app validation rejected P1E-1 before running tests
+because a deliberately deleted Core test remained in the index.

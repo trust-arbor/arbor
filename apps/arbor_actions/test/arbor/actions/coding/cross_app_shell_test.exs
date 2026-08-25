@@ -1904,6 +1904,32 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _}
   end
 
+  test "deleted tracked test files are excluded from candidate test inventory", %{
+    worktree: worktree
+  } do
+    parent = self()
+    dir = Path.join(worktree, "apps/alpha/test")
+    kept = Path.join(dir, "kept_test.exs")
+    deleted = Path.join(dir, "deleted_test.exs")
+    File.mkdir_p!(dir)
+    File.write!(kept, "defmodule KeptTest do\nend\n")
+    File.write!(deleted, "defmodule DeletedTest do\nend\n")
+    _base = git_commit_all!(worktree, "track tests before candidate deletion")
+    File.rm!(deleted)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 20_000)
+    assert check["passed"]
+
+    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
+    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/deleted_test.exs"], _}
+    refute_received {:mix_invocation, _, _}
+  end
+
   test "malformed next_test_step input becomes an execution error, not silent success", %{
     worktree: worktree
   } do

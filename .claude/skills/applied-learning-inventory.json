@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 685,
+  "entry_count": 686,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8449,8 +8449,21 @@
       "source_incident": "found 2026-08-25 verifying the Codex-native harness",
       "always_loaded": false,
       "content_sha256": "53d731a8deca27460a247c754c55b06c23e868acd105b2db64cafd3ee2e3aca9"
+    },
+    {
+      "source_ordinal": 686,
+      "source_kind": "post-migration",
+      "slug": "enumerate-candidate-tests-from-the-working-tree-not-the-index-alone",
+      "title": "Enumerate candidate tests from the committable working tree, not the Git index alone.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-enumerate-candidate-tests-from-the-working-tree-not-the-index-alone",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 fixing deleted-test enumeration in cross-app validation",
+      "always_loaded": false,
+      "content_sha256": "e97c72dddb7bb10dee64741555c591d75617a61dd3955dd512fd3b1feb75165f"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 224
+  "post_migration_entry_count": 225
 }
