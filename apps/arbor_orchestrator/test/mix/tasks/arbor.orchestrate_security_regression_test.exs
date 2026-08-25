@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Arbor.OrchestrateSecurityRegressionTest do
   # instead of :oidc_not_configured, and the security regression looked broken
   # when the code was behaving correctly. The assertions are unchanged; only the
   # precondition is now actually established.
-  @oidc_env_vars ~w(OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES)
+  @oidc_env_vars ~w(OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET OIDC_SCOPES OIDC_ALLOW_HTTP)
 
   setup do
     previous_oidc = Application.get_env(:arbor_security, :oidc)

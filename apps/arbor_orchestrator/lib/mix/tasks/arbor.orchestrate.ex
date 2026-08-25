@@ -530,7 +530,15 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
               s -> String.split(s, ",", trim: true) |> Enum.map(&String.trim/1)
             end
 
-          provider = %{issuer: issuer, client_id: client_id, scopes: scopes}
+          allow_http =
+            Arbor.Security.OIDC.Config.allow_http?(issuer, config_env: Mix.env())
+
+          provider = %{
+            issuer: issuer,
+            client_id: client_id,
+            scopes: scopes,
+            allow_http: allow_http
+          }
 
           provider =
             if client_secret, do: Map.put(provider, :client_secret, client_secret), else: provider
@@ -551,7 +559,8 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
                 Keyword.put(config, :device_flow, %{
                   issuer: issuer,
                   client_id: device_client_id,
-                  scopes: scopes
+                  scopes: scopes,
+                  allow_http: allow_http
                 }),
               else: config
 

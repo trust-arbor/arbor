@@ -108,6 +108,24 @@ defmodule Arbor.Dashboard.OidcAuthTest do
     end
   end
 
+  describe "when OIDC is configured with an http issuer" do
+    test "security regression: http issuer without allow_http does not redirect" do
+      Application.put_env(:arbor_security, :oidc,
+        providers: [%{issuer: "http://localhost:8080", client_id: "test-client"}]
+      )
+
+      conn =
+        conn(:get, "/auth/login")
+        |> init_test_session(%{})
+        |> OidcAuth.call(@opts)
+
+      assert conn.halted
+      assert conn.status == 502
+      assert conn.resp_body =~ "OIDC_ALLOW_HTTP"
+      refute List.keyfind(conn.resp_headers, "location", 0)
+    end
+  end
+
   describe "logout" do
     test "clears session and redirects to root" do
       conn =

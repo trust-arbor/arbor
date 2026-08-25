@@ -67,6 +67,11 @@ OIDC_CLIENT_SECRET=<from-your-provider>
 # Useful when your provider distinguishes web apps from native apps
 # (e.g. Zitadel's "Web" vs "Native" application types). Defaults to OIDC_CLIENT_ID.
 # OIDC_DEVICE_CLIENT_ID=<native-app-client-id>
+
+# Optional — permit http:// issuers. Production stays fail-closed unless this
+# is true. Non-prod loopback issuers (localhost / 127.0.0.1 / ::1) default on
+# so local Zitadel works without an extra flag.
+# OIDC_ALLOW_HTTP=true
 ```
 
 When **both** `OIDC_ISSUER` and `OIDC_CLIENT_ID` are present, Arbor activates OIDC. Either missing → OIDC is disabled.
@@ -97,6 +102,7 @@ In summary:
    OIDC_CLIENT_SECRET=<dashboard-client-secret>   # omit for PKCE
    OIDC_DEVICE_CLIENT_ID=<cli-client-id>
    ```
+   Non-prod loopback HTTP issuers are allowed automatically. In production set `OIDC_ALLOW_HTTP=true` if the issuer is still `http://`.
 5. Restart Arbor.
 
 That same .env block — with a different `OIDC_ISSUER` and client IDs — works for any other compliant provider.
@@ -252,6 +258,7 @@ rm ~/.arbor/identity/oidc_tokens.enc
 |---|---|---|
 | Dashboard returns **503** with "Dashboard authentication required but no OIDC provider configured" | `require_auth: true` (production default) but `OIDC_ISSUER` / `OIDC_CLIENT_ID` not set | Set both env vars and restart. |
 | Dashboard returns **404** at `/auth/login` | OIDC not configured (handler is in the no-OIDC branch) | Same as above. |
+| Dashboard returns **502** with "OIDC issuer uses http://" or logs `{:invalid_issuer, :scheme_not_allowed}` | `OIDC_ISSUER` is `http://…` but `allow_http` is off (production default, or a non-loopback HTTP issuer in dev) | For local Zitadel keep `http://localhost:8080` in non-prod (loopback HTTP is allowed automatically). Otherwise set `OIDC_ALLOW_HTTP=true` and restart. |
 | Provider rejects the redirect with "redirect_uri mismatch" | The provider's configured redirect URI doesn't match `http://localhost:4001/auth/callback` exactly (scheme, host, port, path must match) | Update the provider's app config. |
 | Logged in successfully but every dashboard button fails with "Unauthorized" | Default role is `:viewer` and you haven't run the bootstrap from §7 | Run `Arbor.Security.assign_role(your_human_id, :admin)`. |
 | Logged in but `current_agent_id` is missing from socket assigns | The OidcAuth plug isn't running for the route (e.g. you removed it from the endpoint, or you're hitting an MCP endpoint that uses signed-request auth instead) | Check `apps/arbor_dashboard/lib/arbor_dashboard/endpoint.ex:7`. |

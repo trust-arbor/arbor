@@ -57,6 +57,7 @@ OIDC_ISSUER=http://localhost:8080
 OIDC_CLIENT_ID=<dashboard-client-id>
 OIDC_CLIENT_SECRET=<dashboard-client-secret>  # omit for PKCE
 OIDC_DEVICE_CLIENT_ID=<cli-client-id>         # from the Native app
+# OIDC_ALLOW_HTTP=true                        # needed only in prod; non-prod loopback HTTP is allowed by default
 ```
 
 If using a single Native app for both dashboard and CLI, you can omit

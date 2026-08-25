@@ -282,11 +282,19 @@ if oidc_issuer && oidc_client_id do
       scopes -> String.split(scopes, ",", trim: true) |> Enum.map(&String.trim/1)
     end
 
+  # Whether a plaintext-HTTP issuer is permitted. Decided by
+  # `Arbor.Security.OIDC.Config.allow_http?/2` — a single fail-closed authority
+  # shared with `mix arbor.orchestrate`, rather than each call site re-deriving
+  # it from OIDC_ALLOW_HTTP. Unknown values fail closed.
+  allow_http =
+    Arbor.Security.OIDC.Config.allow_http?(oidc_issuer, config_env: config_env())
+
   # Provider entry for auth code + PKCE flow (dashboard)
   provider = %{
     issuer: oidc_issuer,
     client_id: oidc_client_id,
-    scopes: oidc_scopes
+    scopes: oidc_scopes,
+    allow_http: allow_http
   }
 
   provider =
@@ -311,7 +319,8 @@ if oidc_issuer && oidc_client_id do
       Keyword.put(oidc_config, :device_flow, %{
         issuer: oidc_issuer,
         client_id: device_client_id,
-        scopes: oidc_scopes
+        scopes: oidc_scopes,
+        allow_http: allow_http
       })
     else
       oidc_config

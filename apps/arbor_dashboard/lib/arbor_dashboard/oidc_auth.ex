@@ -128,6 +128,18 @@ defmodule Arbor.Dashboard.OidcAuth do
             |> redirect_to(authorize_url)
             |> halt()
 
+          {:error, {:invalid_issuer, :scheme_not_allowed}} ->
+            Logger.error(
+              "[OidcAuth] Failed to build authorize URL: {:invalid_issuer, :scheme_not_allowed}"
+            )
+
+            conn
+            |> send_resp(
+              502,
+              "OIDC issuer uses http://; set OIDC_ALLOW_HTTP=true for local providers"
+            )
+            |> halt()
+
           {:error, reason} ->
             Logger.error("[OidcAuth] Failed to build authorize URL: #{inspect(reason)}")
 
