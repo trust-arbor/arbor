@@ -47,11 +47,40 @@ defmodule Arbor.Agent.SessionManager do
   def get_session(agent_id) do
     case :ets.lookup(@table, agent_id) do
       [{^agent_id, pid}] when is_pid(pid) ->
+        if Process.alive?(pid), do: {:ok, pid}, else: branch_session(agent_id)
+
+      _ ->
+        branch_session(agent_id)
+    end
+  end
+
+  # An agent started through `Lifecycle` runs its Session as a BranchSupervisor
+  # CHILD, and nothing registers that pid here — `:ets.insert(@table, ...)`
+  # happens only in `create_session/3`, this module's own path, and Lifecycle
+  # only ever calls `stop_session/1`.
+  #
+  # So this table and the supervision tree held two disjoint notions of "the
+  # agent's session", and a lookup here could never see a normally-started one.
+  # `send_authenticated_message/4` therefore failed `:no_session` for every
+  # live agent, which the delivery facade collapsed into `:delivery_failed`.
+  #
+  # Consult the supervision tree as the authority. Do NOT create one here as a
+  # fallback: a Session started outside `Lifecycle` receives no signing
+  # authority bootstrap (issued by `issue_branch_authority_bootstraps/3`, whose
+  # private-key access is deliberately scoped to that boundary), so it cannot
+  # authorize and would be a second, broken session beside the real one.
+  defp branch_session(agent_id) do
+    case Arbor.Agent.BranchSupervisor.child_pids(agent_id) do
+      %{session: pid} when is_pid(pid) ->
         if Process.alive?(pid), do: {:ok, pid}, else: {:error, :no_session}
 
       _ ->
         {:error, :no_session}
     end
+  rescue
+    _ -> {:error, :no_session}
+  catch
+    :exit, _ -> {:error, :no_session}
   end
 
   @doc """
@@ -179,24 +208,7 @@ defmodule Arbor.Agent.SessionManager do
       when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms > 0 and
              is_struct(message, Arbor.Contracts.Session.UserMessage) and
              is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
-    # `ensure_session/2`, not `get_session/1`. A chat arriving for a live agent
-    # with no session yet is an ordinary cold start, not an error — and nothing
-    # else in the tree calls `ensure_session/2`, so requiring a pre-existing
-    # session meant this path only worked if some OTHER path had already created
-    # one as a side effect.
-    #
-    # `Manager.chat/3` (pre-engagement) did exactly that, which is why terminal
-    # turns ran until the CLI moved onto this path and then stopped: the durable
-    # EventLog shows no SessionTurn pipeline starting after 03:00 while other
-    # events kept flowing, and a direct call returned the `{:error, :no_session}`
-    # that the delivery facade was collapsing into `:delivery_failed`.
-    #
-    # Idempotent, and it reaps a stale ETS entry before creating a replacement.
-    #
-    # Deliberately NOT applied to `cancel_turn/1` or `cancel_task/2` above:
-    # cancelling a session that does not exist must stay `:no_session`, never
-    # create one.
-    with {:ok, session_pid} <- ensure_session(agent_id) do
+    with {:ok, session_pid} <- get_session(agent_id) do
       session_mod = session_module()
 
       if Code.ensure_loaded?(session_mod) and
