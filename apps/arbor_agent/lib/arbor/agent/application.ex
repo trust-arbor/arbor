@@ -8,6 +8,18 @@ defmodule Arbor.Agent.Application do
 
   @impl true
   def start(_type, _args) do
+    # Supply the persistence-backed alias resolver to arbor_security. The
+    # contract lives there (L2) so any principal comparison can reach it, but
+    # the store is L3 — this app depends on both, so it is the seam. Registered
+    # unconditionally: resolution is a read path with no children of its own,
+    # and `start_children: false` (test) must not silently disable an
+    # authorization input.
+    Application.put_env(
+      :arbor_security,
+      :identity_alias_resolver,
+      Arbor.Agent.IdentityAliasResolver
+    )
+
     children =
       if Application.get_env(:arbor_agent, :start_children, true) do
         profile_backend = profile_backend()

@@ -1788,11 +1788,30 @@ defmodule Arbor.Orchestrator.Session do
 
   defp canonical_turn_authority(_authority), do: :error
 
+  # Identical ids match without consulting the alias store, so an outage cannot
+  # break the common case.
   defp authenticated_message_owner?(
          %UserMessage{sender_id: principal_id},
          %TurnAuthority{authenticated_principal_id: principal_id}
        ),
        do: true
+
+  # Different ids may still name the same person. `mix arbor.user.link` folds
+  # principals onto one primary — a CLI turn and an OIDC login are two ids for
+  # one human — and a strict comparison denied every linked pair. That is what
+  # made a fresh install's first message fail with
+  # `:initial_denied`: no TurnAuthority was built, so no disclosure capability
+  # was issued, so the untrusted+external egress branch had nothing to admit.
+  #
+  # `same_principal?/2` fails CLOSED — any resolution error, missing resolver,
+  # or unavailable store returns false.
+  defp authenticated_message_owner?(
+         %UserMessage{sender_id: sender_id},
+         %TurnAuthority{authenticated_principal_id: principal_id}
+       )
+       when is_binary(sender_id) and is_binary(principal_id) do
+    Arbor.Security.same_principal?(sender_id, principal_id)
+  end
 
   defp authenticated_message_owner?(_message, _authority), do: false
 

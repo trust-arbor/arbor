@@ -695,6 +695,25 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Resolve a principal id to the primary it is linked to.
+
+  Returns `{:error, _}` when no resolver is configured or the store is
+  unavailable — it never falls back to the input id, so a caller cannot mistake
+  an outage for a successful resolution. See `Arbor.Security.IdentityAlias`.
+  """
+  @spec resolve_identity_alias(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def resolve_identity_alias(id), do: Arbor.Security.IdentityAlias.resolve(id)
+
+  @doc """
+  True when two principal ids name the same person, following alias links.
+
+  Fails closed: any resolution error returns false. Identical ids compare equal
+  without consulting the store.
+  """
+  @spec same_principal?(String.t(), String.t()) :: boolean()
+  def same_principal?(a, b), do: Arbor.Security.IdentityAlias.same_principal?(a, b)
+
+  @doc """
   Mint a new interactive disclosure capability (VP-05D2A0). See
   `Arbor.Security.DisclosureCapability.issue/1` for the option contract and
   invariants.
