@@ -172,6 +172,24 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       refute "file_list" in tools
     end
 
+    test "never discloses a pipeline_internal graph syscall, even when its capability is held",
+         %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{})
+
+      # session_memory_* are exec-node syscalls under arbor://orchestrator/**,
+      # which ordinary agents hold. The LLM handler resolves disclosed names
+      # through the registry with no pipeline_internal filter, so disclosure is
+      # the gate. 28d2b32ff closed this on the APIAgent path only; the DOT
+      # session path still showed 15 graph syscalls live (2026-08-25).
+      {:ok, uri} = Arbor.Actions.tool_name_to_canonical_uri("session_memory_recall")
+      grant!(agent_id, uri)
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      refute "session_memory_recall" in tools
+      assert "memory_recall" in tools
+    end
+
     test "a :block rule hides the tool even when it is in the floor", %{agent_id: agent_id} do
       set_policy_enforcer_enabled(true)
       create_profile_with_rules(agent_id, :ask, %{"arbor://memory/recall" => :block})

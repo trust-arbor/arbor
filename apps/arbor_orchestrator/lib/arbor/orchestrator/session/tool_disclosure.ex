@@ -234,9 +234,15 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     Enum.any?(held_uris, &Arbor.Contracts.Security.CapabilityUri.prefix_match?(canonical_uri, &1))
   end
 
-  # Build a reverse lookup: canonical_uri -> tool names from all registered actions.
+  # Build a reverse lookup: canonical_uri -> tool names from EXPOSED actions.
+  # `exposed_actions/0`, not `all_actions/0`: pipeline_internal graph syscalls
+  # (session_memory_*, session_goals_*, …) live under arbor://orchestrator/**,
+  # which ordinary agents hold, and the LLM handler resolves disclosed names
+  # through the registry with no further filter — so `all_actions/0` here put
+  # 15 graph syscalls in a conversationalist's chat menu (seen live 2026-08-25;
+  # the APIAgent path `Actions.tool_modules_for_agent/1` already excluded them).
   defp build_uri_to_tool_names_map do
-    Arbor.Actions.all_actions()
+    Arbor.Actions.exposed_actions()
     |> Enum.flat_map(fn action_mod ->
       name = if function_exported?(action_mod, :name, 0), do: action_mod.name(), else: nil
 
@@ -264,9 +270,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   def ask_mode_tools(agent_id) do
     # arbor_trust is a hard dep; the rescue/catch degrades to an empty set if
     # the trust subsystem is down.
-    all_actions = Arbor.Actions.all_actions()
-
-    all_actions
+    Arbor.Actions.exposed_actions()
     |> Enum.filter(fn action_mod ->
       name =
         if function_exported?(action_mod, :name, 0),
