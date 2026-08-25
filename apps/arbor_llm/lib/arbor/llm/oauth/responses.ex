@@ -289,6 +289,8 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   # store:false, stream:true (required by the subscription backends). tools only when present.
+  # Codex behavioral parity: never persist the conversation server-side and never
+  # send previous_response_id. Websocket / Responses Lite clients MUST copy both.
   defp build_body(model, req) do
     base = %{
       "model" => model,

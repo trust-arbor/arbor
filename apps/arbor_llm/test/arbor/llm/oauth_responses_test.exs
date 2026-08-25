@@ -1165,12 +1165,65 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     assert Jason.decode!(xai_body)["model"] == "grok-4.6"
   end
 
+  test "security regression: OpenAI and xAI Responses bodies force store false and omit previous_response_id",
+       %{store_dir: store_dir} do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "openai-store-false-token"))
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-store-false-token"))
+
+    tools = [
+      %{
+        "type" => "function",
+        "name" => "noop",
+        "description" => "noop",
+        "parameters" => %{"type" => "object", "properties" => %{}}
+      }
+    ]
+
+    {openai_tools_url, openai_tools_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{openai: openai_tools_url})
+
+    assert {:ok, _} =
+             Responses.complete(
+               :openai,
+               %{instructions: "", input: [], tools: tools},
+               receive_timeout: 1_000
+             )
+
+    assert %{body: openai_tools_body} = Task.await(openai_tools_server, 2_000)
+    assert_unstored_responses_body!(openai_tools_body)
+    assert is_list(Jason.decode!(openai_tools_body)["tools"])
+
+    {openai_single_url, openai_single_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{openai: openai_single_url})
+
+    assert {:ok, _} =
+             Responses.complete_single_attempt(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{body: openai_single_body} = Task.await(openai_single_server, 2_000)
+    assert_unstored_responses_body!(openai_single_body)
+
+    {xai_url, xai_server} = start_request_capture_server()
+    configure_responses_endpoint!(%{xai: xai_url})
+
+    assert {:ok, _} = Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+    assert %{body: xai_body} = Task.await(xai_server, 2_000)
+    assert_unstored_responses_body!(xai_body)
+  end
+
   defp sse(event), do: "data: " <> Jason.encode!(event) <> "\n\n"
 
   defp terminal_sse(response),
     do: sse(%{"type" => "response.completed", "response" => response})
 
   defp empty_request, do: %{instructions: "", input: [], tools: nil}
+
+  defp assert_unstored_responses_body!(body) when is_binary(body) do
+    decoded = Jason.decode!(body)
+    assert decoded["store"] == false
+    assert decoded["stream"] == true
+    refute Map.has_key?(decoded, "previous_response_id")
+    refute Map.has_key?(decoded, :previous_response_id)
+  end
 
   defp oauth_store(provider, access_token) do
     %{

@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 684,
+  "entry_count": 685,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8436,8 +8436,21 @@
       "source_incident": "found 2026-08-25 moving recall to the user turn",
       "always_loaded": false,
       "content_sha256": "65799333ba1a65f84d8a9ba6fa807d5c4c3ad4cd39f33368f9b1d78549858934"
+    },
+    {
+      "source_ordinal": 685,
+      "source_kind": "post-migration",
+      "slug": "prove-responses-store-false-by-retrieve-and-resume-failure-not-the-outbound-flag",
+      "title": "Prove Responses `store: false` by retrieve and resume failure, not the outbound flag.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-prove-responses-store-false-by-retrieve-and-resume-failure-not-the-outbound-flag",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 verifying the Codex-native harness",
+      "always_loaded": false,
+      "content_sha256": "53d731a8deca27460a247c754c55b06c23e868acd105b2db64cafd3ee2e3aca9"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 223
+  "post_migration_entry_count": 224
 }
