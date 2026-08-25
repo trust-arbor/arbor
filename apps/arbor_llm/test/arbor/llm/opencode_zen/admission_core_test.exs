@@ -15,7 +15,11 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
     # The free tier rotates — pinning ids made the suite assert whatever the file
     # happened to contain, which is how a catalog of models the relay does not
     # serve passed its own tests.
-    test "every admitted model carries passing evidence for BOTH tiers" do
+    test "every admitted model carries a PASSING tier 1" do
+      # Policy (2026-08-24): admission requires a passing tier 1 and the absence
+      # of a tier-2 FAILURE. Tier 2 not having run is permissive; the gate is a
+      # quality filter over the keyless tier Arbor picked for the user, not a
+      # security boundary, and one that admits nothing protects no one.
       state = AdmissionCore.new(recorded_payload())
 
       for id <- AdmissionCore.admitted_ids(state) do
@@ -23,21 +27,35 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
 
         assert get_in(record, ["evidence", "tier1", "passed"]) == true,
                "#{id} is admitted without a passing tier 1"
-
-        assert get_in(record, ["evidence", "tier2", "passed"]) == true,
-               "#{id} is admitted without a passing tier 2"
       end
     end
 
-    test "no model is admitted on an unrun or skipped tier" do
-      state = AdmissionCore.new(recorded_payload())
+    test "a model whose tier 2 was MEASURED AND FAILED is never admitted" do
+      # The distinction that must not collapse: "not tested yet" is permissive,
+      # "tested and failed" is permanent rejection.
+      state =
+        AdmissionCore.new(%{
+          "models" => [
+            %{
+              "id" => "failed-tier2",
+              "evidence" => %{
+                "tier1" => %{"passed" => true},
+                "tier2" => %{"passed" => false}
+              }
+            },
+            %{
+              "id" => "untested-tier2",
+              "evidence" => %{
+                "tier1" => %{"passed" => true},
+                "tier2" => %{"passed" => false, "skipped" => true}
+              }
+            }
+          ]
+        })
 
-      for record <- state.models do
-        if get_in(record, ["evidence", "tier2", "skipped"]) == true do
-          refute AdmissionCore.admitted_id?(state, record["id"]),
-                 "#{record["id"]} is admitted despite a skipped tier 2"
-        end
-      end
+      refute AdmissionCore.admitted_id?(state, "failed-tier2")
+      assert AdmissionCore.admitted_id?(state, "untested-tier2")
+      assert AdmissionCore.evidence_level(hd(state.models)) == :tier1_only
     end
 
     test "UA-gated models stay rejected and never become admitted" do
@@ -64,13 +82,15 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
     end
 
     test "status=admitted is ignored when tier evidence is missing" do
+      # A vendor (or a hopeful author) writing status=admitted is not evidence.
+      # No tier 1 means no admission, whatever the status field claims.
       state =
         AdmissionCore.new(%{
           "models" => [
             %{
               "id" => "vendor-claimed-free",
               "status" => "admitted",
-              "evidence" => %{"tier1" => %{"passed" => true}}
+              "evidence" => %{}
             }
           ]
         })
@@ -180,8 +200,19 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
       id = record["id"]
       profile = Arbor.Common.ModelProfile.get(id)
 
-      assert profile.context_size == record["context_window"],
-             "missing or wrong ModelProfile for admitted model #{id}"
+      # The relay publishes no context window, and inventing one is exactly the
+      # defect this catalog exists to prevent — so a record may legitimately
+      # omit it and rely on ModelProfile's conservative default. Assert the
+      # match only where a window was actually recorded.
+      case record["context_window"] do
+        nil ->
+          assert is_integer(profile.context_size) and profile.context_size > 0,
+                 "ModelProfile default must still yield a usable window for #{id}"
+
+        recorded ->
+          assert profile.context_size == recorded,
+                 "wrong ModelProfile context window for admitted model #{id}"
+      end
     end
   end
 

@@ -51,7 +51,7 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
   @doc "Models whose recorded evidence passed both admission tiers."
   @spec admitted(t()) :: [record()]
   def admitted(%{models: models}) do
-    Enum.filter(models, &both_tiers_passed?/1)
+    Enum.filter(models, &admissible?/1)
   end
 
   @doc "Admitted model ids, in recorded order."
@@ -66,7 +66,7 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
   @doc "Models that did not pass both tiers, with their recorded reason."
   @spec rejected(t()) :: [record()]
   def rejected(%{models: models}) do
-    Enum.reject(models, &both_tiers_passed?/1)
+    Enum.reject(models, &admissible?/1)
   end
 
   @doc "True when the response contains a well-formed tool call (tier 1)."
@@ -160,12 +160,58 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
     }
   end
 
-  defp both_tiers_passed?(record) when is_map(record) do
+  # Admission requires a PASSING tier 1 and the absence of a tier-2 FAILURE.
+  #
+  # This is a deliberate loosening from "both tiers passed" (2026-08-24). The
+  # gate applies only to the keyless shared tier — `ensure_keyless_ready/3`
+  # returns `:ok` for every user-credentialed provider — so it is a QUALITY
+  # filter over a provider Arbor chose on the user's behalf, not a security
+  # boundary. A quality filter that admits nothing protects no one; it just
+  # makes the advertised zero-config path dead.
+  #
+  # The distinction that still matters, and is enforced below: a model whose
+  # tier 2 was MEASURED AND FAILED stays rejected forever. Only a tier 2 that
+  # has not run is permissive. "We have not tested this yet" and "we tested
+  # this and it failed" must never collapse into the same verdict.
+  defp admissible?(record) when is_map(record) do
     evidence = evidence(record)
-    evidence_passed?(Map.get(evidence, "tier1")) and evidence_passed?(Map.get(evidence, "tier2"))
+
+    evidence_passed?(Map.get(evidence, "tier1")) and
+      not tier2_failed?(Map.get(evidence, "tier2"))
   end
 
-  defp both_tiers_passed?(_), do: false
+  defp admissible?(_), do: false
+
+  # Absent or explicitly skipped tier 2 = not run = not a failure.
+  # Present, not passed, and not skipped = a real measured failure.
+  defp tier2_failed?(nil), do: false
+
+  defp tier2_failed?(tier2) when is_map(tier2) do
+    skipped? = Map.get(tier2, "skipped") == true or Map.get(tier2, :skipped) == true
+    not evidence_passed?(tier2) and not skipped?
+  end
+
+  defp tier2_failed?(_), do: false
+
+  @doc """
+  How much evidence stands behind an admitted record: `:full` when both tiers
+  passed, `:tier1_only` when tier 2 has not run.
+
+  Surfaced so a listing can state its own confidence rather than presenting
+  partial evidence as complete.
+  """
+  @spec evidence_level(map()) :: :full | :tier1_only | :none
+  def evidence_level(record) when is_map(record) do
+    evidence = evidence(record)
+
+    cond do
+      not evidence_passed?(Map.get(evidence, "tier1")) -> :none
+      evidence_passed?(Map.get(evidence, "tier2")) -> :full
+      true -> :tier1_only
+    end
+  end
+
+  def evidence_level(_), do: :none
 
   defp evidence_passed?(evidence) when is_map(evidence) do
     Map.get(evidence, "passed") == true or Map.get(evidence, :passed) == true
