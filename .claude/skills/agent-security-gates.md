@@ -708,7 +708,11 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   (`Memory.extract_agent_id/2` fails closed); if the action is self-scoped,
   export `self_scoped_resource/2` so the action layer honours a child `:block`
   rule before authorizing the parent. Do not widen the helper to non-principal
-  scopes.
+  scopes. **And forward the call's scope:** JIT-minted capabilities are
+  session/task-bound, so a facade that authorizes without
+  `Arbor.Actions.auth_scope(context)` gets `:scope_mismatch` from a cap the
+  agent visibly holds (78ba5418a). Template/lifecycle grants are unscoped,
+  which is why they never showed this.
 
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
