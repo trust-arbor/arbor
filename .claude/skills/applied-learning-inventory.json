@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 671,
+  "entry_count": 672,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8267,8 +8267,21 @@
       "source_incident": "found 2026-08-23 when ExMCP HttpPlug's 10,000 ms default killed Arbor's 10,000 ms coding-readiness projection",
       "always_loaded": false,
       "content_sha256": "6f18b9eac569fcf32d94dff51209b90afcf90f6c3591f2db1cc8c17f69d7e9c9"
+    },
+    {
+      "source_ordinal": 672,
+      "source_kind": "post-migration",
+      "slug": "sse-json-must-wait-for-reassembled-events-not-finch-chunks",
+      "title": "SSE JSON must wait for reassembled events, not Finch chunks.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-sse-json-must-wait-for-reassembled-events-not-finch-chunks",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 keyless streaming",
+      "always_loaded": false,
+      "content_sha256": "89868a145a199723ac4b13c39dbd27ef12ab7d4a95b6d982523484331c0b534a"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 210
+  "post_migration_entry_count": 211
 }

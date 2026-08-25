@@ -158,6 +158,27 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     end
   end
 
+  test "reassembles OpenAI SSE JSON split across one-byte HTTP chunks including [DONE] and cost trailer" do
+    json = Jason.encode!(%{"choices" => [%{"delta" => %{"content" => "hello"}}]})
+    cost = Jason.encode!(%{"choices" => [], "cost" => "0"})
+    payload = "data: #{json}\n\ndata: [DONE]\n\ndata: #{cost}\n\n"
+    chunks = for <<byte <- payload>>, do: <<byte>>
+    {url, server} = start_chunked_server(chunks, 0)
+
+    assert {:ok, stream} = Client.stream(req_llm_client(), request(), transport_opts(url))
+    events = Enum.to_list(stream)
+
+    refute Enum.any?(events, &match?(%StreamEvent{type: :error}, &1)),
+           "stream failed closed on a chunk boundary: #{inspect(events)}"
+
+    assert Enum.any?(events, fn
+             %StreamEvent{type: :delta, data: %{text: "hello"}} -> true
+             _ -> false
+           end)
+
+    _ = Task.await(server, 2_000)
+  end
+
   test "security regression: split invalid UTF-8 and partial JSON fail closed" do
     invalid_utf8 = [
       "data: {\"choices\":[{\"delta\":{\"content\":\"",

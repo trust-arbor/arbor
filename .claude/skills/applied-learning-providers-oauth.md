@@ -240,3 +240,14 @@ force-refresh once under the provider lock, and retry at most once; keep single-
 one resource request. Report local metadata health separately from active resource canaries, and
 describe login or rotation as a trigger inference unless the provider confirms the invalidation
 cause (found 2026-08-13 while repairing recurring OpenAI council abstentions).
+
+<!-- applied-learning: sse-json-must-wait-for-reassembled-events-not-finch-chunks -->
+<a id="applied-learning-sse-json-must-wait-for-reassembled-events-not-finch-chunks"></a>
+**SSE JSON must wait for reassembled events, not Finch chunks.** `complete/2` never
+sees chunk boundaries, so a streaming-only `{:invalid_stream_json, {:invalid_json,
+:malformed}}` is a line/event split until proven otherwise. Feed the captured byte
+sequence at every offset (mid-`data:` prefix, mid-JSON, between `\n` and `\n`)
+plus one-byte HTTP frames with no network. `[DONE]` is not JSON — match it after
+ASCII whitespace trim or preflight reports a malformed array. OpenCode Zen also
+appends a valid cost object after `[DONE]`; ignore it rather than decoding a
+fragment (found 2026-08-25 keyless streaming).

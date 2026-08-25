@@ -1,6 +1,7 @@
 defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   @moduledoc false
 
+  alias Arbor.LLM.Adapter.ReqLLM.SSEBuffer
   alias Arbor.LLM.{Deadline, ResponseBudget}
 
   @default_max_response_bytes 16_777_216
@@ -283,7 +284,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       terminal?: false,
       cancelled?: false,
       failure: nil,
-      sse: new_sse_state()
+      sse: SSEBuffer.new()
     }
 
     request_opts = [
@@ -424,159 +425,60 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       "text/event-stream"
   end
 
-  defp new_sse_state do
-    %{
-      line_parts: [],
-      line_bytes: 0,
-      data_parts: [],
-      event: nil,
-      id: nil,
-      event_bytes: 0,
-      first_line?: true
-    }
-  end
-
-  defp feed_sse("", state), do: {:ok, state}
-
   defp feed_sse(data, state) do
-    case :binary.match(data, "\n") do
-      :nomatch ->
-        append_incomplete_line(data, state)
+    case SSEBuffer.feed(state.sse, data, %{max_event_bytes: state.limits.max_event_bytes}) do
+      {:ok, events, line_count, sse} ->
+        dispatch_sse_events(events, line_count, %{state | sse: sse})
 
-      {index, 1} ->
-        piece = binary_part(data, 0, index)
-        rest = binary_part(data, index + 1, byte_size(data) - index - 1)
+      {:error, reason, events, line_count, sse} ->
+        case dispatch_sse_events(events, line_count, %{state | sse: sse}) do
+          {:halt, %{cancelled?: true} = state} ->
+            {:halt, state}
 
-        with {:ok, line, state} <- complete_line(piece, state),
-             {:ok, state} <- process_sse_line(line, state) do
-          if state.terminal? or state.cancelled? or state.failure,
-            do: {:halt, state},
-            else: feed_sse(rest, state)
-        else
-          {:halt, state} -> {:halt, state}
+          {:halt, %{terminal?: true} = state} ->
+            {:halt, state}
+
+          {:halt, %{failure: failure} = state} when not is_nil(failure) ->
+            {:halt, state}
+
+          {:ok, state} ->
+            {:halt, fail_state(state, reason)}
+
+          {:halt, state} ->
+            {:halt, fail_state(state, reason)}
         end
     end
   end
 
-  defp append_incomplete_line("", state), do: {:ok, state}
-
-  defp append_incomplete_line(piece, state) do
-    bytes = state.sse.line_bytes + byte_size(piece)
-
-    if bytes > state.limits.max_event_bytes do
-      {:halt,
-       fail_state(
-         state,
-         {:stream_limit_exceeded, :incomplete_sse_bytes, state.limits.max_event_bytes}
-       )}
-    else
-      sse = %{state.sse | line_parts: [piece | state.sse.line_parts], line_bytes: bytes}
-      {:ok, %{state | sse: sse}}
-    end
-  end
-
-  defp complete_line(piece, state) do
-    bytes = state.sse.line_bytes + byte_size(piece)
-
-    if bytes > state.limits.max_event_bytes do
-      {:halt,
-       fail_state(state, {:stream_limit_exceeded, :sse_line_bytes, state.limits.max_event_bytes})}
-    else
-      line =
-        case state.sse.line_parts do
-          [] -> piece
-          parts -> [piece | parts] |> Enum.reverse() |> IO.iodata_to_binary()
-        end
-        |> strip_carriage_return()
-
-      sse = %{state.sse | line_parts: [], line_bytes: 0}
-      {:ok, line, %{state | sse: sse}}
-    end
-  end
-
-  defp strip_carriage_return(line) do
-    if byte_size(line) > 0 and :binary.last(line) == ?\r,
-      do: binary_part(line, 0, byte_size(line) - 1),
-      else: line
-  end
-
-  defp process_sse_line(line, state) do
-    with {:ok, state} <- add_work(state, 1) do
-      line = if state.sse.first_line?, do: strip_bom(line), else: line
-      state = put_in(state.sse.first_line?, false)
-
-      cond do
-        line == "" -> complete_sse_event(state)
-        String.starts_with?(line, ":") -> {:ok, state}
-        true -> put_sse_field(line, state)
-      end
-    else
+  defp dispatch_sse_events(events, line_count, state) do
+    case add_work(state, line_count) do
+      {:ok, state} -> emit_sse_events(events, state)
       {:error, reason} -> {:halt, fail_state(state, reason)}
     end
   end
 
-  defp strip_bom(<<0xEF, 0xBB, 0xBF, rest::binary>>), do: rest
-  defp strip_bom(line), do: line
+  defp emit_sse_events([], state), do: {:ok, state}
 
-  defp put_sse_field(line, state) do
-    {field, value} = split_sse_field(line)
-
-    value =
-      if String.starts_with?(value, " "),
-        do: binary_part(value, 1, byte_size(value) - 1),
-        else: value
-
-    bytes = state.sse.event_bytes + byte_size(value) + 1
-
-    if bytes > state.limits.max_event_bytes do
-      {:halt,
-       fail_state(state, {:stream_limit_exceeded, :sse_event_bytes, state.limits.max_event_bytes})}
-    else
-      sse =
-        case field do
-          "data" -> %{state.sse | data_parts: [value | state.sse.data_parts], event_bytes: bytes}
-          "event" -> %{state.sse | event: value, event_bytes: bytes}
-          "id" -> %{state.sse | id: value, event_bytes: bytes}
-          _ -> %{state.sse | event_bytes: bytes}
-        end
-
-      {:ok, %{state | sse: sse}}
-    end
-  end
-
-  defp split_sse_field(line) do
-    case :binary.match(line, ":") do
-      :nomatch ->
-        {line, ""}
-
-      {index, 1} ->
-        {binary_part(line, 0, index), binary_part(line, index + 1, byte_size(line) - index - 1)}
-    end
-  end
-
-  defp complete_sse_event(%{sse: %{data_parts: [], event: nil, id: nil}} = state) do
-    {:ok, %{state | sse: reset_event(state.sse)}}
-  end
-
-  defp complete_sse_event(state) do
+  defp emit_sse_events([event | rest], state) do
     event_count = state.event_count + 1
 
     with true <- event_count <= state.limits.max_events,
          {:ok, state} <- add_work(state, 1) do
-      data =
-        state.sse.data_parts |> Enum.reverse() |> Enum.intersperse("\n") |> IO.iodata_to_binary()
-
-      event =
-        %{data: data}
-        |> maybe_put(:event, state.sse.event)
-        |> maybe_put(:id, state.sse.id)
-
-      state = %{state | event_count: event_count, sse: reset_event(state.sse)}
+      state = %{state | event_count: event_count}
 
       case process_provider_event(event, state) do
-        {:ok, state} -> if(state.terminal?, do: {:halt, state}, else: {:ok, state})
-        {:error, reason, state} -> {:halt, fail_state(state, reason)}
-        {:cancel, state} -> {:halt, %{state | cancelled?: true}}
+        {:ok, state} ->
+          if state.terminal? or state.cancelled? or state.failure do
+            {:halt, state}
+          else
+            emit_sse_events(rest, state)
+          end
+
+        {:error, reason, state} ->
+          {:halt, fail_state(state, reason)}
+
+        {:cancel, state} ->
+          {:halt, %{state | cancelled?: true}}
       end
     else
       false ->
@@ -587,14 +489,18 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     end
   end
 
-  defp reset_event(sse),
-    do: %{sse | data_parts: [], event: nil, id: nil, event_bytes: 0}
-
-  defp process_provider_event(%{data: "[DONE]"} = event, state) do
-    decode_and_emit(event, %{state | terminal?: true})
+  defp process_provider_event(%{data: data} = event, state) when is_binary(data) do
+    if done_sentinel?(data) do
+      decode_and_emit(%{event | data: "[DONE]"}, %{state | terminal?: true})
+    else
+      decode_sse_json_event(event, data, state)
+    end
   end
 
-  defp process_provider_event(%{data: data} = event, state) do
+  defp process_provider_event(_event, state),
+    do: {:error, {:invalid_stream_json, {:invalid_json, :binary_body_required}}, state}
+
+  defp decode_sse_json_event(event, data, state) do
     json_limits = json_limits(state.limits, state.limits.max_event_bytes)
 
     with true <- String.valid?(data) or {:error, {:invalid_stream_json, :valid_utf8_required}},
@@ -610,6 +516,26 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       {:error, reason} -> {:error, {:invalid_stream_json, reason}, state}
     end
   end
+
+  # SSE strips one leading space after the colon; extra surrounding whitespace
+  # still has to match the OpenAI `[DONE]` sentinel or JSON preflight treats
+  # `[DONE]` as a malformed array.
+  defp done_sentinel?(data) when is_binary(data) do
+    trim_ascii_ws(data) == "[DONE]"
+  end
+
+  defp trim_ascii_ws(<<char, rest::binary>>) when char in [?\s, ?\t, ?\n, ?\r],
+    do: trim_ascii_ws(rest)
+
+  defp trim_ascii_ws(data) when is_binary(data) and byte_size(data) > 0 do
+    last = :binary.last(data)
+
+    if last in [?\s, ?\t, ?\n, ?\r],
+      do: trim_ascii_ws(binary_part(data, 0, byte_size(data) - 1)),
+      else: data
+  end
+
+  defp trim_ascii_ws(data), do: data
 
   defp measurement_delta(retained, preflight) do
     %{
@@ -752,18 +678,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       not state.headers_valid? ->
         send(state.consumer, {state.ref, :error, {:invalid_stream_headers, :missing_headers}})
 
-      incomplete_sse?(state.sse) ->
+      SSEBuffer.incomplete?(state.sse) ->
         send(state.consumer, {state.ref, :error, {:invalid_stream, :partial_sse_event}})
 
       true ->
         send(state.consumer, {state.ref, :done})
     end
   end
-
-  defp incomplete_sse?(sse),
-    do:
-      sse.line_bytes > 0 or sse.line_parts != [] or sse.data_parts != [] or not is_nil(sse.event) or
-        not is_nil(sse.id)
 
   defp halt_failure(state, reason), do: {:halt, fail_state(state, reason)}
   defp fail_state(state, reason), do: %{state | failure: state.failure || reason}
@@ -885,9 +806,6 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     kind, reason ->
       {:error, {:stream_callback_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
-
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp deadline_passed?(state), do: remaining_ms(state.limits.deadline_ms) <= 0
   defp deadline_error(state), do: {:stream_deadline_exceeded, state.limits.timeout}
