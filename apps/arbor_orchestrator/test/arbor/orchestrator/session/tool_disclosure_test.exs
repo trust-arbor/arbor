@@ -206,6 +206,34 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     end
   end
 
+  describe "truncation priority" do
+    test "curated tools survive when the authorized set overflows the cap" do
+      # A default-baseline agent is authorized for far more than it HOLDS: every
+      # low-risk/reversible/cheap URI is policy-mintable, so a real
+      # conversationalist reached 151 tools from 12 held capabilities
+      # (2026-08-25). That overflows @max_tools_for_llm and the list is cut.
+      #
+      # `core` arrives in Map.keys/1 order — arbitrary — so before prioritising,
+      # whether `memory_recall` survived the cut was luck. Reproduce the bad
+      # ordering directly: bury the curated tools past the cap.
+      filler = for i <- 1..200, do: "filler_tool_#{i}"
+      core = filler ++ ["memory_recall", "memory_remember", "file_read"]
+
+      prioritized = ToolDisclosure.prioritize_base_tools(core)
+      kept = Enum.take(prioritized, 120)
+
+      assert "memory_recall" in kept
+      assert "memory_remember" in kept
+      assert "file_read" in kept
+
+      # Ordering only — nothing added, nothing dropped.
+      assert Enum.sort(prioritized) == Enum.sort(core)
+
+      # Without prioritising, these are exactly the ones that fall off.
+      refute "memory_recall" in Enum.take(core, 120)
+    end
+  end
+
   defp create_profile_with_rules(agent_id, baseline, rules) do
     case Arbor.Trust.create_trust_profile(agent_id) do
       {:ok, _} -> :ok

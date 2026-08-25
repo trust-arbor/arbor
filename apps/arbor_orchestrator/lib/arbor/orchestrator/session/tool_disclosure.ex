@@ -297,11 +297,33 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
         "(core=#{length(core)}, discovered=#{length(discovered)})"
     )
 
-    capped_core = Enum.take(core, @max_tools_for_llm)
+    capped_core = core |> prioritize_base_tools() |> Enum.take(@max_tools_for_llm)
     remaining = @max_tools_for_llm - length(capped_core)
 
     result = capped_core ++ Enum.take(discovered, max(remaining, 0))
     ensure_find_tools(Enum.uniq(result))
+  end
+
+  # `core` arrives in `snapshot.candidate_entries` order, which comes from
+  # `Map.keys(uri_to_tool_names)` — arbitrary map ordering, with no notion of
+  # which tools matter. Truncating that directly drops tools by POSITION: an
+  # agent authorized for 142 tools against a 120 cap loses 22 of them at random,
+  # and whether `memory_recall` survives is luck (measured 2026-08-25: 142 vs
+  # 120). `@base_tools` already names the ones an agent needs for ordinary work,
+  # but it was only consulted as a fallback for when Trust is unavailable, so it
+  # never influenced this path. Float those to the front so the curated set is
+  # never the part that gets cut, while leaving the rest of the order untouched.
+  @doc """
+  Order a tool list so the curated `core_tools/0` come first.
+
+  Public because it is the guard for a silent failure: truncation cuts by
+  POSITION, so without this the tools an agent needs for ordinary work can be
+  dropped purely because of where they landed in an unordered map.
+  """
+  @spec prioritize_base_tools([String.t() | atom()]) :: [String.t() | atom()]
+  def prioritize_base_tools(core) do
+    {base, rest} = Enum.split_with(core, &(to_string(&1) in @base_tools))
+    base ++ rest
   end
 
   defp ensure_find_tools(tools) do
