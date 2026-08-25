@@ -668,7 +668,7 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
         children =
           Enum.map(Supervisor.which_children(name), fn {id, child, _type, _mods} ->
             spec =
-              case Supervisor.get_childspec(name, id) do
+              case :supervisor.get_childspec(name, id) do
                 {:ok, child_spec} -> child_spec
                 other -> flunk("failed to snapshot child spec #{inspect(id)}: #{inspect(other)}")
               end
@@ -723,20 +723,20 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
     assert_restored_topology!(topology)
   end
 
-  defp assert_owner_child_ids!(:absent), do: refute(Process.whereis(Arbor.KernelRuntime.Supervisor))
+  defp assert_owner_child_ids!(:absent),
+    do: refute(Process.whereis(Arbor.KernelRuntime.Supervisor))
 
   defp assert_owner_child_ids!({:present, children}) do
     supervisor = Arbor.KernelRuntime.Supervisor
     assert is_pid(Process.whereis(supervisor))
-    expected = MapSet.new(children, & &1.id)
+    expected_ids = Enum.map(children, & &1.id)
 
-    actual =
+    actual_ids =
       supervisor
       |> Supervisor.which_children()
       |> Enum.map(&elem(&1, 0))
-      |> MapSet.new()
 
-    assert actual == expected
+    assert actual_ids == expected_ids
   end
 
   defp restore_nested_supervisors!(nested) do
@@ -750,7 +750,9 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
   defp restore_nested_supervisor!(name, {:present, children}) do
     assert is_pid(Process.whereis(name))
 
-    Enum.each(children, fn %{id: id, spec: spec} ->
+    children
+    |> Enum.reverse()
+    |> Enum.each(fn %{id: id, spec: spec} ->
       start_child_exact!(name, id, spec)
     end)
   end
@@ -835,9 +837,8 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
       name
       |> Supervisor.which_children()
       |> Enum.map(&elem(&1, 0))
-      |> MapSet.new()
 
-    assert actual_ids == MapSet.new(children, & &1.id)
+    assert actual_ids == Enum.map(children, & &1.id)
   end
 
   defp assert_named_matches!(name, :absent) do
@@ -888,7 +889,9 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
   end
 
   defp already_started_pid?({:already_started, pid}, squat_pid) when pid == squat_pid, do: true
-  defp already_started_pid?({:shutdown, inner}, squat_pid), do: already_started_pid?(inner, squat_pid)
+
+  defp already_started_pid?({:shutdown, inner}, squat_pid),
+    do: already_started_pid?(inner, squat_pid)
 
   defp already_started_pid?({:failed_to_start_child, _id, inner}, squat_pid) do
     already_started_pid?(inner, squat_pid)

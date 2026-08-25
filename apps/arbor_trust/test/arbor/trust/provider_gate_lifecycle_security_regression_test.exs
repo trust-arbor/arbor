@@ -645,7 +645,7 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
         children =
           Enum.map(Supervisor.which_children(name), fn {id, child, _type, _mods} ->
             spec =
-              case Supervisor.get_childspec(name, id) do
+              case :supervisor.get_childspec(name, id) do
                 {:ok, child_spec} -> child_spec
                 other -> flunk("failed to snapshot child spec #{inspect(id)}: #{inspect(other)}")
               end
@@ -694,7 +694,8 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
   defp assert_owner_child_ids!({:present, children}) do
     supervisor = Arbor.Trust.ApplicationSupervisor
     assert is_pid(Process.whereis(supervisor))
-    expected = MapSet.new(children, & &1.id)
+    expected_ids = Enum.map(children, & &1.id)
+    expected = MapSet.new(expected_ids)
 
     actual =
       supervisor
@@ -704,19 +705,20 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
 
     missing = MapSet.difference(expected, actual)
 
-    Enum.each(children, fn %{id: id, spec: spec} ->
+    children
+    |> Enum.reverse()
+    |> Enum.each(fn %{id: id, spec: spec} ->
       if MapSet.member?(missing, id) do
         start_child_exact!(supervisor, id, spec)
       end
     end)
 
-    actual =
+    actual_ids =
       supervisor
       |> Supervisor.which_children()
       |> Enum.map(&elem(&1, 0))
-      |> MapSet.new()
 
-    assert MapSet.subset?(expected, actual)
+    assert actual_ids == expected_ids
 
     unless Enum.any?(children, &(&1.id == Arbor.Trust.ProviderGate)) do
       refute supervisor_has_id?(supervisor, Arbor.Trust.ProviderGate)
@@ -725,9 +727,14 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
 
   defp start_child_exact!(supervisor, id, spec) do
     case Supervisor.start_child(supervisor, spec) do
-      {:ok, _pid} -> :ok
-      {:ok, _pid, _info} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+      {:ok, _pid} ->
+        :ok
+
+      {:ok, _pid, _info} ->
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        :ok
 
       {:error, :already_present} ->
         :ok = Supervisor.delete_child(supervisor, id)
@@ -777,7 +784,9 @@ defmodule Arbor.Trust.ProviderGateLifecycleSecurityRegressionTest do
   end
 
   defp already_started_pid?({:already_started, pid}, squat_pid) when pid == squat_pid, do: true
-  defp already_started_pid?({:shutdown, inner}, squat_pid), do: already_started_pid?(inner, squat_pid)
+
+  defp already_started_pid?({:shutdown, inner}, squat_pid),
+    do: already_started_pid?(inner, squat_pid)
 
   defp already_started_pid?({:failed_to_start_child, _id, inner}, squat_pid) do
     already_started_pid?(inner, squat_pid)

@@ -699,7 +699,7 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
         children =
           Enum.map(Supervisor.which_children(name), fn {id, child, _type, _mods} ->
             spec =
-              case Supervisor.get_childspec(name, id) do
+              case :supervisor.get_childspec(name, id) do
                 {:ok, child_spec} -> child_spec
                 other -> flunk("failed to snapshot child spec #{inspect(id)}: #{inspect(other)}")
               end
@@ -758,7 +758,9 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
   defp assert_owner_child_ids!({:present, children}) do
     supervisor = Arbor.Security.Supervisor
     assert is_pid(Process.whereis(supervisor))
-    expected = MapSet.new(children, & &1.id)
+    children = refresh_signing_authority_pair(children)
+    expected_ids = Enum.map(children, & &1.id)
+    expected = MapSet.new(expected_ids)
 
     actual =
       supervisor
@@ -768,28 +770,54 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
 
     missing = MapSet.difference(expected, actual)
 
-    Enum.each(children, fn %{id: id, spec: spec} ->
+    children
+    |> Enum.reverse()
+    |> Enum.each(fn %{id: id, spec: spec} ->
       if MapSet.member?(missing, id) do
         start_child_exact!(supervisor, id, spec)
       end
     end)
 
-    actual =
+    actual_ids =
       supervisor
       |> Supervisor.which_children()
       |> Enum.map(&elem(&1, 0))
-      |> MapSet.new()
 
-    assert MapSet.subset?(expected, actual)
+    assert actual_ids == expected_ids
+
     refute supervisor_has_id?(supervisor, Arbor.Security.ProviderGate) and
              not Enum.any?(children, &(&1.id == Arbor.Security.ProviderGate))
   end
 
+  defp refresh_signing_authority_pair(children) do
+    token = make_ref()
+
+    Enum.map(children, fn
+      %{id: Arbor.Security.SigningAuthorityStateOwner, spec: spec} = child ->
+        start =
+          {Arbor.Security.SigningAuthorityStateOwner, :start_link, [[broker_token: token]]}
+
+        %{child | spec: Map.put(spec, :start, start)}
+
+      %{id: Arbor.Security.SigningAuthorityBroker, spec: spec} = child ->
+        start = {Arbor.Security.SigningAuthorityBroker, :start_link, [[state_owner_token: token]]}
+        %{child | spec: Map.put(spec, :start, start)}
+
+      child ->
+        child
+    end)
+  end
+
   defp start_child_exact!(supervisor, id, spec) do
     case Supervisor.start_child(supervisor, spec) do
-      {:ok, _pid} -> :ok
-      {:ok, _pid, _info} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+      {:ok, _pid} ->
+        :ok
+
+      {:ok, _pid, _info} ->
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        :ok
 
       {:error, :already_present} ->
         :ok = Supervisor.delete_child(supervisor, id)
@@ -824,7 +852,7 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
     Enum.each(@named_stores, fn name ->
       case Map.fetch!(named, name) do
         :absent ->
-          refute classify_named_process(name, Arbor.Security.Supervisor) == :independent
+          assert classify_named_process(name, Arbor.Security.Supervisor) == :absent
 
         expected ->
           assert classify_named_process(name, Arbor.Security.Supervisor) == expected
@@ -866,7 +894,9 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
   end
 
   defp already_started_pid?({:already_started, pid}, squat_pid) when pid == squat_pid, do: true
-  defp already_started_pid?({:shutdown, inner}, squat_pid), do: already_started_pid?(inner, squat_pid)
+
+  defp already_started_pid?({:shutdown, inner}, squat_pid),
+    do: already_started_pid?(inner, squat_pid)
 
   defp already_started_pid?({:failed_to_start_child, _id, inner}, squat_pid) do
     already_started_pid?(inner, squat_pid)
