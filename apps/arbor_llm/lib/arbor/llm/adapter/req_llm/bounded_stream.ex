@@ -582,6 +582,65 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   end
 
   defp decode_provider_event(event, state) do
+    {chunks, provider_state} = decode_via_provider(event, state)
+    {recover_partial_tool_arguments(chunks, event), provider_state}
+  end
+
+  # ReqLLM's OpenAI-compatible decoder drops a tool-call delta's `arguments`
+  # when the provider packs `name` and an in-progress fragment into the same
+  # delta. Its clause runs `Jason.decode/1` on the partial, fails, and falls
+  # back to `tool_call(name, %{})` — the fragment is discarded. OpenAI proper
+  # sends `arguments: ""` there, so nothing is lost; a provider that sends
+  # `{\"` loses the object's opening bytes and assembly later fails as
+  # `{:invalid_tool_arguments, {:invalid_json, :malformed}}`. Re-emit the
+  # fragment so finalize_fragments/2 can rebuild the arguments. The recovered
+  # fragment still passes through collect_fragment/3, so it stays bounded.
+  defp recover_partial_tool_arguments(chunks, %{data: data}) when is_map(data) do
+    case dropped_argument_fragments(data, chunks) do
+      [] -> chunks
+      recovered -> chunks ++ recovered
+    end
+  end
+
+  defp recover_partial_tool_arguments(chunks, _event), do: chunks
+
+  defp dropped_argument_fragments(data, chunks) do
+    data
+    |> Map.get("choices")
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      %{"delta" => %{"tool_calls" => tool_calls}} when is_list(tool_calls) -> tool_calls
+      _ -> []
+    end)
+    |> Enum.filter(&partial_arguments_dropped?(&1, chunks))
+    |> Enum.map(fn %{"index" => index, "function" => %{"arguments" => fragment}} ->
+      ReqLLM.StreamChunk.meta(%{tool_call_args: %{index: index, fragment: fragment}})
+    end)
+  end
+
+  defp partial_arguments_dropped?(
+         %{"index" => index, "function" => %{"name" => name, "arguments" => fragment}},
+         chunks
+       )
+       when is_integer(index) and is_binary(name) and is_binary(fragment) and fragment != "" do
+    emitted_empty_tool_call?(chunks, index) and not complete_json?(fragment)
+  end
+
+  defp partial_arguments_dropped?(_tool_call, _chunks), do: false
+
+  defp emitted_empty_tool_call?(chunks, index) do
+    Enum.any?(chunks, fn
+      %ReqLLM.StreamChunk{type: :tool_call, arguments: arguments, metadata: %{index: ^index}} ->
+        arguments == %{}
+
+      _ ->
+        false
+    end)
+  end
+
+  defp complete_json?(fragment), do: match?({:ok, _}, Jason.decode(fragment))
+
+  defp decode_via_provider(event, state) do
     cond do
       function_exported?(state.provider, :decode_stream_event, 3) ->
         state.provider.decode_stream_event(event, state.model, state.provider_state)

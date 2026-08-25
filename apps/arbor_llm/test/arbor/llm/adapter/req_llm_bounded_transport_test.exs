@@ -483,6 +483,52 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     end
   end
 
+  test "regression: a tool-call delta packing name with a partial argument fragment still assembles" do
+    # The provider packs `name` and the object's opening bytes into one delta.
+    # ReqLLM's decoder runs Jason.decode/1 on that partial, fails, and falls
+    # back to tool_call(name, %{}) — dropping the `{"`. Later deltas carry no
+    # name, so they accumulate normally, and assembly then sees
+    # `query":"onboarding"}` and rejects it as malformed. Assert on the
+    # ASSEMBLED arguments: "no error event" alone passes even while the
+    # opening fragment is being dropped.
+    deltas = [
+      ~s({"index":0,"id":"call_1","type":"function","function":{"name":"memory_recall","arguments":"{\\""}}),
+      ~s({"index":0,"function":{"arguments":"query\\":\\""}}),
+      ~s({"index":0,"function":{"arguments":"onboarding"}}),
+      ~s({"index":0,"function":{"arguments":"\\"}"}})
+    ]
+
+    payload =
+      Enum.map_join(deltas, "", fn delta ->
+        ~s(data: {"id":"abc","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[#{delta}]}}]}\n\n)
+      end) <> "data: [DONE]\n\n"
+
+    {url, server} = start_chunked_server([payload], 0)
+
+    assert {:ok, stream} = Client.stream(req_llm_client(), request(), transport_opts(url))
+    events = Enum.to_list(stream)
+
+    refute Enum.any?(events, &match?(%StreamEvent{type: :error}, &1)),
+           "tool-call assembly failed: #{inspect(events)}"
+
+    assembled =
+      events
+      |> Enum.flat_map(fn
+        %StreamEvent{data: %{tool_call_args: %{index: 0, fragment: fragment}}} -> [fragment]
+        _ -> []
+      end)
+      |> Enum.join()
+
+    # Pre-fix this is `query":"onboarding"}` — the opening `{"` never survives
+    # ReqLLM's failed Jason.decode/1 on the first delta.
+    assert assembled == ~s({"query":"onboarding"}),
+           "tool arguments did not reassemble; got: #{inspect(assembled)}"
+
+    assert {:ok, %{"query" => "onboarding"}} = Jason.decode(assembled)
+
+    _ = Task.await(server, 2_000)
+  end
+
   defp request do
     %Request{
       provider: "lm_studio",
