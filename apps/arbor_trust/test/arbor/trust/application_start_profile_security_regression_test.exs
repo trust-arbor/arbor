@@ -19,6 +19,18 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     [{:egress_mode, :auto} | :not_a_keyword],
     [:egress_mode, :auto]
   ]
+  @malformed_proper_keyword_opts [
+    [egress_tier: :absent],
+    [egress_mode: :absent],
+    [security_ceilings: :absent],
+    [allow_permissive_baseline: :absent],
+    [egress_mode: "allow"],
+    [egress_mode: nil],
+    [security_ceilings: []],
+    [security_ceilings: %{"arbor://shell" => :absent}],
+    [security_ceilings: %{:atom_key => :ask}],
+    [allow_permissive_baseline: 1]
+  ]
   @provider_names [
     Arbor.Trust.Manager,
     Arbor.Trust.Store,
@@ -385,6 +397,76 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              error: :malformed_policy_opts,
              effective_mode: :block
            } = Policy.explain(unknown, resource, egress_tier: :cloud)
+  end
+
+  test "security regression: :absent egress tier fails closed before Security" do
+    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
+    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+
+    on_exit(fn ->
+      restore_security_env(:egress_gate_enforcing, previous_enforcing)
+    end)
+
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    unknown = "agent_absent_tier_#{System.unique_integer([:positive])}"
+
+    refute :absent in Classification.egress_tiers()
+
+    assert {:error, {:egress_blocked, :absent, :malformed_policy_opts}} =
+             Arbor.Trust.authorize_egress(unknown, :absent)
+
+    assert {:error, :malformed_policy_opts} =
+             Arbor.Trust.authorize(unknown, "arbor://ai/generate", :execute,
+               egress_tier: :absent,
+               verify_identity: false
+             )
+  end
+
+  test "security regression: supplied :absent and malformed proper-keyword values fail closed" do
+    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
+    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+
+    on_exit(fn ->
+      restore_security_env(:egress_gate_enforcing, previous_enforcing)
+    end)
+
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    unknown = "agent_absent_opts_#{System.unique_integer([:positive])}"
+    resource = "arbor://ai/generate"
+
+    Enum.each(@malformed_proper_keyword_opts, fn opts ->
+      assert {:error, :malformed_policy_opts} =
+               Arbor.Trust.authorize(
+                 unknown,
+                 resource,
+                 :execute,
+                 opts ++ [verify_identity: false]
+               )
+
+      unless opts == [egress_tier: :absent] do
+        assert {:error, {:egress_blocked, :external_provider, :malformed_policy_opts}} =
+                 Arbor.Trust.authorize_egress(unknown, :external_provider, opts)
+      end
+
+      assert Policy.effective_mode(unknown, resource, opts) == :block
+
+      assert %{error: :malformed_policy_opts, effective_mode: :block} =
+               Policy.explain(unknown, resource, opts)
+    end)
+
+    assert Policy.effective_mode(unknown, "arbor://shell/exec/ls") == :ask
+
+    assert Policy.effective_mode(unknown, "arbor://shell/exec/ls", security_ceilings: %{}) ==
+             :ask
+
+    assert Policy.effective_mode(unknown, "arbor://shell/exec/ls",
+             allow_permissive_baseline: false
+           ) == :ask
+
+    assert Arbor.Trust.authorize_egress(unknown, :external_provider) ==
+             {:requires_approval, :egress}
+
+    assert Policy.tighten_public_opts(unknown, []) == {:ok, []}
   end
 
   defp ensure_security_children do

@@ -387,11 +387,11 @@ defmodule Arbor.Trust.Policy do
           {:ok, keyword()} | {:error, :malformed_policy_opts}
   def tighten_public_opts(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
     with :ok <- admit_public_opts(opts) do
-      case Keyword.get(opts, :egress_tier, :absent) do
-        :absent ->
+      case Keyword.fetch(opts, :egress_tier) do
+        :error ->
           {:ok, opts}
 
-        tier ->
+        {:ok, tier} ->
           host_mode = egress_mode(agent_id, tier)
           caller_mode = caller_egress_mode(opts)
           tightened = ProfileResolver.most_restrictive([host_mode, caller_mode])
@@ -450,12 +450,13 @@ defmodule Arbor.Trust.Policy do
     end
   end
 
+  # Option presence is Keyword.fetch/2; a supplied value is never treated as omitted.
   defp admit_public_opts(opts) do
     if Keyword.keyword?(opts) do
-      with :ok <- admit_optional_ceiling_map(Keyword.get(opts, :security_ceilings, :absent)),
-           :ok <- admit_optional_boolean(Keyword.get(opts, :allow_permissive_baseline, :absent)),
-           :ok <- admit_optional_mode(Keyword.get(opts, :egress_mode, :absent)),
-           :ok <- admit_optional_egress_tier(Keyword.get(opts, :egress_tier, :absent)) do
+      with :ok <- admit_optional_ceiling_map(Keyword.fetch(opts, :security_ceilings)),
+           :ok <- admit_optional_boolean(Keyword.fetch(opts, :allow_permissive_baseline)),
+           :ok <- admit_optional_mode(Keyword.fetch(opts, :egress_mode)),
+           :ok <- admit_optional_egress_tier(Keyword.fetch(opts, :egress_tier)) do
         :ok
       end
     else
@@ -463,9 +464,9 @@ defmodule Arbor.Trust.Policy do
     end
   end
 
-  defp admit_optional_ceiling_map(:absent), do: :ok
+  defp admit_optional_ceiling_map(:error), do: :ok
 
-  defp admit_optional_ceiling_map(map) when is_map(map) do
+  defp admit_optional_ceiling_map({:ok, map}) when is_map(map) do
     valid? =
       Enum.all?(map, fn {key, value} ->
         is_binary(key) and byte_size(key) > 0 and value in [:block, :ask, :allow, :auto]
@@ -474,21 +475,23 @@ defmodule Arbor.Trust.Policy do
     if valid?, do: :ok, else: :error
   end
 
-  defp admit_optional_ceiling_map(_map), do: :error
+  defp admit_optional_ceiling_map(_fetched), do: :error
 
-  defp admit_optional_boolean(:absent), do: :ok
-  defp admit_optional_boolean(value) when is_boolean(value), do: :ok
-  defp admit_optional_boolean(_value), do: :error
+  defp admit_optional_boolean(:error), do: :ok
+  defp admit_optional_boolean({:ok, value}) when is_boolean(value), do: :ok
+  defp admit_optional_boolean(_fetched), do: :error
 
-  defp admit_optional_mode(:absent), do: :ok
-  defp admit_optional_mode(mode) when mode in [:block, :ask, :allow, :auto], do: :ok
-  defp admit_optional_mode(_mode), do: :error
+  defp admit_optional_mode(:error), do: :ok
+  defp admit_optional_mode({:ok, mode}) when mode in [:block, :ask, :allow, :auto], do: :ok
+  defp admit_optional_mode(_fetched), do: :error
 
-  defp admit_optional_egress_tier(:absent), do: :ok
+  defp admit_optional_egress_tier(:error), do: :ok
 
-  defp admit_optional_egress_tier(tier) do
+  defp admit_optional_egress_tier({:ok, tier}) do
     if tier in Classification.egress_tiers(), do: :ok, else: :error
   end
+
+  defp admit_optional_egress_tier(_fetched), do: :error
 
   defp get_profile(agent_id) do
     if trust_available?() do
