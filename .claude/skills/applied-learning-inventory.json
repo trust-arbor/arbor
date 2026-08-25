@@ -8149,7 +8149,7 @@
       "source_date": "2026-08-21",
       "source_incident": "found 2026-08-21 diagnosing Historian hot_projection_failed: modules hot-reloaded and md5-current, but the ETS child still ran with the pre-12:19 args so mode was nil",
       "always_loaded": false,
-      "content_sha256": "fcf3422be6ed09bf5a987d8faf8601ba1ba4adc1c743d306563cb7cc1427738d"
+      "content_sha256": "055debfcec27398ef2d229b674ca04de236c740eeefddc5d413ca5080667f78c"
     },
     {
       "source_ordinal": 663,
