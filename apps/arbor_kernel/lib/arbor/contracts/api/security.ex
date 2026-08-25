@@ -118,6 +118,31 @@ defmodule Arbor.Contracts.API.Security do
           | :authority_not_found
           | :purpose_mismatch
 
+  @type platform_activation_authorization_error ::
+          signing_authority_bootstrap_error()
+          | :invalid_authority
+          | :not_bound
+          | :invalid_boot_profile
+          | :platform_key_id_mismatch
+          | :invalid_public_key
+          | :boot_mismatch
+          | :invalid_transaction
+          | :invalid_context
+          | :forbidden_attribute
+          | :invalid_timestamp
+          | :invalid_validity_window
+          | :invalid_nonce
+          | :invalid_id
+          | :digest_mismatch
+          | :signature_mismatch
+          | :invalid_envelope
+          | :invalid_hash
+          | :invalid_field
+          | :invalid_envelope_shape
+          | :mixed_keys
+          | :invalid_principal
+          | :invalid_generation
+
   @type authorize_opts :: [
           context: map(),
           skip_consensus: boolean(),
@@ -226,6 +251,20 @@ defmodule Arbor.Contracts.API.Security do
             ) ::
               {:ok, SigningAuthority.t()} | {:error, signing_authority_acquisition_error()}
 
+  @doc """
+  Issue a signed Platform activation authorization from a live authority.
+
+  The authority principal must be the boot-derived Platform identity and the
+  purpose must be exactly `:platform_activation`. Boot, key, and issuer fields
+  are taken only from `Arbor.KernelRuntime.boot_profile/0`.
+  """
+  @callback issue_signed_platform_activation_authorization_from_live_authority_and_transaction(
+              SigningAuthority.t(),
+              map(),
+              keyword() | map()
+            ) ::
+              {:ok, map()} | {:error, platform_activation_authorization_error()}
+
   # ===========================================================================
   # Lifecycle
   # ===========================================================================
@@ -245,6 +284,7 @@ defmodule Arbor.Contracts.API.Security do
     issue_signing_authority_bootstrap_from_owner_bound_possession_proof: 2,
     claim_signing_authority_from_bootstrap_for_calling_process: 1,
     close_signing_authority_bootstrap_and_active_authority: 1,
-    open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key: 2
+    open_ephemeral_signing_authority_from_owner_bound_proof_and_private_key: 2,
+    issue_signed_platform_activation_authorization_from_live_authority_and_transaction: 3
   ]
 end

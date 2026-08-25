@@ -10,6 +10,10 @@ defmodule Arbor.Common.Extension.Activation do
   alias Arbor.Common.Extension.ActivationCore
   alias Arbor.Common.ExtensionEnvelopes
   alias Arbor.Contracts.Extension.Envelope
+  alias Arbor.Contracts.Security.Identity
+
+  @bound_opt_keys [:now, :consumed_nonces, :revoked]
+  @sha256_re ~r/\A[0-9a-f]{64}\z/
 
   @doc "Returns an empty activation machine."
   @spec new() :: ActivationCore.state()
@@ -65,6 +69,170 @@ defmodule Arbor.Common.Extension.Activation do
   @doc "Roll back a staged or authorized transaction."
   @spec rollback(ActivationCore.state()) :: {:ok, ActivationCore.state()} | {:error, String.t()}
   def rollback(state) when is_map(state), do: ActivationCore.rollback(state)
+
+  @doc false
+  @spec authorize_bound(ActivationCore.state(), term(), map(), keyword()) ::
+          {:ok, ActivationCore.state(), [term()]} | {:error, String.t()}
+  def authorize_bound(state, document, snapshot, opts \\ [])
+
+  def authorize_bound(state, document, snapshot, opts)
+      when is_map(state) and is_list(opts) do
+    with :ok <- admit_bound_opts(opts),
+         {:ok, public_key, principal_id, key_id} <- derive_platform_identity(snapshot),
+         {:ok, envelope, authorization} <- admit_signed_platform(document),
+         :ok <- match_wrapper_identity(envelope, authorization, principal_id, key_id),
+         :ok <- match_boot_bindings(authorization, snapshot, state),
+         {:ok, current_digest} <- current_transaction_digest(state),
+         true <- current_digest == authorization["transaction_sha256"],
+         :ok <- verify_platform_signature(envelope, public_key) do
+      ActivationCore.authorize(state, authorization, %{
+        transaction_digest: current_digest,
+        signature_status: :verified,
+        now: now(opts),
+        consumed_nonces: consumed_nonces(opts),
+        boot_profile_digest: snapshot["manifest_sha256"],
+        boot_epoch: snapshot["boot_epoch"],
+        revoked?: Keyword.get(opts, :revoked, false) == true,
+        allow_commit?: false
+      })
+    else
+      false -> {:error, "transaction_mismatch"}
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      {:error, _reason} -> {:error, "malformed"}
+    end
+  end
+
+  def authorize_bound(_state, _document, _snapshot, _opts), do: {:error, "malformed"}
+
+  defp admit_bound_opts(opts) do
+    keys = Keyword.keys(opts)
+
+    cond do
+      not Keyword.keyword?(opts) ->
+        {:error, "malformed"}
+
+      Enum.any?(keys, &(not is_atom(&1))) ->
+        {:error, "malformed"}
+
+      length(keys) != length(Enum.uniq(keys)) ->
+        {:error, "malformed"}
+
+      Enum.any?(keys, &(&1 not in @bound_opt_keys)) ->
+        {:error, "malformed"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp derive_platform_identity(snapshot) when is_map(snapshot) and not is_struct(snapshot) do
+    with {:ok, public_key} <- decode_platform_key(snapshot["platform_public_key"]),
+         key_id = lowercase_sha256(public_key),
+         true <- key_id == snapshot["platform_key_id"],
+         principal_id = Identity.derive_agent_id(public_key) do
+      {:ok, public_key, principal_id, key_id}
+    else
+      false -> {:error, "authorization_invalid"}
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _ -> {:error, "boot_mismatch"}
+    end
+  end
+
+  defp derive_platform_identity(_snapshot), do: {:error, "boot_mismatch"}
+
+  defp decode_platform_key(hex) when is_binary(hex) do
+    if String.valid?(hex) and Regex.match?(@sha256_re, hex) do
+      case Base.decode16(hex, case: :lower) do
+        {:ok, bytes} when byte_size(bytes) == 32 -> {:ok, bytes}
+        _ -> {:error, "authorization_invalid"}
+      end
+    else
+      {:error, "authorization_invalid"}
+    end
+  end
+
+  defp decode_platform_key(_hex), do: {:error, "authorization_invalid"}
+
+  defp admit_signed_platform(%{"schema" => "arbor.extension.signed_envelope.v1"} = document) do
+    with {:ok, envelope} <- Envelope.validate_signed(document),
+         {:ok, :activation_authorization} <- Envelope.kind_from_domain(envelope["domain"]),
+         {:ok, authorization} <-
+           Envelope.validate(:activation_authorization, envelope["payload"]) do
+      {:ok, envelope, authorization}
+    else
+      :error -> {:error, "malformed"}
+      {:ok, _other} -> {:error, "authorization_invalid"}
+      {:error, :digest_mismatch} -> {:error, "authorization_invalid"}
+      {:error, :signature_mismatch} -> {:error, "authorization_invalid"}
+      {:error, _reason} -> {:error, "malformed"}
+    end
+  end
+
+  defp admit_signed_platform(document) when is_map(document) do
+    case Envelope.validate(:activation_authorization, document) do
+      {:ok, _authorization} -> {:error, "authorization_absent"}
+      {:error, _reason} -> {:error, "malformed"}
+    end
+  end
+
+  defp admit_signed_platform(_document), do: {:error, "malformed"}
+
+  defp match_wrapper_identity(envelope, authorization, principal_id, key_id) do
+    cond do
+      envelope["issuer_id"] != principal_id or authorization["issuer_id"] != principal_id ->
+        {:error, "principal_denied"}
+
+      envelope["key_id"] != key_id or authorization["key_id"] != key_id ->
+        {:error, "authorization_invalid"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp match_boot_bindings(authorization, snapshot, %{transaction: transaction})
+       when is_map(transaction) do
+    cond do
+      authorization["boot_profile_sha256"] != snapshot["manifest_sha256"] ->
+        {:error, "boot_mismatch"}
+
+      transaction["boot_profile_sha256"] != snapshot["manifest_sha256"] ->
+        {:error, "boot_mismatch"}
+
+      transaction["boot_profile_id"] != snapshot["profile_id"] ->
+        {:error, "boot_mismatch"}
+
+      authorization["boot_epoch"] != snapshot["boot_epoch"] ->
+        {:error, "generation_mismatch"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp match_boot_bindings(_authorization, _snapshot, _state), do: {:error, "not_ready"}
+
+  defp current_transaction_digest(%{transaction: transaction, transaction_digest: stored})
+       when is_map(transaction) and is_binary(stored) do
+    case Envelope.digest_of(transaction) do
+      {:ok, ^stored} -> {:ok, stored}
+      {:ok, _other} -> {:error, "transaction_mismatch"}
+      {:error, _reason} -> {:error, "malformed"}
+    end
+  end
+
+  defp current_transaction_digest(_state), do: {:error, "not_ready"}
+
+  defp verify_platform_signature(envelope, public_key) do
+    case verify_signature(envelope, public_key) do
+      :verified -> :ok
+      _ -> {:error, "authorization_invalid"}
+    end
+  end
+
+  defp lowercase_sha256(bytes) do
+    Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+  end
 
   defp admit_authorization(%{"schema" => "arbor.extension.signed_envelope.v1"} = document, opts) do
     with {:ok, envelope} <- Envelope.validate_signed(document),

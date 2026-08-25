@@ -71,6 +71,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.DisclosureCapability
   alias Arbor.Security.EgressGate
   alias Arbor.Security.Events
+  alias Arbor.Security.Extension.PlatformActivationAuthorization
   alias Arbor.Security.ExtensionEnvelopes
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
@@ -3103,6 +3104,48 @@ defmodule Arbor.Security do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Issue a canonical signed Platform activation authorization.
+
+  Requires an already acquired owner-scoped signing authority whose principal
+  is the boot-derived Platform identity and whose purpose is exactly
+  `:platform_activation`. Issuer, key, boot digest, profile id, epoch, and
+  validity bounds are taken only from `Arbor.KernelRuntime.boot_profile/0`.
+
+  `context` is a closed atom-keyed map or keyword with exactly:
+
+      %{
+        audience_host_id: binary,
+        audience_install_id: binary,
+        issued_at: binary,
+        expires_at: binary,
+        nonce: binary
+      }
+
+  Caller-supplied boot, key, issuer, transaction digest, or private material
+  is rejected. Success returns a validated `arbor.extension.signed_envelope.v1`
+  wrapping `arbor.extension.activation_authorization.v1` after detached
+  Ed25519 verification against the boot-bound Platform public key.
+  """
+  @spec issue_platform_activation_authorization(term(), term(), term()) ::
+          {:ok, map()} | {:error, SecurityContract.platform_activation_authorization_error()}
+  def issue_platform_activation_authorization(authority, transaction, context) do
+    issue_signed_platform_activation_authorization_from_live_authority_and_transaction(
+      authority,
+      transaction,
+      context
+    )
+  end
+
+  @impl Arbor.Contracts.API.Security
+  def issue_signed_platform_activation_authorization_from_live_authority_and_transaction(
+        authority,
+        transaction,
+        context
+      ) do
+    PlatformActivationAuthorization.issue(authority, transaction, context)
   end
 
   defp fetch_acquisition_purpose(opts) do

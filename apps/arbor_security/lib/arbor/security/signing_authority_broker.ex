@@ -368,6 +368,22 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  @doc false
+  @spec sign_detached(SigningAuthority.t(), binary()) :: {:ok, binary()} | {:error, term()}
+  def sign_detached(authority, message) when is_binary(message) and byte_size(message) > 0 do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:sign_detached, canonical, message})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def sign_detached(authority, _message) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc """
   Derive a domain-separated secret from a live authority.
   """
@@ -751,6 +767,18 @@ defmodule Arbor.Security.SigningAuthorityBroker do
            {:ok, entry} <- authorize_authority(authority, state),
            {:ok, private_key} <- private_key_for(entry, authority.token, state) do
         safely_sign_request(payload, entry.principal_id, private_key)
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:sign_detached, authority, message}, _from, state) do
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- require_platform_activation_purpose(entry.purpose),
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        safely_sign_detached(message, private_key)
       end
 
     {:reply, reply, state}
@@ -1898,12 +1926,32 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  defp require_platform_activation_purpose(:platform_activation), do: :ok
+
+  defp require_platform_activation_purpose(_purpose), do: {:error, :purpose_mismatch}
+
   defp safely_sign_request(payload, principal_id, private_key) do
     try do
       case SignedRequest.sign(payload, principal_id, private_key) do
         {:ok, %SignedRequest{} = signed} -> {:ok, signed}
         {:error, _reason} -> {:error, :signing_failed}
         _unexpected -> {:error, :signing_failed}
+      end
+    rescue
+      _ -> {:error, :signing_failed}
+    catch
+      :exit, _ -> {:error, :signing_failed}
+    end
+  end
+
+  defp safely_sign_detached(message, private_key) do
+    try do
+      signature = Crypto.sign(message, private_key)
+
+      if is_binary(signature) and byte_size(signature) == 64 do
+        {:ok, signature}
+      else
+        {:error, :signing_failed}
       end
     rescue
       _ -> {:error, :signing_failed}
