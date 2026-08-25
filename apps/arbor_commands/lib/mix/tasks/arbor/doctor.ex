@@ -81,9 +81,15 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   @impl Mix.Task
   def run(args) do
-    {opts, _, _} =
+    # `strict:`, not `switches:`. With `switches:`, OptionParser DISCARDS an
+    # unrecognized flag entirely — `parse(["--bogus"], switches: [...])` returns
+    # `{[], [], []}`, so it appears in neither opts, argv, nor invalid. A
+    # mistyped or unsupported flag was therefore a silent no-op: the task ran
+    # with its defaults, wrote a config, and reported success while ignoring
+    # what the operator asked for. `parse_strict/2` surfaces them in `invalid`.
+    {opts, _rest, invalid} =
       OptionParser.parse(args,
-        switches: [
+        strict: [
           refresh: :boolean,
           json: :boolean,
           verbose: :boolean,
@@ -96,6 +102,16 @@ defmodule Mix.Tasks.Arbor.Doctor do
           refresh_models: :boolean
         ]
       )
+
+    # OptionParser drops unrecognized switches into `invalid` and carries on.
+    # Discarding that made a mistyped or unsupported flag a SILENT no-op: the
+    # task ran with its defaults, wrote a config, and reported success while
+    # ignoring what the operator actually asked for. That is how
+    # `--provider opencode_zen` appeared to work before the flag existed.
+    unless invalid == [] do
+      names = Enum.map_join(invalid, ", ", fn {name, _value} -> name end)
+      Mix.raise("Unknown option(s) for mix arbor.doctor: #{names}")
+    end
 
     # Start minimal deps for provider discovery
     Application.ensure_all_started(:req)
