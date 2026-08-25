@@ -158,6 +158,46 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     end
   end
 
+  test "OpenAI tool-call argument fragments are not rejected as malformed envelope JSON" do
+    envelopes = [
+      ~s({"id":"abc","object":"chat.completion.chunk","created":1787635097,"model":"x-preview-f-free","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_b0bcac3972eb44eb92165a9d","type":"function","function":{"name":"memory_recall","arguments":"{\\""}}]}}]}),
+      Jason.encode!(%{
+        "id" => "abc",
+        "object" => "chat.completion.chunk",
+        "created" => 1,
+        "model" => "m",
+        "choices" => [
+          %{
+            "index" => 0,
+            "delta" => %{
+              "tool_calls" => [
+                %{
+                  "index" => 0,
+                  "id" => "call_empty",
+                  "type" => "function",
+                  "function" => %{"name" => "memory_recall", "arguments" => ""}
+                }
+              ]
+            }
+          }
+        ]
+      })
+    ]
+
+    for data <- envelopes do
+      payload = "data: #{data}\n\ndata: [DONE]\n\n"
+      {url, server} = start_chunked_server([payload], 0)
+
+      assert {:ok, stream} = Client.stream(req_llm_client(), request(), transport_opts(url))
+      events = Enum.to_list(stream)
+
+      refute Enum.any?(events, &match?(%StreamEvent{type: :error}, &1)),
+             "stream rejected a valid tool-call envelope: #{inspect(events)}"
+
+      _ = Task.await(server, 2_000)
+    end
+  end
+
   test "reassembles OpenAI SSE JSON split across one-byte HTTP chunks including [DONE] and cost trailer" do
     json = Jason.encode!(%{"choices" => [%{"delta" => %{"content" => "hello"}}]})
     cost = Jason.encode!(%{"choices" => [], "cost" => "0"})

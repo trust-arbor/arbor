@@ -848,3 +848,36 @@ drain trace delivery before terminating the tracer. Otherwise randomized test
 order can make a security regression pass or fail according to which module an
 earlier test happened to load (found 2026-08-23 during P1A-1 cross-app
 validation).
+
+<!-- applied-learning: compile-selected-test-modules-before-declaring-a-candidate-review-ready -->
+<a id="applied-learning-compile-selected-test-modules-before-declaring-a-candidate-review-ready"></a>
+**Compile selected test modules before declaring a candidate review-ready.**
+Warning-strict `mix compile` proves production modules, not `test/**/*.exs`; an
+invalid test pattern or helper call can survive that gate and consume council work
+before the later validation stage discovers it. Run the exact selected test files
+under `MIX_ENV=test` (or an equivalent test-module compile gate) before binding
+review. Preserve the full later behavioral run; this cheap gate establishes only
+that the claimed evidence can load (found 2026-08-24 when Packet B called
+`invalid_tag(kind)` inside match patterns).
+
+<!-- applied-learning: signal-test-callbacks-must-not-assume-serialized-delivery -->
+<a id="applied-learning-signal-test-callbacks-must-not-assume-serialized-delivery"></a>
+**Signal test callbacks must not assume serialized delivery.** `Arbor.Signals`
+subscriptions are asynchronous by default, so two emissions can invoke the same
+handler concurrently. A `:counters.add` followed by `:counters.get == 1` is not an
+atomic first-event claim: both callbacks may observe the final count and skip the
+capture. For order-sensitive assertions, subscribe with `async: false` or use an
+atomic accumulator; do not infer callback order from a shared counter (found
+2026-08-24 when Packet B's clamped-timeout test observed both correct signals but
+left its first-event Agent unset).
+
+<!-- applied-learning: nested-real-process-tests-need-an-explicit-compatible-exunit-timeout -->
+<a id="applied-learning-nested-real-process-tests-need-an-explicit-compatible-exunit-timeout"></a>
+**Nested real-process tests need an explicit compatible ExUnit timeout.** An
+outer contained child can have minutes of valid capacity while ExUnit still kills
+one test at its default 60 seconds. Align the test/module timeout with the reviewed
+nested operation profile plus cleanup reserve, and prove descendants terminate when
+the test owner dies. Otherwise infrastructure is reported as ordinary
+`tests_failed`, correctly enters implementation rework, and pressures the worker to
+change unrelated product code (found 2026-08-24 when a cold `TestMixShell` fixture
+outlived `Arbor.Actions.MixTest`'s default timeout in CrossApp batch 18).

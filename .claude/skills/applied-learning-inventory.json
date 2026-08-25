@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 672,
+  "entry_count": 680,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -5664,8 +5664,8 @@
       "destination": ".claude/skills/applied-learning-providers-oauth.md",
       "anchor": "applied-learning-streamed-function-call-arguments-are-not-terminal-json-until-the-protocol-says-the-item-is-done",
       "source_date": "2026-07-20",
-      "source_incident": "found 2026-07-20 reproducing the xAI council reviewer failure against the raw SSE stream).",
-      "content_sha256": "5fea29e4167f81e06096baa08d7b0ad751e7fed22a2a8ca70629a1de93d137c4",
+      "source_incident": "found 2026-07-20 reproducing the xAI council reviewer failure against the raw SSE stream; recurred 2026-08-25 on BoundedStream OpenCode Zen tool-call chunks).",
+      "content_sha256": "eebe9eb46eaff99e1c79544c7e37eb1decf262a2200df8d472c246385078d028",
       "always_loaded": false
     },
     {
@@ -8280,8 +8280,112 @@
       "source_incident": "found 2026-08-25 keyless streaming",
       "always_loaded": false,
       "content_sha256": "89868a145a199723ac4b13c39dbd27ef12ab7d4a95b6d982523484331c0b534a"
+    },
+    {
+      "source_ordinal": 673,
+      "source_kind": "post-migration",
+      "slug": "verify-retained-candidate-ancestry-before-defining-a-replay-range",
+      "title": "Verify retained-candidate ancestry before defining a replay range.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-verify-retained-candidate-ancestry-before-defining-a-replay-range",
+      "source_date": "2026-08-23",
+      "source_incident": "found 2026-08-23 while reconstructing the contract-change stack",
+      "always_loaded": false,
+      "content_sha256": "021c6f0db390c82d6b3492e6dd6afb7aeec1103dd46f2a5e671ef31b6c839c3c"
+    },
+    {
+      "source_ordinal": 674,
+      "source_kind": "post-migration",
+      "slug": "a-complete-test-artifact-does-not-overrule-process-capacity-exhaustion",
+      "title": "A complete test artifact does not overrule process capacity exhaustion.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-a-complete-test-artifact-does-not-overrule-process-capacity-exhaustion",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 when SecurityRegression passed 49 selected candidate tests under a standard child ceiling but timed out before the base leg",
+      "always_loaded": false,
+      "content_sha256": "0901ab0dd8803d4e1206d277561698177b2f9842e8b60cc6023ef431c9d09a1e"
+    },
+    {
+      "source_ordinal": 675,
+      "source_kind": "post-migration",
+      "slug": "prefer-the-retained-candidate-verifier-over-implementation-replay",
+      "title": "Prefer the retained-candidate verifier over implementation replay.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-prefer-the-retained-candidate-verifier-over-implementation-replay",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 while recovering the checkpoint-policy candidate after validation capacity exhaustion",
+      "always_loaded": false,
+      "content_sha256": "950ff0f9077dd39fbb5258b9d9e92e9324d4f469a1e18ab691e0883af56416ff"
+    },
+    {
+      "source_ordinal": 676,
+      "source_kind": "post-migration",
+      "slug": "distinguish-live-runtime-binding-drift-from-a-nested-manifest-defect",
+      "title": "Distinguish live runtime binding drift from a nested-manifest defect.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-distinguish-live-runtime-binding-drift-from-a-nested-manifest-defect",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 when Packet B crossed a live LlmHandler upgrade",
+      "always_loaded": false,
+      "content_sha256": "90ea532b6a9bd726aca586c058a02d544da59a88de5d4ed43109f703f5abab65"
+    },
+    {
+      "source_ordinal": 677,
+      "source_kind": "post-migration",
+      "slug": "compile-selected-test-modules-before-declaring-a-candidate-review-ready",
+      "title": "Compile selected test modules before declaring a candidate review-ready.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-compile-selected-test-modules-before-declaring-a-candidate-review-ready",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 when Packet B called invalid_tag(kind) inside match patterns",
+      "always_loaded": false,
+      "content_sha256": "0e5773dc56f3bff1fac20973573d0093d17edfc392586c01fd74a41753b75e69"
+    },
+    {
+      "source_ordinal": 678,
+      "source_kind": "post-migration",
+      "slug": "signal-test-callbacks-must-not-assume-serialized-delivery",
+      "title": "Signal test callbacks must not assume serialized delivery.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-signal-test-callbacks-must-not-assume-serialized-delivery",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 when Packet B observed both correct timeout signals but left its first-event Agent unset",
+      "always_loaded": false,
+      "content_sha256": "049a79c1db1fe879ea3ba33cf48a2832a48d91f649f3b4a2f67333831c923b31"
+    },
+    {
+      "source_ordinal": 679,
+      "source_kind": "post-migration",
+      "slug": "nested-real-process-tests-need-an-explicit-compatible-exunit-timeout",
+      "title": "Nested real-process tests need an explicit compatible ExUnit timeout.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-nested-real-process-tests-need-an-explicit-compatible-exunit-timeout",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 when a cold TestMixShell fixture outlived Arbor.Actions.MixTest's default timeout in CrossApp batch 18",
+      "always_loaded": false,
+      "content_sha256": "ab8d2a2602890dbfb989ecf78a72de5701e8e96e19bdc8f78be57dbbabc5b385"
+    },
+    {
+      "source_ordinal": 680,
+      "source_kind": "post-migration",
+      "slug": "local-oidc-http-issuers-need-allow-http-wired-through-runtime-config",
+      "title": "Local OIDC HTTP issuers need `allow_http` wired through runtime config.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-local-oidc-http-issuers-need-allow-http-wired-through-runtime-config",
+      "source_date": "2026-08-24",
+      "source_incident": "found 2026-08-24 launching local Zitadel",
+      "always_loaded": false,
+      "content_sha256": "10dc0bd82fd58a4399b958a82510bf5529ee88e06c708d864f2c4e642e27cf43"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 211
+  "post_migration_entry_count": 219
 }

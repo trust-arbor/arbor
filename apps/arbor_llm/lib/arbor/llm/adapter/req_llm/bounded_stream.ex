@@ -500,6 +500,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   defp process_provider_event(_event, state),
     do: {:error, {:invalid_stream_json, {:invalid_json, :binary_body_required}}, state}
 
+  # Envelope-only decode: OpenAI-style tool-call deltas carry a `function`
+  # map with `name` plus an in-progress `arguments` fragment (`""` or `{"`).
+  # `decode_json_with_measurements/2` treats that pair as complete nested JSON
+  # and rejects the event. Bound the envelope here; `process/2` validates
+  # assembled argument JSON when fragments are finalized.
   defp decode_sse_json_event(event, data, state) do
     json_limits = json_limits(state.limits, state.limits.max_event_bytes)
 
@@ -507,7 +512,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          {:ok, preflight} <- ResponseBudget.preflight_json(data, json_limits),
          {:ok, state} <- add_measurements(state, preflight),
          {:ok, decoded, retained} <-
-           ResponseBudget.decode_json_with_measurements(data, json_limits),
+           ResponseBudget.decode_json_source_with_measurements(data, json_limits),
          {:ok, state} <- add_measurements(state, measurement_delta(retained, preflight)) do
       event = %{event | data: decoded}
       state = if termination_data?(decoded), do: %{state | terminal?: true}, else: state
@@ -529,7 +534,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     Logger.warning(
       "[BoundedStream] SSE event rejected: #{inspect(reason)} " <>
         "bytes=#{byte_size(data)} limits=#{inspect(json_limits)} " <>
-        "head=#{inspect(binary_part(data, 0, min(80, byte_size(data))))}"
+        "newlines=#{length(String.split(data, "\n")) - 1} " <>
+        "head=#{inspect(binary_part(data, 0, min(400, byte_size(data))))}"
     )
   end
 

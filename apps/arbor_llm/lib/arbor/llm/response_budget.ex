@@ -136,6 +136,9 @@ defmodule Arbor.LLM.ResponseBudget do
 
   def preflight_json(_body, _opts), do: {:error, {:invalid_json, :binary_body_required}}
 
+  # Complete-payload decoder: envelope JSON plus nested tool-argument JSON.
+  # Rejects in-progress `arguments` fragments. Use for complete HTTP bodies
+  # and terminal tool-argument strings, not streaming SSE envelopes.
   @doc false
   @spec decode_json_with_measurements(binary(), keyword()) ::
           {:ok, term(), map()} | {:error, term()}
@@ -153,6 +156,9 @@ defmodule Arbor.LLM.ResponseBudget do
   def decode_json_with_measurements(_body, _opts),
     do: {:error, {:invalid_json, :binary_body_required}}
 
+  # Envelope-only decoder: agrees with `preflight_json/2` and `JSON.decode/1`
+  # on what counts as JSON. Streaming SSE events use this so in-progress
+  # tool-call argument fragments are not treated as nested JSON.
   @doc false
   @spec decode_json_source_with_measurements(binary(), keyword()) ::
           {:ok, term(), map()} | {:error, term()}
