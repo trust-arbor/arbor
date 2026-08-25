@@ -45,8 +45,19 @@ initial_thoughts:
 metadata:
   category: "conversational"
   context_management: "heuristic"
-  model: "openai/gpt-oss-120b:free"
-  provider: "openrouter"
+  # No model/provider on purpose. This is the STARTER template — the one
+  # QUICKSTART tells a brand-new user to run — so it must follow whatever
+  # provider they configured, including the keyless OpenCode Zen free tier.
+  #
+  # `Mix.Tasks.Arbor.Agent.do_start/2` resolves
+  #   opts[:provider] || template metadata.provider || LLMDefaults.default_provider()
+  # so declaring one here OVERRIDES the user's configured default. It used to
+  # name openrouter, which meant a user who had just acknowledged the disclosure
+  # and set ARBOR_DEFAULT_PROVIDER=opencode_zen got an agent demanding an
+  # OPENROUTER_API_KEY they were explicitly told they did not need.
+  #
+  # Specialist templates may still pin a provider — that precedence is
+  # deliberate and stays. A starter template must not.
   version: "1.0.0"
 name: "conversationalist"
 relationship_style:
