@@ -167,8 +167,11 @@ defmodule Arbor.Agent.Executor.DecideCore do
       {:ok, :authorized} ->
         {:execute, intent.action, params, sandbox}
 
-      {:ok, :pending_approval, id} ->
+      {:ok, :pending_approval, id} when is_binary(id) and id != "" ->
         {:ask, resource_uri(intent, state), %{approval_id: id}}
+
+      {:ok, :pending_approval, _id} ->
+        {:block, :missing_approval_id}
 
       {:error, reason} ->
         {:block, reason}

@@ -24,12 +24,17 @@ defmodule Arbor.Agent.ConfigTest do
     original_finalization_timeout =
       Application.get_env(:arbor_agent, :executor_finalization_timeout_ms)
 
+    original_authorizer = Application.get_env(:arbor_agent, :executor_authorizer)
+    original_await = Application.get_env(:arbor_agent, :executor_interaction_await)
+
     on_exit(fn ->
       restore_env(:task_executors, original_executors)
       restore_env(:default_task_executor, original_default)
       restore_env(:executor_callback_timeout_ms, original_callback_timeout)
       restore_env(:executor_readiness_timeout_ms, original_readiness_timeout)
       restore_env(:executor_finalization_timeout_ms, original_finalization_timeout)
+      restore_env(:executor_authorizer, original_authorizer)
+      restore_env(:executor_interaction_await, original_await)
     end)
 
     :ok
@@ -160,6 +165,40 @@ defmodule Arbor.Agent.ConfigTest do
 
     assert {:error, {:invalid_task_executor, "not_a_module", "string_value"}} =
              Config.task_executor("not_a_module")
+  end
+
+  defmodule ValidAuthorizer do
+    def authorize(_agent_id, _resource, _action, _opts), do: {:ok, :authorized}
+  end
+
+  defmodule ValidAwait do
+    def await_interaction_response(_request_id, _agent_id, _opts),
+      do: {:ok, :approved, %{}}
+  end
+
+  test "executor_authorizer/0 defaults to Trust and rejects modules without authorize/4" do
+    Application.delete_env(:arbor_agent, :executor_authorizer)
+    assert Config.executor_authorizer() == Arbor.Trust
+
+    Application.put_env(:arbor_agent, :executor_authorizer, ValidAuthorizer)
+    assert Config.executor_authorizer() == ValidAuthorizer
+
+    Application.put_env(:arbor_agent, :executor_authorizer, NoRunExecutor)
+    assert Config.executor_authorizer() == Arbor.Trust
+
+    Application.put_env(:arbor_agent, :executor_authorizer, "nope")
+    assert Config.executor_authorizer() == Arbor.Trust
+  end
+
+  test "executor_interaction_await/0 defaults to Comms and rejects modules without await/3" do
+    Application.delete_env(:arbor_agent, :executor_interaction_await)
+    assert Config.executor_interaction_await() == Arbor.Comms
+
+    Application.put_env(:arbor_agent, :executor_interaction_await, ValidAwait)
+    assert Config.executor_interaction_await() == ValidAwait
+
+    Application.put_env(:arbor_agent, :executor_interaction_await, NoRunExecutor)
+    assert Config.executor_interaction_await() == Arbor.Comms
   end
 
   test "normalize_kind/1 accepts string and atom forms" do

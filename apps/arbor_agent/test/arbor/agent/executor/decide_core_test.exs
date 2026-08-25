@@ -66,6 +66,20 @@ defmodule Arbor.Agent.Executor.DecideCoreTest do
       refute match?({:block, _}, decision)
     end
 
+    test "pending_approval with a nil or blank id fails closed, not a waiter-less park" do
+      assert {:block, :missing_approval_id} =
+               DecideCore.decide(
+                 act_intent(),
+                 snapshot(%{auth_verdict: {:ok, :pending_approval, nil}})
+               )
+
+      assert {:block, :missing_approval_id} =
+               DecideCore.decide(
+                 act_intent(),
+                 snapshot(%{auth_verdict: {:ok, :pending_approval, ""}})
+               )
+    end
+
     test ":act + {:error, :denied} → {:block, :denied}" do
       assert {:block, :denied} =
                DecideCore.decide(act_intent(), snapshot(%{auth_verdict: {:error, :denied}}))
@@ -199,6 +213,15 @@ defmodule Arbor.Agent.Executor.DecideCoreTest do
              "Executor must pass agent_id in the snapshot/dispatch args, not the process dictionary"
 
       refute src =~ "Process.get(:arbor_executor_agent_id"
+
+      refute src =~ "Arbor.Security.authorize(state.agent_id, resource",
+             "gather_auth must use Trust.authorize (mint + :ask), not a held-cap-only Security pre-check"
+
+      assert src =~ "Config.executor_authorizer",
+             "Executor must gather auth through Config.executor_authorizer/0"
+
+      assert src =~ "Config.executor_interaction_await",
+             "Executor must wait for parked HITL through Config.executor_interaction_await/0"
     end
 
     test "ActionDispatch no longer reads executor identity from the process dictionary" do

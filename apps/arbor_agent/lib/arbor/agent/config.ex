@@ -208,6 +208,53 @@ defmodule Arbor.Agent.Config do
 
   def normalize_kind(_kind), do: {:error, :invalid_task_kind}
 
+  @doc """
+  Module the Executor uses to gather an intent's auth verdict.
+
+  Defaults to `Arbor.Trust` so mintable-but-unheld URIs can be minted and
+  `:ask` can return `{:ok, :pending_approval, id}`. `Arbor.Security.authorize/4`
+  only checks already-held capabilities and would skip that park path.
+
+  A configured module must export `authorize/4`. Anything else falls back to
+  Trust (fail closed to the real kernel, never open).
+  """
+  @spec executor_authorizer() :: module()
+  def executor_authorizer do
+    case Application.get_env(@app, :executor_authorizer, Arbor.Trust) do
+      mod when is_atom(mod) and not is_nil(mod) ->
+        if Code.ensure_loaded?(mod) and function_exported?(mod, :authorize, 4) do
+          mod
+        else
+          Arbor.Trust
+        end
+
+      _ ->
+        Arbor.Trust
+    end
+  end
+
+  @doc """
+  Module the Executor uses to wait for a parked HITL response.
+
+  Defaults to `Arbor.Comms`. A configured module must export
+  `await_interaction_response/3`; anything else falls back to Comms.
+  """
+  @spec executor_interaction_await() :: module()
+  def executor_interaction_await do
+    case Application.get_env(@app, :executor_interaction_await, Arbor.Comms) do
+      mod when is_atom(mod) and not is_nil(mod) ->
+        if Code.ensure_loaded?(mod) and
+             function_exported?(mod, :await_interaction_response, 3) do
+          mod
+        else
+          Arbor.Comms
+        end
+
+      _ ->
+        Arbor.Comms
+    end
+  end
+
   defp lookup_executor(executors, kind) when is_map(executors) and is_binary(kind) do
     Map.get(executors, kind) ||
       Enum.find_value(executors, fn

@@ -27,6 +27,7 @@ defmodule Arbor.Agent.Executor do
 
   use GenServer
 
+  alias Arbor.Agent.Config
   alias Arbor.Agent.Executor.{ActionDispatch, DecideCore}
   alias Arbor.Contracts.Memory.{Intent, Percept}
   alias Arbor.Contracts.Security.SandboxLevel
@@ -429,47 +430,59 @@ defmodule Arbor.Agent.Executor do
     request_id = Map.get(meta, :approval_id) || Map.get(meta, "approval_id")
     awaiting = awaiting_approval(state)
 
-    if Map.has_key?(awaiting, intent.id) do
-      handle_blocked(intent, :still_requires_approval, drop_awaiting(state, intent.id))
-    else
-      {waiter_pid, waiter_mon} = spawn_approval_waiter(state, intent.id, request_id)
+    cond do
+      not valid_approval_id?(request_id) ->
+        handle_blocked(intent, :missing_approval_id, state)
 
-      parked = %{
-        intent: intent,
-        request_id: request_id,
-        resource: resource,
-        waiter_pid: waiter_pid,
-        waiter_mon: waiter_mon,
-        started_at_mono: start_time
-      }
+      Map.has_key?(awaiting, intent.id) ->
+        handle_blocked(intent, :still_requires_approval, drop_awaiting(state, intent.id))
 
-      percept =
-        Percept.new(:action_result, :partial,
-          intent_id: intent.id,
-          data: %{
-            status: :awaiting_approval,
-            resource: resource,
-            approval_id: request_id
-          }
-        )
-
-      safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
-      safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
-      forward_percept_to_action_cycle(state.agent_id, percept)
-
-      safe_emit(:agent, :intent_awaiting_approval, %{
-        agent_id: state.agent_id,
-        intent_id: intent.id,
-        resource: resource,
-        approval_id: request_id
-      })
-
-      state
-      |> Map.put(:awaiting_approval, Map.put(awaiting, intent.id, parked))
-      |> update_in([:stats, :intents_parked], &((&1 || 0) + 1))
-      |> Map.put(:current_intent, nil)
+      true ->
+        park_for_approval(intent, resource, request_id, awaiting, state, start_time)
     end
   end
+
+  defp park_for_approval(intent, resource, request_id, awaiting, state, start_time) do
+    {waiter_pid, waiter_mon} = spawn_approval_waiter(state, intent.id, request_id)
+
+    parked = %{
+      intent: intent,
+      request_id: request_id,
+      resource: resource,
+      waiter_pid: waiter_pid,
+      waiter_mon: waiter_mon,
+      started_at_mono: start_time
+    }
+
+    percept =
+      Percept.new(:action_result, :partial,
+        intent_id: intent.id,
+        data: %{
+          status: :awaiting_approval,
+          resource: resource,
+          approval_id: request_id
+        }
+      )
+
+    safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
+    safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
+    forward_percept_to_action_cycle(state.agent_id, percept)
+
+    safe_emit(:agent, :intent_awaiting_approval, %{
+      agent_id: state.agent_id,
+      intent_id: intent.id,
+      resource: resource,
+      approval_id: request_id
+    })
+
+    state
+    |> Map.put(:awaiting_approval, Map.put(awaiting, intent.id, parked))
+    |> update_in([:stats, :intents_parked], &((&1 || 0) + 1))
+    |> Map.put(:current_intent, nil)
+  end
+
+  defp valid_approval_id?(id) when is_binary(id) and id != "", do: true
+  defp valid_approval_id?(_), do: false
 
   defp spawn_approval_waiter(_state, _intent_id, request_id)
        when not is_binary(request_id) or request_id == "" do
@@ -488,9 +501,10 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp await_approval(request_id, agent_id, timeout) do
-    if Code.ensure_loaded?(Arbor.Comms) and
-         function_exported?(Arbor.Comms, :await_interaction_response, 3) do
-      Arbor.Comms.await_interaction_response(request_id, agent_id, timeout: timeout)
+    mod = Config.executor_interaction_await()
+
+    if function_exported?(mod, :await_interaction_response, 3) do
+      mod.await_interaction_response(request_id, agent_id, timeout: timeout)
     else
       {:error, :comms_unavailable}
     end
@@ -579,11 +593,19 @@ defmodule Arbor.Agent.Executor do
   defp gather_auth(%Intent{} = intent, state) do
     resource = canonical_uri_for(intent)
 
+    # Trust.authorize mints under policy then applies ApprovalGuard, so a
+    # mintable-but-unheld URI can still return pending_approval. Security.authorize
+    # only checks already-held caps and would skip the park path.
     # Sender already verified. Skip identity re-verification — autonomous
     # agents do not carry a signed_request in the heartbeat context.
     verdict =
       case safe_call(fn ->
-             Arbor.Security.authorize(state.agent_id, resource, :execute, verify_identity: false)
+             Config.executor_authorizer().authorize(
+               state.agent_id,
+               resource,
+               :execute,
+               verify_identity: false
+             )
            end) do
         {:ok, :authorized} = authorized -> authorized
         {:ok, :pending_approval, _id} = pending -> pending
