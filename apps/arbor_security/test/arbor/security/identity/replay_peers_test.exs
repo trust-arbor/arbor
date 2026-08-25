@@ -135,6 +135,9 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
   end
 
   defp install_peer_boot_profile!(peer_node) do
+    # Bare peers do not inherit Mix test startup or config. Start the verifier
+    # prerequisites, load its compile-time test clock, then bind and compare the
+    # same signed activation-only profile before Security marks the peer capable.
     runtime = Application.get_env(:arbor_kernel, :kernel_runtime, [])
     assert Keyword.keyword?(runtime)
     assert Keyword.has_key?(runtime, :boot_profile)
