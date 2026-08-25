@@ -186,6 +186,42 @@ end
 # Dashboard secret key base (production)
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Listen ports (any environment)
+# ---------------------------------------------------------------------------
+#
+# Both were effectively fixed: the gateway defaulted to 4000 with no env
+# override, and dev.exs hard-coded the dashboard to 4001. Two Arbor instances on
+# one machine therefore could not coexist — the second failed to bind, and
+# `arbor.start` hung holding its lifecycle lock rather than reporting the
+# conflict, so every retry said "already in progress".
+#
+# `DASHBOARD_PORT` already existed but only inside the prod block, and only to
+# build `check_origin` — it never set the listen port. It is honoured as a
+# fallback so existing prod setups keep working.
+parse_port = fn name, raw, default ->
+  case Integer.parse(raw || default) do
+    {port, ""} when port > 0 and port < 65_536 -> port
+    _ -> raise "#{name} must be an integer between 1 and 65535, got: #{inspect(raw)}"
+  end
+end
+
+arbor_gateway_port =
+  parse_port.("ARBOR_GATEWAY_PORT", System.get_env("ARBOR_GATEWAY_PORT"), "4000")
+
+arbor_dashboard_port =
+  parse_port.(
+    "ARBOR_DASHBOARD_PORT",
+    System.get_env("ARBOR_DASHBOARD_PORT") || System.get_env("DASHBOARD_PORT"),
+    "4001"
+  )
+
+config :arbor_gateway, port: arbor_gateway_port
+
+# Keyword lists deep-merge in config, so this sets the port without discarding
+# the endpoint's other options (secret_key_base, check_origin, server, ...).
+config :arbor_dashboard, Arbor.Dashboard.Endpoint, http: [port: arbor_dashboard_port]
+
 if config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
@@ -207,7 +243,7 @@ if config_env() == :prod do
 
   # M14: Enforce check_origin in production (override dev's check_origin: false)
   dashboard_host = System.get_env("DASHBOARD_HOST") || "localhost"
-  dashboard_port = System.get_env("DASHBOARD_PORT") || "4001"
+  dashboard_port = to_string(arbor_dashboard_port)
 
   config :arbor_dashboard, Arbor.Dashboard.Endpoint,
     check_origin: [
