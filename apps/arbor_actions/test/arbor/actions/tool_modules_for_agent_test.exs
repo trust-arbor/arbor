@@ -73,6 +73,22 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
       refute Enum.any?(caps_after, &(&1.resource_uri == "arbor://fs/read"))
     end
 
+    test "memory_remember is exposed wherever memory_recall is", %{agent_id: agent_id} do
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{})
+
+      modules = Arbor.Actions.tool_modules_for_agent(agent_id)
+
+      # Recall without Remember leaves an agent able to search its memory but
+      # never to record one deliberately. `arbor://memory/add_knowledge` had no
+      # capability profile, so trust reported it :unprofiled -> not mintable ->
+      # never exposed, and an agent asked to remember something looped calling
+      # recall instead (found 2026-08-25 on the onboarding path).
+      assert Arbor.Actions.Memory.Recall in modules
+      assert Arbor.Actions.Memory.Remember in modules
+    end
+
     test "is a subset of all_actions/0", %{agent_id: agent_id} do
       {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
 

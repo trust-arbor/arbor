@@ -108,6 +108,17 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      true, :cheap, %{rate_limit: 300}},
     {"arbor://memory/recall", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}},
+    # Recording a memory is the complement of recalling one, and it is the only
+    # way an agent can deliberately remember something it was told. It writes
+    # ONLY the agent's own knowledge graph — `Arbor.Memory` gates the write on
+    # `arbor://memory/write/<agent_id>` — so the blast radius is the agent's own
+    # future behaviour, not the operator's filesystem (which is why the other
+    # :local_write rows are :high and this one is not). Auto is also the
+    # coherent setting: the agent already writes memory autonomously during
+    # heartbeat consolidation, so gating INTENTIONAL recording behind :ask while
+    # automatic consolidation runs unattended would be backwards.
+    {"arbor://memory/add_knowledge", :arbor_memory, :low, :reversible, :local_write,
+     :confidential, true, :auto, true, :cheap, %{rate_limit: 300}},
     # Read-only view of the pending-approval queue (carries enriched context, so
     # :confidential). Low-risk read, auto-grantable with a rate limit.
     {"arbor://approval/read", :arbor_agent, :low, :read_only, :read, :confidential, true, :auto,
