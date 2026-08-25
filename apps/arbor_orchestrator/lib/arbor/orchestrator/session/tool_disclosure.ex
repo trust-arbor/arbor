@@ -59,7 +59,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   # (arbor://memory/write) but it is a code-snippet library, so it is useful to
   # exactly the agents that hold the rest of this collection.
   @coding_tools ~w(
-    file_read file_write file_edit file_list file_search
+    file_read file_write file_edit file_list file_search file_exists file_glob
     git_status git_diff git_commit git_log
     shell_execute shell_execute_script
     code_compile_and_test code_hot_load
