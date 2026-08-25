@@ -188,7 +188,9 @@ defmodule Arbor.Contracts.Extension.BootProfileManifestTest do
              Envelope.validate_boot_profile_verifier_input(Map.delete(verifier, "now"))
 
     assert {:error, :invalid_verifier_input} =
-             Envelope.validate_boot_profile_verifier_input(Map.put(verifier, :now, verifier["now"]))
+             Envelope.validate_boot_profile_verifier_input(
+               Map.put(verifier, :now, verifier["now"])
+             )
 
     assert {:error, :invalid_verifier_input} =
              Envelope.validate_boot_profile_verifier_input(now: verifier["now"])
@@ -237,6 +239,30 @@ defmodule Arbor.Contracts.Extension.BootProfileManifestTest do
     assert {:error, :malformed_encoding} = Envelope.decode_boot_profile_manifest_bytes("[]")
     assert {:error, :malformed_encoding} = Envelope.decode_boot_profile_manifest_bytes("null")
     assert {:error, :malformed_encoding} = Envelope.decode_boot_profile_signature_bytes("[]")
+  end
+
+  test "raw document size boundary fails closed", %{
+    manifest: manifest,
+    manifest_bytes: manifest_bytes,
+    signature: signature,
+    signature_bytes: signature_bytes
+  } do
+    assert byte_size(manifest_bytes) < 16_384
+    assert byte_size(signature_bytes) < 16_384
+    assert {:ok, ^manifest} = Envelope.decode_boot_profile_manifest_bytes(manifest_bytes)
+    assert {:ok, ^signature} = Envelope.decode_boot_profile_signature_bytes(signature_bytes)
+
+    at_limit = String.duplicate(" ", 16_384)
+    oversized = at_limit <> " "
+
+    assert {:error, :malformed_encoding} =
+             Envelope.decode_boot_profile_manifest_bytes(at_limit)
+
+    assert {:error, :payload_byte_limit} =
+             Envelope.decode_boot_profile_manifest_bytes(oversized)
+
+    assert {:error, :payload_byte_limit} =
+             Envelope.decode_boot_profile_signature_bytes(oversized)
   end
 
   test "non-canonical bytes fail closed", %{manifest_bytes: manifest_bytes} do
@@ -453,6 +479,29 @@ defmodule Arbor.Contracts.Extension.BootProfileManifestTest do
              })
   end
 
+  test "trusted signer key id must bind its injected public key", %{
+    manifest_bytes: manifest_bytes,
+    platform: platform,
+    signature_bytes: signature_bytes,
+    verifier: verifier
+  } do
+    [trusted_signer] = verifier["trusted_signers"]
+
+    mismatched_verifier = %{
+      verifier
+      | "trusted_signers" => [
+          %{trusted_signer | "public_key" => platform.public_key_hex}
+        ]
+    }
+
+    assert {:error, :signer_key_id_mismatch} =
+             Envelope.verify_boot_profile(
+               manifest_bytes,
+               signature_bytes,
+               mismatched_verifier
+             )
+  end
+
   test "not-yet-valid, expired, and stale epoch fail closed", %{
     manifest_bytes: manifest_bytes,
     signature_bytes: signature_bytes,
@@ -574,7 +623,7 @@ defmodule Arbor.Contracts.Extension.BootProfileManifestTest do
     verifier: verifier
   } do
     assert {:error, :invalid_verifier_input} =
-             Envelope.verify_boot_profile(manifest_bytes, signature_bytes, [now: verifier["now"]])
+             Envelope.verify_boot_profile(manifest_bytes, signature_bytes, now: verifier["now"])
 
     assert {:error, :malformed_encoding} =
              Envelope.verify_boot_profile(%{}, signature_bytes, verifier)
@@ -603,6 +652,9 @@ defmodule Arbor.Contracts.Extension.BootProfileManifestTest do
 
     assert {:error, :malformed_encoding} =
              Envelope.verify_boot_profile(manifest_bytes, "[]", bad_verifier)
+
+    assert {:error, :invalid_envelope_shape} =
+             Envelope.verify_boot_profile(manifest_bytes, "{}", bad_verifier)
   end
 
   test "valid_from after valid_until is rejected", %{manifest: manifest} do

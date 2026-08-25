@@ -276,11 +276,11 @@ defmodule Arbor.Contracts.Extension.Envelope do
   @boot_profile_schema "arbor.platform.boot_profile_manifest.v1"
   @boot_profile_signature_schema "arbor.platform.boot_profile_signature.v1"
   @boot_profile_max_bytes 16_384
-  @boot_profile_platform_public_key "46adc9536b563c36a777199fd7a6c8dc82c4c0e9e7952f123a23d27bf0e74170"
-  @boot_profile_platform_key_id "e50fe65c9e59cfefce8bea959c8aac98e31d25922b172f9e60acd43cf5b804bb"
-  @boot_profile_installer_key_id "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395"
-  @boot_profile_manifest_sha256 "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268"
-  @boot_profile_signature_hex "a61753ee7ca4ffc281f54432fff57dc574c754ae53f6623f67d2cff8a96eed79148c2752a028fc9296b85099dcc4f6ac97d501d8c949951de05627138791330e"
+  @fixture_boot_profile_platform_public_key "46adc9536b563c36a777199fd7a6c8dc82c4c0e9e7952f123a23d27bf0e74170"
+  @fixture_boot_profile_platform_key_id "e50fe65c9e59cfefce8bea959c8aac98e31d25922b172f9e60acd43cf5b804bb"
+  @fixture_boot_profile_installer_key_id "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395"
+  @fixture_boot_profile_manifest_sha256 "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268"
+  @fixture_boot_profile_signature_hex "a61753ee7ca4ffc281f54432fff57dc574c754ae53f6623f67d2cff8a96eed79148c2752a028fc9296b85099dcc4f6ac97d501d8c949951de05627138791330e"
 
   @boot_profile_manifest_keys [
     "boot_epoch",
@@ -749,6 +749,29 @@ defmodule Arbor.Contracts.Extension.Envelope do
 
   Trusted signer key material is injected. Manifest-carried Platform key
   material is authenticated output and is never used to verify the manifest.
+
+  Success returns the validated manifest and its digest together with the
+  authenticated installer signer id and key id:
+
+      {:ok,
+       %{
+         "manifest" => manifest,
+         "manifest_sha256" => digest,
+         "signer_id" => signer_id,
+         "signer_key_id" => key_id
+       }}
+
+  Failures use this closed set of atoms: `:malformed_encoding`,
+  `:duplicate_json_key`, `:non_canonical_bytes`, `:payload_byte_limit`,
+  `:mixed_keys`, `:invalid_envelope_shape`, `:invalid_envelope`,
+  `:invalid_field`, `:invalid_id`, `:invalid_hash`, `:invalid_timestamp`,
+  `:invalid_epoch`, `:invalid_public_key`, `:invalid_signature`,
+  `:duplicate_identifier`, `:unsupported_version`, `:unsupported_encoding`,
+  `:invalid_validity_window`, `:invalid_verifier_input`, `:digest_mismatch`,
+  `:untrusted_signer`, `:signer_key_id_mismatch`, `:signature_mismatch`,
+  `:platform_key_id_mismatch`, `:not_yet_valid`, `:expired`, `:stale_epoch`,
+  `:signer_revoked`, `:platform_key_revoked`, `:release_mismatch`,
+  `:profile_mismatch`, `:payload_mismatch`, and `:revocation_input_mismatch`.
   """
   @spec verify_boot_profile(term(), term(), term()) :: {:ok, map()} | {:error, atom()}
   def verify_boot_profile(manifest_bytes, signature_bytes, verifier_input)
@@ -845,8 +868,8 @@ defmodule Arbor.Contracts.Extension.Envelope do
       "release_id" => "arbor.platform.release.1",
       "profile_id" => "safe_recovery",
       "boot_epoch" => 1,
-      "platform_key_id" => @boot_profile_platform_key_id,
-      "platform_public_key" => @boot_profile_platform_public_key,
+      "platform_key_id" => @fixture_boot_profile_platform_key_id,
+      "platform_public_key" => @fixture_boot_profile_platform_public_key,
       "payload_digests" => [
         %{
           "id" => "payload.kernel",
@@ -871,10 +894,10 @@ defmodule Arbor.Contracts.Extension.Envelope do
       "version" => @version,
       "domain" => @boot_profile_schema,
       "manifest_encoding" => @payload_encoding,
-      "manifest_sha256" => @boot_profile_manifest_sha256,
+      "manifest_sha256" => @fixture_boot_profile_manifest_sha256,
       "signer_id" => "installer.arbor",
-      "key_id" => @boot_profile_installer_key_id,
-      "signature" => @boot_profile_signature_hex
+      "key_id" => @fixture_boot_profile_installer_key_id,
+      "signature" => @fixture_boot_profile_signature_hex
     }
   end
 
@@ -1457,7 +1480,10 @@ defmodule Arbor.Contracts.Extension.Envelope do
 
   defp boot_profile_sorted_id(nil, _id), do: :ok
   defp boot_profile_sorted_id(previous, id) when previous < id, do: :ok
-  defp boot_profile_sorted_id(previous, id) when previous == id, do: {:error, :duplicate_identifier}
+
+  defp boot_profile_sorted_id(previous, id) when previous == id,
+    do: {:error, :duplicate_identifier}
+
   defp boot_profile_sorted_id(_previous, _id), do: {:error, :invalid_field}
 
   defp boot_profile_key_id_list(list) when is_list(list) and length(list) <= @max_list do
