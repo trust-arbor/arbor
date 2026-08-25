@@ -188,11 +188,24 @@ defmodule Arbor.Actions.CanonicalUriTest do
                profile_by_uri["arbor://action/coding/contract_change/validate"]
     end
 
-    test "generated action namespace profiles are visible to the trust registry" do
+    test "generated action namespace profiles include derived browser URIs" do
+      # Assert the half arbor_actions OWNS: that it GENERATES the profile. This
+      # used to call CapabilityProfileRegistry.profile_for/1, which needs
+      # `:arbor_trust, :action_profile_provider` wired — and config/test.exs
+      # deliberately nils it ("Keep the generated action-profile provider out of
+      # the default test snapshot; focused tests inject a mock and rebound the
+      # host"). So it asserted something this suite's own config disables, and
+      # had to fail.
+      #
+      # The registry side of the seam is already covered where the rebind
+      # infrastructure lives: capability_profile_registry_test's "runtime action
+      # profile provider participates in profile resolution after host rebind"
+      # asserts the same URI. Testing generation here and resolution there keeps
+      # each half in the app that owns it, with no cross-app restart.
+      profiles = Arbor.Actions.action_namespace_capability_profiles()
+
       assert %CapabilityProfile{owner: :arbor_actions, effect_class: :read} =
-               Arbor.Trust.CapabilityProfileRegistry.profile_for(
-                 "arbor://action/browser/navigate"
-               )
+               Enum.find(profiles, &(&1.uri_prefix == "arbor://action/browser/navigate"))
     end
   end
 

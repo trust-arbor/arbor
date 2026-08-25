@@ -36,14 +36,34 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   # Priority: core tools first, then discovered tools fill remaining slots.
   @max_tools_for_llm 120
 
+  # The UNIVERSAL floor: what any agent needs to function at all, regardless of
+  # what it is for. Memory is here because remembering and recalling is
+  # foundational to being an agent — the closest counter-case, a deliberately
+  # ephemeral agent, is expressed by giving it an empty memory store, not by
+  # hiding the verbs.
   @base_tools ~w(
-    file_read file_write file_edit file_list file_search
     memory_recall memory_remember
     skill_search skill_activate
-    git_status git_diff
     tool_find_tools
-    shell_execute code_compile_and_test ai_generate_text git_commit git_log
-    shell_execute_script code_hot_load
+    ai_generate_text
+  )
+
+  # Development tooling. This used to sit in @base_tools, so EVERY agent carried
+  # a coding agent's toolkit as its permanent floor — 13 of the 19 base entries
+  # were dev tools, and a conversationalist was handed shell_execute, git_commit
+  # and code_hot_load it had no use for (measured 2026-08-25). Granted as a
+  # collection instead: an agent that should write code holds these capabilities
+  # and sees them; one that should not, does not.
+  #
+  # `code_pattern_*` belongs here rather than with memory. It is memory-BACKED
+  # (arbor://memory/write) but it is a code-snippet library, so it is useful to
+  # exactly the agents that hold the rest of this collection.
+  @coding_tools ~w(
+    file_read file_write file_edit file_list file_search
+    git_status git_diff git_commit git_log
+    shell_execute shell_execute_script
+    code_compile_and_test code_hot_load
+    code_pattern_store code_pattern_list code_pattern_view code_pattern_delete
   )
 
   @doc """
@@ -55,6 +75,13 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   """
   @spec core_tools() :: [String.t()]
   def core_tools, do: @base_tools
+
+  @doc """
+  Development tooling, granted as a collection rather than carried by every
+  agent. See `@coding_tools`.
+  """
+  @spec coding_tools() :: [String.t()]
+  def coding_tools, do: @coding_tools
 
   @doc """
   Maximum number of discovered tools to persist per session.
@@ -323,7 +350,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @spec prioritize_base_tools([String.t() | atom()]) :: [String.t() | atom()]
   def prioritize_base_tools(core) do
     {base, rest} = Enum.split_with(core, &(to_string(&1) in @base_tools))
-    base ++ rest
+    {coding, other} = Enum.split_with(rest, &(to_string(&1) in @coding_tools))
+    base ++ coding ++ other
   end
 
   defp ensure_find_tools(tools) do

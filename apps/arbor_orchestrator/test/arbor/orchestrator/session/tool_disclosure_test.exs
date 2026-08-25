@@ -6,34 +6,48 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   alias Arbor.Orchestrator.Session.ToolDisclosure
 
   describe "core_tools/0" do
-    test "includes find_tools and core file/memory/skill/git tools" do
+    test "is the universal floor: memory, skills, discovery, generation" do
       tools = ToolDisclosure.core_tools()
 
-      assert "tool_find_tools" in tools
-      assert "file_read" in tools
-      assert "file_write" in tools
-      assert "file_edit" in tools
+      # Memory is foundational to being an agent, so the recall/remember pair
+      # is floor, not an opt-in.
       assert "memory_recall" in tools
       assert "memory_remember" in tools
       assert "skill_search" in tools
       assert "skill_activate" in tools
-      assert "git_status" in tools
-      assert "git_diff" in tools
+      assert "tool_find_tools" in tools
+      assert "ai_generate_text" in tools
     end
 
-    test "exposes the full tool set (tool exposure is not trust-gated)" do
-      # The trust-tier band was retired — core_tools/0 returns the full base
-      # set. Tool *exposure* is not gated by trust; capabilities still gate
-      # execution.
+    test "does not carry development tooling" do
+      # These used to be in the base list, so EVERY agent — a conversationalist
+      # included — carried a coding agent's toolkit as its permanent floor.
+      # They are a granted collection now. Exposure is still not trust-gated;
+      # the point is that dev tools are not UNIVERSAL, not that trust hides them.
       tools = ToolDisclosure.core_tools()
 
+      for dev_tool <- ~w(file_read file_write file_edit git_status git_diff
+                         git_commit git_log shell_execute shell_execute_script
+                         code_compile_and_test code_hot_load) do
+        refute dev_tool in tools, "#{dev_tool} should be in the coding collection, not the floor"
+      end
+    end
+
+    test "coding_tools/0 holds the development collection, including code patterns" do
+      tools = ToolDisclosure.coding_tools()
+
+      assert "file_read" in tools
       assert "shell_execute" in tools
-      assert "code_compile_and_test" in tools
-      assert "ai_generate_text" in tools
       assert "git_commit" in tools
-      assert "git_log" in tools
-      assert "shell_execute_script" in tools
       assert "code_hot_load" in tools
+
+      # Memory-BACKED but code-domain: useful to exactly the agents holding the
+      # rest of this collection, not to every agent with memory.
+      assert "code_pattern_store" in tools
+      assert "code_pattern_view" in tools
+
+      # The floor and the collection are disjoint.
+      assert MapSet.disjoint?(MapSet.new(tools), MapSet.new(ToolDisclosure.core_tools()))
     end
   end
 
@@ -42,7 +56,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       config = %{}
       tools = ToolDisclosure.resolve_tools(config, MapSet.new())
       assert "tool_find_tools" in tools
-      assert "file_read" in tools
+      assert "memory_recall" in tools
     end
 
     test "uses explicit config when set, returns exactly those tools" do
@@ -79,7 +93,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
       assert "web_browse" in tools
       assert "ai_generate_text" in tools
-      assert "file_read" in tools
+      assert "memory_recall" in tools
     end
 
     test "deduplicates core + discovered" do
