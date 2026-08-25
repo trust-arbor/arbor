@@ -113,12 +113,28 @@ defmodule Arbor.Actions.Historian do
       }
     end
 
+    # The agent's own event stream, when the caller is an agent and asked for
+    # nothing else. The default used to be the global "general" stream, which
+    # an agent never holds a grant for — so "show me my recent events" failed
+    # authorization instead of reading the agent's own history (2026-08-25).
+    @doc false
+    def self_scoped_resource(params, context) do
+      case context[:agent_id] do
+        id when is_binary(id) ->
+          if is_nil(params[:stream]) and is_nil(params[:category]) do
+            "arbor://historian/query/" <> Arbor.Historian.StreamIds.for_agent(id)
+          end
+
+        _ ->
+          nil
+      end
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
       Actions.emit_started(__MODULE__, sanitize_params(params))
-
-      opts = build_opts(params)
+      opts = params |> build_opts() |> default_to_self_stream(context)
 
       result =
         if context[:agent_id] do
@@ -147,6 +163,20 @@ defmodule Arbor.Actions.Historian do
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, format_error(reason)}
+      end
+    end
+
+    defp default_to_self_stream(opts, context) do
+      case context[:agent_id] do
+        id when is_binary(id) ->
+          if Keyword.has_key?(opts, :stream) or Keyword.has_key?(opts, :category) do
+            opts
+          else
+            Keyword.put(opts, :stream, Arbor.Historian.StreamIds.for_agent(id))
+          end
+
+        _ ->
+          opts
       end
     end
 

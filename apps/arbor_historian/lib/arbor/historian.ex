@@ -83,11 +83,26 @@ defmodule Arbor.Historian do
     stream = extract_stream_from_query(query_opts)
     resource = "arbor://historian/query/#{stream}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
+    auth_opts = [trace_id: trace_id, verify_identity: false]
 
-    case Arbor.Security.authorize(agent_id, resource, :query,
-           trace_id: trace_id,
-           verify_identity: false
-         ) do
+    # An agent's OWN stream is self-scoped: a capability on the canonical
+    # parent (what trust policy mints) covers it. Any other stream, and every
+    # category (`security`, …), still needs the scoped grant.
+    decision =
+      if stream == Arbor.Historian.StreamIds.for_agent(agent_id) do
+        Arbor.Security.authorize_self_scoped(
+          agent_id,
+          resource,
+          agent_id,
+          "arbor://historian/query",
+          :query,
+          auth_opts
+        )
+      else
+        Arbor.Security.authorize(agent_id, resource, :query, auth_opts)
+      end
+
+    case decision do
       {:ok, :authorized} ->
         query(query_opts)
 

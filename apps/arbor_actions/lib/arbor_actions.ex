@@ -1371,7 +1371,14 @@ defmodule Arbor.Actions do
 
     maybe_observe_egress(action_module, egress_tier, clean_context)
 
-    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
+    case authorize_with_self_scope(
+           action_module,
+           agent_id,
+           resource,
+           params,
+           clean_context,
+           auth_opts
+         ) do
       result
       when result == {:ok, :authorized} or
              (is_tuple(result) and elem(result, 0) == :ok and elem(result, 1) == :authorized) ->
@@ -2404,6 +2411,33 @@ defmodule Arbor.Actions do
   def all_tools do
     exposed_actions()
     |> Enum.map(& &1.to_tool())
+  end
+
+  # Trust authorizes (and mints) the canonical parent URI. When the action is
+  # SELF-scoped, the facade will accept that parent as covering the agent's own
+  # child resource (`Security.authorize_self_scoped/6`) — so a child-specific
+  # trust rule (`arbor://memory/read/<agent> => :block`) must be honoured HERE,
+  # or a parent `:auto` would silently override it (2026-08-25).
+  defp authorize_with_self_scope(action_module, agent_id, resource, params, context, auth_opts) do
+    scoped =
+      if function_exported?(action_module, :self_scoped_resource, 2),
+        do: action_module.self_scoped_resource(params, context),
+        else: nil
+
+    with true <- is_binary(scoped),
+         :block <- Arbor.Trust.effective_mode(agent_id, scoped, []) do
+      require Logger
+
+      Logger.warning(
+        "[Actions] #{inspect(action_module)} blocked by self-scope rule on #{scoped} for #{agent_id}"
+      )
+
+      {:error, :unauthorized}
+    else
+      _ -> Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts)
+    end
+  rescue
+    _ -> Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts)
   end
 
   @doc """

@@ -128,6 +128,49 @@ defmodule Arbor.Security do
         opts
       )
 
+  @doc """
+  Authorize a SELF-scoped resource, letting a capability on the canonical
+  parent cover the principal's own child resource.
+
+  Facades gate scoped resources (`arbor://historian/query/agent:<id>`,
+  `arbor://memory/read/<id>`) while trust policy mints the canonical parent
+  (`arbor://historian/query`). An exact capability never covers a descendant,
+  so anything reached by minting rather than template grant was refused
+  (2026-08-25). This relaxes CAPABILITY COVERAGE only, and only when:
+
+    * `principal_id == subject_id` — self is the authenticated principal, never
+      a parameter; and
+    * `scoped_uri` is a strict segment-descendant of `parent_uri`.
+
+  Otherwise it is exactly `authorize/4` on `scoped_uri`. Trust policy on the
+  child (rules, ceilings) is the action layer's job and is not evaluated here.
+  """
+  @spec authorize_self_scoped(String.t(), String.t(), String.t(), String.t(), atom(), keyword()) ::
+          {:ok, :authorized} | {:ok, :pending_approval, String.t()} | {:error, term()}
+  def authorize_self_scoped(principal_id, scoped_uri, subject_id, parent_uri, action, opts \\ [])
+
+  def authorize_self_scoped(principal_id, scoped_uri, subject_id, parent_uri, action, opts)
+      when is_binary(principal_id) and is_binary(scoped_uri) and is_binary(subject_id) and
+             is_binary(parent_uri) do
+    self? = principal_id == subject_id and principal_id != ""
+    descendant? = scoped_uri != parent_uri and CapabilityUri.prefix_match?(parent_uri, scoped_uri)
+
+    case authorize(principal_id, scoped_uri, action, opts) do
+      {:error, _} = denied when self? and descendant? ->
+        case authorize(principal_id, parent_uri, action, opts) do
+          {:ok, _} = ok -> ok
+          {:ok, _, _} = ok -> ok
+          _ -> denied
+        end
+
+      other ->
+        other
+    end
+  end
+
+  def authorize_self_scoped(principal_id, scoped_uri, _subject_id, _parent_uri, action, opts),
+    do: authorize(principal_id, scoped_uri, action, opts)
+
   @exact_scope_keys MapSet.new([:session_id, :task_id, :principal_scope, :expected_egress])
   @exact_egress_keys MapSet.new([:max_tier, :destination])
   @exact_scalar_max_bytes 256

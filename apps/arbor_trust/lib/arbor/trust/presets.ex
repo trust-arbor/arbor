@@ -33,6 +33,11 @@ defmodule Arbor.Trust.Presets do
        "arbor://code/write" => :block,
        "arbor://fs/read" => :auto,
        "arbor://historian/query" => :auto,
+       # The historian `security` category (taint traces, grant/denial
+       # events) is never self-scoped and is not for the average agent; keep
+       # it behind approval even where the historian domain is :auto
+       # (longest prefix wins). full_trust is the operator's explicit choice.
+       "arbor://historian/query/security" => :ask,
        "arbor://orchestrator" => :auto,
        # An agent's OWN memory is its cognitive loop, not outward reach. The
        # heartbeat's first node (session_memory.background_checks) resolves to
@@ -57,6 +62,11 @@ defmodule Arbor.Trust.Presets do
        "arbor://fs/read" => :auto,
        "arbor://fs/write" => :allow,
        "arbor://historian/query" => :auto,
+       # The historian `security` category (taint traces, grant/denial
+       # events) is never self-scoped and is not for the average agent; keep
+       # it behind approval even where the historian domain is :auto
+       # (longest prefix wins). full_trust is the operator's explicit choice.
+       "arbor://historian/query/security" => :ask,
        "arbor://orchestrator" => :auto,
        "arbor://comms/notify/session" => :allow,
        "arbor://shell" => :ask,
@@ -73,6 +83,11 @@ defmodule Arbor.Trust.Presets do
        "arbor://fs/read" => :auto,
        "arbor://fs/list" => :auto,
        "arbor://historian" => :auto,
+       # The historian `security` category (taint traces, grant/denial
+       # events) is never self-scoped and is not for the average agent; keep
+       # it behind approval even where the historian domain is :auto
+       # (longest prefix wins). full_trust is the operator's explicit choice.
+       "arbor://historian/query/security" => :ask,
        "arbor://memory" => :auto,
        "arbor://orchestrator" => :auto,
        "arbor://status" => :auto,

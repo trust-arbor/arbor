@@ -483,7 +483,7 @@ defmodule Arbor.Memory do
   @spec authorize_index(String.t(), String.t(), String.t(), map(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_index(caller_id, agent_id, content, metadata \\ %{}, opts \\ []) do
-    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "write", agent_id) do
       :ok -> index(agent_id, content, metadata, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -497,7 +497,7 @@ defmodule Arbor.Memory do
   @spec authorize_recall(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_recall(caller_id, agent_id, query, opts \\ []) do
-    case authorize(caller_id, "arbor://memory/read/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "read", agent_id) do
       :ok -> recall(agent_id, query, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -511,7 +511,7 @@ defmodule Arbor.Memory do
   @spec authorize_search(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_search(caller_id, agent_id, query, opts \\ []) do
-    case authorize(caller_id, "arbor://memory/search/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "search", agent_id) do
       :ok -> search_knowledge(agent_id, query, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -525,7 +525,7 @@ defmodule Arbor.Memory do
   @spec authorize_read(String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_read(caller_id, agent_id, opts \\ []) do
-    case authorize(caller_id, "arbor://memory/read/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "read", agent_id) do
       :ok -> load_working_memory(agent_id, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -539,7 +539,7 @@ defmodule Arbor.Memory do
   @spec authorize_write(String.t(), String.t(), term()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_write(caller_id, agent_id, working_memory) do
-    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "write", agent_id) do
       :ok -> save_working_memory(agent_id, working_memory)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -553,7 +553,7 @@ defmodule Arbor.Memory do
   @spec authorize_add_knowledge(String.t(), String.t(), map()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_add_knowledge(caller_id, agent_id, node_data) do
-    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "write", agent_id) do
       :ok -> add_knowledge(agent_id, node_data)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -570,7 +570,7 @@ defmodule Arbor.Memory do
           {:ok, String.t(), :created | :deduplicated | :unknown}
           | {:error, {:unauthorized, term()} | term()}
   def authorize_add_knowledge_with_outcome(caller_id, agent_id, node_data) do
-    case authorize(caller_id, "arbor://memory/write/#{agent_id}") do
+    case authorize_self_scoped_memory(caller_id, "write", agent_id) do
       :ok -> add_knowledge_with_outcome(agent_id, node_data)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -579,6 +579,37 @@ defmodule Arbor.Memory do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Self-scoped memory ops: the agent's own memory is covered by a capability on
+  # the canonical parent (`arbor://memory/<op>`), which is what trust policy
+  # mints. Another agent's memory still needs the scoped grant. Falls back to
+  # the plain scoped check when Security predates the helper.
+  defp authorize_self_scoped_memory(caller_id, op, agent_id, opts \\ []) do
+    scoped = "arbor://memory/#{op}/#{agent_id}"
+    parent = "arbor://memory/#{op}"
+
+    if Code.ensure_loaded?(Arbor.Security) and
+         function_exported?(Arbor.Security, :authorize_self_scoped, 6) and
+         security_available?() do
+      auth_opts = Keyword.put_new(opts, :verify_identity, false)
+
+      case Arbor.Security.authorize_self_scoped(
+             caller_id,
+             scoped,
+             agent_id,
+             parent,
+             :execute,
+             auth_opts
+           ) do
+        {:ok, :authorized} -> :ok
+        {:ok, :authorized, _} -> :ok
+        {:ok, :pending_approval, _proposal_id} = pending -> pending
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      authorize(caller_id, scoped, opts)
+    end
+  end
 
   # Runtime bridge for authorization — arbor_memory does not have a compile-time
   # dependency on arbor_security, so we use Code.ensure_loaded? + function_exported?

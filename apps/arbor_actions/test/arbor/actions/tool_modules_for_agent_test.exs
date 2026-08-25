@@ -162,6 +162,29 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
   end
 
+  describe "self-scoped child rules at the action layer (security regression)" do
+    test "a :block rule on the agent's own scoped resource wins over a parent :auto",
+         %{agent_id: agent_id} do
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+
+      create_profile_with_rules(agent_id, :ask, %{
+        "arbor://memory/recall" => :auto,
+        "arbor://memory/read/#{agent_id}" => :block
+      })
+
+      # Facades accept the minted parent for self-scoped children, so the only
+      # place this rule can bite is before Trust authorizes the parent.
+      assert {:error, :unauthorized} =
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 Arbor.Actions.Memory.Recall,
+                 %{query: "anything"},
+                 %{agent_id: agent_id}
+               )
+    end
+  end
+
   defp start_trust_infrastructure do
     ensure_started(Arbor.Trust.EventStore)
     ensure_started(Arbor.Trust.Store)

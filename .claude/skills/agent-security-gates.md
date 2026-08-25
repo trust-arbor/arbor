@@ -692,6 +692,24 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   under an `:auto` rule — not just one that checks disclosure. Grep the enforcer
   log for `:unprofiled` after wiring any new tool.
 
+## 26. Self-scoped resources: the minted parent covers only *your own* child
+
+- **What:** facades gate scoped resources (`arbor://memory/read/<agent>`,
+  `arbor://historian/query/agent:<id>`) while trust policy mints the canonical
+  parent. Since 2026-08-25 `Arbor.Security.authorize_self_scoped/6` lets the
+  parent cover the child **only when principal == subject and the child is a
+  strict segment-descendant**. Memory and the historian's own-stream use it;
+  categories, other agents' streams, and non-principal scopes (shell command,
+  AI provider, consensus topic, signal topic, persistence name) do not.
+- **Symptom:** `Unauthorized: :unauthorized` right after the log says Trust
+  *minted* the parent — you are hitting a scoped facade gate the parent does not
+  cover. If the scope is another principal or a category, that is correct.
+- **Action:** derive "self" from the executor context, never from params
+  (`Memory.extract_agent_id/2` fails closed); if the action is self-scoped,
+  export `self_scoped_resource/2` so the action layer honours a child `:block`
+  rule before authorizing the parent. Do not widen the helper to non-principal
+  scopes.
+
 
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>

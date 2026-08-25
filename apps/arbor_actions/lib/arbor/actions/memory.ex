@@ -30,11 +30,23 @@ defmodule Arbor.Actions.Memory do
   # Shared Helpers
   # ============================================================================
 
+  # "Self" is the authenticated principal from the executor context — never a
+  # parameter. The `|| params[:agent_id]` fallback let the model choose whose
+  # memory was "self" on any path without a context principal (closed
+  # 2026-08-25 alongside self-scoped authorization, which made it load-bearing).
   @doc false
-  def extract_agent_id(context, params) do
-    case context[:agent_id] || params[:agent_id] do
-      nil -> {:error, :missing_agent_id}
-      id -> {:ok, id}
+  def extract_agent_id(context, _params) do
+    case context[:agent_id] do
+      id when is_binary(id) and id != "" -> {:ok, id}
+      _ -> {:error, :missing_agent_id}
+    end
+  end
+
+  @doc false
+  def self_scoped_resource(op, context) do
+    case context[:agent_id] do
+      id when is_binary(id) and id != "" -> "arbor://memory/#{op}/#{id}"
+      _ -> nil
     end
   end
 
@@ -99,6 +111,10 @@ defmodule Arbor.Actions.Memory do
       ]
 
     require Logger
+
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: Arbor.Actions.Memory.self_scoped_resource("write", context)
 
     alias Arbor.Actions
     alias Arbor.Actions.Memory, as: MemoryHelpers
@@ -259,6 +275,10 @@ defmodule Arbor.Actions.Memory do
           doc: "Enable spreading activation to boost related nodes"
         ]
       ]
+
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: Arbor.Actions.Memory.self_scoped_resource("read", context)
 
     alias Arbor.Actions
     alias Arbor.Actions.Memory, as: MemoryHelpers

@@ -438,4 +438,15 @@ defmodule Arbor.Actions.MemoryTest do
       assert tool[:description] || tool["description"] =~ "cascade"
     end
   end
+
+  describe "extract_agent_id/2 (security regression)" do
+    test "self comes from the context principal, never from params" do
+      assert {:ok, "agent_ctx"} =
+               Memory.extract_agent_id(%{agent_id: "agent_ctx"}, %{agent_id: "agent_param"})
+
+      # No principal in context → fail closed, even if the model supplied one.
+      assert {:error, :missing_agent_id} =
+               Memory.extract_agent_id(%{}, %{agent_id: "agent_param"})
+    end
+  end
 end
