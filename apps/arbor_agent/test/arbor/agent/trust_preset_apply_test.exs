@@ -393,6 +393,15 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end
 
+    # arbor_agent does not depend on arbor_orchestrator (both L7), so in the
+    # per-app test BEAM BranchSupervisor skips the Session child by design and
+    # this assertion has nothing to inspect. It runs from the umbrella root,
+    # where every app loads. Skip with the reason rather than fail red.
+    @tag skip:
+           if(Code.ensure_loaded?(Arbor.Orchestrator.Session),
+             do: false,
+             else: "needs arbor_orchestrator loaded — run from the umbrella root"
+           )
     test "pipeline architect runtime restrictions are load-bearing through Session config", %{
       store: store
     } do
