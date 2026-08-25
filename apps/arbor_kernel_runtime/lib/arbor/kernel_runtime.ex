@@ -22,8 +22,10 @@ defmodule Arbor.KernelRuntime do
   The map is closed plain data. It does not include process tokens,
   verifier input, private keys, or internal slot state. This read does
   not invoke Envelope; each fetch validates the bounded table and
-  snapshot. Returns `{:error, :not_bound}` when the binding owner is
-  not live or bounded admission fails.
+  snapshot. Publication waits for a synchronous successful-init
+  handshake, then admits the table. Returns `{:error, :not_bound}` when
+  the handshake is missing, dead, or timed out, or bounded admission
+  fails.
   """
   @spec boot_profile() :: {:ok, map()} | {:error, :not_bound}
   def boot_profile, do: BootProfileBinding.snapshot()

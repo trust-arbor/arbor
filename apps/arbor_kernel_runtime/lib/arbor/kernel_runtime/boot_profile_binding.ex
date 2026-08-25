@@ -17,8 +17,10 @@ defmodule Arbor.KernelRuntime.BootProfileBinding do
   verification or row replacement.
 
   Public `boot_profile/0` does not invoke Envelope. Each fetch validates
-  the bounded table and snapshot. Publication requires a live binding
-  owner, proving restore or first-bind succeeded.
+  the bounded table and snapshot. Publication waits for a synchronous
+  successful-init handshake, then admits the bounded table. Process
+  registration is not readiness: the name is visible before init
+  finishes. Missing, dead, or timed-out handshakes are `:not_bound`.
 
   Application-level: `:protected` ETS allows any process to read and only
   the owner to mutate. Non-owner insert, delete, take, or give_away raise
@@ -52,6 +54,10 @@ defmodule Arbor.KernelRuntime.BootProfileBinding do
                {__MODULE__, :sample_utc_second, []}
              )
 
+  # Finite handshake so a stuck init cannot hang public reads; timeout is
+  # :not_bound. Envelope verify completes well under this budget.
+  @ready_timeout 5_000
+
   @spec start_link(term()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
@@ -59,14 +65,14 @@ defmodule Arbor.KernelRuntime.BootProfileBinding do
 
   @spec snapshot() :: {:ok, map()} | {:error, :not_bound}
   def snapshot do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
+    case await_ready() do
+      :ok ->
         case fetch_slot() do
           {:ok, snapshot, _token} -> {:ok, snapshot}
           _ -> {:error, :not_bound}
         end
 
-      _ ->
+      :error ->
         {:error, :not_bound}
     end
   end
@@ -93,6 +99,11 @@ defmodule Arbor.KernelRuntime.BootProfileBinding do
         Logger.warning("kernel runtime boot profile bind failed: #{reason_tag(reason)}")
         {:stop, reason}
     end
+  end
+
+  @impl true
+  def handle_call(:await_ready, _from, state) do
+    {:reply, :ok, state}
   end
 
   defp bind_or_restore do
@@ -260,6 +271,17 @@ defmodule Arbor.KernelRuntime.BootProfileBinding do
     case Process.whereis(:init) do
       pid when is_pid(pid) -> {:ok, pid}
       _ -> :error
+    end
+  end
+
+  defp await_ready do
+    try do
+      case GenServer.call(__MODULE__, :await_ready, @ready_timeout) do
+        :ok -> :ok
+        _ -> :error
+      end
+    catch
+      :exit, _ -> :error
     end
   end
 

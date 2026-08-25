@@ -9,6 +9,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
 
   alias Arbor.Contracts.Extension.Envelope
   alias Arbor.KernelRuntime.BootProfileBinding.Core
+  alias Arbor.KernelRuntime.BootProfileBinding.Testing
 
   @moduletag :integration
   @moduletag :slow
@@ -40,6 +41,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
 
     on_exit(fn ->
       disable_verify_trace()
+      reset_test_clock()
       stop_runtime()
       restore_kernel_runtime(config_before)
       {:ok, _} = Application.ensure_all_started(:arbor_kernel_runtime)
@@ -531,6 +533,48 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
     end)
   end
 
+  test "security regression: boot_profile does not publish while blocked restore then expires" do
+    stop_runtime()
+    put_kernel_runtime(start_profile: :activation_only)
+    Testing.block_now()
+    parent = self()
+
+    starter =
+      spawn(fn ->
+        send(parent, {:started, Application.ensure_all_started(:arbor_kernel_runtime)})
+      end)
+
+    starter_ref = Process.monitor(starter)
+    await_true(fn -> Testing.now_waiting?() end, 5_000)
+
+    reader =
+      spawn(fn ->
+        send(parent, {:boot_profile, Arbor.KernelRuntime.boot_profile()})
+      end)
+
+    reader_ref = Process.monitor(reader)
+    refute_receive {:boot_profile, _}, 300
+    refute_receive {:started, _}, 0
+    assert Process.alive?(reader)
+    assert Process.alive?(starter)
+
+    Testing.unblock_now("2027-08-17T00:00:01Z")
+
+    assert_receive {:started,
+                    {:error,
+                     {:arbor_kernel_runtime,
+                      {reason, {Arbor.KernelRuntime.Application, :start, _}}}}},
+                   5_000
+
+    assert failed_child?(reason, :expired)
+    assert_receive {:boot_profile, {:error, :not_bound}}, 5_000
+    assert_receive {:DOWN, ^starter_ref, :process, ^starter, _}, 1_000
+    assert_receive {:DOWN, ^reader_ref, :process, ^reader, _}, 1_000
+    refute Process.whereis(Arbor.KernelRuntime.Supervisor)
+    assert {:error, :not_bound} = Arbor.KernelRuntime.boot_profile()
+    assert_frozen_digest()
+  end
+
   test "lib identity slot has a single put site and no erase" do
     binding =
       Path.expand("../../../lib/arbor/kernel_runtime/boot_profile_binding.ex", __DIR__)
@@ -918,6 +962,14 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
     end
   end
 
+  defp reset_test_clock do
+    if function_exported?(Testing, :reset_clock, 0) do
+      Testing.reset_clock()
+    else
+      :ok
+    end
+  end
+
   defp disable_verify_trace do
     try do
       :erlang.trace(:new, false, [:call])
@@ -943,8 +995,8 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
     end
   end
 
-  defp await_true(fun) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
+  defp await_true(fun, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
     await_true_loop(fun, deadline)
   end
 
