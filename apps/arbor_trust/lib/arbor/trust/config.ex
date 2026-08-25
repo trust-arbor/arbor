@@ -24,6 +24,8 @@ defmodule Arbor.Trust.Config do
         }
   """
 
+  alias Arbor.Contracts.Security.Classification
+
   # Default anti-spam budget for the A1 proactive notify channel
   # (arbor://comms/notify/session), applied as a :rate_limit constraint on the
   # grant — tokens per rate_limit_refill_period_seconds (1h default). Notify is
@@ -34,13 +36,9 @@ defmodule Arbor.Trust.Config do
   # (We can't read NotifySession here — arbor_actions is L6, above arbor_trust L4.)
   @notify_session_rate_limit 30
 
-  @egress_mode_defaults %{
-    on_host: :allow,
-    on_premises: :allow,
-    external_provider: :ask,
-    external_peer: :ask,
-    none: :allow
-  }
+  @egress_mode_defaults Map.new(Classification.egress_tiers(), fn tier ->
+                          {tier, if(Classification.external_egress?(tier), do: :ask, else: :allow)}
+                        end)
 
   # The universal baseline capabilities every agent gets at profile creation.
   # Self-scoped (`/self/`) URIs are expanded to the agent's id at grant time.
@@ -211,12 +209,12 @@ defmodule Arbor.Trust.Config do
   defp valid_mode_key?(key, :binary), do: is_binary(key) and byte_size(key) > 0
   defp valid_mode_key?(key, :atom), do: is_atom(key) and key != nil
 
-  defp normalize_egress_key(key) when is_atom(key) and key != nil, do: key
+  defp normalize_egress_key(key) when is_atom(key) do
+    if key in Classification.egress_tiers(), do: key, else: nil
+  end
 
   defp normalize_egress_key(key) when is_binary(key) do
-    String.to_existing_atom(key)
-  rescue
-    ArgumentError -> nil
+    Enum.find(Classification.egress_tiers(), &(Atom.to_string(&1) == key))
   end
 
   defp normalize_egress_key(_key), do: nil

@@ -9,7 +9,7 @@ defmodule Arbor.Trust.PolicyHost do
 
   use GenServer
 
-  alias Arbor.Contracts.Security.CapabilityProfile
+  alias Arbor.Contracts.Security.{CapabilityProfile, Classification}
   alias Arbor.Trust.Config
 
   @table :arbor_trust_policy_host_claim
@@ -140,13 +140,26 @@ defmodule Arbor.Trust.PolicyHost do
     end
   end
 
-  defp snapshot_from_opts(opts, requested) do
-    case injected_snapshot(opts) do
-      {:ok, snapshot} ->
-        {:ok, snapshot}
+  if Mix.env() == :test do
+    defp snapshot_from_opts(opts, requested) do
+      case injected_snapshot(opts) do
+        {:ok, snapshot} ->
+          {:ok, snapshot}
 
-      :none ->
-        Config.startup_policy_snapshot(requested)
+        :none ->
+          Config.startup_policy_snapshot(requested)
+      end
+    end
+
+    defp injected_snapshot(opts) when is_list(opts) do
+      case Keyword.get(opts, :snapshot) do
+        snapshot when is_map(snapshot) -> {:ok, snapshot}
+        _ -> :none
+      end
+    end
+  else
+    defp snapshot_from_opts(_opts, requested) do
+      Config.startup_policy_snapshot(requested)
     end
   end
 
@@ -162,19 +175,6 @@ defmodule Arbor.Trust.PolicyHost do
 
   defp match_start_profile(frozen, requested) do
     {:error, {:policy_host_profile_mismatch, frozen, requested}}
-  end
-
-  if Mix.env() == :test do
-    defp injected_snapshot(opts) when is_list(opts) do
-      case Keyword.get(opts, :snapshot) do
-        snapshot when is_map(snapshot) -> {:ok, snapshot}
-        _ -> :none
-      end
-    end
-
-    defp injected_snapshot(_opts), do: :none
-  else
-    defp injected_snapshot(_opts), do: :none
   end
 
   defp commit_first(snapshot) do
@@ -409,7 +409,7 @@ defmodule Arbor.Trust.PolicyHost do
   defp admit_mode_map(_map, _key_kind), do: :error
 
   defp valid_mode_key?(key, :binary), do: is_binary(key) and byte_size(key) > 0
-  defp valid_mode_key?(key, :atom), do: is_atom(key) and key != nil
+  defp valid_mode_key?(key, :atom), do: key in Classification.egress_tiers()
 
   defp admit_profiles(profiles) when is_list(profiles) do
     if Enum.all?(profiles, &match?(%CapabilityProfile{}, &1)), do: :ok, else: :error

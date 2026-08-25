@@ -325,9 +325,7 @@ defmodule Arbor.Trust do
           | {:requires_approval, :egress}
           | {:error, {:egress_blocked, atom(), atom()}}
   def authorize_egress(agent_id, tier, opts \\ []) do
-    opts = Keyword.put(opts, :egress_tier, tier)
-
-    case Arbor.Trust.Policy.tighten_public_opts(agent_id, opts) do
+    case Arbor.Trust.Policy.tighten_public_opts(agent_id, put_egress_tier(opts, tier)) do
       {:ok, tightened} ->
         Arbor.Security.authorize_egress(agent_id, tier, tightened)
 
@@ -400,6 +398,14 @@ defmodule Arbor.Trust do
       end
     else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp put_egress_tier(opts, tier) do
+    if Keyword.keyword?(opts) do
+      Keyword.put(opts, :egress_tier, tier)
+    else
+      opts
     end
   end
 

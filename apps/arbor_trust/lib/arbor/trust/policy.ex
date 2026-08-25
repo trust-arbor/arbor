@@ -55,6 +55,7 @@ defmodule Arbor.Trust.Policy do
       {:ok, count} = Policy.grant_base_capabilities("agent_123")
   """
 
+  alias Arbor.Contracts.Security.Classification
   alias Arbor.Trust.{Config, PolicyHost, ProfileResolver}
 
   require Logger
@@ -390,14 +391,11 @@ defmodule Arbor.Trust.Policy do
         :absent ->
           {:ok, opts}
 
-        tier when is_atom(tier) and not is_nil(tier) ->
+        tier ->
           host_mode = egress_mode(agent_id, tier)
           caller_mode = caller_egress_mode(opts)
           tightened = ProfileResolver.most_restrictive([host_mode, caller_mode])
           {:ok, Keyword.put(opts, :egress_mode, tightened)}
-
-        _invalid ->
-          {:error, :malformed_policy_opts}
       end
     else
       :error -> {:error, :malformed_policy_opts}
@@ -456,7 +454,8 @@ defmodule Arbor.Trust.Policy do
     if Keyword.keyword?(opts) do
       with :ok <- admit_optional_ceiling_map(Keyword.get(opts, :security_ceilings, :absent)),
            :ok <- admit_optional_boolean(Keyword.get(opts, :allow_permissive_baseline, :absent)),
-           :ok <- admit_optional_mode(Keyword.get(opts, :egress_mode, :absent)) do
+           :ok <- admit_optional_mode(Keyword.get(opts, :egress_mode, :absent)),
+           :ok <- admit_optional_egress_tier(Keyword.get(opts, :egress_tier, :absent)) do
         :ok
       end
     else
@@ -484,6 +483,12 @@ defmodule Arbor.Trust.Policy do
   defp admit_optional_mode(:absent), do: :ok
   defp admit_optional_mode(mode) when mode in [:block, :ask, :allow, :auto], do: :ok
   defp admit_optional_mode(_mode), do: :error
+
+  defp admit_optional_egress_tier(:absent), do: :ok
+
+  defp admit_optional_egress_tier(tier) do
+    if tier in Classification.egress_tiers(), do: :ok, else: :error
+  end
 
   defp get_profile(agent_id) do
     if trust_available?() do

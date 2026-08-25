@@ -9,9 +9,16 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.Classification
   alias Arbor.Trust.Policy
 
   @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
+  @unknown_egress_tiers [:cloud, :internet, :not_a_tier, "external_provider", nil]
+  @malformed_policy_opt_containers [
+    %{egress_mode: :auto},
+    [{:egress_mode, :auto} | :not_a_keyword],
+    [:egress_mode, :auto]
+  ]
   @provider_names [
     Arbor.Trust.Manager,
     Arbor.Trust.Store,
@@ -22,6 +29,14 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     Arbor.Trust.CircuitBreaker,
     :arbor_trust_profiles
   ]
+
+  defmodule MockConsensus do
+    def healthy?, do: true
+
+    def submit(%{proposer: _} = _proposal, _opts \\ []) do
+      {:ok, "proposal_#{System.unique_integer([:positive])}"}
+    end
+  end
 
   defmodule ActionProfileProvider do
     def action_namespace_capability_profiles do
@@ -206,6 +221,29 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     refute Process.whereis(Arbor.Trust.ApplicationSupervisor)
   end
 
+  test "security regression: startup default_egress_modes rejects keys outside Classification.egress_tiers/0" do
+    Enum.each([%{cloud: :allow}, %{"not_a_tier" => :ask}], fn overrides ->
+      Application.put_env(:arbor_trust, :start_children, true)
+      Application.put_env(:arbor_trust, :default_egress_modes, overrides)
+      put_kernel_runtime(start_profile: :activation_only)
+      _ = Application.stop(:arbor_trust)
+      maybe_release_claim()
+
+      assert {:error, _} = Application.ensure_all_started(:arbor_trust)
+      refute Process.whereis(Arbor.Trust.ApplicationSupervisor)
+    end)
+  end
+
+  test "security regression: arbor_trust OTP spec lists persistence and pubsub as optional" do
+    applications = Application.spec(:arbor_trust, :applications) || []
+    optional = Application.spec(:arbor_trust, :optional_applications) || []
+
+    refute :arbor_persistence in applications
+    refute :phoenix_pubsub in applications
+    assert :arbor_persistence in optional
+    assert :phoenix_pubsub in optional
+  end
+
   test "caller egress_mode cannot weaken authorize_egress or authorize" do
     previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
@@ -227,6 +265,87 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              )
   end
 
+  test "security regression: unknown egress tiers fail closed before Security" do
+    previous_enforcing = Application.get_env(:arbor_security, :egress_gate_enforcing)
+    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+
+    on_exit(fn ->
+      restore_security_env(:egress_gate_enforcing, previous_enforcing)
+    end)
+
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    unknown = "agent_unknown_tier_#{System.unique_integer([:positive])}"
+    valid = MapSet.new(Classification.egress_tiers())
+
+    Enum.each(@unknown_egress_tiers, fn tier ->
+      refute MapSet.member?(valid, tier)
+
+      assert {:error, {:egress_blocked, ^tier, :malformed_policy_opts}} =
+               Arbor.Trust.authorize_egress(unknown, tier)
+
+      assert {:error, :malformed_policy_opts} =
+               Arbor.Trust.authorize(unknown, "arbor://ai/generate", :execute,
+                 egress_tier: tier,
+                 verify_identity: false
+               )
+    end)
+  end
+
+  test "security regression: valid caller :auto cannot relax frozen :ask through authorize/4" do
+    previous = %{
+      enforcing: Application.get_env(:arbor_security, :egress_gate_enforcing),
+      escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+      module: Application.get_env(:arbor_security, :consensus_module),
+      router: Application.get_env(:arbor_security, :use_interaction_router_for_approval)
+    }
+
+    Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+    Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+
+    on_exit(fn ->
+      restore_security_env(:egress_gate_enforcing, previous.enforcing)
+      restore_security_env(:consensus_escalation_enabled, previous.escalation)
+      restore_security_env(:consensus_module, previous.module)
+      restore_security_env(:use_interaction_router_for_approval, previous.router)
+    end)
+
+    ensure_security_children()
+    assert {:ok, _} = restart_trust!(:full, true)
+
+    agent_id = "agent_auto_tighten_#{System.unique_integer([:positive])}"
+    resource = "arbor://ai/generate"
+    assert {:ok, _} = Arbor.Trust.create_trust_profile(agent_id)
+
+    {:ok, _} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{
+          profile
+          | baseline: :ask,
+            rules: %{resource => :auto},
+            egress_modes: %{external_provider: :ask}
+        }
+      end)
+
+    {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+    assert {:ok, tightened} =
+             Policy.tighten_public_opts(agent_id,
+               egress_tier: :external_provider,
+               egress_mode: :auto
+             )
+
+    assert tightened[:egress_mode] == :ask
+
+    assert {:error, {:pending_approval, _proposal_id}} =
+             Arbor.Trust.authorize(agent_id, resource, :execute,
+               egress_tier: :external_provider,
+               egress_mode: :auto,
+               verify_identity: false
+             )
+  end
+
   test "malformed ceiling and permissive opts fail closed" do
     assert {:ok, _} = restart_trust!(:activation_only, true)
     unknown = "agent_opts_#{System.unique_integer([:positive])}"
@@ -240,6 +359,48 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     assert {:error, {:egress_blocked, :external_provider, :malformed_policy_opts}} =
              Arbor.Trust.authorize_egress(unknown, :external_provider, egress_mode: :invalid)
+  end
+
+  test "security regression: malformed option containers return typed closed outcomes" do
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    unknown = "agent_malformed_opts_#{System.unique_integer([:positive])}"
+    resource = "arbor://ai/generate"
+
+    Enum.each(@malformed_policy_opt_containers, fn opts ->
+      assert {:error, {:egress_blocked, :external_provider, :malformed_policy_opts}} =
+               Arbor.Trust.authorize_egress(unknown, :external_provider, opts)
+
+      assert {:error, :malformed_policy_opts} =
+               Arbor.Trust.authorize(unknown, resource, :execute, opts)
+    end)
+
+    assert %{
+             resource_uri: resource,
+             error: :malformed_policy_opts,
+             effective_mode: :block
+           } = Policy.explain(unknown, resource, %{egress_mode: :auto})
+
+    assert %{
+             resource_uri: resource,
+             error: :malformed_policy_opts,
+             effective_mode: :block
+           } = Policy.explain(unknown, resource, egress_tier: :cloud)
+  end
+
+  defp ensure_security_children do
+    ensure_started(Arbor.Security.Identity.Registry)
+    ensure_started(Arbor.Security.SystemAuthority)
+    ensure_started(Arbor.Security.CapabilityStore)
+    ensure_started(Arbor.Security.Reflex.Registry)
+    ensure_started(Arbor.Security.Constraint.RateLimiter)
+  end
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
+    end
   end
 
   defp restart_trust!(profile, start_children) do
