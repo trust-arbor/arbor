@@ -673,6 +673,26 @@ another one. It doubles as user documentation — anyone standing up agents need
 
 Read this when changing capabilities, trust, authorization, identity, URI matching, taint, egress, or proof boundaries.
 
+## 25. `:auto` mode does not mint an UNPROFILED URI
+
+- **What:** `Arbor.Trust.PolicyEnforcer` JIT-mints only URIs that have an entry in
+  `Arbor.Trust.CapabilityRiskProfiles` (or an action-namespace profile). A URI
+  with no profile is refused with `:unprofiled` even when the effective mode is
+  `:auto` — mode says "may mint", the profile says "what it costs"; missing the
+  latter fails closed.
+- **Symptom:** `Trust.effective_mode/3` reports `:auto`, disclosure shows the tool,
+  yet execution returns `{:error, :unauthorized}` and the log has
+  `[Trust.PolicyEnforcer] refused to mint <uri>: :unprofiled`. Hit twice on
+  2026-08-25: `arbor://memory/add_knowledge` (memory_remember) and
+  `arbor://agent/discover_tools` (tool_find_tools — never exercised before, then
+  load-bearing the moment disclosure became floor ∪ held).
+- **Action:** add the profile row (`{uri, owner, blast_radius, reversibility,
+  effect_class, data_class, arg_dependent, default_approval, graduation_eligible,
+  cost_class, constraints}`) and commit a test that calls `Trust.authorize/3`
+  under an `:auto` rule — not just one that checks disclosure. Grep the enforcer
+  log for `:unprofiled` after wiring any new tool.
+
+
 <!-- applied-learning: do-not-telemetry-invert-distributed-security-state-sync -->
 <a id="applied-learning-do-not-telemetry-invert-distributed-security-state-sync"></a>
 **Do not telemetry-invert distributed security state sync.** Security observability can emit `:telemetry` and let `arbor_signals` bridge it back to signals, but nonce, capability, and identity sync are load-bearing cross-node security state. `NonceCache` uses `security.nonce_seen` to block replay against peer nodes; `CapabilityStore` uses revocation signals to evict revoked grants on peers; `Identity.Registry` uses identity lifecycle signals to keep peer caches current. Telemetry is in-process and synchronous, so it cannot replace node-hop transport. B9 extraction needs an injected sync transport (likely Phoenix.PubSub or `Arbor.Signals` behind a behaviour), not a telemetry bridge, before dropping the `arbor_signals` dependency.
