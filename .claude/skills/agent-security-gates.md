@@ -165,7 +165,10 @@ another one. It doubles as user documentation — anyone standing up agents need
   `config["tools"]` still pins an explicit set (authoritative, no find_tools
   injection). If a held scoped grant does NOT expose its tool, the canonical
   action URI is probably not an ancestor of the grant — compare
-  `Arbor.Actions.tool_name_to_canonical_uri/1` with the held URI.
+  `Arbor.Actions.tool_name_to_canonical_uri/1` with the held URI. Pipeline-internal
+  syscalls (`tags: ["pipeline_internal"]`) are excluded from disclosure on BOTH
+  paths — `Actions.tool_modules_for_agent/1` (APIAgent) and
+  `ToolDisclosure.profile_tools/1` (DOT session) — the latter only since 61f76e4b6.
 
 ## 8. Unregistered capability URIs (when the URI registry is enforcing)
 
