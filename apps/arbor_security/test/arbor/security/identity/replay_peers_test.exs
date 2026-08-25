@@ -85,6 +85,8 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
     # reconnecting.
     :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()], 5_000)
 
+    install_peer_boot_profile!(peer_node)
+
     :ok =
       :erpc.call(
         peer_node,
@@ -130,6 +132,57 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
     peer_name = String.to_atom("#{prefix}_#{System.unique_integer([:positive])}")
     {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
     {peer, peer_node}
+  end
+
+  defp install_peer_boot_profile!(peer_node) do
+    runtime = Application.get_env(:arbor_kernel, :kernel_runtime, [])
+    assert Keyword.keyword?(runtime)
+    assert Keyword.has_key?(runtime, :boot_profile)
+
+    peer_runtime = Keyword.put(runtime, :start_profile, :activation_only)
+
+    assert {:ok, _} =
+             :erpc.call(peer_node, :application, :ensure_all_started, [:elixir], 5_000)
+
+    assert {:ok, _} =
+             :erpc.call(peer_node, :application, :ensure_all_started, [:crypto], 5_000)
+
+    assert {:module, Arbor.KernelRuntime.BootProfileBinding.Testing} =
+             :erpc.call(
+               peer_node,
+               Code,
+               :ensure_loaded,
+               [Arbor.KernelRuntime.BootProfileBinding.Testing],
+               5_000
+             )
+
+    :ok =
+      :erpc.call(
+        peer_node,
+        Application,
+        :put_env,
+        [:arbor_kernel, :kernel_runtime, peer_runtime, [persistent: true]],
+        5_000
+      )
+
+    assert {:ok, _} =
+             :erpc.call(
+               peer_node,
+               Application,
+               :ensure_all_started,
+               [:arbor_kernel_runtime],
+               10_000
+             )
+
+    assert {:ok, host_snapshot} = Arbor.KernelRuntime.boot_profile()
+
+    assert {:ok, peer_snapshot} =
+             :erpc.call(peer_node, Arbor.KernelRuntime, :boot_profile, [], 5_000)
+
+    assert peer_snapshot["schema"] == "arbor.kernel_runtime.boot_profile_binding.v1"
+    assert peer_snapshot["manifest_sha256"] == host_snapshot["manifest_sha256"]
+    assert peer_snapshot["profile_id"] == host_snapshot["profile_id"]
+    :ok
   end
 
   defp remote_applications(node) do
