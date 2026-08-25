@@ -12,7 +12,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     # declaration, so a new entry should be a deliberate edit, never a fix-up
     # to make the suite pass.
     Arbor.KernelRuntime => %{
-      deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor],
+      deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor, Logger],
       exports: [SafeManagementSurface]
     },
     Arbor.Common => %{
@@ -86,7 +86,8 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     for module <- [
           Arbor.Common.Config.Testing,
           Arbor.Signals.Config.Testing,
-          Arbor.Monitor.Config.Testing
+          Arbor.Monitor.Config.Testing,
+          Arbor.KernelRuntime.BootProfileBinding.Testing
         ] do
       definition = boundary_definition(module)
 

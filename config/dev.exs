@@ -290,4 +290,43 @@ config :arbor_kernel,
 # restate it here, only override specific keys if dev needs to differ.
 config :arbor_orchestrator, preprocessor_enabled: true
 
+# Development installer substitute for P1A-2. Production samples the clock
+# and receives these bytes from installer sys.config, not from this file.
+boot_profile_fixture_dir =
+  Path.expand("../apps/arbor_kernel/test/fixtures/extension_envelopes/v1", __DIR__)
+
+config :arbor_kernel,
+  kernel_runtime: [
+    start_profile: :full,
+    boot_profile: [
+      manifest_bytes:
+        File.read!(Path.join(boot_profile_fixture_dir, "boot_profile_manifest.json")),
+      signature_bytes:
+        File.read!(Path.join(boot_profile_fixture_dir, "boot_profile_signature.json")),
+      trusted_signers: [
+        %{
+          "signer_id" => "installer.arbor",
+          "key_id" => "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395",
+          "public_key" => "347f4f2c0221027fb01086e2d5b8ee0264ae43ddb99aea3dacf04ce0331f89b8"
+        }
+      ],
+      expected_release_id: "arbor.platform.release.1",
+      expected_profile_id: "safe_recovery",
+      expected_revocation_input_id: "revocation.platform.1",
+      expected_payload_digests: [
+        %{
+          "id" => "payload.kernel",
+          "sha256" => "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        %{
+          "id" => "payload.kernel_runtime",
+          "sha256" => "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ],
+      min_boot_epoch: 1,
+      revoked_signer_key_ids: [],
+      revoked_platform_key_ids: []
+    ]
+  ]
+
 import_config "provider_route_profile.exs"
