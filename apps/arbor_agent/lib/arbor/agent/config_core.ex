@@ -90,14 +90,22 @@ defmodule Arbor.Agent.ConfigCore do
       heartbeat: get_field(metadata, :heartbeat) || %{},
       execution_mode: get_field(metadata, :execution_mode),
       auto_start: get_field(metadata, :auto_start) || false,
-      project_context: get_field(metadata, :project_context) || :inherit,
-      skills: get_field(metadata, :skills) || :inherit
+      project_context: prompt_toggle(get_field(metadata, :project_context)),
+      skills: prompt_toggle(get_field(metadata, :skills))
     }
   end
 
   defp get_field(map, key) when is_atom(key) do
     Map.get(map, key) || Map.get(map, to_string(key))
   end
+
+  # Template metadata arrives from YAML/JSON as strings ("enabled"); the prompt
+  # builder matches atoms (:enabled/:disabled/:inherit). Anything else inherits.
+  @doc false
+  @spec prompt_toggle(term()) :: :enabled | :disabled | :inherit
+  def prompt_toggle(v) when v in [:enabled, "enabled"], do: :enabled
+  def prompt_toggle(v) when v in [:disabled, "disabled"], do: :disabled
+  def prompt_toggle(_), do: :inherit
 
   defp maybe_atom(nil), do: nil
   defp maybe_atom(v) when is_atom(v), do: v

@@ -150,6 +150,13 @@ defmodule Arbor.Agent.LifecycleStartSessionFalseTest do
     assert :ok = Lifecycle.stop(agent_id)
   end
 
+  # arbor_agent does not depend on arbor_orchestrator (both L7); per-app,
+  # BranchSupervisor skips the Session child by design. Runs from the root.
+  @tag skip:
+         if(Code.ensure_loaded?(Arbor.Orchestrator.Session),
+           do: false,
+           else: "needs arbor_orchestrator loaded — run from the umbrella root"
+         )
   test "start_session: true with start_heartbeat: false still starts Session only", %{
     store: store
   } do

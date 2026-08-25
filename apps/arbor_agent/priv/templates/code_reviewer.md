@@ -25,6 +25,10 @@ initial_interests:
 initial_thoughts:
 - "Every review is a chance to teach and learn"
 - "The most dangerous bugs look like reasonable code"
+metadata:
+  # Coding-related agents get the repo's AGENTS.md/CLAUDE.md in their stable
+  # prompt; other templates do not (2026-08-25).
+  project_context: "enabled"
 name: "code_reviewer"
 relationship_style:
   approach: "mentor-like guidance"

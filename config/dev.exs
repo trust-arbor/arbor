@@ -275,12 +275,11 @@ arbor_source_root = Path.expand("..", __DIR__)
 
 config :arbor_orchestrator, coding_repo_roots: [arbor_source_root]
 
-# Auto-load project context and expose the skill catalog in development.
-config :arbor_kernel,
-  common: [
-    project_context_enabled: true,
-    skill_catalog_enabled: true
-  ]
+# Project context (AGENTS.md/CLAUDE.md) is NOT enabled globally: a blanket dev
+# override put the 31 KB developer handbook into every agent's prompt,
+# conversationalists included (2026-08-25). Coding-related templates opt in via
+# `metadata.project_context: "enabled"`. The skill catalog is on by default
+# in config.exs.
 
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM

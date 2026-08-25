@@ -28,6 +28,7 @@ defmodule Arbor.Agent.Lifecycle do
   """
 
   alias Arbor.Agent.{
+    ConfigCore,
     BranchSupervisor,
     Character,
     ExactTemplatePolicy,
@@ -1195,10 +1196,16 @@ defmodule Arbor.Agent.Lifecycle do
   # Build a system prompt for Session LLM calls via Arbor.AI runtime bridge.
   # Falls back to template/character-based prompt if Arbor.AI is unavailable.
   defp build_session_system_prompt(agent_id, profile, opts) do
+    # Thread the template's prompt toggles (project context = AGENTS.md /
+    # CLAUDE.md) so the DOT-session path honours them like the APIAgent path.
+    metadata = extract_template_metadata(profile)
+
     prompt_opts = [
       state: %{id: agent_id},
       model: Keyword.get(opts, :model),
-      provider: Keyword.get(opts, :provider)
+      provider: Keyword.get(opts, :provider),
+      project_context: ConfigCore.prompt_toggle(metadata_field(metadata, :project_context)),
+      skills: ConfigCore.prompt_toggle(metadata_field(metadata, :skills))
     ]
 
     Arbor.AI.build_stable_system_prompt(agent_id, prompt_opts)
@@ -1216,6 +1223,11 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Extract metadata from the template module (if available).
   # Template metadata may include :context_management, :model, :provider.
+  defp metadata_field(metadata, key) when is_map(metadata),
+    do: Map.get(metadata, key) || Map.get(metadata, to_string(key))
+
+  defp metadata_field(_metadata, _key), do: nil
+
   defp extract_template_metadata(profile) do
     case exact_policy_snapshot(profile) do
       {:ok, snapshot} ->

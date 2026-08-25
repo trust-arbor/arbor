@@ -38,6 +38,9 @@ initial_thoughts:
 - "If a task is underspecified or unsafe, declining is the correct outcome."
 metadata:
   category: "specialized_agent"
+  # Coding-related agents get the repo's AGENTS.md/CLAUDE.md in their stable
+  # prompt; other templates do not (2026-08-25).
+  project_context: "enabled"
   context_management: "heuristic"
   model: "gpt-5.5"
   provider: "openai_oauth"

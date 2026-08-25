@@ -206,6 +206,31 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert {:ok, _} = Arbor.Trust.authorize(agent_id, uri, :execute)
     end
 
+    test "discoverable_tools/1 is mintable minus held minus blocked minus floor",
+         %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+
+      create_profile_with_rules(agent_id, :ask, %{
+        "arbor://fs/read" => :auto,
+        "arbor://fs/list" => :auto,
+        "arbor://memory/recall" => :auto,
+        "arbor://shell/exec" => :block
+      })
+
+      grant!(agent_id, "arbor://fs/list")
+
+      assert {:ok, names} = ToolDisclosure.discoverable_tools(agent_id)
+      # mintable, not held → discoverable
+      assert "file_read" in names
+      # held → already disclosed, not "discoverable"
+      refute "file_list" in names
+      # floor → already disclosed
+      refute "memory_recall" in names
+      # blocked → not reachable at all. (An :ask URI IS discoverable: discovery
+      # can request it and the approval gate decides — mintable includes ask.)
+      refute "shell_execute" in names
+    end
+
     test "a :block rule hides the tool even when it is in the floor", %{agent_id: agent_id} do
       set_policy_enforcer_enabled(true)
       create_profile_with_rules(agent_id, :ask, %{"arbor://memory/recall" => :block})

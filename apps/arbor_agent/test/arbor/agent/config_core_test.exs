@@ -109,4 +109,16 @@ defmodule Arbor.Agent.ConfigCoreTest do
       assert ConfigCore.format_model(config) == "not configured"
     end
   end
+
+  describe "prompt_toggle/1" do
+    test "normalises template metadata strings to the prompt builder's atoms" do
+      # YAML/JSON templates carry "enabled"; the builder matches :enabled. Before
+      # this, a template's project_context: "enabled" silently inherited the
+      # system flag (2026-08-25).
+      assert Arbor.Agent.ConfigCore.prompt_toggle("enabled") == :enabled
+      assert Arbor.Agent.ConfigCore.prompt_toggle(:disabled) == :disabled
+      assert Arbor.Agent.ConfigCore.prompt_toggle("bogus") == :inherit
+      assert Arbor.Agent.ConfigCore.prompt_toggle(nil) == :inherit
+    end
+  end
 end

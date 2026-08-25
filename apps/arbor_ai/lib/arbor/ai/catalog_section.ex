@@ -59,9 +59,11 @@ defmodule Arbor.AI.CatalogSection do
       purpose_max: nil
     },
     action: %{
-      header: "# Available Tools",
+      header: "# Discoverable Tools",
       instruction:
-        "These tools are callable directly. Only use tool_find_tools to discover something NOT listed here:",
+        "Not attached to this conversation. Request one by name with tool_find_tools " <>
+          "and it becomes callable for the rest of the session. Tools already attached " <>
+          "are in your tool list and are NOT repeated here:",
       opts_key: :tools,
       system_flag: :tool_catalog_enabled,
       # Generous BACKSTOP, not a routine truncation: ~172 tools ≈ 12.2k today, so 32k leaves
@@ -94,7 +96,7 @@ defmodule Arbor.AI.CatalogSection do
   defp build_kind(kind, cfg, opts) do
     if context_enabled?(opts, cfg.opts_key, cfg.system_flag) do
       kind
-      |> entries()
+      |> entries(opts)
       |> Enum.reject(fn {name, _desc} -> name in [nil, ""] end)
       |> format_catalog(cfg)
     else
@@ -114,21 +116,44 @@ defmodule Arbor.AI.CatalogSection do
   # pattern this library uses for Arbor.Agent.* and Arbor.Memory.*): returns []
   # when arbor_actions isn't loaded in the current BEAM (e.g. arbor_ai's own
   # isolated test suite), and the drift-guard sees no new mix.exs dep.
-  defp entries(:skill) do
+  defp entries(:skill, _opts) do
     SkillLibrary.list()
     |> Enum.map(fn skill -> {Map.get(skill, :name), Map.get(skill, :description)} end)
   end
 
-  defp entries(:action) do
+  # The tool catalog lists what DISCOVERY can deliver for this agent — policy-
+  # mintable, not held, not blocked — via ToolDisclosure.discoverable_tools/1
+  # (arbor_orchestrator, L7, reached through the runtime bridge). Attached tools
+  # arrive with full schemas in the tool array and are not repeated. Without an
+  # agent id or with Trust unavailable we render nothing: an unknown set is
+  # better left out than listed as "callable" (that lie is what this replaced,
+  # 2026-08-25).
+  defp entries(:action, opts) do
     actions = Arbor.Actions
+    disclosure = Arbor.Orchestrator.Session.ToolDisclosure
+    agent_id = agent_id_from(opts)
 
-    if LazyLoader.exported?(actions, :all_tools, 0) do
+    with true <- is_binary(agent_id),
+         true <- LazyLoader.exported?(actions, :all_tools, 0),
+         true <- LazyLoader.exported?(disclosure, :discoverable_tools, 1),
+         # credo:disable-for-next-line Credo.Check.Refactor.Apply
+         {:ok, names} <- apply(disclosure, :discoverable_tools, [agent_id]) do
+      allowed = MapSet.new(names, &to_string/1)
+
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       actions
       |> apply(:all_tools, [])
       |> Enum.map(fn tool -> {Map.get(tool, :name), Map.get(tool, :description)} end)
+      |> Enum.filter(fn {name, _} -> MapSet.member?(allowed, to_string(name)) end)
     else
-      []
+      _ -> []
+    end
+  end
+
+  defp agent_id_from(opts) do
+    case Keyword.get(opts, :state) do
+      %{id: id} when is_binary(id) -> id
+      _ -> Keyword.get(opts, :agent_id)
     end
   end
 

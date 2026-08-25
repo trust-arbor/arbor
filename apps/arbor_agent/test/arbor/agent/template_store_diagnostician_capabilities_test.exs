@@ -24,4 +24,16 @@ defmodule Arbor.Agent.TemplateStoreDiagnosticianCapabilitiesTest do
       assert uri in resources, "diagnostician template is missing #{uri}"
     end
   end
+
+  test "only coding-related templates opt into AGENTS.md/CLAUDE.md project context" do
+    for name <- ~w(coding_agent code_reviewer) do
+      assert {:ok, data} = TemplateStore.get(name)
+      assert get_in(data, ["metadata", "project_context"]) == "enabled", name
+    end
+
+    for name <- ~w(conversationalist diagnostician researcher) do
+      assert {:ok, data} = TemplateStore.get(name)
+      refute get_in(data, ["metadata", "project_context"]) == "enabled", name
+    end
+  end
 end
