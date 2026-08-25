@@ -6,12 +6,14 @@ defmodule Arbor.Common.Sanitizers.SSRFTest do
   alias Arbor.Contracts.Security.Taint
 
   @bit 0b00100000
+  # Exercise the public-address path without making fast tests depend on public DNS.
+  @public_ip "8.8.8.8"
 
   describe "sanitize/3" do
     test "valid public URL passes with bit set" do
       taint = %Taint{level: :untrusted}
-      {:ok, url, updated} = SSRF.sanitize("https://example.com/api", taint)
-      assert url == "https://example.com/api"
+      url = "https://#{@public_ip}/api"
+      {:ok, ^url, updated} = SSRF.sanitize(url, taint)
       assert Bitwise.band(updated.sanitizations, @bit) == @bit
     end
 
@@ -54,7 +56,7 @@ defmodule Arbor.Common.Sanitizers.SSRFTest do
 
     test "allows port 8080" do
       taint = %Taint{}
-      {:ok, _, _} = SSRF.sanitize("http://example.com:8080/api", taint)
+      {:ok, _, _} = SSRF.sanitize("http://#{@public_ip}:8080/api", taint)
     end
 
     test "allows private IPs when allow_private is true" do
@@ -66,7 +68,7 @@ defmodule Arbor.Common.Sanitizers.SSRFTest do
       taint = %Taint{}
 
       {:ok, _, _} =
-        SSRF.sanitize("ftp://example.com/file", taint,
+        SSRF.sanitize("ftp://#{@public_ip}/file", taint,
           allowed_schemes: ["ftp", "http", "https"],
           allowed_ports: [21, 80, 443, 8080, 8443]
         )
@@ -79,7 +81,7 @@ defmodule Arbor.Common.Sanitizers.SSRFTest do
 
     test "preserves existing sanitization bits" do
       taint = %Taint{sanitizations: 0b00000001}
-      {:ok, _, updated} = SSRF.sanitize("https://example.com", taint)
+      {:ok, _, updated} = SSRF.sanitize("https://#{@public_ip}", taint)
       assert Bitwise.band(updated.sanitizations, 0b00000001) == 0b00000001
       assert Bitwise.band(updated.sanitizations, @bit) == @bit
     end
