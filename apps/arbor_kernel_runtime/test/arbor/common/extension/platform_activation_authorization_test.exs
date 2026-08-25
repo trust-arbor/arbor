@@ -197,6 +197,80 @@ defmodule Arbor.Common.Extension.PlatformActivationAuthorizationTest do
              )
   end
 
+  @tag :security_regression
+  test "security regression: malformed verification options fail closed", ctx do
+    issued_at = ctx.payload["issued_at"]
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope, now: 1)
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope, now: nil)
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope, now: "")
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope, now: "0")
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: "2026-08-17T00:00:00.000Z"
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: "2026-08-17T00:00:00+00:00"
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: issued_at,
+               consumed_nonces: [ctx.payload["nonce"]]
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: issued_at,
+               revoked: "true"
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: issued_at,
+               revoked: 1
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: issued_at,
+               now: issued_at
+             )
+  end
+
+  test "valid verification options and omission preserve mechanical authorization", ctx do
+    assert {:ok, omitted, [{:consume_nonce, _}]} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope)
+
+    assert omitted.status == :authorized
+    assert {:error, "not_ready"} = Activation.commit(omitted)
+
+    assert {:ok, allowed, [{:consume_nonce, _}]} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: ctx.payload["issued_at"],
+               revoked: false
+             )
+
+    assert allowed.status == :authorized
+    assert {:error, "not_ready"} = Activation.commit(allowed)
+
+    assert {:error, "authorization_revoked"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: ctx.payload["issued_at"],
+               revoked: true
+             )
+  end
+
   defp bound_transaction(snapshot) do
     %{
       Envelope.fixture(:activation_transaction)

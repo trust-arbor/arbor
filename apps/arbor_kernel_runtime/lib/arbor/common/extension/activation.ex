@@ -14,6 +14,7 @@ defmodule Arbor.Common.Extension.Activation do
 
   @bound_opt_keys [:now, :consumed_nonces, :revoked]
   @sha256_re ~r/\A[0-9a-f]{64}\z/
+  @time_re ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
 
   @doc "Returns an empty activation machine."
   @spec new() :: ActivationCore.state()
@@ -121,7 +122,63 @@ defmodule Arbor.Common.Extension.Activation do
         {:error, "malformed"}
 
       true ->
+        admit_bound_opt_values(opts)
+    end
+  end
+
+  defp admit_bound_opt_values(opts) do
+    with :ok <- admit_bound_now(opts),
+         :ok <- admit_bound_consumed_nonces(opts),
+         :ok <- admit_bound_revoked(opts) do
+      :ok
+    end
+  end
+
+  defp admit_bound_now(opts) do
+    case Keyword.fetch(opts, :now) do
+      :error ->
         :ok
+
+      {:ok, now} ->
+        if canonical_utc_second?(now) do
+          :ok
+        else
+          {:error, "malformed"}
+        end
+    end
+  end
+
+  defp admit_bound_consumed_nonces(opts) do
+    case Keyword.fetch(opts, :consumed_nonces) do
+      :error -> :ok
+      {:ok, %MapSet{}} -> :ok
+      {:ok, _} -> {:error, "malformed"}
+    end
+  end
+
+  defp admit_bound_revoked(opts) do
+    case Keyword.fetch(opts, :revoked) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _} -> {:error, "malformed"}
+    end
+  end
+
+  defp canonical_utc_second?(value) when is_binary(value) do
+    String.valid?(value) and Regex.match?(@time_re, value) and canonical_parsed_utc_second?(value)
+  end
+
+  defp canonical_utc_second?(_value), do: false
+
+  defp canonical_parsed_utc_second?(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, %DateTime{} = datetime, 0} ->
+        datetime.calendar == Calendar.ISO and datetime.time_zone in ["Etc/UTC", "UTC"] and
+          datetime.utc_offset == 0 and datetime.std_offset == 0 and
+          datetime.microsecond == {0, 0} and DateTime.to_iso8601(datetime) == value
+
+      _ ->
+        false
     end
   end
 
