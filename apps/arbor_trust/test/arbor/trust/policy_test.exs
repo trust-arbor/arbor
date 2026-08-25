@@ -536,8 +536,13 @@ defmodule Arbor.Trust.PolicyTest do
   end
 
   defp rebind_policy_host! do
-    Arbor.Trust.PolicyHost.release_claim()
-    assert {:ok, _pid} = Arbor.Trust.PolicyHost.start_link([])
+    _ = Application.stop(:arbor_trust)
+
+    if function_exported?(Arbor.Trust.PolicyHost, :release_claim, 0) do
+      Arbor.Trust.PolicyHost.release_claim()
+    end
+
+    assert {:ok, _} = Application.ensure_all_started(:arbor_trust)
   end
 
   defp restore_env(_app, key, nil), do: Application.delete_env(:arbor_trust, key)

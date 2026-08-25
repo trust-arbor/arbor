@@ -30,16 +30,18 @@ defmodule Arbor.Trust.Application do
     Application.get_env(:arbor_trust, :start_children, true)
   end
 
-  defp children_for(_profile, start_children) when start_children in [false, nil] do
-    {:ok, []}
-  end
-
+  # PolicyHost is mandatory reference-monitor infrastructure. start_children
+  # may suppress Arbor.Trust.Supervisor (Store/Manager/etc.) but not the host.
   defp children_for(:activation_only, _start_children) do
     {:ok, [policy_host_child(:activation_only)]}
   end
 
-  defp children_for(:full, _start_children) do
+  defp children_for(:full, true) do
     {:ok, [policy_host_child(:full), {Arbor.Trust.Supervisor, []}]}
+  end
+
+  defp children_for(:full, _start_children) do
+    {:ok, [policy_host_child(:full)]}
   end
 
   defp policy_host_child(profile) do

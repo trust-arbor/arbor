@@ -26,9 +26,14 @@ config :logger, level: :warning
 # Don't start HTTP server or MCP client supervisor in tests
 config :arbor_gateway, start_server: false, mcp_client_enabled: false
 
-# Don't start application supervision trees in tests —
-# tests use start_supervised! for what they need
-config :arbor_trust, start_children: false
+# Don't start Trust provider children (Store/Manager/etc.) in tests —
+# tests use start_supervised! for what they need. PolicyHost is mandatory
+# reference-monitor infrastructure and still starts. Keep the generated
+# action-profile provider out of the default test snapshot; focused tests
+# inject a mock and rebound the host.
+config :arbor_trust,
+  start_children: false,
+  action_profile_provider: nil
 
 config :arbor_security,
   start_children: false,

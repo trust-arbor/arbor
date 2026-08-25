@@ -255,8 +255,11 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
       # Write operations fall to baseline :ask
       assert ProfileResolver.effective_mode(profile, @file_write, security_ceilings: %{}) == :ask
 
-      # Memory falls to baseline :ask
-      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :ask
+      # Own-memory is the cognitive loop; heartbeat background_checks resolves to
+      # arbor://memory/write. Omitting this rule made cautious agents inert (2026-08-21).
+      assert preset.rules["arbor://memory"] == :auto
+      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :auto
+      assert ProfileResolver.effective_mode(profile, @memory_write, security_ceilings: %{}) == :auto
     end
 
     test ":balanced preset allows writes with notification, asks for git" do

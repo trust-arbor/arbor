@@ -31,7 +31,7 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
         profiles
 
       _unavailable ->
-        project_profiles(include_action_provider: not is_nil(Config.action_profile_provider()))
+        project_profiles(include_action_provider: false)
     end
   end
 
@@ -175,9 +175,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_security
   defp owner_for_parsed(%CapabilityUri{domain: "code"}), do: :arbor_actions
+  defp owner_for_parsed(%CapabilityUri{domain: "action"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "ai"}), do: :arbor_ai
   defp owner_for_parsed(%CapabilityUri{domain: "net"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "eval"}), do: :arbor_actions
+  defp owner_for_parsed(%CapabilityUri{domain: "identity"}), do: :arbor_agent
   defp owner_for_parsed(%CapabilityUri{domain: "monitor"}), do: :arbor_kernel_runtime
   defp owner_for_parsed(%CapabilityUri{domain: "trust"}), do: :arbor_trust
   defp owner_for_parsed(%CapabilityUri{domain: "governance"}), do: :arbor_trust

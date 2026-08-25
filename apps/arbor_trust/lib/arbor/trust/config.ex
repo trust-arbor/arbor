@@ -122,7 +122,11 @@ defmodule Arbor.Trust.Config do
   Runtime provider for generated action-namespace capability profiles.
 
   There is no Trust default. Full-profile action contribution is explicit
-  and upward-owned.
+  and upward-owned. Returns the configured module atom, or `nil` when unset.
+
+  This function only reads application env. Callers other than full-profile
+  snapshot projection must not `Code.ensure_loaded?/1` the atom; activation_only
+  must neither invoke nor load the provider.
   """
   @spec action_profile_provider() :: module() | nil
   def action_profile_provider do

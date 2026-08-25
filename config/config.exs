@@ -405,6 +405,10 @@ config :arbor_kernel,
     start_profile: :full
   ]
 
+# Full-profile action-namespace projection. Atom only; activation_only must
+# not invoke or load this module. arbor_trust must not depend on arbor_actions.
+config :arbor_trust, action_profile_provider: Arbor.Actions
+
 # Dashboard chat model configuration
 config :arbor_dashboard,
   chat_models: [

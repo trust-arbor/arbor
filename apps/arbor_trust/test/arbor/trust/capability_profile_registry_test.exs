@@ -27,17 +27,26 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
   end
 
   setup do
-    previous = Application.get_env(:arbor_trust, :action_profile_provider)
+    originals = %{
+      provider: Application.get_env(:arbor_trust, :action_profile_provider),
+      start_children: Application.get_env(:arbor_trust, :start_children),
+      kernel_runtime: Application.fetch_env(:arbor_kernel, :kernel_runtime)
+    }
 
     on_exit(fn ->
-      if is_nil(previous) do
-        Application.delete_env(:arbor_trust, :action_profile_provider)
-      else
-        Application.put_env(:arbor_trust, :action_profile_provider, previous)
+      restore_env(:action_profile_provider, originals.provider)
+      restore_env(:start_children, originals.start_children)
+
+      case originals.kernel_runtime do
+        {:ok, value} -> Application.put_env(:arbor_kernel, :kernel_runtime, value)
+        :error -> Application.delete_env(:arbor_kernel, :kernel_runtime)
       end
+
+      rebind_trust!()
     end)
 
-    Application.delete_env(:arbor_trust, :action_profile_provider)
+    Application.put_env(:arbor_trust, :action_profile_provider, nil)
+    rebind_trust!(:full, false)
     :ok
   end
 
@@ -65,8 +74,20 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
                "owned by arbor_persistence"
     end
 
-    test "runtime action profile provider participates in profile resolution" do
+    test "absent action provider annotates arbor://action ownership without granting a profile" do
+      assert CapabilityProfileRegistry.owner_for("arbor://action/browser/navigate") ==
+               :arbor_actions
+
+      assert CapabilityProfileRegistry.profile_for("arbor://action/browser/navigate") == nil
+      assert CapabilityProfileRegistry.owner_for("arbor://agent/action") == :arbor_agent
+      assert CapabilityProfileRegistry.owner_for("arbor://identity/alias") == :arbor_agent
+      assert CapabilityProfileRegistry.coverage_complete?()
+      assert CapabilityProfileRegistry.coverage_gaps() == []
+    end
+
+    test "runtime action profile provider participates in profile resolution after host rebind" do
       Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+      rebind_trust!(:full, false)
 
       assert %CapabilityProfile{
                owner: :arbor_actions,
@@ -81,4 +102,26 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
       assert "arbor://action/browser/navigate" in profile_uris
     end
   end
+
+  defp rebind_trust!(profile \\ :full, start_children \\ false) do
+    Application.put_env(:arbor_trust, :start_children, start_children)
+    current = Application.get_env(:arbor_kernel, :kernel_runtime, []) || []
+
+    Application.put_env(
+      :arbor_kernel,
+      :kernel_runtime,
+      Keyword.put(current, :start_profile, profile)
+    )
+
+    _ = Application.stop(:arbor_trust)
+
+    if function_exported?(Arbor.Trust.PolicyHost, :release_claim, 0) do
+      Arbor.Trust.PolicyHost.release_claim()
+    end
+
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_trust, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_trust, key, value)
 end

@@ -364,6 +364,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert preset.baseline == :ask
       assert preset.rules["arbor://shell"] == :block
       assert preset.rules["arbor://fs/read"] == :auto
+      assert preset.rules["arbor://memory"] == :auto
     end
 
     test ":balanced allows file writes, asks for shell" do

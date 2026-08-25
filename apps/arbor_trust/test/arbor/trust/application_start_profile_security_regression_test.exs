@@ -131,6 +131,72 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     assert Arbor.Trust.healthy?()
   end
 
+  test ":full with start_children false still starts the policy host" do
+    assert {:ok, _} = restart_trust!(:full, false)
+
+    assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
+    refute_providers()
+    refute Process.whereis(Arbor.Trust.Supervisor)
+    refute Arbor.Trust.healthy?()
+
+    assert {:ok, %{start_profile: :full}} = Arbor.Trust.PolicyHost.snapshot()
+
+    unknown = "agent_full_no_children_#{System.unique_integer([:positive])}"
+    assert Policy.effective_mode(unknown, "arbor://shell/exec/ls") == :ask
+  end
+
+  test "activation_only with start_children false starts only the policy host" do
+    :persistent_term.erase({ActionProfileProvider, :invoked})
+    Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+    assert {:ok, _} = restart_trust!(:activation_only, false)
+
+    assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
+    refute_providers()
+    assert {:ok, %{start_profile: :activation_only, action_profiles_admitted: false}} =
+             Arbor.Trust.PolicyHost.snapshot()
+
+    refute :persistent_term.get({ActionProfileProvider, :invoked}, false)
+
+    profile_uris =
+      Arbor.Trust.CapabilityProfileRegistry.profiles()
+      |> Enum.map(& &1.uri_prefix)
+
+    refute "arbor://action/browser/navigate" in profile_uris
+  end
+
+  test "full profile admits a preconfigured action provider without provider children" do
+    :persistent_term.erase({ActionProfileProvider, :invoked})
+    Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+    assert {:ok, _} = restart_trust!(:full, false)
+
+    assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
+    refute_providers()
+    assert :persistent_term.get({ActionProfileProvider, :invoked}, false)
+
+    assert {:ok, %{start_profile: :full, action_profiles_admitted: true}} =
+             Arbor.Trust.PolicyHost.snapshot()
+
+    assert %Arbor.Contracts.Security.CapabilityProfile{
+             owner: :arbor_actions,
+             uri_prefix: "arbor://action/browser/navigate"
+           } =
+             Arbor.Trust.CapabilityProfileRegistry.profile_for("arbor://action/browser/navigate")
+  end
+
+  test "full profile with start_children true still admits a preconfigured action provider" do
+    :persistent_term.erase({ActionProfileProvider, :invoked})
+    Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+    assert {:ok, _} = restart_trust!(:full, true)
+
+    ids = application_child_ids()
+    assert MapSet.member?(ids, Arbor.Trust.PolicyHost)
+    assert MapSet.member?(ids, Arbor.Trust.Supervisor)
+    assert :persistent_term.get({ActionProfileProvider, :invoked}, false)
+
+    assert {:ok, %{start_profile: :full, action_profiles_admitted: true}} =
+             Arbor.Trust.PolicyHost.snapshot()
+  end
+
   test "caller more-specific :auto cannot weaken the frozen shell ceiling" do
     assert {:ok, _} = restart_trust!(:activation_only, true)
     start_memory_profile_stack!()

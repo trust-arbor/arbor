@@ -148,16 +148,23 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     test "B2 regression: action namespace profiles feed policy minting" do
       agent_id = unique_agent()
       uri = "arbor://action/browser/navigate"
+      previous_provider = Application.get_env(:arbor_trust, :action_profile_provider)
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
       Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+      rebind_trust!()
 
-      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert cap.resource_uri == uri
-      assert cap.metadata[:profile_uri] == "arbor://action/browser/navigate"
-      assert cap.metadata[:profile_effect_class] == :read
-      assert cap.metadata[:mode] == :ask
+      try do
+        assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
+        assert cap.resource_uri == uri
+        assert cap.metadata[:profile_uri] == "arbor://action/browser/navigate"
+        assert cap.metadata[:profile_effect_class] == :read
+        assert cap.metadata[:mode] == :ask
+      after
+        restore(:arbor_trust, :action_profile_provider, previous_provider)
+        rebind_trust!()
+      end
     end
 
     test "mints an explicit trust-stamped capability when policy mode is :ask" do
@@ -227,6 +234,16 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
   defp ensure_started(module) do
     if Process.whereis(module), do: :ok, else: start_supervised!({module, []})
+  end
+
+  defp rebind_trust! do
+    _ = Application.stop(:arbor_trust)
+
+    if function_exported?(Arbor.Trust.PolicyHost, :release_claim, 0) do
+      Arbor.Trust.PolicyHost.release_claim()
+    end
+
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
