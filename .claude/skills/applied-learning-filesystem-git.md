@@ -434,3 +434,12 @@ guard after the commit exists, leaving a preserved commit but a failed pipeline.
 exact diff before approval, then leave the worktree untouched until the task reaches a terminal
 state; inspect the preserved branch only afterward (found 2026-08-21 during reviewed-commit
 approval for the TaskArtifacts/readiness fixes).
+
+<!-- applied-learning: verify-retained-candidate-ancestry-before-defining-a-replay-range -->
+<a id="applied-learning-verify-retained-candidate-ancestry-before-defining-a-replay-range"></a>
+**Verify retained-candidate ancestry before defining a replay range.** A
+correction task's recorded base may not be an ancestor of the destination.
+Compute the true merge base, enumerate the complete merge-base-to-tip commit
+and path manifest, and prove overlap and non-overlap provenance before replay.
+Never treat the final correction's base-to-tip range as the full inherited
+candidate (found 2026-08-23 while reconstructing the contract-change stack).

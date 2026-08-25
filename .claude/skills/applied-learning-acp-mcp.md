@@ -1102,3 +1102,41 @@ Names do not reliably imply argument keys: `arbor_help` requires `action`, not
 `action_name`. A missing required key may also expose a server admission bug rather
 than a useful lookup error, so distinguish caller correction from the separate
 typed-validation regression (found 2026-08-23 while inspecting task steering).
+
+<!-- applied-learning: a-complete-test-artifact-does-not-overrule-process-capacity-exhaustion -->
+<a id="applied-learning-a-complete-test-artifact-does-not-overrule-process-capacity-exhaustion"></a>
+**A complete test artifact does not overrule process capacity exhaustion.** A
+contained child may emit a full passing ExUnit count and still hit its deadline
+before clean process completion; the trusted timeout/containment result remains
+authoritative and the revision is not accepted. Before retrying, compare the work's
+actual grain with the closed Shell resource profile: fix a standard-versus-intensive
+profile mismatch at the Core, action opts, and compiled-policy owners instead of
+raising a one-off timeout or relabeling counts as success. Then repeat every unfinished
+revision under the corrected bound (found 2026-08-24 when SecurityRegression passed
+49 selected candidate tests under a standard child ceiling but timed out before the
+base leg).
+
+<!-- applied-learning: prefer-the-retained-candidate-verifier-over-implementation-replay -->
+<a id="applied-learning-prefer-the-retained-candidate-verifier-over-implementation-replay"></a>
+**Prefer the retained-candidate verifier over implementation replay.** When a
+coding task terminalizes after producing a reviewed commit but deliberately retains
+an inactive task-owned workspace, first use public `arbor.coding.check --verify`
+with its archived plan and exact agent, task, and workspace ids. That boundary
+reactivates the workspace, binds compilation plus task/principal/workspace
+provenance, and reruns product validation without reconstructing the tree. Preserve
+the original terminal as historical evidence; a later passing report does not
+rewrite it. Replay only when no valid retained record exists (found 2026-08-24 while
+recovering the checkpoint-policy candidate after validation capacity exhaustion).
+
+<!-- applied-learning: distinguish-live-runtime-binding-drift-from-a-nested-manifest-defect -->
+<a id="applied-learning-distinguish-live-runtime-binding-drift-from-a-nested-manifest-defect"></a>
+**Distinguish live runtime binding drift from a nested-manifest defect.** An
+authorized graph pins loaded module and BEAM identities. If the server reloads a
+handler after the parent manifest is compiled but before a nested graph launches,
+`child_binding_not_pinned_by_parent` is the expected fail-closed result even when
+both graphs select the same module. Compare parent/child module hashes and correlate
+task and source-commit timestamps before changing compiler or authority code. Keep
+the candidate, classify the run as infrastructure drift, and rerun review against a
+stable runtime; never weaken subset enforcement or request implementation rework
+without a semantic verdict (found 2026-08-24 when Packet B crossed a live
+`LlmHandler` upgrade).
