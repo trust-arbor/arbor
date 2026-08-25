@@ -18,7 +18,8 @@ defmodule Arbor.Agent.MessageFacade do
   @max_engagement_id_bytes 256
   @max_session_token_bytes 4096
   @session_token_absent :__session_token_absent__
-  @allowed_opt_keys [:timeout, :session_token]
+  @proof_absent :__proof_absent__
+  @allowed_opt_keys [:timeout, :session_token, :signed_request]
   # Whole-string positive allowlist for ids interpolated into
   # arbor://chat/agent/<target>. Equivalent to
   # \A(?:agent|human)_[A-Za-z0-9_-]+\z plus the 256-byte bound.
@@ -153,12 +154,12 @@ defmodule Arbor.Agent.MessageFacade do
   end
 
   defp deliver_with(caller_id, target_agent_id, message, opts, mode, collaborators) do
-    with {:ok, timeout_ms, session_token} <- validate_opts(opts),
+    with {:ok, timeout_ms, proof} <- validate_opts(opts),
          :ok <- validate_principal_id(caller_id, :invalid_caller_id),
          :ok <- validate_principal_id(target_agent_id, :invalid_agent_id),
-         :ok <- validate_message_for_branch(message, caller_id, session_token) do
-      case session_token do
-        @session_token_absent ->
+         :ok <- validate_message_for_branch(message, caller_id, proof) do
+      case proof do
+        @proof_absent ->
           ordinary_path(
             caller_id,
             target_agent_id,
@@ -168,13 +169,13 @@ defmodule Arbor.Agent.MessageFacade do
             collaborators
           )
 
-        token when is_binary(token) ->
+        {_kind, _value} = proof ->
           authenticated_path(
             caller_id,
             target_agent_id,
             message,
             timeout_ms,
-            token,
+            proof,
             mode,
             collaborators
           )
@@ -199,15 +200,15 @@ defmodule Arbor.Agent.MessageFacade do
          target_agent_id,
          message,
          timeout_ms,
-         token,
+         proof,
          mode,
          collaborators
        ) do
     resource = "arbor://chat/agent/" <> target_agent_id
 
-    case issue_receipt(collaborators.issue_receipt, caller_id, resource, token) do
+    case issue_receipt(collaborators.issue_receipt, caller_id, resource, proof) do
       {:ok, receipt} ->
-        secrets = secrets_for(token, receipt)
+        secrets = secrets_for(proof, receipt)
 
         deliver_authenticated(
           collaborators,
@@ -225,10 +226,19 @@ defmodule Arbor.Agent.MessageFacade do
     end
   end
 
-  defp secrets_for(token, receipt) do
+  # Only a session token is itself a bearer secret that must be scrubbed from
+  # the turn. A signed request is a per-request proof, not a reusable credential,
+  # and carries no value to redact here.
+  defp secrets_for(proof, receipt) do
     bearer =
       case DeliveryReceipt.bearer_token(receipt) do
         {:ok, b} when is_binary(b) and byte_size(b) > 0 -> b
+        _ -> nil
+      end
+
+    token =
+      case proof do
+        {:session_token, value} -> value
         _ -> nil
       end
 
@@ -253,8 +263,8 @@ defmodule Arbor.Agent.MessageFacade do
             [] ->
               with {:ok, timeout_ms} <-
                      validate_timeout(Keyword.get(opts, :timeout, @default_timeout_ms)),
-                   {:ok, session_token} <- extract_session_token_opt(opts) do
-                {:ok, timeout_ms, session_token}
+                   {:ok, proof} <- extract_proof_opt(opts) do
+                {:ok, timeout_ms, proof}
               end
 
             _unknown ->
@@ -271,6 +281,46 @@ defmodule Arbor.Agent.MessageFacade do
   defp has_duplicate_keys?(opts) do
     keys = Keyword.keys(opts)
     length(keys) != length(Enum.uniq(keys))
+  end
+
+  # A human principal may prove itself in more than one way —
+  # `Arbor.Security.authorize/4` lists `:signed_request` (per-request Ed25519)
+  # and `:session_token` (HMAC session) as ALTERNATIVES.
+  #
+  # This previously branched on session-token presence alone, conflating "is
+  # authenticated" with "authenticated by one specific mechanism". A caller
+  # holding a perfectly good signed request fell into the ordinary branch and
+  # was told it needed an `engagement_id` — which the authenticated path then
+  # rejects, since it resolves the engagement itself. That left the CLI unable
+  # to reach the authenticated path at all despite holding the operator key
+  # `mix arbor.user.link` already signs with.
+  #
+  # Exactly one proof may be supplied. Two would leave which one authorized the
+  # turn ambiguous.
+  defp extract_proof_opt(opts) do
+    token = Keyword.get_values(opts, :session_token)
+    signed = Keyword.get_values(opts, :signed_request)
+
+    case {token, signed} do
+      {[], []} ->
+        {:ok, @proof_absent}
+
+      {[_ | _], [_ | _]} ->
+        {:error, :invalid_opts}
+
+      {[], [request]} ->
+        {:ok, {:signed_request, request}}
+
+      {[], _duplicates} ->
+        {:error, :invalid_opts}
+
+      {_token_values, []} ->
+        case extract_session_token_opt(opts) do
+          {:ok, @session_token_absent} -> {:ok, @proof_absent}
+          {:ok, value} -> {:ok, {:session_token, value}}
+          {:error, reason} -> {:error, reason}
+        end
+    end
   end
 
   defp extract_session_token_opt(opts) do
@@ -308,14 +358,17 @@ defmodule Arbor.Agent.MessageFacade do
 
   defp validate_principal_id(_id, error), do: {:error, error}
 
-  defp validate_message_for_branch(%UserMessage{} = message, caller_id, session_token) do
+  defp validate_message_for_branch(%UserMessage{} = message, caller_id, proof) do
     with :ok <- validate_content(message.content),
          :ok <- validate_sender(message.sender_id, caller_id) do
-      case session_token do
-        @session_token_absent ->
+      case proof do
+        @proof_absent ->
           validate_engagement_id_required(message.engagement_id)
 
-        _token when is_binary(session_token) ->
+        {_kind, _value} ->
+          # Any accepted proof reaches the authenticated path, which resolves
+          # the principal's canonical engagement itself and REJECTS a
+          # caller-supplied one as a route claim.
           validate_engagement_id_nil(message.engagement_id)
       end
     end
@@ -379,8 +432,11 @@ defmodule Arbor.Agent.MessageFacade do
     :exit, _ -> {:error, :unauthorized}
   end
 
-  defp issue_receipt(issue_fun, caller_id, resource, token) do
-    case issue_fun.(caller_id, resource, :chat, session_token: token) do
+  # Forward the proof under its own option name so Security applies the right
+  # verification: `:session_token` takes the HMAC path, `:signed_request` the
+  # per-request Ed25519 path.
+  defp issue_receipt(issue_fun, caller_id, resource, {kind, value}) do
+    case issue_fun.(caller_id, resource, :chat, [{kind, value}]) do
       {:ok, %DeliveryReceipt{} = receipt} ->
         {:ok, receipt}
 

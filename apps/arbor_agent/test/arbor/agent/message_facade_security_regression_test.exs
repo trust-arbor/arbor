@@ -341,6 +341,103 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     {auth_counter, chat_counter, authorize, chat}
   end
 
+  describe "proof kinds reaching the authenticated path" do
+    test "a SIGNED REQUEST reaches the authenticated path, forwarded under its own key" do
+      # `Arbor.Security.authorize/4` treats :signed_request and :session_token as
+      # ALTERNATIVE proofs of a human principal. The facade branched on
+      # session-token presence alone, so a caller holding a signed request —
+      # what the CLI has, via ~/.arbor/operator.key — fell into the ORDINARY
+      # branch and was told it needed an engagement_id that the authenticated
+      # path then rejects. It could not reach authentication at all.
+      caller = proof_caller()
+      collab = auth_collaborators(parent: self())
+
+      assert {:ok, _} =
+               MessageFacade.deliver_text(
+                 caller,
+                 proof_target(),
+                 proof_message(caller),
+                 [signed_request: "signed-request-blob"],
+                 collab
+               )
+
+      # Forwarded under :signed_request so Security applies Ed25519 verification
+      # rather than the HMAC session path.
+      assert_received {:issue_seen, auth_opts}
+      assert Keyword.get(auth_opts, :signed_request) == "signed-request-blob"
+      refute Keyword.has_key?(auth_opts, :session_token)
+    end
+
+    test "a SESSION TOKEN still reaches the authenticated path unchanged" do
+      caller = proof_caller()
+      collab = auth_collaborators(parent: self())
+
+      assert {:ok, _} =
+               MessageFacade.deliver_text(
+                 caller,
+                 proof_target(),
+                 proof_message(caller),
+                 [session_token: "tok-abc"],
+                 collab
+               )
+
+      assert_received {:issue_seen, auth_opts}
+      assert Keyword.get(auth_opts, :session_token) == "tok-abc"
+      refute Keyword.has_key?(auth_opts, :signed_request)
+    end
+
+    test "security regression: NO proof does not reach the authenticated path" do
+      # Without a proof the ordinary branch applies, which REQUIRES an
+      # engagement_id. A nil-engagement message must not slip through as though
+      # it had been authenticated.
+      caller = proof_caller()
+      collab = auth_collaborators(parent: self())
+
+      assert {:error, :invalid_engagement_id} =
+               MessageFacade.deliver_text(
+                 caller,
+                 proof_target(),
+                 proof_message(caller),
+                 [],
+                 collab
+               )
+
+      refute_received {:issue_seen, _}
+    end
+
+    test "security regression: two proofs at once are rejected" do
+      # Which proof authorized the turn must never be ambiguous.
+      caller = proof_caller()
+      collab = auth_collaborators(parent: self())
+
+      assert {:error, :invalid_opts} =
+               MessageFacade.deliver_text(
+                 caller,
+                 proof_target(),
+                 proof_message(caller),
+                 [session_token: "tok", signed_request: "sig"],
+                 collab
+               )
+
+      refute_received {:issue_seen, _}
+    end
+  end
+
+  defp proof_caller,
+    do: "human_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+  defp proof_target,
+    do: "agent_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+  defp proof_message(caller) do
+    %UserMessage{
+      content: "hello",
+      sender_id: caller,
+      engagement_id: nil,
+      sent_at: DateTime.utc_now()
+    }
+  end
+
   defp auth_collaborators(opts) do
     parent = Keyword.get(opts, :parent, self())
     issue_counter = Keyword.get(opts, :issue_counter, :counters.new(1, []))
