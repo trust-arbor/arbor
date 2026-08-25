@@ -2,6 +2,13 @@ defmodule Arbor.Actions.MemoryCode do
   @moduledoc """
   Code management actions for storing and retrieving learned code patterns.
 
+  These are memory-BACKED (`Arbor.Memory.store_code/2` and friends, under
+  `arbor://memory/write`) but they are not general memory. The old
+  `memory_*_code` names put a code-snippet library directly alongside
+  `memory_remember` in the tool list, so a model deciding where to put a fact
+  had to rule out four near-identical "store in memory" options first. Lead with
+  the domain instead: the storage classification was right, the naming was not.
+
   ## Actions
 
   | Action | Description |
@@ -30,7 +37,7 @@ defmodule Arbor.Actions.MemoryCode do
     """
 
     use Jido.Action,
-      name: "memory_store_code",
+      name: "code_pattern_store",
       description: "Store a code pattern. Required: code, language, purpose.",
       category: "memory_code",
       tags: ["memory", "code", "store"],
@@ -87,7 +94,7 @@ defmodule Arbor.Actions.MemoryCode do
     """
 
     use Jido.Action,
-      name: "memory_list_code",
+      name: "code_pattern_list",
       description: "List stored code patterns. Optional: language filter, limit.",
       category: "memory_code",
       tags: ["memory", "code", "list"],
@@ -156,7 +163,7 @@ defmodule Arbor.Actions.MemoryCode do
     """
 
     use Jido.Action,
-      name: "memory_delete_code",
+      name: "code_pattern_delete",
       description: "Delete a code pattern from storage. Required: entry_id.",
       category: "memory_code",
       tags: ["memory", "code", "delete"],
@@ -209,7 +216,7 @@ defmodule Arbor.Actions.MemoryCode do
     """
 
     use Jido.Action,
-      name: "memory_view_code",
+      name: "code_pattern_view",
       description:
         "View a code pattern. Provide entry_id for exact lookup or query for purpose search.",
       category: "memory_code",

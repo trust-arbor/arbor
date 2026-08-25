@@ -246,4 +246,34 @@ defmodule Arbor.Actions.MemoryReviewTest do
       assert "reject" in MemoryReview.RejectSuggestion.tags()
     end
   end
+
+  describe "capability classification (security regression)" do
+    test "review_queue is gated on memory/write because approve mutates the graph" do
+      # `action: approve` calls Arbor.Memory.accept_proposal/2, which CREATES a
+      # knowledge node. The tool was mapped to `arbor://memory/read`, so a
+      # read-only capability could mutate the graph through it. A tool's URI has
+      # to reflect its MAXIMUM effect, not its default action (found 2026-08-25
+      # while auditing the memory tool surface).
+      uri = Arbor.Actions.canonical_uri_for(Arbor.Actions.MemoryReview.ReviewQueue, %{})
+
+      assert uri == "arbor://memory/write",
+             "review_queue can approve/reject proposals; gating it on #{uri} lets a " <>
+               "read-only capability write to memory"
+    end
+
+    test "listing-only suggestion review stays a read, its mutations stay writes" do
+      # The read/write split here is deliberate and worth keeping: folding
+      # accept/reject into the listing tool would force the stricter capability
+      # onto listing, or repeat the under-classification above.
+      assert Arbor.Actions.canonical_uri_for(Arbor.Actions.MemoryReview.ReviewSuggestions, %{}) ==
+               "arbor://memory/read"
+
+      for module <- [
+            Arbor.Actions.MemoryReview.AcceptSuggestion,
+            Arbor.Actions.MemoryReview.RejectSuggestion
+          ] do
+        assert Arbor.Actions.canonical_uri_for(module, %{}) == "arbor://memory/write"
+      end
+    end
+  end
 end

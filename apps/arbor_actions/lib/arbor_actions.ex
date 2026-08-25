@@ -3227,7 +3227,11 @@ defmodule Arbor.Actions do
     Arbor.Actions.MemoryCognitive.AdjustPreference => "arbor://memory/write",
     Arbor.Actions.MemoryCognitive.PinMemory => "arbor://memory/write",
     Arbor.Actions.MemoryCognitive.UnpinMemory => "arbor://memory/write",
-    Arbor.Actions.MemoryReview.ReviewQueue => "arbor://memory/read",
+    # `action: approve|reject|approve_all` calls accept_proposal/reject_proposal,
+    # which CREATE knowledge nodes. Gating the whole tool on memory/read let a
+    # read-only capability mutate the graph. The tool's URI has to reflect its
+    # maximum effect, not its default action.
+    Arbor.Actions.MemoryReview.ReviewQueue => "arbor://memory/write",
     Arbor.Actions.MemoryReview.ReviewSuggestions => "arbor://memory/read",
     Arbor.Actions.MemoryReview.AcceptSuggestion => "arbor://memory/write",
     Arbor.Actions.MemoryReview.RejectSuggestion => "arbor://memory/write",

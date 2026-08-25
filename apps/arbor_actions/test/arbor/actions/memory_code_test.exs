@@ -78,7 +78,7 @@ defmodule Arbor.Actions.MemoryCodeTest do
     end
 
     test "validates action metadata" do
-      assert MemoryCode.StoreCode.name() == "memory_store_code"
+      assert MemoryCode.StoreCode.name() == "code_pattern_store"
       assert MemoryCode.StoreCode.category() == "memory_code"
       assert "store" in MemoryCode.StoreCode.tags()
     end
@@ -133,7 +133,7 @@ defmodule Arbor.Actions.MemoryCodeTest do
     end
 
     test "validates action metadata" do
-      assert MemoryCode.ListCode.name() == "memory_list_code"
+      assert MemoryCode.ListCode.name() == "code_pattern_list"
       assert "list" in MemoryCode.ListCode.tags()
     end
   end
@@ -166,7 +166,7 @@ defmodule Arbor.Actions.MemoryCodeTest do
     end
 
     test "validates action metadata" do
-      assert MemoryCode.DeleteCode.name() == "memory_delete_code"
+      assert MemoryCode.DeleteCode.name() == "code_pattern_delete"
       assert "delete" in MemoryCode.DeleteCode.tags()
     end
   end
@@ -220,14 +220,14 @@ defmodule Arbor.Actions.MemoryCodeTest do
     end
 
     test "validates action metadata" do
-      assert MemoryCode.ViewCode.name() == "memory_view_code"
+      assert MemoryCode.ViewCode.name() == "code_pattern_view"
       assert "view" in MemoryCode.ViewCode.tags()
     end
 
     test "generates tool schema" do
       tool = MemoryCode.ViewCode.to_tool()
       assert is_map(tool)
-      assert tool[:name] == "memory_view_code"
+      assert tool[:name] == "code_pattern_view"
     end
   end
 end
