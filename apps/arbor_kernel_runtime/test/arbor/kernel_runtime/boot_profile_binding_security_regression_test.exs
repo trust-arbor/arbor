@@ -53,6 +53,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
   end
 
   test "successful fixture bind publishes the closed snapshot on the public boundary" do
+    assert {:module, Arbor.KernelRuntime} = Code.ensure_loaded(Arbor.KernelRuntime)
     assert function_exported?(Arbor.KernelRuntime, :boot_profile, 0)
     assert {:ok, snapshot} = Arbor.KernelRuntime.boot_profile()
     assert snapshot["schema"] == "arbor.kernel_runtime.boot_profile_binding.v1"
@@ -91,9 +92,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
   test "mutated Application env cannot rebind a live snapshot" do
     assert {:ok, before} = Arbor.KernelRuntime.boot_profile()
 
-    put_kernel_runtime(
-      boot_profile: fixture_boot_profile(expected_release_id: "other.release.1")
-    )
+    put_kernel_runtime(boot_profile: fixture_boot_profile(expected_release_id: "other.release.1"))
 
     assert {:ok, ^before} = Arbor.KernelRuntime.boot_profile()
     assert before["manifest_sha256"] == @digest
@@ -205,9 +204,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
     common_ref = Process.monitor(common)
     sup_ref = Process.monitor(supervisor)
 
-    put_kernel_runtime(
-      boot_profile: fixture_boot_profile(expected_release_id: "other.release.1")
-    )
+    put_kernel_runtime(boot_profile: fixture_boot_profile(expected_release_id: "other.release.1"))
 
     with_verify_trace(fn ->
       Process.exit(owner, :kill)
@@ -527,6 +524,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
       assert {:ok, frozen, token} = peer_call(control, helper, :frozen_row, [])
       assert frozen["manifest_sha256"] == @digest
       assert byte_size(token) == 32
+
       assert peer_call(control, helper, :binding_table_owner, []) ==
                peer_call(control, Process, :whereis, [:init])
 
