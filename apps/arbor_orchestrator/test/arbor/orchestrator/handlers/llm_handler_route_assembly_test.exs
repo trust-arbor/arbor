@@ -251,6 +251,48 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
            end)
   end
 
+  test "recalled-memory system context is merged, never sent as a second system message" do
+    Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
+
+    node = %{
+      id: "single-system-node",
+      attrs: %{
+        "simulate" => "false",
+        "prompt" => "unused",
+        "messages_context_key" => "session.messages"
+      }
+    }
+
+    base_context = context()
+
+    # session_llm's turn builder prepends recalled memories as a leading SYSTEM
+    # message. Prepending the agent's prompt on top produced two, which
+    # OpenAI-compatible providers reject ("Context should have at most one
+    # system message, found 2"). Invisible while recall returned nothing; it
+    # fired the moment memory started working.
+    history = [
+      %Arbor.LLM.Message{role: :system, content: "## Recalled\nvault code is OBSIDIAN-42"},
+      %Arbor.LLM.Message{role: :user, content: "what is the vault code?"}
+    ]
+
+    context = %{base_context | values: Map.put(base_context.values, "session.messages", history)}
+
+    outcome = LlmHandler.execute(node, context, graph(), [])
+    assert outcome.status == :success
+    assert [{request, _opts}] = RecordingDispatcher.calls()
+
+    assert Enum.count(request.messages, &(&1.role == :system)) == 1,
+           "provider received #{Enum.count(request.messages, &(&1.role == :system))} system messages"
+
+    [system | rest] = request.messages
+    assert system.role == :system
+
+    # The recalled section must survive the merge — dropping it would silently
+    # take memory back out of the turn.
+    assert system.content =~ "OBSIDIAN-42"
+    assert Enum.map(rest, & &1.role) == [:user]
+  end
+
   test "disabled/legacy spoof of arbor.executed_route does not rewrite attribution" do
     Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
     Application.put_env(:arbor_orchestrator, :_test_legacy_spoof_executed_route, true)

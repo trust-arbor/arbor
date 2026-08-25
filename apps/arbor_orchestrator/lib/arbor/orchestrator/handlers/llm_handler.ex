@@ -1014,7 +1014,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           case Context.get(context, key) do
             msgs when is_list(msgs) and msgs != [] ->
               # Prepend system message, use context messages as conversation history
-              [Message.new(:system, system_content) | to_messages(msgs)]
+              merge_leading_system(system_content, to_messages(msgs))
 
             _ ->
               [
@@ -1251,6 +1251,32 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         messages
     end
   end
+
+  # `session_llm`'s turn builder prepends recalled memories as a leading SYSTEM
+  # message, and this path prepends the agent's system prompt — two system
+  # messages, which OpenAI-compatible providers reject outright ("Context should
+  # have at most one system message, found 2"). That stayed invisible for as
+  # long as recall returned nothing, and fired the moment memory actually
+  # started returning results (2026-08-25). Fold a leading system message from
+  # the conversation history into the single system prompt instead of emitting a
+  # second one — this guards every source of one, not just recall.
+  defp merge_leading_system(system_content, [%Message{role: :system} = carried | rest]) do
+    [Message.new(:system, join_system_sections(system_content, carried.content)) | rest]
+  end
+
+  defp merge_leading_system(system_content, messages),
+    do: [Message.new(:system, system_content) | messages]
+
+  defp join_system_sections(base, carried) when is_binary(base) and is_binary(carried) do
+    case String.trim(carried) do
+      "" -> base
+      trimmed -> base <> "\n\n" <> trimmed
+    end
+  end
+
+  # Non-binary content (multimodal parts) cannot be concatenated; keep the
+  # agent's prompt and drop the carried section rather than emit two.
+  defp join_system_sections(base, _carried), do: base
 
   defp to_messages(msgs) do
     msgs
