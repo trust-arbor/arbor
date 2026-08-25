@@ -22,9 +22,10 @@ defmodule Arbor.Security.OIDC.Config do
         },
         token_cache_path: ".arbor/identity/oidc_tokens.enc"
 
-  `allow_http` is required for `http://` issuers (local Zitadel). Resolve it
-  with `allow_http?/2` from `runtime.exs` / CLI fallbacks — do not set it by
-  hand in those two places or it will drift.
+  `allow_http` is required for `http://` issuers (local Zitadel). Configured
+  entries may set it explicitly. When omitted, this module resolves it through
+  `allow_http?/2` as the entry is read, keeping `runtime.exs` independent of
+  application BEAMs while retaining one fail-closed policy authority.
   """
 
   @app :arbor_security
@@ -32,7 +33,9 @@ defmodule Arbor.Security.OIDC.Config do
   @doc "Returns the full OIDC configuration map."
   @spec get() :: keyword()
   def get do
-    Application.get_env(@app, :oidc, [])
+    @app
+    |> Application.get_env(:oidc, [])
+    |> materialize_allow_http()
   end
 
   @doc "Whether OIDC is configured with at least one provider or device flow."
@@ -125,6 +128,38 @@ defmodule Arbor.Security.OIDC.Config do
   end
 
   defp loopback_http_issuer?(_issuer), do: false
+
+  defp materialize_allow_http(config) when is_list(config) do
+    config
+    |> update_if_present(:providers, &materialize_providers/1)
+    |> update_if_present(:device_flow, &materialize_entry/1)
+  end
+
+  defp materialize_allow_http(config), do: config
+
+  defp update_if_present(config, key, update) do
+    case Keyword.fetch(config, key) do
+      {:ok, value} -> Keyword.put(config, key, update.(value))
+      :error -> config
+    end
+  end
+
+  defp materialize_providers(providers) when is_list(providers) do
+    Enum.map(providers, &materialize_entry/1)
+  end
+
+  defp materialize_providers(providers), do: providers
+
+  defp materialize_entry(entry) when is_map(entry) do
+    if Map.has_key?(entry, :allow_http) or Map.has_key?(entry, "allow_http") do
+      entry
+    else
+      issuer = Map.get(entry, :issuer) || Map.get(entry, "issuer")
+      Map.put(entry, :allow_http, allow_http?(issuer))
+    end
+  end
+
+  defp materialize_entry(entry), do: entry
 
   defp has_providers?(config) do
     case Keyword.get(config, :providers) do

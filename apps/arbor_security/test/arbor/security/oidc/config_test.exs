@@ -1,5 +1,5 @@
 defmodule Arbor.Security.OIDC.ConfigTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Security.OIDC.Config
 
@@ -35,17 +35,90 @@ defmodule Arbor.Security.OIDC.ConfigTest do
     end
   end
 
-  test "runtime.exs and arbor.orchestrate wire allow_http through Config.allow_http?" do
+  describe "configured entries" do
+    setup do
+      previous_config = Application.get_env(:arbor_security, :oidc)
+      previous_allow_http = System.get_env("OIDC_ALLOW_HTTP")
+
+      on_exit(fn ->
+        if previous_config do
+          Application.put_env(:arbor_security, :oidc, previous_config)
+        else
+          Application.delete_env(:arbor_security, :oidc)
+        end
+
+        if previous_allow_http do
+          System.put_env("OIDC_ALLOW_HTTP", previous_allow_http)
+        else
+          System.delete_env("OIDC_ALLOW_HTTP")
+        end
+      end)
+
+      :ok
+    end
+
+    test "materializes omitted provider and device-flow policy through the authority" do
+      System.put_env("OIDC_ALLOW_HTTP", "true")
+
+      Application.put_env(:arbor_security, :oidc,
+        providers: [%{issuer: "http://localhost:8080", client_id: "dashboard"}],
+        device_flow: %{issuer: "http://localhost:8080", client_id: "device"}
+      )
+
+      assert [%{allow_http: true}] = Config.providers()
+      assert %{allow_http: true} = Config.device_flow()
+    end
+
+    test "preserves an explicit fail-closed setting" do
+      System.put_env("OIDC_ALLOW_HTTP", "true")
+
+      Application.put_env(:arbor_security, :oidc,
+        providers: [
+          %{issuer: "http://localhost:8080", client_id: "dashboard", allow_http: false}
+        ]
+      )
+
+      assert [%{allow_http: false}] = Config.providers()
+    end
+  end
+
+  test "security regression: runtime.exs stays app-agnostic while arbor.orchestrate uses the authority" do
     root = find_root(__DIR__)
     runtime = File.read!(Path.join(root, "config/runtime.exs"))
 
     orchestrate =
       File.read!(Path.join(root, "apps/arbor_orchestrator/lib/mix/tasks/arbor.orchestrate.ex"))
 
-    assert runtime =~ "Arbor.Security.OIDC.Config.allow_http?"
-    assert runtime =~ "allow_http: allow_http"
+    refute runtime =~ "Arbor.Security.OIDC.Config.allow_http?"
+    refute runtime =~ "allow_http: allow_http"
     assert orchestrate =~ "Arbor.Security.OIDC.Config.allow_http?"
     assert orchestrate =~ "allow_http: allow_http"
+  end
+
+  test "security regression: runtime config evaluates without Security application BEAMs" do
+    root = find_root(__DIR__)
+    runtime_path = Path.join(root, "config/runtime.exs")
+    elixir = System.find_executable("elixir") || flunk("elixir executable not found")
+    expression = "Config.Reader.read!(#{inspect(runtime_path)}, env: :test)"
+
+    cwd =
+      Path.join(System.tmp_dir!(), "arbor_runtime_config_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(cwd)
+    on_exit(fn -> File.rm_rf!(cwd) end)
+
+    {output, status} =
+      System.cmd(elixir, ["-e", expression],
+        cd: cwd,
+        env: [
+          {"OIDC_ISSUER", "http://localhost:8080"},
+          {"OIDC_CLIENT_ID", "runtime-boundary-test"},
+          {"OIDC_ALLOW_HTTP", "true"}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
   end
 
   defp find_root(dir) do
