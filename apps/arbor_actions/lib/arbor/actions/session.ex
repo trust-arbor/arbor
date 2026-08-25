@@ -35,6 +35,7 @@ defmodule Arbor.Actions.Session do
     """
     use Jido.Action,
       name: "session_classify",
+      tags: ["pipeline_internal"],
       description: "Classify session input as query, command, tool_result, or blocked",
       schema: [
         input: [type: :string, required: false, doc: "Input to classify"],
@@ -81,6 +82,7 @@ defmodule Arbor.Actions.Session do
     """
     use Jido.Action,
       name: "session_mode_select",
+      tags: ["pipeline_internal"],
       description: "Select BDI cognitive mode based on goals, intents, and turn state",
       schema: [
         goals: [type: {:list, :map}, required: false, doc: "Active goals"],
@@ -157,6 +159,7 @@ defmodule Arbor.Actions.Session do
     """
     use Jido.Action,
       name: "session_process_results",
+      tags: ["pipeline_internal"],
       description: "Parse and validate LLM JSON response into typed output fields",
       schema: [
         raw_content: [type: :string, required: false, doc: "Raw LLM response (JSON string)"]

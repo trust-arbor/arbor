@@ -190,6 +190,22 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert "memory_recall" in tools
     end
 
+    test "the disclosed find_tools is actually executable under an :auto rule (regression: unprofiled)",
+         %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      {:ok, uri} = Arbor.Actions.tool_name_to_canonical_uri("tool_find_tools")
+      create_profile_with_rules(agent_id, :ask, %{uri => :auto})
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      assert "tool_find_tools" in tools
+
+      # Disclosure is floor ∪ held, so discovery is the only path to everything
+      # else. It was disclosed but unmintable (:unprofiled) on the live
+      # onboarding node 2026-08-25: the agent called it correctly, was refused,
+      # and the turn failed.
+      assert {:ok, _} = Arbor.Trust.authorize(agent_id, uri, :execute)
+    end
+
     test "a :block rule hides the tool even when it is in the floor", %{agent_id: agent_id} do
       set_policy_enforcer_enabled(true)
       create_profile_with_rules(agent_id, :ask, %{"arbor://memory/recall" => :block})

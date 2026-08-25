@@ -44,6 +44,7 @@ defmodule Arbor.Actions.SessionLlm do
     """
     use Jido.Action,
       name: "session_llm_build_prompt",
+      tags: ["pipeline_internal"],
       description: "Build LLM prompt from session context sources",
       schema: [
         mode: [type: :string, required: true, doc: "heartbeat, followup, or turn"],

@@ -126,7 +126,13 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     # Read-only task status/result view. Results can include diffs and reports,
     # so the data is confidential even though the operation is non-mutating.
     {"arbor://agent/task/read", :arbor_agent, :low, :read_only, :read, :confidential, true, :auto,
-     true, :cheap, %{rate_limit: 300}}
+     true, :cheap, %{rate_limit: 300}},
+    # tool_find_tools. Disclosure is floor ∪ HELD (2026-08-25), so discovery is
+    # the only route to a mintable-but-unheld tool — and an unprofiled URI can
+    # never be minted, however permissive the mode. Found live: onboard4 called
+    # find_tools correctly and was refused with :unprofiled, then the turn failed.
+    {"arbor://agent/discover_tools", :arbor_agent, :low, :read_only, :read, :internal, false,
+     :auto, true, :cheap, %{rate_limit: 300}}
   ]
 
   @doc "Return inline URI profiles before operator overrides."

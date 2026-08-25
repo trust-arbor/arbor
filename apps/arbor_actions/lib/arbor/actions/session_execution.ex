@@ -37,6 +37,7 @@ defmodule Arbor.Actions.SessionExecution do
     """
     use Jido.Action,
       name: "session_exec_route_actions",
+      tags: ["pipeline_internal"],
       description: "Dispatch actions via execute_batch or route pending intentions",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
@@ -104,6 +105,7 @@ defmodule Arbor.Actions.SessionExecution do
     """
     use Jido.Action,
       name: "session_exec_execute_actions",
+      tags: ["pipeline_internal"],
       description: "Execute actions and create percept feedback for the agent",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],

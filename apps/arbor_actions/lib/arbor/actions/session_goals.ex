@@ -40,6 +40,7 @@ defmodule Arbor.Actions.SessionGoals do
     """
     use Jido.Action,
       name: "session_goals_update",
+      tags: ["pipeline_internal"],
       description: "Apply goal progress updates and create new goals with dedup",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
@@ -174,6 +175,7 @@ defmodule Arbor.Actions.SessionGoals do
     """
     use Jido.Action,
       name: "session_goals_store_decomps",
+      tags: ["pipeline_internal"],
       description: "Create Intent structs from goal decompositions",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
@@ -289,6 +291,7 @@ defmodule Arbor.Actions.SessionGoals do
     """
     use Jido.Action,
       name: "session_goals_process_proposals",
+      tags: ["pipeline_internal"],
       description: "Route accept/reject/defer decisions to Proposal facade",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
@@ -373,6 +376,7 @@ defmodule Arbor.Actions.SessionGoals do
     """
     use Jido.Action,
       name: "session_goals_store_identity",
+      tags: ["pipeline_internal"],
       description: "Store identity insights from LLM self-discovery",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
@@ -448,6 +452,7 @@ defmodule Arbor.Actions.SessionGoals do
     """
     use Jido.Action,
       name: "session_goals_prune_stale_intents",
+      tags: ["pipeline_internal"],
       description: "Remove pending intents older than max_age_ms from IntentStore",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
