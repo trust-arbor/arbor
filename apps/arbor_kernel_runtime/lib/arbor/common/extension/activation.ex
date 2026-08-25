@@ -150,9 +150,30 @@ defmodule Arbor.Common.Extension.Activation do
 
   defp admit_bound_consumed_nonces(opts) do
     case Keyword.fetch(opts, :consumed_nonces) do
-      :error -> :ok
-      {:ok, %MapSet{}} -> :ok
-      {:ok, _} -> {:error, "malformed"}
+      :error ->
+        :ok
+
+      {:ok, set} ->
+        if operational_map_set?(set) do
+          :ok
+        else
+          {:error, "malformed"}
+        end
+    end
+  end
+
+  defp operational_map_set?(value) when is_map(value) do
+    Map.get(value, :__struct__) == MapSet and is_map(Map.get(value, :map)) and
+      map_set_member_ok?(value)
+  end
+
+  defp operational_map_set?(_value), do: false
+
+  defp map_set_member_ok?(set) do
+    try do
+      is_boolean(MapSet.member?(set, 0))
+    rescue
+      _ -> false
     end
   end
 

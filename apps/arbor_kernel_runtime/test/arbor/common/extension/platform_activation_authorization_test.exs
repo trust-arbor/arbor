@@ -232,6 +232,12 @@ defmodule Arbor.Common.Extension.PlatformActivationAuthorizationTest do
     assert {:error, "malformed"} =
              KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
                now: issued_at,
+               consumed_nonces: %MapSet{map: nil}
+             )
+
+    assert {:error, "malformed"} =
+             KernelRuntime.authorize_platform_activation(ctx.staged, ctx.envelope,
+               now: issued_at,
                revoked: "true"
              )
 
