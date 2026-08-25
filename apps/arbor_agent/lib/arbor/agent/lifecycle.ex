@@ -139,6 +139,7 @@ defmodule Arbor.Agent.Lifecycle do
             :ok ->
               unless Keyword.has_key?(opts, :exact_template_policy) do
                 grant_owner_chat_capability(agent_id, opts)
+                grant_self_memory_capabilities(agent_id)
               end
 
               emit_created_signal(profile)
@@ -1560,6 +1561,46 @@ defmodule Arbor.Agent.Lifecycle do
   rescue
     e ->
       Logger.warning("[Lifecycle] owner chat grant raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Self-scoped memory: an agent owns its own memory. `Arbor.Memory`'s facade
+  # gates every operation on `arbor://memory/<op>/<agent_id>`, which is the
+  # boundary between reading MY memory and reading ANOTHER agent's — so it has
+  # to stay scoped. But the action-layer URIs templates declare
+  # (`arbor://memory/recall`, `.../write`) are a DIFFERENT, coarser gate: an
+  # agent could clear the action gate, run Memory.Recall, and then be denied by
+  # the facade gate inside it. That is how a fresh agent ended up unable to
+  # search its own memory while `memory_reflect` worked
+  # (`{:unauthorized, :unauthorized}`, found 2026-08-25 on the onboarding path).
+  #
+  # Grant the self-scoped baseline at creation so owning your own memory is not
+  # something each template has to remember to opt into. Best-effort, and
+  # suppressed under an exact template policy, where declared authority is the
+  # whole contract.
+  @self_memory_operations ~w[read write search]
+
+  defp grant_self_memory_capabilities(agent_id) do
+    Enum.each(@self_memory_operations, fn operation ->
+      resource = "arbor://memory/#{operation}/#{agent_id}"
+
+      case Arbor.Security.grant(principal: agent_id, resource: resource) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Lifecycle] self memory grant failed for #{agent_id} (#{resource}): #{inspect(reason)}"
+          )
+      end
+    end)
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("[Lifecycle] self memory grant raised: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok

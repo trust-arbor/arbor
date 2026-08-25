@@ -158,6 +158,47 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute/exec", :execute)
     end
 
+    test "an agent is authorized on its OWN memory at create time" do
+      assert {:ok, profile} = Lifecycle.create("Self Memory Probe", template: "test_agent")
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      # `Arbor.Memory`'s facade gates each op on `arbor://memory/<op>/<agent_id>`,
+      # a DIFFERENT and finer gate than the action-layer URIs a template declares
+      # (`arbor://memory/recall`, `.../write`). Before the create-time grant an
+      # agent cleared the action gate, ran Memory.Recall, and was then denied
+      # INSIDE it with `{:unauthorized, :unauthorized}` — it could not search its
+      # own memory while `memory_reflect` worked.
+      for operation <- ~w[read write search] do
+        assert {:ok, :authorized} =
+                 Arbor.Security.authorize(
+                   agent_id,
+                   "arbor://memory/#{operation}/#{agent_id}",
+                   :execute,
+                   verify_identity: false
+                 ),
+               "agent cannot #{operation} its own memory"
+      end
+    end
+
+    test "the self-memory grant does not reach another agent's memory" do
+      assert {:ok, mine} = Lifecycle.create("Self Memory Owner", template: "test_agent")
+      assert {:ok, theirs} = Lifecycle.create("Self Memory Stranger", template: "test_agent")
+      cleanup(mine.agent_id)
+      cleanup(theirs.agent_id)
+
+      # The scoped URI is the boundary between reading MY memory and reading
+      # ANOTHER agent's. Granting the baseline must not widen it into a blanket
+      # `arbor://memory/read`.
+      assert {:error, _} =
+               Arbor.Security.authorize(
+                 mine.agent_id,
+                 "arbor://memory/read/#{theirs.agent_id}",
+                 :execute,
+                 verify_identity: false
+               )
+    end
+
     test "security regression: coding template authorizes every canonical graph action" do
       assert {:ok, profile} =
                Lifecycle.create("Coding Graph Gate Probe", template: "coding_agent")
