@@ -2407,6 +2407,59 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Tool names the agent could obtain through discovery: policy-mintable for this
+  agent (`:auto` or `:ask` — the approval gate decides), not already held, and
+  not blocked. Pipeline-internal actions are excluded via `exposed_actions/0`.
+
+  "Held" is segment-aware in both directions (exact/ancestor-wildcard via the
+  Trust snapshot's `held`, scoped-descendant via `CapabilityUri.prefix_match?/2`),
+  matching `Arbor.Orchestrator.Session.ToolDisclosure`. This is the single
+  source for both the disclosure layer and `tool_find_tools`, so what discovery
+  returns is always something the agent can actually run (2026-08-25).
+
+  Returns `{:ok, names}` or `{:error, reason}` when Trust is unavailable.
+  """
+  @spec discoverable_tool_names(String.t() | nil) :: {:ok, [String.t()]} | {:error, term()}
+  def discoverable_tool_names(agent_id) when is_binary(agent_id) and agent_id != "" do
+    uri_index = action_uri_index()
+
+    case Arbor.Trust.enumerate_authority(agent_id, Map.keys(uri_index)) do
+      {:ok, snapshot} ->
+        entries_by_uri = Map.new(snapshot.candidate_entries, &{&1.uri, &1})
+        held_uris = snapshot.held_uris
+
+        names =
+          uri_index
+          |> Enum.filter(fn {uri, _mods} ->
+            entry = Map.get(entries_by_uri, uri)
+
+            match?(%{policy_mintable: true}, entry) and not match?(%{mode: :block}, entry) and
+              not held_for_disclosure?(entry, uri, held_uris)
+          end)
+          |> Enum.flat_map(fn {_uri, mods} -> Enum.map(mods, &to_string(&1.name())) end)
+          |> Enum.uniq()
+          |> Enum.sort()
+
+        {:ok, names}
+
+      {:error, _} = error ->
+        error
+    end
+  rescue
+    e -> {:error, e}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  def discoverable_tool_names(_), do: {:ok, []}
+
+  defp held_for_disclosure?(%{held: true}, _uri, _held_uris), do: true
+
+  defp held_for_disclosure?(_entry, uri, held_uris) do
+    Enum.any?(held_uris, &Arbor.Contracts.Security.CapabilityUri.prefix_match?(uri, &1))
+  end
+
+  @doc """
   Filter exposed actions to modules the given agent has capability to execute.
 
   Used by the ACP runtime's tool exposure path (`Runtime.Acp`'s

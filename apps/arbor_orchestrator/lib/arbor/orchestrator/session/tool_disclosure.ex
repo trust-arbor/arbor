@@ -216,39 +216,21 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   end
 
   @doc """
-  Tools the agent could obtain through `tool_find_tools`: policy-mintable for
-  this agent, not already held (so not already disclosed), and not blocked.
+  Tools the agent could obtain through `tool_find_tools`: policy-mintable, not
+  held (so not already disclosed), not blocked, and not in the floor.
 
-  This is the honest "discoverable" set for the prompt's tool catalog. Before
-  2026-08-25 the catalog listed all ~172 exposed tools as "callable directly",
-  which became false for most of them once disclosure was floor ∪ held.
-  Returns `:fallback` when Trust is unavailable — callers should render
-  nothing rather than guess.
+  Delegates to `Arbor.Actions.discoverable_tool_names/1` so discovery and
+  disclosure agree on one definition. Returns `:fallback` when Trust is
+  unavailable — callers should render nothing rather than guess.
   """
   @spec discoverable_tools(String.t()) :: {:ok, [String.t()]} | :fallback
   def discoverable_tools(agent_id) do
-    uri_to_tool_names = build_uri_to_tool_names_map()
-    {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, Map.keys(uri_to_tool_names))
-    entries_by_uri = Map.new(snapshot.candidate_entries, &{&1.uri, &1})
-    held_uris = snapshot.held_uris
-
-    tools =
-      uri_to_tool_names
-      |> Enum.filter(fn {uri, _names} ->
-        entry = Map.get(entries_by_uri, uri)
-
-        match?(%{policy_mintable: true}, entry) and not match?(%{mode: :block}, entry) and
-          not holds_for_disclosure?(entry, uri, held_uris)
-      end)
-      |> Enum.flat_map(fn {_uri, names} -> names end)
-      |> Enum.uniq()
-      |> Enum.sort()
-
-    {:ok, tools -- @base_tools}
+    case Arbor.Actions.discoverable_tool_names(agent_id) do
+      {:ok, names} -> {:ok, names -- @base_tools}
+      {:error, _} -> :fallback
+    end
   rescue
-    e ->
-      Logger.debug("ToolDisclosure.discoverable_tools failed: #{inspect(e)}")
-      :fallback
+    _ -> :fallback
   catch
     :exit, _ -> :fallback
   end

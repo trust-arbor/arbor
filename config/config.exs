@@ -97,7 +97,13 @@ config :arbor_actions, :channel_receivers, %{
 # Runtime injects the optional provider modules. See Arbor.Common.Config.
 config :arbor_kernel,
   common: [
-    tool_catalog_enabled: true,
+    # The tool catalog (a prompt listing of tool names) is OFF: since disclosure
+    # became floor ∪ held (2026-08-25) the tool array carries everything callable,
+    # and tool_find_tools is a self-describing semantic search over exactly the
+    # tools discovery can deliver. The catalog cost ~8 KB of every cached prefix
+    # for a section most turns never use. Enable per agent (`tools: :enabled`)
+    # or here if a model proves unable to discover by describing the task.
+    tool_catalog_enabled: false,
     # Skills follow the Agent Skills pattern: the catalog (name + one-line
     # purpose, ~2.7k tokens for 66 skills) is always in the stable system
     # prompt; bodies (~850 KB total) load on activation. Was dev-only until

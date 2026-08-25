@@ -488,24 +488,19 @@ defmodule Arbor.AI.SystemPromptBuilder do
     :exit, _ -> nil
   end
 
+  # Truthful about the tool model since 2026-08-25: the tool array IS the
+  # callable set (floor ∪ held ∪ discovered this session); there is no prompt
+  # catalog to consult, and no hardcoded "core tools" list — a conversationalist
+  # has no shell or git, and saying otherwise here made the model try them.
   defp build_tool_guidance_section do
     """
     ## Tool Usage
-    You start with a core set of tools, and the "# Available Tools" catalog above
-    lists more you can call directly by name. Check that catalog FIRST. Only use
-    `tool_find_tools` to discover a capability that is NOT already listed there
-    (an obscure tool, or one added after this prompt was built).
-
-    Don't tell the user you can't do something before checking the catalog and,
-    if needed, searching once for the missing capability.
-
-    Core tools available now:
-    - Memory: memory_recall, memory_remember, memory_read_self
-    - Relationships: relationship_get, relationship_save, relationship_moment, relationship_browse
-    - Files: file_read, file_write, file_list, file_search
-    - Shell: shell_execute
-    - Git: git_status, git_diff, git_commit, git_log
-    - Discovery: tool_find_tools (use this to find web, browser, skill, and other tools)
+    The tools attached to this conversation are exactly the ones you can call right
+    now. If a request needs a capability that is not attached, call `tool_find_tools`
+    ONCE, describing the task in plain language; it returns only tools you are allowed
+    to obtain, ready to call in the same turn. Some of those may ask for approval when
+    used. If nothing comes back, say the capability is unavailable to you — do not
+    re-search with rewordings.
 
     When a user's request can be fulfilled by using a tool, use the appropriate tool
     rather than just describing what you would do. Be concise. Use tools proactively.\

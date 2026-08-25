@@ -28,8 +28,13 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
       assert is_binary(tool.description)
       # Fix 4 (discovery-loop): the description must steer to the visible catalog
       # FIRST, not read as "when in doubt, search."
-      assert tool.description =~ "catalog"
-      assert tool.description =~ "NOT already listed"
+      # The description must stand alone: the prompt no longer carries a tool
+      # catalog (2026-08-25), so this text is where the model learns HOW to
+      # discover (describe the task; semantic) and WHAT it gets back.
+      assert tool.description =~ "Describe the TASK"
+      assert tool.description =~ "semantic"
+      assert tool.description =~ "allowed to obtain"
+      refute tool.description =~ "Available Tools"
       refute tool.description =~ "ANY task you can't accomplish"
     end
 

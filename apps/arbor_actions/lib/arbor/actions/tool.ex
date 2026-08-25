@@ -32,11 +32,11 @@ defmodule Arbor.Actions.Tool do
     use Jido.Action,
       name: "tool_find_tools",
       description:
-        "Discover a tool that is NOT already listed in your \"# Available Tools\" catalog. " <>
-          "Check that catalog FIRST — the tools it names are already callable directly, so do NOT " <>
-          "search for them. Only call this for a capability the catalog doesn't list (an obscure " <>
-          "tool, or one added after your prompt was built). Returns full tool schemas you can use " <>
-          "immediately in the same turn.",
+        "Find a tool you do not currently have. Describe the TASK in plain language " <>
+          "(e.g. \"look up Elixir docs\", \"list files in a directory\", \"query event history\"); " <>
+          "the search is semantic, so you do not need to know a tool's name. Only tools you are " <>
+          "allowed to obtain are returned, with full schemas you can call in this same turn. " <>
+          "Some may require approval when called. Do not search for tools already in your list.",
       category: "tool",
       tags: ["tool", "discovery", "search", "progressive"],
       schema: [
@@ -51,7 +51,7 @@ defmodule Arbor.Actions.Tool do
     def taint_roles, do: %{query: :control, limit: :data}
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       query = params[:query]
       limit = params[:limit] || 10
 
@@ -59,6 +59,12 @@ defmodule Arbor.Actions.Tool do
 
       resolver = Arbor.Common.CapabilityResolver
       executor_mod = executor_module()
+
+      # Constrain results to what THIS agent can actually obtain. Discovery over
+      # the full catalog let an agent "find" a blocked or unmintable tool and
+      # then fail to run it; with the catalog gone from the prompt this is the
+      # only place the model learns what exists, so it must be truthful.
+      allowed = obtainable_names(context)
 
       tools =
         if Code.ensure_loaded?(resolver) and function_exported?(resolver, :search, 2) do
@@ -75,6 +81,15 @@ defmodule Arbor.Actions.Tool do
         else
           # Fallback: search action names directly
           fallback_search(query, limit, executor_mod)
+        end
+
+      tools =
+        case allowed do
+          :any ->
+            tools
+
+          %MapSet{} ->
+            Enum.filter(tools, &MapSet.member?(allowed, get_in(&1, ["function", "name"])))
         end
 
       tool_names = Enum.map(tools, fn t -> get_in(t, ["function", "name"]) end)
@@ -94,10 +109,25 @@ defmodule Arbor.Actions.Tool do
        }}
     end
 
+    # :any when there is no agent in context (non-agent callers keep the full
+    # catalog); otherwise the discoverable set. Trust unavailable → nothing.
+    defp obtainable_names(context) do
+      case context[:agent_id] || context["agent_id"] do
+        id when is_binary(id) and id != "" ->
+          case Actions.discoverable_tool_names(id) do
+            {:ok, names} -> MapSet.new(names)
+            {:error, _} -> MapSet.new()
+          end
+
+        _ ->
+          :any
+      end
+    end
+
     defp discovery_instruction([]),
       do:
-        "No tools matched. Do NOT repeat this search with reworded queries — either use a tool " <>
-          "already in your \"# Available Tools\" catalog, or tell the user this capability is unavailable."
+        "No obtainable tool matched. Do NOT repeat this search with reworded queries — use a " <>
+          "tool already in your list, or tell the user this capability is unavailable to you."
 
     defp discovery_instruction(tool_names) do
       names = Enum.join(tool_names, ", ")

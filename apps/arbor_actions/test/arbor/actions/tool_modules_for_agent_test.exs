@@ -126,6 +126,42 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
     end
   end
 
+  describe "discoverable_tool_names/1 and tool_find_tools" do
+    test "discovery returns only tools the agent can obtain", %{agent_id: agent_id} do
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+
+      create_profile_with_rules(agent_id, :ask, %{
+        "arbor://fs/read" => :auto,
+        "arbor://fs/list" => :auto,
+        "arbor://shell/exec" => :block
+      })
+
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/list")
+
+      assert {:ok, names} = Arbor.Actions.discoverable_tool_names(agent_id)
+      assert "file_read" in names
+      refute "file_list" in names
+      refute "shell_execute" in names
+      refute "session_memory_recall" in names
+
+      # tool_find_tools honours the same set. Exact-name queries so the test
+      # exercises the FILTER, not search ranking in an isolated test BEAM.
+      find = fn q ->
+        {:ok, %{discovered_tool_names: hits}} =
+          Arbor.Actions.Tool.FindTools.run(%{query: q, limit: 10}, %{agent_id: agent_id})
+
+        hits
+      end
+
+      assert "file_read" in find.("file_read")
+      # held → attached already, so discovery does not return it
+      refute "file_list" in find.("file_list")
+      # blocked → never
+      refute "shell_execute" in find.("shell_execute")
+    end
+  end
+
   defp start_trust_infrastructure do
     ensure_started(Arbor.Trust.EventStore)
     ensure_started(Arbor.Trust.Store)
