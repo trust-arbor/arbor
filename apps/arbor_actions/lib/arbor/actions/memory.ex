@@ -95,6 +95,8 @@ defmodule Arbor.Actions.Memory do
         entities: [type: {:list, :string}, default: [], doc: "Related entity names to link"]
       ]
 
+    require Logger
+
     alias Arbor.Actions
     alias Arbor.Actions.Memory, as: MemoryHelpers
 
@@ -140,6 +142,16 @@ defmodule Arbor.Actions.Memory do
                 :unknown -> nil
               end
 
+            # The knowledge graph and the semantic index are separate stores:
+            # `add_knowledge` writes the graph, while `memory_recall` searches
+            # the index. Storing without indexing is why an agent could be told
+            # a fact, confirm it stored, and then fail to recall it moments
+            # later — reporting its own memory as broken (2026-08-25). An agent
+            # asked to REMEMBER something means it wants to retrieve it with the
+            # tool it actually has, so index the content too. Best-effort: a
+            # failed index must not turn a successful store into an error.
+            indexed = index_for_recall(agent_id, params.content, type_atom)
+
             Actions.emit_completed(__MODULE__, %{node_id: node_id, outcome: outcome})
 
             {:ok,
@@ -147,6 +159,7 @@ defmodule Arbor.Actions.Memory do
                node_id: node_id,
                type: type_atom,
                stored: true,
+               indexed: indexed,
                linked_count: linked,
                already_existed: already_existed,
                outcome: outcome
@@ -167,6 +180,29 @@ defmodule Arbor.Actions.Memory do
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Failed to store knowledge: #{inspect(reason)}"}
       end
+    end
+
+    defp index_for_recall(agent_id, content, type_atom) do
+      case Arbor.Memory.index(agent_id, content, %{source: :agent_tool, type: type_atom}) do
+        {:ok, _entry_id} ->
+          true
+
+        other ->
+          Logger.warning(
+            "[Memory.Remember] stored but not indexed for #{agent_id}: #{inspect(other)}"
+          )
+
+          false
+      end
+    rescue
+      e ->
+        Logger.warning(
+          "[Memory.Remember] indexing raised for #{agent_id}: #{Exception.message(e)}"
+        )
+
+        false
+    catch
+      :exit, _ -> false
     end
 
     defp maybe_link_entities(_agent_id, _node_id, []), do: 0

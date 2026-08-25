@@ -104,6 +104,29 @@ defmodule Arbor.Actions.MemoryTest do
       assert result.stored == true
     end
 
+    test "a remembered fact is recallable afterwards", %{agent_id: agent_id, context: ctx} do
+      # The knowledge graph and the semantic index are separate stores, and
+      # memory_recall reads the INDEX. Storing without indexing let an agent be
+      # told a fact, confirm it stored, then fail to recall it moments later and
+      # report its own memory as broken (2026-08-25). Remembering has to make
+      # the fact retrievable with the tool the agent actually has.
+      assert {:ok, result} =
+               Memory.Remember.run(
+                 %{content: "The onboarding passphrase is HELIOTROPE-7", type: "fact"},
+                 ctx
+               )
+
+      assert result.stored == true
+      assert result.indexed == true
+
+      assert {:ok, recalled} = Arbor.Memory.recall(agent_id, "onboarding passphrase", limit: 5)
+
+      assert Enum.any?(recalled, fn entry ->
+               String.contains?(to_string(entry[:content] || entry[:text] || ""), "HELIOTROPE-7")
+             end),
+             "a remembered fact was not recallable: #{inspect(recalled)}"
+    end
+
     test "stores with importance", %{context: ctx} do
       assert {:ok, result} =
                Memory.Remember.run(
