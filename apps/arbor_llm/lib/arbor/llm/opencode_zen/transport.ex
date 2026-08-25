@@ -126,6 +126,33 @@ defmodule Arbor.LLM.OpenCodeZen.Transport do
     |> Req.Request.put_header("x-title", @title)
   end
 
+  # Streaming takes a DIFFERENT shape. `provider.attach_stream/4` returns a
+  # `%Finch.Request{}`, not a `%Req.Request{}`, carrying `@req_llm_placeholder`
+  # as a real Authorization header in its `headers` list.
+  #
+  # The relay 401s ANY bearer, including that sentinel, so a streaming turn
+  # failed with {:stream_http_error, 401} while the identical non-streaming call
+  # succeeded. Before this clause the Finch request fell through the catch-all
+  # below and shipped the placeholder to the wire — the exact thing the comment
+  # on @req_llm_placeholder says must never happen.
+  #
+  # Finch headers are a plain list of {name, value}; there is no options map and
+  # no auth step to neutralise, so rewrite the list directly.
+  def apply_anonymous_auth(%Finch.Request{headers: headers} = request)
+      when is_list(headers) do
+    kept =
+      Enum.reject(headers, fn {name, _v} ->
+        String.downcase(to_string(name)) in [
+          "authorization",
+          "user-agent",
+          "http-referer",
+          "x-title"
+        ]
+      end)
+
+    %{request | headers: kept ++ attribution_headers()}
+  end
+
   def apply_anonymous_auth(request), do: request
 
   @doc "True when `opts` mark this dispatch as the keyless provider."

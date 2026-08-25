@@ -652,4 +652,51 @@ defmodule Arbor.LLM.OpenCodeZen.SecurityRegressionTest do
 
   defp restore_env(_key, nil), do: Application.delete_env(:arbor_llm, :trusted_proxy_endpoints)
   defp restore_env(key, val), do: Application.put_env(:arbor_llm, key, val)
+
+  test "security regression: the placeholder never survives on the STREAMING shape" do
+    # `provider.attach_stream/4` returns a %Finch.Request{}, not a
+    # %Req.Request{}, carrying the sentinel as a real header. Before the Finch
+    # clause existed it fell through `apply_anonymous_auth/1`'s catch-all and
+    # shipped `Bearer arbor-keyless-not-a-credential` to the wire. The relay
+    # 401s ANY bearer, so streaming turns failed with {:stream_http_error, 401}
+    # while the identical non-streaming call succeeded.
+    placeholder = Arbor.LLM.OpenCodeZen.Transport.req_llm_placeholder()
+
+    request = %Finch.Request{
+      scheme: :https,
+      host: "opencode.ai",
+      port: 443,
+      method: "POST",
+      path: "/zen/v1/chat/completions",
+      headers: [
+        {"Authorization", "Bearer " <> placeholder},
+        {"Content-Type", "application/json"}
+      ],
+      body: "{}",
+      query: nil,
+      unix_socket: nil,
+      private: %{}
+    }
+
+    out = Arbor.LLM.OpenCodeZen.apply_anonymous_auth(request)
+    joined = Enum.map_join(out.headers, ";", fn {n, v} -> "#{n}=#{v}" end)
+
+    refute joined =~ placeholder, "the keyless placeholder reached the wire: #{joined}"
+
+    assert Enum.any?(out.headers, fn {n, v} ->
+             String.downcase(to_string(n)) == "authorization" and v == ""
+           end)
+
+    # Honest attribution, never a spoofed opencode/latest.
+    assert Enum.any?(out.headers, fn {n, v} ->
+             String.downcase(to_string(n)) == "user-agent" and v =~ "Arbor/"
+           end)
+
+    refute joined =~ "opencode/latest"
+
+    # Content headers survive.
+    assert Enum.any?(out.headers, fn {n, _} ->
+             String.downcase(to_string(n)) == "content-type"
+           end)
+  end
 end
