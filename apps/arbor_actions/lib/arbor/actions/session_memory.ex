@@ -68,6 +68,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_recall",
       description: "Recall memories, goals, intents, or beliefs by type",
+      tags: ["pipeline_internal"],
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
         recall_type: [type: :string, required: false, doc: "Type: goals/intents/beliefs/query"],
@@ -175,6 +176,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_update",
       description: "Index memory notes from LLM turn output",
+      tags: ["pipeline_internal"],
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
         turn_data: [type: :map, required: false, doc: "Turn data with memory notes"]
@@ -220,6 +222,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_checkpoint",
       description: "Write a session checkpoint for crash recovery",
+      tags: ["pipeline_internal"],
       schema: [
         session_id: [type: :string, required: true, doc: "Session ID"],
         turn_count: [type: :integer, required: false, doc: "Current turn number"],
@@ -267,6 +270,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_consolidate",
       description: "Run KG decay/prune and identity consolidation",
+      tags: ["pipeline_internal"],
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"]
       ]
@@ -343,6 +347,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_update_wm",
       description: "Add memory notes, concerns, and curiosity to working memory",
+      tags: ["pipeline_internal"],
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
         memory_notes: [
@@ -455,6 +460,7 @@ defmodule Arbor.Actions.SessionMemory do
     use Jido.Action,
       name: "session_memory_background_checks",
       description: "Run memory background checks (patterns, insights, preconscious)",
+      tags: ["pipeline_internal"],
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
         history_limit: [
