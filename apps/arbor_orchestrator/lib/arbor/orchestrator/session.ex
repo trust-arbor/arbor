@@ -689,8 +689,8 @@ defmodule Arbor.Orchestrator.Session do
         end
 
       # Grant security capabilities for the session's resolved tool set.
-      # Tool exposure is profile/capability-derived (not trust-tier gated); the
-      # agent needs matching capabilities for Security.authorize to succeed.
+      # Tool exposure is the floor plus HELD capabilities (ToolDisclosure); the
+      # agent still needs matching capabilities for Security.authorize to succeed.
       alias Arbor.Orchestrator.Session.ToolDisclosure
 
       resolved_tools =

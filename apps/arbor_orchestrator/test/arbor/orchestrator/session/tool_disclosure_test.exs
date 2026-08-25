@@ -108,7 +108,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
   describe "profile_tools/1" do
     setup :start_trust_infrastructure
 
-    test "includes profile-mintable tools without granting capabilities", %{agent_id: agent_id} do
+    test "leaves policy-mintable tools to discovery and mints nothing", %{agent_id: agent_id} do
       set_policy_enforcer_enabled(true)
       create_profile_with_rules(agent_id, :ask, %{"arbor://fs/read" => :auto})
 
@@ -117,12 +117,75 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       refute Enum.any?(caps_before, &(&1.resource_uri == "arbor://fs/read"))
 
       assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
-      assert "file_read" in tools
 
+      # Mintable-but-not-held is reachable through tool_find_tools, not shown by
+      # default. Disclosing every mintable URI is what put a 12-capability
+      # conversationalist at 151 tools (2026-08-25).
+      refute "file_read" in tools
+      assert "tool_find_tools" in tools
+
+      # The floor is always there.
+      for floor <- ToolDisclosure.core_tools(), do: assert(floor in tools)
+
+      # Still read-only.
       {:ok, caps_after} = Arbor.Security.list_capabilities(agent_id)
       assert Enum.map(caps_after, & &1.id) == cap_ids_before
-      refute Enum.any?(caps_after, &(&1.resource_uri == "arbor://fs/read"))
     end
+
+    test "discloses a tool whose exact canonical capability is held", %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{})
+      grant!(agent_id, "arbor://fs/read")
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      assert "file_read" in tools
+      refute "file_write" in tools
+    end
+
+    test "discloses a tool held under an ancestor wildcard grant", %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{})
+      grant!(agent_id, "arbor://fs/**")
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      assert "file_read" in tools
+      assert "file_write" in tools
+    end
+
+    test "discloses a tool held under a SCOPED grant (regression: exact match drops it)",
+         %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{})
+
+      # This is the shape ACP and self-memory grants actually take. It does not
+      # authorize the bare `arbor://fs/read` resource, so Trust's own
+      # per-candidate `held` flag is false for it — an exact-match mapping
+      # silently hides file_read from every agent that holds only scoped paths.
+      grant!(agent_id, "arbor://fs/read/tmp/tool_disclosure_test/**")
+
+      {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, ["arbor://fs/read"])
+      [entry] = snapshot.candidate_entries
+      refute entry.held, "precondition: scoped grant is not exact authority for the bare URI"
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      assert "file_read" in tools
+      refute "file_list" in tools
+    end
+
+    test "a :block rule hides the tool even when it is in the floor", %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{"arbor://memory/recall" => :block})
+
+      assert "memory_recall" in ToolDisclosure.core_tools()
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      refute "memory_recall" in tools
+      assert "memory_remember" in tools
+    end
+  end
+
+  defp grant!(agent_id, resource) do
+    {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+    cap
   end
 
   describe "merge_discovered/2" do

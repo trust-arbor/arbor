@@ -148,14 +148,24 @@ another one. It doubles as user documentation — anyone standing up agents need
 
 ## 7. Tool *exposure* vs *authorization* are separate
 
-- **What:** what the model *sees* (`config["tools"]`, else profile-derived via
-  `ToolDisclosure` reverse-mapping caps→tools by **exact canonical URI**) is distinct
-  from what it may *execute* (caps + trust mode). Path-scoped caps (`…/**`) do NOT
-  expose a tool via the reverse-map.
-- **Symptom:** the agent flails on tools it can't run, or can't see a tool it was
-  granted a path-scoped cap for.
-- **Action:** pin the exposed set with `config["tools"]` (authoritative) and grant the
-  execution caps separately; don't rely on the reverse-map for path-scoped grants.
+- **What:** what the model *sees* is distinct from what it may *execute* (caps +
+  trust mode). Since 2026-08-25, `ToolDisclosure.profile_tools/1` shows the
+  **floor** (`core_tools/0`: memory, skills, find_tools, generate) **∪ tools whose
+  capability the agent HOLDS**; policy-mintable-but-unheld tools are hidden until
+  `tool_find_tools` surfaces them (it searches the full catalog). "Holds" is
+  segment-aware in both directions — exact, ancestor wildcard (`arbor://fs/**`),
+  AND scoped descendant (`arbor://fs/read/<dir>/**`) all disclose `file_read`.
+  Before this, every mintable URI was disclosed (a 12-cap conversationalist saw
+  120 tools) and path-scoped grants did NOT expose their tool (exact-match
+  reverse map).
+- **Symptom:** the agent can't see a tool it is only *mintable* for (expected —
+  it must discover it), or flails on a tool it sees but a `:block` rule hides
+  execution for (`:block` also hides it from disclosure, so check the profile).
+- **Action:** grant the capability if the tool should be visible by default;
+  `config["tools"]` still pins an explicit set (authoritative, no find_tools
+  injection). If a held scoped grant does NOT expose its tool, the canonical
+  action URI is probably not an ancestor of the grant — compare
+  `Arbor.Actions.tool_name_to_canonical_uri/1` with the held URI.
 
 ## 8. Unregistered capability URIs (when the URI registry is enforcing)
 

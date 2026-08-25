@@ -2,18 +2,34 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @moduledoc """
   Progressive tool disclosure for agent sessions.
 
-  Instead of loading all ~149 action tools into the LLM context at once,
-  sessions start with a small core tool set (~12-15 tools) plus a `tool_find_tools`
-  meta-tool. Agents discover additional tools on demand via `find_tools(query)`,
-  which are then available for the rest of the session.
+  Instead of loading all ~150 action tools into the LLM context at once,
+  sessions start with a small floor (`core_tools/0`) plus the tools the agent
+  holds capabilities for. Agents discover additional tools on demand via
+  `find_tools(query)`, which are then available for the rest of the session.
 
   ## Tool Visibility
 
-  When the trust profile system is available, tool visibility is derived from a
-  read-only authority snapshot via `profile_tools/1`: held capabilities plus
-  candidate URIs the trust profile would JIT-mint. Tools where the profile mode
-  is `:block` are hidden; tools where mode is `:ask` are annotated. Falls back
-  to `core_tools/0` when Trust is unavailable.
+  When the trust profile system is available, `profile_tools/1` discloses:
+
+      disclosed = core_tools()  (the universal floor)
+                ∪ tools whose capability the agent HOLDS
+                ∪ session-discovered tools
+
+  Tools the trust profile would merely auto-mint on first use are NOT shown by
+  default; they stay reachable through `tool_find_tools`, which searches the
+  full catalog. Before 2026-08-25 mintable tools were disclosed too, and a
+  conversationalist holding 12 capabilities was shown 120 tools (151 before the
+  cap) — exposure is now gated on held capability, while execution is still
+  gated exactly as before. Tools where the profile mode is `:block` are hidden
+  even when held or in the floor; `:ask` tools are annotated. Falls back to
+  `core_tools/0` when Trust is unavailable.
+
+  "Holds" is matched on parsed URI segments in both directions, because real
+  grants come in three shapes: exact (`arbor://fs/read`), ancestor wildcard
+  (`arbor://fs/**`), and scoped descendant (`arbor://fs/read/<dir>/**`,
+  `arbor://code/read/<agent>/*`). An exact match would silently drop the third
+  shape — which is what ACP and self-memory grants look like — and a raw
+  `String.starts_with?/2` would match siblings (`arbor://fs/reader`).
 
   ## Authorization
 
@@ -67,11 +83,12 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   )
 
   @doc """
-  Return the core tool name list used as the fallback when the trust profile
-  system is unavailable.
+  The universal floor: always disclosed (unless the profile blocks a tool), and
+  the whole tool set when Trust is unavailable.
 
-  Tool *exposure* is not gated by trust — capabilities still gate execution.
-  Always includes `find_tools` for on-demand discovery.
+  Everything beyond the floor is disclosed only when the agent HOLDS the
+  capability — see `profile_tools/1`. Always includes `find_tools` for
+  on-demand discovery.
   """
   @spec core_tools() :: [String.t()]
   def core_tools, do: @base_tools
@@ -92,8 +109,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @doc """
   Resolve the effective tool list for a session turn.
 
-  When `agent_id` is provided and Trust profiles are available, derives
-  tool visibility from the profile (hiding :block tools, annotating :ask).
+  When `agent_id` is provided and Trust profiles are available, discloses the
+  floor plus held capabilities (hiding :block tools, annotating :ask).
   Falls back to `core_tools/0` when Trust is unavailable.
 
   Priority:
@@ -131,11 +148,12 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   end
 
   @doc """
-  Derive tool visibility from the agent's trust profile.
+  Derive tool visibility from the agent's trust profile: the floor plus every
+  tool whose capability the agent holds.
 
-  Queries the authority snapshot for all known tool URIs and returns tool names
-  with either a held capability or profile-mintable reach. Returns `:fallback`
-  when the Trust system is unavailable.
+  Read-only — nothing is minted. Policy-mintable tools the agent does not hold
+  are deliberately left out; `tool_find_tools` surfaces them on demand.
+  Returns `:fallback` when the Trust system is unavailable.
   """
   @spec profile_tools(String.t()) :: {:ok, [String.t()]} | :fallback
   def profile_tools(agent_id) do
@@ -144,11 +162,24 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     uri_to_tool_names = build_uri_to_tool_names_map()
     {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, Map.keys(uri_to_tool_names))
 
-    tools =
-      snapshot.candidate_entries
-      |> Enum.filter(&Arbor.Trust.effective_authority_entry?/1)
-      |> Enum.flat_map(fn entry -> Map.get(uri_to_tool_names, entry.uri, []) end)
-      |> Enum.uniq()
+    entries_by_uri = Map.new(snapshot.candidate_entries, &{&1.uri, &1})
+    held_uris = snapshot.held_uris
+
+    {blocked, unblocked} =
+      Enum.split_with(uri_to_tool_names, fn {uri, _names} ->
+        match?(%{mode: :block}, Map.get(entries_by_uri, uri))
+      end)
+
+    blocked_tools = Enum.flat_map(blocked, fn {_uri, names} -> names end)
+
+    held_tools =
+      unblocked
+      |> Enum.filter(fn {uri, _names} ->
+        holds_for_disclosure?(Map.get(entries_by_uri, uri), uri, held_uris)
+      end)
+      |> Enum.flat_map(fn {_uri, names} -> names end)
+
+    tools = Enum.uniq((@base_tools -- blocked_tools) ++ held_tools)
 
     # Include find_tools only if the profile allows it
     discover_mode = get_effective_mode(agent_id, "arbor://agent/discover_tools")
@@ -160,10 +191,19 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
         tools
       end
 
+    hidden_mintable =
+      Enum.count(unblocked, fn {uri, _names} ->
+        entry = Map.get(entries_by_uri, uri)
+
+        match?(%{policy_mintable: true}, entry) and
+          not holds_for_disclosure?(entry, uri, held_uris)
+      end)
+
     Logger.debug(
       "[ToolDisclosure] profile_tools for #{agent_id}: #{length(tools)} tools " <>
-        "(from #{length(snapshot.held_capabilities)} held capabilities, " <>
-        "#{length(snapshot.policy_mintable_uris)} policy-mintable URIs)"
+        "(floor=#{length(@base_tools)}, held=#{length(held_tools)} from " <>
+        "#{length(snapshot.held_capabilities)} held capabilities; " <>
+        "#{hidden_mintable} policy-mintable URIs left to discovery)"
     )
 
     {:ok, tools}
@@ -173,6 +213,25 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
       :fallback
   catch
     :exit, _ -> :fallback
+  end
+
+  # Does the agent hold authority over the tool's canonical URI, for the
+  # purpose of SHOWING the tool? Two directions, both segment-aware:
+  #
+  #   * `entry.held` — Trust already ran `Security.capability_authorizes?/3`
+  #     for the canonical URI, so exact grants and ancestor wildcards
+  #     (`arbor://fs/**` ⊇ `arbor://fs/read`) are covered.
+  #   * a held URI UNDER the canonical one — a scoped grant such as
+  #     `arbor://fs/read/<dir>/**` does not authorize the bare `arbor://fs/read`
+  #     resource (that is correct for execution), but the agent plainly holds
+  #     file_read authority for some paths and should see the tool. Matched with
+  #     `CapabilityUri.prefix_match?/2` so `arbor://fs/reader/x` cannot match.
+  #
+  # Verified against the three grant shapes present on the live node 2026-08-25.
+  defp holds_for_disclosure?(%{held: true}, _canonical_uri, _held_uris), do: true
+
+  defp holds_for_disclosure?(_entry, canonical_uri, held_uris) do
+    Enum.any?(held_uris, &Arbor.Contracts.Security.CapabilityUri.prefix_match?(canonical_uri, &1))
   end
 
   # Build a reverse lookup: canonical_uri -> tool names from all registered actions.
