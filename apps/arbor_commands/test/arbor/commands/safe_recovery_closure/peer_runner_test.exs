@@ -1,10 +1,12 @@
 defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Extension.Envelope
   alias Arbor.Commands.SafeRecoveryClosure.PeerRunner
 
   @moduletag :slow
   @moduletag timeout: 180_000
+  @installer_public_key "347f4f2c0221027fb01086e2d5b8ee0264ae43ddb99aea3dacf04ce0331f89b8"
 
   test "peer starts a fixture app, injects RELEASE_COOKIE, and shuts down bounded" do
     root = fixture_release!()
@@ -183,31 +185,52 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
     release_dir = Path.join(root, "releases/0.1.0")
     File.mkdir_p!(release_dir)
 
-    File.write!(
-      Path.join(release_dir, "sys.config"),
-      """
-      [
-        {kernel, [{logger_level, notice}]},
-        {arbor_kernel, [
-          {kernel_runtime, [
-            {start_profile, full},
-            {boot_profile, [
-              {manifest_bytes, <<"m">>},
-              {signature_bytes, <<"s">>}
-            ]}
-          ]}
-        ]},
-        {arbor_security, [
-          {start_children, true},
-          {storage_backend, 'Elixir.Arbor.Security.Store.JSONFile'},
-          {audit_journal_mode, ephemeral},
-          {distributed_signals, false}
-        ]}
-      ].
-      """
-    )
+    sys_config = [
+      kernel: [logger_level: :notice],
+      arbor_kernel: [
+        kernel_runtime: [
+          start_profile: :full,
+          boot_profile: fixture_boot_profile()
+        ]
+      ],
+      arbor_security: [
+        start_children: true,
+        storage_backend: Arbor.Security.Store.JSONFile,
+        audit_journal_mode: :ephemeral,
+        distributed_signals: false
+      ]
+    ]
+
+    encoded_sys_config = :io_lib.format(~c"~tp.~n", [sys_config])
+    File.write!(Path.join(release_dir, "sys.config"), encoded_sys_config)
 
     root
+  end
+
+  defp fixture_boot_profile do
+    manifest = Envelope.boot_profile_fixture()
+    signature = Envelope.boot_profile_signature_fixture()
+    {:ok, manifest_bytes} = Envelope.boot_profile_canonical_json(manifest)
+    {:ok, signature_bytes} = Envelope.boot_profile_signature_canonical_json(signature)
+
+    [
+      manifest_bytes: manifest_bytes,
+      signature_bytes: signature_bytes,
+      trusted_signers: [
+        %{
+          "signer_id" => signature["signer_id"],
+          "key_id" => signature["key_id"],
+          "public_key" => @installer_public_key
+        }
+      ],
+      expected_release_id: manifest["release_id"],
+      expected_profile_id: manifest["profile_id"],
+      expected_revocation_input_id: manifest["revocation_input_id"],
+      expected_payload_digests: manifest["payload_digests"],
+      min_boot_epoch: manifest["boot_epoch"],
+      revoked_signer_key_ids: [],
+      revoked_platform_key_ids: []
+    ]
   end
 
   defp copy_application_deps!(release_root, roots) do
