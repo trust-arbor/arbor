@@ -199,11 +199,29 @@ defmodule Mix.Tasks.Arbor.Agent do
           start_opts: []
         }
 
-        start_opts = [
+        # Name the creator so `Lifecycle.grant_owner_chat_capability/2` issues
+        # `arbor://chat/agent/<agent_id>` to them. That capability cannot exist
+        # before creation — the agent id does not — so creation is the only
+        # place it can be granted, and it is scoped to THIS agent.
+        #
+        # Travels as `tenant_context`, NOT a bare `principal_id`:
+        # `Manager.do_start_agent/2` builds the AgentSpec from a closed
+        # allowlist (`[:capabilities, :initial_goals, :delegator_id,
+        # :tenant_context, :character]`), so a top-level `:principal_id` is
+        # silently dropped before `Lifecycle.create/2` sees it, and
+        # `extract_principal_id/1` reads `tenant_context.principal_id` for
+        # exactly this. No workspace_root, so workspace fs grants stay a no-op.
+        base_start_opts = [
           template: template_name,
           display_name: display_name,
           model_config: model_config
         ]
+
+        start_opts =
+          case local_operator_principal() do
+            nil -> base_start_opts
+            p -> base_start_opts ++ [tenant_context: Arbor.Contracts.TenantContext.new(p)]
+          end
 
         case remote(Arbor.Agent.Manager, :start_or_resume, [
                Arbor.Agent.APIAgent,
@@ -461,11 +479,7 @@ defmodule Mix.Tasks.Arbor.Agent do
             sender_id: local_operator_principal()
           )
 
-        case remote(Arbor.Agent.Manager, :chat, [
-               envelope,
-               "CLI",
-               [agent_id: agent_id, timeout: timeout]
-             ]) do
+        case chat_send(agent_id, envelope, timeout) do
           {:ok, response} ->
             Mix.shell().info(response)
 
@@ -530,6 +544,73 @@ defmodule Mix.Tasks.Arbor.Agent do
     end
   end
 
+  # MessageFacade caps delivery at 30s (@max_timeout_ms) and REJECTS anything
+  # larger rather than clamping, so the CLI's 60s default was an outright
+  # `:invalid_timeout`. That bound looks sized for agent-to-agent delivery, not
+  # a human chat turn waiting on an LLM.
+  @authenticated_delivery_max_ms 30_000
+
+  # Deliver a terminal turn through the AUTHENTICATED path, proving the operator
+  # by SIGNING with the key `mix arbor.user.init` wrote.
+  #
+  # `Manager.chat/3` predates engagements and mints no `%TurnAuthority{}`, so no
+  # disclosure capability is issued and any external-provider egress dies at the
+  # gate with `:initial_denied`. `Arbor.Agent.send_message/4` issues a delivery
+  # receipt and reaches `Session.send_authenticated_message/3`, which consumes
+  # it, mints the authority, and resolves the principal's canonical engagement.
+  #
+  # A signed request rather than a session token: the CLI holds
+  # `~/.arbor/operator.key` and already signs with it in `mix arbor.user.link`.
+  # A session token is a stand-in for possession, useful when the holder cannot
+  # sign; a one-shot command can, and gains nothing from session state it would
+  # have to create, carry, and revoke.
+  defp chat_send(agent_id, envelope, timeout) do
+    key_path = Arbor.Agent.IdentityAliasProof.default_key_path()
+
+    if File.exists?(key_path) do
+      signed_chat_send(key_path, agent_id, envelope, timeout)
+    else
+      # No operator key: nothing to authenticate as. Keep the legacy path rather
+      # than failing a turn that works today for un-gated runtimes (ACP,
+      # on-host). It still cannot egress externally, which is correct — it is
+      # unauthenticated.
+      remote(Arbor.Agent.Manager, :chat, [envelope, "CLI", [agent_id: agent_id, timeout: timeout]])
+    end
+  end
+
+  defp signed_chat_send(key_path, agent_id, envelope, timeout) do
+    effective = min(timeout, @authenticated_delivery_max_ms)
+
+    if effective < timeout do
+      Mix.shell().info(
+        "  (timeout capped at #{div(effective, 1000)}s by the authenticated delivery path)"
+      )
+    end
+
+    # Bind the proof to THIS turn: resource plus a digest of the content. The
+    # signature already carries a nonce and timestamp, so this is about making
+    # the payload describe what it authorizes rather than being a bare token.
+    payload =
+      "chat:" <>
+        "arbor://chat/agent/#{agent_id}:" <>
+        Base.encode16(:crypto.hash(:sha256, envelope.content || ""), case: :lower)
+
+    case remote(Arbor.Security, :sign_key_file_request, [key_path, payload]) do
+      {:ok, principal, signed} ->
+        envelope = %{envelope | sender_id: principal}
+
+        remote(Arbor.Agent, :send_message, [
+          principal,
+          agent_id,
+          envelope,
+          [timeout: effective, signed_request: signed]
+        ])
+
+      {:error, reason} ->
+        {:error, "could not sign as the local operator using #{key_path}: #{inspect(reason)}"}
+    end
+  end
+
   # The local-operator principal, or nil.
   #
   # Deliberately conservative: this is a principal asserted by local config, not
@@ -539,7 +620,15 @@ defmodule Mix.Tasks.Arbor.Agent do
   # `human_` check closed, while a forged one would pass it.
   defp local_operator_principal do
     if Mix.env() == :dev and not auth_required?() and not oidc_configured?() do
-      Arbor.Contracts.Security.Identity.local_operator_id()
+      # The REAL local human principal — the same `human_<hash>` that
+      # `mix arbor.user.init` produces, derived from identical claims rather
+      # than read from state.
+      #
+      # This used to send `Identity.local_operator_id()`, the static string
+      # "human_dashboard", which is NOT the principal `arbor.user.init` creates.
+      # See `0-inbox/human-dashboard-principal-assumptions.md` for why that
+      # static id exists at all.
+      remote(Arbor.Security, :local_human_principal_id, [[]])
     end
   end
 
