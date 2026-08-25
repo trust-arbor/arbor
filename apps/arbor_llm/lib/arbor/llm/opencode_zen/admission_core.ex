@@ -107,33 +107,57 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
     admitted = admitted(state)
     rejected = rejected(state)
 
+    # Report the evidence that EXISTS. This previously read `eval`, `score` and
+    # `at` from tier 2 unconditionally, so a tier-1-only admission printed
+    # "eval=arbor.eval.task, score=nil" — claiming a provenance that never ran
+    # and rendering an absent value as though it were a measurement.
     admitted_lines =
       Enum.map(admitted, fn record ->
         id = model_id(record)
         evidence = evidence(record)
-        t2 = Map.get(evidence, "tier2") || %{}
-        score = Map.get(t2, "score")
-        at = Map.get(t2, "at") || state.recorded_at
-        eval = Map.get(t2, "eval") || "arbor.eval.task"
+        tier = if evidence_level(record) == :full, do: "tier2", else: "tier1"
+        t = Map.get(evidence, tier) || %{}
+        eval = Map.get(t, "eval") || "unrecorded"
+        at = Map.get(t, "at") || state.recorded_at || "unknown"
 
-        "  - #{id}  (eval=#{eval}, score=#{inspect(score)}, at=#{at})"
+        case Map.get(t, "score") do
+          nil -> "  - #{id}  (#{tier}: #{eval}, at=#{at})"
+          score -> "  - #{id}  (#{tier}: #{eval}, score=#{score}, at=#{at})"
+        end
       end)
 
-    rejected_lines =
-      Enum.map(rejected, fn record ->
-        id = model_id(record)
-        reason = Map.get(record, "reason") || Map.get(record, :reason) || "rejected"
-        "  - #{id}  (#{reason})"
+    # "Rejected" must mean MEASURED AND FAILED. A model the relay rate-limits
+    # for honest attribution is not defective — Arbor declines to spoof a
+    # User-Agent to reach it — and merging that with genuine tool-call failures
+    # leaves an operator unable to tell "this model is bad" from "unreachable on
+    # our terms", which is exactly what they need when the free tier rotates.
+    {unreachable, failed} =
+      Enum.split_with(rejected, fn record ->
+        reason = to_string(Map.get(record, "reason") || Map.get(record, :reason) || "")
+        String.contains?(reason, "ua_gated")
       end)
+
+    rejected_lines = Enum.map(failed, &rejection_line/1)
+    unreachable_lines = Enum.map(unreachable, &rejection_line/1)
 
     """
     #{disclosure_text()}
-    Admitted models (derived from recorded eval evidence, recorded #{state.recorded_at || "unknown"}):
+    Admitted models (measured, recorded #{state.recorded_at || "unknown"}).
+    Each line states which tier the evidence comes from:
     #{Enum.join(admitted_lines, "\n")}
-
-    Rejected (kept so the catalog can be re-synced rather than re-litigated):
-    #{Enum.join(rejected_lines, "\n")}
+    #{section("Failed evaluation (measured, will not be retried automatically):", rejected_lines)}#{section("Unreachable on Arbor's terms (the model may be fine; Arbor sends honest attribution and will not spoof a User-Agent to get free compute):", unreachable_lines)}
     """
+  end
+
+  defp rejection_line(record) do
+    reason = Map.get(record, "reason") || Map.get(record, :reason) || "unrecorded"
+    "  - #{model_id(record)}  (#{reason})"
+  end
+
+  defp section(_heading, []), do: ""
+
+  defp section(heading, lines) do
+    "\n" <> heading <> "\n" <> Enum.join(lines, "\n") <> "\n"
   end
 
   @doc "Build a recorded-eval row from tier results. Pure."

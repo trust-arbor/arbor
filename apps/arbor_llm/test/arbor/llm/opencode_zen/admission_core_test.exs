@@ -105,7 +105,27 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCoreTest do
       assert listing =~ "NO representations or guarantees"
       assert listing =~ "sensitive, confidential, or regulated data"
       assert listing =~ "Admitted models"
-      assert listing =~ "Rejected"
+
+      # "Rejected" was one bucket holding three different meanings. It is now
+      # split: measured failure vs unreachable-on-our-terms. big-pickle is not
+      # defective — the relay rate-limits honest attribution — and merging the
+      # two leaves an operator unable to tell a bad model from an unreachable
+      # one when the free tier rotates.
+      assert listing =~ "Failed evaluation"
+      assert listing =~ "Unreachable on Arbor's terms"
+
+      # An admitted line must name the tier its evidence came from, so a
+      # tier-1-only admission cannot read as a full one.
+      for record <- AdmissionCore.admitted(AdmissionCore.new(recorded_payload())) do
+        level = AdmissionCore.evidence_level(record)
+        expected = if level == :full, do: "tier2:", else: "tier1:"
+
+        assert listing =~ expected,
+               "admitted line for #{record["id"]} does not state its evidence tier"
+      end
+
+      # An absent score must not render as a measurement.
+      refute listing =~ "score=nil"
 
       # Every rejection must show its recorded reason, whatever the reasons
       # currently are — not a specific one, which rotates with the catalog.
