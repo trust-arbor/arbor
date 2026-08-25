@@ -159,6 +159,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
     refute_providers()
+
     assert {:ok, %{start_profile: :activation_only, action_profiles_admitted: false}} =
              Arbor.Trust.PolicyHost.snapshot()
 
