@@ -88,6 +88,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
           json: :boolean,
           verbose: :boolean,
           configure: :boolean,
+          provider: :string,
           runtimes: :boolean,
           model: :string,
           fallback: :keep,
@@ -429,7 +430,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   defp recommend_default(entries, opts) do
     ready = Enum.filter(entries, & &1.available?)
 
-    case pick_best_provider(ready) do
+    case pick_best_provider(ready, opts[:provider]) do
       nil ->
         Mix.shell().info(
           "  No LLM providers available. Add an API key to .env or start a local model."
@@ -481,7 +482,40 @@ defmodule Mix.Tasks.Arbor.Doctor do
     end
   end
 
-  defp pick_best_provider(ready_entries) do
+  # An explicit `--provider` is an operator decision and outranks the priority
+  # list. Without this there was no way to CHOOSE the keyless tier: the priority
+  # list prefers a detected ACP CLI, and those live on PATH rather than in HOME,
+  # so any machine with Claude Code / Codex / Gemini CLI installed — i.e. most
+  # machines whose owner is reading Arbor's docs — silently skipped the
+  # zero-config path QUICKSTART advertises, and the disclosure was never even
+  # offered.
+  defp pick_best_provider(ready_entries, requested)
+       when is_binary(requested) and requested != "" do
+    ready_providers = MapSet.new(ready_entries, & &1.provider)
+
+    match =
+      Enum.find(@provider_priority, fn {catalog_key, config_atom, _llmdb} ->
+        requested in [catalog_key, to_string(config_atom)]
+      end)
+
+    case match do
+      nil ->
+        known = Enum.map_join(@provider_priority, ", ", fn {k, _, _} -> k end)
+        Mix.raise("Unknown --provider #{inspect(requested)}. Known providers: #{known}")
+
+      {catalog_key, config_atom, llmdb_atom} ->
+        unless MapSet.member?(ready_providers, catalog_key) do
+          Mix.raise("""
+          --provider #{catalog_key} was requested but it is not available.
+          Run `mix arbor.doctor` to see what each provider needs.
+          """)
+        end
+
+        {catalog_key, config_atom, select_best_model(llmdb_atom, config_atom)}
+    end
+  end
+
+  defp pick_best_provider(ready_entries, _requested) do
     ready_providers = MapSet.new(ready_entries, & &1.provider)
 
     Enum.find_value(@provider_priority, fn {catalog_key, config_atom, llmdb_atom} ->
