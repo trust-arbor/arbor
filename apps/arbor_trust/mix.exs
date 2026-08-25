@@ -56,7 +56,7 @@ defmodule Arbor.Trust.MixProject do
 
       # Core dependencies
       {:telemetry, "~> 1.0"},
-      {:phoenix_pubsub, "~> 2.1", optional: true},
+      {:phoenix_pubsub, "~> 2.1", optional: true, runtime: false},
       {:jason, "~> 1.4"},
 
       # Dev/test

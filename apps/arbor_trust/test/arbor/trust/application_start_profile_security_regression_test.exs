@@ -132,7 +132,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "caller more-specific :auto cannot weaken the frozen shell ceiling" do
-    assert {:ok, _} = restart_trust!(:full, true)
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    start_memory_profile_stack!()
 
     agent_id = "agent_ceiling_#{System.unique_integer([:positive])}"
     assert {:ok, _} = Arbor.Trust.create_trust_profile(agent_id)
@@ -186,9 +187,18 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     maybe_release_claim()
 
     {:ok, snapshot} = Arbor.Trust.Config.startup_policy_snapshot(:activation_only)
+    expected = {:policy_host_profile_mismatch, :activation_only, :full}
 
-    assert {:error, {:policy_host_profile_mismatch, :activation_only, :full}} =
+    Process.flag(:trap_exit, true)
+
+    assert {:error, ^expected} =
              Arbor.Trust.PolicyHost.start_link(start_profile: :full, snapshot: snapshot)
+
+    receive do
+      {:EXIT, _pid, ^expected} -> :ok
+    after
+      100 -> :ok
+    end
   end
 
   test "preconfigured action provider is not invoked on activation_only" do
@@ -207,7 +217,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
   end
 
   test "post-start permissive-baseline env cannot weaken a frozen host" do
-    assert {:ok, _} = restart_trust!(:full, true)
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    start_memory_profile_stack!()
 
     agent_id = "agent_baseline_#{System.unique_integer([:positive])}"
     assert {:ok, _} = Arbor.Trust.create_trust_profile(agent_id)
@@ -324,7 +335,8 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     end)
 
     ensure_security_children()
-    assert {:ok, _} = restart_trust!(:full, true)
+    assert {:ok, _} = restart_trust!(:activation_only, true)
+    start_memory_profile_stack!()
 
     agent_id = "agent_auto_tighten_#{System.unique_integer([:positive])}"
     resource = "arbor://ai/generate"
@@ -387,13 +399,13 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     end)
 
     assert %{
-             resource_uri: resource,
+             resource_uri: ^resource,
              error: :malformed_policy_opts,
              effective_mode: :block
            } = Policy.explain(unknown, resource, %{egress_mode: :auto})
 
     assert %{
-             resource_uri: resource,
+             resource_uri: ^resource,
              error: :malformed_policy_opts,
              effective_mode: :block
            } = Policy.explain(unknown, resource, egress_tier: :cloud)
@@ -467,6 +479,46 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
              {:requires_approval, :egress}
 
     assert Policy.tighten_public_opts(unknown, []) == {:ok, []}
+  end
+
+  defp start_memory_profile_stack! do
+    stop_named(Arbor.Trust.Manager)
+    stop_named(Arbor.Trust.Store)
+    delete_profile_cache()
+
+    start_supervised!({Arbor.Trust.Store, [persistence: :memory]})
+
+    start_supervised!(
+      {Arbor.Trust.Manager, [circuit_breaker: false, decay: false, event_store: false]}
+    )
+
+    on_exit(fn ->
+      stop_named(Arbor.Trust.Manager)
+      stop_named(Arbor.Trust.Store)
+      delete_profile_cache()
+    end)
+
+    :ok
+  end
+
+  defp stop_named(name) when is_atom(name) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        GenServer.stop(pid)
+
+      _ ->
+        :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp delete_profile_cache do
+    if :ets.info(:trust_profile_cache) != :undefined do
+      :ets.delete(:trust_profile_cache)
+    end
+
+    :ok
   end
 
   defp ensure_security_children do

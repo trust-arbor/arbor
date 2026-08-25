@@ -14,7 +14,6 @@ defmodule Arbor.Trust.PolicyHost do
 
   @table :arbor_trust_policy_host_claim
   @key :claimed
-  @heir_data :arbor_trust_policy_host_claim
   @ready_timeout 5_000
   @modes [:block, :ask, :allow, :auto]
   @start_profiles [:full, :activation_only]
@@ -224,14 +223,20 @@ defmodule Arbor.Trust.PolicyHost do
 
   if Mix.env() == :test do
     defp heir_opts do
-      _ = @heir_data
       []
     end
   else
     defp heir_opts do
       case init_pid() do
-        {:ok, init_pid} -> [{:heir, init_pid, @heir_data}]
+        {:ok, init_pid} -> [{:heir, init_pid, @table}]
         :error -> []
+      end
+    end
+
+    defp init_pid do
+      case Process.whereis(:init) do
+        pid when is_pid(pid) -> {:ok, pid}
+        _ -> :error
       end
     end
   end
@@ -353,13 +358,6 @@ defmodule Arbor.Trust.PolicyHost do
     end
 
     defp init_pid_or_none, do: init_pid()
-  end
-
-  defp init_pid do
-    case Process.whereis(:init) do
-      pid when is_pid(pid) -> {:ok, pid}
-      _ -> :error
-    end
   end
 
   defp admit_snapshot(snapshot) when is_map(snapshot) do
