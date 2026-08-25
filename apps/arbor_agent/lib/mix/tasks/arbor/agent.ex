@@ -34,6 +34,21 @@ defmodule Mix.Tasks.Arbor.Agent do
 
   use Mix.Task
 
+  # `config/runtime.exs` is applied by the `app.config` task, which `mix run` and
+  # `mix test` invoke for you. A custom task that starts applications itself does
+  # NOT get it, so every runtime-configured value — including everything loaded
+  # from `.env` — was nil here.
+  #
+  # Concretely: `ARBOR_DEFAULT_PROVIDER` is mapped to
+  # `config :arbor_ai, default_provider:` in runtime.exs, so without this
+  # `LLMDefaults.default_provider/1` fell through to its last-resort constants
+  # (`:openrouter` / "openai/gpt-oss-120b:free") and every agent started from the
+  # CLI was pinned to OpenRouter — regardless of what the user configured, and
+  # even after the starter template stopped declaring a provider.
+  #
+  # Same defect as 246c73b5b, which fixed it for `mix arbor.eval.task`.
+  @requirements ["app.config"]
+
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shortdoc "Manage agent lifecycle (start, stop, chat, status)"
