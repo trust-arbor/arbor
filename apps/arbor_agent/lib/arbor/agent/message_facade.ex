@@ -531,17 +531,30 @@ defmodule Arbor.Agent.MessageFacade do
 
     admit_authenticated_result(result, mode, secrets, collaborators, receipt)
   rescue
-    _ ->
+    exception ->
       discard_receipt(collaborators, receipt)
+      log_delivery_failure({:raised, Exception.message(exception)})
       {:error, :delivery_failed}
   catch
-    :throw, _ ->
+    :throw, value ->
       discard_receipt(collaborators, receipt)
+      log_delivery_failure({:threw, value})
       {:error, :delivery_failed}
 
-    :exit, _ ->
+    :exit, reason ->
       discard_receipt(collaborators, receipt)
+      log_delivery_failure({:exited, reason})
       {:error, :delivery_failed}
+  end
+
+  # `:delivery_failed` is returned for a raise, a throw, an exit, a non-binary
+  # reply, and a sensitive-content rejection. Collapsing them is deliberate —
+  # the CALLER must not learn which — but discarding the cause entirely left
+  # nothing to diagnose from in any log, anywhere. Record it server-side while
+  # the returned error stays uniform.
+  defp log_delivery_failure(cause) do
+    require Logger
+    Logger.warning("[MessageFacade] authenticated delivery failed: #{inspect(cause, limit: 12)}")
   end
 
   defp admit_authenticated_result({:ok, reply}, :text, secrets, collaborators, receipt)
@@ -553,6 +566,7 @@ defmodule Arbor.Agent.MessageFacade do
 
       :reject ->
         discard_receipt(collaborators, receipt)
+        log_delivery_failure(:reply_contained_a_delivery_secret)
         {:error, :delivery_failed}
     end
   end
@@ -571,13 +585,15 @@ defmodule Arbor.Agent.MessageFacade do
 
       :reject ->
         discard_receipt(collaborators, receipt)
+        log_delivery_failure(:reply_contained_a_delivery_secret)
         {:error, :delivery_failed}
     end
   end
 
   # Text mode admits binaries only. Production Manager.chat_authenticated/4
   # extracts content from Pipeline.Response before returning.
-  defp admit_authenticated_result({:ok, _other}, _mode, _secrets, collaborators, receipt) do
+  defp admit_authenticated_result({:ok, other}, _mode, _secrets, collaborators, receipt) do
+    log_delivery_failure({:unexpected_ok_shape, other})
     discard_receipt(collaborators, receipt)
     {:error, :delivery_failed}
   end
@@ -593,12 +609,14 @@ defmodule Arbor.Agent.MessageFacade do
     {:error, :delivery_ambiguous}
   end
 
-  defp admit_authenticated_result({:error, _reason}, _mode, _secrets, collaborators, receipt) do
+  defp admit_authenticated_result({:error, reason}, _mode, _secrets, collaborators, receipt) do
+    log_delivery_failure({:session_error, reason})
     discard_receipt(collaborators, receipt)
     {:error, :delivery_failed}
   end
 
-  defp admit_authenticated_result(_other, _mode, _secrets, collaborators, receipt) do
+  defp admit_authenticated_result(other, _mode, _secrets, collaborators, receipt) do
+    log_delivery_failure({:unexpected_result, other})
     discard_receipt(collaborators, receipt)
     {:error, :delivery_failed}
   end

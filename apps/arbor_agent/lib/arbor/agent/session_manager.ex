@@ -179,7 +179,24 @@ defmodule Arbor.Agent.SessionManager do
       when is_binary(agent_id) and is_integer(timeout_ms) and timeout_ms > 0 and
              is_struct(message, Arbor.Contracts.Session.UserMessage) and
              is_struct(receipt, Arbor.Contracts.Security.DeliveryReceipt) do
-    with {:ok, session_pid} <- get_session(agent_id) do
+    # `ensure_session/2`, not `get_session/1`. A chat arriving for a live agent
+    # with no session yet is an ordinary cold start, not an error — and nothing
+    # else in the tree calls `ensure_session/2`, so requiring a pre-existing
+    # session meant this path only worked if some OTHER path had already created
+    # one as a side effect.
+    #
+    # `Manager.chat/3` (pre-engagement) did exactly that, which is why terminal
+    # turns ran until the CLI moved onto this path and then stopped: the durable
+    # EventLog shows no SessionTurn pipeline starting after 03:00 while other
+    # events kept flowing, and a direct call returned the `{:error, :no_session}`
+    # that the delivery facade was collapsing into `:delivery_failed`.
+    #
+    # Idempotent, and it reaps a stale ETS entry before creating a replacement.
+    #
+    # Deliberately NOT applied to `cancel_turn/1` or `cancel_task/2` above:
+    # cancelling a session that does not exist must stay `:no_session`, never
+    # create one.
+    with {:ok, session_pid} <- ensure_session(agent_id) do
       session_mod = session_module()
 
       if Code.ensure_loaded?(session_mod) and
