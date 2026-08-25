@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 683,
+  "entry_count": 684,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8423,8 +8423,21 @@
       "source_incident": "found 2026-08-25 auditing the memory tool surface",
       "always_loaded": false,
       "content_sha256": "bb9dc6e826d5cc19de1174024b734555cddcd3d805719369ce5d804eea804961"
+    },
+    {
+      "source_ordinal": 684,
+      "source_kind": "post-migration",
+      "slug": "a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it",
+      "title": "A canary must assert its invariant, not the implementation that satisfies it.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-a-canary-must-assert-its-invariant-not-the-implementation-that-satisfies-it",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 moving recall to the user turn",
+      "always_loaded": false,
+      "content_sha256": "65799333ba1a65f84d8a9ba6fa807d5c4c3ad4cd39f33368f9b1d78549858934"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 222
+  "post_migration_entry_count": 223
 }

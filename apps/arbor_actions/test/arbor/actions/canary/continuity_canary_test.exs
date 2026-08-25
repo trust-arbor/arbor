@@ -149,17 +149,30 @@ defmodule Arbor.Actions.Canary.ContinuityCanaryTest do
                "regression class: a perfect component score with zero delivered value."
     end
 
-    test "recall is injected as a leading system message, ahead of the user turn",
+    test "recall rides the user turn, ahead of the question and outside the cached prefix",
          %{agent_id: agent_id} do
       :ok = session_1_plant(agent_id)
 
       {_recall_out, prompt_out} = session_3_recall_and_build(agent_id, @s3_question)
 
-      assert [%{"role" => "system"} = first | rest] = prompt_out[:messages]
-      assert first["content"] =~ "Postgres"
+      # Recall used to be prepended as a leading SYSTEM message. It is
+      # query-relevant and so changes every turn, which put volatile content
+      # inside the one part of the request that must stay byte-identical for the
+      # provider's prefix cache — and a second system message is rejected
+      # outright by OpenAI-compatible providers. It now attaches to the user
+      # turn, matching the stable/volatile split APIAgent already used.
+      refute Enum.any?(prompt_out[:messages], &(&1["role"] == "system")),
+             "recall must not introduce a system message: #{inspect(prompt_out[:messages])}"
 
-      assert Enum.any?(rest, &(&1["role"] == "user")),
-             "the user's actual turn must still be present after the injected context"
+      assert [%{"role" => "user", "content" => content}] = prompt_out[:messages]
+
+      # Placement within the turn still matters: context first, question last,
+      # so the model reads the memory before the thing it has to answer.
+      assert content =~ "Postgres"
+      assert content =~ @s3_question
+
+      assert :binary.match(content, "Postgres") < :binary.match(content, @s3_question),
+             "the recalled context must precede the user's question"
     end
 
     test "the user's question survives the injection", %{agent_id: agent_id} do
