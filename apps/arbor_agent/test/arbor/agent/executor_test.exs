@@ -40,6 +40,7 @@ defmodule Arbor.Agent.ExecutorTest do
       assert status.agent_id == @agent_id
       assert status.status == :running
       assert status.pending_count == 0
+      assert status.awaiting_count == 0
       assert status.stats.intents_received == 0
 
       Executor.stop(@agent_id)

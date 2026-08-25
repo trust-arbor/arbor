@@ -114,15 +114,19 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   When `agent_id` is provided, routes through `authorize_and_execute`
   for full security enforcement. When nil, calls actions directly
-  (system-level dispatch only).
+  (system-level dispatch only). Identity and sandbox are passed as
+  arguments — never the process dictionary.
 
-  Returns `{:ok, result}` or `{:error, reason}`.
+  Returns `{:ok, result}`, `{:ok, :pending_approval, id}`, or `{:error, reason}`.
+
+  `context` carries shell facts (currently `:sandbox_level`). Do not read
+  executor identity from the process dictionary — pass `agent_id` explicitly.
   """
-  @spec dispatch(atom() | term(), map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def dispatch(action, params, agent_id \\ nil)
+  @spec dispatch(atom() | term(), map(), String.t() | nil, map()) ::
+          {:ok, map()} | {:ok, :pending_approval, term()} | {:error, term()}
+  def dispatch(action, params, agent_id \\ nil, context \\ %{})
 
-  # Proposal submission — map to Proposal.Submit action
-  def dispatch(:proposal_submit, params, agent_id) do
+  def dispatch(:proposal_submit, params, agent_id, context) when is_map(context) do
     proposal = params[:proposal] || params["proposal"] || %{}
     submit_params = build_submit_params(proposal)
 
@@ -131,36 +135,33 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       submit_params,
       :proposal_submit_failed,
       :consensus_unavailable,
-      agent_id
+      agent_id,
+      context
     )
   end
 
-  # Code hot-load — map to Code.HotLoad action (runtime call to avoid Level 2 cycle)
-  def dispatch(:code_hot_load, params, agent_id) do
+  def dispatch(:code_hot_load, params, agent_id, context) when is_map(context) do
     module = params[:module] || params["module"]
     code = params[:code] || params[:source] || params["code"] || params["source"]
-    do_hot_load(module, code, params, agent_id)
+    do_hot_load(module, code, params, agent_id, context)
   end
 
-  # Proposal status — query the status of a submitted proposal
-  def dispatch(:proposal_status, params, _agent_id) do
+  def dispatch(:proposal_status, params, _agent_id, context) when is_map(context) do
     proposal_id = params[:proposal_id] || params["proposal_id"]
     do_proposal_status(proposal_id)
   end
 
-  # Generic action dispatch — try to find a matching action module
-  def dispatch(action, params, _agent_id) when is_atom(action) do
+  def dispatch(action, params, agent_id, context) when is_atom(action) and is_map(context) do
     action_module = find_action_module(action)
-    run_discovered_action(action_module, action, params)
+    run_discovered_action(action_module, action, params, agent_id, context)
   end
 
-  # String action names from decomposition JSON — convert to atom and re-dispatch
-  def dispatch(action, params, _agent_id) when is_binary(action) do
+  def dispatch(action, params, agent_id, context) when is_binary(action) and is_map(context) do
     action_module = find_action_module_from_string(action)
-    run_discovered_action(action_module, action, params)
+    run_discovered_action(action_module, action, params, agent_id, context)
   end
 
-  def dispatch(action, params, _agent_id) do
+  def dispatch(action, params, _agent_id, context) when is_map(context) do
     Logger.warning("ActionDispatch: invalid action type #{inspect(action)}")
     {:ok, %{action: action, status: :invalid_action_type, params: params}}
   end
@@ -192,20 +193,41 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   # nil — e.g. system-internal callers, tests that don't bootstrap Security —
   # falls back to the direct apply so existing system-level dispatch keeps
   # working.
-  defp run_runtime_action(action_mod, params, error_tag, unavailable_tag, agent_id) do
+  defp run_runtime_action(action_mod, params, error_tag, unavailable_tag, agent_id, context) do
     if is_binary(agent_id) and byte_size(agent_id) > 0 do
-      run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id)
+      run_via_authorize_and_execute(
+        action_mod,
+        params,
+        error_tag,
+        unavailable_tag,
+        agent_id,
+        context
+      )
     else
       run_direct(action_mod, params, error_tag, unavailable_tag)
     end
   end
 
-  defp run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id) do
+  defp run_via_authorize_and_execute(
+         action_mod,
+         params,
+         error_tag,
+         unavailable_tag,
+         agent_id,
+         context
+       ) do
     case safe_call(fn ->
-           Arbor.Actions.authorize_and_execute(agent_id, action_mod, params, executor_context())
+           Arbor.Actions.authorize_and_execute(
+             agent_id,
+             action_mod,
+             params,
+             executor_context(context)
+           )
          end) do
+      {:ok, :pending_approval, id} -> {:ok, :pending_approval, id}
       {:ok, {:ok, result}} -> {:ok, result}
       {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
+      {:ok, result} -> {:ok, result}
       {:error, reason} -> {:error, {error_tag, reason}}
       nil -> {:error, unavailable_tag}
     end
@@ -220,11 +242,12 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     end
   end
 
-  defp do_hot_load(module, code, _params, _agent_id) when is_nil(module) or is_nil(code) do
+  defp do_hot_load(module, code, _params, _agent_id, _context)
+       when is_nil(module) or is_nil(code) do
     {:error, :missing_module_or_code}
   end
 
-  defp do_hot_load(module, code, params, agent_id) do
+  defp do_hot_load(module, code, params, agent_id, context) do
     hot_load_params = %{
       module: to_string(module),
       source: code,
@@ -237,7 +260,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       hot_load_params,
       :hot_load_failed,
       :code_service_unavailable,
-      agent_id
+      agent_id,
+      context
     )
   end
 
@@ -253,30 +277,24 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # ── Generic Action Module Discovery ──
 
-  defp run_discovered_action(nil, action, params) do
+  defp run_discovered_action(nil, action, params, _agent_id, _context) do
     Logger.warning("ActionDispatch: unknown action #{inspect(action)}, returning stub result")
     {:ok, %{action: action, status: :no_handler, params: params}}
   end
 
-  defp run_discovered_action(action_module, action, params) do
-    # Use authorize_and_execute when agent_id available in process dictionary.
-    # The Executor stores its agent_id there so dispatch can enforce auth
-    # without threading it through every hardcoded clause.
-    agent_id = Process.get(:arbor_executor_agent_id)
-
-    if agent_id do
+  defp run_discovered_action(action_module, action, params, agent_id, context) do
+    if is_binary(agent_id) and byte_size(agent_id) > 0 do
       case Arbor.Actions.authorize_and_execute(
              agent_id,
              action_module,
              params,
-             executor_context()
+             executor_context(context)
            ) do
-        {:ok, :pending_approval, _} -> {:error, {:pending_approval, action}}
+        {:ok, :pending_approval, id} -> {:ok, :pending_approval, id}
         {:error, :unauthorized} -> {:error, {:unauthorized, action}}
         result -> result
       end
     else
-      # System-level dispatch (no agent_id) — direct call
       case safe_call(fn -> action_module.run(params, %{}) end) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, {action, reason}}
@@ -373,15 +391,19 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # ── Config ──
 
-  # Build the action execution context from executor process state. Threads the
-  # agent's declared sandbox level (stashed by the Executor) so the sandbox-create
-  # action can cap a requested level to the agent's declared ceiling. Empty when
-  # not dispatched from an executor process (system-level callers).
-  defp executor_context do
-    case Process.get(:arbor_executor_sandbox_level) do
-      nil -> %{}
-      level -> %{sandbox_level: level}
+  # Thread the agent's declared sandbox level so sandbox-create can cap a
+  # requested level. Empty for system-level callers that pass no context.
+  defp executor_context(context) when is_map(context) do
+    case fetch_sandbox_level(context) do
+      nil -> context
+      level -> Map.put(context, :sandbox_level, level)
     end
+  end
+
+  defp executor_context(_context), do: %{}
+
+  defp fetch_sandbox_level(context) do
+    Map.get(context, :sandbox_level) || Map.get(context, "sandbox_level")
   end
 
   # ── Safety ──

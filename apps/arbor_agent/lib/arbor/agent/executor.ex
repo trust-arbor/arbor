@@ -2,9 +2,14 @@ defmodule Arbor.Agent.Executor do
   @moduledoc """
   Executes intents from the Mind and returns percepts.
 
-  The Executor is the "Body" side of the Mind-Body architecture. It receives
-  intents via Bridge subscription, checks reflexes and capabilities, executes
-  in a sandbox appropriate for the agent's trust tier, and returns percepts.
+  The Executor is the "Body" side of the Mind-Body architecture. It is the
+  imperative shell around `Arbor.Agent.Executor.DecideCore`: it gathers
+  sender/reflex/auth verdicts, calls `decide/2`, and interprets the effect
+  (`execute` / `skip` / `block` / `ask` / `reject_sender`).
+
+  `:ask` parks the intent (does not fail it) and waits on
+  `Arbor.Comms.await_interaction_response/3` in a linked-off waiter so the
+  GenServer stays free to process other intents.
 
   ## States
 
@@ -22,9 +27,11 @@ defmodule Arbor.Agent.Executor do
 
   use GenServer
 
-  alias Arbor.Agent.Executor.ActionDispatch
+  alias Arbor.Agent.Executor.{ActionDispatch, DecideCore}
   alias Arbor.Contracts.Memory.{Intent, Percept}
   alias Arbor.Contracts.Security.SandboxLevel
+
+  @default_approval_timeout_ms 900_000
 
   require Logger
 
@@ -35,6 +42,8 @@ defmodule Arbor.Agent.Executor do
           intent_subscription: String.t() | nil,
           pending_intents: :queue.queue(),
           current_intent: Intent.t() | nil,
+          awaiting_approval: map(),
+          approval_timeout_ms: pos_integer(),
           stats: map()
         }
 
@@ -110,12 +119,8 @@ defmodule Arbor.Agent.Executor do
 
     Logger.info("[Executor] Starting for agent #{agent_id}, sandbox=#{sandbox_level}")
 
-    # Store agent_id in process dictionary so ActionDispatch can route
-    # through authorize_and_execute without threading it through every clause.
-    # The declared sandbox level rides alongside so dispatch can thread it into
-    # the action context (the sandbox-create ceiling).
-    Process.put(:arbor_executor_agent_id, agent_id)
-    Process.put(:arbor_executor_sandbox_level, sandbox_level)
+    approval_timeout_ms =
+      Keyword.get(opts, :approval_timeout_ms, @default_approval_timeout_ms)
 
     state = %{
       agent_id: agent_id,
@@ -124,10 +129,13 @@ defmodule Arbor.Agent.Executor do
       intent_subscription: nil,
       pending_intents: :queue.new(),
       current_intent: nil,
+      awaiting_approval: %{},
+      approval_timeout_ms: approval_timeout_ms,
       stats: %{
         intents_received: 0,
         intents_executed: 0,
         intents_blocked: 0,
+        intents_parked: 0,
         total_duration_ms: 0,
         started_at: DateTime.utc_now()
       }
@@ -172,6 +180,7 @@ defmodule Arbor.Agent.Executor do
       agent_id: state.agent_id,
       status: state.status,
       pending_count: :queue.len(state.pending_intents),
+      awaiting_count: map_size(awaiting_approval(state)),
       stats: state.stats
     }
 
@@ -190,13 +199,21 @@ defmodule Arbor.Agent.Executor do
       action: intent.action
     })
 
-    # Authorize the intent sender (if source_agent is available)
-    case authorize_intent_sender(intent, state) do
+    sender_verdict = authorize_intent_sender(intent, state)
+
+    case sender_verdict do
+      {:error, reason} ->
+        Logger.warning(
+          "[Executor] Intent sender unauthorized: #{inspect(reason)} " <>
+            "for intent #{intent.id} targeting #{state.agent_id}"
+        )
+
+        {:noreply, process_intent(intent, state, sender_verdict)}
+
       :ok ->
         case state.status do
           :running ->
-            state = process_intent(intent, state)
-            {:noreply, state}
+            {:noreply, process_intent(intent, state, sender_verdict)}
 
           :paused ->
             pending = :queue.in(intent, state.pending_intents)
@@ -205,20 +222,27 @@ defmodule Arbor.Agent.Executor do
           :stopped ->
             {:noreply, state}
         end
-
-      {:error, reason} ->
-        Logger.warning(
-          "[Executor] Intent sender unauthorized: #{inspect(reason)} " <>
-            "for intent #{intent.id} targeting #{state.agent_id}"
-        )
-
-        handle_blocked(intent, {:sender_unauthorized, reason}, state)
-        {:noreply, state}
     end
   end
 
+  def handle_cast({:approval_resolved, intent_id, request_id, result}, state)
+      when is_binary(intent_id) do
+    {:noreply, resolve_approval(state, intent_id, request_id, result)}
+  end
+
+  @impl true
+  def handle_info({:DOWN, mon, :process, _pid, reason}, state) do
+    {:noreply, waiter_down(state, mon, reason)}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
   @impl true
   def terminate(_reason, state) do
+    Enum.each(Map.values(awaiting_approval(state)), fn parked ->
+      if is_pid(parked.waiter_pid), do: Process.exit(parked.waiter_pid, :shutdown)
+    end)
+
     if state.intent_subscription do
       safe_call(fn -> Arbor.Signals.unsubscribe(state.intent_subscription) end)
     end
@@ -228,63 +252,119 @@ defmodule Arbor.Agent.Executor do
 
   # -- Private --
 
-  # H3: Authorize the source of an intent. If the intent has a source_agent,
-  # verify it holds a capability for sending intents to this agent.
-  # Intents without source_agent (self-generated) are allowed.
+  # H3: Authorize the source of an intent. If the intent names a source_agent
+  # (struct field or metadata), verify it holds arbor://agent/intent/{target}.
+  # Missing source is treated as self-generated.
   defp authorize_intent_sender(%Intent{} = intent, state) do
-    source = Map.get(intent, :source_agent, nil)
+    source = intent_source_agent(intent)
 
-    cond do
-      is_nil(source) ->
-        # Self-generated intents (from the agent's own Mind) — always allowed
-        :ok
+    if is_nil(source) or source == state.agent_id do
+      :ok
+    else
+      resource = "arbor://agent/intent/#{state.agent_id}"
 
-      source == state.agent_id ->
-        # Agent sending intents to itself — always allowed
-        :ok
-
-      true ->
-        resource = "arbor://agent/intent/#{state.agent_id}"
-
-        case safe_call(fn -> Arbor.Security.authorize(source, resource, :send) end) do
-          {:ok, :authorized} -> :ok
-          {:error, reason} -> {:error, reason}
-          _ -> {:error, :security_unavailable}
-        end
+      case safe_call(fn -> Arbor.Security.authorize(source, resource, :send) end) do
+        {:ok, :authorized} -> :ok
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :security_unavailable}
+      end
     end
   end
 
-  defp process_intent(%Intent{} = intent, state) do
+  defp intent_source_agent(%Intent{} = intent) do
+    metadata = intent.metadata || %{}
+
+    Map.get(intent, :source_agent) ||
+      Map.get(metadata, :source_agent) ||
+      Map.get(metadata, "source_agent")
+  end
+
+  defp process_intent(%Intent{} = intent, state, sender_verdict \\ :ok) do
     start_time = System.monotonic_time(:millisecond)
     state = %{state | current_intent: intent}
 
-    # Step 1: Check reflexes
-    reflex_context = build_reflex_context(intent)
+    reflex_verdict =
+      case safe_reflex_check(build_reflex_context(intent)) do
+        {:blocked, _reflex, _reason} = blocked -> blocked
+        _ -> :ok
+      end
 
-    case safe_reflex_check(reflex_context) do
-      {:blocked, _reflex, reason} ->
-        handle_blocked(intent, reason, state)
+    {canonical_uri, auth_verdict} = gather_auth(intent, state)
 
-      _ ->
-        # Step 2: Check capabilities
-        case check_capabilities(intent, state) do
-          :authorized ->
-            # Step 3: Execute
-            execute_intent(intent, state, start_time)
+    snapshot = %{
+      agent_id: state.agent_id,
+      sandbox_level: state.sandbox_level,
+      sender_verdict: sender_verdict,
+      reflex_verdict: reflex_verdict,
+      auth_verdict: auth_verdict,
+      canonical_uri: canonical_uri
+    }
 
-          {:blocked, reason} ->
-            handle_blocked(intent, reason, state)
-        end
+    apply_decision(DecideCore.decide(intent, snapshot), intent, state, start_time, false)
+  end
+
+  defp apply_decision({:reject_sender, reason}, intent, state, _start_time, _from_approval) do
+    handle_blocked(intent, {:sender_unauthorized, reason}, state)
+  end
+
+  defp apply_decision({:block, reason}, intent, state, _start_time, _from_approval) do
+    handle_blocked(intent, reason, state)
+  end
+
+  defp apply_decision({:ask, _resource, _meta}, intent, state, _start_time, true) do
+    # Ceiling still :ask after a granted approval — do not loop. The one-shot
+    # ceiling bypass lives in hitl-approve-once-ceiling-bypass.md.
+    handle_blocked(intent, :still_requires_approval, state)
+  end
+
+  defp apply_decision({:ask, resource, meta}, intent, state, start_time, false) do
+    handle_ask(intent, resource, meta, state, start_time)
+  end
+
+  defp apply_decision({:skip, _reason}, intent, state, start_time, _from_approval) do
+    finalize_result(intent, state, start_time, mental_result(intent))
+  end
+
+  defp apply_decision(
+         {:execute, action, params, sandbox},
+         intent,
+         state,
+         start_time,
+         from_approval
+       ) do
+    Logger.info("Executor: dispatching action=#{inspect(action)} sandbox=#{sandbox}")
+
+    result =
+      ActionDispatch.dispatch(action, params, state.agent_id, %{
+        sandbox_level: state.sandbox_level
+      })
+
+    case result do
+      {:ok, :pending_approval, id} ->
+        apply_decision(
+          {:ask, canonical_uri_for(intent), %{approval_id: id}},
+          intent,
+          state,
+          start_time,
+          from_approval
+        )
+
+      other ->
+        finalize_result(intent, drop_awaiting(state, intent.id), start_time, other)
     end
   end
 
-  defp execute_intent(%Intent{} = intent, state, start_time) do
-    # The agent's DECLARED isolation level (from its template/profile), translated
-    # to the shell sandbox vocabulary. Replaces the old trust-tier derivation.
-    shell_sandbox = SandboxLevel.to_shell(state.sandbox_level)
+  defp apply_decision(_other, intent, state, _start_time, _from_approval) do
+    handle_blocked(intent, :invalid_decision, state)
+  end
 
-    result = do_execute(intent, shell_sandbox, state.agent_id)
+  defp mental_result(%Intent{type: :think} = intent), do: {:ok, %{thought: intent.reasoning}}
+  defp mental_result(%Intent{type: :wait}), do: {:ok, %{status: :waiting}}
+  defp mental_result(%Intent{type: :reflect} = intent), do: {:ok, %{reflection: intent.reasoning}}
+  defp mental_result(%Intent{type: :internal} = intent), do: {:ok, %{internal: intent.params}}
+  defp mental_result(%Intent{}), do: {:error, :unknown_intent_type}
 
+  defp finalize_result(%Intent{} = intent, state, start_time, result) do
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     {outcome, data, error} =
@@ -301,14 +381,9 @@ defmodule Arbor.Agent.Executor do
         duration_ms: duration_ms
       )
 
-    # Emit percept via Bridge (non-fatal if unavailable)
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
     safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
-
-    # Mark intent complete in IntentStore so it isn't re-routed
     complete_or_fail_intent(state.agent_id, intent, outcome)
-
-    # Forward percept to ActionCycleServer for Mind processing
     forward_percept_to_action_cycle(state.agent_id, percept)
 
     safe_emit(:agent, :intent_executed, %{
@@ -325,6 +400,7 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp handle_blocked(%Intent{} = intent, reason, state) do
+    state = drop_awaiting(state, intent.id)
     percept = Percept.blocked(intent.id, inspect(reason))
 
     safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
@@ -349,39 +425,180 @@ defmodule Arbor.Agent.Executor do
     |> Map.put(:current_intent, nil)
   end
 
-  defp do_execute(%Intent{type: :think} = intent, _sandbox_level, _agent_id) do
-    {:ok, %{thought: intent.reasoning}}
+  defp handle_ask(%Intent{} = intent, resource, meta, state, start_time) do
+    request_id = Map.get(meta, :approval_id) || Map.get(meta, "approval_id")
+    awaiting = awaiting_approval(state)
+
+    if Map.has_key?(awaiting, intent.id) do
+      handle_blocked(intent, :still_requires_approval, drop_awaiting(state, intent.id))
+    else
+      {waiter_pid, waiter_mon} = spawn_approval_waiter(state, intent.id, request_id)
+
+      parked = %{
+        intent: intent,
+        request_id: request_id,
+        resource: resource,
+        waiter_pid: waiter_pid,
+        waiter_mon: waiter_mon,
+        started_at_mono: start_time
+      }
+
+      percept =
+        Percept.new(:action_result, :partial,
+          intent_id: intent.id,
+          data: %{
+            status: :awaiting_approval,
+            resource: resource,
+            approval_id: request_id
+          }
+        )
+
+      safe_call(fn -> Arbor.Memory.emit_percept(state.agent_id, percept) end)
+      safe_call(fn -> Arbor.Memory.record_percept(state.agent_id, percept) end)
+      forward_percept_to_action_cycle(state.agent_id, percept)
+
+      safe_emit(:agent, :intent_awaiting_approval, %{
+        agent_id: state.agent_id,
+        intent_id: intent.id,
+        resource: resource,
+        approval_id: request_id
+      })
+
+      state
+      |> Map.put(:awaiting_approval, Map.put(awaiting, intent.id, parked))
+      |> update_in([:stats, :intents_parked], &((&1 || 0) + 1))
+      |> Map.put(:current_intent, nil)
+    end
   end
 
-  # H5: Enforce sandbox level on action execution. The sandbox_level computed
-  # from the agent's trust tier is passed into the action dispatch context.
-  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level, agent_id) do
-    Logger.info("Executor: dispatching action=#{inspect(action)} sandbox=#{sandbox_level}")
-
-    # Inject sandbox level into params so actions can respect it
-    params_with_sandbox = Map.put(params || %{}, :sandbox, sandbox_level)
-
-    # H7: thread agent_id so ActionDispatch can route hardcoded actions
-    # (proposal_submit, code_hot_load) through
-    # Arbor.Actions.authorize_and_execute instead of bypassing it with a
-    # direct apply.
-    ActionDispatch.dispatch(action, params_with_sandbox, agent_id)
+  defp spawn_approval_waiter(_state, _intent_id, request_id)
+       when not is_binary(request_id) or request_id == "" do
+    {nil, nil}
   end
 
-  defp do_execute(%Intent{type: :wait}, _sandbox_level, _agent_id) do
-    {:ok, %{status: :waiting}}
+  defp spawn_approval_waiter(state, intent_id, request_id) do
+    executor_pid = self()
+    agent_id = state.agent_id
+    timeout = Map.get(state, :approval_timeout_ms, @default_approval_timeout_ms)
+
+    spawn_monitor(fn ->
+      result = await_approval(request_id, agent_id, timeout)
+      GenServer.cast(executor_pid, {:approval_resolved, intent_id, request_id, result})
+    end)
   end
 
-  defp do_execute(%Intent{type: :reflect} = intent, _sandbox_level, _agent_id) do
-    {:ok, %{reflection: intent.reasoning}}
+  defp await_approval(request_id, agent_id, timeout) do
+    if Code.ensure_loaded?(Arbor.Comms) and
+         function_exported?(Arbor.Comms, :await_interaction_response, 3) do
+      Arbor.Comms.await_interaction_response(request_id, agent_id, timeout: timeout)
+    else
+      {:error, :comms_unavailable}
+    end
+  rescue
+    e -> {:error, {:await_failed, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:await_failed, reason}}
   end
 
-  defp do_execute(%Intent{type: :internal} = intent, _sandbox_level, _agent_id) do
-    {:ok, %{internal: intent.params}}
+  defp resolve_approval(state, intent_id, request_id, result) do
+    case Map.get(awaiting_approval(state), intent_id) do
+      %{request_id: ^request_id, intent: intent, waiter_mon: mon} = parked ->
+        if is_reference(mon), do: Process.demonitor(mon, [:flush])
+
+        state = drop_awaiting(state, intent_id)
+        start_time = Map.get(parked, :started_at_mono, System.monotonic_time(:millisecond))
+
+        if approval_granted?(result) do
+          retry_after_approval(intent, state, start_time)
+        else
+          handle_blocked(intent, {:approval_denied, result}, state)
+        end
+
+      _other ->
+        state
+    end
   end
 
-  defp do_execute(%Intent{}, _sandbox_level, _agent_id) do
-    {:error, :unknown_intent_type}
+  defp retry_after_approval(%Intent{} = intent, state, start_time) do
+    reflex_verdict =
+      case safe_reflex_check(build_reflex_context(intent)) do
+        {:blocked, _reflex, _reason} = blocked -> blocked
+        _ -> :ok
+      end
+
+    {canonical_uri, auth_verdict} = gather_auth(intent, state)
+
+    snapshot = %{
+      agent_id: state.agent_id,
+      sandbox_level: state.sandbox_level,
+      sender_verdict: :ok,
+      reflex_verdict: reflex_verdict,
+      auth_verdict: auth_verdict,
+      canonical_uri: canonical_uri
+    }
+
+    apply_decision(DecideCore.decide(intent, snapshot), intent, state, start_time, true)
+  end
+
+  defp waiter_down(state, mon, reason) do
+    parked =
+      Enum.find(awaiting_approval(state), fn {_id, entry} -> entry.waiter_mon == mon end)
+
+    case parked do
+      {intent_id, %{intent: intent}} when reason not in [:normal, :shutdown] ->
+        handle_blocked(intent, {:approval_waiter_down, reason}, drop_awaiting(state, intent_id))
+
+      _ ->
+        state
+    end
+  end
+
+  defp approval_granted?({:ok, response, _meta}), do: granted_response?(response)
+  defp approval_granted?({:ok, response}), do: granted_response?(response)
+  defp approval_granted?(_), do: false
+
+  defp granted_response?(response)
+       when response in [:approved, :approve, :allow, "approved", "approve", "allow"],
+       do: true
+
+  defp granted_response?({:approved, _}), do: true
+  defp granted_response?({:approve, _}), do: true
+  defp granted_response?(_), do: false
+
+  defp awaiting_approval(state), do: Map.get(state, :awaiting_approval, %{})
+
+  defp drop_awaiting(state, intent_id) do
+    Map.put(state, :awaiting_approval, Map.delete(awaiting_approval(state), intent_id))
+  end
+
+  defp gather_auth(%Intent{type: type}, _state)
+       when type in [:think, :reflect, :wait, :internal] do
+    {nil, nil}
+  end
+
+  defp gather_auth(%Intent{} = intent, state) do
+    resource = canonical_uri_for(intent)
+
+    # Sender already verified. Skip identity re-verification — autonomous
+    # agents do not carry a signed_request in the heartbeat context.
+    verdict =
+      case safe_call(fn ->
+             Arbor.Security.authorize(state.agent_id, resource, :execute, verify_identity: false)
+           end) do
+        {:ok, :authorized} = authorized -> authorized
+        {:ok, :pending_approval, _id} = pending -> pending
+        {:error, reason} -> {:error, reason}
+        _ -> {:error, :security_unavailable}
+      end
+
+    {resource, verdict}
+  end
+
+  defp canonical_uri_for(%Intent{action: action}) do
+    case ActionDispatch.resolve_action_module(action) do
+      {:ok, module} -> Arbor.Actions.canonical_uri_for(module, %{})
+      :error -> "arbor://agent/action/#{action}"
+    end
   end
 
   defp build_reflex_context(%Intent{action: action, params: params}) do
@@ -392,44 +609,6 @@ defmodule Arbor.Agent.Executor do
       if params[:command], do: Map.put(context, :command, params[:command]), else: context
 
     if params[:path], do: Map.put(context, :path, params[:path]), else: context
-  end
-
-  defp check_capabilities(%Intent{type: type}, _state)
-       when type in [:think, :reflect, :wait, :internal] do
-    :authorized
-  end
-
-  # Self-directed heartbeat intents — agent executing its own cognitive goals.
-  # Tagged at creation in StoreDecompositions; no external trust boundary applies.
-  defp check_capabilities(%Intent{metadata: %{"source" => "heartbeat"}}, _state) do
-    :authorized
-  end
-
-  # P0-2: Use full authorize/4 pipeline directly (reflexes, identity,
-  # constraints, escalation, audit). Shadow mode removed — can?/3 is only
-  # for UI hints, not security decisions.
-  #
-  # URI unification: use Arbor.Actions.canonical_uri_for/2 which maps action
-  # modules to the same canonical resource URI used by the action executor
-  # (e.g., "arbor://fs/read" or "arbor://action/mix/test").
-  defp check_capabilities(%Intent{action: action}, state) do
-    resource =
-      case ActionDispatch.resolve_action_module(action) do
-        {:ok, module} -> Arbor.Actions.canonical_uri_for(module, %{})
-        :error -> "arbor://agent/action/#{action}"
-      end
-
-    # Intent sender was already verified by authorize_intent_sender/2.
-    # Skip identity re-verification here — it would require a signed_request
-    # that autonomous agents don't have in the heartbeat context.
-    case safe_call(fn ->
-           Arbor.Security.authorize(state.agent_id, resource, :execute, verify_identity: false)
-         end) do
-      {:ok, :authorized} -> :authorized
-      {:ok, :pending_approval, _ref} -> {:blocked, :pending_approval}
-      {:error, reason} -> {:blocked, reason}
-      _ -> {:blocked, :security_unavailable}
-    end
   end
 
   defp drain_pending(state) do
