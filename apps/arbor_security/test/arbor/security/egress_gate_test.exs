@@ -26,6 +26,14 @@ defmodule Arbor.Security.EgressGateTest do
 
   @resource "arbor://ai/generate"
 
+  defmodule MockConsensus do
+    def healthy?, do: true
+
+    def submit(%{proposer: _} = _proposal, _opts \\ []) do
+      {:ok, "proposal_#{System.unique_integer([:positive])}"}
+    end
+  end
+
   setup do
     prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
     prev_onprem = Application.get_env(:arbor_security, :gate_on_premises_egress)
@@ -48,7 +56,7 @@ defmodule Arbor.Security.EgressGateTest do
 
     CapabilityStore.put(cap)
 
-    %{agent_id: agent_id}
+    %{agent_id: agent_id, cap: cap}
   end
 
   defp restore(key, nil), do: Application.delete_env(:arbor_security, key)
@@ -184,6 +192,43 @@ defmodule Arbor.Security.EgressGateTest do
 
       assert {:requires_approval, _} =
                AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+    end
+  end
+
+  describe "public authorize/4 egress :ask handoff" do
+    test "security regression: public authorize returns pending approval for unconstrained egress :ask",
+         %{agent_id: agent, cap: cap} do
+      previous = %{
+        enforcing: Application.get_env(:arbor_security, :egress_gate_enforcing),
+        escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+        module: Application.get_env(:arbor_security, :consensus_module),
+        router: Application.get_env(:arbor_security, :use_interaction_router_for_approval)
+      }
+
+      Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+
+      on_exit(fn ->
+        restore(:egress_gate_enforcing, previous.enforcing)
+        restore(:consensus_escalation_enabled, previous.escalation)
+        restore(:consensus_module, previous.module)
+        restore(:use_interaction_router_for_approval, previous.router)
+      end)
+
+      assert {:ok, :pending_approval, proposal_id} =
+               Arbor.Security.authorize(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 verify_identity: false
+               )
+
+      assert is_binary(proposal_id)
+      assert String.starts_with?(proposal_id, "proposal_")
+
+      assert {:ok, stored} = CapabilityStore.get(cap.id)
+      refute stored.constraints[:requires_approval] == true
+      refute stored.constraints["requires_approval"] == true
     end
   end
 

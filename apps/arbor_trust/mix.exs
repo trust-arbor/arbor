@@ -39,7 +39,6 @@ defmodule Arbor.Trust.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      optional_applications: [:arbor_persistence, :phoenix_pubsub],
       mod: {Arbor.Trust.Application, []}
     ]
   end

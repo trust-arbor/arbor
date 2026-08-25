@@ -257,14 +257,11 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     end)
   end
 
-  test "security regression: arbor_trust OTP spec lists persistence and pubsub as optional" do
+  test "security regression: arbor_trust required runtime applications omit persistence and pubsub" do
     applications = Application.spec(:arbor_trust, :applications) || []
-    optional = Application.spec(:arbor_trust, :optional_applications) || []
 
     refute :arbor_persistence in applications
     refute :phoenix_pubsub in applications
-    assert :arbor_persistence in optional
-    assert :phoenix_pubsub in optional
   end
 
   test "caller egress_mode cannot weaken authorize_egress or authorize" do

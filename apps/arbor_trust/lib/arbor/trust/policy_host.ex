@@ -304,28 +304,29 @@ defmodule Arbor.Trust.PolicyHost do
       owner when owner == self() ->
         {:ok, owner}
 
-      owner ->
-        binding = Process.whereis(__MODULE__)
-
-        cond do
-          is_pid(binding) and owner == binding ->
-            {:ok, owner}
-
-          legitimate_heir_owner?(owner) ->
-            {:ok, owner}
-
-          is_pid(owner) ->
-            {:error, {:policy_host_claim_table_foreign_owner, owner}}
-
-          true ->
-            {:error, :policy_host_claim_table_unavailable}
+      owner when is_pid(owner) ->
+        if owner_accepted?(owner) do
+          {:ok, owner}
+        else
+          {:error, {:policy_host_claim_table_foreign_owner, owner}}
         end
+
+      _ ->
+        {:error, :policy_host_claim_table_unavailable}
     end
   end
 
   if Mix.env() == :test do
-    defp legitimate_heir_owner?(_owner), do: false
+    defp owner_accepted?(owner) do
+      binding = Process.whereis(__MODULE__)
+      is_pid(binding) and owner == binding
+    end
   else
+    defp owner_accepted?(owner) do
+      binding = Process.whereis(__MODULE__)
+      (is_pid(binding) and owner == binding) or legitimate_heir_owner?(owner)
+    end
+
     defp legitimate_heir_owner?(owner) do
       init = Process.whereis(:init)
       is_pid(init) and owner == init

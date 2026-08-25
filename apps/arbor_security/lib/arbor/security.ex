@@ -2322,16 +2322,25 @@ defmodule Arbor.Security do
   defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
     safe_opts = Keyword.delete(opts, @source_owned_egress_opt)
 
-    # Escalate to Consensus for kernel-owned capability constraints. Trust policy
-    # approval lives in Arbor.Trust.ApprovalGuard.
-    escalation_opts =
-      safe_opts
-      |> Keyword.put_new(:gate, :capability_constraint)
-      |> Keyword.put_new(:reason, :capability_requires_approval)
+    # Standing capability constraints escalate as-is. Dynamic egress :ask uses a
+    # request-local copy with requires_approval set so Escalation.maybe_escalate/4
+    # does not treat unconstrained caps as already graduated.
+    {escalate_cap, escalation_opts} =
+      if capability_requires_approval?(cap) do
+        {cap,
+         safe_opts
+         |> Keyword.put_new(:gate, :capability_constraint)
+         |> Keyword.put_new(:reason, :capability_requires_approval)}
+      else
+        {request_local_approval_capability(cap),
+         safe_opts
+         |> Keyword.put_new(:gate, :egress_policy)
+         |> Keyword.put_new(:reason, :egress_requires_approval)}
+      end
 
     with :ok <- enforce_source_owned_egress_expectation(cap, opts) do
       case Arbor.Security.Escalation.maybe_escalate(
-             cap,
+             escalate_cap,
              principal_id,
              resource_uri,
              escalation_opts
@@ -2379,6 +2388,24 @@ defmodule Arbor.Security do
         Events.record_authorization_denied(principal_id, resource_uri, reason, safe_opts)
         error
     end
+  end
+
+  defp capability_requires_approval?(cap) do
+    constraints = Map.get(cap, :constraints)
+
+    is_map(constraints) and
+      (constraints[:requires_approval] == true or
+         constraints["requires_approval"] == true)
+  end
+
+  defp request_local_approval_capability(cap) do
+    constraints =
+      case Map.get(cap, :constraints) do
+        map when is_map(map) -> map
+        _ -> %{}
+      end
+
+    %{cap | constraints: Map.put(constraints, :requires_approval, true)}
   end
 
   defp build_auth_context(principal_id, opts) do
