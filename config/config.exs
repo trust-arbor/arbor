@@ -98,6 +98,11 @@ config :arbor_actions, :channel_receivers, %{
 config :arbor_kernel,
   common: [
     tool_catalog_enabled: true,
+    # Skills follow the Agent Skills pattern: the catalog (name + one-line
+    # purpose, ~2.7k tokens for 66 skills) is always in the stable system
+    # prompt; bodies (~850 KB total) load on activation. Was dev-only until
+    # 2026-08-25, which left every non-dev agent searching a hidden catalog.
+    skill_catalog_enabled: true,
     hands: [
       config_dir: "~/.claude-hands",
       sandbox_image: "claude-sandbox",

@@ -3371,10 +3371,14 @@ defmodule Arbor.Actions do
     # Subagent spawning — ephemeral workers with scoped trust
     Arbor.Actions.Agent.SpawnWorker => "arbor://agent/spawn_worker",
 
-    # Skill — arbor://code/read (skill management)
+    # Skill — reading the library is a code read; activating a skill only
+    # writes the agent's OWN working memory (the body becomes prompt context),
+    # so it is a memory write, not a code write. Mapping it to code/write meant a
+    # conversationalist's `arbor://code/write => :block` rule hid skill_activate
+    # — a floor tool — for no reason (found 2026-08-25).
     Arbor.Actions.Skill.Search => "arbor://code/read",
-    Arbor.Actions.Skill.Activate => "arbor://code/write",
-    Arbor.Actions.Skill.Deactivate => "arbor://code/write",
+    Arbor.Actions.Skill.Activate => "arbor://memory/write",
+    Arbor.Actions.Skill.Deactivate => "arbor://memory/write",
     Arbor.Actions.Skill.ListActive => "arbor://code/read",
     Arbor.Actions.Skill.Import => "arbor://code/write",
     Arbor.Actions.Skill.Compile => "arbor://code/compile",

@@ -96,7 +96,7 @@ defmodule Arbor.Common.Config do
 
   @doc "Whether the skill catalog is enabled (default false)."
   @spec skill_catalog_enabled?() :: term()
-  def skill_catalog_enabled?, do: get(:skill_catalog_enabled, false)
+  def skill_catalog_enabled?, do: get(:skill_catalog_enabled, true)
 
   @doc "Whether the tool catalog is enabled (default false)."
   @spec tool_catalog_enabled?() :: term()

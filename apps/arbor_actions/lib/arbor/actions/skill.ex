@@ -31,8 +31,8 @@ defmodule Arbor.Actions.Skill do
   ## Authorization
 
   - Search: `arbor://code/read`
-  - Activate: `arbor://code/write`
-  - Deactivate: `arbor://code/write`
+  - Activate: `arbor://memory/write` (writes the agent's own working memory)
+  - Deactivate: `arbor://memory/write`
   - ListActive: `arbor://code/read`
   - Import: `arbor://code/write`
   - Compile: `arbor://code/compile`

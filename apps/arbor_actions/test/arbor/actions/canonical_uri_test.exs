@@ -80,6 +80,21 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert Actions.canonical_uri_for(Arbor.Actions.Shell.Execute, %{}) == "arbor://shell/exec"
     end
 
+    test "skill activation is a working-memory write, not a code write" do
+      # Activate/Deactivate only mutate the agent's own working memory (the skill
+      # body becomes prompt context). Mapped to arbor://code/write, a
+      # conversationalist's `code/write => :block` rule hid skill_activate — a
+      # floor tool — for no reason (2026-08-25).
+      assert Actions.canonical_uri_for(Arbor.Actions.Skill.Activate, %{}) ==
+               "arbor://memory/write"
+
+      assert Actions.canonical_uri_for(Arbor.Actions.Skill.Deactivate, %{}) ==
+               "arbor://memory/write"
+
+      assert Actions.canonical_uri_for(Arbor.Actions.Skill.Search, %{}) == "arbor://code/read"
+      assert Actions.canonical_uri_for(Arbor.Actions.Skill.Import, %{}) == "arbor://code/write"
+    end
+
     test "implements Arbor.Common.CapabilityProviders.ActionCapabilityURI" do
       behaviours =
         Actions.module_info(:attributes)
