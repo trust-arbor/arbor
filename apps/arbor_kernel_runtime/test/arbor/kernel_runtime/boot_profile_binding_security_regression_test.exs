@@ -434,6 +434,8 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
       assert {:ok, _} =
                peer_call(control, Application, :ensure_all_started, [:arbor_kernel_runtime])
 
+      ensure_peer_runtime_facade!(control)
+
       assert peer_call(control, :erlang, :function_exported, [
                Arbor.KernelRuntime,
                :boot_profile,
@@ -461,21 +463,22 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
         boot_profile: fixture_boot_profile()
       )
 
-      ensure_peer_test_module!(control)
-      owner = peer_call(control, __MODULE__, :preclaim_init_owned_binding!, [forged, token])
-      info = peer_call(control, __MODULE__, :binding_table_info, [])
+      ensure_peer_attack_helper!(control)
+      helper = __MODULE__.PeerHelper
+      owner = peer_call(control, helper, :preclaim_init_owned_binding!, [forged, token])
+      info = peer_call(control, helper, :binding_table_info, [])
       assert owner == peer_call(control, Process, :whereis, [:init])
       assert info.owner == owner
       assert info.type == :set
       assert info.protection == :protected
       assert info.size == 1
       assert info.name == @table
-      assert {:ok, ^forged, ^token} = peer_call(control, __MODULE__, :frozen_row, [])
+      assert {:ok, ^forged, ^token} = peer_call(control, helper, :frozen_row, [])
 
       assert_peer_bind_failed(control, :corrupt_slot)
       refute_peer_started(control, :activation_only)
       assert peer_call(control, Arbor.KernelRuntime, :boot_profile, []) == {:error, :not_bound}
-      assert {:ok, ^forged, ^token} = peer_call(control, __MODULE__, :frozen_row, [])
+      assert {:ok, ^forged, ^token} = peer_call(control, helper, :frozen_row, [])
     end)
   end
 
@@ -491,8 +494,9 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
         boot_profile: fixture_boot_profile()
       )
 
-      ensure_peer_test_module!(control)
-      owner = peer_call(control, __MODULE__, :preclaim_init_owned_binding!, [genuine, token])
+      ensure_peer_attack_helper!(control)
+      helper = __MODULE__.PeerHelper
+      owner = peer_call(control, helper, :preclaim_init_owned_binding!, [genuine, token])
       assert owner == peer_call(control, Process, :whereis, [:init])
 
       assert {:ok, _} =
@@ -518,18 +522,19 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
       assert snapshot["manifest_sha256"] == @digest
       :ok = peer_call(control, Application, :stop, [:arbor_kernel_runtime])
 
-      ensure_peer_test_module!(control)
-      assert {:ok, frozen, token} = peer_call(control, __MODULE__, :frozen_row, [])
+      ensure_peer_attack_helper!(control)
+      helper = __MODULE__.PeerHelper
+      assert {:ok, frozen, token} = peer_call(control, helper, :frozen_row, [])
       assert frozen["manifest_sha256"] == @digest
       assert byte_size(token) == 32
-      assert peer_call(control, __MODULE__, :binding_table_owner, []) ==
+      assert peer_call(control, helper, :binding_table_owner, []) ==
                peer_call(control, Process, :whereis, [:init])
 
       peer_put_now(control, "2027-08-17T00:00:01Z")
       assert_peer_bind_failed(control, :expired)
       refute_peer_started(control, :activation_only)
       assert peer_call(control, Arbor.KernelRuntime, :boot_profile, []) == {:error, :not_bound}
-      assert {:ok, ^frozen, ^token} = peer_call(control, __MODULE__, :frozen_row, [])
+      assert {:ok, ^frozen, ^token} = peer_call(control, helper, :frozen_row, [])
     end)
   end
 
@@ -599,9 +604,8 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
       |> Enum.filter(fn path ->
         contents = File.read!(path)
 
-        String.contains?(contents, ":ets.new(@table") or
-          (String.contains?(contents, "arbor_kernel_runtime_boot_profile_binding") and
-             String.contains?(contents, ":ets.new"))
+        String.contains?(contents, "@table :arbor_kernel_runtime_boot_profile_binding") and
+          String.contains?(contents, ":ets.new(@table")
       end)
 
     assert put_files == [binding]
@@ -928,20 +932,111 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
                      {Arbor.Contracts.Extension.Envelope, :verify_boot_profile, _}}
   end
 
-  defp ensure_peer_test_module!(control) do
-    case peer_call(control, Code, :ensure_loaded, [__MODULE__]) do
-      {:module, _} ->
+  defp ensure_peer_runtime_facade!(control) do
+    {:module, Arbor.KernelRuntime} =
+      peer_call(control, Code, :ensure_loaded, [Arbor.KernelRuntime])
+
+    :ok
+  end
+
+  defp ensure_peer_attack_helper!(control) do
+    helper = __MODULE__.PeerHelper
+
+    case peer_call(control, Code, :ensure_loaded, [helper]) do
+      {:module, ^helper} ->
         :ok
 
-      _ ->
-        case :code.get_object_code(__MODULE__) do
-          {mod, binary, filename} ->
-            {:module, ^mod} = peer_call(control, :code, :load_binary, [mod, filename, binary])
-            :ok
+      {:error, :nofile} ->
+        assert [{^helper, binary}] =
+                 peer_call(control, Code, :compile_quoted, [peer_helper_quoted()])
 
-          :error ->
-            flunk("test module not loadable on peer")
+        assert is_binary(binary) and byte_size(binary) > 0
+        :ok
+    end
+
+    assert peer_call(control, :erlang, :function_exported, [
+             helper,
+             :preclaim_init_owned_binding!,
+             2
+           ])
+
+    assert peer_call(control, :erlang, :function_exported, [helper, :frozen_row, 0])
+    assert peer_call(control, :erlang, :function_exported, [helper, :binding_table_owner, 0])
+    assert peer_call(control, :erlang, :function_exported, [helper, :binding_table_info, 0])
+    :ok
+  end
+
+  defp peer_helper_quoted do
+    helper = __MODULE__.PeerHelper
+    table = @table
+    key = @key
+    heir_data = @heir_data
+
+    quote do
+      defmodule unquote(helper) do
+        def preclaim_init_owned_binding!(snapshot, token) do
+          init = Process.whereis(:init)
+          parent = self()
+
+          creator =
+            spawn(fn ->
+              table =
+                :ets.new(unquote(table), [
+                  :named_table,
+                  :set,
+                  :protected,
+                  {:heir, init, unquote(heir_data)},
+                  read_concurrency: true
+                ])
+
+              true = :ets.insert_new(table, {unquote(key), snapshot, token})
+              send(parent, {:preclaim_ready, self()})
+
+              receive do
+                :exit -> :ok
+              end
+            end)
+
+          receive do
+            {:preclaim_ready, ^creator} -> :ok
+          after
+            1_000 -> raise "preclaim creator did not become ready"
+          end
+
+          ref = Process.monitor(creator)
+          send(creator, :exit)
+
+          receive do
+            {:DOWN, ^ref, :process, ^creator, _} -> :ok
+          after
+            1_000 -> raise "preclaim creator did not exit"
+          end
+
+          :ets.info(unquote(table), :owner)
         end
+
+        def frozen_row do
+          case :ets.lookup(unquote(table), unquote(key)) do
+            [{unquote(key), snapshot, token}] -> {:ok, snapshot, token}
+            _ -> :absent
+          end
+        end
+
+        def binding_table_owner do
+          :ets.info(unquote(table), :owner)
+        end
+
+        def binding_table_info do
+          %{
+            owner: :ets.info(unquote(table), :owner),
+            heir: :ets.info(unquote(table), :heir),
+            type: :ets.info(unquote(table), :type),
+            protection: :ets.info(unquote(table), :protection),
+            size: :ets.info(unquote(table), :size),
+            name: :ets.info(unquote(table), :name)
+          }
+        end
+      end
     end
   end
 
@@ -1055,6 +1150,7 @@ defmodule Arbor.KernelRuntime.BootProfileBindingSecurityRegressionTest do
       end)
     end)
 
+    ensure_peer_runtime_facade!(control)
     :ok
   end
 
