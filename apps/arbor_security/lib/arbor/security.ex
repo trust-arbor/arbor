@@ -1717,6 +1717,23 @@ defmodule Arbor.Security do
   def oidc_enabled?, do: Arbor.Security.OIDC.Config.enabled?()
 
   @doc """
+  The local operator's `human_` principal id, derived without creating anything.
+
+  Same claims as `create_local_human_identity/1`, so it returns exactly the id
+  `mix arbor.user.init` produced — that id is a deterministic hash of
+  `iss:sub`, not stored state.
+
+  Read-only ON PURPOSE. Callers that merely need to NAME the operator (a CLI
+  turn identifying its sender) must not mint an identity as a side effect of
+  asking who they are; and if `arbor.user.init` was never run, the derived id
+  simply is not registered and downstream checks fail closed.
+  """
+  @spec local_human_principal_id(keyword()) :: String.t()
+  def local_human_principal_id(opts \\ []) do
+    Arbor.Security.OIDC.IdentityStore.derive_agent_id(local_human_claims(opts))
+  end
+
+  @doc """
   Create (or load) the LOCAL human identity for a single-operator dev install.
 
   **This is a deliberate, gated carve-out from `:oidc_proof_required`.**
