@@ -2413,6 +2413,29 @@ defmodule Arbor.Actions do
     |> Enum.map(& &1.to_tool())
   end
 
+  @auth_scope_keys [:session_id, :task_id, :principal_scope]
+
+  @doc """
+  The capability scope of the current call, taken from the executor context.
+
+  JIT-minted capabilities are bound to the session/task they were minted in;
+  `Security.authorize/4` rejects them with `:scope_mismatch` unless the same
+  scope is presented. The action layer already does this; facades called from
+  inside an action must forward it too, or a minted capability can never
+  satisfy a facade gate (found live 2026-08-25: parent minted, facade refused).
+  """
+  @spec auth_scope(map()) :: keyword()
+  def auth_scope(context) when is_map(context) do
+    Enum.flat_map(@auth_scope_keys, fn key ->
+      case Map.get(context, key) || Map.get(context, to_string(key)) do
+        nil -> []
+        value -> [{key, value}]
+      end
+    end)
+  end
+
+  def auth_scope(_), do: []
+
   # Trust authorizes (and mints) the canonical parent URI. When the action is
   # SELF-scoped, the facade will accept that parent as covering the agent's own
   # child resource (`Security.authorize_self_scoped/6`) — so a child-specific

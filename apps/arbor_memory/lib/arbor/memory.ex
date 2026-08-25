@@ -57,6 +57,10 @@ defmodule Arbor.Memory do
   All functions remain accessible via `Arbor.Memory` for backward compatibility.
   """
 
+  # Capability scope keys forwarded from the executor context (see
+  # `Arbor.Actions.auth_scope/1`): minted capabilities are session/task-bound.
+  @auth_scope_keys [:session_id, :task_id, :principal_scope]
+
   alias Arbor.Memory.{
     Events,
     GoalIntentOps,
@@ -497,7 +501,9 @@ defmodule Arbor.Memory do
   @spec authorize_recall(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_recall(caller_id, agent_id, query, opts \\ []) do
-    case authorize_self_scoped_memory(caller_id, "read", agent_id) do
+    {scope, opts} = Keyword.split(opts, @auth_scope_keys)
+
+    case authorize_self_scoped_memory(caller_id, "read", agent_id, scope) do
       :ok -> recall(agent_id, query, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -566,11 +572,16 @@ defmodule Arbor.Memory do
 
   Verifies the caller has the `arbor://memory/write/{agent_id}` capability.
   """
-  @spec authorize_add_knowledge_with_outcome(String.t(), String.t(), map()) ::
+  @spec authorize_add_knowledge_with_outcome(String.t(), String.t(), map(), keyword()) ::
           {:ok, String.t(), :created | :deduplicated | :unknown}
           | {:error, {:unauthorized, term()} | term()}
-  def authorize_add_knowledge_with_outcome(caller_id, agent_id, node_data) do
-    case authorize_self_scoped_memory(caller_id, "write", agent_id) do
+  def authorize_add_knowledge_with_outcome(caller_id, agent_id, node_data, opts \\ []) do
+    case authorize_self_scoped_memory(
+           caller_id,
+           "write",
+           agent_id,
+           Keyword.take(opts, @auth_scope_keys)
+         ) do
       :ok -> add_knowledge_with_outcome(agent_id, node_data)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end

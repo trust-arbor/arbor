@@ -58,4 +58,28 @@ defmodule Arbor.Historian.SelfScopedQueryAuthorizationTest do
   test "security regression: the parent does not open a category (security)", %{agent: agent} do
     assert {:error, {:unauthorized, _}} = Historian.authorize_query(agent, category: :security)
   end
+
+  test "security regression: a session-bound minted parent works only with its scope forwarded" do
+    agent = "agent_hist_scoped_#{:erlang.unique_integer([:positive])}"
+    own = StreamIds.for_agent(agent)
+
+    {:ok, _} =
+      Arbor.Security.grant(
+        principal: agent,
+        resource: "arbor://historian/query",
+        session_id: "sess_forwarded"
+      )
+
+    # Facade called without the scope (the pre-fix shape): the minted parent
+    # cannot match, so the agent is refused on its own history.
+    assert {:error, {:unauthorized, _}} = Historian.authorize_query(agent, stream: own)
+
+    # With the executor's scope forwarded it authorizes.
+    refute match?(
+             {:error, {:unauthorized, _}},
+             Historian.authorize_query(agent, [stream: own, limit: 5],
+               session_id: "sess_forwarded"
+             )
+           )
+  end
 end

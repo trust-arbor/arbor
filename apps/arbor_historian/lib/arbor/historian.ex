@@ -83,7 +83,12 @@ defmodule Arbor.Historian do
     stream = extract_stream_from_query(query_opts)
     resource = "arbor://historian/query/#{stream}"
     {trace_id, _opts} = Keyword.pop(opts, :trace_id)
-    auth_opts = [trace_id: trace_id, verify_identity: false]
+
+    # Forward the call's capability scope: JIT-minted capabilities are bound
+    # to a session/task and fail with :scope_mismatch without it.
+    auth_opts =
+      [trace_id: trace_id, verify_identity: false] ++
+        Keyword.take(opts, [:session_id, :task_id, :principal_scope])
 
     # An agent's OWN stream is self-scoped: a capability on the canonical
     # parent (what trust policy mints) covers it. Any other stream, and every

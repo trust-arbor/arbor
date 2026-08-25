@@ -138,7 +138,7 @@ defmodule Arbor.Actions.Historian do
 
       result =
         if context[:agent_id] do
-          Arbor.Historian.authorize_query(context[:agent_id], opts)
+          Arbor.Historian.authorize_query(context[:agent_id], opts, Actions.auth_scope(context))
         else
           Arbor.Historian.query(opts)
         end

@@ -144,7 +144,8 @@ defmodule Arbor.Actions.Memory do
             Arbor.Memory.authorize_add_knowledge_with_outcome(
               context[:agent_id],
               agent_id,
-              node_data
+              node_data,
+              Actions.auth_scope(context)
             )
           else
             Arbor.Memory.add_knowledge_with_outcome(agent_id, node_data)
@@ -301,7 +302,12 @@ defmodule Arbor.Actions.Memory do
         # Use facade auth when called through authorize_and_execute
         recall_result =
           if context[:agent_id] do
-            Arbor.Memory.authorize_recall(context[:agent_id], agent_id, params.query, opts)
+            Arbor.Memory.authorize_recall(
+              context[:agent_id],
+              agent_id,
+              params.query,
+              opts ++ Actions.auth_scope(context)
+            )
           else
             Arbor.Memory.recall(agent_id, params.query, opts)
           end
