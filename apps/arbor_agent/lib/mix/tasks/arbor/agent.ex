@@ -26,7 +26,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     * `--model` / `-m` — model ID (default: openai/gpt-oss-120b:free)
     * `--provider` — provider atom (default: openrouter)
     * `--auto-start` — set auto-start on creation (with start)
-    * `--timeout` — response timeout in seconds (default: 60, with chat)
+    * `--timeout` — response timeout in seconds (default: 120, with chat;
+      capped at 120 by the authenticated delivery path)
     * `--all` — show both running and stopped agents (with list)
     * `--yes` — skip the destroy confirmation (required when stdin is not a
       TTY, e.g. scripted or non-interactive ssh runs)
@@ -52,6 +53,20 @@ defmodule Mix.Tasks.Arbor.Agent do
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shortdoc "Manage agent lifecycle (start, stop, chat, status)"
+
+  # MessageFacade caps delivery at @max_timeout_ms and REJECTS anything larger
+  # rather than clamping, so a CLI default above this bound would be an outright
+  # `:invalid_timeout`. That bound is sized for a human chat turn waiting on an
+  # LLM, not for agent-to-agent delivery.
+  @authenticated_delivery_max_ms 120_000
+
+  # A turn that calls tools runs a multi-turn loop — model, tool, model again —
+  # so the wall clock is a multiple of one completion, not one. 60s expired
+  # mid-loop and reported `:delivery_ambiguous` while the turn was still running
+  # server-side (found 2026-08-25: a memory_recall turn needed ~75s). Default to
+  # the delivery ceiling so the common tool-using turn is not cut off; pass a
+  # smaller `--timeout` to fail faster.
+  @default_chat_timeout_s div(@authenticated_delivery_max_ms, 1_000)
 
   @switches [
     name: :string,
@@ -479,7 +494,8 @@ defmodule Mix.Tasks.Arbor.Agent do
 
   defp do_chat(ref, message, opts) do
     ensure_server!()
-    timeout = (opts[:timeout] || 60) * 1_000
+    timeout = (opts[:timeout] || @default_chat_timeout_s) * 1_000
+    effective_s = div(min(timeout, @authenticated_delivery_max_ms), 1_000)
 
     case find_running(ref) do
       {:ok, agent_id, _name} ->
@@ -499,7 +515,9 @@ defmodule Mix.Tasks.Arbor.Agent do
             Mix.shell().info(response)
 
           {:error, :timeout} ->
-            Mix.shell().error("Response timed out after #{opts[:timeout] || 60}s.")
+            # Report the EFFECTIVE wait, not the requested one — the signed
+            # delivery path clamps to @authenticated_delivery_max_ms.
+            Mix.shell().error("Response timed out after #{effective_s}s.")
 
           {:error, reason} ->
             Mix.shell().error("Chat failed: #{inspect(reason)}")
@@ -558,12 +576,6 @@ defmodule Mix.Tasks.Arbor.Agent do
       exit({:shutdown, 1})
     end
   end
-
-  # MessageFacade caps delivery at 30s (@max_timeout_ms) and REJECTS anything
-  # larger rather than clamping, so the CLI's 60s default was an outright
-  # `:invalid_timeout`. That bound looks sized for agent-to-agent delivery, not
-  # a human chat turn waiting on an LLM.
-  @authenticated_delivery_max_ms 120_000
 
   # Deliver a terminal turn through the AUTHENTICATED path, proving the operator
   # by SIGNING with the key `mix arbor.user.init` wrote.
