@@ -23,8 +23,14 @@ defmodule Arbor.Agent.MessageFacade do
   # while the turn was still running.
   #
   # Still bounded — an unbounded delivery ties up a caller indefinitely.
+  # Raised to 300s (2026-08-25): 120s still cut off real tool-using turns. A
+  # turn that calls tools is a LOOP — model, tool, model again — so its wall
+  # clock is a multiple of one completion. Measured on the free tier: ~20-25s
+  # per provider round trip, and a memory question that recalls, reflects, then
+  # answers runs 4-9 rounds. Arbor's own pipeline is ~290ms of that, so the
+  # ceiling has to cover provider latency times rounds, not one call.
   @default_timeout_ms 30_000
-  @max_timeout_ms 120_000
+  @max_timeout_ms 300_000
   @max_id_bytes 256
   @max_content_bytes 32_768
   @max_engagement_id_bytes 256

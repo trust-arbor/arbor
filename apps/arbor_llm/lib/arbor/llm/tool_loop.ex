@@ -191,6 +191,16 @@ defmodule Arbor.LLM.ToolLoop do
         end),
       turn: 0,
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
+      # Turn time budget. A chat turn's wall clock is dominated by PROVIDER
+      # round trips, not Arbor: measured 2026-08-25, the whole DOT pipeline
+      # around the call (build_prompt/select_mode/memory_checks/start) came to
+      # ~290ms against a 20-25s call_llm. Per-round `llm_ms` already went out as
+      # a signal, but nothing made the split legible in a log, so "the chat is
+      # slow" could not be attributed without a dashboard. Accumulate here and
+      # print one line per round.
+      llm_ms_total: 0,
+      tool_ms_total: 0,
+      llm_calls: 0,
       discovered_tools: [],
       accumulated_text: "",
       tool_result_budget: ToolResultBudget.new(),
@@ -776,6 +786,12 @@ defmodule Arbor.LLM.ToolLoop do
             reserved_terminal_call_diagnostic(tool_calls, state)
           end
 
+        state = %{
+          state
+          | llm_ms_total: state.llm_ms_total + llm_ms,
+            llm_calls: state.llm_calls + 1
+        }
+
         emit_tool_loop_signal(:tool_loop_response, %{
           agent_id: state.agent_id,
           # Wall time of this round's LLM call — the first round is time-to-first-
@@ -1303,8 +1319,12 @@ defmodule Arbor.LLM.ToolLoop do
             true -> Map.update(failures, tc.name, 1, &(&1 + 1))
           end
 
-        {{tc.id, tc.name, result}, new_failures}
+        {{{tc.id, tc.name, result}, duration_ms}, new_failures}
       end)
+
+    # map_reduce threads `failures`, not `state`, so per-tool time has to travel
+    # out with the results rather than by rebinding `state` in the closure.
+    {results, round_tool_ms} = split_results_and_timing(results)
 
     discovery_this_round = Enum.count(tool_calls, &discovery_tool?(&1.name))
 
@@ -1312,8 +1332,24 @@ defmodule Arbor.LLM.ToolLoop do
       state
       |> Map.put(:tool_failures, tool_failures)
       |> Map.update(:discovery_count, discovery_this_round, &(&1 + discovery_this_round))
+      |> Map.update(:tool_ms_total, round_tool_ms, &(&1 + round_tool_ms))
+
+    # One line per round, so "the chat is slow" is attributable from the log
+    # alone: provider latency vs tool execution vs everything else.
+    Logger.info(
+      "[ToolLoop] agent=#{state.agent_id} turn=#{state.turn} TIMING " <>
+        "round_tool_ms=#{round_tool_ms} llm_ms_total=#{Map.get(state, :llm_ms_total, 0)} " <>
+        "tool_ms_total=#{Map.get(updated_state, :tool_ms_total, 0)} " <>
+        "llm_calls=#{Map.get(state, :llm_calls, 0)}"
+    )
 
     {results, updated_state}
+  end
+
+  defp split_results_and_timing(entries) do
+    Enum.map_reduce(entries, 0, fn {result, duration_ms}, acc ->
+      {result, acc + duration_ms}
+    end)
   end
 
   defp put_tool_taint(opts, nil, _args), do: opts

@@ -26,8 +26,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     * `--model` / `-m` — model ID (default: openai/gpt-oss-120b:free)
     * `--provider` — provider atom (default: openrouter)
     * `--auto-start` — set auto-start on creation (with start)
-    * `--timeout` — response timeout in seconds (default: 120, with chat;
-      capped at 120 by the authenticated delivery path)
+    * `--timeout` — response timeout in seconds (default: 300, with chat;
+      capped at 300 by the authenticated delivery path)
     * `--all` — show both running and stopped agents (with list)
     * `--yes` — skip the destroy confirmation (required when stdin is not a
       TTY, e.g. scripted or non-interactive ssh runs)
@@ -58,7 +58,7 @@ defmodule Mix.Tasks.Arbor.Agent do
   # rather than clamping, so a CLI default above this bound would be an outright
   # `:invalid_timeout`. That bound is sized for a human chat turn waiting on an
   # LLM, not for agent-to-agent delivery.
-  @authenticated_delivery_max_ms 120_000
+  @authenticated_delivery_max_ms 300_000
 
   # A turn that calls tools runs a multi-turn loop — model, tool, model again —
   # so the wall clock is a multiple of one completion, not one. 60s expired
