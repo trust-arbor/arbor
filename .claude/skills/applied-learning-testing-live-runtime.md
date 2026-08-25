@@ -881,3 +881,7 @@ the test owner dies. Otherwise infrastructure is reported as ordinary
 `tests_failed`, correctly enters implementation rework, and pressures the worker to
 change unrelated product code (found 2026-08-24 when a cold `TestMixShell` fixture
 outlived `Arbor.Actions.MixTest`'s default timeout in CrossApp batch 18).
+
+<!-- applied-learning: a-feature-that-never-worked-hides-every-bug-downstream-of-it -->
+<a id="applied-learning-a-feature-that-never-worked-hides-every-bug-downstream-of-it"></a>
+**A feature that never worked hides every bug downstream of it.** Fixing one can look like causing a regression. `memory_remember` wrote the knowledge graph while `memory_recall` read the semantic index, so recall ALWAYS returned empty — which silently satisfied a `case format_recalled_memories(recalled) do "" -> ...` branch whose other arm prepended a second system message that OpenAI-compatible providers reject outright. Making remember index its content fixed memory and instantly broke every turn whose recall returned results, latent since the 2026-07-04 rewiring. Two practical consequences: when a fix makes a dormant code path live for the first time, the next failure is probably the path you just woke up, not your change being wrong — check what the empty/zero case was silently satisfying before you revert. And an empty-result guard (`[] ->`, `"" ->`, `nil ->`) that has never been exercised with real data is untested code wearing a passing test; the suite stayed green throughout because every fixture recalled nothing (found 2026-08-25).

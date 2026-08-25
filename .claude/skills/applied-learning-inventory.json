@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 681,
+  "entry_count": 682,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8397,8 +8397,21 @@
       "source_incident": "found 2026-08-25 debugging the onboarding chat chain",
       "always_loaded": false,
       "content_sha256": "9a1fc3508eb57b4a60067870674dc4ccc0a239ccc929fe73f4d7a249e3c5eb79"
+    },
+    {
+      "source_ordinal": 682,
+      "source_kind": "post-migration",
+      "slug": "a-feature-that-never-worked-hides-every-bug-downstream-of-it",
+      "title": "A feature that never worked hides every bug downstream of it.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-a-feature-that-never-worked-hides-every-bug-downstream-of-it",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 fixing memory recall on the onboarding path",
+      "always_loaded": false,
+      "content_sha256": "6de33c9b46f0f7c6777e5ae1cfb61fe6737ccad5895e4299f007bc86a54aba5c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 220
+  "post_migration_entry_count": 221
 }
