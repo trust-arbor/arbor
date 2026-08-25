@@ -28,6 +28,13 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
     def tags, do: [:git]
   end
 
+  defmodule Actions.Pipeline.Internal do
+    @moduledoc false
+
+    def description, do: "Internal graph syscall"
+    def tags, do: ["pipeline_internal"]
+  end
+
   setup do
     unless Process.whereis(ActionRegistry) do
       start_supervised!(ActionRegistry)
@@ -88,6 +95,14 @@ defmodule Arbor.Common.CapabilityProviders.ActionProviderTest do
       ids = Enum.map(capabilities, & &1.id)
       assert "action:file.read" in ids
       assert "action:shell.execute" in ids
+    end
+
+    test "security regression: pipeline_internal actions are absent from discovery" do
+      :ok = ActionRegistry.register_action(Actions.Pipeline.Internal, %{category: :pipeline})
+
+      capabilities = ActionProvider.list_capabilities()
+
+      refute Enum.any?(capabilities, &(&1.metadata.module == Actions.Pipeline.Internal))
     end
 
     test "descriptors have string descriptions" do

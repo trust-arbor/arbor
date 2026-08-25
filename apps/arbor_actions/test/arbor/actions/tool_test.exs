@@ -1,9 +1,24 @@
 defmodule Arbor.Actions.Tool.FindToolsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Actions.Tool.FindTools
+  alias Arbor.Common.CapabilityIndex
+
+  defmodule PipelineInternalProvider do
+    @moduledoc false
+
+    def list_capabilities(_opts \\ []) do
+      [
+        Arbor.Common.CapabilityProviders.ActionProvider.module_to_descriptor(
+          "session_memory_recall",
+          Arbor.Actions.SessionMemory.Recall,
+          %{}
+        )
+      ]
+    end
+  end
 
   describe "to_tool/0" do
     test "produces valid tool schema" do
@@ -82,6 +97,16 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
         # names the tools it found so the model can select one directly
         assert Enum.all?(names, fn n -> instruction =~ n end)
       end
+    end
+
+    test "security regression: stale indexed pipeline_internal actions stay undisclosed" do
+      refute Process.whereis(CapabilityIndex)
+      start_supervised!({CapabilityIndex, providers: [PipelineInternalProvider]})
+
+      assert {:ok, %{discovered_tool_names: names}} =
+               FindTools.run(%{query: "session memory recall", limit: 10}, %{})
+
+      refute "session_memory_recall" in names
     end
   end
 

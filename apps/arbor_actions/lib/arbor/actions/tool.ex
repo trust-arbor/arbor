@@ -115,6 +115,9 @@ defmodule Arbor.Actions.Tool do
       module = metadata[:module] || metadata["module"]
 
       cond do
+        module != nil and is_atom(module) and pipeline_internal_action?(module) ->
+          []
+
         module != nil and is_atom(module) and function_exported?(module, :to_tool, 0) ->
           tool = module.to_tool()
           [apply(executor_mod, :to_openai_format, [tool])]

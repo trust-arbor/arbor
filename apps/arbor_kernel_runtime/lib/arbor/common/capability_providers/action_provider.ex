@@ -4,7 +4,9 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
 
   Converts registered Jido action modules into `CapabilityDescriptor`s
   for the unified capability index. Deduplicates by excluding Jido alias
-  entries (underscore variants).
+  entries (underscore variants), and excludes actions tagged
+  `pipeline_internal` because they are graph syscalls rather than discoverable
+  agent tools.
   """
 
   @behaviour Arbor.Contracts.CapabilityProvider
@@ -17,6 +19,7 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
   def list_capabilities(_opts \\ []) do
     ActionRegistry.list_all()
     |> deduplicate_actions()
+    |> Enum.reject(&pipeline_internal_action?/1)
     |> Enum.map(fn {name, module, metadata} ->
       module_to_descriptor(name, module, metadata)
     end)
@@ -116,6 +119,11 @@ defmodule Arbor.Common.CapabilityProviders.ActionProvider do
         String.contains?(name, ".")
       end)
     end)
+  end
+
+  defp pipeline_internal_action?({_name, module, _metadata}) do
+    {_description, tags} = extract_module_info(module)
+    Enum.any?(List.wrap(tags), &(to_string(&1) == "pipeline_internal"))
   end
 
   defp extract_module_info(module) do
