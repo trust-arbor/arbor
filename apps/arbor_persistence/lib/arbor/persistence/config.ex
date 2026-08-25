@@ -2,9 +2,10 @@ defmodule Arbor.Persistence.Config do
   @moduledoc """
   Configuration seam for Persistence-owned backends.
 
-  Vector storage remains disabled until an operator explicitly configures a
-  concrete backend after the additive migration and cutover checks. A malformed
-  configured module fails closed before dispatch.
+  The product default is `Arbor.Persistence.VectorStore.Ecto` (see
+  `config/config.exs`). Tests override to `VectorStore.Unsupported` so hermetic
+  suites do not touch the shared database. A malformed configured module fails
+  closed before dispatch.
   """
 
   alias Arbor.Persistence.VectorStore.Unsupported

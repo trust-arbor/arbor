@@ -40,7 +40,10 @@ defmodule Arbor.Actions.Memory do
 
   @doc false
   def ensure_memory(agent_id) do
-    unless Arbor.Memory.initialized?(agent_id) do
+    # Graph survival across restart makes `initialized?/1` true while the ETS
+    # index is still absent. Start (and therefore rehydrate) the index whenever
+    # it is not actually running.
+    unless Arbor.Memory.index_running?(agent_id) do
       Arbor.Memory.init_for_agent(agent_id)
     end
 

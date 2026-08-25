@@ -12,21 +12,25 @@ defmodule Arbor.Memory.Index do
   - Batch indexing
   - LRU eviction when max entries exceeded
   - Per-agent isolation via Registry
-  - Optional dual backend mode (ETS + pgvector)
+  - Optional dual backend mode (ETS + durable vector store)
+  - Rehydrates the ETS cache from `StrictVectorSeam.list/2` on start
 
   ## Architecture
 
   - Uses ETS for storage (fast reads, concurrent access)
   - Embeddings are stored alongside content
-  - On crash, rebuild from Postgres (no re-embedding needed)
+  - On start, rehydrate from the durable vector store via `list/2` (SQLite or
+    Postgres). Similarity search on SQLite does not require pgvector.
   - Embedding backend is pluggable via arbor_ai
 
   ## Backend Modes
 
   Configure via `config :arbor_memory, :embedding_backend`:
 
-  - `:ets` — ETS only (default, backward compatible)
-  - `:pgvector` — durable strict vector store only
+  - `:ets` — ETS only (process-lifetime; still rehydrates if a durable store
+    has rows for this agent)
+  - `:pgvector` — durable strict vector store only (ANN when available; ETS
+    cosine after rehydration when ANN is `:unsupported`)
   - `:dual` — Write to both, read from ETS first then durable ANN
 
   Durable paths use `Arbor.Memory.StrictVectorSeam` (encode/execute/reconcile and
@@ -120,6 +124,8 @@ defmodule Arbor.Memory.Index do
   - `:operation_timeout_ms` - Finite deadline for one serialized mutation (default: 15s)
   - `:max_pending_mutations` - Bounded mutation queue depth (default: 16)
   - `:max_concurrent_recalls` - Bounded concurrent recall workers (default: 4)
+  - `:rehydrate` - Load durable `memory_index` rows into ETS during `init/1`
+    (default: `true`). Set `false` only in tests that isolate `warm_cache/2`.
 
   ## Examples
 
@@ -249,10 +255,11 @@ defmodule Arbor.Memory.Index do
   end
 
   @doc """
-  Warm the ETS cache from pgvector.
+  Warm the ETS cache from the durable vector store.
 
-  Loads recent entries from the persistent backend into ETS.
-  Only useful in `:dual` or `:pgvector` backend modes.
+  Loads recent entries from the persistent backend into ETS via `list/2`.
+  Only useful in `:dual` or `:pgvector` backend modes; index start already
+  performs this rehydration by default.
 
   ## Options
 
@@ -377,6 +384,13 @@ defmodule Arbor.Memory.Index do
       mutation_queue: :queue.new(),
       inflight_recalls: %{}
     }
+
+    state =
+      if Keyword.get(opts, :rehydrate, true) == false do
+        state
+      else
+        maybe_rehydrate(state)
+      end
 
     Logger.debug("Started memory index for agent #{agent_id} with backend #{backend}")
     {:ok, state}
@@ -1443,7 +1457,18 @@ defmodule Arbor.Memory.Index do
   end
 
   defp do_pgvector_recall(evidence, type_filter, threshold, limit, state) do
-    strict_ann_search(state, evidence, type_filter, threshold, limit)
+    case strict_ann_search(state, evidence, type_filter, threshold, limit) do
+      {:ok, results} ->
+        {:ok, results}
+
+      {:error, reason} when reason in [:backend_failure, :unsupported, :indeterminate] ->
+        # SQLite has no pgvector `<=>`. After start rehydration, ETS cosine is
+        # the durable search path (option B fallback for option C).
+        do_ets_recall(evidence, type_filter, threshold, limit, state)
+
+      error ->
+        error
+    end
   end
 
   defp do_dual_recall(evidence, type_filter, threshold, limit, state) do
@@ -2399,6 +2424,56 @@ defmodule Arbor.Memory.Index do
 
   defp finish_pending_sync({:error, reason}, _groups, _count, _state),
     do: {:error, reason}
+
+  defp maybe_rehydrate(state) do
+    limit = min(state.max_entries, 1000)
+    opts = [limit: limit]
+
+    case rehydrate_from_durable(state, opts) do
+      {:ok, new_state} ->
+        new_state
+
+      {:error, reason}
+      when reason in [
+             :unsupported,
+             :backend_failure,
+             :backend_not_persistent,
+             :unverified_strict_provenance,
+             :malformed_persistence_result,
+             :indeterminate,
+             :not_found,
+             :invalid_request
+           ] ->
+        Logger.debug(
+          "Memory index rehydrate skipped for agent #{state.agent_id}: #{inspect(reason)}"
+        )
+
+        state
+
+      {:error, reason} ->
+        Logger.warning(
+          "Memory index rehydrate failed for agent #{state.agent_id}: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp rehydrate_from_durable(state, opts) do
+    with {:ok, entries} <-
+           fetch_warm_cache_entries(
+             state.strict_vector_seam,
+             state.agent_id,
+             state.embedding_provider,
+             opts
+           ) do
+      commit_warm_cache(entries, Keyword.fetch!(opts, :limit), state)
+    end
+  rescue
+    _ -> {:error, :indeterminate}
+  catch
+    _, _ -> {:error, :indeterminate}
+  end
 
   defp fetch_warm_cache_entries(seam, agent_id, provider, opts) do
     limit = Keyword.fetch!(opts, :limit)

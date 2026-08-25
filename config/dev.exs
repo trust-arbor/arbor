@@ -74,7 +74,7 @@ else
 
   config :arbor_memory,
     persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
-    embedding_backend: :ets,
+    embedding_backend: :dual,
     embedding_dedup_enabled: false
 end
 

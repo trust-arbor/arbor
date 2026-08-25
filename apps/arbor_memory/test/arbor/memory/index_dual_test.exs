@@ -195,7 +195,8 @@ defmodule Arbor.Memory.IndexDualTest do
     assert {:ok, entry_id} =
              Index.index(writer, "warm me", %{type: :thought}, embedding: vector)
 
-    cache = start_index(agent_id, :dual)
+    # Isolate the explicit warm_cache/2 path from start-time rehydration.
+    cache = start_index(agent_id, :dual, rehydrate: false)
     assert {:error, :not_found} = Index.get(cache, entry_id)
     assert :ok = Index.warm_cache(cache, limit: 10)
 

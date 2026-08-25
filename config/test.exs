@@ -256,9 +256,12 @@ config :arbor_memory,
   # Ollama here caused flaky Finch pool-exhaustion timeouts (KnowledgeGraphTest).
   embedding_service_enabled: false
 
-# pgvector tests (requires postgres + pgvector extension)
+# pgvector tests (requires postgres + pgvector extension). Keep the vector
+# store fail-closed in the hermetic suite so Index start rehydration does not
+# touch the shared test database. Dual/pgvector files configure Ecto locally.
 config :arbor_persistence,
-  embedding_dimension: 768
+  embedding_dimension: 768,
+  vector_store_backend: Arbor.Persistence.VectorStore.Unsupported
 
 # P0-1: Keep permissive taint in tests — existing tests don't set taint context
 config :arbor_actions, default_taint_policy: :permissive

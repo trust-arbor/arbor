@@ -3,7 +3,7 @@ defmodule Arbor.Memory.IndexOps do
   Sub-facade for index and embedding operations.
 
   Handles vector-based semantic search via the in-memory ETS index
-  and persistent pgvector embeddings.
+  and the durable vector store. Index start rehydrates ETS from `list/2`.
 
   This module is not intended to be called directly by external consumers.
   Use `Arbor.Memory` as the public API.
@@ -87,7 +87,7 @@ defmodule Arbor.Memory.IndexOps do
   @spec recall(String.t(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def recall(agent_id, query, opts \\ []) do
-    with {:ok, pid} <- IndexSupervisor.get_index(agent_id),
+    with {:ok, pid} <- ensure_recall_index(agent_id),
          {:ok, results} <- Index.recall(pid, query, opts) do
       emit_recall_signal(agent_id, query, results)
       {:ok, results}
@@ -263,8 +263,9 @@ defmodule Arbor.Memory.IndexOps do
   @doc """
   Warm the in-memory index cache from persistent storage.
 
-  Loads recent entries from pgvector into the ETS index.
+  Loads recent entries from the durable vector store into the ETS index.
   Only works when the index is running in `:dual` or `:pgvector` mode.
+  Index start already rehydrates by default.
 
   ## Options
 
@@ -283,6 +284,39 @@ defmodule Arbor.Memory.IndexOps do
 
       {:error, :not_found} ->
         {:error, :index_not_initialized}
+    end
+  end
+
+  # Restart leaves the knowledge graph durable while the ETS index is gone.
+  # `initialized?/1` is true from the graph alone, so callers that skip init
+  # still need recall to start (and therefore rehydrate) the index when
+  # persisted vectors exist.
+  defp ensure_recall_index(agent_id) do
+    case IndexSupervisor.get_index(agent_id) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, :not_found} ->
+        if durable_index_present?(agent_id) do
+          IndexSupervisor.start_index(agent_id)
+        else
+          {:error, :not_found}
+        end
+    end
+  end
+
+  defp durable_index_present?(agent_id) do
+    seam = StrictVectorSeam.resolve()
+
+    case safe_vector_call(fn ->
+           seam.list(agent_id,
+             source_namespace: StrictEmbeddingInput.index_namespace(),
+             include_tombstones: false,
+             limit: 1
+           )
+         end) do
+      {:ok, [_ | _]} -> true
+      _ -> false
     end
   end
 

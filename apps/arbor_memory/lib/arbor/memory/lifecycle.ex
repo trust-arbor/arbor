@@ -50,8 +50,10 @@ defmodule Arbor.Memory.Lifecycle do
   def on_agent_start(agent_id, opts \\ []) do
     Logger.debug("Lifecycle: agent #{agent_id} starting")
 
-    # Initialize memory if not already done
-    unless Memory.initialized?(agent_id) do
+    # Graph survival across restart makes `initialized?/1` true while the ETS
+    # index is still absent. Re-init whenever the index process is missing so
+    # start rehydration can restore persisted vectors.
+    unless Memory.index_running?(agent_id) do
       Memory.init_for_agent(agent_id, opts)
     end
 

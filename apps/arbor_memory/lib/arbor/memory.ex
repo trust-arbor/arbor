@@ -147,11 +147,24 @@ defmodule Arbor.Memory do
 
   @doc """
   Check if memory is initialized for an agent.
+
+  True when either the ETS index process is running **or** a durable knowledge
+  graph exists. Graph survival across restart is not proof that the semantic
+  index is running; use `index_running?/1` for that.
   """
   @spec initialized?(String.t()) :: boolean()
   def initialized?(agent_id) do
     IndexSupervisor.has_index?(agent_id) or GraphOps.has_graph?(agent_id)
   end
+
+  @doc """
+  True when this agent's semantic index process is alive.
+
+  Distinct from `initialized?/1`: a persisted knowledge graph makes
+  `initialized?/1` true after restart even though the ETS index is gone.
+  """
+  @spec index_running?(String.t()) :: boolean()
+  def index_running?(agent_id), do: IndexSupervisor.has_index?(agent_id)
 
   # ============================================================================
   # Index Operations (delegated to IndexOps)

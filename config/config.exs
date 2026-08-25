@@ -371,7 +371,9 @@ config :arbor_memory,
   kg_default_decay_rate: 0.10,
   kg_max_nodes_per_type: 500,
   default_model: "anthropic:claude-sonnet-4-5-20250514",
-  # Embedding backend: :ets (default), :pgvector, or :dual (ETS + pgvector)
+  # Embedding backend: :ets, :pgvector (durable store only), or :dual
+  # (ETS + durable store). :dual is the product default so indexed memories
+  # survive restart via VectorStore.list rehydration on SQLite or Postgres.
   embedding_backend: :dual,
   # Preconscious (Phase 7): Anticipatory retrieval during heartbeats
   preconscious_enabled: true,
@@ -382,10 +384,14 @@ config :arbor_memory,
   # that word-set similarity misses (different vocabulary, same concept)
   embedding_dedup_enabled: false
 
-# pgvector embedding configuration
+# Vector store: Ecto on the application Repo. Writes and list/2 work on
+# SQLite and Postgres; ANN search still requires pgvector (SQLite recall
+# rehydrates ETS and scores in-process).
 config :arbor_persistence,
   # Vector dimension: 768 for nomic-embed-text, 1536 for OpenAI
-  embedding_dimension: 768
+  embedding_dimension: 768,
+  vector_store_backend: Arbor.Persistence.VectorStore.Ecto,
+  vector_store_repo: Arbor.Persistence.Repo
 
 # Monitor owner-scoped config lives under :arbor_kernel, :monitor.
 # Elixir's Config reader deep-merges keyword values from imported
