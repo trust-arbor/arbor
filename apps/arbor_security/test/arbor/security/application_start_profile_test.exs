@@ -33,8 +33,36 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
     :ok
   end
 
+  test "security regression: arbor_security required apps omit JWT and HTTP providers" do
+    applications = MapSet.new(Application.spec(:arbor_security, :applications) || [])
+    optional = Application.spec(:arbor_security, :optional_applications) || []
+    included = Application.spec(:arbor_security, :included_applications) || []
+
+    assert applications ==
+             MapSet.new([
+               :arbor_kernel_runtime,
+               :elixir,
+               :jason,
+               :kernel,
+               :logger,
+               :plug_crypto,
+               :stdlib,
+               :telemetry
+             ])
+
+    Enum.each([:joken, :joken_jwks, :req, :jose, :tesla, :finch, :mint], fn app ->
+      refute app in applications
+      refute app in optional
+      refute app in included
+    end)
+
+    assert optional == []
+    assert included == []
+  end
+
   test "activation_only omits named authority children and still starts CapabilityStore" do
     restart_security!(:activation_only)
+    refute Process.whereis(Arbor.Security.ProviderGate)
 
     Enum.each(@named_stores, fn name ->
       assert Process.whereis(name) == nil
@@ -102,11 +130,22 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
       |> Enum.map(&elem(&1, 0))
       |> Enum.reverse()
 
+    gate_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.ProviderGate))
+    store_index = Enum.find_index(start_ids, &(&1 == :arbor_security_capabilities))
     owner_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.AuditJournalOwner))
     broker_index = Enum.find_index(start_ids, &(&1 == Arbor.Security.DeliveryReceiptBroker))
+    assert is_integer(gate_index)
+    assert is_integer(store_index)
     assert is_integer(owner_index)
     assert is_integer(broker_index)
+    assert gate_index < store_index
     assert owner_index < broker_index
+    assert Process.whereis(Arbor.Security.ProviderGate)
+
+    started = Application.started_applications() |> Enum.map(&elem(&1, 0))
+    assert :joken in started
+    assert :joken_jwks in started
+    assert :req in started
 
     Enum.each(@named_stores, fn name ->
       assert {^name, _pid, :worker, [Arbor.Security.AuthorityStore]} =

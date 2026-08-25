@@ -38,10 +38,19 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     assert source =~
              ~r/\{:llm_db,\s*"~> 2026\.1",\s*optional:\s*true,\s*runtime:\s*false\}/
 
+    assert source =~ ~r/\{:finch,\s*"~> 0\.21\.0",\s*runtime:\s*false\}/
+    assert source =~ ~r/\{:req,\s*"~> 0\.5",\s*runtime:\s*false\}/
+    assert source =~ ~r/\{:recon,\s*"~> 2\.5",\s*runtime:\s*false\}/
+    assert source =~ ~r/override:\s*true,\s*runtime:\s*false\}/
+
     refute source =~ "dirty_xrefs"
 
     refute :boundary in Application.spec(:arbor_kernel_runtime, :applications)
     refute :llm_db in Application.spec(:arbor_kernel_runtime, :applications)
+
+    Enum.each([:os_mon, :finch, :mint, :req, :recon], fn app ->
+      refute app in (Application.spec(:arbor_kernel_runtime, :applications) || [])
+    end)
   end
 
   test "runtime production namespaces retain least-privilege declarations" do

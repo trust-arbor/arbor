@@ -91,6 +91,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
     refute_providers()
+    refute Process.whereis(Arbor.Trust.ProviderGate)
     assert Arbor.Trust.healthy?()
 
     assert {:ok, _} = Arbor.Trust.start_link([])
@@ -126,9 +127,14 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     ids = application_child_ids()
     assert MapSet.member?(ids, Arbor.Trust.PolicyHost)
+    assert MapSet.member?(ids, Arbor.Trust.ProviderGate)
     assert MapSet.member?(ids, Arbor.Trust.Supervisor)
     assert Process.whereis(Arbor.Trust.Manager)
     assert Arbor.Trust.healthy?()
+
+    started = Application.started_applications() |> Enum.map(&elem(&1, 0))
+    assert :arbor_persistence in started
+    assert :phoenix_pubsub in started
   end
 
   test ":full with start_children false still starts the policy host" do
@@ -137,6 +143,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
     assert application_child_ids() == MapSet.new([Arbor.Trust.PolicyHost])
     refute_providers()
     refute Process.whereis(Arbor.Trust.Supervisor)
+    refute Process.whereis(Arbor.Trust.ProviderGate)
     refute Arbor.Trust.healthy?()
 
     assert {:ok, %{start_profile: :full}} = Arbor.Trust.PolicyHost.snapshot()
@@ -325,9 +332,43 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
   test "security regression: arbor_trust required runtime applications omit persistence and pubsub" do
     applications = Application.spec(:arbor_trust, :applications) || []
+    optional = Application.spec(:arbor_trust, :optional_applications) || []
+    included = Application.spec(:arbor_trust, :included_applications) || []
 
-    refute :arbor_persistence in applications
-    refute :phoenix_pubsub in applications
+    assert MapSet.new(applications) ==
+             MapSet.new([
+               :arbor_kernel_runtime,
+               :arbor_security,
+               :elixir,
+               :jason,
+               :kernel,
+               :logger,
+               :stdlib,
+               :telemetry
+             ])
+
+    Enum.each(
+      [
+        :arbor_persistence,
+        :phoenix_pubsub,
+        :ecto,
+        :ecto_sql,
+        :postgrex,
+        :exqlite,
+        :sqlite_vec,
+        :pgvector,
+        :stream_data,
+        :mox
+      ],
+      fn app ->
+        refute app in applications
+        refute app in optional
+        refute app in included
+      end
+    )
+
+    assert optional == []
+    assert included == []
   end
 
   test "caller egress_mode cannot weaken authorize_egress or authorize" do

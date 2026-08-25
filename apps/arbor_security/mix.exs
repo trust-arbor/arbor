@@ -34,9 +34,9 @@ defmodule ArborSecurity.MixProject do
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:plug_crypto, "~> 2.0"},
-      {:joken, "~> 2.6"},
-      {:joken_jwks, "~> 1.6"},
-      {:req, "~> 0.5"},
+      {:joken, "~> 2.6", runtime: false},
+      {:joken_jwks, "~> 1.6", runtime: false},
+      {:req, "~> 0.5", runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

@@ -188,6 +188,15 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerRunnerTest do
       """
       [
         {kernel, [{logger_level, notice}]},
+        {arbor_kernel, [
+          {kernel_runtime, [
+            {start_profile, full},
+            {boot_profile, [
+              {manifest_bytes, <<"m">>},
+              {signature_bytes, <<"s">>}
+            ]}
+          ]}
+        ]},
         {arbor_security, [
           {start_children, true},
           {storage_backend, 'Elixir.Arbor.Security.Store.JSONFile'},

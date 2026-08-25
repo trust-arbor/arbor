@@ -76,6 +76,10 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
     @doc false
     @spec __test_install_ephemeral_authority_root__() :: :ok | {:error, term()}
     def __test_install_ephemeral_authority_root__, do: install_ephemeral_authority_root()
+
+    @doc false
+    @spec __test_install_activation_only_profile__() :: :ok | {:error, term()}
+    def __test_install_activation_only_profile__, do: install_activation_only_profile()
   end
 
   defp measure_selected(selected) do
@@ -83,7 +87,8 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
     pre = snapshot()
 
     with {:ok, sys_config} <- apply_release_sys_config(),
-         :ok <- install_ephemeral_authority_root() do
+         :ok <- install_ephemeral_authority_root(),
+         :ok <- install_activation_only_profile() do
       started_at = :erlang.monotonic_time()
       {started, start_failures} = start_selected(apps)
 
@@ -174,6 +179,38 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
     with {:ok, root} <- fetch_ephemeral_authority_root(),
          :ok <- validate_ephemeral_authority_root(root) do
       Application.put_env(:arbor_security, :authority_state_root, root)
+    end
+  end
+
+  # Measurement-only overlay. Preserve installer stage-zero bytes and expected
+  # identity from sys.config; select the closed activation_only start profile
+  # so Signals/Monitor/OAuth/os_mon stay off the selected four-app start.
+  defp install_activation_only_profile do
+    case Application.get_env(:arbor_kernel, :kernel_runtime, []) do
+      current when is_list(current) ->
+        if Keyword.keyword?(current) and Keyword.has_key?(current, :boot_profile) do
+          Application.put_env(
+            :arbor_kernel,
+            :kernel_runtime,
+            Keyword.put(current, :start_profile, :activation_only)
+          )
+        else
+          {:error, :boot_profile_missing}
+        end
+
+      current when is_map(current) and not is_struct(current) ->
+        if Map.has_key?(current, :boot_profile) do
+          Application.put_env(
+            :arbor_kernel,
+            :kernel_runtime,
+            Map.put(current, :start_profile, :activation_only)
+          )
+        else
+          {:error, :boot_profile_missing}
+        end
+
+      _other ->
+        {:error, :boot_profile_missing}
     end
   end
 

@@ -38,21 +38,56 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   @config_sections [:common, :signals, :monitor, :kernel_runtime]
   @full_child_ids MapSet.new([
                     Arbor.KernelRuntime.BootProfileBinding,
+                    Arbor.KernelRuntime.ProviderGate,
                     Arbor.Common.Application,
                     Arbor.Signals.Application,
                     Arbor.Monitor.Application
                   ])
+  @provider_roots [:os_mon, :recon, :mint, :finch, :req]
+  @required_apps MapSet.new([
+                   :arbor_kernel,
+                   :crypto,
+                   :elixir,
+                   :jason,
+                   :kernel,
+                   :logger,
+                   :stdlib,
+                   :telemetry,
+                   :zoi
+                 ])
   @activation_only_child_ids MapSet.new([Arbor.KernelRuntime.BootProfileBinding])
   @invalid_start_profiles [:unknown, "full", "activation_only", nil, 1, %{}]
 
   test "the runtime supervisor owns the three nested application supervisors" do
     assert Process.whereis(Arbor.KernelRuntime.Supervisor)
     assert Process.whereis(Arbor.KernelRuntime.BootProfileBinding)
+    assert Process.whereis(Arbor.KernelRuntime.ProviderGate)
     assert Process.whereis(Arbor.Common.Supervisor)
     assert Process.whereis(Arbor.Signals.Supervisor)
     assert Process.whereis(Arbor.Monitor.Supervisor)
 
     assert runtime_child_ids() == @full_child_ids
+
+    assert rest_for_one_order() == [
+             Arbor.KernelRuntime.BootProfileBinding,
+             Arbor.KernelRuntime.ProviderGate,
+             Arbor.Common.Application,
+             Arbor.Signals.Application,
+             Arbor.Monitor.Application
+           ]
+
+    started = started_app_set()
+
+    Enum.each(@provider_roots, fn app ->
+      assert MapSet.member?(started, app), "expected #{inspect(app)} started on :full"
+    end)
+  end
+
+  test "security regression: arbor_kernel_runtime required apps omit network and os_mon providers" do
+    assert required_app_set(:arbor_kernel_runtime) == @required_apps
+    refute_spec_members(:arbor_kernel_runtime, @provider_roots ++ [:llm_db, :boundary])
+    assert optional_app_list(:arbor_kernel_runtime) == []
+    assert included_app_list(:arbor_kernel_runtime) == []
   end
 
   test "missing or :full start profile nests the three application supervisors" do
@@ -96,6 +131,7 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     refute Process.whereis(Arbor.Signals.Bus)
     refute Process.whereis(Arbor.Monitor.Poller)
     refute Process.whereis(Arbor.Common.Extension.ProtectedRegistry)
+    refute Process.whereis(Arbor.KernelRuntime.ProviderGate)
   end
 
   test "unknown or malformed start profile fails closed" do
@@ -119,7 +155,79 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
       refute Process.whereis(Arbor.Common.OAuth.HttpClient.Pool)
       refute Process.whereis(Arbor.Signals.Bus)
       refute Process.whereis(Arbor.Monitor.Poller)
+      refute Process.whereis(Arbor.KernelRuntime.ProviderGate)
     end)
+  end
+
+  test "security regression: invalid start profile starts zero provider apps" do
+    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
+    stop_runtime()
+    stop_provider_roots()
+    before = started_app_set()
+    put_section(:kernel_runtime, start_profile: :unknown)
+
+    assert {:error, _} = Application.ensure_all_started(:arbor_kernel_runtime)
+    refute Process.whereis(Arbor.KernelRuntime.Supervisor)
+
+    assert MapSet.intersection(
+             MapSet.difference(started_app_set(), before),
+             MapSet.new(@provider_roots)
+           ) ==
+             MapSet.new()
+  end
+
+  test "security regression: downstream start failure leaves admitted providers running and does not peel unrelated errors" do
+    config_before = Map.new(@config_sections, &{&1, Application.fetch_env(:arbor_kernel, &1)})
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
+    stop_runtime()
+    stop_provider_roots()
+    {:ok, squat} = Agent.start_link(fn -> :ok end, name: Arbor.Common.Supervisor)
+    on_exit(fn -> stop_named(Arbor.Common.Supervisor) end)
+    assert Process.alive?(squat)
+
+    put_section(:kernel_runtime, start_profile: :full)
+
+    assert {:error,
+            {:arbor_kernel_runtime, {reason, {Arbor.KernelRuntime.Application, :start, _}}}} =
+             Application.ensure_all_started(:arbor_kernel_runtime)
+
+    refute reason == {:provider_gate_name_collision, squat}
+    refute match?({:provider_gate_name_collision, _}, reason)
+    refute Process.whereis(Arbor.KernelRuntime.Supervisor)
+    refute Process.whereis(Arbor.KernelRuntime.ProviderGate)
+    assert Process.whereis(Arbor.Common.Supervisor) == squat
+
+    Enum.each(@provider_roots, fn app ->
+      assert MapSet.member?(started_app_set(), app), "expected #{inspect(app)} to remain started"
+    end)
+  end
+
+  test "security regression: gate crash does not stop shared req" do
+    assert Process.whereis(Arbor.KernelRuntime.ProviderGate)
+    assert req_started?()
+
+    old_common = Process.whereis(Arbor.Common.Supervisor)
+    assert is_pid(old_common)
+
+    gate = Process.whereis(Arbor.KernelRuntime.ProviderGate)
+    ref = Process.monitor(gate)
+    Process.exit(gate, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^gate, _reason}, 1_000
+
+    await_true(
+      fn ->
+        new_gate = Process.whereis(Arbor.KernelRuntime.ProviderGate)
+        new_common = Process.whereis(Arbor.Common.Supervisor)
+
+        is_pid(new_gate) and new_gate != gate and is_pid(new_common) and new_common != old_common
+      end,
+      5_000
+    )
+
+    assert req_started?()
   end
 
   test "nested applications honor disabled and enabled child gates" do
@@ -211,6 +319,70 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
     |> Supervisor.which_children()
     |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
     |> MapSet.new()
+  end
+
+  defp rest_for_one_order do
+    Arbor.KernelRuntime.Supervisor
+    |> Supervisor.which_children()
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.reverse()
+  end
+
+  defp required_app_set(app) do
+    MapSet.new(Application.spec(app, :applications) || [])
+  end
+
+  defp optional_app_list(app), do: Application.spec(app, :optional_applications) || []
+  defp included_app_list(app), do: Application.spec(app, :included_applications) || []
+
+  defp refute_spec_members(app, names) do
+    required = required_app_set(app)
+    optional = MapSet.new(optional_app_list(app))
+    included = MapSet.new(included_app_list(app))
+
+    Enum.each(names, fn name ->
+      refute MapSet.member?(required, name)
+      refute MapSet.member?(optional, name)
+      refute MapSet.member?(included, name)
+    end)
+  end
+
+  defp started_app_set do
+    Application.started_applications()
+    |> Enum.map(&elem(&1, 0))
+    |> MapSet.new()
+  end
+
+  defp req_started?, do: MapSet.member?(started_app_set(), :req)
+
+  defp stop_provider_roots do
+    Enum.each(Enum.reverse(@provider_roots), fn app ->
+      _ = Application.stop(app)
+    end)
+
+    :ok
+  end
+
+  defp await_true(fun, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_true_loop(fun, deadline)
+  end
+
+  defp await_true_loop(fun, deadline) do
+    if fun.() do
+      true
+    else
+      remaining = deadline - System.monotonic_time(:millisecond)
+
+      if remaining <= 0 do
+        flunk("condition not met before deadline")
+      else
+        receive do
+        after
+          min(remaining, 10) -> await_true_loop(fun, deadline)
+        end
+      end
+    end
   end
 
   defp drop_start_profile do

@@ -256,6 +256,7 @@ defmodule Arbor.Commands.SafeManagementSurfaceTest do
     assert child_ids ==
              MapSet.new([
                Arbor.KernelRuntime.BootProfileBinding,
+               Arbor.KernelRuntime.ProviderGate,
                Arbor.Common.Application,
                Arbor.Signals.Application,
                Arbor.Monitor.Application

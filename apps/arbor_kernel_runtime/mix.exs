@@ -52,7 +52,7 @@ defmodule Arbor.KernelRuntime.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :os_mon],
+      extra_applications: [:logger, :crypto],
       mod: {Arbor.KernelRuntime.Application, []}
     ]
   end
@@ -63,16 +63,16 @@ defmodule Arbor.KernelRuntime.MixProject do
   defp deps do
     [
       {:arbor_kernel, in_umbrella: true},
-      {:finch, "~> 0.21.0"},
+      {:finch, "~> 0.21.0", runtime: false},
       {:jason, "~> 1.4"},
       # OAuth's bounded HTTP/1 pool relies on Mint's parser-level response
       # header limit and the response-smuggling fixes released in 1.9.3.
-      {:mint, "~> 1.9.3", override: true},
+      {:mint, "~> 1.9.3", override: true, runtime: false},
       {:llm_db, "~> 2026.1", optional: true, runtime: false},
-      {:req, "~> 0.5"},
+      {:req, "~> 0.5", runtime: false},
       {:zoi, "~> 0.17"},
       {:telemetry, "~> 1.0"},
-      {:recon, "~> 2.5"},
+      {:recon, "~> 2.5", runtime: false},
       {:boundary, "~> 0.10", runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

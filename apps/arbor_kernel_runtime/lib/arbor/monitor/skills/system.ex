@@ -5,6 +5,9 @@ defmodule Arbor.Monitor.Skills.System do
 
   @behaviour Arbor.Monitor.Skill
 
+  # os_mon is a full-profile provider, not a required OTP application.
+  @compile {:no_warn_undefined, [{:memsup, :get_system_memory_data, 0}]}
+
   @impl true
   def name, do: :system
 
