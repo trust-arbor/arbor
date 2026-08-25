@@ -10,6 +10,7 @@ defmodule Arbor.Trust.Config do
       # config/config.exs
       config :arbor_trust,
         pubsub: Arbor.Core.PubSub,
+        action_profile_provider: Arbor.Actions,
         circuit_breaker: %{
           rapid_failure_threshold: 5,
           rapid_failure_window_seconds: 60,
@@ -37,7 +38,8 @@ defmodule Arbor.Trust.Config do
   @notify_session_rate_limit 30
 
   @egress_mode_defaults Map.new(Classification.egress_tiers(), fn tier ->
-                          {tier, if(Classification.external_egress?(tier), do: :ask, else: :allow)}
+                          {tier,
+                           if(Classification.external_egress?(tier), do: :ask, else: :allow)}
                         end)
 
   # The universal baseline capabilities every agent gets at profile creation.

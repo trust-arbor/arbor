@@ -58,8 +58,9 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
       memory = entry(snapshot, "arbor://memory/recall")
       refute memory.held
       refute memory.policy_mintable
+      assert memory.mode == :ask
       assert memory.sources == []
-      assert memory.policy_error == :not_found
+      refute Map.has_key?(memory, :policy_error)
     end
 
     test "does not report policy-mintable URIs when policy enforcer is disabled", %{

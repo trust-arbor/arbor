@@ -57,6 +57,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       restore(:arbor_trust, :policy_module, prev_policy)
       restore(:arbor_trust, :capability_profile_overrides, prev_profile_overrides)
       restore(:arbor_trust, :action_profile_provider, prev_action_profile_provider)
+      rebind_trust!()
     end)
 
     :ok
@@ -116,6 +117,8 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       Application.put_env(:arbor_trust, :capability_profile_overrides, %{
         "arbor://fs/read" => %{default_constraints: %{rate_limit: 7}}
       })
+
+      rebind_trust!()
 
       assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
       assert cap.constraints == %{rate_limit: 7}
