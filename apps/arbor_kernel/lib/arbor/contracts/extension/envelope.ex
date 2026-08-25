@@ -10,6 +10,9 @@ defmodule Arbor.Contracts.Extension.Envelope do
   Receipts and authorizations are not bearer tokens for a later activation
   or call. Kernel Runtime consumes an authorization against one transaction
   or request digest and generation.
+
+  Boot-profile manifests and detached installer signatures are additional APIs
+  on this module (`boot_profile_*`); they are not E0C kinds.
   """
 
   alias Arbor.Contracts.Security.TaintEnvelope
@@ -269,6 +272,55 @@ defmodule Arbor.Contracts.Extension.Envelope do
   @fixture_signature String.duplicate("ef", 64)
   @fixture_agent "agent_" <> String.duplicate("11", 32)
   @fixture_time "2026-08-17T00:00:00Z"
+
+  @boot_profile_schema "arbor.platform.boot_profile_manifest.v1"
+  @boot_profile_signature_schema "arbor.platform.boot_profile_signature.v1"
+  @boot_profile_max_bytes 16_384
+  @boot_profile_platform_public_key "46adc9536b563c36a777199fd7a6c8dc82c4c0e9e7952f123a23d27bf0e74170"
+  @boot_profile_platform_key_id "e50fe65c9e59cfefce8bea959c8aac98e31d25922b172f9e60acd43cf5b804bb"
+  @boot_profile_installer_key_id "37eb0623867f14c690e51a9e24c55fd98ae4b353a00cd3a37ec953330ddda395"
+  @boot_profile_manifest_sha256 "374dabaf63c89a46a92b87bbf0f2e871330ecfe01eb9a230560137b1a7a18268"
+  @boot_profile_signature_hex "a61753ee7ca4ffc281f54432fff57dc574c754ae53f6623f67d2cff8a96eed79148c2752a028fc9296b85099dcc4f6ac97d501d8c949951de05627138791330e"
+
+  @boot_profile_manifest_keys [
+    "boot_epoch",
+    "payload_digests",
+    "platform_key_id",
+    "platform_public_key",
+    "profile_id",
+    "release_id",
+    "revocation_input_id",
+    "schema",
+    "valid_from",
+    "valid_until",
+    "version"
+  ]
+
+  @boot_profile_signature_keys [
+    "domain",
+    "key_id",
+    "manifest_encoding",
+    "manifest_sha256",
+    "schema",
+    "signature",
+    "signer_id",
+    "version"
+  ]
+
+  @boot_profile_verifier_keys [
+    "expected_payload_digests",
+    "expected_profile_id",
+    "expected_release_id",
+    "expected_revocation_input_id",
+    "min_boot_epoch",
+    "now",
+    "revoked_platform_key_ids",
+    "revoked_signer_key_ids",
+    "trusted_signers"
+  ]
+
+  @boot_profile_payload_digest_keys ["id", "sha256"]
+  @boot_profile_trusted_signer_keys ["key_id", "public_key", "signer_id"]
 
   @type kind ::
           :artifact_manifest
@@ -543,6 +595,286 @@ defmodule Arbor.Contracts.Extension.Envelope do
       "key_id" => @fixture_digest,
       "signature" => @fixture_signature,
       "payload" => payload
+    }
+  end
+
+  @doc "Returns the closed v1 boot-profile manifest schema id."
+  @spec boot_profile_schema() :: String.t()
+  def boot_profile_schema, do: @boot_profile_schema
+
+  @doc "Returns the closed v1 detached boot-profile signature schema id."
+  @spec boot_profile_signature_schema() :: String.t()
+  def boot_profile_signature_schema, do: @boot_profile_signature_schema
+
+  @doc "Returns the closed boot-profile contract version."
+  @spec boot_profile_version() :: pos_integer()
+  def boot_profile_version, do: @version
+
+  @doc "Returns the boot-profile canonical payload encoding name."
+  @spec boot_profile_payload_encoding() :: String.t()
+  def boot_profile_payload_encoding, do: @payload_encoding
+
+  @doc "Decodes canonical boot-profile manifest bytes and validates the closed schema."
+  @spec decode_boot_profile_manifest_bytes(term()) :: {:ok, map()} | {:error, atom()}
+  def decode_boot_profile_manifest_bytes(bytes) do
+    decode_boot_profile_bytes(bytes, &validate_boot_profile_manifest/1)
+  end
+
+  @doc "Decodes canonical detached boot-profile signature bytes and validates the closed schema."
+  @spec decode_boot_profile_signature_bytes(term()) :: {:ok, map()} | {:error, atom()}
+  def decode_boot_profile_signature_bytes(bytes) do
+    decode_boot_profile_bytes(bytes, &validate_boot_profile_signature/1)
+  end
+
+  @doc "Validates a closed boot-profile manifest map."
+  @spec validate_boot_profile_manifest(term()) :: {:ok, map()} | {:error, atom()}
+  def validate_boot_profile_manifest(document) do
+    with :ok <- exact_keys(document, @boot_profile_manifest_keys),
+         :ok <- exact(document["schema"], @boot_profile_schema),
+         :ok <- boot_profile_version_field(document["version"]),
+         :ok <- id(document["release_id"]),
+         :ok <- id(document["profile_id"]),
+         :ok <- id(document["revocation_input_id"]),
+         :ok <- boot_profile_epoch(document["boot_epoch"]),
+         :ok <- digest(document["platform_key_id"]),
+         :ok <- boot_profile_public_key(document["platform_public_key"]),
+         :ok <- boot_profile_payload_digests(document["payload_digests"]),
+         {:ok, valid_from} <- boot_profile_instant(document["valid_from"]),
+         {:ok, valid_until} <- boot_profile_instant(document["valid_until"]),
+         :ok <- boot_profile_validity_window(valid_from, valid_until) do
+      {:ok, document}
+    end
+  end
+
+  @doc "Validates a closed detached boot-profile signature map."
+  @spec validate_boot_profile_signature(term()) :: {:ok, map()} | {:error, atom()}
+  def validate_boot_profile_signature(document) do
+    with :ok <- exact_keys(document, @boot_profile_signature_keys),
+         :ok <- exact(document["schema"], @boot_profile_signature_schema),
+         :ok <- boot_profile_version_field(document["version"]),
+         :ok <- exact(document["domain"], @boot_profile_schema),
+         :ok <- boot_profile_encoding_field(document["manifest_encoding"]),
+         :ok <- digest(document["manifest_sha256"]),
+         :ok <- id(document["signer_id"]),
+         :ok <- digest(document["key_id"]),
+         :ok <- signature(document["signature"]) do
+      {:ok, document}
+    end
+  end
+
+  @doc "Validates injected boot-profile verifier input."
+  @spec validate_boot_profile_verifier_input(term()) :: {:ok, map()} | {:error, atom()}
+  def validate_boot_profile_verifier_input(document) do
+    with :ok <- boot_profile_verifier_keys(document),
+         :ok <- id(document["expected_release_id"]),
+         :ok <- id(document["expected_profile_id"]),
+         :ok <- id(document["expected_revocation_input_id"]),
+         :ok <- boot_profile_payload_digests(document["expected_payload_digests"]),
+         :ok <- boot_profile_epoch(document["min_boot_epoch"]),
+         {:ok, _now} <- boot_profile_instant(document["now"]),
+         :ok <- boot_profile_key_id_list(document["revoked_platform_key_ids"]),
+         :ok <- boot_profile_key_id_list(document["revoked_signer_key_ids"]),
+         :ok <- boot_profile_trusted_signers(document["trusted_signers"]) do
+      {:ok, document}
+    else
+      {:error, reason} -> {:error, boot_profile_verifier_shape(reason)}
+    end
+  end
+
+  @doc """
+  Returns canonical JSON bytes for a closed boot-profile manifest.
+
+  Full schema validation runs before `canonical_json_v1` encoding.
+  """
+  @spec boot_profile_canonical_json(term()) :: {:ok, binary()} | {:error, atom()}
+  def boot_profile_canonical_json(document) do
+    encode_validated_boot_profile(document, &validate_boot_profile_manifest/1)
+  end
+
+  @doc """
+  Returns the lowercase SHA-256 digest of a closed boot-profile manifest.
+
+  Full schema validation runs before digesting.
+  """
+  @spec boot_profile_digest_of(term()) :: {:ok, String.t()} | {:error, atom()}
+  def boot_profile_digest_of(document) do
+    digest_validated_boot_profile(document, &validate_boot_profile_manifest/1)
+  end
+
+  @doc """
+  Returns canonical JSON bytes for a closed detached boot-profile signature.
+
+  Full schema validation runs before `canonical_json_v1` encoding.
+  """
+  @spec boot_profile_signature_canonical_json(term()) :: {:ok, binary()} | {:error, atom()}
+  def boot_profile_signature_canonical_json(document) do
+    encode_validated_boot_profile(document, &validate_boot_profile_signature/1)
+  end
+
+  @doc """
+  Returns the lowercase SHA-256 digest of a closed detached boot-profile signature.
+
+  Full schema validation runs before digesting.
+  """
+  @spec boot_profile_signature_digest_of(term()) :: {:ok, String.t()} | {:error, atom()}
+  def boot_profile_signature_digest_of(document) do
+    digest_validated_boot_profile(document, &validate_boot_profile_signature/1)
+  end
+
+  @doc """
+  Detached-signature input for a boot-profile manifest.
+
+  Domain, signature schema, signer id, signer key id, and manifest digest are
+  joined with NUL so a signature cannot be replayed across kinds or signers.
+  """
+  @spec boot_profile_signing_message(map()) :: {:ok, binary()} | {:error, atom()}
+  def boot_profile_signing_message(%{
+        "domain" => domain,
+        "schema" => schema,
+        "signer_id" => signer_id,
+        "key_id" => key_id,
+        "manifest_sha256" => digest
+      })
+      when is_binary(domain) and is_binary(schema) and is_binary(signer_id) and
+             is_binary(key_id) and is_binary(digest) do
+    with :ok <- digest(digest) do
+      {:ok, Enum.join([domain, schema, signer_id, key_id, digest], <<0>>)}
+    end
+  end
+
+  def boot_profile_signing_message(_document), do: {:error, :invalid_envelope}
+
+  @doc """
+  Verifies canonical boot-profile manifest bytes against a detached signature.
+
+  Trusted signer key material is injected. Manifest-carried Platform key
+  material is authenticated output and is never used to verify the manifest.
+  """
+  @spec verify_boot_profile(term(), term(), term()) :: {:ok, map()} | {:error, atom()}
+  def verify_boot_profile(manifest_bytes, signature_bytes, verifier_input)
+      when is_binary(manifest_bytes) and is_binary(signature_bytes) do
+    with {:ok, manifest} <- decode_boot_profile_manifest_bytes(manifest_bytes),
+         {:ok, signature} <- decode_boot_profile_signature_bytes(signature_bytes),
+         {:ok, verifier} <- validate_boot_profile_verifier_input(verifier_input),
+         {:ok, digest} <- boot_profile_digest_of(manifest),
+         true <- secure_equal?(digest, signature["manifest_sha256"]),
+         {:ok, trusted} <- boot_profile_resolve_signer(signature, verifier),
+         {:ok, trusted_pub} <- boot_profile_decode_key(trusted["public_key"]),
+         :ok <-
+           boot_profile_match_key_id(
+             signature["key_id"],
+             trusted_pub,
+             :signer_key_id_mismatch
+           ),
+         {:ok, message} <- boot_profile_signing_message(signature),
+         {:ok, signature_raw} <- boot_profile_decode_signature(signature["signature"]),
+         :ok <- boot_profile_verify_ed25519(message, signature_raw, trusted_pub),
+         {:ok, platform_pub} <- boot_profile_decode_key(manifest["platform_public_key"]),
+         :ok <-
+           boot_profile_match_key_id(
+             manifest["platform_key_id"],
+             platform_pub,
+             :platform_key_id_mismatch
+           ),
+         :ok <-
+           boot_profile_check_window(
+             verifier["now"],
+             manifest["valid_from"],
+             manifest["valid_until"]
+           ),
+         :ok <- boot_profile_check_epoch(manifest["boot_epoch"], verifier["min_boot_epoch"]),
+         :ok <-
+           boot_profile_check_revoked(
+             signature["key_id"],
+             verifier["revoked_signer_key_ids"],
+             :signer_revoked
+           ),
+         :ok <-
+           boot_profile_check_revoked(
+             manifest["platform_key_id"],
+             verifier["revoked_platform_key_ids"],
+             :platform_key_revoked
+           ),
+         :ok <-
+           boot_profile_match_text(
+             manifest["release_id"],
+             verifier["expected_release_id"],
+             :release_mismatch
+           ),
+         :ok <-
+           boot_profile_match_text(
+             manifest["profile_id"],
+             verifier["expected_profile_id"],
+             :profile_mismatch
+           ),
+         :ok <-
+           boot_profile_match_text(
+             manifest["revocation_input_id"],
+             verifier["expected_revocation_input_id"],
+             :revocation_input_mismatch
+           ),
+         :ok <-
+           boot_profile_match_payloads(
+             manifest["payload_digests"],
+             verifier["expected_payload_digests"]
+           ) do
+      {:ok,
+       %{
+         "manifest" => manifest,
+         "manifest_sha256" => digest,
+         "signer_id" => signature["signer_id"],
+         "signer_key_id" => signature["key_id"]
+       }}
+    else
+      false -> {:error, :digest_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def verify_boot_profile(manifest_bytes, signature_bytes, _verifier_input)
+      when not is_binary(manifest_bytes) or not is_binary(signature_bytes) do
+    {:error, :malformed_encoding}
+  end
+
+  @doc "Returns a closed, byte-stable unsigned boot-profile fixture."
+  @spec boot_profile_fixture() :: map()
+  def boot_profile_fixture do
+    %{
+      "schema" => @boot_profile_schema,
+      "version" => @version,
+      "release_id" => "arbor.platform.release.1",
+      "profile_id" => "safe_recovery",
+      "boot_epoch" => 1,
+      "platform_key_id" => @boot_profile_platform_key_id,
+      "platform_public_key" => @boot_profile_platform_public_key,
+      "payload_digests" => [
+        %{
+          "id" => "payload.kernel",
+          "sha256" => String.duplicate("11", 32)
+        },
+        %{
+          "id" => "payload.kernel_runtime",
+          "sha256" => String.duplicate("22", 32)
+        }
+      ],
+      "valid_from" => @fixture_time,
+      "valid_until" => "2027-08-17T00:00:00Z",
+      "revocation_input_id" => "revocation.platform.1"
+    }
+  end
+
+  @doc "Returns a closed, byte-stable detached boot-profile signature fixture."
+  @spec boot_profile_signature_fixture() :: map()
+  def boot_profile_signature_fixture do
+    %{
+      "schema" => @boot_profile_signature_schema,
+      "version" => @version,
+      "domain" => @boot_profile_schema,
+      "manifest_encoding" => @payload_encoding,
+      "manifest_sha256" => @boot_profile_manifest_sha256,
+      "signer_id" => "installer.arbor",
+      "key_id" => @boot_profile_installer_key_id,
+      "signature" => @boot_profile_signature_hex
     }
   end
 
@@ -926,4 +1258,326 @@ defmodule Arbor.Contracts.Extension.Envelope do
   end
 
   defp secure_equal?(_left, _right), do: false
+
+  defp encode_validated_boot_profile(document, validator) do
+    with {:ok, validated} <- validator.(document),
+         {:ok, bytes} <- TaintEnvelope.canonical_json(validated),
+         :ok <- boot_profile_bounded(bytes) do
+      {:ok, bytes}
+    end
+  end
+
+  defp digest_validated_boot_profile(document, validator) do
+    with {:ok, validated} <- validator.(document),
+         {:ok, digest} <- TaintEnvelope.payload_sha256(validated) do
+      {:ok, digest}
+    end
+  end
+
+  defp decode_boot_profile_bytes(bytes, validator) when is_binary(bytes) do
+    cond do
+      not String.valid?(bytes) ->
+        {:error, :malformed_encoding}
+
+      byte_size(bytes) > @boot_profile_max_bytes ->
+        {:error, :payload_byte_limit}
+
+      true ->
+        case Jason.decode(bytes, objects: :ordered_objects) do
+          {:ok, %Jason.OrderedObject{} = object} ->
+            with :ok <- boot_profile_reject_duplicate_keys(object),
+                 {:ok, map} <- boot_profile_materialize(object),
+                 {:ok, validated} <- validator.(map),
+                 {:ok, canonical} <- TaintEnvelope.canonical_json(validated),
+                 :ok <- boot_profile_bounded(canonical),
+                 true <- secure_equal?(canonical, bytes) do
+              {:ok, validated}
+            else
+              false -> {:error, :non_canonical_bytes}
+              {:error, reason} -> {:error, reason}
+            end
+
+          {:ok, _other} ->
+            {:error, :malformed_encoding}
+
+          {:error, _reason} ->
+            {:error, :malformed_encoding}
+        end
+    end
+  end
+
+  defp decode_boot_profile_bytes(_bytes, _validator), do: {:error, :malformed_encoding}
+
+  defp boot_profile_bounded(bytes) when byte_size(bytes) <= @boot_profile_max_bytes, do: :ok
+  defp boot_profile_bounded(_bytes), do: {:error, :payload_byte_limit}
+
+  defp boot_profile_reject_duplicate_keys(%Jason.OrderedObject{values: values}) do
+    keys = Enum.map(values, &elem(&1, 0))
+
+    if length(keys) != MapSet.size(MapSet.new(keys)) do
+      {:error, :duplicate_json_key}
+    else
+      Enum.reduce_while(values, :ok, fn {_key, value}, :ok ->
+        case boot_profile_reject_duplicate_keys(value) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp boot_profile_reject_duplicate_keys(values) when is_list(values) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case boot_profile_reject_duplicate_keys(value) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp boot_profile_reject_duplicate_keys(_value), do: :ok
+
+  defp boot_profile_materialize(%Jason.OrderedObject{values: values}) do
+    Enum.reduce_while(values, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      if is_binary(key) do
+        case boot_profile_materialize(value) do
+          {:ok, materialized} -> {:cont, {:ok, Map.put(acc, key, materialized)}}
+          {:error, _} = error -> {:halt, error}
+        end
+      else
+        {:halt, {:error, :mixed_keys}}
+      end
+    end)
+  end
+
+  defp boot_profile_materialize(values) when is_list(values) do
+    values
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+      case boot_profile_materialize(value) do
+        {:ok, materialized} -> {:cont, {:ok, [materialized | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      other -> other
+    end
+  end
+
+  defp boot_profile_materialize(value), do: {:ok, value}
+
+  defp boot_profile_verifier_keys(value) when is_map(value) and not is_struct(value) do
+    exact_keys(value, @boot_profile_verifier_keys)
+  end
+
+  defp boot_profile_verifier_keys(_value), do: {:error, :invalid_verifier_input}
+
+  defp boot_profile_verifier_shape(:mixed_keys), do: :invalid_verifier_input
+  defp boot_profile_verifier_shape(:invalid_envelope_shape), do: :invalid_verifier_input
+  defp boot_profile_verifier_shape(:invalid_envelope), do: :invalid_verifier_input
+  defp boot_profile_verifier_shape(reason), do: reason
+
+  defp boot_profile_version_field(@version), do: :ok
+  defp boot_profile_version_field(_value), do: {:error, :unsupported_version}
+
+  defp boot_profile_encoding_field(@payload_encoding), do: :ok
+  defp boot_profile_encoding_field(_value), do: {:error, :unsupported_encoding}
+
+  defp boot_profile_epoch(value) when is_integer(value) and value >= 1 and value <= 1_000_000_000,
+    do: :ok
+
+  defp boot_profile_epoch(_value), do: {:error, :invalid_epoch}
+
+  defp boot_profile_public_key(value) when is_binary(value) do
+    if String.valid?(value) and Regex.match?(@sha256_re, value) do
+      case Base.decode16(value, case: :lower) do
+        {:ok, bytes} when byte_size(bytes) == 32 -> :ok
+        _ -> {:error, :invalid_public_key}
+      end
+    else
+      {:error, :invalid_public_key}
+    end
+  end
+
+  defp boot_profile_public_key(_value), do: {:error, :invalid_public_key}
+
+  defp boot_profile_instant(value) when is_binary(value) do
+    if String.valid?(value) do
+      case DateTime.from_iso8601(value) do
+        {:ok, %DateTime{} = datetime, 0} ->
+          if boot_profile_utc_second?(datetime) and DateTime.to_iso8601(datetime) == value do
+            {:ok, datetime}
+          else
+            {:error, :invalid_timestamp}
+          end
+
+        _ ->
+          {:error, :invalid_timestamp}
+      end
+    else
+      {:error, :invalid_timestamp}
+    end
+  end
+
+  defp boot_profile_instant(_value), do: {:error, :invalid_timestamp}
+
+  defp boot_profile_utc_second?(%DateTime{} = datetime) do
+    datetime.calendar == Calendar.ISO and datetime.time_zone in ["Etc/UTC", "UTC"] and
+      datetime.utc_offset == 0 and datetime.std_offset == 0 and datetime.microsecond == {0, 0}
+  end
+
+  defp boot_profile_validity_window(valid_from, valid_until) do
+    if DateTime.compare(valid_from, valid_until) == :gt do
+      {:error, :invalid_validity_window}
+    else
+      :ok
+    end
+  end
+
+  defp boot_profile_payload_digests(list)
+       when is_list(list) and list != [] and length(list) <= @max_list do
+    list
+    |> Enum.reduce_while({:ok, nil}, fn item, {:ok, previous_id} ->
+      with :ok <- exact_keys(item, @boot_profile_payload_digest_keys),
+           :ok <- id(item["id"]),
+           :ok <- digest(item["sha256"]),
+           :ok <- boot_profile_sorted_id(previous_id, item["id"]) do
+        {:cont, {:ok, item["id"]}}
+      else
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, _last_id} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp boot_profile_payload_digests(_list), do: {:error, :invalid_field}
+
+  defp boot_profile_sorted_id(nil, _id), do: :ok
+  defp boot_profile_sorted_id(previous, id) when previous < id, do: :ok
+  defp boot_profile_sorted_id(previous, id) when previous == id, do: {:error, :duplicate_identifier}
+  defp boot_profile_sorted_id(_previous, _id), do: {:error, :invalid_field}
+
+  defp boot_profile_key_id_list(list) when is_list(list) and length(list) <= @max_list do
+    reduce_unique(list, MapSet.new(), fn item, seen ->
+      with :ok <- digest(item),
+           false <- MapSet.member?(seen, item) do
+        {:ok, MapSet.put(seen, item)}
+      else
+        true -> {:error, :duplicate_identifier}
+        other -> other
+      end
+    end)
+  end
+
+  defp boot_profile_key_id_list(_list), do: {:error, :invalid_field}
+
+  defp boot_profile_trusted_signers(list) when is_list(list) and length(list) <= @max_list do
+    reduce_unique(list, MapSet.new(), fn item, seen ->
+      with :ok <- exact_keys(item, @boot_profile_trusted_signer_keys),
+           :ok <- id(item["signer_id"]),
+           :ok <- digest(item["key_id"]),
+           :ok <- boot_profile_public_key(item["public_key"]) do
+        identity = {item["signer_id"], item["key_id"]}
+
+        if MapSet.member?(seen, identity) do
+          {:error, :duplicate_identifier}
+        else
+          {:ok, MapSet.put(seen, identity)}
+        end
+      end
+    end)
+  end
+
+  defp boot_profile_trusted_signers(_list), do: {:error, :invalid_field}
+
+  defp boot_profile_resolve_signer(signature, verifier) do
+    matches =
+      Enum.filter(verifier["trusted_signers"], fn signer ->
+        signer["signer_id"] == signature["signer_id"] and signer["key_id"] == signature["key_id"]
+      end)
+
+    case matches do
+      [trusted] -> {:ok, trusted}
+      _ -> {:error, :untrusted_signer}
+    end
+  end
+
+  defp boot_profile_decode_key(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :lower) do
+      {:ok, bytes} when byte_size(bytes) == 32 -> {:ok, bytes}
+      _ -> {:error, :invalid_public_key}
+    end
+  end
+
+  defp boot_profile_decode_key(_hex), do: {:error, :invalid_public_key}
+
+  defp boot_profile_decode_signature(hex) when is_binary(hex) do
+    case Base.decode16(hex, case: :lower) do
+      {:ok, bytes} when byte_size(bytes) == 64 -> {:ok, bytes}
+      _ -> {:error, :invalid_signature}
+    end
+  end
+
+  defp boot_profile_decode_signature(_hex), do: {:error, :invalid_signature}
+
+  defp boot_profile_match_key_id(key_id, public_key_bytes, error) do
+    expected = boot_profile_hex_key_id_bytes(public_key_bytes)
+
+    if secure_equal?(key_id, expected), do: :ok, else: {:error, error}
+  end
+
+  defp boot_profile_verify_ed25519(message, signature, public_key) do
+    if :crypto.verify(:eddsa, :none, message, signature, [public_key, :ed25519]) do
+      :ok
+    else
+      {:error, :signature_mismatch}
+    end
+  rescue
+    _ -> {:error, :signature_mismatch}
+  catch
+    _, _ -> {:error, :signature_mismatch}
+  end
+
+  defp boot_profile_check_window(now, valid_from, valid_until) do
+    with {:ok, now_dt} <- boot_profile_instant(now),
+         {:ok, from_dt} <- boot_profile_instant(valid_from),
+         {:ok, until_dt} <- boot_profile_instant(valid_until) do
+      cond do
+        DateTime.compare(now_dt, from_dt) == :lt -> {:error, :not_yet_valid}
+        DateTime.compare(now_dt, until_dt) == :gt -> {:error, :expired}
+        true -> :ok
+      end
+    end
+  end
+
+  defp boot_profile_check_epoch(boot_epoch, min_boot_epoch) when boot_epoch < min_boot_epoch,
+    do: {:error, :stale_epoch}
+
+  defp boot_profile_check_epoch(_boot_epoch, _min_boot_epoch), do: :ok
+
+  defp boot_profile_check_revoked(key_id, revoked_ids, error) do
+    if Enum.any?(revoked_ids, &secure_equal?(&1, key_id)), do: {:error, error}, else: :ok
+  end
+
+  defp boot_profile_match_text(actual, expected, error) do
+    if secure_equal?(actual, expected), do: :ok, else: {:error, error}
+  end
+
+  defp boot_profile_match_payloads(actual, expected) do
+    with {:ok, left} <- TaintEnvelope.canonical_json(actual),
+         {:ok, right} <- TaintEnvelope.canonical_json(expected),
+         true <- secure_equal?(left, right) do
+      :ok
+    else
+      false -> {:error, :payload_mismatch}
+      {:error, _reason} -> {:error, :payload_mismatch}
+    end
+  end
+
+  defp boot_profile_hex_key_id_bytes(public_key_bytes) do
+    Base.encode16(:crypto.hash(:sha256, public_key_bytes), case: :lower)
+  end
 end
