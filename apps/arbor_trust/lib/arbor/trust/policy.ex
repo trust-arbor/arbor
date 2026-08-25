@@ -55,7 +55,7 @@ defmodule Arbor.Trust.Policy do
       {:ok, count} = Policy.grant_base_capabilities("agent_123")
   """
 
-  alias Arbor.Trust.{Config, ProfileResolver}
+  alias Arbor.Trust.{Config, PolicyHost, ProfileResolver}
 
   require Logger
 
@@ -72,7 +72,7 @@ defmodule Arbor.Trust.Policy do
   This is the primary API. Returns the 4-mode result from the agent's
   trust profile, constrained by security ceilings and model constraints.
 
-  Returns `:ask` if the trust system is unavailable (fail closed to gated).
+  Returns `:block` if the policy host is unavailable (fail closed).
 
   ## Options
 
@@ -91,13 +91,18 @@ defmodule Arbor.Trust.Policy do
   """
   @spec effective_mode(String.t(), String.t(), keyword()) :: mode()
   def effective_mode(agent_id, resource_uri, opts \\ []) do
-    case get_profile(agent_id) do
-      {:ok, profile} ->
-        ProfileResolver.effective_mode(profile, resource_uri, opts)
+    with :ok <- admit_public_opts(opts),
+         {:ok, snapshot} <- PolicyHost.snapshot() do
+      profile = profile_or_stub(agent_id)
+      host_opts = public_host_opts(opts, snapshot)
+      host_result = ProfileResolver.effective_mode(profile, resource_uri, host_opts)
 
-      {:error, _} ->
-        # Trust system unavailable — fail closed to :ask
-        :ask
+      ProfileResolver.most_restrictive([
+        host_result,
+        caller_ceiling_mode(opts, resource_uri)
+      ])
+    else
+      _ -> :block
     end
   end
 
@@ -105,7 +110,7 @@ defmodule Arbor.Trust.Policy do
   Check if an agent's trust profile allows a resource URI.
 
   Returns `true` if the effective mode is anything other than `:block`.
-  Returns `false` if the trust system is unavailable (fail closed).
+  Returns `false` if the policy host is unavailable (fail closed).
 
   ## Examples
 
@@ -147,18 +152,6 @@ defmodule Arbor.Trust.Policy do
     mode_to_confirmation(effective_mode(agent_id, resource_uri, opts))
   end
 
-  # Conservative defaults when a profile does not declare an egress mode for a
-  # tier. External egress asks (fail closed); on-host/on-premises/none proceed.
-  # (On-premises is additionally gated by a separate config flag in the auth
-  # path; the profile default here is the un-flagged baseline.)
-  @egress_mode_defaults %{
-    on_host: :allow,
-    on_premises: :allow,
-    external_provider: :ask,
-    external_peer: :ask,
-    none: :allow
-  }
-
   @doc """
   Get the agent's egress mode for a resolved egress tier (2026-06-14
   URI-addressing-vs-classification decision).
@@ -178,36 +171,34 @@ defmodule Arbor.Trust.Policy do
   """
   @spec egress_mode(String.t(), atom()) :: mode()
   def egress_mode(agent_id, tier) when is_binary(agent_id) and is_atom(tier) do
-    case get_profile(agent_id) do
-      {:ok, profile} -> lookup_egress_mode(Map.get(profile, :egress_modes), tier)
-      {:error, _} -> default_egress_mode(tier)
+    case PolicyHost.snapshot() do
+      {:ok, snapshot} ->
+        defaults = snapshot.default_egress_modes
+
+        case get_profile(agent_id) do
+          {:ok, profile} -> lookup_egress_mode(Map.get(profile, :egress_modes), tier, defaults)
+          {:error, _} -> default_egress_mode(tier, defaults)
+        end
+
+      {:error, _} ->
+        :ask
     end
   end
 
-  defp lookup_egress_mode(modes, tier) when is_map(modes) do
+  defp lookup_egress_mode(modes, tier, defaults) when is_map(modes) do
     raw = Map.get(modes, tier) || Map.get(modes, Atom.to_string(tier))
 
     case normalize_egress_mode(raw) do
-      nil -> default_egress_mode(tier)
+      nil -> default_egress_mode(tier, defaults)
       mode -> mode
     end
   end
 
-  defp lookup_egress_mode(_modes, tier), do: default_egress_mode(tier)
+  defp lookup_egress_mode(_modes, tier, defaults), do: default_egress_mode(tier, defaults)
 
-  # The fallback egress mode for a tier when the agent's profile does not declare
-  # one. The library default is conservative (external -> :ask), but a deployment
-  # can set a system-wide posture via `config :arbor_trust, :default_egress_modes`
-  # — e.g. a single-operator deployment may default `external_provider: :allow`
-  # so enabling enforcement activates the taint-exfil block + per-agent tightening
-  # without gating every agent's normal cloud egress.
-  defp default_egress_mode(tier) do
-    overrides = Application.get_env(:arbor_trust, :default_egress_modes, %{})
-
-    case normalize_egress_mode(
-           Map.get(overrides, tier) || Map.get(overrides, Atom.to_string(tier))
-         ) do
-      nil -> Map.get(@egress_mode_defaults, tier, :ask)
+  defp default_egress_mode(tier, defaults) when is_map(defaults) do
+    case normalize_egress_mode(Map.get(defaults, tier) || Map.get(defaults, Atom.to_string(tier))) do
+      nil -> Map.get(Config.egress_mode_defaults(), tier, :ask)
       mode -> mode
     end
   end
@@ -280,16 +271,21 @@ defmodule Arbor.Trust.Policy do
   """
   @spec explain(String.t(), String.t(), keyword()) :: map()
   def explain(agent_id, resource_uri, opts \\ []) do
-    case get_profile(agent_id) do
-      {:ok, profile} ->
-        ProfileResolver.explain(profile, resource_uri, opts)
+    with :ok <- admit_public_opts(opts),
+         {:ok, snapshot} <- PolicyHost.snapshot() do
+      profile = profile_or_stub(agent_id)
+      host_opts = public_host_opts(opts, snapshot)
+      result = ProfileResolver.explain(profile, resource_uri, host_opts)
+      caller_mode = caller_ceiling_mode(opts, resource_uri)
+      effective = ProfileResolver.most_restrictive([result.effective_mode, caller_mode])
+      ceiling = ProfileResolver.most_restrictive([result.security_ceiling, caller_mode])
+      %{result | effective_mode: effective, security_ceiling: ceiling}
+    else
+      :error ->
+        %{resource_uri: resource_uri, error: :malformed_policy_opts, effective_mode: :block}
 
       {:error, reason} ->
-        %{
-          resource_uri: resource_uri,
-          error: reason,
-          effective_mode: :ask
-        }
+        %{resource_uri: resource_uri, error: reason, effective_mode: :block}
     end
   end
 
@@ -384,6 +380,110 @@ defmodule Arbor.Trust.Policy do
   # ===========================================================================
   # Internals
   # ===========================================================================
+
+  @doc false
+  @spec tighten_public_opts(String.t(), keyword()) ::
+          {:ok, keyword()} | {:error, :malformed_policy_opts}
+  def tighten_public_opts(agent_id, opts) when is_binary(agent_id) and is_list(opts) do
+    with :ok <- admit_public_opts(opts) do
+      case Keyword.get(opts, :egress_tier, :absent) do
+        :absent ->
+          {:ok, opts}
+
+        tier when is_atom(tier) and not is_nil(tier) ->
+          host_mode = egress_mode(agent_id, tier)
+          caller_mode = caller_egress_mode(opts)
+          tightened = ProfileResolver.most_restrictive([host_mode, caller_mode])
+          {:ok, Keyword.put(opts, :egress_mode, tightened)}
+
+        _invalid ->
+          {:error, :malformed_policy_opts}
+      end
+    else
+      :error -> {:error, :malformed_policy_opts}
+    end
+  end
+
+  def tighten_public_opts(_agent_id, _opts), do: {:error, :malformed_policy_opts}
+
+  defp profile_or_stub(agent_id) do
+    case get_profile(agent_id) do
+      {:ok, profile} -> profile
+      {:error, _} -> missing_profile_stub(agent_id)
+    end
+  end
+
+  defp missing_profile_stub(agent_id) when is_binary(agent_id) do
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+    profile
+  end
+
+  defp public_host_opts(opts, snapshot) do
+    opts
+    |> Keyword.delete(:security_ceilings)
+    |> Keyword.put(:security_ceilings, snapshot.security_ceilings)
+    |> Keyword.put(:allow_permissive_baseline, permissive_flag(opts, snapshot))
+  end
+
+  defp permissive_flag(opts, snapshot) do
+    host? = snapshot.allow_permissive_baseline == true
+
+    case Keyword.fetch(opts, :allow_permissive_baseline) do
+      {:ok, false} -> false
+      {:ok, true} -> host?
+      _ -> host?
+    end
+  end
+
+  defp caller_ceiling_mode(opts, resource_uri) do
+    case Keyword.fetch(opts, :security_ceilings) do
+      {:ok, ceilings} when is_map(ceilings) ->
+        ProfileResolver.resolve_prefix(ceilings, resource_uri, :auto)
+
+      :error ->
+        :auto
+    end
+  end
+
+  defp caller_egress_mode(opts) do
+    case Keyword.fetch(opts, :egress_mode) do
+      {:ok, mode} when mode in [:block, :ask, :allow, :auto] -> mode
+      :error -> :auto
+    end
+  end
+
+  defp admit_public_opts(opts) do
+    if Keyword.keyword?(opts) do
+      with :ok <- admit_optional_ceiling_map(Keyword.get(opts, :security_ceilings, :absent)),
+           :ok <- admit_optional_boolean(Keyword.get(opts, :allow_permissive_baseline, :absent)),
+           :ok <- admit_optional_mode(Keyword.get(opts, :egress_mode, :absent)) do
+        :ok
+      end
+    else
+      :error
+    end
+  end
+
+  defp admit_optional_ceiling_map(:absent), do: :ok
+
+  defp admit_optional_ceiling_map(map) when is_map(map) do
+    valid? =
+      Enum.all?(map, fn {key, value} ->
+        is_binary(key) and byte_size(key) > 0 and value in [:block, :ask, :allow, :auto]
+      end)
+
+    if valid?, do: :ok, else: :error
+  end
+
+  defp admit_optional_ceiling_map(_map), do: :error
+
+  defp admit_optional_boolean(:absent), do: :ok
+  defp admit_optional_boolean(value) when is_boolean(value), do: :ok
+  defp admit_optional_boolean(_value), do: :error
+
+  defp admit_optional_mode(:absent), do: :ok
+  defp admit_optional_mode(mode) when mode in [:block, :ask, :allow, :auto], do: :ok
+  defp admit_optional_mode(_mode), do: :error
 
   defp get_profile(agent_id) do
     if trust_available?() do

@@ -67,18 +67,50 @@ defmodule Arbor.Trust do
   @impl true
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    Arbor.Trust.Supervisor.start_link(opts)
+    with {:ok, profile} <- lifecycle_start_profile(),
+         {:ok, host} <- ensure_policy_host(profile) do
+      case profile do
+        :activation_only ->
+          {:ok, host}
+
+        :full ->
+          Arbor.Trust.Supervisor.start_link(opts)
+      end
+    end
   end
 
   @doc """
   Check if the trust system is running and healthy.
 
-  Returns `true` if the trust manager process is alive.
+  Requires a live PolicyHost snapshot. Activation-only is healthy without
+  the durable manager; full profile also requires the manager.
   """
   @impl true
   @spec healthy?() :: boolean()
   def healthy? do
-    Process.whereis(Manager) != nil
+    case Arbor.Trust.PolicyHost.snapshot() do
+      {:ok, %{start_profile: :activation_only}} -> true
+      {:ok, %{start_profile: :full}} -> Process.whereis(Manager) != nil
+      _ -> false
+    end
+  end
+
+  defp lifecycle_start_profile do
+    case Arbor.Trust.PolicyHost.snapshot() do
+      {:ok, %{start_profile: profile}} when profile in [:full, :activation_only] ->
+        {:ok, profile}
+
+      _ ->
+        Arbor.Trust.Application.closed_start_profile()
+    end
+  end
+
+  defp ensure_policy_host(profile) do
+    case Arbor.Trust.PolicyHost.start_link(start_profile: profile) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, _} = error -> error
+    end
   end
 
   # ===========================================================================
@@ -293,11 +325,15 @@ defmodule Arbor.Trust do
           | {:requires_approval, :egress}
           | {:error, {:egress_blocked, atom(), atom()}}
   def authorize_egress(agent_id, tier, opts \\ []) do
-    opts =
-      opts
-      |> Keyword.put_new(:egress_mode, egress_mode(agent_id, tier))
+    opts = Keyword.put(opts, :egress_tier, tier)
 
-    Arbor.Security.authorize_egress(agent_id, tier, opts)
+    case Arbor.Trust.Policy.tighten_public_opts(agent_id, opts) do
+      {:ok, tightened} ->
+        Arbor.Security.authorize_egress(agent_id, tier, tightened)
+
+      {:error, :malformed_policy_opts} ->
+        {:error, {:egress_blocked, tier, :malformed_policy_opts}}
+    end
   end
 
   @doc """
@@ -352,9 +388,8 @@ defmodule Arbor.Trust do
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
   def authorize(agent_id, resource_uri, action \\ nil, opts \\ []) do
-    opts = maybe_put_egress_mode(agent_id, opts)
-
-    with {:ok, effective_uri} <-
+    with {:ok, opts} <- Arbor.Trust.Policy.tighten_public_opts(agent_id, opts),
+         {:ok, effective_uri} <-
            Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts),
          {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
          {:ok, authorized_result} <- security_authorize(agent_id, resource_uri, action, opts) do
@@ -374,13 +409,6 @@ defmodule Arbor.Trust do
       {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected_auth_result, other}}
-    end
-  end
-
-  defp maybe_put_egress_mode(agent_id, opts) do
-    case Keyword.get(opts, :egress_tier) do
-      tier when is_atom(tier) -> Keyword.put_new(opts, :egress_mode, egress_mode(agent_id, tier))
-      _ -> opts
     end
   end
 

@@ -33,7 +33,14 @@ defmodule Arbor.Trust.Config do
   # budget); a drift guard in arbor_agent's lifecycle test asserts they match.
   # (We can't read NotifySession here — arbor_actions is L6, above arbor_trust L4.)
   @notify_session_rate_limit 30
-  @default_action_profile_provider Module.concat(["Arbor", "Actions"])
+
+  @egress_mode_defaults %{
+    on_host: :allow,
+    on_premises: :allow,
+    external_provider: :ask,
+    external_peer: :ask,
+    none: :allow
+  }
 
   # The universal baseline capabilities every agent gets at profile creation.
   # Self-scoped (`/self/`) URIs are expanded to the agent's id at grant time.
@@ -116,13 +123,110 @@ defmodule Arbor.Trust.Config do
   @doc """
   Runtime provider for generated action-namespace capability profiles.
 
-  Defaults to `Arbor.Actions` by module atom without a compile-time dependency;
-  `arbor_trust` is lower in the umbrella hierarchy than `arbor_actions`.
+  There is no Trust default. Full-profile action contribution is explicit
+  and upward-owned.
   """
   @spec action_profile_provider() :: module() | nil
   def action_profile_provider do
-    get(:action_profile_provider, @default_action_profile_provider)
+    case Application.fetch_env(:arbor_trust, :action_profile_provider) do
+      {:ok, provider} when is_atom(provider) and not is_nil(provider) -> provider
+      _ -> nil
+    end
   end
+
+  @doc """
+  Library default egress standing used when a profile omits a tier.
+  """
+  @spec egress_mode_defaults() :: %{atom() => :block | :ask | :allow | :auto}
+  def egress_mode_defaults, do: @egress_mode_defaults
+
+  @doc """
+  Validated immutable policy snapshot for the given closed start profile.
+  """
+  @spec startup_policy_snapshot(:full | :activation_only) ::
+          {:ok, map()} | {:error, :malformed_policy_snapshot}
+  def startup_policy_snapshot(start_profile)
+      when start_profile in [:full, :activation_only] do
+    include_action_provider? = start_profile == :full and not is_nil(action_profile_provider())
+
+    with {:ok, security_ceilings} <- merge_security_ceilings(),
+         {:ok, default_egress_modes} <- merge_egress_defaults() do
+      {:ok,
+       %{
+         start_profile: start_profile,
+         security_ceilings: security_ceilings,
+         allow_permissive_baseline: get(:allow_permissive_baseline, false) == true,
+         default_egress_modes: default_egress_modes,
+         capability_profiles:
+           Arbor.Trust.CapabilityProfileRegistry.project_profiles(
+             include_action_provider: include_action_provider?
+           ),
+         action_profiles_admitted: include_action_provider?
+       }}
+    end
+  end
+
+  defp merge_security_ceilings do
+    case get(:security_ceilings, %{}) || %{} do
+      overrides when is_map(overrides) ->
+        admit_mode_map(
+          Map.merge(Arbor.Trust.Presets.default_security_ceilings(), overrides),
+          :binary
+        )
+
+      _invalid ->
+        {:error, :malformed_policy_snapshot}
+    end
+  end
+
+  defp merge_egress_defaults do
+    case get(:default_egress_modes, %{}) || %{} do
+      overrides when is_map(overrides) ->
+        Enum.reduce_while(overrides, {:ok, @egress_mode_defaults}, fn {key, value}, {:ok, acc} ->
+          case {normalize_egress_key(key), normalize_mode(value)} do
+            {tier, mode} when not is_nil(tier) and not is_nil(mode) ->
+              {:cont, {:ok, Map.put(acc, tier, mode)}}
+
+            _ ->
+              {:halt, {:error, :malformed_policy_snapshot}}
+          end
+        end)
+
+      _invalid ->
+        {:error, :malformed_policy_snapshot}
+    end
+  end
+
+  defp admit_mode_map(map, key_kind) when is_map(map) do
+    valid? =
+      Enum.all?(map, fn {key, value} ->
+        valid_mode_key?(key, key_kind) and value in [:block, :ask, :allow, :auto]
+      end)
+
+    if valid?, do: {:ok, map}, else: {:error, :malformed_policy_snapshot}
+  end
+
+  defp admit_mode_map(_map, _key_kind), do: {:error, :malformed_policy_snapshot}
+
+  defp valid_mode_key?(key, :binary), do: is_binary(key) and byte_size(key) > 0
+  defp valid_mode_key?(key, :atom), do: is_atom(key) and key != nil
+
+  defp normalize_egress_key(key) when is_atom(key) and key != nil, do: key
+
+  defp normalize_egress_key(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp normalize_egress_key(_key), do: nil
+
+  defp normalize_mode(mode) when mode in [:block, :ask, :allow, :auto], do: mode
+  defp normalize_mode("block"), do: :block
+  defp normalize_mode("ask"), do: :ask
+  defp normalize_mode("allow"), do: :allow
+  defp normalize_mode("auto"), do: :auto
+  defp normalize_mode(_mode), do: nil
 
   # ===========================================================================
   # Capabilities

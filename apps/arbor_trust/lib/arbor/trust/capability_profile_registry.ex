@@ -6,14 +6,15 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   trust-owned profile defaults over that registry and records an owner/reason
   row for registered prefixes that do not yet have a dedicated profile.
 
-  Generated `arbor://action/...` prefixes are projected by `Arbor.Actions` so
-  `arbor_trust` does not depend upward on `arbor_actions`. The provider is read
-  through `Arbor.Trust.Config.action_profile_provider/0` at runtime.
+  Generated `arbor://action/...` prefixes are projected by an explicit
+  action-profile provider so `arbor_trust` does not depend upward on
+  `arbor_actions`. The provider is read through
+  `Arbor.Trust.Config.action_profile_provider/0` at snapshot time.
   """
 
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.CapabilityUri
-  alias Arbor.Trust.{CapabilityRiskProfiles, Config}
+  alias Arbor.Trust.{CapabilityRiskProfiles, Config, PolicyHost}
 
   @type coverage_row :: %{
           required(:uri_prefix) => String.t(),
@@ -25,7 +26,29 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   @doc "Return the resolved profiles known to the trust registry."
   @spec profiles() :: [CapabilityProfile.t()]
   def profiles do
-    (CapabilityRiskProfiles.profiles() ++ action_namespace_profiles())
+    case PolicyHost.snapshot() do
+      {:ok, %{capability_profiles: profiles}} when is_list(profiles) ->
+        profiles
+
+      _unavailable ->
+        project_profiles(include_action_provider: not is_nil(Config.action_profile_provider()))
+    end
+  end
+
+  @doc """
+  Project capability profiles from Trust-owned risk tables and, optionally,
+  an explicit action-profile provider.
+  """
+  @spec project_profiles(keyword()) :: [CapabilityProfile.t()]
+  def project_profiles(opts \\ []) do
+    action_profiles =
+      if Keyword.get(opts, :include_action_provider, false) do
+        action_namespace_profiles()
+      else
+        []
+      end
+
+    (CapabilityRiskProfiles.profiles() ++ action_profiles)
     |> Enum.uniq_by(& &1.uri_prefix)
     |> Enum.sort_by(& &1.uri_prefix)
   end
@@ -176,8 +199,8 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp action_namespace_profiles do
     provider = Config.action_profile_provider()
 
-    if is_atom(provider) &&
-         Code.ensure_loaded?(provider) &&
+    if is_atom(provider) and not is_nil(provider) and
+         Code.ensure_loaded?(provider) and
          function_exported?(provider, :action_namespace_capability_profiles, 0) do
       provider
       |> apply(:action_namespace_capability_profiles, [])

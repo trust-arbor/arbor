@@ -27,17 +27,9 @@ defmodule Arbor.Trust.BaselineConstraintTest do
   end
 
   test "an :allow baseline stays :allow WITH config :arbor_trust, :allow_permissive_baseline" do
-    prev = Application.get_env(:arbor_trust, :allow_permissive_baseline)
-    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
-
-    on_exit(fn ->
-      case prev do
-        nil -> Application.delete_env(:arbor_trust, :allow_permissive_baseline)
-        v -> Application.put_env(:arbor_trust, :allow_permissive_baseline, v)
-      end
-    end)
-
-    assert Authority.effective_mode(profile_with_baseline(:allow), @uri) == :allow
+    assert Authority.effective_mode(profile_with_baseline(:allow), @uri,
+             allow_permissive_baseline: true
+           ) == :allow
   end
 
   test ":block and :ask baselines pass through unchanged" do

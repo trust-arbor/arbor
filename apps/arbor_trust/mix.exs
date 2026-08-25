@@ -39,6 +39,7 @@ defmodule Arbor.Trust.MixProject do
   def application do
     [
       extra_applications: [:logger],
+      optional_applications: [:arbor_persistence, :phoenix_pubsub],
       mod: {Arbor.Trust.Application, []}
     ]
   end
@@ -51,11 +52,11 @@ defmodule Arbor.Trust.MixProject do
       # Umbrella dependencies
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
-      {:arbor_persistence, in_umbrella: true},
+      {:arbor_persistence, in_umbrella: true, runtime: false},
 
       # Core dependencies
       {:telemetry, "~> 1.0"},
-      {:phoenix_pubsub, "~> 2.1"},
+      {:phoenix_pubsub, "~> 2.1", optional: true},
       {:jason, "~> 1.4"},
 
       # Dev/test

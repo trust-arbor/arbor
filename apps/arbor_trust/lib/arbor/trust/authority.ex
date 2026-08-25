@@ -129,7 +129,9 @@ defmodule Arbor.Trust.Authority do
     # rule still overrides (resolve_prefix returns it); ceilings + model constraints
     # below still apply (most-restrictive wins).
     layer1_default =
-      if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
+      if infrastructure_auto?(resource_uri),
+        do: :auto,
+        else: constrain_baseline(profile.baseline, opts)
 
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
 
@@ -163,7 +165,9 @@ defmodule Arbor.Trust.Authority do
     model_class = Keyword.get(opts, :model_class)
 
     layer1_default =
-      if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
+      if infrastructure_auto?(resource_uri),
+        do: :auto,
+        else: constrain_baseline(profile.baseline, opts)
 
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
     ceiling_mode = resolve_prefix(ceilings, resource_uri, :auto)
@@ -412,17 +416,13 @@ defmodule Arbor.Trust.Authority do
   # the effective-mode boundary so it holds for EVERY profile regardless of how the
   # baseline was set. Per-URI :auto/:allow RULES are untouched — earned autonomy on a
   # specific power stays. See capability-policy-model-review (P1). Silent (hot path).
-  defp constrain_baseline(:auto), do: :block
+  defp constrain_baseline(:auto, _opts), do: :block
 
-  defp constrain_baseline(:allow) do
-    if allow_permissive_baseline?(), do: :allow, else: :block
+  defp constrain_baseline(:allow, opts) do
+    if Keyword.get(opts, :allow_permissive_baseline, false) == true, do: :allow, else: :block
   end
 
-  defp constrain_baseline(baseline), do: baseline
-
-  defp allow_permissive_baseline? do
-    Application.get_env(:arbor_trust, :allow_permissive_baseline, false)
-  end
+  defp constrain_baseline(baseline, _opts), do: baseline
 
   # Delegates to Presets (single source). Was a divergent 2-entry fallback; now
   # === the real ceiling, so direct `Authority.effective_mode` callers that bypass

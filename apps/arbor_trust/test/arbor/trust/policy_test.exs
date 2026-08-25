@@ -276,10 +276,17 @@ defmodule Arbor.Trust.PolicyTest do
     test "a deployment can set a system-wide default posture via config",
          %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
+      previous = Application.get_env(:arbor_trust, :default_egress_modes)
       Application.put_env(:arbor_trust, :default_egress_modes, %{external_provider: :allow})
-      on_exit(fn -> Application.delete_env(:arbor_trust, :default_egress_modes) end)
 
-      # Profile declares nothing for the tier -> falls through to the config default.
+      on_exit(fn ->
+        restore_env(:arbor_trust, :default_egress_modes, previous)
+        rebind_policy_host!()
+      end)
+
+      rebind_policy_host!()
+
+      # Profile declares nothing for the tier -> falls through to the frozen startup default.
       assert Policy.egress_mode(agent_id, :external_provider) == :allow
       # Untouched tiers keep the library default.
       assert Policy.egress_mode(agent_id, :external_peer) == :ask
@@ -341,7 +348,7 @@ defmodule Arbor.Trust.PolicyTest do
       assert result.effective_mode in [:block, :ask, :allow, :auto]
     end
 
-    test "returns error info for unknown agent" do
+    test "applies the frozen ceiling for an unknown agent" do
       result =
         Policy.explain(
           "agent_unknown_#{System.unique_integer([:positive])}",
@@ -349,7 +356,8 @@ defmodule Arbor.Trust.PolicyTest do
         )
 
       assert result.effective_mode == :ask
-      assert result.error
+      assert result.security_ceiling == :ask
+      refute Map.get(result, :error)
     end
   end
 
@@ -474,6 +482,7 @@ defmodule Arbor.Trust.PolicyTest do
     ensure_started(Arbor.Security.Constraint.RateLimiter)
 
     # Trust infrastructure
+    ensure_policy_host()
     ensure_started(Arbor.Trust.EventStore)
     ensure_started(Arbor.Trust.Store)
 
@@ -518,6 +527,21 @@ defmodule Arbor.Trust.PolicyTest do
       %{profile | baseline: baseline, rules: rules}
     end)
   end
+
+  defp ensure_policy_host do
+    case Arbor.Trust.PolicyHost.start_link([]) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+  end
+
+  defp rebind_policy_host! do
+    Arbor.Trust.PolicyHost.release_claim()
+    assert {:ok, _pid} = Arbor.Trust.PolicyHost.start_link([])
+  end
+
+  defp restore_env(_app, key, nil), do: Application.delete_env(:arbor_trust, key)
+  defp restore_env(_app, key, value), do: Application.put_env(:arbor_trust, key, value)
 
   defp put_security_env(key, value) do
     previous = Application.get_env(:arbor_security, key)
