@@ -1466,6 +1466,7 @@ defmodule Arbor.AI.AcpSession do
       state
       |> then(&accumulate_text(update, &1))
       |> accumulate_stream_tail(update)
+      |> note_provider_session_identity(update)
 
     Logger.debug(
       "ACP session #{Arbor.LLM.inspect_external_reason(session_id)} update: " <>
@@ -3176,6 +3177,51 @@ defmodule Arbor.AI.AcpSession do
 
   defp claude_prompt_provider_session_id(_result), do: :absent
 
+  # ex_mcp ≥ 1.1.0 also announces Claude Code's own session UUID on the `init`
+  # `session_info_update` (same `_meta."ex_mcp.claude_sdk".sessionId` key as the
+  # prompt result). Record it as the resume identity as soon as it is known, so a
+  # prompt that times out BEFORE its result can still be recovered with
+  # `session/resume` instead of the transient ACP id. Never touches
+  # `session_id`; drift or a malformed id is logged and ignored here — the prompt
+  # result remains the authoritative, failing check.
+  defp note_provider_session_identity(%{provider: :claude} = state, update) do
+    case claude_prompt_provider_session_id(update) do
+      {:ok, provider_session_id} ->
+        case reconcile_claude_provider_session_id(
+               provider_session_id,
+               state,
+               :claude_session_info_update
+             ) do
+          {:ok, state} ->
+            state
+
+          {:error, reason} ->
+            Logger.debug(
+              "AcpSession ignored provider identity in session_info_update: " <>
+                Arbor.LLM.inspect_external_reason(reason)
+            )
+
+            state
+        end
+
+      _absent_or_invalid ->
+        state
+    end
+  end
+
+  defp note_provider_session_identity(state, _update), do: state
+
+  # `session_id` is the id the ACP CLIENT knows this session by — what
+  # `session/new` returned (`claude_sdk_<n>` for a fresh Claude session) and what
+  # every `session/prompt` must carry. `last_session_id` is the PROVIDER's id —
+  # Claude Code's own UUID — which is what a `session/resume` after a reconnect
+  # needs. They are only the same after such a resume.
+  #
+  # Until 2026-08-25 a transient `session_id` was overwritten with the UUID
+  # here. That matched the old ex_mcp adapter, which adopted the CLI's UUID as
+  # its own session id; since ex_mcp 1.1.0 keeps the ACP id stable, the second
+  # prompt of every session went out under an id the client had never seen and
+  # every update was dropped ("unknown session") — the reply came back empty.
   defp reconcile_claude_provider_session_id(session_id, state, source) do
     cond do
       not valid_claude_provider_session_id?(session_id) ->
@@ -3184,9 +3230,14 @@ defmodule Arbor.AI.AcpSession do
       state.session_id == session_id ->
         {:ok, %{state | last_session_id: session_id}}
 
-      transient_claude_session_id?(state.session_id) ->
-        {:ok, %{state | session_id: session_id, last_session_id: session_id}}
+      # First provider id for this ACP session (`last_session_id` is still nil
+      # or the transient ACP id seeded at creation), or the same one again.
+      transient_claude_session_id?(state.session_id) and
+          (state.last_session_id in [nil, session_id] or
+             transient_claude_session_id?(state.last_session_id)) ->
+        {:ok, %{state | last_session_id: session_id}}
 
+      # Any other UUID is drift: the provider swapped sessions under us.
       true ->
         {:error, {:provider_session_id_mismatch, source}}
     end
@@ -3823,8 +3874,11 @@ defmodule Arbor.AI.AcpSession do
     :erlang.start_timer(timeout_ms, self(), {tag, prompt_ref})
   end
 
+  # Progress counts whether the adapter stamps updates with the ACP session id
+  # (ex_mcp ≥ 1.1.0) or with the provider's own id (older adapters, which Arbor
+  # has already reconciled into `last_session_id`).
   defp maybe_reset_inactivity_timer(timers, prompt_ref, session_id, state, update) do
-    if session_id == state.session_id and progress_update?(update) do
+    if session_id in [state.session_id, state.last_session_id] and progress_update?(update) do
       cancel_timer(timers.inactivity_timer)
 
       %{

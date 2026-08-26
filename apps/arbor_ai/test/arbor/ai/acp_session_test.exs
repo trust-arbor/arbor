@@ -1220,7 +1220,9 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, %{"text" => "done"}} =
                AcpSession.send_message(session, "steady_progress", timeout: 1_000)
 
-      assert %{status: :ready, session_id: ^provider_session_id} = AcpSession.status(session)
+      # The provider UUID becomes the durable (resume) identity; the ACP session
+      # id the client knows stays the one `session/new` returned.
+      assert %{status: :ready, session_id: "claude_sdk_8890"} = AcpSession.status(session)
       assert :sys.get_state(session).last_session_id == provider_session_id
       assert :ok = AcpSession.close(session)
     end
@@ -1240,10 +1242,14 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:error, :inactivity_timeout} =
                AcpSession.send_message(session, "progress_then_stall", timeout: 1_000)
 
-      assert_receive {:fake_cancel, ^provider_session_id}
+      # Cancel goes to the client under the id it knows; the provider UUID is
+      # kept for the recovery (resume) that follows.
+      assert_receive {:fake_cancel, "claude_sdk_8890"}
 
-      assert %{status: :recovery_required, session_id: ^provider_session_id} =
+      assert %{status: :recovery_required, session_id: "claude_sdk_8890"} =
                AcpSession.status(session)
+
+      assert :sys.get_state(session).last_session_id == provider_session_id
 
       assert :ok = AcpSession.close(session)
     end
@@ -1918,7 +1924,59 @@ defmodule Arbor.AI.AcpSessionTest do
       session
     end
 
-    test "security regression: Claude adopts the provider UUID before continuity consumers" do
+    test "Claude records the provider UUID announced on the init session_info_update" do
+      # ex_mcp ≥ 1.1.0 announces Claude Code's UUID on the `init` update, before
+      # any prompt result. A prompt that times out before its result must still
+      # have a resumable identity.
+      provider_session_id = "0ab10f45-9463-42ad-9733-a5b07089e47f"
+
+      session =
+        start_usage_session([%{"text" => "done", "stopReason" => "end_turn"}],
+          provider: :claude,
+          new_session_result: {:ok, %{"sessionId" => "claude_sdk_182"}}
+        )
+
+      assert {:ok, %{"sessionId" => "claude_sdk_182"}} =
+               AcpSession.create_session(session, timeout: 1_000)
+
+      send(
+        session,
+        {:acp_session_update, "claude_sdk_182",
+         %{
+           "sessionUpdate" => "session_info_update",
+           "_meta" => %{
+             "ex_mcp.claude_sdk" => %{
+               "status" => "initialized",
+               "sessionId" => provider_session_id
+             }
+           }
+         }}
+      )
+
+      assert %{session_id: "claude_sdk_182"} = AcpSession.status(session)
+      assert :sys.get_state(session).last_session_id == provider_session_id
+
+      # A malformed id on a later update is ignored, never adopted.
+      send(
+        session,
+        {:acp_session_update, "claude_sdk_182",
+         %{
+           "sessionUpdate" => "session_info_update",
+           "_meta" => %{"ex_mcp.claude_sdk" => %{"sessionId" => "../../not-a-session"}}
+         }}
+      )
+
+      assert %{session_id: "claude_sdk_182"} = AcpSession.status(session)
+      assert :sys.get_state(session).last_session_id == provider_session_id
+    end
+
+    # ex_mcp ≥ 1.1.0 keeps the ACP session id stable and reports Claude Code's
+    # own UUID only in `_meta`. Arbor used to ADOPT that UUID as `session_id`, so
+    # the second prompt of every session went to the client under an id it had
+    # never seen and every update was dropped ("unknown session") — the reply
+    # came back empty. The UUID is continuity state (`last_session_id`), not the
+    # id we prompt with.
+    test "security regression: Claude keeps the ACP session id for prompts and records the provider UUID for continuity" do
       provider_session_id = "a226df5e-bc82-412c-9870-1fc52d036763"
 
       result = %{
@@ -1942,13 +2000,14 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, ^result} = AcpSession.send_message(session, "first", timeout: 1_000)
       assert_receive {:fake_usage_prompt_session_id, "claude_sdk_179"}
 
-      assert %{session_id: ^provider_session_id} = AcpSession.status(session)
+      assert %{session_id: "claude_sdk_179"} = AcpSession.status(session)
       assert :sys.get_state(session).last_session_id == provider_session_id
 
       assert {:ok, %{"text" => "second"}} =
                AcpSession.send_message(session, "second", timeout: 1_000)
 
-      assert_receive {:fake_usage_prompt_session_id, ^provider_session_id}
+      # The second prompt MUST still carry the ACP id, never the provider UUID.
+      assert_receive {:fake_usage_prompt_session_id, "claude_sdk_179"}
     end
 
     test "Claude rejects provider UUID drift after adopting the durable identity" do
@@ -1977,7 +2036,8 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:error, {:provider_session_id_mismatch, :claude_prompt_result}} =
                AcpSession.send_message(session, "second", timeout: 1_000)
 
-      assert %{status: :error, session_id: ^first_session_id} = AcpSession.status(session)
+      assert %{status: :error, session_id: "claude_sdk_180"} = AcpSession.status(session)
+      assert :sys.get_state(session).last_session_id == first_session_id
     end
 
     test "security regression: Claude rejects a malformed durable provider identity" do
