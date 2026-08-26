@@ -11,6 +11,7 @@ defmodule Arbor.Commands.Baseline do
 
   @mix_lock_max_bytes 1_048_576
   @file_mode 0o400
+  @exec_file_mode 0o500
   @dir_mode 0o700
   @provisioning_image_prefix "docker.io/arbor/validation@"
 
@@ -511,16 +512,24 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
+  # The tree digest covers each entry's `executable` flag
+  # (`LinuxDependencyBaselineCore` `@logical_regular_keys`), and the digest is
+  # computed over the staging copy BEFORE persist. Flattening every file to
+  # 0400 here dropped the bit on deps' scripts, so the authority's recompute
+  # over the persisted tree disagreed with the recorded digest
+  # (`baseline_tree_digest_mismatch`, V7-6, 2026-08-26). Keep executables
+  # owner-executable (0500); everything stays owner-only and read-only.
   defp copy_regular(source, dest) do
-    case File.copy(source, dest) do
-      {:ok, _count} ->
-        File.chmod!(dest, @file_mode)
-        :ok
-
-      {:error, _reason} ->
-        {:error, :tree_copy_failed}
+    with {:ok, %File.Stat{mode: mode}} <- File.lstat(source),
+         {:ok, _count} <- File.copy(source, dest) do
+      File.chmod!(dest, if(executable_mode?(mode), do: @exec_file_mode, else: @file_mode))
+      :ok
+    else
+      {:error, _reason} -> {:error, :tree_copy_failed}
     end
   end
+
+  defp executable_mode?(mode), do: Bitwise.band(mode, 0o111) != 0
 
   defp chmod_tree(path) do
     case File.lstat(path) do
@@ -540,8 +549,11 @@ defmodule Arbor.Commands.Baseline do
   end
 
   defp chmod_regular(path) do
-    case File.chmod(path, @file_mode) do
-      :ok -> :ok
+    with {:ok, %File.Stat{mode: mode}} <- File.lstat(path),
+         :ok <-
+           File.chmod(path, if(executable_mode?(mode), do: @exec_file_mode, else: @file_mode)) do
+      :ok
+    else
       {:error, _reason} -> {:error, :baseline_write_failed}
     end
   end
