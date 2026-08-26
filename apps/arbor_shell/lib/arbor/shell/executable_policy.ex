@@ -56,6 +56,14 @@ defmodule Arbor.Shell.ExecutablePolicy do
     "/usr/bin/shlock"
   ]
 
+  # Distro Podman only. Missing/untrusted paths are omitted at pin time so
+  # non-Linux hosts still start; OCI probe fails closed on resolve miss.
+  @oci_fixed_executable_paths [
+    "/usr/bin/podman"
+  ]
+
+  @fixed_executable_paths @apple_fixed_executable_paths ++ @oci_fixed_executable_paths
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -66,8 +74,9 @@ defmodule Arbor.Shell.ExecutablePolicy do
   def apple_fixed_executable_paths, do: @apple_fixed_executable_paths
 
   # Same-module test seam for merge/pin logic with temporary fixture paths.
-  # Production init always supplies `@apple_fixed_executable_paths` only —
-  # never Application env or caller-nominated fixed path lists.
+  # Production init supplies `@fixed_executable_paths` (Apple control-plane
+  # plus distro Podman). Missing/untrusted Podman is omitted at pin time.
+  # Never Application env or caller-nominated fixed path lists.
   @doc false
   @spec __merge_fixed_executables_for_test__(
           %{String.t() => Executable.t()},
@@ -167,7 +176,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
         merge_fixed_executables(
           executables_by_name,
           executables_by_path,
-          @apple_fixed_executable_paths
+          @fixed_executable_paths
         )
 
       {:ok,
@@ -295,7 +304,7 @@ defmodule Arbor.Shell.ExecutablePolicy do
   # fixed path, and only when that entry preserves the requested invocation
   # name. This prevents an untrusted symlink from nominating a new argv0.
   defp resolve_exact_absolute_path(command, canonical, requested_name, state) do
-    exact_path? = command == canonical or command in @apple_fixed_executable_paths
+    exact_path? = command == canonical or command in @fixed_executable_paths
 
     case {exact_path?, Map.get(state.executables_by_path, canonical)} do
       {true, %Executable{name: ^requested_name} = executable} ->

@@ -1788,7 +1788,7 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
           deadline
         )
       else
-        state.worker_module.start_under_coordinator_durable(
+        worker_module_for(state, executable).start_under_coordinator_durable(
           spec,
           executable,
           execution_id,
@@ -1814,6 +1814,15 @@ defmodule Arbor.Shell.AppleContainerUnitDrainCoordinator do
     kind, reason ->
       # Exit/error/throw is ambiguous: a DynamicSupervisor child may already be live.
       {:ambiguous, {kind, reason}}
+  end
+
+  # Production coordinator stays Apple-default. Distro Podman units must start
+  # the OCI worker; otherwise Apple validate_executable rejects `/usr/bin/podman`.
+  defp worker_module_for(state, executable) do
+    case executable do
+      %{path: "/usr/bin/podman"} -> Arbor.Shell.OciUnitWorker
+      _other -> state.worker_module
+    end
   end
 
   defp fetch_unit_name(%{plan: plan}) when is_map(plan) do

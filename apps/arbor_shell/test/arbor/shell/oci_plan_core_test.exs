@@ -56,6 +56,16 @@ defmodule Arbor.Shell.OciPlanCoreTest do
       refute Enum.any?(create, &String.contains?(&1, ":latest"))
       assert Enum.at(create, Enum.find_index(create, &(&1 == "--entrypoint")) + 2) == @image
       assert List.last(create) == "apps/arbor_shell/test/example_test.exs"
+
+      assert plan.argv.verify_absent == [
+               "/usr/bin/podman",
+               "ps",
+               "-a",
+               "--format",
+               "json"
+             ]
+
+      refute "exists" in plan.argv.verify_absent
     end
 
     test "does not bind host tmp into the guest" do

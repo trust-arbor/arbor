@@ -16,6 +16,7 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
 
   alias Arbor.Shell.StartupEpoch
   alias Arbor.Shell.ValidationRuntime.AppleContainer
+  alias Arbor.Shell.ValidationRuntime.Oci
 
   @epoch_namespace __MODULE__
   @checkout_timeout_ms 5_000
@@ -250,6 +251,7 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
   defp reason_label(_reason), do: "unavailable"
 
   defp driver_label(AppleContainer), do: "apple_container"
+  defp driver_label(Oci), do: "podman"
   defp driver_label(_other), do: "injected"
 
   defp epoch_bind_term(implementation), do: {:validation_runtime, implementation}

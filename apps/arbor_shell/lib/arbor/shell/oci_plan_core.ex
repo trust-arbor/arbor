@@ -35,7 +35,21 @@ defmodule Arbor.Shell.OciPlanCore do
 
   @guest_validation_runner_dir "/arbor/validation/runner"
   @guest_validation_result_dir "/arbor/validation/result"
-  @guest_source_inventory_path "/arbor/validation/runner/source_inventory.json"
+  @validation_runner_script_basename "runner.exs"
+  @validation_result_basename "result.etf"
+  @source_inventory_basename "source_inventory.json"
+  @guest_validation_runner_script Path.join(
+                                    @guest_validation_runner_dir,
+                                    @validation_runner_script_basename
+                                  )
+  @guest_validation_result_file Path.join(
+                                  @guest_validation_result_dir,
+                                  @validation_result_basename
+                                )
+  @guest_source_inventory_path Path.join(
+                                 @guest_validation_runner_dir,
+                                 @source_inventory_basename
+                               )
 
   @projection_specs [
     {:worktree, "/workspace", :read_write},
@@ -131,6 +145,105 @@ defmodule Arbor.Shell.OciPlanCore do
   end
 
   def new(_request), do: {:error, :invalid_request}
+
+  @doc """
+  JSON-clean view of an admitted plan. Does not include caller env beyond the
+  closed guest environment already planned into argv.
+  """
+  @spec show(plan()) :: map()
+  def show(%{argv: argv} = plan) when is_map(argv) do
+    %{
+      "runtime_executable" => plan.runtime_executable,
+      "driver" => Atom.to_string(plan.driver),
+      "unit_name" => plan.unit_name,
+      "image" => plan.image,
+      "image_kind" => "digest_execution_image",
+      "platform" => plan.platform,
+      "mix_env" => plan.mix_env,
+      "command_args" => plan.command_args,
+      "projections" => stringify_keys(plan.projections),
+      "guest_workdir" => plan.guest_workdir,
+      "guest_mix_wrapper" => plan.guest_mix_wrapper,
+      "guest_tmpfs" => %{
+        "guest_path" => plan.guest_tmpfs.guest_path,
+        "argv_spec" => plan.guest_tmpfs.argv_spec
+      },
+      "resource_profile" => Atom.to_string(plan.resource_profile),
+      "resource_limits" => stringify_keys(plan.resource_limits),
+      "mounts" =>
+        Enum.map(plan.mounts, fn mount ->
+          %{
+            "purpose" => Atom.to_string(mount.purpose),
+            "host_path" => mount.host_path,
+            "guest_path" => mount.guest_path,
+            "mode" => Atom.to_string(mount.mode),
+            "mount_spec" => mount.mount_spec
+          }
+        end),
+      "env" => Enum.map(plan.env, fn {k, v} -> %{"key" => k, "value" => v} end),
+      "argv" => %{
+        "create" => argv.create,
+        "start" => argv.start,
+        "force_stop" => argv.force_stop,
+        "delete" => argv.delete,
+        "verify_absent" => argv.verify_absent
+      }
+    }
+  end
+
+  @doc false
+  @spec security_regression_path_map() :: %{
+          runner_dir: String.t(),
+          result_dir: String.t(),
+          runner_script_basename: String.t(),
+          result_basename: String.t(),
+          guest_runner_script: String.t(),
+          guest_result_file: String.t()
+        }
+  def security_regression_path_map do
+    %{
+      runner_dir: @guest_validation_runner_dir,
+      result_dir: @guest_validation_result_dir,
+      runner_script_basename: @validation_runner_script_basename,
+      result_basename: @validation_result_basename,
+      guest_runner_script: @guest_validation_runner_script,
+      guest_result_file: @guest_validation_result_file
+    }
+  end
+
+  @doc """
+  Normalize a resource-profile value against the closed allowlist.
+
+  Request-time contract: admitted atoms `:standard` | `:intensive` only.
+  """
+  @spec normalize_resource_profile(term()) ::
+          {:ok, :standard | :intensive} | {:error, :invalid_resource_profile}
+  def normalize_resource_profile(profile) when is_atom(profile) do
+    if Map.has_key?(@resource_profiles, profile) do
+      {:ok, profile}
+    else
+      {:error, :invalid_resource_profile}
+    end
+  end
+
+  def normalize_resource_profile(_other), do: {:error, :invalid_resource_profile}
+
+  @doc """
+  Normalize a durable / serialized resource-profile value.
+
+  Admits atoms `:standard` | `:intensive` and JSON-clean `"standard"` /
+  `"intensive"` strings from `show/1`.
+  """
+  @spec normalize_durable_resource_profile(term()) ::
+          {:ok, :standard | :intensive} | {:error, :invalid_resource_profile}
+  def normalize_durable_resource_profile(profile) when is_atom(profile) do
+    normalize_resource_profile(profile)
+  end
+
+  def normalize_durable_resource_profile("standard"), do: {:ok, :standard}
+  def normalize_durable_resource_profile("intensive"), do: {:ok, :intensive}
+
+  def normalize_durable_resource_profile(_other), do: {:error, :invalid_resource_profile}
 
   defp validate_request_keys(request) do
     keys = Map.keys(request)
@@ -297,13 +410,6 @@ defmodule Arbor.Shell.OciPlanCore do
   end
 
   defp validate_mix_env(_mix_env), do: {:error, :invalid_mix_env}
-
-  defp normalize_resource_profile(profile) when profile in [:standard, :intensive],
-    do: {:ok, profile}
-
-  defp normalize_resource_profile("standard"), do: {:ok, :standard}
-  defp normalize_resource_profile("intensive"), do: {:ok, :intensive}
-  defp normalize_resource_profile(_profile), do: {:error, :invalid_resource_profile}
 
   defp resource_limits_for(profile) do
     case Map.fetch(@resource_profiles, profile) do
@@ -536,7 +642,9 @@ defmodule Arbor.Shell.OciPlanCore do
       start: [@runtime_executable, "start", "--attach", name],
       force_stop: [@runtime_executable, "kill", "--signal", "KILL", name],
       delete: [@runtime_executable, "rm", "--force", name],
-      verify_absent: [@runtime_executable, "container", "exists", name]
+      # Absence is proven from a successful `ps -a --format json` list, never
+      # `container exists` (nonzero exists is not absence).
+      verify_absent: [@runtime_executable, "ps", "-a", "--format", "json"]
     }
   end
 
@@ -550,5 +658,12 @@ defmodule Arbor.Shell.OciPlanCore do
 
   defp require_valid_utf8(value) when is_binary(value) do
     if String.valid?(value), do: :ok, else: {:error, :invalid_utf8}
+  end
+
+  defp stringify_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} when is_binary(key) -> {key, value}
+    end)
   end
 end
