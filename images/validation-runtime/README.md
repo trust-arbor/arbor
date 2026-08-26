@@ -23,7 +23,7 @@ Native arch only. `linux/amd64` or `linux/arm64`. No qemu-user translation.
 Builds pass `--pull=never` for the **base** image. Pull it once:
 
 ```
-podman pull debian:bookworm-slim
+podman pull debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 ```
 
 Then:
@@ -35,4 +35,6 @@ mix arbor.baseline.activate <tree-digest>
 
 Restart the Arbor node so `config/runtime.exs` re-pins `$ARBOR_HOME/validation-runtime.json`.
 
-Toolchain ARG defaults must match `.tool-versions`. The drift test parses both; do not hardcode a third copy.
+Toolchain ARG defaults must match `.tool-versions`. The drift test parses both
+and requires a digest-pinned `FROM` plus `sha256sum -c` for the OTP and Elixir
+archives; do not hardcode a third copy of the version strings.

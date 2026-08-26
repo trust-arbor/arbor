@@ -60,6 +60,30 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
   @spec load_operator_owned(String.t()) :: {:ok, config()} | {:error, atom() | tuple()}
   def load_operator_owned(path), do: load_with_trusted_path(path, TrustedPath, :operator_owned)
 
+  @doc """
+  Re-admit the boot-pinned document and return its `kind`.
+
+  Selection is the TrustedPath-pinned document, not an Application-env kind
+  atom. Missing locator/family or a pin/schema failure is a stable error so
+  callers default to Apple Container.
+  """
+  @spec admit_kind() :: {:ok, :apple | :oci} | {:error, atom() | tuple()}
+  def admit_kind, do: admit_kind_with_trusted_path(TrustedPath)
+
+  # Test-only injection point. Production callers use admit_kind/0.
+  @doc false
+  @spec admit_kind_with_trusted_path(module()) ::
+          {:ok, :apple | :oci} | {:error, atom() | tuple()}
+  def admit_kind_with_trusted_path(trusted_path) when is_atom(trusted_path) do
+    with {:ok, path} <- Config.validation_runtime_config_path(),
+         {:ok, family} <- Config.validation_runtime_pin_family() do
+      case load_with_trusted_path(path, trusted_path, family) do
+        {:ok, %{kind: kind}} when kind in [:apple, :oci] -> {:ok, kind}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   # Test-only injection point. Production callers use load/1, which is always
   # bound to Arbor.Shell.TrustedPath.
   @doc false

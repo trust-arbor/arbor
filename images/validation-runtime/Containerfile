@@ -4,15 +4,28 @@
 # Mix arbor.baseline.build fills lock/tree digest ARGs and platform.
 # The Arbor Mix wrapper lives on the host and is bind-mounted at /arbor/bin/mix.
 #
+# Bump (keep ARG defaults matching `.tool-versions`):
+# 1. Update erlang/elixir in `.tool-versions`.
+# 2. Replace the FROM digest with the debian:bookworm-slim *index* digest
+#    from docker-library/repo-info `repos/debian/remote/bookworm-slim.md`
+#    (or `podman image inspect --format '{{index .RepoDigests 0}}'` after a
+#    reviewed pull). Last pinned 2026-08-26: bookworm-20260824-slim.
+# 3. Replace OTP_SRC_SHA256 from OTP SHA256.txt
+#    (`otp_src_${ERLANG_VERSION}.tar.gz` on the matching GitHub release).
+# 4. Replace ELIXIR_OTP_28_SHA256 from `elixir-otp-28.zip.sha256sum` on the
+#    Elixir GitHub release for v<elixir version>.
+#
 # First-time operator preflight (builds use --pull=never and will not fetch
 # the base image):
 #
-#     podman pull debian:bookworm-slim
+#     podman pull debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 ARG ERLANG_VERSION=28.4.1
 ARG ELIXIR_VERSION=1.19.5-otp-28
+ARG OTP_SRC_SHA256=fb2aa0bd8d4118a275895d4a0ea5b24e40e9e1e27a7b29e001377d7660fd9ecf
+ARG ELIXIR_OTP_28_SHA256=ca481510feb6dabc875bba43e44b25c7abafa53bd7a103639851b7aeace8a022
 ARG ARBOR_VALIDATION_PLATFORM=linux/amd64
 ARG MIX_LOCK_SHA256
 ARG DEPS_TREE_SHA256
@@ -43,6 +56,7 @@ RUN apt-get update \
 RUN curl -fsSL \
       "https://github.com/erlang/otp/releases/download/OTP-${ERLANG_VERSION}/otp_src_${ERLANG_VERSION}.tar.gz" \
       -o /tmp/otp.tar.gz \
+    && echo "${OTP_SRC_SHA256}  /tmp/otp.tar.gz" | sha256sum -c - \
     && mkdir -p /tmp/otp \
     && tar -xzf /tmp/otp.tar.gz -C /tmp/otp --strip-components=1 \
     && cd /tmp/otp \
@@ -56,6 +70,7 @@ RUN elixir_tag="$(printf '%s\n' "${ELIXIR_VERSION}" | cut -d- -f1)" \
     && curl -fsSL \
       "https://github.com/elixir-lang/elixir/releases/download/v${elixir_tag}/elixir-otp-28.zip" \
       -o /tmp/elixir.zip \
+    && echo "${ELIXIR_OTP_28_SHA256}  /tmp/elixir.zip" | sha256sum -c - \
     && unzip /tmp/elixir.zip -d /usr/local \
     && rm -f /tmp/elixir.zip
 

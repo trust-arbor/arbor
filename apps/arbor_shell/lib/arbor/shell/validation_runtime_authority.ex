@@ -7,15 +7,17 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
   Mix, probes a VM, or interprets a plan: `Arbor.Shell.ValidationRuntime`
   applies the pinned module in the caller.
 
-  Production start reads `Config.validation_runtime_kind/0`: `:oci` pins
-  `ValidationRuntime.Oci`, otherwise `ValidationRuntime.AppleContainer`.
-  Retired Mix-set keys such as `:spawn_backend` cannot select a backend.
-  Narrow `:implementation` injection is reserved for same-library tests.
+  Production start re-admits the boot-pinned operator document through
+  `RuntimeConfigLoader.admit_kind/0`: `:oci` pins `ValidationRuntime.Oci`,
+  otherwise `ValidationRuntime.AppleContainer`. A bare Application-env kind
+  atom and retired Mix-set keys such as `:spawn_backend` cannot select a
+  backend. Narrow `:implementation` injection is reserved for same-library
+  tests.
   """
 
   use GenServer
 
-  alias Arbor.Shell.Config
+  alias Arbor.Shell.RuntimeConfigLoader
   alias Arbor.Shell.StartupEpoch
   alias Arbor.Shell.ValidationRuntime.AppleContainer
   alias Arbor.Shell.ValidationRuntime.Oci
@@ -322,8 +324,8 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
   end
 
   defp default_implementation do
-    case Config.validation_runtime_kind() do
-      :oci -> Oci
+    case RuntimeConfigLoader.admit_kind() do
+      {:ok, :oci} -> Oci
       _other -> AppleContainer
     end
   end

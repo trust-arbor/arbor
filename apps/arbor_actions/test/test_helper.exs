@@ -68,6 +68,15 @@ Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.ExecutionRegistry, [
 # cascaded into ~84 failures across the Mix, Shell and Coding suites.
 Supervisor.start_child(Arbor.Shell.Supervisor, {Arbor.Shell.OwnedTreeRegistry, []})
 
+# PR 1 added ValidationRuntime.Authority as the spawn-capable dispatcher.
+# start_children: false leaves it absent here unless we start it; the Apple
+# unit-owner security regression then fails closed as
+# :validation_runtime_unavailable instead of :apple_container_unit_owner_required.
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
+  {Arbor.Shell.ValidationRuntime.Authority, []}
+)
+
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}

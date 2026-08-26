@@ -11,7 +11,8 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
       mix arbor.baseline.build
 
   Image production uses `/usr/bin/podman build --pull=never`. Pull the
-  reviewed Debian base once first (`podman pull debian:bookworm-slim`);
+  reviewed Debian base once first (`podman pull debian:bookworm-slim@sha256:…`
+  — digest in `images/validation-runtime/Containerfile`);
   see `images/validation-runtime/README.md`.
   """
 

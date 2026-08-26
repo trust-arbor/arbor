@@ -160,7 +160,16 @@ defmodule Arbor.Shell.Config do
           | :apple_container_unit_journal_path_malformed
           | {:invalid_apple_container_unit_journal_path, atom()}
 
-  @type validation_runtime_kind :: :apple | :oci | :unavailable
+  @type validation_runtime_pin_family :: :root_owned | :operator_owned
+
+  @type validation_runtime_config_path_error ::
+          :validation_runtime_config_path_absent
+          | :validation_runtime_config_path_malformed
+          | {:invalid_validation_runtime_config_path, atom()}
+
+  @type validation_runtime_pin_family_error ::
+          :validation_runtime_pin_family_absent
+          | :validation_runtime_pin_family_malformed
 
   @type oci_image_policy :: %{
           image: String.t(),
@@ -273,19 +282,51 @@ defmodule Arbor.Shell.Config do
   end
 
   @doc """
-  Boot-pinned validation-runtime kind from the loaded operator document.
+  Boot-pinned locator of the operator validation-runtime document.
 
-  Set once at host boot by `config/runtime.exs`. Performs no HOME IO and
-  ignores retired Mix-set keys such as `:spawn_backend`.
+  Path and pin-family only. Performs no HOME IO and does not interpret kind.
+  `RuntimeConfigLoader.admit_kind/0` re-pins this locator through TrustedPath
+  and reads `kind` from the document. Retired Mix-set keys such as
+  `:spawn_backend` and a bare `:validation_runtime_kind` atom are ignored.
   """
-  @spec validation_runtime_kind() :: validation_runtime_kind()
-  def validation_runtime_kind do
-    case Application.get_env(@app, :validation_runtime_kind) do
-      :apple -> :apple
-      :oci -> :oci
-      :unavailable -> :unavailable
-      nil -> :unavailable
-      _other -> :unavailable
+  @spec validation_runtime_config_path() ::
+          {:ok, String.t()} | {:error, validation_runtime_config_path_error()}
+  def validation_runtime_config_path do
+    case Application.get_env(@app, :validation_runtime_config_path) do
+      nil ->
+        {:error, :validation_runtime_config_path_absent}
+
+      path ->
+        case validate_locator_path(path) do
+          {:ok, ^path} = ok ->
+            ok
+
+          {:ok, normalized} when is_binary(normalized) ->
+            {:ok, normalized}
+
+          {:error, :invalid_path} ->
+            {:error, :validation_runtime_config_path_malformed}
+
+          {:error, reason} when is_atom(reason) ->
+            {:error, {:invalid_validation_runtime_config_path, reason}}
+        end
+    end
+  end
+
+  @doc """
+  Boot-pinned TrustedPath family used to re-admit the operator document.
+
+  Closed atoms only. Performs no HOME IO.
+  """
+  @spec validation_runtime_pin_family() ::
+          {:ok, validation_runtime_pin_family()}
+          | {:error, validation_runtime_pin_family_error()}
+  def validation_runtime_pin_family do
+    case Application.get_env(@app, :validation_runtime_pin_family) do
+      :operator_owned -> {:ok, :operator_owned}
+      :root_owned -> {:ok, :root_owned}
+      nil -> {:error, :validation_runtime_pin_family_absent}
+      _other -> {:error, :validation_runtime_pin_family_malformed}
     end
   end
 

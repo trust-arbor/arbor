@@ -8,6 +8,8 @@ defmodule Arbor.Shell.ConfigTest do
   @linux_key :linux_dependency_baseline
   @image_key :apple_container_image_policy
   @oci_image_key :oci_image_policy
+  @config_path_key :validation_runtime_config_path
+  @pin_family_key :validation_runtime_pin_family
   @kind_key :validation_runtime_kind
   @journal_path_key :apple_container_unit_journal_path
 
@@ -38,6 +40,8 @@ defmodule Arbor.Shell.ConfigTest do
     previous_linux = Application.get_env(@app, @linux_key)
     previous_image = Application.get_env(@app, @image_key)
     previous_oci_image = Application.get_env(@app, @oci_image_key)
+    previous_config_path = Application.get_env(@app, @config_path_key)
+    previous_pin_family = Application.get_env(@app, @pin_family_key)
     previous_kind = Application.get_env(@app, @kind_key)
     previous_journal_path = Application.get_env(@app, @journal_path_key)
     previous_home = System.get_env("HOME")
@@ -47,6 +51,8 @@ defmodule Arbor.Shell.ConfigTest do
       restore_env(@linux_key, previous_linux)
       restore_env(@image_key, previous_image)
       restore_env(@oci_image_key, previous_oci_image)
+      restore_env(@config_path_key, previous_config_path)
+      restore_env(@pin_family_key, previous_pin_family)
       restore_env(@kind_key, previous_kind)
       restore_env(@journal_path_key, previous_journal_path)
       restore_system_env("HOME", previous_home)
@@ -655,14 +661,20 @@ defmodule Arbor.Shell.ConfigTest do
     end
   end
 
-  describe "validation_runtime_kind/0" do
-    test "absent config is unavailable and ignores HOME" do
-      Application.delete_env(@app, @kind_key)
+  describe "validation_runtime_config_path/0 and pin_family/0" do
+    test "absent locators are stable errors and ignore HOME" do
+      Application.delete_env(@app, @config_path_key)
+      Application.delete_env(@app, @pin_family_key)
       System.put_env("HOME", "/tmp/should-not-matter")
-      assert Config.validation_runtime_kind() == :unavailable
+
+      assert {:error, :validation_runtime_config_path_absent} =
+               Config.validation_runtime_config_path()
+
+      assert {:error, :validation_runtime_pin_family_absent} =
+               Config.validation_runtime_pin_family()
     end
 
-    test "admits apple and oci and ignores retired backend keys" do
+    test "admits locator and family and ignores a bare kind atom" do
       previous_spawn = Application.get_env(@app, :spawn_backend)
       previous_runtime = Application.get_env(@app, :validation_runtime)
 
@@ -674,10 +686,26 @@ defmodule Arbor.Shell.ConfigTest do
       Application.put_env(@app, @kind_key, :oci)
       Application.put_env(@app, :spawn_backend, :podman)
       Application.put_env(@app, :validation_runtime, Arbor.Shell.ValidationRuntime.Oci)
-      assert Config.validation_runtime_kind() == :oci
+      Application.put_env(@app, @config_path_key, "/var/lib/arbor/validation-runtime.json")
+      Application.put_env(@app, @pin_family_key, :operator_owned)
 
-      Application.put_env(@app, @kind_key, :apple)
-      assert Config.validation_runtime_kind() == :apple
+      assert {:ok, "/var/lib/arbor/validation-runtime.json"} =
+               Config.validation_runtime_config_path()
+
+      assert {:ok, :operator_owned} = Config.validation_runtime_pin_family()
+
+      Application.put_env(@app, @pin_family_key, :root_owned)
+      assert {:ok, :root_owned} = Config.validation_runtime_pin_family()
+
+      Application.put_env(@app, @pin_family_key, "operator_owned")
+
+      assert {:error, :validation_runtime_pin_family_malformed} =
+               Config.validation_runtime_pin_family()
+
+      Application.put_env(@app, @config_path_key, "relative.json")
+
+      assert {:error, {:invalid_validation_runtime_config_path, :relative_path}} =
+               Config.validation_runtime_config_path()
     end
   end
 

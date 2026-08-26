@@ -93,7 +93,10 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
       :linux_dependency_baseline,
       :apple_container_image_policy,
       :oci_image_policy,
-      :apple_container_unit_journal_path
+      :apple_container_unit_journal_path,
+      :validation_runtime_config_path,
+      :validation_runtime_pin_family,
+      :validation_runtime_kind
     ]
 
     previous = Map.new(config_keys, fn key -> {key, Application.get_env(:arbor_shell, key)} end)
@@ -201,7 +204,10 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
     assert loader_branch =~ "ARBOR_VALIDATION_RUNTIME_CONFIG_PATH"
     assert loader_branch =~ "validation-runtime.json"
     assert loader_branch =~ "load_operator_owned"
+    assert loader_branch =~ "validation_runtime_config_path"
+    assert loader_branch =~ "validation_runtime_pin_family"
     assert loader_branch =~ "if config_env() != :test do"
+    refute loader_branch =~ "validation_runtime_kind"
     refute loader_branch =~ "Arbor.Orchestrator"
     refute loader_branch =~ "Arbor.Agent"
   end
@@ -289,6 +295,32 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
       ~s({"apple_container":{},"linux_dependency_baseline":{},"image_policy":{},"unit_journal_path":"/j","unit_journal_path":"/other"})
 
     assert {:error, :config_schema_duplicate_key} = load_text(root, duplicate)
+  end
+
+  test "admit_kind reads kind from the pinned document, not a kind atom", %{root: root} do
+    path = write_document(root, oci_document())
+    File.chmod!(root, 0o700)
+    File.chmod!(path, 0o400)
+
+    Application.put_env(:arbor_shell, :validation_runtime_kind, :apple)
+    Application.delete_env(:arbor_shell, :validation_runtime_config_path)
+    Application.delete_env(:arbor_shell, :validation_runtime_pin_family)
+
+    assert {:error, :validation_runtime_config_path_absent} =
+             RuntimeConfigLoader.admit_kind_with_trusted_path(TestTrustedPath)
+
+    Application.put_env(:arbor_shell, :validation_runtime_config_path, path)
+    Application.put_env(:arbor_shell, :validation_runtime_pin_family, :operator_owned)
+
+    assert {:ok, :oci} = RuntimeConfigLoader.admit_kind_with_trusted_path(TestTrustedPath)
+
+    apple_path = Path.join(root, "apple.json")
+    File.write!(apple_path, Jason.encode!(@valid_document))
+    File.chmod!(apple_path, 0o400)
+    Application.put_env(:arbor_shell, :validation_runtime_config_path, apple_path)
+    Application.put_env(:arbor_shell, :validation_runtime_pin_family, :root_owned)
+
+    assert {:ok, :apple} = RuntimeConfigLoader.admit_kind_with_trusted_path(TestTrustedPath)
   end
 
   test "rejects malformed nested values", %{root: root} do

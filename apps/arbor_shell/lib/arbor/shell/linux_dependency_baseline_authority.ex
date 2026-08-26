@@ -17,6 +17,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   alias Arbor.Shell.Config
   alias Arbor.Shell.LinuxDependencyBaselineSource
+  alias Arbor.Shell.RuntimeConfigLoader
   alias Arbor.Shell.StartupEpoch
   alias Arbor.Shell.TrustedPath
 
@@ -45,8 +46,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   Production callers pass only the application-generated `:boot_epoch` token.
   Direct-start tests may additionally inject `:name`, `:source`,
-  `:trusted_path`, and/or `:pin_family`. Production start reads
-  `Config.validation_runtime_kind/0`: `:oci` selects `:operator_owned`,
+  `:trusted_path`, and/or `:pin_family`. Production start re-admits the
+  boot-pinned operator document: `:oci` selects `:operator_owned`,
   otherwise `:root_owned`. Mix callers cannot set the pin family.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -512,8 +513,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
   end
 
   defp default_pin_family do
-    case Config.validation_runtime_kind() do
-      :oci -> :operator_owned
+    case RuntimeConfigLoader.admit_kind() do
+      {:ok, :oci} -> :operator_owned
       _other -> :root_owned
     end
   end

@@ -50,20 +50,50 @@ defmodule Arbor.Shell.ValidationRuntime.AuthorityTest do
       refute_receive :fake_runtime_execute, 50
     end
 
-    test "Config oci kind pins ValidationRuntime.Oci without Mix backend keys" do
-      previous = Application.get_env(:arbor_shell, :validation_runtime_kind)
+    test "security regression: Application env kind cannot pin ValidationRuntime.Oci" do
+      previous_kind = Application.get_env(:arbor_shell, :validation_runtime_kind)
+      previous_path = Application.get_env(:arbor_shell, :validation_runtime_config_path)
+      previous_family = Application.get_env(:arbor_shell, :validation_runtime_pin_family)
+
       Application.put_env(:arbor_shell, :validation_runtime_kind, :oci)
+      Application.delete_env(:arbor_shell, :validation_runtime_config_path)
+      Application.delete_env(:arbor_shell, :validation_runtime_pin_family)
       Application.put_env(:arbor_shell, :spawn_backend, FakeRuntime)
 
       on_exit(fn ->
-        if previous do
-          Application.put_env(:arbor_shell, :validation_runtime_kind, previous)
-        else
-          Application.delete_env(:arbor_shell, :validation_runtime_kind)
-        end
-
+        restore_env(:validation_runtime_kind, previous_kind)
+        restore_env(:validation_runtime_config_path, previous_path)
+        restore_env(:validation_runtime_pin_family, previous_family)
         Application.delete_env(:arbor_shell, :spawn_backend)
       end)
+
+      name = unique_name()
+      boot_epoch = make_ref()
+      {:ok, pid} = start_authority(name: name, boot_epoch: boot_epoch)
+
+      assert {:ok, AppleContainer} = Authority.checkout_implementation(pid)
+      assert Authority.public_status(pid)["driver"] == "apple_container"
+    end
+
+    test "operator-owned OCI document pins ValidationRuntime.Oci" do
+      {path, cleanup} = write_operator_owned_oci_document!()
+      on_exit(cleanup)
+
+      previous_path = Application.get_env(:arbor_shell, :validation_runtime_config_path)
+      previous_family = Application.get_env(:arbor_shell, :validation_runtime_pin_family)
+      previous_kind = Application.get_env(:arbor_shell, :validation_runtime_kind)
+
+      Application.put_env(:arbor_shell, :validation_runtime_config_path, path)
+      Application.put_env(:arbor_shell, :validation_runtime_pin_family, :operator_owned)
+      Application.put_env(:arbor_shell, :validation_runtime_kind, :apple)
+
+      on_exit(fn ->
+        restore_env(:validation_runtime_config_path, previous_path)
+        restore_env(:validation_runtime_pin_family, previous_family)
+        restore_env(:validation_runtime_kind, previous_kind)
+      end)
+
+      assert {:ok, %{kind: :oci}} = Arbor.Shell.RuntimeConfigLoader.load_operator_owned(path)
 
       name = unique_name()
       boot_epoch = make_ref()
@@ -201,5 +231,48 @@ defmodule Arbor.Shell.ValidationRuntime.AuthorityTest do
 
   defp unique_name do
     :"validation_runtime_authority_#{System.unique_integer([:positive])}"
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_shell, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_shell, key, value)
+
+  defp write_operator_owned_oci_document! do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-validation-runtime-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Shell.TrustedPath.canonicalize_absolute(root)
+    File.chmod!(root, 0o700)
+    path = Path.join(root, "validation-runtime.json")
+    File.write!(path, Jason.encode!(oci_document()))
+    File.chmod!(path, 0o400)
+
+    {path, fn -> File.rm_rf!(root) end}
+  end
+
+  defp oci_document do
+    %{
+      "runtime" => "oci",
+      "linux_dependency_baseline" => %{
+        "source_root" =>
+          "/home/operator/.arbor/baseline/" <> String.duplicate("a", 64) <> "/tree",
+        "manifest_path" =>
+          "/home/operator/.arbor/baseline/" <> String.duplicate("a", 64) <> "/manifest.json"
+      },
+      "image_policy" => %{
+        "image" => "docker.io/arbor/validation@sha256:" <> String.duplicate("a", 64),
+        "manifest_digest" => "sha256:" <> String.duplicate("b", 64),
+        "env" => ["MIX_HOME=/usr/local/.mix"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => String.duplicate("e", 64),
+        "baseline_tree_digest" => String.duplicate("f", 64),
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      },
+      "unit_journal_path" => "/home/operator/.arbor/oci-unit-journal.json"
+    }
   end
 end

@@ -15,6 +15,8 @@ defmodule Arbor.Shell.OciProbeRuntime do
   alias Arbor.Shell.LinuxDependencyBaselineAuthority
   alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath
+  alias Arbor.Shell.ValidationRuntime.Authority, as: ValidationRuntimeAuthority
+  alias Arbor.Shell.ValidationRuntime.Oci
 
   @runtime_path "/usr/bin/podman"
   @max_probe_deadline_ms SpawnCapableTimeout.max_probe_deadline_ms()
@@ -108,18 +110,21 @@ defmodule Arbor.Shell.OciProbeRuntime do
   @doc false
   @spec checkout_image_policy() :: {:ok, map()} | {:error, term()}
   def checkout_image_policy do
-    case Config.validation_runtime_kind() do
-      :oci ->
+    case ValidationRuntimeAuthority.checkout_implementation() do
+      {:ok, Oci} ->
         case Config.oci_image_policy() do
           {:ok, policy} when is_map(policy) -> {:ok, policy}
           {:error, reason} -> {:error, bound_reason(reason)}
         end
 
-      _other ->
+      {:ok, _mod} ->
         case AppleContainerImagePolicyAuthority.checkout_policy() do
           {:ok, policy} when is_map(policy) -> {:ok, policy}
           {:error, reason} -> {:error, bound_reason(reason)}
         end
+
+      {:error, reason} ->
+        {:error, bound_reason(reason)}
     end
   end
 

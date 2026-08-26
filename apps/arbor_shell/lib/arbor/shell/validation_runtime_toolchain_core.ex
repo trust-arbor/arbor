@@ -10,6 +10,9 @@ defmodule Arbor.Shell.ValidationRuntimeToolchainCore do
   @tool_versions_elixir ~r/^elixir[ \t]+(\S+)\s*$/m
   @containerfile_erlang ~r/^ARG ERLANG_VERSION=(\S+)\s*$/m
   @containerfile_elixir ~r/^ARG ELIXIR_VERSION=(\S+)\s*$/m
+  @containerfile_from_digest ~r/^FROM debian(?::bookworm-slim)?@sha256:([0-9a-f]{64})\s*$/m
+  @containerfile_otp_sha256 ~r/^ARG OTP_SRC_SHA256=([0-9a-f]{64})\s*$/m
+  @containerfile_elixir_sha256 ~r/^ARG ELIXIR_OTP_28_SHA256=([0-9a-f]{64})\s*$/m
 
   @required_labels [
     "org.arbor.validation.schema",
@@ -60,6 +63,30 @@ defmodule Arbor.Shell.ValidationRuntimeToolchainCore do
   end
 
   def require_attestation_labels(_text), do: {:error, :invalid_containerfile}
+
+  @doc """
+  Require digest-pinned base image and archive checksum verification.
+
+  Versions still come from ARG defaults / `.tool-versions`. This only proves
+  the Containerfile cannot fetch an unpinned base or unsigned GitHub archive.
+  """
+  @spec require_pinned_inputs(term()) :: :ok | {:error, atom()}
+  def require_pinned_inputs(text) when is_binary(text) do
+    with {:ok, _digest} <-
+           capture(@containerfile_from_digest, text, :missing_base_image_digest),
+         {:ok, _otp} <-
+           capture(@containerfile_otp_sha256, text, :missing_otp_archive_digest),
+         {:ok, _elixir} <-
+           capture(@containerfile_elixir_sha256, text, :missing_elixir_archive_digest) do
+      if String.contains?(text, "sha256sum -c") do
+        :ok
+      else
+        {:error, :missing_archive_checksum_verify}
+      end
+    end
+  end
+
+  def require_pinned_inputs(_text), do: {:error, :invalid_containerfile}
 
   @spec compare(toolchain(), toolchain()) :: :ok | {:error, :toolchain_drift}
   def compare(%{erlang: erlang, elixir: elixir}, %{erlang: erlang, elixir: elixir}), do: :ok

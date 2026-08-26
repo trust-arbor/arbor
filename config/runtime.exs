@@ -147,43 +147,42 @@ end
 #    unavailable. An invalid present file still raises.
 # Config itself performs no HOME IO.
 if config_env() != :test do
+  # Store locator + pin family only. Kind is re-admitted from the document at
+  # owner start via RuntimeConfigLoader.admit_kind/0 — never a bare atom key.
+  apply_validation_runtime = fn path, pin_family, values ->
+    shared = [
+      validation_runtime_config_path: path,
+      validation_runtime_pin_family: pin_family,
+      linux_dependency_baseline: values.linux_dependency_baseline,
+      apple_container_unit_journal_path: values.apple_container_unit_journal_path
+    ]
+
+    case values do
+      %{kind: :oci, oci_image_policy: policy} ->
+        config :arbor_shell, [oci_image_policy: policy] ++ shared
+
+      %{kind: :apple, apple_container: apple, apple_container_image_policy: policy} ->
+        config :arbor_shell,
+               [apple_container: apple, apple_container_image_policy: policy] ++ shared
+
+      _other ->
+        raise "invalid validation-runtime configuration"
+    end
+  end
+
   validation_path = System.get_env("ARBOR_VALIDATION_RUNTIME_CONFIG_PATH")
   apple_path = System.get_env("ARBOR_APPLE_CONTAINER_CONFIG_PATH")
 
   cond do
     is_binary(validation_path) and validation_path != "" ->
       case Arbor.Shell.RuntimeConfigLoader.load_operator_owned(validation_path) do
-        {:ok, %{kind: :oci} = values} ->
-          config :arbor_shell,
-            validation_runtime_kind: :oci,
-            linux_dependency_baseline: values.linux_dependency_baseline,
-            oci_image_policy: values.oci_image_policy,
-            apple_container_unit_journal_path: values.apple_container_unit_journal_path
-
-        {:ok, %{kind: :apple} = values} ->
-          config :arbor_shell,
-            validation_runtime_kind: :apple,
-            apple_container: values.apple_container,
-            linux_dependency_baseline: values.linux_dependency_baseline,
-            apple_container_image_policy: values.apple_container_image_policy,
-            apple_container_unit_journal_path: values.apple_container_unit_journal_path
+        {:ok, values} ->
+          apply_validation_runtime.(validation_path, :operator_owned, values)
 
         {:error, :config_file_untrusted} ->
           case Arbor.Shell.RuntimeConfigLoader.load(validation_path) do
-            {:ok, %{kind: :oci} = values} ->
-              config :arbor_shell,
-                validation_runtime_kind: :oci,
-                linux_dependency_baseline: values.linux_dependency_baseline,
-                oci_image_policy: values.oci_image_policy,
-                apple_container_unit_journal_path: values.apple_container_unit_journal_path
-
-            {:ok, %{kind: :apple} = values} ->
-              config :arbor_shell,
-                validation_runtime_kind: :apple,
-                apple_container: values.apple_container,
-                linux_dependency_baseline: values.linux_dependency_baseline,
-                apple_container_image_policy: values.apple_container_image_policy,
-                apple_container_unit_journal_path: values.apple_container_unit_journal_path
+            {:ok, values} ->
+              apply_validation_runtime.(validation_path, :root_owned, values)
 
             {:error, _reason} ->
               raise "invalid ARBOR_VALIDATION_RUNTIME_CONFIG_PATH configuration"
@@ -196,12 +195,7 @@ if config_env() != :test do
     is_binary(apple_path) and apple_path != "" ->
       case Arbor.Shell.RuntimeConfigLoader.load(apple_path) do
         {:ok, values} ->
-          config :arbor_shell,
-            validation_runtime_kind: :apple,
-            apple_container: values.apple_container,
-            linux_dependency_baseline: values.linux_dependency_baseline,
-            apple_container_image_policy: values.apple_container_image_policy,
-            apple_container_unit_journal_path: values.apple_container_unit_journal_path
+          apply_validation_runtime.(apple_path, :root_owned, values)
 
         {:error, _reason} ->
           raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration"
@@ -214,20 +208,8 @@ if config_env() != :test do
       case File.lstat(default_path) do
         {:ok, %File.Stat{type: :regular}} ->
           case Arbor.Shell.RuntimeConfigLoader.load_operator_owned(default_path) do
-            {:ok, %{kind: :oci} = values} ->
-              config :arbor_shell,
-                validation_runtime_kind: :oci,
-                linux_dependency_baseline: values.linux_dependency_baseline,
-                oci_image_policy: values.oci_image_policy,
-                apple_container_unit_journal_path: values.apple_container_unit_journal_path
-
-            {:ok, %{kind: :apple} = values} ->
-              config :arbor_shell,
-                validation_runtime_kind: :apple,
-                apple_container: values.apple_container,
-                linux_dependency_baseline: values.linux_dependency_baseline,
-                apple_container_image_policy: values.apple_container_image_policy,
-                apple_container_unit_journal_path: values.apple_container_unit_journal_path
+            {:ok, values} ->
+              apply_validation_runtime.(default_path, :operator_owned, values)
 
             {:error, _reason} ->
               raise "invalid validation-runtime configuration"

@@ -11,7 +11,8 @@ defmodule Arbor.Shell.OciUnitWorker do
   # attempted. Owned by OciExecutor via execute_spawn_capable/3. Reuses the
   # Apple unit ownership tree (journal, drain coordinator, PortSession runtime,
   # names) so cancel/crash/prep_stop still converge; resource_type stays the
-  # existing journal identity.
+  # existing journal identity. Accepted tech debt (decision 10 preferred a
+  # runtime-neutral identity; rename is deferred — do not rediscover as a bug).
   #
   # Terminal publication is two-stage: hold a bounded terminal, call the stored
   # production AppleContainerUnitJournal.complete/3 with the exact journal

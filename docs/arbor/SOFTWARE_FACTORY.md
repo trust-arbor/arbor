@@ -126,7 +126,7 @@ Follow this install literally on a native-arch Linux host. Written 2026-08-26.
 Debian base once:
 
 ```
-podman pull debian:bookworm-slim
+podman pull debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 ```
 
 **Build and activate**

@@ -3,10 +3,10 @@ defmodule Arbor.Shell.ValidationRuntime do
   Boot-pinned dispatcher for spawn-capable validation runtimes.
 
   Implementations own probe/execute/status. Production start pins Apple
-  Container unless `Config.validation_runtime_kind/0` is `:oci`. Retired
-  Mix-set keys cannot select a backend. Checkout returns the pinned
-  module; `execute/3` runs in the caller so a Mix unit cannot occupy the
-  authority GenServer.
+  Container unless the boot-pinned operator document admits `:oci`.
+  Retired Mix-set keys and a bare Application-env kind atom cannot select
+  a backend. Checkout returns the pinned module; `execute/3` runs in the
+  caller so a Mix unit cannot occupy the authority GenServer.
   """
 
   alias Arbor.Shell.ValidationRuntime.Authority

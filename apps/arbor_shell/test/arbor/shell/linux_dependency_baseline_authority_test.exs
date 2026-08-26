@@ -275,6 +275,34 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       assert Authority.public_status(pid)["state"] == "pinned"
     end
 
+    test "security regression: Application env kind cannot select operator-owned pin family" do
+      put_valid_config()
+      previous_kind = Application.get_env(@app, :validation_runtime_kind)
+      previous_path = Application.get_env(@app, :validation_runtime_config_path)
+      previous_family = Application.get_env(@app, :validation_runtime_pin_family)
+
+      Application.put_env(@app, :validation_runtime_kind, :oci)
+      Application.delete_env(@app, :validation_runtime_config_path)
+      Application.delete_env(@app, :validation_runtime_pin_family)
+
+      on_exit(fn ->
+        restore_named_env(:validation_runtime_kind, previous_kind)
+        restore_named_env(:validation_runtime_config_path, previous_path)
+        restore_named_env(:validation_runtime_pin_family, previous_family)
+      end)
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath
+        )
+
+      assert Process.alive?(pid)
+      assert FakeSource.last_pin_family() == :root_owned
+      assert Authority.public_status(pid)["state"] == "pinned"
+    end
+
     test "missing config stays unavailable and seals no-repin across restart" do
       boot_epoch = make_ref()
       Application.delete_env(@app, @config_key)
@@ -1127,6 +1155,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
   defp restore_env(nil), do: Application.delete_env(@app, @config_key)
   defp restore_env(value), do: Application.put_env(@app, @config_key, value)
+
+  defp restore_named_env(key, nil), do: Application.delete_env(@app, key)
+  defp restore_named_env(key, value), do: Application.put_env(@app, key, value)
 
   defp unique_name do
     :"linux_dep_baseline_authority_#{System.unique_integer([:positive])}"

@@ -12,8 +12,14 @@ defmodule Arbor.Shell.OciPodmanLiveTest do
 
   @moduletag :podman
 
-  if not File.regular?("/usr/bin/podman") do
-    @moduletag skip: "podman missing at /usr/bin/podman"
+  @podman_path "/usr/bin/podman"
+  @podman_skip_reason "podman missing at #{@podman_path}"
+
+  if not File.regular?(@podman_path) do
+    @moduletag skip: @podman_skip_reason
+    # ExUnit prints skip reasons only under --trace; emit so a plain run
+    # cannot look silently green.
+    IO.puts(:stderr, "[arbor_shell] skipping OciPodmanLiveTest: #{@podman_skip_reason}")
   end
 
   test "resolves the distro podman executable" do

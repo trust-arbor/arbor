@@ -178,8 +178,14 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     configure_legacy_backend!(EnvSelectedRuntime, root)
 
     previous = Application.get_env(:arbor_shell, :validation_runtime)
+    previous_kind = Application.get_env(:arbor_shell, :validation_runtime_kind)
     Application.put_env(:arbor_shell, :validation_runtime, EnvSelectedRuntime)
-    on_exit(fn -> restore(:validation_runtime, previous) end)
+    Application.put_env(:arbor_shell, :validation_runtime_kind, :oci)
+
+    on_exit(fn ->
+      restore(:validation_runtime, previous)
+      restore(:validation_runtime_kind, previous_kind)
+    end)
 
     assert @relative_preflight ==
              Shell.execute_spawn_capable("mix", ["compile"], cwd: root)
