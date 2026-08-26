@@ -33,7 +33,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     on_exit(fn -> if started_distributed, do: Node.stop() end)
 
     peer_name = String.to_atom("replay_foreign_#{System.unique_integer([:positive])}")
-    {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
+    {:ok, peer, peer_node} = start_peer(peer_name)
     on_exit(fn -> safely_stop_peer(peer) end)
 
     assert peer_node in Node.list()
@@ -63,7 +63,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     on_exit(fn -> if started_distributed, do: Node.stop() end)
 
     peer_name = String.to_atom("replay_wedged_#{System.unique_integer([:positive])}")
-    {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
+    {:ok, peer, peer_node} = start_peer(peer_name)
 
     on_exit(fn ->
       try do
@@ -102,7 +102,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     on_exit(fn -> if started_distributed, do: Node.stop() end)
 
     peer_name = String.to_atom("replay_race_#{System.unique_integer([:positive])}")
-    {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
+    {:ok, peer, peer_node} = start_peer(peer_name)
     on_exit(fn -> safely_stop_peer(peer) end)
 
     await_classification(peer_node, :foreign)
@@ -124,8 +124,7 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
 
     peer_name = String.to_atom("replay_hidden_#{System.unique_integer([:positive])}")
 
-    {:ok, peer, peer_node} =
-      :peer.start_link(%{name: peer_name, args: [~c"-hidden"]})
+    {:ok, peer, peer_node} = start_peer(peer_name, [~c"-hidden"])
 
     on_exit(fn -> safely_stop_peer(peer) end)
 
@@ -151,6 +150,30 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
     case System.cmd(epmd, ["-daemon"], stderr_to_stdout: true) do
       {_output, 0} -> :ok
       {output, code} -> flunk("epmd failed to start (#{code}): #{output}")
+    end
+  end
+
+  # Contained validation runs with `--network none`. In that namespace,
+  # :peer's distribution-backed control channel cannot complete its boot
+  # handshake against the container hostname. Keep lifecycle control on stdio,
+  # then connect explicitly so the tests still exercise real distribution.
+  defp start_peer(name, args \\ []) do
+    options = %{
+      name: name,
+      host: ~c"localhost",
+      connection: :standard_io,
+      args: args
+    }
+
+    with {:ok, peer, peer_node} <- :peer.start_link(options) do
+      case Node.connect(peer_node) do
+        true ->
+          {:ok, peer, peer_node}
+
+        other ->
+          safely_stop_peer(peer)
+          {:error, {:distribution_connection_failed, peer_node, other}}
+      end
     end
   end
 

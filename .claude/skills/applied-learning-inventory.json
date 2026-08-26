@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 692,
+  "entry_count": 693,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8540,8 +8540,21 @@
       "source_incident": "found 2026-08-26 when a 29,034-row RunJournal refresh took about 5.8 seconds and terminalized P1B-2A",
       "always_loaded": false,
       "content_sha256": "4e502a249c905aa32dc59d984c5ce94fca0586918cb198347b1e5e827128913b"
+    },
+    {
+      "source_ordinal": 693,
+      "source_kind": "post-migration",
+      "slug": "networkless-peer-tests-need-out-of-band-boot-control",
+      "title": "Networkless `:peer` tests need out-of-band boot control.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-networkless-peer-tests-need-out-of-band-boot-control",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 during P1B-2A contained validation",
+      "always_loaded": false,
+      "content_sha256": "123f93827a33282b893134343900a75e01a51d94267df76053987d4cd107c830"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 231
+  "post_migration_entry_count": 232
 }
