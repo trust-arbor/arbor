@@ -618,16 +618,11 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
     scenario = production_scenario!()
     fixture = Path.join(scenario.root, "fixtures/happy")
     hook = Path.join(fixture, ".git/hooks/post-checkout")
-    alternates = Path.join(fixture, ".git/objects/info/alternates")
-    alternate_repo = Path.join(scenario.root, "alternate-objects")
-    File.mkdir!(alternate_repo)
-    git!(alternate_repo, ["init", "--quiet"])
 
     File.write!(Path.join(fixture, ".git/info/exclude"), "ignored-secret\n")
     File.write!(Path.join(fixture, "ignored-secret"), "must not cross boundary\n")
     File.write!(hook, "#!/bin/sh\nexit 99\n")
     File.chmod!(hook, 0o755)
-    File.write!(alternates, Path.join(alternate_repo, ".git/objects") <> "\n")
     git!(fixture, ["config", "benchmark.untrusted", "present"])
 
     git!(fixture, [
@@ -658,6 +653,36 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
                         source_config?: false
                       }}
     end
+  end
+
+  test "security regression: source object alternates fail closed before executor observation" do
+    scenario = production_scenario!()
+    fixture = Path.join(scenario.root, "fixtures/happy")
+    alternate = Path.join(scenario.root, "other")
+    File.mkdir_p!(alternate)
+    git!(alternate, ["init", "--quiet"])
+    File.mkdir_p!(Path.join(fixture, ".git/objects/info"))
+
+    File.write!(
+      Path.join(fixture, ".git/objects/info/alternates"),
+      Path.join(alternate, ".git/objects") <> "\n"
+    )
+
+    install_leased_executors()
+    Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
+
+    assert {:ok, report} = run_production_scenario(scenario)
+
+    for executor <- ~w(legacy pipeline) do
+      result = row(report, executor)
+      assert result["terminal_status"] == "fixture_setup_failed"
+      assert result["terminal_reason"] == "source_object_alternates"
+    end
+
+    refute_receive {:fixture_repository_observed, _executor, _facts}
+
+    refute_receive {:production_executor_call, _path, _principal, _task, _context, _worktree,
+                    _artifact_root}
   end
 
   test "identical benchmark runs reuse released artifact leases" do
