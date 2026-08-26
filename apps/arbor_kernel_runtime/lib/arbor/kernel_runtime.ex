@@ -3,9 +3,11 @@ defmodule Arbor.KernelRuntime do
   Boundary owner for the active kernel runtime application.
 
   Runtime services remain in their stable public namespaces. This root owns
-  only the application callback namespace and declares the service
-  boundaries it composes plus the contracts it consumes. The public
-  safe-management surface is `Arbor.KernelRuntime.SafeManagementSurface`.
+  the application callback namespace and the shared provider-gate lifecycle
+  facade, `provider_gate_child_spec/2` and `start_provider_gate_supervisor/3`.
+  It also declares the service boundaries it composes plus the contracts it
+  consumes. The public safe-management surface is
+  `Arbor.KernelRuntime.SafeManagementSurface`.
   The VM-lifetime boot-profile snapshot is `boot_profile/0`.
   Bound Platform activation verification is `authorize_platform_activation/3`.
   """
