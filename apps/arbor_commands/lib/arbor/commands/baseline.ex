@@ -452,7 +452,12 @@ defmodule Arbor.Commands.Baseline do
   end
 
   defp persist(layout, document, source_tree, image_policy) do
-    with :ok <- mkdir_owner_only(layout.baseline_root),
+    # The collection dir (`$ARBOR_HOME/baseline`) is an ANCESTOR of everything
+    # the operator-owned pin walks; created by `mkdir_p` under a 002 umask it
+    # came out 775 and every pin failed with :untrusted_path even though the
+    # digest dir and tree were 0700/0400 (V7-4, 2026-08-26). Own it too.
+    with :ok <- mkdir_owner_only(Path.dirname(layout.baseline_root)),
+         :ok <- mkdir_owner_only(layout.baseline_root),
          :ok <- copy_tree(source_tree, layout.tree_dir),
          :ok <- write_mode_0400(layout.manifest_path, Jason.encode!(document)),
          :ok <-
