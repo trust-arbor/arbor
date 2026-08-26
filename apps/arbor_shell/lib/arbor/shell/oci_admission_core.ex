@@ -6,9 +6,11 @@ defmodule Arbor.Shell.OciAdmissionCore do
   compact receipt. Performs no IO. Does not call AppleContainerAdmissionCore
   (that core requires Apple control-plane bindings and vminit).
 
-  Policy may name a provisioning digest (`docker.io/arbor/validation@sha256:...`).
-  Execution identity is the inspect digest (`sha256:` + 64 lowercase hex) and
-  must equal that provisioning digest's sha256 component.
+  Policy may name a provisioning digest (`docker.io/arbor/validation@sha256:...`)
+  and, for locally built images, a local image id (`sha256:` + 64 hex). Inspect
+  Digest must equal that provisioning digest and `manifest_digest`. When
+  `image_id` is present, inspect Id must equal it and create argv uses that id
+  (Podman does not address local builds by manifest digest). Labels still bind.
   """
 
   @allowed_platforms MapSet.new(["linux/amd64", "linux/arm64"])
@@ -32,6 +34,7 @@ defmodule Arbor.Shell.OciAdmissionCore do
 
   @logical_policy_keys [
     :image,
+    :image_id,
     :manifest_digest,
     :labels,
     :mix_lock_digest,
@@ -78,13 +81,15 @@ defmodule Arbor.Shell.OciAdmissionCore do
            ),
          {:ok, execution_digest} <- fetch_execution_digest(inspect_map),
          :ok <- match_provisioning_digest(policy, execution_digest),
-         :ok <- match_inspect_labels(inspect_map, labels) do
+         :ok <- match_manifest_digest(policy, execution_digest),
+         :ok <- match_inspect_labels(inspect_map, labels),
+         {:ok, local_image} <- local_execution_image(policy, inspect_map, execution_digest) do
       {:ok,
        %{
          "kind" => "oci_validation_image",
          "driver" => "podman",
          "platform" => platform,
-         "execution_image" => execution_digest,
+         "execution_image" => local_image,
          "mix_lock_digest" => mix_lock_digest,
          "baseline_tree_digest" => baseline_tree_digest
        }}
@@ -259,6 +264,53 @@ defmodule Arbor.Shell.OciAdmissionCore do
 
       _other ->
         {:error, :invalid_policy_image}
+    end
+  end
+
+  defp match_manifest_digest(policy, execution_digest) do
+    case get_field(policy, :manifest_digest) do
+      nil ->
+        case get_field(policy, :image_id) do
+          nil -> :ok
+          _image_id -> {:error, :missing_manifest_digest}
+        end
+
+      digest when is_binary(digest) ->
+        if digest == execution_digest do
+          :ok
+        else
+          {:error, :manifest_digest_mismatch}
+        end
+
+      _other ->
+        {:error, :invalid_manifest_digest}
+    end
+  end
+
+  defp local_execution_image(policy, inspect_map, execution_digest) do
+    case get_field(policy, :image_id) do
+      nil ->
+        {:ok, execution_digest}
+
+      image_id when is_binary(image_id) ->
+        if Regex.match?(@sha256_digest_re, image_id) do
+          with :ok <- match_inspect_id(inspect_map, image_id) do
+            {:ok, image_id}
+          end
+        else
+          {:error, :invalid_image_id}
+        end
+
+      _other ->
+        {:error, :invalid_image_id}
+    end
+  end
+
+  defp match_inspect_id(inspect_map, image_id) do
+    case Map.get(inspect_map, "Id") || Map.get(inspect_map, "id") do
+      ^image_id -> :ok
+      nil -> {:error, :missing_inspect_id}
+      _other -> {:error, :image_id_mismatch}
     end
   end
 

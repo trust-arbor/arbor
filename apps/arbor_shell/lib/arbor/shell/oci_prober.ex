@@ -321,16 +321,24 @@ defmodule Arbor.Shell.OciProber do
              :baseline_tree_digest_mismatch
            ),
          :ok <- require_guest_platform(projection) do
-      {:ok,
-       %{
-         image: image,
-         manifest_digest: policy_manifest_digest(policy, projection),
-         labels: labels,
-         mix_lock_digest: mix_lock,
-         baseline_tree_digest: tree,
-         toolchain: toolchain,
-         platform: projection.guest_platform
-       }}
+      policy_map = %{
+        image: image,
+        manifest_digest: policy_manifest_digest(policy, projection),
+        labels: labels,
+        mix_lock_digest: mix_lock,
+        baseline_tree_digest: tree,
+        toolchain: toolchain,
+        platform: projection.guest_platform
+      }
+
+      {:ok, maybe_put_image_id(policy_map, policy)}
+    end
+  end
+
+  defp maybe_put_image_id(policy_map, policy) do
+    case get_field(policy, :image_id) do
+      id when is_binary(id) and id != "" -> Map.put(policy_map, :image_id, id)
+      _other -> policy_map
     end
   end
 

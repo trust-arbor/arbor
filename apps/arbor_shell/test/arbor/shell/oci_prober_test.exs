@@ -12,6 +12,7 @@ defmodule Arbor.Shell.OciProberTest do
 
   @digest_hex String.duplicate("a", 64)
   @digest "sha256:#{@digest_hex}"
+  @image_id "sha256:" <> String.duplicate("1", 64)
   @lock String.duplicate("c", 64)
   @tree String.duplicate("d", 64)
   @podman "/usr/bin/podman"
@@ -176,6 +177,17 @@ defmodule Arbor.Shell.OciProberTest do
       assert run.args == ["image", "inspect", @digest]
     end
 
+    test "inspects a locally built image by id and still binds Digest and labels" do
+      FakeRuntime.set_policy(Map.put(valid_policy(), :image_id, @image_id))
+      FakeRuntime.set_inspect_json(inspect_json(%{"Id" => @image_id}))
+
+      assert {:ok, admission} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
+      assert admission["image"]["execution_reference"] == @image_id
+
+      [run] = FakeRuntime.runs()
+      assert run.args == ["image", "inspect", @image_id]
+    end
+
     test "maps arm64 hosts to linux/arm64" do
       FakeRuntime.set_arch("aarch64-unknown-linux-gnu")
       labels = Map.put(@labels, "org.arbor.validation.platform", "linux/arm64")
@@ -213,6 +225,21 @@ defmodule Arbor.Shell.OciProberTest do
 
       assert {:error, :untrusted_path} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
       assert FakeRuntime.runs() == []
+    end
+
+    @tag :security_regression
+    test "security regression: image_id cannot skip inspect digest mismatch" do
+      FakeRuntime.set_policy(Map.put(valid_policy(), :image_id, @image_id))
+
+      FakeRuntime.set_inspect_json(
+        inspect_json(%{
+          "Id" => @image_id,
+          "Digest" => "sha256:" <> String.duplicate("f", 64)
+        })
+      )
+
+      assert {:error, :execution_digest_mismatch} =
+               Prober.probe_for_test(5_000, runtime: FakeRuntime)
     end
   end
 
@@ -279,15 +306,19 @@ defmodule Arbor.Shell.OciProberTest do
     }
   end
 
-  defp inspect_json do
-    Jason.encode!([
-      %{
-        "Digest" => @digest,
-        "Id" => @digest,
-        "Architecture" => "amd64",
-        "Os" => "linux",
-        "Labels" => @labels
-      }
-    ])
+  defp inspect_json(overrides \\ %{}) do
+    resource =
+      Map.merge(
+        %{
+          "Digest" => @digest,
+          "Id" => @digest,
+          "Architecture" => "amd64",
+          "Os" => "linux",
+          "Labels" => @labels
+        },
+        overrides
+      )
+
+    Jason.encode!([resource])
   end
 end

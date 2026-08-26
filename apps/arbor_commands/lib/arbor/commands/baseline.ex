@@ -59,6 +59,7 @@ defmodule Arbor.Commands.Baseline do
          {:ok, image_policy} <-
            BuildCore.image_policy(%{
              image: image.image,
+             image_id: Map.get(image, :image_id),
              manifest_digest: image.manifest_digest,
              mix_lock_digest: mix_lock_digest,
              baseline_tree_digest: tree_digest,
@@ -344,17 +345,24 @@ defmodule Arbor.Commands.Baseline do
     manifest = Map.get(image, :manifest_digest) || Map.get(image, "manifest_digest")
     image_ref = Map.get(image, :image) || Map.get(image, "image")
 
+    image_id = Map.get(image, :image_id) || Map.get(image, "image_id")
+
     cond do
       is_binary(index) and is_binary(manifest) and is_binary(image_ref) ->
-        {:ok, %{index_digest: index, manifest_digest: manifest, image: image_ref}}
+        with_image_id(
+          %{index_digest: index, manifest_digest: manifest, image: image_ref},
+          image_id
+        )
 
       is_binary(index) and is_binary(manifest) ->
-        {:ok,
-         %{
-           index_digest: index,
-           manifest_digest: manifest,
-           image: @provisioning_image_prefix <> index
-         }}
+        with_image_id(
+          %{
+            index_digest: index,
+            manifest_digest: manifest,
+            image: @provisioning_image_prefix <> index
+          },
+          image_id
+        )
 
       true ->
         {:error, :invalid_image_inspect}
@@ -410,35 +418,57 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
+  defp with_image_id(image, image_id) when image_id in [nil, ""] do
+    {:ok, image}
+  end
+
+  defp with_image_id(image, "sha256:" <> hex = image_id)
+       when is_binary(hex) and byte_size(hex) == 64 do
+    if Regex.match?(~r/\A[0-9a-f]{64}\z/, hex) do
+      {:ok, Map.put(image, :image_id, image_id)}
+    else
+      {:error, :invalid_image_id}
+    end
+  end
+
+  defp with_image_id(_image, _image_id), do: {:error, :invalid_image_id}
+
   defp inspect_built_image(iidfile) do
     with {:ok, contents} <- File.read(iidfile),
          "sha256:" <> hex = image_id when byte_size(hex) == 64 <- String.trim(contents),
          {json, 0} <-
            System.cmd("/usr/bin/podman", ["image", "inspect", image_id], stderr_to_stdout: true) do
-      parse_inspect(json)
+      parse_inspect(json, image_id)
     else
       _other -> {:error, :image_inspect_failed}
     end
   end
 
-  defp parse_inspect(json) do
+  defp parse_inspect(json, image_id) do
     case Jason.decode(json) do
       {:ok, [resource | _rest]} when is_map(resource) ->
         digest = inspect_digest(resource)
+        inspect_id = Map.get(resource, "Id") || Map.get(resource, "id")
 
-        if is_binary(digest) do
-          {:ok,
-           %{
-             index_digest: digest,
-             manifest_digest: digest,
-             image: @provisioning_image_prefix <> digest
-           }}
-        else
-          {:error, :image_inspect_failed}
+        cond do
+          not is_binary(digest) ->
+            {:error, :image_inspect_failed}
+
+          inspect_id != image_id ->
+            {:error, :image_id_mismatch}
+
+          true ->
+            {:ok,
+             %{
+               index_digest: digest,
+               manifest_digest: digest,
+               image: @provisioning_image_prefix <> digest,
+               image_id: image_id
+             }}
         end
 
       {:ok, resource} when is_map(resource) ->
-        parse_inspect(Jason.encode!([resource]))
+        parse_inspect(Jason.encode!([resource]), image_id)
 
       _other ->
         {:error, :image_inspect_failed}

@@ -142,15 +142,31 @@ defmodule Arbor.Shell.OciProbeCore do
          {:ok, labels} <- fetch_labels(resource),
          {:ok, architecture} <- fetch_inspect_architecture(resource),
          {:ok, os} <- fetch_inspect_os(resource) do
-      {:ok,
-       %{
-         "Digest" => digest,
-         "Labels" => labels,
-         "Architecture" => architecture,
-         "Os" => os
-       }}
+      inspect_map = %{
+        "Digest" => digest,
+        "Labels" => labels,
+        "Architecture" => architecture,
+        "Os" => os
+      }
+
+      {:ok, put_optional_id(inspect_map, resource)}
     end
   end
+
+  defp put_optional_id(inspect_map, resource) do
+    id = json_get(resource, "Id") || json_get(resource, "id")
+
+    case admit_optional_sha256(id) do
+      {:ok, id} -> Map.put(inspect_map, "Id", id)
+      :skip -> inspect_map
+    end
+  end
+
+  defp admit_optional_sha256(value) when is_binary(value) do
+    if Regex.match?(@digest_re, value), do: {:ok, value}, else: :skip
+  end
+
+  defp admit_optional_sha256(_value), do: :skip
 
   defp unwrap_inspect_resource(resource) when is_map(resource), do: {:ok, resource}
 

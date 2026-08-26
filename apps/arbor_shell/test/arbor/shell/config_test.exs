@@ -730,6 +730,42 @@ defmodule Arbor.Shell.ConfigTest do
       assert {:ok, policy} = Config.oci_image_policy()
       assert policy.platform == "linux/amd64"
       refute Map.has_key?(policy, :vminit_image)
+      refute Map.has_key?(policy, :image_id)
+    end
+
+    test "accepts an optional sha256 image_id" do
+      image_id = "sha256:" <> String.duplicate("1", 64)
+
+      Application.put_env(@app, @oci_image_key, %{
+        "image" => "docker.io/arbor/validation@sha256:#{@index_hex}",
+        "image_id" => image_id,
+        "manifest_digest" => "sha256:#{@manifest_hex}",
+        "env" => ["MIX_HOME=/usr/local/.mix"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => @mix_lock_hex,
+        "baseline_tree_digest" => @tree_hex,
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      })
+
+      assert {:ok, policy} = Config.oci_image_policy()
+      assert policy.image_id == image_id
+    end
+
+    test "rejects a non-digest image_id" do
+      Application.put_env(@app, @oci_image_key, %{
+        "image" => "docker.io/arbor/validation@sha256:#{@index_hex}",
+        "image_id" => "arbor/validation:latest",
+        "manifest_digest" => "sha256:#{@manifest_hex}",
+        "env" => [],
+        "labels" => %{},
+        "mix_lock_digest" => @mix_lock_hex,
+        "baseline_tree_digest" => @tree_hex,
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      })
+
+      assert {:error, :invalid_image_id} = Config.oci_image_policy()
     end
 
     test "rejects vminit keys and unsupported platforms" do

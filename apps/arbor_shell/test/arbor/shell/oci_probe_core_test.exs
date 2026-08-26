@@ -71,9 +71,10 @@ defmodule Arbor.Shell.OciProbeCoreTest do
   end
 
   describe "inspect projection" do
-    test "projects Digest, Labels, Architecture, and Os" do
+    test "projects Digest, Id, Labels, Architecture, and Os" do
       assert {:ok, projection} = Core.project(valid_input())
       assert projection.inspect["Digest"] == @digest
+      assert projection.inspect["Id"] == @id
       assert projection.inspect["Labels"] == @labels
       assert projection.inspect["Architecture"] == "amd64"
       assert projection.inspect["Os"] == "linux"

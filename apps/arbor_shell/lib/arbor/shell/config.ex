@@ -44,6 +44,7 @@ defmodule Arbor.Shell.Config do
 
   @logical_oci_image_policy_keys [
     :image,
+    :image_id,
     :manifest_digest,
     :env,
     :labels,
@@ -52,6 +53,7 @@ defmodule Arbor.Shell.Config do
     :toolchain,
     :platform
   ]
+  @sha256_digest_re ~r/\Asha256:[0-9a-f]{64}\z/
   @allowed_oci_image_policy_keys MapSet.new(
                                    @logical_oci_image_policy_keys ++
                                      Enum.map(@logical_oci_image_policy_keys, &Atom.to_string/1)
@@ -172,14 +174,15 @@ defmodule Arbor.Shell.Config do
           | :validation_runtime_pin_family_malformed
 
   @type oci_image_policy :: %{
-          image: String.t(),
-          manifest_digest: String.t(),
-          env: [String.t()],
-          labels: %{optional(String.t()) => String.t()},
-          mix_lock_digest: String.t(),
-          baseline_tree_digest: String.t(),
-          toolchain: %{erlang: String.t(), elixir: String.t()},
-          platform: String.t()
+          required(:image) => String.t(),
+          required(:manifest_digest) => String.t(),
+          required(:env) => [String.t()],
+          required(:labels) => %{optional(String.t()) => String.t()},
+          required(:mix_lock_digest) => String.t(),
+          required(:baseline_tree_digest) => String.t(),
+          required(:toolchain) => %{erlang: String.t(), elixir: String.t()},
+          required(:platform) => String.t(),
+          optional(:image_id) => String.t()
         }
 
   @type oci_image_policy_error ::
@@ -189,6 +192,7 @@ defmodule Arbor.Shell.Config do
           | :duplicate_oci_image_policy_config_key
           | :apple_only_policy_key
           | :missing_image
+          | :missing_image_id
           | :missing_manifest_digest
           | :missing_env
           | :missing_labels
@@ -197,6 +201,7 @@ defmodule Arbor.Shell.Config do
           | :missing_toolchain
           | :missing_platform
           | :invalid_image
+          | :invalid_image_id
           | :invalid_manifest_digest
           | :invalid_env
           | :invalid_labels
@@ -734,6 +739,7 @@ defmodule Arbor.Shell.Config do
           case key do
             atom when is_atom(atom) -> atom
             "image" -> :image
+            "image_id" -> :image_id
             "manifest_digest" -> :manifest_digest
             "env" -> :env
             "labels" -> :labels
@@ -781,18 +787,40 @@ defmodule Arbor.Shell.Config do
              :invalid_baseline_tree_digest
            ),
          {:ok, toolchain} <- required_toolchain(acc),
-         {:ok, platform} <- required_oci_platform(acc) do
-      {:ok,
-       %{
-         image: image,
-         manifest_digest: manifest_digest,
-         env: env,
-         labels: labels,
-         mix_lock_digest: mix_lock_digest,
-         baseline_tree_digest: baseline_tree_digest,
-         toolchain: toolchain,
-         platform: platform
-       }}
+         {:ok, platform} <- required_oci_platform(acc),
+         {:ok, image_id} <- optional_oci_image_id(acc) do
+      policy = %{
+        image: image,
+        manifest_digest: manifest_digest,
+        env: env,
+        labels: labels,
+        mix_lock_digest: mix_lock_digest,
+        baseline_tree_digest: baseline_tree_digest,
+        toolchain: toolchain,
+        platform: platform
+      }
+
+      {:ok, if(is_binary(image_id), do: Map.put(policy, :image_id, image_id), else: policy)}
+    end
+  end
+
+  defp optional_oci_image_id(acc) do
+    case Map.fetch(acc, :image_id) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, _value} ->
+        case required_bounded_string(acc, :image_id, :missing_image_id, :invalid_image_id) do
+          {:ok, id} ->
+            if Regex.match?(@sha256_digest_re, id) do
+              {:ok, id}
+            else
+              {:error, :invalid_image_id}
+            end
+
+          error ->
+            error
+        end
     end
   end
 

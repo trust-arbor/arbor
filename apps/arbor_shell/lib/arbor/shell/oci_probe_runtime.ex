@@ -140,22 +140,35 @@ defmodule Arbor.Shell.OciProbeRuntime do
   @doc false
   @spec execution_digest(map()) :: {:ok, String.t()} | {:error, term()}
   def execution_digest(policy) when is_map(policy) do
-    case policy_image(policy) do
-      image when is_binary(image) ->
-        cond do
-          Regex.match?(@sha256_digest_re, image) ->
-            {:ok, image}
-
-          match = Regex.run(~r/@sha256:([0-9a-f]{64})\z/, image) ->
-            [_, hex] = match
-            {:ok, "sha256:" <> hex}
-
-          true ->
-            {:error, :not_digest_execution_image}
+    # Inspect/create reference: local image id when recorded, else the
+    # digest extracted from the provisioning image. Podman does not address
+    # locally built images by manifest digest (V7-5).
+    case policy_image_id(policy) do
+      id when is_binary(id) ->
+        if Regex.match?(@sha256_digest_re, id) do
+          {:ok, id}
+        else
+          {:error, :invalid_image_id}
         end
 
-      _other ->
-        {:error, :missing_policy_image}
+      _missing ->
+        case policy_image(policy) do
+          image when is_binary(image) ->
+            cond do
+              Regex.match?(@sha256_digest_re, image) ->
+                {:ok, image}
+
+              match = Regex.run(~r/@sha256:([0-9a-f]{64})\z/, image) ->
+                [_, hex] = match
+                {:ok, "sha256:" <> hex}
+
+              true ->
+                {:error, :not_digest_execution_image}
+            end
+
+          _other ->
+            {:error, :missing_policy_image}
+        end
     end
   end
 
@@ -173,6 +186,13 @@ defmodule Arbor.Shell.OciProbeRuntime do
     case Map.fetch(policy, :image) do
       {:ok, value} -> value
       :error -> Map.get(policy, "image")
+    end
+  end
+
+  defp policy_image_id(policy) do
+    case Map.fetch(policy, :image_id) do
+      {:ok, value} -> value
+      :error -> Map.get(policy, "image_id")
     end
   end
 

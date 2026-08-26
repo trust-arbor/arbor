@@ -45,6 +45,33 @@ defmodule Arbor.Commands.BaselineCoreTest do
              })
   end
 
+  test "image_policy records an optional local image id" do
+    image = "docker.io/arbor/validation@sha256:#{@digest}"
+    image_id = "sha256:" <> String.duplicate("12", 32)
+    labels = %{"org.arbor.validation.schema" => "1"}
+
+    fields = %{
+      image: image,
+      manifest_digest: "sha256:#{@digest}",
+      mix_lock_digest: @digest,
+      baseline_tree_digest: @digest,
+      erlang: "28.4.1",
+      elixir: "1.19.5-otp-28",
+      platform: "linux/amd64",
+      env: [],
+      labels: labels
+    }
+
+    assert {:ok, policy} = BuildCore.image_policy(fields)
+    refute Map.has_key?(policy, "image_id")
+
+    assert {:ok, with_id} = BuildCore.image_policy(Map.put(fields, :image_id, image_id))
+    assert with_id["image_id"] == image_id
+
+    assert {:error, :invalid_image_id} =
+             BuildCore.image_policy(Map.put(fields, :image_id, "arbor/validation:latest"))
+  end
+
   test "status projection is JSON-clean and redacts failed digests" do
     report =
       StatusCore.project(%{

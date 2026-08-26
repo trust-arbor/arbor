@@ -114,17 +114,18 @@ defmodule Arbor.Commands.Baseline.BuildCore do
          :ok <- require_platform(platform),
          {:ok, env} <- fetch_env(fields),
          {:ok, labels} <- fetch_labels(fields) do
-      {:ok,
-       %{
-         "image" => image,
-         "manifest_digest" => manifest_digest,
-         "env" => env,
-         "labels" => labels,
-         "mix_lock_digest" => mix_lock_digest,
-         "baseline_tree_digest" => baseline_tree_digest,
-         "toolchain" => %{"erlang" => erlang, "elixir" => elixir},
-         "platform" => platform
-       }}
+      policy = %{
+        "image" => image,
+        "manifest_digest" => manifest_digest,
+        "env" => env,
+        "labels" => labels,
+        "mix_lock_digest" => mix_lock_digest,
+        "baseline_tree_digest" => baseline_tree_digest,
+        "toolchain" => %{"erlang" => erlang, "elixir" => elixir},
+        "platform" => platform
+      }
+
+      put_optional_image_id(policy, Map.get(fields, :image_id))
     end
   end
 
@@ -166,6 +167,20 @@ defmodule Arbor.Commands.Baseline.BuildCore do
       _other -> {:error, :invalid_image_policy}
     end
   end
+
+  defp put_optional_image_id(policy, image_id) when image_id in [nil, ""] do
+    {:ok, policy}
+  end
+
+  defp put_optional_image_id(policy, image_id) when is_binary(image_id) do
+    if Regex.match?(@digest_re, image_id) do
+      {:ok, Map.put(policy, "image_id", image_id)}
+    else
+      {:error, :invalid_image_id}
+    end
+  end
+
+  defp put_optional_image_id(_policy, _image_id), do: {:error, :invalid_image_id}
 
   defp image_digest_part("docker.io/arbor/validation@sha256:" <> hex = image) do
     if Regex.match?(@hex64_re, hex), do: image, else: ""

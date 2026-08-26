@@ -8,6 +8,7 @@ defmodule Arbor.Shell.OciAdmissionCoreTest do
 
   @digest String.duplicate("b", 64)
   @execution "sha256:#{@digest}"
+  @image_id "sha256:" <> String.duplicate("1", 64)
   @lock String.duplicate("c", 64)
   @tree String.duplicate("d", 64)
 
@@ -47,6 +48,14 @@ defmodule Arbor.Shell.OciAdmissionCoreTest do
     assert receipt["driver"] == "podman"
   end
 
+  test "admits a local image id when inspect Digest and labels still match" do
+    policy = Map.put(@policy, :image_id, @image_id)
+    evidence = put_in(@evidence, [:inspect, "Id"], @image_id)
+
+    assert {:ok, receipt} = OciAdmissionCore.new(%{policy: policy, evidence: evidence})
+    assert receipt["execution_image"] == @image_id
+  end
+
   test "security regression: label digest mismatch is rejected" do
     labels = Map.put(@labels, "org.arbor.validation.mix-lock-sha256", String.duplicate("e", 64))
     policy = Map.put(@policy, :labels, labels)
@@ -82,5 +91,39 @@ defmodule Arbor.Shell.OciAdmissionCoreTest do
 
     assert {:error, :inspect_label_mismatch} =
              OciAdmissionCore.new(%{policy: @policy, evidence: evidence})
+  end
+
+  test "security regression: image_id cannot skip inspect digest mismatch" do
+    policy = Map.put(@policy, :image_id, @image_id)
+
+    evidence =
+      @evidence
+      |> put_in([:inspect, "Id"], @image_id)
+      |> put_in([:inspect, "Digest"], "sha256:" <> String.duplicate("f", 64))
+
+    assert {:error, :execution_digest_mismatch} =
+             OciAdmissionCore.new(%{policy: policy, evidence: evidence})
+  end
+
+  test "security regression: image_id mismatch is rejected" do
+    policy = Map.put(@policy, :image_id, @image_id)
+    evidence = put_in(@evidence, [:inspect, "Id"], "sha256:" <> String.duplicate("2", 64))
+
+    assert {:error, :image_id_mismatch} =
+             OciAdmissionCore.new(%{policy: policy, evidence: evidence})
+  end
+
+  test "security regression: image_id without inspect Id is rejected" do
+    policy = Map.put(@policy, :image_id, @image_id)
+
+    assert {:error, :missing_inspect_id} =
+             OciAdmissionCore.new(%{policy: policy, evidence: @evidence})
+  end
+
+  test "security regression: inspect Digest must match policy manifest_digest" do
+    policy = Map.put(@policy, :manifest_digest, "sha256:" <> String.duplicate("f", 64))
+
+    assert {:error, :manifest_digest_mismatch} =
+             OciAdmissionCore.new(%{policy: policy, evidence: @evidence})
   end
 end

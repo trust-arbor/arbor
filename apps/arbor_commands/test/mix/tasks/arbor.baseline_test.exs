@@ -124,6 +124,8 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     File.write!(active, "do-not-touch")
     File.chmod!(active, 0o400)
 
+    image_id = "sha256:" <> String.duplicate("1", 64)
+
     image_build = fn request ->
       send(self(), {:image_build, request})
 
@@ -131,7 +133,8 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
        %{
          index_digest: @index,
          manifest_digest: @manifest,
-         image: "docker.io/arbor/validation@" <> @index
+         image: "docker.io/arbor/validation@" <> @index,
+         image_id: image_id
        }}
     end
 
@@ -156,6 +159,15 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert File.exists?(report["baseline_root"])
     assert_received {:image_build, request}
     assert request.platform == "linux/amd64"
+
+    baseline_json =
+      report["baseline_root"]
+      |> Path.join("baseline.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert baseline_json["image_policy"]["image_id"] == image_id
+    assert baseline_json["image_policy"]["manifest_digest"] == @manifest
   end
 
   test "status uses the Shell facade and never names Authority modules" do
