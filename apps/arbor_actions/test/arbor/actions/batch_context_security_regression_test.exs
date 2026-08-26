@@ -8,6 +8,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
   @orchestrator_resource "arbor://orchestrator/execute"
   @shell_capability "arbor://shell/exec/**"
   @shell_rule "arbor://shell/exec"
+  @trust_read_resource "arbor://trust/read"
 
   @moduletag :fast
   @moduletag :security_regression
@@ -32,7 +33,8 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
               "arbor://fs/write" => :auto,
               @orchestrator_resource => :ask,
               @parse_resource => :auto,
-              @shell_rule => :auto
+              @shell_rule => :auto,
+              @trust_read_resource => :ask
             })
       })
 
@@ -40,7 +42,8 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
           "arbor://fs/write#{workspace}/**",
           @orchestrator_resource,
           @parse_resource,
-          @shell_capability
+          @shell_capability,
+          @trust_read_resource
         ] do
       assert {:ok, _capability} =
                Arbor.Security.grant(
@@ -81,6 +84,11 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
 
   test "security regression: batch cannot replay parent approved invocation for selected children",
        %{principal: principal} do
+    child_action = Arbor.Actions.Trust.ListPresets
+
+    assert child_action in Arbor.Actions.exposed_actions()
+    refute Arbor.Actions.pipeline_internal_action?(child_action)
+
     previous_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
     previous_escalation = Application.get_env(:arbor_security, :consensus_escalation_enabled)
 
@@ -93,15 +101,15 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
     end)
 
     approval = %{
-      request_id: "irq_parent_route_actions_once",
+      request_id: "irq_parent_trust_read_once",
       principal_id: principal,
-      resource_uri: @orchestrator_resource,
+      resource_uri: @trust_read_resource,
       decision: :approved
     }
 
     spec = %{
-      "type" => "session_exec_route_actions",
-      "params" => %{"agent_id" => principal, "actions" => []}
+      "type" => "trust_list_presets",
+      "params" => %{}
     }
 
     results =
@@ -110,7 +118,7 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
           key => approval,
           task_id: "task_audit_provenance",
           session_id: "session_audit_provenance",
-          node_id: "parent_route_node",
+          node_id: "parent_trust_read_node",
           approval_provenance: %{request_id: approval.request_id}
         }
 
