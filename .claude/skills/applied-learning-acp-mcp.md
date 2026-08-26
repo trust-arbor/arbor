@@ -927,9 +927,12 @@ compiler before dispatch so schema drift is caught before workspace or provider
 resources are acquired. Include nested policy bounds in that preflight: the
 current contract caps `rework.max_cycles` at `2`, so a remembered higher retry
 count fails admission before delegation begins. Treat the live constructor and
-compiler as authoritative rather than copying bounds into dispatch code (found
-2026-07-30 while preparing the OAuth model-catalog correction and reinforced
-2026-07-31 while dispatching the OAuth Device Code correction).
+compiler as authoritative rather than copying bounds into dispatch code. On a
+successful compile, read the `%Compilation{manifest: manifest}` field; a later
+`KeyError` from probing a nonexistent `compile_manifest` field is a diagnostic
+bug, not evidence that compilation failed (found 2026-07-30 while preparing the
+OAuth model-catalog correction, reinforced 2026-07-31 while dispatching the
+OAuth Device Code correction, and clarified 2026-08-26 during P1B-2 preflight).
 
 <!-- applied-learning: acp-receiver-idleness-is-not-worker-inactivity -->
 <a id="applied-learning-acp-receiver-idleness-is-not-worker-inactivity"></a>

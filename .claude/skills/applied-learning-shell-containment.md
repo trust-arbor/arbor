@@ -236,6 +236,10 @@ before disconnect; keep hard/inactivity recovery reply-first when the session mu
 <!-- applied-learning: a-contained-mix-guest-must-own-every-executable-tool-it-needs -->
 <a id="applied-learning-a-contained-mix-guest-must-own-every-executable-tool-it-needs"></a>
 **A contained Mix guest must own every executable tool it needs.** `AppleContainerPlanCore` reconstructs a closed guest environment, so a host `MIX_ARCHIVES` value does not cross the boundary. A materialized dependency tree alone is insufficient when Mix cannot load Hex/Rebar or a dependency falls back to native compilation/download. Put Hex, Rebar, Linux build tools and headers, and checksum-verified precompiled NIF archives in the immutable Linux image; expose only fixed guest `MIX_HOME`, `MIX_ARCHIVES`, and `ELIXIR_MAKE_CACHE_DIR` values; then prove an empty-build compile with networking disabled (found 2026-07-16/17 during Phase 6 cross-app dogfood).
+Manual admission smoke tests must project all three fixed environment values too:
+omitting `ELIXIR_MAKE_CACHE_DIR` makes an available precompiled NIF look absent
+and causes a misleading network fallback (clarified 2026-08-26 while refreshing
+the `ex_mcp 1.1.0` baseline).
 
 <!-- applied-learning: smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed -->
 <a id="applied-learning-smoke-test-a-disposable-copy-of-a-dependency-baseline-never-the-source-to-be-signed"></a>

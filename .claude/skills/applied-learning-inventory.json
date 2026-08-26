@@ -4742,8 +4742,8 @@
       "destination": ".claude/skills/applied-learning-shell-containment.md",
       "anchor": "applied-learning-a-contained-mix-guest-must-own-every-executable-tool-it-needs",
       "source_date": "2026-07-16",
-      "source_incident": "found 2026-07-16/17 during Phase 6 cross-app dogfood).",
-      "content_sha256": "85cb62fed5a2869a0300b850f51f17cdaa2998d1a04b8961f8fc154b7dfbbbb4",
+      "source_incident": "found 2026-07-16/17 during Phase 6 cross-app dogfood and clarified 2026-08-26 while refreshing the ex_mcp 1.1.0 baseline).",
+      "content_sha256": "4a7225754faae22b2315b8f1d566e5ef6764340e630ebc90e0345ac9f74fae2b",
       "always_loaded": false
     },
     {
@@ -7224,8 +7224,8 @@
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-use-current-coding-plan-output-keys-and-preflight-the-normalized-plan",
       "source_date": "2026-07-31",
-      "source_incident": "found 2026-07-30 while preparing the OAuth model-catalog correction and reinforced 2026-07-31 while dispatching the OAuth Device Code correction).",
-      "content_sha256": "da48f744ef3174046750521bedeedffde1867d2999079864de2e70231d170838",
+      "source_incident": "found 2026-07-30 while preparing the OAuth model-catalog correction, reinforced 2026-07-31 while dispatching the OAuth Device Code correction, and clarified 2026-08-26 during P1B-2 preflight).",
+      "content_sha256": "a94fe72121be5358c5cecd13a53a927c19b23daaee11a6f07f68add425f21bbe",
       "always_loaded": false
     },
     {
