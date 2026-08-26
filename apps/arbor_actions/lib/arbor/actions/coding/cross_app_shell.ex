@@ -778,15 +778,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                 deadline =
                   validation_test_deadline || monotonic_ms() + test_stage_timeout
 
-                run_tests_sequential(
-                  path,
-                  batches,
-                  batches,
-                  deadline,
-                  operation_timeout,
-                  resource,
-                  []
-                )
+                case Core.new_test_execution(batches, operation_timeout) do
+                  {:ok, execution} ->
+                    run_tests_sequential(path, execution, deadline, resource)
+
+                  {:error, reason} ->
+                    throw({:execution_error, {:invalid_test_execution, reason}})
+                end
 
               {:capacity_exceeded, check} ->
                 check
@@ -854,28 +852,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp validation_resource_opts(timeout, validation_deadline),
     do: [timeout: timeout, deadline_ms: validation_deadline]
 
-  defp run_tests_sequential(
-         worktree_path,
-         all_batches,
-         remaining_batches,
-         deadline,
-         operation_timeout,
-         resource,
-         acc
-       ) do
+  defp run_tests_sequential(worktree_path, execution, deadline, resource) do
     # Shared aggregate deadline checked before every child (including the first).
     remaining_ms = deadline - monotonic_ms()
 
-    case Core.next_test_step(remaining_ms, remaining_batches, operation_timeout) do
-      :complete ->
-        Core.aggregate_test_check(Enum.reverse(acc))
+    case Core.next_test_execution_step(execution, remaining_ms) do
+      {:complete, check} ->
+        check
 
-      {:timeout, _batch, _rest} ->
-        # Budget already exhausted — do not launch this or any later child.
-        # Preserve the exact unstarted suffix for the operator/CI handoff.
-        emit_runtime_unstarted_handoff(all_batches, remaining_batches, operation_timeout)
+      {:capacity, completed, interrupted, unstarted} ->
+        emit_runtime_handoff(
+          completed,
+          interrupted,
+          unstarted,
+          execution.operation_timeout
+        )
 
-      {:run, batch, budget_ms, rest} ->
+      {:run, attempt, budget_ms} ->
         mix_opts =
           [timeout: budget_ms]
           |> then(fn opts ->
@@ -883,119 +876,83 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           end)
 
         # Exact multi-file batch argv — never shell-joined strings or directories.
-        case run_mix(worktree_path, ["test", "--" | batch.paths], mix_opts) do
+        case run_mix(worktree_path, ["test", "--" | attempt.paths], mix_opts) do
           {:ok, result} ->
             # Re-check shared deadline immediately after every child, including the final one.
             remaining_after = deadline - monotonic_ms()
             runner_timeout = Core.runner_timed_out?(result)
             feedback = Core.feedback_from_result(result)
 
-            aggregate_interrupted? =
-              Core.aggregate_deadline_interrupted?(
-                runner_timeout,
-                remaining_after,
-                budget_ms,
-                operation_timeout
-              )
+            case Core.record_test_execution_attempt(
+                   execution,
+                   attempt,
+                   feedback,
+                   runner_timeout,
+                   budget_ms,
+                   remaining_after
+                 ) do
+              {:continue, next_execution} ->
+                run_tests_sequential(worktree_path, next_execution, deadline, resource)
 
-            # Aggregate-deadline interruption of a launched child is a capacity
-            # handoff (compact interrupted descriptor). Ordinary child timeout
-            # (including equal ceilings) and nonzero failures remain validation
-            # failures. A passing child that consumes residual is completed;
-            # only a remaining unstarted suffix is handed off.
-            cond do
-              aggregate_interrupted? ->
-                completed_batches = Enum.take(all_batches, batch.index - 1)
+              {:terminal, check} ->
+                check
 
-                case Core.capacity_handoff(
-                       :runtime,
-                       0,
-                       operation_timeout,
-                       completed_batches,
-                       batch,
-                       rest
-                     ) do
-                  {:ok, check} ->
-                    check
+              {:capacity, completed, interrupted, unstarted} ->
+                emit_runtime_handoff(
+                  completed,
+                  interrupted,
+                  unstarted,
+                  execution.operation_timeout
+                )
 
-                  {:error, reason} ->
-                    throw({:execution_error, {:invalid_capacity_handoff, reason}})
-                end
-
-              true ->
-                # Ordinary runner timeout only (equal ceilings / residual still
-                # positive). A passing child that exhausts residual is completed:
-                # hand off remaining suffix, or succeed when it was the final batch.
-                timed_out = runner_timeout
-
-                app_result =
-                  Core.classify_app_test_result(batch.label, feedback, timed_out: timed_out)
-
-                if app_result.passed do
-                  if remaining_after <= 0 and rest != [] do
-                    completed_batches = Enum.take(all_batches, batch.index)
-
-                    case Core.capacity_handoff(
-                           :runtime,
-                           0,
-                           operation_timeout,
-                           completed_batches,
-                           nil,
-                           rest
-                         ) do
-                      {:ok, check} ->
-                        check
-
-                      {:error, reason} ->
-                        throw({:execution_error, {:invalid_capacity_handoff, reason}})
-                    end
-                  else
-                    run_tests_sequential(
-                      worktree_path,
-                      all_batches,
-                      rest,
-                      deadline,
-                      operation_timeout,
-                      resource,
-                      [app_result | acc]
-                    )
-                  end
-                else
-                  Core.aggregate_test_check(Enum.reverse([app_result | acc]))
-                end
+              {:error, reason} ->
+                throw({:execution_error, {:invalid_refinement_state, reason}})
             end
 
           {:error, reason} ->
             remaining_after = deadline - monotonic_ms()
 
-            if Core.prelaunch_probe_timeout_capacity?(reason, remaining_after) do
-              emit_runtime_unstarted_handoff(all_batches, [batch | rest], operation_timeout)
-            else
-              # Bound the error with the deterministic batch inventory label.
-              throw({:execution_error, {:test_execution_failed, batch.label, reason}})
+            case Core.record_test_execution_prelaunch_error(
+                   execution,
+                   reason,
+                   remaining_after
+                 ) do
+              {:capacity, completed, interrupted, unstarted} ->
+                emit_runtime_handoff(
+                  completed,
+                  interrupted,
+                  unstarted,
+                  execution.operation_timeout
+                )
+
+              {:execution_error, bounded_reason} ->
+                throw({:execution_error, bounded_reason})
+
+              {:error, invalid_reason} ->
+                throw({:execution_error, {:invalid_refinement_state, invalid_reason}})
             end
         end
 
       {:error, reason} ->
-        # Malformed step input must never silently complete as success.
+        # Malformed state must never silently complete as success.
         throw({:execution_error, {:invalid_test_step, reason}})
     end
   end
 
-  defp emit_runtime_unstarted_handoff(all_batches, remaining_batches, operation_timeout) do
-    [batch | _rest] = remaining_batches
-    completed_batches = Enum.take(all_batches, batch.index - 1)
-
+  defp emit_runtime_handoff(completed, interrupted, unstarted, operation_timeout) do
     case Core.capacity_handoff(
            :runtime,
            0,
            operation_timeout,
-           completed_batches,
-           nil,
-           remaining_batches
+           completed,
+           interrupted,
+           unstarted
          ) do
-      {:ok, check} -> check
-      {:error, reason} -> throw({:execution_error, {:invalid_capacity_handoff, reason}})
+      {:ok, check} ->
+        check
+
+      {:error, reason} ->
+        throw({:execution_error, {:invalid_capacity_handoff, reason}})
     end
   end
 

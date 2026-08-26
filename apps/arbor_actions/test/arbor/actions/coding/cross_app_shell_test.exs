@@ -76,6 +76,121 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _}
   end
 
+  test "timed-out multi-file batch refines in order before untouched suffix", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", 6)
+    assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
+    [left_paths, right_paths] = [Enum.take(original.paths, 3), Enum.drop(original.paths, 3)]
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == original.paths ->
+          {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
+
+        ["test", "--" | batch_paths] when batch_paths == left_paths ->
+          {:ok, %{exit_code: 0, stdout: "left pass", stderr: "", timed_out: false}}
+
+        ["test", "--" | batch_paths] when batch_paths == right_paths ->
+          {:ok, %{exit_code: 0, stdout: "right pass", stderr: "", timed_out: false}}
+
+        ["test", "--" | batch_paths] when batch_paths == suffix.paths ->
+          {:ok, %{exit_code: 0, stdout: "suffix pass", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+
+    assert check["passed"]
+    assert String.contains?(check["stdout_excerpt"], "cross_app_refinement")
+    assert String.contains?(check["stdout_excerpt"], "attempted_outputs_sha256=")
+    refute String.contains?(check["stdout_excerpt"], hd(paths))
+    assert {:ok, _} = Jason.encode(check)
+
+    assert_receive {:mix_invocation, ["test", "--" | root_paths], _opts}
+    assert root_paths == original.paths
+    assert_receive {:mix_invocation, ["test", "--" | ^left_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--" | ^right_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--" | suffix_paths], _opts}
+    assert suffix_paths == suffix.paths
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "refined non-timeout failure stops immediately without retry", %{worktree: worktree} do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", 5)
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    left_paths = Enum.take(original.paths, 3)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+
+      case args do
+        ["test", "--" | batch_paths] when batch_paths == original.paths ->
+          {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
+
+        ["test", "--" | batch_paths] when batch_paths == left_paths ->
+          {:ok, %{exit_code: 1, stdout: "child failed", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("must not retry after refined failure: #{inspect(other)}")
+      end
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+
+    refute check["passed"]
+    assert check["reason"] == "tests_failed"
+    assert_receive {:mix_invocation, ["test", "--" | root_paths]}
+    assert root_paths == original.paths
+    assert_receive {:mix_invocation, ["test", "--" | ^left_paths]}
+    refute_received {:mix_invocation, _}
+  end
+
+  test "capacity before first refined child interrupts only the immutable original", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", 6)
+    assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
+    {:ok, clock} = Agent.start_link(fn -> [0, 0, 1, 20_000] end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get_and_update(clock, fn
+        [value | rest] -> {value, rest}
+        [] -> {20_000, []}
+      end)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+      {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["completed_batch_count"] == 0
+    assert handoff["interrupted_batch"]["label"] == original.label
+    assert Enum.map(handoff["unstarted_batches"], & &1["label"]) == [suffix.label]
+    refute handoff["interrupted_batch"]["label"] =~ "refine-"
+    refute Jason.encode!(handoff) =~ "\"paths\""
+    assert_receive {:mix_invocation, ["test", "--" | root_paths]}
+    assert root_paths == original.paths
+    refute_received {:mix_invocation, _}
+  end
+
   test "stops after first failed batch and preserves earlier batch evidence", %{
     worktree: worktree
   } do
@@ -937,10 +1052,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _}
   end
 
-  test "process timeout on first batch stops and reports tests_timed_out", %{worktree: worktree} do
+  test "singleton process timeout stops and reports tests_timed_out", %{worktree: worktree} do
     parent = self()
-    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
-    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    paths = write_numbered_tests!(worktree, "alpha", 1)
+    assert {:ok, [batch1]} = Core.partition_test_batches(paths)
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, args})
@@ -969,9 +1084,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received]}
     assert received == batch1.paths
-    # Fail-fast: second batch never launches after first times out.
     refute_received {:mix_invocation, _}
-    assert batch2.index == 2
   end
 
   test "validation checks run compile, xref, MIX_ENV=test compile, then tests in order", %{

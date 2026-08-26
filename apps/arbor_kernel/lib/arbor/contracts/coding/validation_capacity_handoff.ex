@@ -72,12 +72,23 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
   @batch_fields [:index, :total, :count, :label, :inventory_sha256]
   # These bounds mirror CrossApp's closed maxima without introducing a
   # contracts -> actions dependency. With 2,000 files, 256 app test roots, and
-  # at most 20 files per batch, the worst distribution is 255 singleton roots
-  # plus 1,745 files in one root: 255 + ceil(1,745 / 20) = 343 batches.
+  # at most 5 files per current CrossApp batch, the worst distribution is 255
+  # singleton roots plus 1,745 files in one root:
+  # 255 + ceil(1,745 / 5) = 604 batches.
+  #
+  # Descriptor count remains at the historical 20-file ceiling so archived
+  # v1/v2 evidence and other existing contract consumers remain readable.
   @max_file_count 2_000
   @max_test_roots 256
-  @max_batch_files 20
-  @max_batch_count @max_test_roots + div(@max_file_count - @max_test_roots - 1, @max_batch_files)
+  @cross_app_max_batch_files 5
+  @max_descriptor_batch_files 20
+  @singleton_roots @max_test_roots - 1
+  @files_in_last_root @max_file_count - @singleton_roots
+  @last_root_batch_count div(
+                           @files_in_last_root + @cross_app_max_batch_files - 1,
+                           @cross_app_max_batch_files
+                         )
+  @max_batch_count @singleton_roots + @last_root_batch_count
   @max_operation_timeout_ms 1_200_000
   @max_budget_ms @max_batch_count * @max_operation_timeout_ms
   @max_label_bytes 256
@@ -656,7 +667,8 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
          :ok <- require_all_fields(attrs, @batch_fields),
          {:ok, index} <- bounded_positive_integer(attrs.index, :index, @max_batch_count),
          {:ok, total} <- bounded_positive_integer(attrs.total, :total, @max_batch_count),
-         {:ok, count} <- bounded_positive_integer(attrs.count, :count, @max_batch_files),
+         {:ok, count} <-
+           bounded_positive_integer(attrs.count, :count, @max_descriptor_batch_files),
          {:ok, label} <- bounded_text(attrs.label, :label),
          {:ok, inventory_sha256} <- digest(attrs.inventory_sha256, :inventory_sha256),
          true <- label == expected_label(index, total, count, inventory_sha256) do

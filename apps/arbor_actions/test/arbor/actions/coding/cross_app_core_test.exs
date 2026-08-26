@@ -509,6 +509,377 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(-3, [first, second], 10_000)
   end
 
+  test "timeout refinement is deterministic, ordered, and completes each original once" do
+    paths =
+      for i <- 1..6 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution(batches, 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+    assert root.paths == original.paths
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(refined, 10_000)
+    assert left.paths == Enum.take(original.paths, 3)
+    assert left.count == 3
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               refined,
+               left,
+               test_feedback(0, "left pass"),
+               false,
+               10_000,
+               9_000
+             )
+
+    assert {:run, right, 9_000} = Core.next_test_execution_step(after_left, 9_000)
+    assert right.paths == Enum.drop(original.paths, 3)
+    assert right.count == 2
+
+    assert {:continue, next_original} =
+             Core.record_test_execution_attempt(
+               after_left,
+               right,
+               test_feedback(0, "right pass"),
+               false,
+               9_000,
+               8_000
+             )
+
+    assert next_original.completed_originals == [original]
+
+    assert {:run, suffix_attempt, 8_000} =
+             Core.next_test_execution_step(next_original, 8_000)
+
+    assert suffix_attempt.paths == suffix.paths
+
+    assert {:continue, complete} =
+             Core.record_test_execution_attempt(
+               next_original,
+               suffix_attempt,
+               test_feedback(0, "suffix pass"),
+               false,
+               8_000,
+               7_000
+             )
+
+    assert {:complete, check} = Core.next_test_execution_step(complete, 7_000)
+    assert check["passed"]
+    assert check["reason"] == nil
+    assert String.contains?(check["stdout_excerpt"], "cross_app_refinement")
+    assert String.contains?(check["stdout_excerpt"], "attempted_outputs_sha256=")
+    assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    refute String.contains?(check["stdout_excerpt"], "apps/alpha/test/f1_test.exs")
+
+    expected_attempt_digest =
+      [
+        [
+          original.label,
+          root.label,
+          1,
+          root.count,
+          root.inventory_sha256,
+          true,
+          nil,
+          test_feedback(nil, "root timeout")["stdout_sha256"],
+          test_feedback(nil, "root timeout")["stderr_sha256"]
+        ],
+        [
+          original.label,
+          left.label,
+          2,
+          left.count,
+          left.inventory_sha256,
+          false,
+          0,
+          test_feedback(0, "left pass")["stdout_sha256"],
+          test_feedback(0, "left pass")["stderr_sha256"]
+        ],
+        [
+          original.label,
+          right.label,
+          3,
+          right.count,
+          right.inventory_sha256,
+          false,
+          0,
+          test_feedback(0, "right pass")["stdout_sha256"],
+          test_feedback(0, "right pass")["stderr_sha256"]
+        ]
+      ]
+      |> Jason.encode!()
+      |> then(&:crypto.hash(:sha256, "cross_app_refinement_attempts_v1\0" <> &1))
+      |> Base.encode16(case: :lower)
+
+    assert String.contains?(check["stdout_excerpt"], expected_attempt_digest)
+    assert {:ok, _} = Jason.encode(check)
+  end
+
+  test "refined failure is fail-fast and only singleton ordinary timeout is terminal timeout" do
+    paths =
+      for i <- 1..5 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, child, 10_000} = Core.next_test_execution_step(refined, 10_000)
+
+    assert {:terminal, failed} =
+             Core.record_test_execution_attempt(
+               refined,
+               child,
+               test_feedback(1, "assertion failed"),
+               false,
+               10_000,
+               0
+             )
+
+    assert failed["reason"] == "tests_failed"
+    refute failed["reason"] == "tests_timed_out"
+
+    assert {:ok, [singleton]} =
+             Core.partition_test_batches(["apps/alpha/test/only_test.exs"])
+
+    assert {:ok, singleton_execution} = Core.new_test_execution([singleton], 10_000)
+
+    assert {:run, singleton_attempt, 10_000} =
+             Core.next_test_execution_step(singleton_execution, 10_000)
+
+    assert {:terminal, timed_out} =
+             Core.record_test_execution_attempt(
+               singleton_execution,
+               singleton_attempt,
+               test_feedback(nil, "killed"),
+               true,
+               10_000,
+               0
+             )
+
+    assert timed_out["reason"] == "tests_timed_out"
+  end
+
+  test "capacity during refinement uses only immutable original descriptors" do
+    paths =
+      for i <- 1..6 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution(batches, 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "timeout"),
+               true,
+               10_000,
+               1
+             )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.next_test_execution_step(refined, 0)
+
+    assert {:ok, handoff_check} =
+             Core.capacity_handoff(:runtime, 0, 10_000, [], original, [suffix])
+
+    handoff = handoff_check["capacity_handoff"]
+    assert handoff["interrupted_batch"]["label"] == original.label
+    assert Enum.map(handoff["unstarted_batches"], & &1["label"]) == [suffix.label]
+    refute handoff["interrupted_batch"]["label"] =~ "refine-"
+    refute Jason.encode!(handoff) =~ "\"paths\""
+
+    assert {:error, :invalid_refinement_state} =
+             Core.next_test_execution_step(
+               %{refined | work_queue: Enum.reverse(refined.work_queue)},
+               1
+             )
+
+    assert {:error, :invalid_refinement_state} =
+             Core.next_test_execution_step(
+               put_in(
+                 refined,
+                 [:attempt_records, Access.at(0), :stdout_excerpt],
+                 String.duplicate("x", 2_001)
+               ),
+               1
+             )
+  end
+
+  test "malformed refinement maps are total and cannot change capacity classification" do
+    assert {:ok, [batch]} =
+             Core.partition_test_batches(["apps/alpha/test/only_test.exs"])
+
+    assert {:ok, execution} = Core.new_test_execution([batch], 10_000)
+
+    malformed_states = [
+      %{execution | work_queue: [%{}]},
+      %{execution | work_queue: [nil]},
+      %{execution | work_queue: [Map.delete(hd(execution.work_queue), :paths)]},
+      %{execution | current_started: true},
+      %{execution | attempt_records: [%{}]},
+      %{execution | refined?: true, refined_child_count: 2},
+      %{execution | accepted_paths: batch.paths}
+    ]
+
+    for malformed <- malformed_states do
+      assert {:error, :invalid_refinement_state} =
+               Core.next_test_execution_step(malformed, 0)
+    end
+
+    assert {:run, attempt, 10_000} = Core.next_test_execution_step(execution, 10_000)
+    feedback = test_feedback(0, "raw root output")
+
+    assert {:continue, completed} =
+             Core.record_test_execution_attempt(
+               execution,
+               attempt,
+               feedback,
+               false,
+               10_000,
+               1
+             )
+
+    [result] = completed.original_results
+    assert result.stdout_sha256 == feedback["stdout_sha256"]
+    assert result.stderr_sha256 == feedback["stderr_sha256"]
+    refute Map.has_key?(result, :refinement)
+
+    idle_tamper = [
+      %{completed | current_started: true},
+      %{completed | attempt_records: [%{}]},
+      %{completed | refined?: true, refined_child_count: 2},
+      %{completed | accepted_paths: batch.paths},
+      %{completed | total_attempt_count: 0}
+    ]
+
+    for malformed <- idle_tamper do
+      assert {:error, :invalid_refinement_state} =
+               Core.next_test_execution_step(malformed, 0)
+    end
+  end
+
+  test "aggregate expiry at each refined-child boundary preserves original plan" do
+    paths =
+      for i <- 1..6 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution(batches, 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 5_000} = Core.next_test_execution_step(refined, 5_000)
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.record_test_execution_attempt(
+               refined,
+               left,
+               test_feedback(nil, "aggregate interruption"),
+               true,
+               5_000,
+               0
+             )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.record_test_execution_attempt(
+               refined,
+               left,
+               test_feedback(0, "left pass"),
+               false,
+               10_000,
+               0
+             )
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               refined,
+               left,
+               test_feedback(0, "left pass"),
+               false,
+               10_000,
+               5_000
+             )
+
+    assert {:run, right, 5_000} = Core.next_test_execution_step(after_left, 5_000)
+
+    assert {:continue, resolved_original} =
+             Core.record_test_execution_attempt(
+               after_left,
+               right,
+               test_feedback(0, "right pass"),
+               false,
+               5_000,
+               0
+             )
+
+    assert {:capacity, [^original], nil, [^suffix]} =
+             Core.next_test_execution_step(resolved_original, 0)
+  end
+
+  test "maximum five-file per app-root plan is representable by the handoff contract" do
+    singleton_paths =
+      for i <- 1..255 do
+        app = "app#{String.pad_leading(Integer.to_string(i), 3, "0")}"
+        "apps/#{app}/test/only_test.exs"
+      end
+
+    final_paths =
+      for i <- 1..1_745 do
+        "apps/zzfinal/test/f#{String.pad_leading(Integer.to_string(i), 4, "0")}_test.exs"
+      end
+
+    inventory = singleton_paths ++ final_paths
+    assert length(inventory) == Core.max_expanded_test_files()
+    assert Core.max_test_batch_files() == 5
+    assert {:ok, batches} = Core.partition_test_batches(inventory)
+    assert length(batches) == 604
+    assert Enum.flat_map(batches, & &1.paths) == inventory
+    assert Enum.all?(batches, &(&1.count <= 5))
+
+    assert {:ok, check} =
+             Core.capacity_handoff(:structural, 0, Core.maximum_timeout(), [], nil, batches)
+
+    assert check["capacity_handoff"]["total_batch_count"] == 604
+    assert check["capacity_handoff"]["total_file_count"] == 2_000
+  end
+
   test "next_test_step malformed arguments fail closed rather than completing" do
     assert {:error, {:invalid_test_step_input, meta}} =
              Core.next_test_step("not-int", [%{label: "x"}], 10_000)
@@ -538,6 +909,19 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     # Empty remaining batches still require a positive operation ceiling.
     assert {:error, {:invalid_test_step_input, _}} =
              Core.next_test_step(10_000, [], 0)
+  end
+
+  defp test_feedback(exit_code, stdout) do
+    %{
+      "exit_code" => exit_code,
+      "passed" => exit_code == 0,
+      "stdout_excerpt" => stdout,
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => :crypto.hash(:sha256, stdout) |> Base.encode16(case: :lower),
+      "stderr_sha256" => :crypto.hash(:sha256, "") |> Base.encode16(case: :lower)
+    }
   end
 
   test "next_test_step rejects forged batch metadata and incoherent remaining lists" do

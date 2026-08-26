@@ -8,7 +8,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   test "live schema is v3 and maximum compact batch cardinality remains bounded" do
     assert ValidationCapacityHandoff.schema_version() == 3
     batches = max_batches()
-    assert length(batches) == 343
+    assert length(batches) == 604
 
     assert {:ok, ordered_plan_sha256} =
              ValidationCapacityHandoff.ordered_plan_digest(batches)
@@ -156,7 +156,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
 
     assert {:ok, normalized_v1} = ValidationCapacityHandoff.normalize_archived_v1(v1)
     assert normalized_v1["schema_version"] == 1
-    assert normalized_v1["required_budget_ms"] == 343 * 1_200_000
+    assert normalized_v1["required_budget_ms"] == 604 * 1_200_000
     assert ValidationCapacityHandoff.valid_archived_v1?(v1)
 
     assert {:ok, normalized_v2} = ValidationCapacityHandoff.normalize_archived_v2(v2)
@@ -184,9 +184,9 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
       "per_batch_budget_ms" => 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 343,
+      "unstarted_batch_count" => 604,
       "unstarted_file_count" => 2_000,
-      "total_batch_count" => 343,
+      "total_batch_count" => 604,
       "total_file_count" => 2_000,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "interrupted_batch" => nil,
@@ -202,9 +202,9 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
       "per_batch_budget_ms" => 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 343,
+      "unstarted_batch_count" => 604,
       "unstarted_file_count" => 2_000,
-      "total_batch_count" => 343,
+      "total_batch_count" => 604,
       "total_file_count" => 2_000,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "unstarted_batches" => batches
@@ -217,12 +217,12 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
       "phase" => "structural",
       "available_budget_ms" => 1_000,
       "per_batch_budget_ms" => 1_200_000,
-      "required_budget_ms" => 343 * 1_200_000,
+      "required_budget_ms" => 604 * 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 343,
+      "unstarted_batch_count" => 604,
       "unstarted_file_count" => 2_000,
-      "total_batch_count" => 343,
+      "total_batch_count" => 604,
       "total_file_count" => 2_000,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "unstarted_batches" => batches
@@ -248,19 +248,14 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   end
 
   defp max_batches do
-    Enum.map(1..343, fn index ->
-      count =
-        cond do
-          index <= 255 -> 1
-          index <= 342 -> 20
-          true -> 5
-        end
+    Enum.map(1..604, fn index ->
+      count = if index <= 255, do: 1, else: 5
 
       inventory_sha256 =
         :crypto.hash(:sha256, "inventory-#{index}")
         |> Base.encode16(case: :lower)
 
-      batch(index, 343, count, inventory_sha256)
+      batch(index, 604, count, inventory_sha256)
     end)
   end
 end

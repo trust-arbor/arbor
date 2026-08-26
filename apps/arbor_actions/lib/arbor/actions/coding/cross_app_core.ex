@@ -187,6 +187,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           | {:timeout, test_batch(), [test_batch()]}
           | {:error, term()}
 
+  @typedoc "One bounded root or refined process attempt."
+  @type test_attempt :: %{
+          label: String.t(),
+          paths: [String.t()],
+          count: pos_integer(),
+          inventory_sha256: String.t(),
+          position: String.t(),
+          original_index: pos_integer()
+        }
+
+  @typedoc "Opaque pure state for deterministic timeout refinement."
+  @type test_execution :: map()
+
   @typedoc "Bounded evidence for a validation capacity handoff."
   @type capacity_handoff :: %{required(String.t()) => term()}
 
@@ -757,6 +770,692 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       do: true
 
   def prelaunch_probe_timeout_capacity?(_reason, _remaining_ms_after), do: false
+
+  @doc """
+  Construct bounded pure state for sequential test execution with timeout refinement.
+
+  The supplied batches remain the immutable capacity-handoff plan. Refined
+  attempts are runtime-only descriptors and can never replace plan entries.
+  """
+  @spec new_test_execution([test_batch()], pos_integer()) ::
+          {:ok, test_execution()} | {:error, term()}
+  def new_test_execution([], operation_timeout)
+      when is_integer(operation_timeout) and operation_timeout > 0 do
+    {:ok, empty_test_execution(operation_timeout)}
+  end
+
+  def new_test_execution(batches, operation_timeout)
+      when is_list(batches) and is_integer(operation_timeout) and operation_timeout > 0 do
+    if valid_remaining_batches?(batches) do
+      [current | suffix] = batches
+
+      {:ok,
+       empty_test_execution(operation_timeout)
+       |> Map.merge(%{
+         original_batches: batches,
+         current_original: current,
+         original_suffix: suffix,
+         work_queue: [root_attempt(current)]
+       })}
+    else
+      {:error, :invalid_test_batch_plan}
+    end
+  end
+
+  def new_test_execution(_batches, _operation_timeout), do: {:error, :invalid_test_batch_plan}
+
+  @doc """
+  Decide the next process effect under the caller-supplied shared-deadline residual.
+
+  Capacity effects always contain original batches only.
+  """
+  @spec next_test_execution_step(test_execution(), integer()) ::
+          {:run, test_attempt(), pos_integer()}
+          | {:complete, map()}
+          | {:capacity, [test_batch()], test_batch() | nil, [test_batch()]}
+          | {:error, term()}
+  def next_test_execution_step(state, remaining_ms)
+      when is_map(state) and is_integer(remaining_ms) do
+    with :ok <- validate_test_execution(state) do
+      case state.current_original do
+        nil ->
+          {:complete, aggregate_test_check(state.original_results)}
+
+        current when remaining_ms <= 0 ->
+          if state.current_started do
+            {:capacity, state.completed_originals, current, state.original_suffix}
+          else
+            {:capacity, state.completed_originals, nil, [current | state.original_suffix]}
+          end
+
+        _current ->
+          case state.work_queue do
+            [attempt | _] ->
+              {:run, attempt, min(state.operation_timeout, remaining_ms)}
+
+            _ ->
+              {:error, :invalid_refinement_state}
+          end
+      end
+    end
+  end
+
+  def next_test_execution_step(_state, _remaining_ms), do: {:error, :invalid_refinement_state}
+
+  @doc """
+  Purely reduce one launched process result into the next refinement state/effect.
+
+  Non-timeout failures win over deadline exhaustion. Multi-path ordinary
+  timeouts refine only while positive aggregate residual remains.
+  """
+  @spec record_test_execution_attempt(
+          test_execution(),
+          test_attempt(),
+          map(),
+          boolean(),
+          pos_integer(),
+          integer()
+        ) ::
+          {:continue, test_execution()}
+          | {:terminal, map()}
+          | {:capacity, [test_batch()], test_batch(), [test_batch()]}
+          | {:error, term()}
+  def record_test_execution_attempt(
+        state,
+        attempt,
+        feedback,
+        runner_timeout,
+        launched_budget,
+        remaining_after
+      )
+      when is_map(state) and is_map(attempt) and is_map(feedback) and
+             is_boolean(runner_timeout) and is_integer(launched_budget) and
+             launched_budget > 0 and is_integer(remaining_after) do
+    with :ok <- validate_test_execution(state),
+         [expected | rest] <- state.work_queue,
+         true <- attempt == expected do
+      record = attempt_record(state, attempt, feedback, runner_timeout)
+
+      state = %{
+        state
+        | current_started: true,
+          attempt_records: state.attempt_records ++ [record],
+          total_attempt_count: state.total_attempt_count + 1
+      }
+
+      passed = feedback_value(feedback, :passed) == true
+
+      cond do
+        not runner_timeout and not passed ->
+          result = original_result(state, feedback, false, false)
+          {:terminal, aggregate_test_check(state.original_results ++ [result])}
+
+        aggregate_deadline_interrupted?(
+          runner_timeout,
+          remaining_after,
+          launched_budget,
+          state.operation_timeout
+        ) ->
+          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+
+        runner_timeout and attempt.count == 1 ->
+          result = original_result(state, feedback, false, true)
+          {:terminal, aggregate_test_check(state.original_results ++ [result])}
+
+        runner_timeout and remaining_after <= 0 ->
+          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+
+        runner_timeout ->
+          with {:ok, left, right} <- split_attempt(state.current_original, attempt) do
+            {:continue,
+             %{
+               state
+               | work_queue: [left, right | rest],
+                 refined?: true,
+                 refined_child_count: state.refined_child_count + 2
+             }}
+          end
+
+        passed ->
+          accept_passing_attempt(state, attempt, rest, feedback, remaining_after)
+
+        true ->
+          {:error, :invalid_refinement_state}
+      end
+    else
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  def record_test_execution_attempt(
+        _state,
+        _attempt,
+        _feedback,
+        _runner_timeout,
+        _launched_budget,
+        _remaining_after
+      ),
+      do: {:error, :invalid_refinement_state}
+
+  @doc """
+  Classify a process that failed before launch.
+
+  An exhausted probe timeout during refinement interrupts the immutable
+  original batch; before a root launch it leaves that original unstarted.
+  """
+  @spec record_test_execution_prelaunch_error(test_execution(), term(), integer()) ::
+          {:capacity, [test_batch()], test_batch() | nil, [test_batch()]}
+          | {:execution_error, term()}
+          | {:error, term()}
+  def record_test_execution_prelaunch_error(state, reason, remaining_after)
+      when is_map(state) and is_integer(remaining_after) do
+    with :ok <- validate_test_execution(state) do
+      if prelaunch_probe_timeout_capacity?(reason, remaining_after) do
+        if state.current_started do
+          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+        else
+          {:capacity, state.completed_originals, nil,
+           [state.current_original | state.original_suffix]}
+        end
+      else
+        [attempt | _] = state.work_queue
+        {:execution_error, {:test_execution_failed, attempt.label, reason}}
+      end
+    end
+  end
+
+  def record_test_execution_prelaunch_error(_state, _reason, _remaining_after),
+    do: {:error, :invalid_refinement_state}
+
+  defp empty_test_execution(operation_timeout) do
+    %{
+      original_batches: [],
+      completed_originals: [],
+      current_original: nil,
+      original_suffix: [],
+      work_queue: [],
+      accepted_paths: [],
+      original_results: [],
+      attempt_records: [],
+      current_started: false,
+      refined?: false,
+      refined_child_count: 0,
+      total_attempt_count: 0,
+      operation_timeout: operation_timeout
+    }
+  end
+
+  defp accept_passing_attempt(state, attempt, rest, feedback, remaining_after) do
+    accepted_paths = state.accepted_paths ++ attempt.paths
+    state = %{state | accepted_paths: accepted_paths, work_queue: rest}
+
+    cond do
+      rest != [] and remaining_after <= 0 ->
+        {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+
+      rest != [] ->
+        {:continue, state}
+
+      accepted_paths != state.current_original.paths ->
+        {:error, :invalid_refinement_state}
+
+      true ->
+        result = original_result(state, feedback, true, false)
+        {:continue, advance_original(state, result)}
+    end
+  end
+
+  defp advance_original(state, result) do
+    completed = state.completed_originals ++ [state.current_original]
+    results = state.original_results ++ [result]
+
+    case state.original_suffix do
+      [next | suffix] ->
+        %{
+          state
+          | completed_originals: completed,
+            current_original: next,
+            original_suffix: suffix,
+            work_queue: [root_attempt(next)],
+            accepted_paths: [],
+            original_results: results,
+            attempt_records: [],
+            current_started: false,
+            refined?: false,
+            refined_child_count: 0
+        }
+
+      [] ->
+        %{
+          state
+          | completed_originals: completed,
+            current_original: nil,
+            original_suffix: [],
+            work_queue: [],
+            accepted_paths: [],
+            original_results: results,
+            attempt_records: [],
+            current_started: false,
+            refined?: false,
+            refined_child_count: 0
+        }
+    end
+  end
+
+  defp root_attempt(batch) do
+    %{
+      label: batch.label,
+      paths: batch.paths,
+      count: batch.count,
+      inventory_sha256: batch.inventory_sha256,
+      position: "root",
+      original_index: batch.index
+    }
+  end
+
+  defp split_attempt(original, attempt) do
+    split_at = div(attempt.count + 1, 2)
+    {left_paths, right_paths} = Enum.split(attempt.paths, split_at)
+
+    if left_paths != [] and right_paths != [] and length(left_paths) < attempt.count and
+         length(right_paths) < attempt.count do
+      {:ok, refined_attempt(original, attempt.position <> "L", left_paths),
+       refined_attempt(original, attempt.position <> "R", right_paths)}
+    else
+      {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp refined_attempt(original, position, paths) do
+    count = length(paths)
+    digest = inventory_sha256(paths)
+
+    %{
+      label: "#{original.label}:refine-#{position}-n#{count}-#{digest}",
+      paths: paths,
+      count: count,
+      inventory_sha256: digest,
+      position: position,
+      original_index: original.index
+    }
+  end
+
+  defp attempt_record(state, attempt, feedback, runner_timeout) do
+    %{
+      original_label: state.current_original.label,
+      attempt_label: attempt.label,
+      sequence: length(state.attempt_records) + 1,
+      count: attempt.count,
+      inventory_sha256: attempt.inventory_sha256,
+      timed_out: runner_timeout,
+      exit_code: feedback_value(feedback, :exit_code),
+      stdout_excerpt: feedback_value(feedback, :stdout_excerpt) || "",
+      stderr_excerpt: feedback_value(feedback, :stderr_excerpt) || "",
+      stdout_truncated: feedback_value(feedback, :stdout_truncated) == true,
+      stderr_truncated: feedback_value(feedback, :stderr_truncated) == true,
+      stdout_sha256: feedback_value(feedback, :stdout_sha256) || sha256(""),
+      stderr_sha256: feedback_value(feedback, :stderr_sha256) || sha256("")
+    }
+  end
+
+  defp original_result(%{refined?: false} = state, final_feedback, _passed, timed_out) do
+    classify_app_test_result(state.current_original.label, final_feedback, timed_out: timed_out)
+  end
+
+  defp original_result(state, final_feedback, passed, timed_out) do
+    records = state.attempt_records
+    attempt_digest = attempt_records_digest(records)
+
+    marker =
+      if state.refined? do
+        "[cross_app_refinement strategy=ordered_binary_split_v1 original=#{state.current_original.label} attempts=#{length(records)} refined_children=#{state.refined_child_count} attempted_outputs_sha256=#{attempt_digest}]"
+      else
+        ""
+      end
+
+    stdout =
+      records
+      |> Enum.map_join("\n", fn record ->
+        "[#{record.attempt_label}]\n#{json_safe_utf8(record.stdout_excerpt)}"
+      end)
+      |> prepend_marker(marker)
+      |> bound_output_excerpt()
+
+    stderr =
+      records
+      |> Enum.map_join("\n", fn record ->
+        "[#{record.attempt_label}]\n#{json_safe_utf8(record.stderr_excerpt)}"
+      end)
+      |> bound_output_excerpt()
+
+    {stdout_excerpt, stdout_aggregate_truncated} = stdout
+    {stderr_excerpt, stderr_aggregate_truncated} = stderr
+
+    %{
+      path: state.current_original.label,
+      passed: passed,
+      timed_out: timed_out,
+      exit_code: feedback_value(final_feedback, :exit_code),
+      reason:
+        if(passed, do: nil, else: if(timed_out, do: "tests_timed_out", else: "tests_failed")),
+      stdout_excerpt: stdout_excerpt,
+      stderr_excerpt: stderr_excerpt,
+      stdout_truncated: stdout_aggregate_truncated or Enum.any?(records, & &1.stdout_truncated),
+      stderr_truncated: stderr_aggregate_truncated or Enum.any?(records, & &1.stderr_truncated),
+      stdout_sha256: attempt_stream_digest(records, :stdout_sha256),
+      stderr_sha256: attempt_stream_digest(records, :stderr_sha256),
+      refinement: %{
+        strategy: "ordered_binary_split_v1",
+        attempt_count: length(records),
+        refined_child_count: state.refined_child_count,
+        attempted_outputs_sha256: attempt_digest
+      }
+    }
+  end
+
+  defp prepend_marker(text, ""), do: text
+  defp prepend_marker("", marker), do: marker
+  defp prepend_marker(text, marker), do: marker <> "\n" <> text
+
+  defp attempt_records_digest(records) do
+    records
+    |> Enum.map(fn record ->
+      [
+        record.original_label,
+        record.attempt_label,
+        record.sequence,
+        record.count,
+        record.inventory_sha256,
+        record.timed_out,
+        record.exit_code,
+        record.stdout_sha256,
+        record.stderr_sha256
+      ]
+    end)
+    |> Jason.encode!()
+    |> then(&sha256("cross_app_refinement_attempts_v1\0" <> &1))
+  end
+
+  defp attempt_stream_digest(records, field) do
+    records
+    |> Enum.map(fn record -> [record.attempt_label, Map.fetch!(record, field)] end)
+    |> Jason.encode!()
+    |> then(&sha256("cross_app_refinement_stream_v1\0" <> Atom.to_string(field) <> "\0" <> &1))
+  end
+
+  defp feedback_value(feedback, key) do
+    Map.get(feedback, key) || Map.get(feedback, Atom.to_string(key))
+  end
+
+  defp validate_test_execution(state) when is_map(state) do
+    try do
+      do_validate_test_execution(state)
+    rescue
+      _ -> {:error, :invalid_refinement_state}
+    catch
+      _, _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp validate_test_execution(_state), do: {:error, :invalid_refinement_state}
+
+  defp do_validate_test_execution(state) do
+    required = [
+      :original_batches,
+      :completed_originals,
+      :current_original,
+      :original_suffix,
+      :work_queue,
+      :accepted_paths,
+      :original_results,
+      :attempt_records,
+      :current_started,
+      :refined?,
+      :refined_child_count,
+      :total_attempt_count,
+      :operation_timeout
+    ]
+
+    cond do
+      Enum.any?(required, &(not Map.has_key?(state, &1))) ->
+        {:error, :invalid_refinement_state}
+
+      not is_integer(state.operation_timeout) or state.operation_timeout <= 0 ->
+        {:error, :invalid_refinement_state}
+
+      not is_list(state.original_batches) or not is_list(state.completed_originals) or
+        not is_list(state.original_suffix) or not is_list(state.work_queue) or
+        not is_list(state.accepted_paths) or not is_list(state.original_results) or
+          not is_list(state.attempt_records) ->
+        {:error, :invalid_refinement_state}
+
+      not is_boolean(state.current_started) or not is_boolean(state.refined?) or
+        not is_integer(state.refined_child_count) or state.refined_child_count < 0 or
+        not is_integer(state.total_attempt_count) or state.total_attempt_count < 0 ->
+        {:error, :invalid_refinement_state}
+
+      state.original_batches == [] ->
+        validate_empty_test_execution(state)
+
+      not valid_remaining_batches?(state.original_batches) ->
+        {:error, :invalid_refinement_state}
+
+      true ->
+        validate_active_test_execution(state)
+    end
+  end
+
+  defp validate_empty_test_execution(state) do
+    if state.completed_originals == [] and is_nil(state.current_original) and
+         state.original_suffix == [] and state.work_queue == [] and
+         state.accepted_paths == [] and state.original_results == [] and
+         state.attempt_records == [] and state.current_started == false and
+         state.refined? == false and state.refined_child_count == 0 and
+         state.total_attempt_count == 0 do
+      :ok
+    else
+      {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp validate_active_test_execution(state) do
+    remaining =
+      if is_nil(state.current_original),
+        do: [],
+        else: [state.current_original | state.original_suffix]
+
+    with true <- state.completed_originals ++ remaining == state.original_batches,
+         {:ok, completed_attempt_count} <-
+           validate_execution_results(state.completed_originals, state.original_results) do
+      validate_active_test_execution_fields(state, completed_attempt_count)
+    else
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp validate_active_test_execution_fields(
+         %{current_original: nil} = state,
+         completed_attempt_count
+       ) do
+    if state.work_queue == [] and state.original_suffix == [] and state.accepted_paths == [] and
+         state.attempt_records == [] and state.current_started == false and
+         state.refined? == false and state.refined_child_count == 0 and
+         length(state.completed_originals) == length(state.original_batches) and
+         state.total_attempt_count == completed_attempt_count do
+      :ok
+    else
+      {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp validate_active_test_execution_fields(state, completed_attempt_count) do
+    current = state.current_original
+    current_count = Map.get(current, :count)
+    valid_queue? = Enum.all?(state.work_queue, &valid_attempt?(&1, current))
+
+    cond do
+      not is_integer(current_count) or current_count <= 0 ->
+        {:error, :invalid_refinement_state}
+
+      state.work_queue == [] or not valid_queue? ->
+        {:error, :invalid_refinement_state}
+
+      length(state.attempt_records) > 2 * current_count - 1 ->
+        {:error, :invalid_refinement_state}
+
+      not valid_attempt_records?(state.attempt_records, current) ->
+        {:error, :invalid_refinement_state}
+
+      state.total_attempt_count != completed_attempt_count + length(state.attempt_records) ->
+        {:error, :invalid_refinement_state}
+
+      state.current_started != state.refined? ->
+        {:error, :invalid_refinement_state}
+
+      state.current_started != (state.attempt_records != []) ->
+        {:error, :invalid_refinement_state}
+
+      state.refined? and
+          (state.refined_child_count < 2 or rem(state.refined_child_count, 2) != 0) ->
+        {:error, :invalid_refinement_state}
+
+      not state.refined? and
+          (state.refined_child_count != 0 or state.accepted_paths != [] or
+             state.work_queue != [root_attempt(current)]) ->
+        {:error, :invalid_refinement_state}
+
+      state.refined? and not valid_refined_origin_record?(state.attempt_records, current) ->
+        {:error, :invalid_refinement_state}
+
+      state.accepted_paths ++ queue_paths(state.work_queue) != Map.get(current, :paths) ->
+        {:error, :invalid_refinement_state}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp queue_paths(queue), do: Enum.flat_map(queue, &Map.fetch!(&1, :paths))
+
+  defp valid_attempt?(attempt, original)
+       when is_map(attempt) and is_map(original) do
+    with {:ok, label} <- Map.fetch(attempt, :label),
+         {:ok, paths} <- Map.fetch(attempt, :paths),
+         {:ok, count} <- Map.fetch(attempt, :count),
+         {:ok, digest} <- Map.fetch(attempt, :inventory_sha256),
+         {:ok, position} <- Map.fetch(attempt, :position),
+         {:ok, original_index} <- Map.fetch(attempt, :original_index),
+         {:ok, expected_original_index} <- Map.fetch(original, :index),
+         {:ok, original_label} <- Map.fetch(original, :label),
+         true <-
+           is_binary(position) and byte_size(position) <= 7 and
+             Regex.match?(~r/\Aroot([LR])*\z/, position),
+         true <- is_list(paths) and paths != [],
+         :ok <- validate_batch_member_paths(paths),
+         true <- count == length(paths),
+         true <- digest == inventory_sha256(paths),
+         true <- original_index == expected_original_index do
+      expected_label =
+        if position == "root" do
+          original_label
+        else
+          refined_attempt(original, position, paths).label
+        end
+
+      label == expected_label
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_attempt?(_attempt, _original), do: false
+
+  defp validate_execution_results(completed, results)
+       when is_list(completed) and is_list(results) and length(completed) == length(results) do
+    Enum.zip(completed, results)
+    |> Enum.reduce_while({:ok, 0}, fn {batch, result}, {:ok, count} ->
+      case completed_result_attempt_count(batch, result) do
+        {:ok, attempts} -> {:cont, {:ok, count + attempts}}
+        :error -> {:halt, {:error, :invalid_refinement_state}}
+      end
+    end)
+  end
+
+  defp validate_execution_results(_completed, _results),
+    do: {:error, :invalid_refinement_state}
+
+  defp completed_result_attempt_count(batch, result) when is_map(batch) and is_map(result) do
+    valid_base? =
+      Map.get(result, :path) == Map.get(batch, :label) and Map.get(result, :passed) == true and
+        Map.get(result, :timed_out) == false and Map.get(result, :exit_code) == 0 and
+        is_nil(Map.get(result, :reason)) and
+        bounded_attempt_excerpt?(Map.get(result, :stdout_excerpt)) and
+        bounded_attempt_excerpt?(Map.get(result, :stderr_excerpt)) and
+        is_boolean(Map.get(result, :stdout_truncated)) and
+        is_boolean(Map.get(result, :stderr_truncated)) and
+        valid_sha256?(Map.get(result, :stdout_sha256)) and
+        valid_sha256?(Map.get(result, :stderr_sha256))
+
+    case {valid_base?, Map.get(result, :refinement)} do
+      {true, nil} ->
+        {:ok, 1}
+
+      {true, refinement} when is_map(refinement) ->
+        max_attempts = 2 * Map.get(batch, :count, 0) - 1
+        attempts = Map.get(refinement, :attempt_count)
+        children = Map.get(refinement, :refined_child_count)
+
+        if Map.get(refinement, :strategy) == "ordered_binary_split_v1" and
+             is_integer(attempts) and attempts >= 3 and attempts <= max_attempts and
+             is_integer(children) and children >= 2 and rem(children, 2) == 0 and
+             valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)) do
+          {:ok, attempts}
+        else
+          :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp completed_result_attempt_count(_batch, _result), do: :error
+
+  defp valid_refined_origin_record?([record | _], original) do
+    Map.get(record, :attempt_label) == Map.get(original, :label) and
+      Map.get(record, :count) == Map.get(original, :count) and
+      Map.get(record, :inventory_sha256) == Map.get(original, :inventory_sha256) and
+      Map.get(record, :timed_out) == true
+  end
+
+  defp valid_refined_origin_record?(_records, _original), do: false
+
+  defp valid_attempt_records?(records, original) when is_list(records) and is_map(original) do
+    Enum.with_index(records, 1)
+    |> Enum.all?(fn {record, sequence} ->
+      is_map(record) and record.original_label == original.label and
+        is_binary(record.attempt_label) and byte_size(record.attempt_label) <= 512 and
+        record.sequence == sequence and is_integer(record.count) and record.count > 0 and
+        record.count <= original.count and valid_sha256?(record.inventory_sha256) and
+        is_boolean(record.timed_out) and
+        (is_nil(record.exit_code) or is_integer(record.exit_code)) and
+        bounded_attempt_excerpt?(record.stdout_excerpt) and
+        bounded_attempt_excerpt?(record.stderr_excerpt) and
+        is_boolean(record.stdout_truncated) and is_boolean(record.stderr_truncated) and
+        valid_sha256?(record.stdout_sha256) and valid_sha256?(record.stderr_sha256)
+    end)
+  rescue
+    _ -> false
+  end
+
+  defp valid_attempt_records?(_records, _original), do: false
+
+  defp bounded_attempt_excerpt?(value),
+    do:
+      is_binary(value) and byte_size(value) <= @max_output_excerpt_bytes and String.valid?(value)
+
+  defp valid_sha256?(value),
+    do: is_binary(value) and byte_size(value) == 64 and String.match?(value, ~r/\A[0-9a-f]{64}\z/)
 
   @doc """
   Pure next-step decision for sequential batch tests under dual budgets.
@@ -1622,14 +2321,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           end
       end
 
-    {stdout_excerpt, stdout_agg_truncated} =
+    {raw_stdout_excerpt, stdout_agg_truncated} =
       bound_aggregate_excerpt(app_results, :stdout_excerpt)
 
     {stderr_excerpt, stderr_agg_truncated} =
       bound_aggregate_excerpt(app_results, :stderr_excerpt)
 
+    {stdout_excerpt, refinement_truncated} =
+      case refinement_aggregate_summary(app_results) do
+        nil -> {raw_stdout_excerpt, false}
+        summary -> bound_output_excerpt(summary <> "\n" <> raw_stdout_excerpt)
+      end
+
     stdout_truncated =
-      stdout_agg_truncated or Enum.any?(app_results, &(&1.stdout_truncated == true))
+      stdout_agg_truncated or refinement_truncated or
+        Enum.any?(app_results, &(&1.stdout_truncated == true))
 
     stderr_truncated =
       stderr_agg_truncated or Enum.any?(app_results, &(&1.stderr_truncated == true))
@@ -1647,6 +2353,37 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       },
       reason: reason
     )
+  end
+
+  defp refinement_aggregate_summary(app_results) do
+    refinements =
+      app_results
+      |> Enum.map(&Map.get(&1, :refinement))
+      |> Enum.reject(&is_nil/1)
+
+    case refinements do
+      [] ->
+        nil
+
+      _ ->
+        attempted_outputs_sha256 =
+          refinements
+          |> Enum.map(fn refinement ->
+            [
+              refinement.strategy,
+              refinement.attempt_count,
+              refinement.refined_child_count,
+              refinement.attempted_outputs_sha256
+            ]
+          end)
+          |> Jason.encode!()
+          |> then(&sha256("cross_app_refinement_summary_v1\0" <> &1))
+
+        attempts = Enum.sum(Enum.map(refinements, & &1.attempt_count))
+        children = Enum.sum(Enum.map(refinements, & &1.refined_child_count))
+
+        "[cross_app_refinement_summary strategy=ordered_binary_split_v1 refined_originals=#{length(refinements)} attempts=#{attempts} refined_children=#{children} attempted_outputs_sha256=#{attempted_outputs_sha256}]"
+    end
   end
 
   @doc false
