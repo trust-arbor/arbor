@@ -15,8 +15,18 @@ defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test.AppRestartStore do
     name = Keyword.fetch!(opts, :name)
 
     case GenServer.call(name, :mode) do
-      :throw_get -> throw(:injected_get_throw)
-      _ -> GenServer.call(name, {:get, key})
+      :throw_get ->
+        throw(:injected_get_throw)
+
+      {:block_before_get, test_pid} ->
+        await_get_release(test_pid, :before, key, fn -> GenServer.call(name, {:get, key}) end)
+
+      {:block_after_get, test_pid} ->
+        result = GenServer.call(name, {:get, key})
+        await_get_release(test_pid, :after, key, fn -> result end)
+
+      _ ->
+        GenServer.call(name, {:get, key})
     end
   end
 
@@ -72,6 +82,16 @@ defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test.AppRestartStore do
   def handle_call({:delete, key}, _from, state) do
     {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
   end
+
+  defp await_get_release(test_pid, phase, key, result_fun) do
+    send(test_pid, {:runtime_refresh_get_blocked, phase, self(), key})
+
+    receive do
+      {:release_runtime_refresh_get, ^key} -> result_fun.()
+    after
+      5_000 -> {:error, :runtime_refresh_test_release_timeout}
+    end
+  end
 end
 
 defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test do
@@ -87,6 +107,11 @@ defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test do
   alias Arbor.Orchestrator.RunJournal
   alias Arbor.Orchestrator.RunLifecycle.Record
   alias Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test.AppRestartStore
+
+  @effect_input_hash String.duplicate("a", 64)
+  @effect_result_hash String.duplicate("b", 64)
+  @effect_started_at "2026-08-26T12:00:00.000000Z"
+  @effect_completed_at "2026-08-26T12:00:01.000000Z"
 
   setup do
     suffix = System.unique_integer([:positive, :monotonic])
@@ -558,6 +583,110 @@ defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test do
                RunJournal.get_record(run_id, server: journal)
     end
 
+    test "security regression: effect receipts stay available during a blocked durable refresh",
+         %{
+           suffix: suffix
+         } do
+      {journal, store, local_node} = start_journal(suffix, "receipt_available")
+      run_id = "receipt_available_#{suffix}"
+      now = DateTime.utc_now()
+
+      assert :ok =
+               RunJournal.put(
+                 %Record{
+                   run_id: run_id,
+                   pipeline_id: run_id,
+                   status: :running,
+                   started_at: now,
+                   last_heartbeat: now,
+                   owner_node: local_node,
+                   source_node: local_node
+                 },
+                 server: journal
+               )
+
+      assert :ok = AppRestartStore.set_mode(store, {:block_before_get, self()})
+
+      refresh =
+        Task.async(fn ->
+          RunJournal.refresh_from_durable(server: journal)
+        end)
+
+      assert_receive {:runtime_refresh_get_blocked, :before, worker, ^run_id}, 1_000
+
+      assert {:ok, :prepared, _pending} =
+               RunJournal.prepare_effect(run_id, prepare_attrs(run_id), server: journal)
+
+      assert {:ok, :recorded, completed} =
+               RunJournal.record_effect_receipt(
+                 run_id,
+                 1,
+                 "exec_1",
+                 receipt_attrs(),
+                 server: journal
+               )
+
+      assert completed["status"] == "completed"
+      send(worker, {:release_runtime_refresh_get, run_id})
+
+      assert {:ok, %{upserted: 0}} = Task.await(refresh, 5_000)
+
+      assert {:ok, %Record{current_effect: %{"status" => "completed"}}} =
+               RunJournal.get_record(run_id, server: journal)
+    end
+
+    test "security regression: stale refresh cannot overwrite a concurrent effect receipt", %{
+      suffix: suffix
+    } do
+      {journal, store, local_node} = start_journal(suffix, "receipt_stale")
+      run_id = "receipt_stale_#{suffix}"
+      now = DateTime.utc_now()
+
+      assert :ok =
+               RunJournal.put(
+                 %Record{
+                   run_id: run_id,
+                   pipeline_id: run_id,
+                   status: :running,
+                   started_at: now,
+                   last_heartbeat: now,
+                   owner_node: local_node,
+                   source_node: local_node
+                 },
+                 server: journal
+               )
+
+      assert {:ok, :prepared, _pending} =
+               RunJournal.prepare_effect(run_id, prepare_attrs(run_id), server: journal)
+
+      assert :ok = AppRestartStore.set_mode(store, {:block_after_get, self()})
+
+      refresh =
+        Task.async(fn ->
+          RunJournal.refresh_from_durable(server: journal)
+        end)
+
+      assert_receive {:runtime_refresh_get_blocked, :after, worker, ^run_id}, 1_000
+
+      assert {:ok, :recorded, completed} =
+               RunJournal.record_effect_receipt(
+                 run_id,
+                 1,
+                 "exec_1",
+                 receipt_attrs(),
+                 server: journal
+               )
+
+      send(worker, {:release_runtime_refresh_get, run_id})
+      assert {:ok, %{upserted: 0}} = Task.await(refresh, 5_000)
+
+      assert {:ok, %Record{current_effect: current_effect}} =
+               RunJournal.get_record(run_id, server: journal)
+
+      assert current_effect == completed
+      assert current_effect["status"] == "completed"
+    end
+
     test "initially unhealthy durable backend becomes healthy and re-enables automatic recovery",
          %{suffix: suffix} do
       store_name = store_name_for(suffix, "health")
@@ -856,6 +985,26 @@ defmodule Arbor.Orchestrator.RunJournalRuntimeRefreshL4Test do
       })
 
     {journal, store, local_node}
+  end
+
+  defp prepare_attrs(run_id) do
+    %{
+      "node_id" => "node_a",
+      "execution_id" => "exec_1",
+      "handler" => "Arbor.Orchestrator.Handlers.ExecHandler",
+      "input_hash" => @effect_input_hash,
+      "idempotency_class" => "side_effecting",
+      "started_at" => @effect_started_at,
+      "run_id" => run_id
+    }
+  end
+
+  defp receipt_attrs do
+    %{
+      "completed_at" => @effect_completed_at,
+      "outcome_status" => "success",
+      "result_digest" => @effect_result_hash
+    }
   end
 
   defp assert_eventually(fun, attempts \\ 40) do

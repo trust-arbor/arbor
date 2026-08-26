@@ -71,6 +71,8 @@ defmodule Arbor.Orchestrator.RunJournal do
   @default_ets_table :arbor_pipeline_runs
   @default_store_name :arbor_pipeline_run_lifecycle
   @default_collection "pipeline_run_lifecycle"
+  @default_call_timeout_ms 5_000
+  @runtime_refresh_timeout_ms 120_000
 
   @terminal_statuses [:completed, :failed, :abandoned]
   @finalize_statuses [:completed, :failed, :abandoned, :interrupted]
@@ -265,7 +267,7 @@ defmodule Arbor.Orchestrator.RunJournal do
   @spec refresh_from_durable(keyword()) ::
           {:ok, %{upserted: non_neg_integer()}} | {:error, term()}
   def refresh_from_durable(opts \\ []) do
-    call_server(opts, :refresh_from_durable)
+    call_server(opts, :refresh_from_durable, @runtime_refresh_timeout_ms)
   end
 
   @doc """
@@ -447,7 +449,8 @@ defmodule Arbor.Orchestrator.RunJournal do
       backend_opts: backend_opts,
       durable_error: nil,
       last_write_error: nil,
-      local_node: Keyword.get(opts, :local_node, Kernel.node())
+      local_node: Keyword.get(opts, :local_node, Kernel.node()),
+      runtime_refresh: nil
     }
 
     # Configured backends are a separate supervisor child. Probe via the
@@ -614,9 +617,39 @@ defmodule Arbor.Orchestrator.RunJournal do
     {:reply, build_durability_status(state), state}
   end
 
-  def handle_call(:refresh_from_durable, _from, state) do
-    {reply, state} = do_refresh_from_durable(state)
-    {:reply, reply, state}
+  def handle_call(:refresh_from_durable, _from, %{backend: nil} = state) do
+    {:reply, {:ok, %{upserted: 0}}, state}
+  end
+
+  def handle_call(:refresh_from_durable, _from, %{durable_mode: :ets_only} = state) do
+    {:reply, {:ok, %{upserted: 0}}, state}
+  end
+
+  def handle_call(:refresh_from_durable, _from, %{runtime_refresh: pending} = state)
+      when not is_nil(pending) do
+    {:reply, {:error, :refresh_in_progress}, state}
+  end
+
+  def handle_call(:refresh_from_durable, from, state) do
+    ref = make_ref()
+    parent = self()
+    source = runtime_refresh_source(state)
+
+    pid =
+      spawn_link(fn ->
+        result = collect_runtime_refresh_batch(source)
+        send(parent, {:runtime_refresh_result, ref, self(), result})
+      end)
+
+    pending = %{
+      ref: ref,
+      pid: pid,
+      from: from,
+      hot_snapshot: hot_snapshot(state.table),
+      health_snapshot: health_snapshot(state)
+    }
+
+    {:noreply, %{state | runtime_refresh: pending}}
   end
 
   def handle_call({:import_durable, maps}, _from, state) do
@@ -684,6 +717,26 @@ defmodule Arbor.Orchestrator.RunJournal do
   end
 
   @impl true
+  def handle_info(
+        {:runtime_refresh_result, ref, pid, result},
+        %{runtime_refresh: %{ref: ref, pid: pid} = pending} = state
+      ) do
+    Process.unlink(pid)
+    {reply, state} = finish_runtime_refresh(result, pending, state)
+    GenServer.reply(pending.from, reply)
+    {:noreply, %{state | runtime_refresh: nil}}
+  end
+
+  def handle_info(
+        {:EXIT, pid, reason},
+        %{runtime_refresh: %{pid: pid} = pending} = state
+      ) do
+    bound = bound_runtime_refresh_error({:refresh_exit, reason})
+    state = maybe_update_refresh_health(state, pending.health_snapshot, {:error, bound})
+    GenServer.reply(pending.from, {:error, bound})
+    {:noreply, %{state | runtime_refresh: nil}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
@@ -696,11 +749,13 @@ defmodule Arbor.Orchestrator.RunJournal do
   # Internals
   # ---------------------------------------------------------------------------
 
-  defp call_server(opts, request) do
+  defp call_server(opts, request), do: call_server(opts, request, @default_call_timeout_ms)
+
+  defp call_server(opts, request, timeout) do
     server = Keyword.get(opts, :server, __MODULE__)
 
     try do
-      GenServer.call(server, request)
+      GenServer.call(server, request, timeout)
     catch
       :exit, {:noproc, _} ->
         unavailable_reply(request)
@@ -855,83 +910,80 @@ defmodule Arbor.Orchestrator.RunJournal do
       {:error, {:durable_rehydrate_throw, bound_effect_reason(reason)}}
   end
 
-  # Runtime refresh (L4B2): durable is authority for row content, but unlike
-  # boot rehydrate we do **not** rewrite in-flight statuses to :interrupted
-  # and we never delete hot rows missing from a single list snapshot.
-  # Collect + validate the full batch first so a mid-batch failure cannot leave
-  # a partial upsert view of durable authority.
-  defp do_refresh_from_durable(%{backend: nil} = state) do
-    {{:ok, %{upserted: 0}}, state}
+  # Runtime refresh (L4B2): durable collection runs outside the journal owner
+  # so a large durable inventory cannot block effect receipts. The owner keeps
+  # an exact hot snapshot and applies a decoded row only when that row's hot
+  # value is unchanged; a concurrent durable-first write therefore wins over a
+  # stale refresh result. The full durable batch is still decoded before any
+  # hot upsert, preserving the no-partial-upsert failure contract.
+  defp runtime_refresh_source(state) do
+    Map.take(state, [:backend, :store_name, :collection, :backend_opts, :local_node])
   end
 
-  defp do_refresh_from_durable(%{durable_mode: :ets_only} = state) do
-    {{:ok, %{upserted: 0}}, state}
+  defp hot_snapshot(table) do
+    table
+    |> list_all_records()
+    |> Map.new(fn %Record{} = record -> {record.run_id, record} end)
   end
 
-  defp do_refresh_from_durable(state) do
-    case collect_runtime_refresh_batch(state) do
-      {:ok, records} ->
-        Enum.each(records, fn %Record{} = record ->
-          hot_insert(state.table, record)
-        end)
+  defp health_snapshot(state) do
+    Map.take(state, [:durable_mode, :durable_error, :last_write_error])
+  end
 
-        healthy = %{
-          state
-          | durable_error: nil,
-            last_write_error: nil,
-            durable_mode: :backed
-        }
+  defp finish_runtime_refresh({:ok, records}, pending, state) when is_list(records) do
+    upserted = apply_runtime_refresh_batch(records, pending.hot_snapshot, state)
+    state = maybe_update_refresh_health(state, pending.health_snapshot, :ok)
+    {{:ok, %{upserted: upserted}}, state}
+  end
 
-        {{:ok, %{upserted: length(records)}}, healthy}
+  defp finish_runtime_refresh({:error, reason}, pending, state) do
+    bound = bound_runtime_refresh_error(reason)
+    state = maybe_update_refresh_health(state, pending.health_snapshot, {:error, bound})
+    {{:error, bound}, state}
+  end
 
-      {:error, reason} ->
-        bound = bound_runtime_refresh_error(reason)
+  defp finish_runtime_refresh(other, pending, state) do
+    finish_runtime_refresh({:error, {:unexpected_refresh_result, other}}, pending, state)
+  end
 
-        degraded = %{
-          state
-          | durable_error: bound,
-            last_write_error: bound,
-            durable_mode: :degraded
-        }
+  defp apply_runtime_refresh_batch(records, snapshot, state) do
+    Enum.reduce(records, 0, fn %Record{} = decoded, count ->
+      current = lookup_record(state.table, decoded.run_id)
 
-        {{:error, bound}, degraded}
+      if hot_unchanged_since_refresh?(snapshot, decoded.run_id, current) do
+        decoded = maybe_preserve_local_spawning_pid(decoded, current, state.local_node)
+        hot_insert(state.table, decoded)
+        count + 1
+      else
+        count
+      end
+    end)
+  end
+
+  defp hot_unchanged_since_refresh?(snapshot, run_id, current) do
+    case Map.fetch(snapshot, run_id) do
+      {:ok, initial} -> current == initial
+      :error -> is_nil(current)
     end
-  rescue
-    e ->
-      bound = bound_runtime_refresh_error({:refresh_raised, Exception.message(e)})
+  end
 
-      degraded = %{
-        state
-        | durable_error: bound,
-          last_write_error: bound,
-          durable_mode: :degraded
-      }
+  defp maybe_update_refresh_health(state, snapshot, outcome) do
+    if health_snapshot(state) == snapshot do
+      case outcome do
+        :ok ->
+          %{state | durable_error: nil, last_write_error: nil, durable_mode: :backed}
 
-      {{:error, bound}, degraded}
-  catch
-    :exit, reason ->
-      bound = bound_runtime_refresh_error({:refresh_exit, reason})
-
-      degraded = %{
-        state
-        | durable_error: bound,
-          last_write_error: bound,
-          durable_mode: :degraded
-      }
-
-      {{:error, bound}, degraded}
-
-    :throw, reason ->
-      bound = bound_runtime_refresh_error({:refresh_throw, reason})
-
-      degraded = %{
-        state
-        | durable_error: bound,
-          last_write_error: bound,
-          durable_mode: :degraded
-      }
-
-      {{:error, bound}, degraded}
+        {:error, bound} ->
+          %{
+            state
+            | durable_error: bound,
+              last_write_error: bound,
+              durable_mode: :degraded
+          }
+      end
+    else
+      state
+    end
   end
 
   defp collect_runtime_refresh_batch(state) do
@@ -942,9 +994,7 @@ defmodule Arbor.Orchestrator.RunJournal do
             {:ok, raw} ->
               case bind_and_decode_lifecycle_row(key, raw, state.local_node, :runtime) do
                 {:ok, %Record{} = decoded} ->
-                  hot = lookup_record(state.table, decoded.run_id)
-                  merged = maybe_preserve_local_spawning_pid(decoded, hot, state.local_node)
-                  {:cont, {:ok, [merged | acc]}}
+                  {:cont, {:ok, [decoded | acc]}}
 
                 {:error, reason} ->
                   # Fail closed before any hot write — no partial batch upsert.
