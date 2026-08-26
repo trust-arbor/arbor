@@ -99,6 +99,25 @@ not pick capability ids or the `task_id`.
 - Persistence is healthy enough to ack the pre-grant recovery marker.
   Dispatch fail-closes when durability is unavailable.
 
+### Validation runtime (currently macOS only)
+
+Candidate validation (`mix compile`, tests, the admission probe) runs in an
+isolated VM against a **reviewed, root-owned Linux dependency baseline**, not on
+the host. Today that VM is **Apple Container on macOS**, configured by
+`ARBOR_APPLE_CONTAINER_CONFIG_PATH` (for example
+`/usr/local/etc/arbor/apple-container.json`): the validation image and its
+digests, the `vminit` image, toolchain pins, the `mix.lock` / deps-tree digests,
+and the baseline `source_root` + `manifest_path`. Building and promoting that
+baseline is the procedure in the `dependency-baseline-release-workflow` roadmap
+item.
+
+Without it, live readiness stops at
+`dependency_baseline: dependency_baseline_unavailable` and nothing can be
+dispatched. **On Linux there is no validation runtime yet** — every step up to
+readiness works, readiness does not. A Podman/Docker-based runtime is planned
+(`.arbor/roadmap/0-inbox/linux-validation-runtime-for-the-software-factory.md`);
+this section will be rewritten when it lands.
+
 ### Coding roots
 
 Dev defaults (see `config/dev.exs` and `config/runtime.exs`):
@@ -121,6 +140,26 @@ A registered Ed25519 agent key, mode `0600`, in one of:
 
 The signing proxy uses this key. Arbor does not accept a caller-supplied
 `agent_id` as proof of identity.
+
+**The key must also be registered on the running node.** Dashboard-issued keys
+are; the `~/.arbor/identity.key` that `mix arbor.setup` generates is **not**
+(as of 2026-08-26 — see the `software-factory-onboarding-friction` roadmap
+item). Until that lands, the signer answers every request with
+`401 … signature rejected` (`:unknown_agent` in the gateway log). Register it
+once, on the live node:
+
+```elixir
+kv =
+  File.read!(Path.expand("~/.arbor/identity.key"))
+  |> String.split("\n", trim: true)
+  |> Map.new(fn line -> line |> String.split("=", parts: 2) |> List.to_tuple() end)
+
+seed = kv["private_key_b64"] |> Base.decode64!() |> binary_part(0, 32)
+{pub, _} = :crypto.generate_key(:eddsa, :ed25519, seed)
+{:ok, id} = Arbor.Contracts.Security.Identity.new(public_key: pub, name: "operator-cli")
+true = id.agent_id == kv["agent_id"]   # sanity: derived id must equal the file's
+:ok = Arbor.Security.register_identity(id)
+```
 
 ### Coordinator agent
 
@@ -185,11 +224,16 @@ Arbor.LLM.OAuth.Login.DevicePrompt.user_code(prompt)
 # inspect(prompt) is intentionally redacted — keep prompt.handle yourself.
 ```
 
-Complete the device flow in a browser, then:
+Complete the device flow in a browser **first** — the verification URL is one
+line in the rpc output, so copy it out deliberately. Then:
 
 ```elixir
 Arbor.LLM.complete_xai_device_login(prompt.handle)
 ```
+
+`complete_xai_device_login/1` polls xAI until the browser step is done; called
+early it blocks the mix task instead of returning an error. Confirm with
+`Arbor.LLM.oauth_health(:xai_oauth)` → `status: "ready"`.
 
 A SuperGrok Heavy subscription can still be rejected as
 `xai_oauth_tier_denied` on some accounts. That is terminal for the current
