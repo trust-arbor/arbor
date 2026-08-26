@@ -83,6 +83,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.Coding.CodingResourceInventory
   alias Arbor.Actions.Coding.DependencyBaselineAdmission
   alias Arbor.Actions.Coding.ToolchainIdentityCore
+  alias Arbor.Actions.Coding.ValidationRuntimeAdmissionCore
   alias Arbor.Actions.Config
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
@@ -785,6 +786,30 @@ defmodule Arbor.Actions do
   def coding_dependency_baseline_admission(_repo_path, _base_ref),
     do: {:error, :base_ref_unresolvable}
 
+  @doc """
+  Point-in-time validation-runtime admission for live coding readiness.
+
+  Calls the public `Arbor.Shell` facade (`validation_runtime_status/0` and,
+  when pinned, `validation_runtime_probe/0`) and returns a JSON-clean
+  envelope. Mix.lock comparison remains `coding_dependency_baseline_admission/2`.
+  Never includes image digests or host paths.
+  """
+  @spec coding_validation_runtime_admission() ::
+          {:ok, %{required(String.t()) => String.t()}} | {:error, :malformed}
+  def coding_validation_runtime_admission do
+    with {:ok, module} <- Config.validation_runtime_module(),
+         status when is_map(status) <- module.validation_runtime_status(),
+         probe <- maybe_validation_runtime_probe(module, status) do
+      ValidationRuntimeAdmissionCore.observe(status, probe, validation_runtime_host_os())
+    else
+      _other -> {:error, :malformed}
+    end
+  rescue
+    _exception -> {:error, :malformed}
+  catch
+    _kind, _reason -> {:error, :malformed}
+  end
+
   @doc "Return the bounded identity of the reviewed Mix and loaded BEAM toolchain."
   @spec coding_toolchain_identity() ::
           {:ok, %{required(String.t()) => term()}}
@@ -818,6 +843,21 @@ defmodule Arbor.Actions do
 
       _ ->
         {:error, :invalid_toolchain_identity}
+    end
+  end
+
+  defp maybe_validation_runtime_probe(module, %{"state" => state})
+       when state in ["pinned", "available"] do
+    module.validation_runtime_probe()
+  end
+
+  defp maybe_validation_runtime_probe(_module, _status), do: :skipped
+
+  defp validation_runtime_host_os do
+    case :os.type() do
+      {:unix, :linux} -> "linux"
+      {:unix, :darwin} -> "macos"
+      _other -> "unknown"
     end
   end
 

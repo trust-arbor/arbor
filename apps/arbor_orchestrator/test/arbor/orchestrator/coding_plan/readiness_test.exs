@@ -32,6 +32,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     def coding_dependency_baseline_admission(repo_path, base_ref),
       do: invoke(:coding_dependency_baseline_admission, [repo_path, base_ref])
 
+    def coding_validation_runtime_admission,
+      do: invoke(:coding_validation_runtime_admission, [])
+
     defp invoke(key, args) do
       case Process.get({:readiness_observer, key}) do
         function when is_function(function, length(args)) -> apply(function, args)
@@ -142,6 +145,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert Enum.count(report["diagnostics"], &(&1["decision"] == "blocked")) == 0
     assert diagnostic(report, "dependency_baseline")["decision"] == "passed"
     assert diagnostic(report, "dependency_baseline")["code"] == "dependency_baseline_matched"
+    assert diagnostic(report, "dependency_baseline")["evidence_ref"] == "podman"
     assert diagnostic(report, "acp_health")["decision"] == "degraded"
     assert diagnostic(report, "acp_health")["code"] == "acp_health_degraded"
     assert diagnostic(report, "validation_capacity")["decision"] == "unavailable"
@@ -156,6 +160,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     opts =
       live_opts(ctx,
         security_available?: fn -> false end,
+        coding_validation_runtime_admission: fn -> send(test_pid, :runtime_called) end,
         coding_dependency_baseline_admission: fn _repo, _ref ->
           send(test_pid, :baseline_called)
         end,
@@ -167,6 +172,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
     assert report["status"] == "blocked"
     assert blocked_code(report) == "security_authority_unavailable"
+    refute_received :runtime_called
     refute_received :baseline_called
     refute_received :acp_called
     refute_received :toolchain_called
@@ -260,6 +266,31 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert after_worktrees == before_worktrees
   end
 
+  test "live runtime observer raise, exit, throw, and malformed results fail closed", ctx do
+    test_pid = self()
+
+    for {label, observer} <- [
+          {:raise, fn -> raise "runtime boom" end},
+          {:exit, fn -> exit(:runtime_exit) end},
+          {:throw, fn -> throw(:runtime_throw) end},
+          {:malformed, fn -> {:ok, %{"driver" => "podman", "digest" => "secret"}} end}
+        ] do
+      opts =
+        live_opts(ctx,
+          coding_validation_runtime_admission: observer,
+          coding_dependency_baseline_admission: fn _repo, _ref ->
+            send(test_pid, {:mix_lock_called, label})
+          end
+        )
+
+      assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+      assert report["status"] == "blocked"
+      assert blocked_code(report) == "runtime_invalid"
+      refute inspect(report) =~ "secret"
+      refute_received {:mix_lock_called, ^label}
+    end
+  end
+
   test "live baseline observer raise, exit, throw, and malformed results fail closed", ctx do
     test_pid = self()
 
@@ -326,6 +357,136 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
              {:error, :malformed}
 
     assert ReadinessLiveCore.dependency_baseline(:ok) == {:error, :malformed}
+  end
+
+  test "pure runtime classifier admits pinned+passed and distinguishes unconfigured from probe failure" do
+    passed = runtime_envelope()
+    assert ReadinessLiveCore.validation_runtime({:ok, passed}) == {:ok, :passed, "podman"}
+
+    unconfigured = runtime_envelope(state: "unavailable", probe: "skipped")
+
+    assert ReadinessLiveCore.validation_runtime({:ok, unconfigured}) ==
+             {:error, :unconfigured, "podman", "linux"}
+
+    probe_failed = runtime_envelope(probe: "failed")
+
+    assert ReadinessLiveCore.validation_runtime({:ok, probe_failed}) ==
+             {:error, :probe_failed, "podman"}
+
+    assert ReadinessLiveCore.validation_runtime({:ok, Map.put(passed, "digest", "x")}) ==
+             {:error, :malformed}
+
+    assert ReadinessLiveCore.validation_runtime(:ok) == {:error, :malformed}
+  end
+
+  test "live unconfigured Linux runtime is runtime_unconfigured and does not run mix.lock",
+       ctx do
+    test_pid = self()
+
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          send(test_pid, :runtime_called)
+          {:ok, runtime_envelope(state: "unavailable", probe: "skipped")}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          send(test_pid, :mix_lock_called)
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert report["status"] == "blocked"
+    assert blocked_code(report) == "runtime_unconfigured"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["evidence_ref"] == "podman"
+    assert diagnostic["remediation"] =~ "mix arbor.baseline.build"
+    assert diagnostic["remediation"] =~ "mix arbor.baseline.activate"
+    refute diagnostic["remediation"] =~ "Restore the reviewed Linux dependency baseline"
+    assert_received :runtime_called
+    refute_received :mix_lock_called
+  end
+
+  test "live unconfigured macOS runtime keeps Apple Container install wording", ctx do
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok,
+           runtime_envelope(
+             driver: "apple_container",
+             state: "unavailable",
+             probe: "skipped",
+             host_os: "macos"
+           )}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          flunk("mix.lock must not run when the runtime is unconfigured")
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "runtime_unconfigured"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["evidence_ref"] == "apple_container"
+    assert diagnostic["remediation"] =~ "ARBOR_APPLE_CONTAINER_CONFIG_PATH"
+    assert diagnostic["remediation"] =~ "/usr/local/etc/arbor/apple-container.json"
+    refute diagnostic["remediation"] =~ "mix arbor.baseline.build"
+  end
+
+  test "live probe failure is distinct from baseline unavailable and names the driver",
+       ctx do
+    test_pid = self()
+
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok, runtime_envelope(probe: "failed")}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          send(test_pid, :mix_lock_called)
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "runtime_probe_failed"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["evidence_ref"] == "podman"
+    assert diagnostic["remediation"] =~ "podman"
+    refute diagnostic["remediation"] =~ "sha256"
+    refute diagnostic["remediation"] =~ "/"
+    refute diagnostic["remediation"] =~ "Restore the reviewed Linux dependency baseline"
+    refute_received :mix_lock_called
+  end
+
+  test "live mix.lock unavailable keeps the existing authority remedy after a passing runtime",
+       ctx do
+    opts =
+      live_opts(ctx,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          {:error, :baseline_unavailable}
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "dependency_baseline_unavailable"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["evidence_ref"] == "podman"
+
+    assert diagnostic["remediation"] ==
+             "Restore the reviewed Linux dependency baseline before dispatch."
+  end
+
+  test "live passed Apple runtime shows apple_container on the report", ctx do
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok, runtime_envelope(driver: "apple_container", host_os: "macos")}
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert diagnostic(report, "dependency_baseline")["code"] == "dependency_baseline_matched"
+    assert diagnostic(report, "dependency_baseline")["evidence_ref"] == "apple_container"
+    refute inspect(report) =~ "/usr/local/etc/arbor"
   end
 
   test "live ACP model mismatch is primary and short-circuits later gates", ctx do
@@ -700,6 +861,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
       end)
     )
 
+    Process.put(
+      {:readiness_observer, :coding_validation_runtime_admission},
+      Keyword.get(overrides, :coding_validation_runtime_admission, fn ->
+        {:ok, runtime_envelope()}
+      end)
+    )
+
     readiness_opts(ctx)
     |> Keyword.merge(
       mode: :live,
@@ -712,8 +880,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
       :acp_provider_readiness,
       :coding_toolchain_identity,
       :validation_capacity_observer,
-      :coding_dependency_baseline_admission
+      :coding_dependency_baseline_admission,
+      :coding_validation_runtime_admission
     ])
+  end
+
+  defp runtime_envelope(opts \\ []) do
+    %{
+      "driver" => Keyword.get(opts, :driver, "podman"),
+      "state" => Keyword.get(opts, :state, "pinned"),
+      "probe" => Keyword.get(opts, :probe, "passed"),
+      "host_os" => Keyword.get(opts, :host_os, "linux")
+    }
   end
 
   defp acp_envelope(opts) do

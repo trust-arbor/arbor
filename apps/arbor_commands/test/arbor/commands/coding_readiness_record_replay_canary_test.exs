@@ -53,8 +53,8 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     canary-06 canary-07 canary-08 canary-09 canary-10
   )
   @readiness_gate_ids ~w(
-    plan_schema trusted_roots compiler provenance security_authority acp_health
-    toolchain_identity validation_capacity
+    plan_schema trusted_roots compiler provenance security_authority
+    dependency_baseline acp_health toolchain_identity validation_capacity
   )
 
   defmodule FakeReqLLMTransport do
@@ -107,6 +107,19 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     def signing_key_status(_agent_id), do: {:ok, :available}
     def coding_toolchain_identity, do: {:ok, toolchain_identity()}
     def validation_capacity_observer, do: :available
+
+    def coding_validation_runtime_admission do
+      {:ok,
+       %{
+         "driver" => "podman",
+         "state" => "pinned",
+         "probe" => "passed",
+         "host_os" => "linux"
+       }}
+    end
+
+    def coding_dependency_baseline_admission(_repo_path, _base_ref),
+      do: {:ok, %{"matched" => true}}
 
     def acp_provider_readiness(provider, model) do
       task_id = Application.fetch_env!(:arbor_commands, :phase_b_canary_active_task_id)

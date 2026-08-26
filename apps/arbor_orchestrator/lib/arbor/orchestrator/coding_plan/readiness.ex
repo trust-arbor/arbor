@@ -439,6 +439,67 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   end
 
   defp observe_dependency_baseline(plan, observed_at) do
+    case observe_validation_runtime(observed_at) do
+      {:ok, driver} ->
+        observe_mix_lock_baseline(plan, observed_at, driver)
+
+      {:blocked, diagnostic} ->
+        {:blocked, diagnostic}
+    end
+  end
+
+  defp observe_validation_runtime(observed_at) do
+    result =
+      safe_observer(
+        :coding_validation_runtime_admission,
+        [],
+        fn ->
+          apply(
+            Config.coding_readiness_actions_module(),
+            :coding_validation_runtime_admission,
+            []
+          )
+        end
+      )
+
+    case result do
+      {:ok, observed} ->
+        case ReadinessLiveCore.validation_runtime(observed) do
+          {:ok, :passed, driver} ->
+            {:ok, driver}
+
+          {:error, :unconfigured, driver, host_os} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "runtime_unconfigured",
+               observed_at,
+               "No validation runtime is configured.",
+               runtime_unconfigured_remedy(host_os),
+               driver
+             )}
+
+          {:error, :probe_failed, driver} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "runtime_probe_failed",
+               observed_at,
+               "The validation runtime probe failed.",
+               runtime_probe_failed_remedy(driver),
+               driver
+             )}
+
+          {:error, :malformed} ->
+            {:blocked, runtime_invalid_diagnostic(observed_at)}
+        end
+
+      _other ->
+        {:blocked, runtime_invalid_diagnostic(observed_at)}
+    end
+  end
+
+  defp observe_mix_lock_baseline(plan, observed_at, driver) do
     repo_root = plan.repo_root
     base_ref = plan.base_ref
 
@@ -464,7 +525,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline",
                "dependency_baseline_matched",
                observed_at,
-               "The exact base commit matches the pinned Linux dependency baseline."
+               "The exact base commit matches the pinned Linux dependency baseline.",
+               driver
              )}
 
           {:error, :mismatch} ->
@@ -474,7 +536,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_mismatch",
                observed_at,
                "The exact base commit does not match the pinned Linux dependency baseline.",
-               "Rebuild the Linux dependency baseline for this commit before dispatch."
+               "Rebuild the Linux dependency baseline for this commit before dispatch.",
+               driver
              )}
 
           {:error, :unavailable} ->
@@ -484,7 +547,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_unavailable",
                observed_at,
                "The pinned Linux dependency baseline is unavailable.",
-               "Restore the reviewed Linux dependency baseline before dispatch."
+               "Restore the reviewed Linux dependency baseline before dispatch.",
+               driver
              )}
 
           {:error, :mix_lock_unreadable} ->
@@ -494,7 +558,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_mix_lock_unreadable",
                observed_at,
                "The exact base commit mix.lock could not be read.",
-               "Use a base ref whose commit contains a readable mix.lock."
+               "Use a base ref whose commit contains a readable mix.lock.",
+               driver
              )}
 
           {:error, :base_ref_unresolvable} ->
@@ -504,7 +569,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_base_ref_unresolvable",
                observed_at,
                "The coding plan base ref could not be resolved to an exact commit.",
-               "Use a resolvable Git commit, tag, or branch as base_ref."
+               "Use a resolvable Git commit, tag, or branch as base_ref.",
+               driver
              )}
 
           {:error, :malformed} ->
@@ -514,18 +580,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "dependency_baseline_invalid",
                observed_at,
                "The dependency-baseline readiness observation is malformed.",
-               "Return the bounded matched-or-error admission result."
+               "Return the bounded matched-or-error admission result.",
+               driver
              )}
         end
 
-      _ ->
+      _other ->
         {:blocked,
          blocked(
            "dependency_baseline",
            "dependency_baseline_invalid",
            observed_at,
            "The dependency-baseline readiness observation is unavailable.",
-           "Restore the dependency-baseline observer and retry live readiness."
+           "Restore the dependency-baseline observer and retry live readiness.",
+           driver
          )}
     end
   end
@@ -1120,8 +1188,55 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     ]
   end
 
-  defp passed(gate_id, code, observed_at, message),
-    do: ReadinessCore.diagnostic(gate_id, "preflight", "passed", code, observed_at, message, nil)
+  defp runtime_unconfigured_remedy("linux") do
+    "No validation runtime is configured. Linux: mix arbor.baseline.build && " <>
+      "mix arbor.baseline.activate <digest>, then restart."
+  end
+
+  defp runtime_unconfigured_remedy("macos") do
+    "No validation runtime is configured. macOS: provision Apple Container via " <>
+      "ARBOR_APPLE_CONTAINER_CONFIG_PATH or /usr/local/etc/arbor/apple-container.json, " <>
+      "then restart."
+  end
+
+  defp runtime_unconfigured_remedy(_host_os) do
+    "No validation runtime is configured. Configure a reviewed validation runtime, then restart."
+  end
+
+  defp runtime_probe_failed_remedy("podman") do
+    "The podman driver could not probe the validation image. Restore podman and retry."
+  end
+
+  defp runtime_probe_failed_remedy("apple_container") do
+    "The apple_container driver could not probe the validation image. Restore Apple Container and retry."
+  end
+
+  defp runtime_probe_failed_remedy(_driver) do
+    "The validation runtime probe failed. Restore the reviewed driver and retry."
+  end
+
+  defp runtime_invalid_diagnostic(observed_at) do
+    blocked(
+      "dependency_baseline",
+      "runtime_invalid",
+      observed_at,
+      "The validation-runtime readiness observation is malformed.",
+      "Return a bounded validation-runtime admission envelope."
+    )
+  end
+
+  defp passed(gate_id, code, observed_at, message, evidence_ref \\ nil),
+    do:
+      ReadinessCore.diagnostic(
+        gate_id,
+        "preflight",
+        "passed",
+        code,
+        observed_at,
+        message,
+        nil,
+        evidence_ref
+      )
 
   defp unavailable(gate_id, code, observed_at, message, remediation),
     do:
@@ -1135,7 +1250,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         remediation
       )
 
-  defp blocked(gate_id, code, observed_at, message, remediation),
+  defp blocked(gate_id, code, observed_at, message, remediation, evidence_ref \\ nil),
     do:
       ReadinessCore.diagnostic(
         gate_id,
@@ -1144,7 +1259,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         code,
         observed_at,
         message,
-        remediation
+        remediation,
+        evidence_ref
       )
 
   defp normalize_plan(%Plan{} = plan), do: {:ok, plan}

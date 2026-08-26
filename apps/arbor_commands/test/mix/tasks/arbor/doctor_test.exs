@@ -99,6 +99,44 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
     end
   end
 
+  describe "validation vs runtimes flags" do
+    test "--validation is a known strict option and does not collide with --runtimes" do
+      {opts, rest, invalid} =
+        OptionParser.parse(["--validation", "--json"], strict: Doctor.cli_strict())
+
+      assert invalid == []
+      assert rest == []
+      assert opts[:validation] == true
+      assert opts[:json] == true
+
+      {runtime_opts, _, runtime_invalid} =
+        OptionParser.parse(["--runtimes"], strict: Doctor.cli_strict())
+
+      assert runtime_invalid == []
+      assert runtime_opts[:runtimes] == true
+      refute runtime_opts[:validation]
+
+      {both, _, both_invalid} =
+        OptionParser.parse(["--validation", "--runtimes"], strict: Doctor.cli_strict())
+
+      assert both_invalid == []
+      assert both[:validation] == true
+      assert both[:runtimes] == true
+    end
+
+    test "--validation cannot be combined with --runtimes" do
+      assert_raise Mix.Error, ~r/--validation cannot be combined with --runtimes/, fn ->
+        Doctor.run(["--validation", "--runtimes"])
+      end
+    end
+
+    test "unknown flags still raise" do
+      assert_raise Mix.Error, ~r/Unknown option/, fn ->
+        Doctor.run(["--not-a-doctor-flag"])
+      end
+    end
+  end
+
   describe "option parsing" do
     test "parses --refresh flag" do
       {opts, _, _} =

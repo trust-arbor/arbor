@@ -98,6 +98,32 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
   def dependency_baseline(_other), do: {:error, :malformed}
 
   @doc false
+  @spec validation_runtime(term()) ::
+          {:ok, :passed, String.t()}
+          | {:error, :unconfigured, String.t(), String.t()}
+          | {:error, :probe_failed, String.t()}
+          | {:error, :malformed}
+  def validation_runtime({:ok, envelope})
+      when is_map(envelope) and not is_struct(envelope) do
+    with true <- exact_keys?(envelope, ~w(driver state probe host_os)),
+         true <- json_clean?(envelope),
+         {:ok, driver} <- admit_runtime_driver(envelope["driver"]),
+         {:ok, state} <- admit_runtime_state(envelope["state"]),
+         {:ok, probe} <- admit_runtime_probe(envelope["probe"]),
+         {:ok, host_os} <- admit_runtime_host_os(envelope["host_os"]) do
+      classify_runtime(driver, state, probe, host_os)
+    else
+      _other -> {:error, :malformed}
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
+  def validation_runtime(_other), do: {:error, :malformed}
+
+  @doc false
   @spec expiry(DateTime.t(), String.t() | nil) ::
           {:ok, DateTime.t()} | {:error, :malformed | :expired}
   def expiry(observed_at, nil) when is_struct(observed_at, DateTime) do
@@ -332,4 +358,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
        do: true
 
   defp json_clean?(_value), do: false
+
+  defp classify_runtime(driver, "unavailable", _probe, host_os),
+    do: {:error, :unconfigured, driver, host_os}
+
+  defp classify_runtime(driver, state, "passed", _host_os)
+       when state in ["pinned", "available"],
+       do: {:ok, :passed, driver}
+
+  defp classify_runtime(driver, state, "failed", _host_os)
+       when state in ["pinned", "available"],
+       do: {:error, :probe_failed, driver}
+
+  defp classify_runtime(_driver, _state, _probe, _host_os), do: {:error, :malformed}
+
+  defp admit_runtime_driver(driver)
+       when driver in ["podman", "apple_container", "unavailable"],
+       do: {:ok, driver}
+
+  defp admit_runtime_driver(_driver), do: {:error, :malformed}
+
+  defp admit_runtime_state(state) when state in ["pinned", "available", "unavailable"],
+    do: {:ok, state}
+
+  defp admit_runtime_state(_state), do: {:error, :malformed}
+
+  defp admit_runtime_probe(probe) when probe in ["passed", "failed", "skipped"],
+    do: {:ok, probe}
+
+  defp admit_runtime_probe(_probe), do: {:error, :malformed}
+
+  defp admit_runtime_host_os(host_os) when host_os in ["linux", "macos", "unknown"],
+    do: {:ok, host_os}
+
+  defp admit_runtime_host_os(_host_os), do: {:error, :malformed}
 end

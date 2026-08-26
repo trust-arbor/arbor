@@ -7,6 +7,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
       $ mix arbor.doctor                              # Provider health (default)
       $ mix arbor.doctor --runtimes                   # Registered runtimes + profiles
+      $ mix arbor.doctor --validation                 # Validation runtime (baseline.status)
       $ mix arbor.doctor --model claude-opus-4-6      # Selection preview for a model
       $ mix arbor.doctor --refresh-models             # Reload the llm_db catalog
       $ mix arbor.doctor --model claude-opus-4-6 \\
@@ -53,6 +54,12 @@ defmodule Mix.Tasks.Arbor.Doctor do
       config change are no-ops at the llm_db level. Composes with
       `--json`.
 
+  ### Validation runtime
+
+    * `--validation` - Thin alias of `mix arbor.baseline.status` for the
+      Podman/OCI or Apple Container validation runtime. This is **not**
+      `--runtimes` (LLM `Arbor.AI.Runtime`). Composes with `--json`.
+
   ## Auto-Configuration
 
   `mix arbor.doctor --configure` lets you choose among the providers that are
@@ -93,6 +100,25 @@ defmodule Mix.Tasks.Arbor.Doctor do
   # `select_best_model/2` falls back to `fallback_model/2`: the user's configured
   # default → live discovery from local providers → honest nil (never a fabricated guess).
 
+  @cli_strict [
+    refresh: :boolean,
+    json: :boolean,
+    verbose: :boolean,
+    configure: :boolean,
+    non_interactive: :boolean,
+    provider: :string,
+    acp_agent: :string,
+    runtimes: :boolean,
+    model: :string,
+    fallback: :keep,
+    runtime: :string,
+    refresh_models: :boolean,
+    validation: :boolean
+  ]
+
+  @doc false
+  def cli_strict, do: @cli_strict
+
   @impl Mix.Task
   def run(args) do
     # `strict:`, not `switches:`. With `switches:`, OptionParser DISCARDS an
@@ -101,23 +127,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     # mistyped or unsupported flag was therefore a silent no-op: the task ran
     # with its defaults, wrote a config, and reported success while ignoring
     # what the operator asked for. `parse_strict/2` surfaces them in `invalid`.
-    {opts, _rest, invalid} =
-      OptionParser.parse(args,
-        strict: [
-          refresh: :boolean,
-          json: :boolean,
-          verbose: :boolean,
-          configure: :boolean,
-          non_interactive: :boolean,
-          provider: :string,
-          acp_agent: :string,
-          runtimes: :boolean,
-          model: :string,
-          fallback: :keep,
-          runtime: :string,
-          refresh_models: :boolean
-        ]
-      )
+    {opts, rest, invalid} = OptionParser.parse(args, strict: @cli_strict)
 
     # OptionParser drops unrecognized switches into `invalid` and carries on.
     # Discarding that made a mistyped or unsupported flag a SILENT no-op: the
@@ -129,12 +139,22 @@ defmodule Mix.Tasks.Arbor.Doctor do
       Mix.raise("Unknown option(s) for mix arbor.doctor: #{names}")
     end
 
-    # Start minimal deps for provider discovery
+    cond do
+      opts[:validation] && opts[:runtimes] ->
+        Mix.raise("mix arbor.doctor --validation cannot be combined with --runtimes")
+
+      opts[:validation] ->
+        run_validation_view(opts, rest)
+
+      true ->
+        run_llm_doctor(opts, args)
+    end
+  end
+
+  defp run_llm_doctor(opts, args) do
     Application.ensure_all_started(:req)
     Application.ensure_all_started(:req_llm)
     Application.ensure_all_started(:llm_db)
-
-    # Load LLMDB for model lookup
     ensure_llmdb()
 
     cond do
@@ -143,6 +163,11 @@ defmodule Mix.Tasks.Arbor.Doctor do
       opts[:model] -> run_model_view(opts, args)
       true -> run_provider_health(opts)
     end
+  end
+
+  defp run_validation_view(opts, rest) do
+    forwarded = if opts[:json] == true, do: ["--json"], else: []
+    Mix.Task.rerun("arbor.baseline.status", forwarded ++ rest)
   end
 
   # ── Model registry refresh (--refresh-models) ────────────────────────

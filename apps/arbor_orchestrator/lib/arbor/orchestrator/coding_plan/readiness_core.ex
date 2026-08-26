@@ -26,7 +26,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
   end
 
   @doc false
-  def diagnostic(gate_id, phase, decision, code, observed_at, message, remediation) do
+  def diagnostic(
+        gate_id,
+        phase,
+        decision,
+        code,
+        observed_at,
+        message,
+        remediation,
+        evidence_ref \\ nil
+      ) do
     {:ok, diagnostic} =
       Diagnostic.new(
         version: Diagnostic.schema_version(),
@@ -36,7 +45,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessCore do
         code: code,
         observed_at: observed_at,
         message: message,
-        remediation: remediation
+        remediation: remediation,
+        evidence_ref: evidence_ref
       )
 
     diagnostic

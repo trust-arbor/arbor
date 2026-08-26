@@ -138,7 +138,7 @@ This is a documented delegation, not an oversight — `shell.ex:286-294, 445-448
 ### 3.5 Platform coverage
 
 - **Windows:** nothing. `docs/arbor/SECURITY_ARCHITECTURE.md:399-420` records the compatibility item as open.
-- **Linux hosts:** no spawn-capable containment backend at all. The Apple Container path requires `{:unix, :darwin}` + arm64 (`apple_container_control_plane_authority.ex:479-485`).
+- **Linux hosts:** spawn-capable validation is Podman/OCI via `ValidationRuntime.Oci` (digest-only, `--pull never`, `--network none`). Apple Container remains the Darwin path (`{:unix, :darwin}` + arm64, `apple_container_control_plane_authority.ex:479-485`). Bubblewrap/Landlock native containment is not done.
 - **Non-Linux/non-Darwin Unix:** launcher `_exit(126)` — fail-closed, nothing runs (`launcher.c:932-939`).
 - **macOS:** requires operator-provisioned signed assets + `ARBOR_APPLE_CONTAINER_CONFIG_PATH`. Unconfigured hosts are *live but permanently closed*, which is the right posture. As `SECURITY_ARCHITECTURE.md:399-420` puts it: "code presence alone does not prove a host can execute this path."
 
@@ -271,4 +271,4 @@ Four unrelated things share the word "sandbox," which makes reasoning about this
 
 9. Add rlimits (`RLIMIT_AS`, `RLIMIT_NOFILE`, `RLIMIT_FSIZE`, `RLIMIT_CPU`) to the launcher. Cheap, portable, and closes the "unbounded memory/disk" gap on both platforms.
 10. Decide whether operand-path constraint stays delegated to the authorizer. It is a defensible design, but today it means the strongest part of the system depends on a component outside it, and `touch` can write anywhere the service account can.
-11. Native Linux containment (bubblewrap / namespaces + seccomp, or Landlock) remains the largest platform gap — there is no spawn-capable backend on Linux hosts at all.
+11. Linux spawn-capable validation is Podman/OCI via `ValidationRuntime.Oci` (digest-only, `--pull never`, `--network none`); Apple Container remains the Darwin path. Bubblewrap/Landlock native containment is not done.

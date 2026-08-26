@@ -245,6 +245,48 @@ defmodule Arbor.Actions.Config do
   end
 
   @doc """
+  Public Shell facade used by live validation-runtime admission.
+
+  Production defaults to `Arbor.Shell`. Tests may configure a trusted named
+  module via `:validation_runtime_module`. Never accepted from action
+  parameters. Distinct from `:dependency_baseline_digest_module` so mix.lock
+  stubs need not implement runtime callbacks.
+  """
+  @type validation_runtime_module_error ::
+          {:invalid_validation_runtime_module,
+           :named_module_required
+           | {:module_not_loaded, module()}
+           | {:callback_not_exported, module(), atom(), non_neg_integer()}}
+
+  @spec validation_runtime_module() ::
+          {:ok, module()} | {:error, validation_runtime_module_error()}
+  def validation_runtime_module do
+    case Application.get_env(:arbor_actions, :validation_runtime_module, Arbor.Shell) do
+      module when is_atom(module) ->
+        cond do
+          not Code.ensure_loaded?(module) ->
+            {:error, {:invalid_validation_runtime_module, {:module_not_loaded, module}}}
+
+          not function_exported?(module, :validation_runtime_status, 0) ->
+            {:error,
+             {:invalid_validation_runtime_module,
+              {:callback_not_exported, module, :validation_runtime_status, 0}}}
+
+          not function_exported?(module, :validation_runtime_probe, 0) ->
+            {:error,
+             {:invalid_validation_runtime_module,
+              {:callback_not_exported, module, :validation_runtime_probe, 0}}}
+
+          true ->
+            {:ok, module}
+        end
+
+      _other ->
+        {:error, {:invalid_validation_runtime_module, :named_module_required}}
+    end
+  end
+
+  @doc """
   Workspace lease registry GenServer name/server used by coding facades.
 
   Production defaults to `Arbor.Actions.Coding.WorkspaceLeaseRegistry`.

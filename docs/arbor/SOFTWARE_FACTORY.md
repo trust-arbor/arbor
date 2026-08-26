@@ -99,24 +99,81 @@ not pick capability ids or the `task_id`.
 - Persistence is healthy enough to ack the pre-grant recovery marker.
   Dispatch fail-closes when durability is unavailable.
 
-### Validation runtime (currently macOS only)
+### Validation runtime
 
 Candidate validation (`mix compile`, tests, the admission probe) runs in an
-isolated VM against a **reviewed, root-owned Linux dependency baseline**, not on
-the host. Today that VM is **Apple Container on macOS**, configured by
-`ARBOR_APPLE_CONTAINER_CONFIG_PATH` (for example
-`/usr/local/etc/arbor/apple-container.json`): the validation image and its
-digests, the `vminit` image, toolchain pins, the `mix.lock` / deps-tree digests,
-and the baseline `source_root` + `manifest_path`. Building and promoting that
-baseline is the procedure in the `dependency-baseline-release-workflow` roadmap
-item.
+isolated container against a **reviewed Linux dependency baseline**, not on the
+host. Linux uses Podman/OCI. macOS uses Apple Container. Without a pinned
+runtime, live readiness stops at `dependency_baseline: runtime_unconfigured`
+and nothing can be dispatched.
 
-Without it, live readiness stops at
-`dependency_baseline: dependency_baseline_unavailable` and nothing can be
-dispatched. **On Linux there is no validation runtime yet** — every step up to
-readiness works, readiness does not. A Podman/Docker-based runtime is planned
-(`.arbor/roadmap/3-in-progress/linux-validation-runtime-for-the-software-factory.md`);
-this section will be rewritten when it lands.
+#### Linux (Podman/OCI)
+
+Follow this install literally on a native-arch Linux host. Written 2026-08-26.
+
+**Prerequisites**
+
+- Distro-packaged **root-owned** `/usr/bin/podman` (do not use a user-local
+  binary).
+- Rootless user namespaces: `/etc/subuid` and `/etc/subgid` for the Arbor
+  service account.
+- Native architecture only: `linux/amd64` or `linux/arm64`. No qemu-user
+  translation.
+
+**First-time image pull**
+
+`mix arbor.baseline.build` uses `podman build --pull=never`. Pull the reviewed
+Debian base once:
+
+```
+podman pull debian:bookworm-slim
+```
+
+**Build and activate**
+
+From a clean checkout of the umbrella:
+
+```
+./bin/mix arbor.baseline.build
+./bin/mix arbor.baseline.activate <digest>
+```
+
+`<digest>` is the baseline tree digest printed by `build`. Activate writes
+`$ARBOR_HOME/validation-runtime.json` (default `~/.arbor/validation-runtime.json`)
+mode `0400`. Override the path with `ARBOR_VALIDATION_RUNTIME_CONFIG_PATH`.
+
+**Restart Arbor** so `config/runtime.exs` re-pins the activated document.
+
+**Check**
+
+```
+./bin/mix arbor.baseline.status
+./bin/mix arbor.doctor --validation
+./bin/mix arbor.coding.check --live --plan path/to/plan.json --agent-id agent_...
+```
+
+`mix arbor.doctor --validation` is the validation-runtime row. It is not
+`--runtimes` (LLM `Arbor.AI.Runtime`). Probe failure is
+`runtime_probe_failed` and names the `podman` driver; it is not hidden behind
+`validation_capacity`.
+
+#### macOS (Apple Container)
+
+Candidate validation on Darwin runs in an isolated VM against a **reviewed,
+root-owned Linux dependency baseline**. That VM is **Apple Container on
+macOS**, configured by `ARBOR_APPLE_CONTAINER_CONFIG_PATH` (for example
+`/usr/local/etc/arbor/apple-container.json`): the validation image and its
+digests, the `vminit` image, toolchain pins, the `mix.lock` / deps-tree
+digests, and the baseline `source_root` + `manifest_path`. Building and
+promoting that baseline is the procedure in the
+`dependency-baseline-release-workflow` roadmap item.
+
+Without it, live readiness stops at `dependency_baseline: runtime_unconfigured`
+(or `dependency_baseline_unavailable` when the mix.lock authority is unpinned)
+and nothing can be dispatched.
+
+Implementation notes for the Linux Podman path live in
+`.arbor/roadmap/3-in-progress/linux-validation-runtime-for-the-software-factory.md`.
 
 ### Coding roots
 

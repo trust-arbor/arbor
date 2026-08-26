@@ -256,6 +256,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
+    def coding_validation_runtime_admission do
+      case Process.get({:coding_executor_readiness, :validation_runtime}) do
+        nil ->
+          {:ok,
+           %{
+             "driver" => "podman",
+             "state" => "pinned",
+             "probe" => "passed",
+             "host_os" => "linux"
+           }}
+
+        observer when is_function(observer, 0) ->
+          observer.()
+
+        value ->
+          value
+      end
+    end
+
     defp toolchain_identity do
       base = %{
         "schema_version" => 1,
@@ -969,7 +988,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           :acp_provider_readiness,
           :toolchain_identity,
           :validation_capacity,
-          :dependency_baseline
+          :dependency_baseline,
+          :validation_runtime
         ] do
       Process.delete({:coding_executor_readiness, key})
     end
