@@ -22,6 +22,7 @@ defmodule Arbor.Shell.OciProber do
 
   @max_deadline_ms SpawnCapableTimeout.max_probe_deadline_ms()
   @global_output_budget 1_048_576
+  @max_probe_error_tail_bytes 2_048
   @path_podman "/usr/bin/podman"
   @cap_image_json 262_144
   @sha256_digest_re ~r/\Asha256:[0-9a-f]{64}\z/
@@ -284,10 +285,58 @@ defmodule Arbor.Shell.OciProber do
 
   defp interpret_result(%{timed_out: true}), do: {:error, :probe_timeout}
 
-  defp interpret_result(%{exit_code: code}) when is_integer(code) and code != 0,
-    do: {:error, :probe_nonzero_exit}
+  defp interpret_result(%{exit_code: code} = result)
+       when is_integer(code) and code != 0 and code <= 0xFFFF do
+    {:error, {:probe_nonzero_exit, probe_error_detail(result, code)}}
+  end
 
   defp interpret_result(_), do: {:error, :probe_command_failed}
+
+  defp probe_error_detail(result, code) do
+    stdout = result_bytes(result, :stdout)
+    stderr = result_bytes(result, :stderr)
+    combined = stdout <> stderr
+
+    %{
+      exit_code: code,
+      output_tail: output_tail(combined)
+    }
+  end
+
+  defp result_bytes(result, key) do
+    case Map.get(result, key) do
+      value when is_binary(value) -> value
+      _other -> ""
+    end
+  end
+
+  defp output_tail(bytes) when is_binary(bytes) do
+    tail =
+      if byte_size(bytes) <= @max_probe_error_tail_bytes do
+        bytes
+      else
+        binary_part(
+          bytes,
+          byte_size(bytes) - @max_probe_error_tail_bytes,
+          @max_probe_error_tail_bytes
+        )
+      end
+
+    utf8_tail(tail)
+  end
+
+  defp utf8_tail(data) when is_binary(data) do
+    if String.valid?(data) do
+      data
+    else
+      size = byte_size(data)
+
+      Enum.find_value(0..min(3, max(size - 1, 0)), fn n ->
+        candidate = binary_part(data, n, size - n)
+        if String.valid?(candidate), do: candidate
+      end) || <<>>
+    end
+  end
 
   defp debit_output(state, result, path, args, opts) do
     out = Map.get(result, :stdout, "")

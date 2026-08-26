@@ -60,9 +60,14 @@ extern char **environ;
 #define EXECUTION_NO_FORK 0
 #define EXECUTION_APPLE_CONTAINER_PROBE 1
 #define EXECUTION_TRUSTED_BUILD 2
+#define EXECUTION_OCI_PROBE 3
+#define EXECUTION_OCI_UNIT 4
 
 #define APPLE_CONTAINER_CLI "/usr/local/bin/container"
 #define APPLE_CONTAINER_ALIAS_PREFIX "127.0.0.1:0/arbor/"
+#define OCI_PODMAN_CLI "/usr/bin/podman"
+#define OCI_MAX_ARG_BYTES 4096U
+#define OCI_MAX_COMMAND_ARGS 256
 
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
@@ -457,6 +462,252 @@ static int reviewed_apple_container_probe(const char *path, int target_argc,
   return target_argc == 4 && strcmp(target_argv[1], "image") == 0 &&
          strcmp(target_argv[2], "inspect") == 0 &&
          immutable_apple_container_alias(target_argv[3]);
+}
+
+static int lowercase_hex64(const char *s) {
+  if (s == NULL || strlen(s) != 64) return 0;
+  for (size_t i = 0; i < 64; i++) {
+    if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+  }
+  return 1;
+}
+
+static int oci_sha256_reference(const char *s) {
+  return s != NULL && strncmp(s, "sha256:", 7) == 0 && lowercase_hex64(s + 7);
+}
+
+static int oci_unit_name(const char *s) {
+  size_t n;
+  if (s == NULL) return 0;
+  n = strlen(s);
+  if (n < 2 || n > 63) return 0;
+  if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))) return 0;
+  if (!((s[n - 1] >= 'a' && s[n - 1] <= 'z') || (s[n - 1] >= '0' && s[n - 1] <= '9'))) return 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return 0;
+  }
+  return 1;
+}
+
+static int oci_bounded_token(const char *s) {
+  size_t n;
+  if (s == NULL) return 0;
+  n = strlen(s);
+  return n > 0 && n <= OCI_MAX_ARG_BYTES;
+}
+
+static int oci_no_dotdot_segment(const char *s) {
+  const char *p = s;
+  if (s == NULL) return 0;
+  if (strcmp(s, "..") == 0) return 0;
+  if (strncmp(s, "../", 3) == 0) return 0;
+  while ((p = strstr(p, "/..")) != NULL) {
+    char next = p[3];
+    if (next == '\0' || next == '/') return 0;
+    p += 3;
+  }
+  return 1;
+}
+
+static int oci_absolute_path(const char *s) {
+  if (!oci_bounded_token(s) || s[0] != '/' || strstr(s, "//") != NULL) return 0;
+  if (strchr(s, ',') != NULL || strchr(s, '=') != NULL) return 0;
+  return oci_no_dotdot_segment(s);
+}
+
+static int oci_guest_destination(const char *s) {
+  static const char *allowed[] = {
+      "/workspace",
+      "/arbor/home",
+      "/arbor/build",
+      "/arbor/deps",
+      "/arbor/validation/runner",
+      "/arbor/validation/result",
+      "/arbor/bin",
+  };
+  if (s == NULL) return 0;
+  for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+    if (strcmp(s, allowed[i]) == 0) return 1;
+  }
+  return 0;
+}
+
+static int oci_mount_spec(const char *s) {
+  static const char prefix[] = "type=bind,source=";
+  static const char dest_key[] = ",destination=";
+  static const char ro_suffix[] = ",ro=true";
+  const char *source_start;
+  const char *dest_key_at;
+  const char *dest_start;
+  const char *ro_at;
+  size_t source_len;
+  size_t dest_len;
+  char source[OCI_MAX_ARG_BYTES + 1];
+  char dest[OCI_MAX_ARG_BYTES + 1];
+
+  if (!oci_bounded_token(s) || strncmp(s, prefix, sizeof(prefix) - 1) != 0) return 0;
+  source_start = s + (sizeof(prefix) - 1);
+  dest_key_at = strstr(source_start, dest_key);
+  if (dest_key_at == NULL) return 0;
+  source_len = (size_t)(dest_key_at - source_start);
+  if (source_len == 0 || source_len > OCI_MAX_ARG_BYTES) return 0;
+  memcpy(source, source_start, source_len);
+  source[source_len] = '\0';
+  dest_start = dest_key_at + (sizeof(dest_key) - 1);
+  ro_at = strstr(dest_start, ro_suffix);
+  if (ro_at != NULL) {
+    if (strcmp(ro_at, ro_suffix) != 0) return 0;
+    dest_len = (size_t)(ro_at - dest_start);
+  } else {
+    dest_len = strlen(dest_start);
+  }
+  if (dest_len == 0 || dest_len > OCI_MAX_ARG_BYTES) return 0;
+  memcpy(dest, dest_start, dest_len);
+  dest[dest_len] = '\0';
+  return oci_absolute_path(source) && oci_guest_destination(dest);
+}
+
+static int oci_env_pair(const char *s) {
+  static const char *keys[] = {
+      "HOME=",
+      "TMPDIR=",
+      "MIX_BUILD_PATH=",
+      "MIX_DEPS_PATH=",
+      "MIX_HOME=",
+      "MIX_ARCHIVES=",
+      "ELIXIR_MAKE_CACHE_DIR=",
+      "ARBOR_MIX_CONTAINED=",
+      "ARBOR_SOURCE_INVENTORY_PATH=",
+      "ARBOR_ERLANG_ROOT=",
+      "ARBOR_ELIXIR_ROOT=",
+      "MIX_ENV=",
+  };
+  const char *value = NULL;
+  size_t key_len = 0;
+
+  if (!oci_bounded_token(s)) return 0;
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    size_t n = strlen(keys[i]);
+    if (strncmp(s, keys[i], n) == 0) {
+      value = s + n;
+      key_len = n;
+      break;
+    }
+  }
+  if (value == NULL || value[0] == '\0') return 0;
+  if (strchr(value, ',') != NULL) return 0;
+  if (strcmp(s, "ARBOR_MIX_CONTAINED=1") == 0) return 1;
+  if (key_len == 8 && strncmp(s, "MIX_ENV=", 8) == 0) {
+    return strcmp(value, "dev") == 0 || strcmp(value, "test") == 0 ||
+           strcmp(value, "prod") == 0;
+  }
+  return oci_absolute_path(value) || oci_guest_destination(value);
+}
+
+static int reviewed_oci_probe(const char *path, int target_argc, char **target_argv) {
+  if (strcmp(path, OCI_PODMAN_CLI) != 0 || target_argc != 4 ||
+      strcmp(target_argv[0], OCI_PODMAN_CLI) != 0) {
+    return 0;
+  }
+  return strcmp(target_argv[1], "image") == 0 && strcmp(target_argv[2], "inspect") == 0 &&
+         oci_sha256_reference(target_argv[3]);
+}
+
+static int reviewed_oci_ps(int target_argc, char **target_argv) {
+  return target_argc == 5 && strcmp(target_argv[1], "ps") == 0 &&
+         strcmp(target_argv[2], "-a") == 0 && strcmp(target_argv[3], "--format") == 0 &&
+         strcmp(target_argv[4], "json") == 0;
+}
+
+static int reviewed_oci_start(int target_argc, char **target_argv) {
+  return target_argc == 4 && strcmp(target_argv[1], "start") == 0 &&
+         strcmp(target_argv[2], "--attach") == 0 && oci_unit_name(target_argv[3]);
+}
+
+static int reviewed_oci_kill(int target_argc, char **target_argv) {
+  return target_argc == 5 && strcmp(target_argv[1], "kill") == 0 &&
+         strcmp(target_argv[2], "--signal") == 0 && strcmp(target_argv[3], "KILL") == 0 &&
+         oci_unit_name(target_argv[4]);
+}
+
+static int reviewed_oci_rm(int target_argc, char **target_argv) {
+  return target_argc == 4 && strcmp(target_argv[1], "rm") == 0 &&
+         strcmp(target_argv[2], "--force") == 0 && oci_unit_name(target_argv[3]);
+}
+
+static int reviewed_oci_create(int target_argc, char **target_argv) {
+  int i = 2;
+  int command_args = 0;
+
+  if (target_argc < 28 || strcmp(target_argv[1], "create") != 0) return 0;
+  if (strcmp(target_argv[i++], "--name") != 0 || !oci_unit_name(target_argv[i++])) return 0;
+  if (strcmp(target_argv[i++], "--platform") != 0) return 0;
+  if (strcmp(target_argv[i], "linux/amd64") != 0 && strcmp(target_argv[i], "linux/arm64") != 0) {
+    return 0;
+  }
+  i++;
+  if (strcmp(target_argv[i++], "--pull") != 0 || strcmp(target_argv[i++], "never") != 0) return 0;
+  if (strcmp(target_argv[i++], "--network") != 0 || strcmp(target_argv[i++], "none") != 0) {
+    return 0;
+  }
+  if (strcmp(target_argv[i++], "--read-only") != 0) return 0;
+  if (strcmp(target_argv[i++], "--cap-drop") != 0 || strcmp(target_argv[i++], "ALL") != 0) {
+    return 0;
+  }
+  if (strcmp(target_argv[i++], "--userns") != 0 || strcmp(target_argv[i++], "keep-id") != 0) {
+    return 0;
+  }
+  if (strcmp(target_argv[i++], "--cpus") != 0) return 0;
+  if (strcmp(target_argv[i], "1") != 0 && strcmp(target_argv[i], "4") != 0) return 0;
+  i++;
+  if (strcmp(target_argv[i++], "--memory") != 0) return 0;
+  if (strcmp(target_argv[i], "2g") != 0 && strcmp(target_argv[i], "4g") != 0) return 0;
+  i++;
+  if (strcmp(target_argv[i++], "--pids-limit") != 0) return 0;
+  if (strcmp(target_argv[i], "512") != 0 && strcmp(target_argv[i], "2048") != 0) return 0;
+  i++;
+  while (i + 1 < target_argc && strcmp(target_argv[i], "--mount") == 0) {
+    if (!oci_mount_spec(target_argv[i + 1])) return 0;
+    i += 2;
+  }
+  if (i + 1 >= target_argc || strcmp(target_argv[i++], "--tmpfs") != 0 ||
+      strcmp(target_argv[i++], "/tmp:rw,mode=1777") != 0) {
+    return 0;
+  }
+  if (i + 1 >= target_argc || strcmp(target_argv[i++], "--workdir") != 0 ||
+      strcmp(target_argv[i++], "/workspace") != 0) {
+    return 0;
+  }
+  while (i + 1 < target_argc && strcmp(target_argv[i], "--env") == 0) {
+    if (!oci_env_pair(target_argv[i + 1])) return 0;
+    i += 2;
+  }
+  if (i + 2 >= target_argc || strcmp(target_argv[i++], "--entrypoint") != 0 ||
+      strcmp(target_argv[i++], "/arbor/bin/mix") != 0 ||
+      !oci_sha256_reference(target_argv[i++])) {
+    return 0;
+  }
+  while (i < target_argc) {
+    if (!oci_bounded_token(target_argv[i])) return 0;
+    command_args++;
+    if (command_args > OCI_MAX_COMMAND_ARGS) return 0;
+    i++;
+  }
+  return 1;
+}
+
+static int reviewed_oci_unit(const char *path, int target_argc, char **target_argv) {
+  if (strcmp(path, OCI_PODMAN_CLI) != 0 || target_argc < 2 ||
+      strcmp(target_argv[0], OCI_PODMAN_CLI) != 0) {
+    return 0;
+  }
+  if (strcmp(target_argv[1], "ps") == 0) return reviewed_oci_ps(target_argc, target_argv);
+  if (strcmp(target_argv[1], "start") == 0) return reviewed_oci_start(target_argc, target_argv);
+  if (strcmp(target_argv[1], "kill") == 0) return reviewed_oci_kill(target_argc, target_argv);
+  if (strcmp(target_argv[1], "rm") == 0) return reviewed_oci_rm(target_argc, target_argv);
+  if (strcmp(target_argv[1], "create") == 0) return reviewed_oci_create(target_argc, target_argv);
+  return 0;
 }
 
 #ifdef __APPLE__
@@ -1076,8 +1327,16 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   if (fchdir(cwd_fd) != 0) _exit(126);
   close(cwd_fd);
 #ifdef __linux__
-  if (execution_mode != EXECUTION_NO_FORK) _exit(126);
-  if (install_linux_no_fork_filter() != 0) _exit(126);
+  if (execution_mode == EXECUTION_NO_FORK) {
+    if (install_linux_no_fork_filter() != 0) _exit(126);
+  } else if (execution_mode == EXECUTION_OCI_PROBE ||
+             execution_mode == EXECUTION_OCI_UNIT) {
+    /* Reviewed /usr/bin/podman argv. Skip the no-fork seccomp filter and
+     * PR_SET_NO_NEW_PRIVS so rootless podman can clone threads and exec
+     * setuid newuidmap/newgidmap after reboot. */
+  } else {
+    _exit(126);
+  }
 #endif
   uint8_t ready = 1;
   if (write_all(ready_fd, &ready, 1) != 0) _exit(126);
@@ -1115,6 +1374,9 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
   }
   close(check_fd);
   close(target_fd);
+  if (execution_mode == EXECUTION_OCI_PROBE || execution_mode == EXECUTION_OCI_UNIT) {
+    _exit(126);
+  }
   if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE) {
     execve(path, target_argv, environ);
   } else if (execution_mode == EXECUTION_TRUSTED_BUILD) {
@@ -1182,9 +1444,25 @@ static int run_exec(int argc, char **argv, int execution_mode) {
     send_error("unreviewed Apple Container probe command");
     return 2;
   }
+  if (execution_mode == EXECUTION_OCI_PROBE &&
+      !reviewed_oci_probe(path, argc - 16, &argv[16])) {
+    send_error("unreviewed OCI probe command");
+    return 2;
+  }
+  if (execution_mode == EXECUTION_OCI_UNIT &&
+      !reviewed_oci_unit(path, argc - 16, &argv[16])) {
+    send_error("unreviewed OCI unit command");
+    return 2;
+  }
 #ifndef __APPLE__
   if (execution_mode == EXECUTION_APPLE_CONTAINER_PROBE) {
     send_error("Apple Container probe launcher unavailable");
+    return 126;
+  }
+#endif
+#ifndef __linux__
+  if (execution_mode == EXECUTION_OCI_PROBE || execution_mode == EXECUTION_OCI_UNIT) {
+    send_error("OCI launcher unavailable");
     return 126;
   }
 #endif
@@ -2688,6 +2966,12 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && strcmp(argv[1], "apple-container-probe") == 0) {
     return run_exec(argc, argv, EXECUTION_APPLE_CONTAINER_PROBE);
+  }
+  if (argc >= 2 && strcmp(argv[1], "oci-probe") == 0) {
+    return run_exec(argc, argv, EXECUTION_OCI_PROBE);
+  }
+  if (argc >= 2 && strcmp(argv[1], "oci-unit") == 0) {
+    return run_exec(argc, argv, EXECUTION_OCI_UNIT);
   }
   if (argc >= 2 && strcmp(argv[1], "trusted-build") == 0) {
     return run_trusted_build(argc, argv);

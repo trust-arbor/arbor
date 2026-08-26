@@ -48,6 +48,7 @@ defmodule Arbor.Shell.OciProberTest do
       :persistent_term.put({__MODULE__, :runs}, [])
       :persistent_term.put({__MODULE__, :resolves}, [])
       :persistent_term.put({__MODULE__, :host_env_mode}, :ok)
+      :persistent_term.put({__MODULE__, :run_result}, nil)
     end
 
     def set_executables(map), do: :persistent_term.put({__MODULE__, :executables}, map)
@@ -105,6 +106,8 @@ defmodule Arbor.Shell.OciProberTest do
       end
     end
 
+    def set_run_result(result), do: :persistent_term.put({__MODULE__, :run_result}, result)
+
     def run_bound(%Executable{} = exe, args, opts) do
       maybe_callback()
 
@@ -113,19 +116,25 @@ defmodule Arbor.Shell.OciProberTest do
         runs() ++ [%{path: exe.path, args: args, opts: opts}]
       )
 
-      json = :persistent_term.get({__MODULE__, :inspect_json})
+      case :persistent_term.get({__MODULE__, :run_result}, nil) do
+        {:ok, result} when is_map(result) ->
+          {:ok, result}
 
-      {:ok,
-       %{
-         exit_code: 0,
-         stdout: json || "",
-         stderr: "",
-         duration_ms: 1,
-         timed_out: false,
-         killed: false,
-         output_truncated: false,
-         output_limit_exceeded: false
-       }}
+        nil ->
+          json = :persistent_term.get({__MODULE__, :inspect_json})
+
+          {:ok,
+           %{
+             exit_code: 0,
+             stdout: json || "",
+             stderr: "",
+             duration_ms: 1,
+             timed_out: false,
+             killed: false,
+             output_truncated: false,
+             output_limit_exceeded: false
+           }}
+      end
     end
 
     def checkout_image_policy do
@@ -297,6 +306,29 @@ defmodule Arbor.Shell.OciProberTest do
     test "invalid deadline is rejected" do
       assert {:error, :invalid_probe_deadline} = Prober.probe(0)
       assert {:error, :invalid_probe_deadline} = Prober.probe_for_test(-1, runtime: FakeRuntime)
+    end
+
+    test "nonzero inspect exit keeps a bounded output tail" do
+      FakeRuntime.set_run_result(
+        {:ok,
+         %{
+           exit_code: 2,
+           stdout: "runtime/cgo: pthread_create failed: Operation not permitted\n",
+           stderr: "",
+           duration_ms: 1,
+           timed_out: false,
+           killed: false,
+           output_truncated: false,
+           output_limit_exceeded: false
+         }}
+      )
+
+      assert {:error, {:probe_nonzero_exit, detail}} =
+               Prober.probe_for_test(5_000, runtime: FakeRuntime)
+
+      assert detail.exit_code == 2
+      assert detail.output_tail =~ "pthread_create"
+      refute detail.output_tail =~ "sha256"
     end
 
     test "throw, exit, and raise become probe_failed" do

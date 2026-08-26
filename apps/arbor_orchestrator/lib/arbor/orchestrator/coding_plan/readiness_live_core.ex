@@ -102,17 +102,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
           {:ok, :passed, String.t()}
           | {:error, :unconfigured, String.t(), String.t()}
           | {:error, :probe_failed, String.t()}
+          | {:error, :probe_failed, String.t(), map()}
           | {:error, :probe_failed_untrusted_home, String.t()}
           | {:error, :malformed}
   def validation_runtime({:ok, envelope})
       when is_map(envelope) and not is_struct(envelope) do
-    with true <- exact_keys?(envelope, ~w(driver state probe host_os)),
+    with true <- runtime_keys_ok?(envelope),
          true <- json_clean?(envelope),
          {:ok, driver} <- admit_runtime_driver(envelope["driver"]),
          {:ok, state} <- admit_runtime_state(envelope["state"]),
          {:ok, probe} <- admit_runtime_probe(envelope["probe"]),
-         {:ok, host_os} <- admit_runtime_host_os(envelope["host_os"]) do
-      classify_runtime(driver, state, probe, host_os)
+         {:ok, host_os} <- admit_runtime_host_os(envelope["host_os"]),
+         {:ok, extras} <- admit_runtime_extras(envelope) do
+      classify_runtime(driver, state, probe, host_os, extras)
     else
       _other -> {:error, :malformed}
     end
@@ -360,22 +362,74 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
 
   defp json_clean?(_value), do: false
 
-  defp classify_runtime(driver, "unavailable", _probe, host_os),
+  defp classify_runtime(driver, "unavailable", _probe, host_os, _extras),
     do: {:error, :unconfigured, driver, host_os}
 
-  defp classify_runtime(driver, state, "passed", _host_os)
+  defp classify_runtime(driver, state, "passed", _host_os, _extras)
        when state in ["pinned", "available"],
        do: {:ok, :passed, driver}
 
-  defp classify_runtime(driver, state, "failed", _host_os)
+  defp classify_runtime(driver, state, "failed", _host_os, extras)
+       when state in ["pinned", "available"] and extras != %{} do
+    {:error, :probe_failed, driver, extras}
+  end
+
+  defp classify_runtime(driver, state, "failed", _host_os, _extras)
        when state in ["pinned", "available"],
        do: {:error, :probe_failed, driver}
 
-  defp classify_runtime(driver, state, "failed_untrusted_home", _host_os)
+  defp classify_runtime(driver, state, "failed_untrusted_home", _host_os, _extras)
        when state in ["pinned", "available"],
        do: {:error, :probe_failed_untrusted_home, driver}
 
-  defp classify_runtime(_driver, _state, _probe, _host_os), do: {:error, :malformed}
+  defp classify_runtime(_driver, _state, _probe, _host_os, _extras), do: {:error, :malformed}
+
+  defp runtime_keys_ok?(envelope) do
+    keys = MapSet.new(Map.keys(envelope))
+    required = MapSet.new(~w(driver state probe host_os))
+    optional = MapSet.new(~w(probe_exit_code probe_output_tail))
+    MapSet.subset?(required, keys) and MapSet.subset?(keys, MapSet.union(required, optional))
+  end
+
+  defp admit_runtime_extras(envelope) do
+    extras =
+      %{}
+      |> maybe_put_extra(envelope, "probe_exit_code", &valid_probe_exit_code?/1)
+      |> maybe_put_extra(envelope, "probe_output_tail", &valid_probe_output_tail?/1)
+
+    if extras == :error, do: :error, else: {:ok, extras}
+  end
+
+  defp maybe_put_extra(:error, _envelope, _key, _pred), do: :error
+
+  defp maybe_put_extra(extras, envelope, key, pred) do
+    case Map.fetch(envelope, key) do
+      :error ->
+        extras
+
+      {:ok, value} ->
+        if pred.(value), do: Map.put(extras, key, value), else: :error
+    end
+  end
+
+  defp valid_probe_exit_code?(code) when is_binary(code) do
+    String.match?(code, ~r/\A[1-9][0-9]{0,4}\z/) and
+      case Integer.parse(code) do
+        {n, ""} -> n >= 1 and n <= 65_535
+        _other -> false
+      end
+  end
+
+  defp valid_probe_exit_code?(_code), do: false
+
+  defp valid_probe_output_tail?(tail)
+       when is_binary(tail) and tail != "" and byte_size(tail) <= 512 do
+    String.valid?(tail) and not String.contains?(tail, <<0>>) and
+      not String.contains?(tail, "sha256:") and
+      not String.match?(tail, ~r/(^|[\s])\//)
+  end
+
+  defp valid_probe_output_tail?(_tail), do: false
 
   defp admit_runtime_driver(driver)
        when driver in ["podman", "apple_container", "unavailable"],

@@ -161,6 +161,20 @@ defmodule Arbor.Shell.PortSessionTest do
                  timeout: 1_000
                )
     end
+
+    test "security regression: oci-unit launcher rejects unreviewed argv" do
+      {:ok, executable} = Arbor.Shell.ExecutablePolicy.resolve("sh")
+
+      assert {:error, {:launcher_error, "unreviewed OCI unit command"}} =
+               PortSession.start_supervised_direct_for_oci_unit(
+                 executable,
+                 ["-c", "echo unexpected"],
+                 "sh",
+                 :standard,
+                 stream_to: self(),
+                 timeout: 5_000
+               )
+    end
   end
 
   describe "streaming output ceiling" do

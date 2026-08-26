@@ -373,6 +373,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert ReadinessLiveCore.validation_runtime({:ok, probe_failed}) ==
              {:error, :probe_failed, "podman"}
 
+    probe_failed_detail =
+      runtime_envelope(
+        probe: "failed",
+        extras: %{
+          "probe_exit_code" => "2",
+          "probe_output_tail" => "runtime/cgo: pthread_create failed"
+        }
+      )
+
+    assert ReadinessLiveCore.validation_runtime({:ok, probe_failed_detail}) ==
+             {:error, :probe_failed, "podman",
+              %{
+                "probe_exit_code" => "2",
+                "probe_output_tail" => "runtime/cgo: pthread_create failed"
+              }}
+
     untrusted_home = runtime_envelope(probe: "failed_untrusted_home")
 
     assert ReadinessLiveCore.validation_runtime({:ok, untrusted_home}) ==
@@ -456,10 +472,42 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     diagnostic = diagnostic(report, "dependency_baseline")
     assert diagnostic["evidence_ref"] == "podman"
     assert diagnostic["remediation"] =~ "podman"
+    refute diagnostic["remediation"] =~ "Restore podman"
     refute diagnostic["remediation"] =~ "sha256"
-    refute diagnostic["remediation"] =~ "/"
+    refute diagnostic["remediation"] =~ "/home"
+    refute diagnostic["remediation"] =~ "/usr/"
     refute diagnostic["remediation"] =~ "Restore the reviewed Linux dependency baseline"
     refute_received :mix_lock_called
+  end
+
+  test "live probe failure with exit code and tail names them without Restore podman",
+       ctx do
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok,
+           runtime_envelope(
+             probe: "failed",
+             extras: %{
+               "probe_exit_code" => "2",
+               "probe_output_tail" =>
+                 "runtime/cgo: pthread_create failed: Operation not permitted"
+             }
+           )}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          flunk("mix.lock must not run when the runtime probe failed")
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "runtime_probe_failed"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["remediation"] =~ "exited 2"
+    assert diagnostic["remediation"] =~ "pthread_create"
+    refute diagnostic["remediation"] =~ "Restore podman"
+    refute diagnostic["remediation"] =~ "sha256"
+    refute diagnostic["remediation"] =~ "/home"
   end
 
   test "live untrusted HOME probe failure names chmod go-w, not restore podman",
@@ -913,12 +961,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
   end
 
   defp runtime_envelope(opts \\ []) do
+    extras = Keyword.get(opts, :extras, %{})
+
     %{
       "driver" => Keyword.get(opts, :driver, "podman"),
       "state" => Keyword.get(opts, :state, "pinned"),
       "probe" => Keyword.get(opts, :probe, "passed"),
       "host_os" => Keyword.get(opts, :host_os, "linux")
     }
+    |> Map.merge(extras)
   end
 
   defp acp_envelope(opts) do

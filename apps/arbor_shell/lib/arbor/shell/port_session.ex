@@ -57,7 +57,8 @@ defmodule Arbor.Shell.PortSession do
     output_limit_exceeded: false,
     timed_out: false,
     killed: false,
-    cancelled: false
+    cancelled: false,
+    launcher: :generic
   ]
 
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
@@ -144,6 +145,54 @@ defmodule Arbor.Shell.PortSession do
       do: {:error, :invalid_stream_timeout}
 
   @doc false
+  @spec start_supervised_direct_for_oci_unit(
+          String.t() | term(),
+          [String.t()],
+          String.t(),
+          term(),
+          keyword()
+        ) :: {:ok, pid()} | {:error, term()}
+  def start_supervised_direct_for_oci_unit(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts \\ []
+      )
+
+  def start_supervised_direct_for_oci_unit(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts
+      )
+      when is_list(args) and is_binary(display_command) and is_list(opts) do
+    with {:ok, _timeout} <-
+           validate_timeout_for_profile(
+             Keyword.get(opts, :timeout, @default_timeout),
+             resource_profile
+           ) do
+      DynamicSupervisor.start_child(
+        Arbor.Shell.PortSessionSupervisor,
+        child_spec(
+          {:direct_owned_for_oci_unit, self(), executable, args, display_command,
+           resource_profile, opts}
+        )
+      )
+    end
+  end
+
+  def start_supervised_direct_for_oci_unit(
+        _executable,
+        _args,
+        _display_command,
+        _resource_profile,
+        _opts
+      ),
+      do: {:error, :invalid_stream_timeout}
+
+  @doc false
   def start_link_owned(command, opts, owner_pid) when is_pid(owner_pid) do
     GenServer.start_link(__MODULE__, {:owned, owner_pid, command, opts})
   end
@@ -170,6 +219,23 @@ defmodule Arbor.Shell.PortSession do
     GenServer.start_link(
       __MODULE__,
       {:direct_owned_for_profile, owner_pid, executable, args, display_command, resource_profile,
+       opts}
+    )
+  end
+
+  @doc false
+  def start_link_direct_owned_for_oci_unit(
+        executable,
+        args,
+        display_command,
+        resource_profile,
+        opts,
+        owner_pid
+      )
+      when is_pid(owner_pid) do
+    GenServer.start_link(
+      __MODULE__,
+      {:direct_owned_for_oci_unit, owner_pid, executable, args, display_command, resource_profile,
        opts}
     )
   end
@@ -270,6 +336,20 @@ defmodule Arbor.Shell.PortSession do
     }
   end
 
+  def child_spec(
+        {:direct_owned_for_oci_unit, owner_pid, executable, args, display_command,
+         resource_profile, opts}
+      ) do
+    %{
+      id: {__MODULE__, make_ref()},
+      start:
+        {__MODULE__, :start_link_direct_owned_for_oci_unit,
+         [executable, args, display_command, resource_profile, opts, owner_pid]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
   @impl true
   def init({:direct, executable, args, display_command, opts}) do
     init_session(executable, args, display_command, opts, parent_owner())
@@ -294,6 +374,20 @@ defmodule Arbor.Shell.PortSession do
          resource_profile, opts}
       ) do
     init_session_for_profile(
+      executable,
+      args,
+      display_command,
+      resource_profile,
+      opts,
+      owner_pid
+    )
+  end
+
+  def init(
+        {:direct_owned_for_oci_unit, owner_pid, executable, args, display_command,
+         resource_profile, opts}
+      ) do
+    init_session_for_oci_unit(
       executable,
       args,
       display_command,
@@ -473,7 +567,7 @@ defmodule Arbor.Shell.PortSession do
 
   defp init_session(executable, args, display_command, opts, owner_pid) do
     with {:ok, timeout} <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)) do
-      build_session(executable, args, display_command, opts, owner_pid, timeout)
+      build_session(executable, args, display_command, opts, owner_pid, timeout, :generic)
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -492,13 +586,33 @@ defmodule Arbor.Shell.PortSession do
              Keyword.get(opts, :timeout, @default_timeout),
              resource_profile
            ) do
-      build_session(executable, args, display_command, opts, owner_pid, timeout)
+      build_session(executable, args, display_command, opts, owner_pid, timeout, :generic)
     else
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp build_session(executable, args, display_command, opts, owner_pid, timeout) do
+  defp init_session_for_oci_unit(
+         executable,
+         args,
+         display_command,
+         resource_profile,
+         opts,
+         owner_pid
+       ) do
+    case validate_timeout_for_profile(
+           Keyword.get(opts, :timeout, @default_timeout),
+           resource_profile
+         ) do
+      {:ok, timeout} ->
+        build_session(executable, args, display_command, opts, owner_pid, timeout, :oci_unit)
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
+  end
+
+  defp build_session(executable, args, display_command, opts, owner_pid, timeout, launcher) do
     with :ok <- validate_subscribers(Keyword.get(opts, :stream_to)),
          true <- is_pid(owner_pid) and Process.alive?(owner_pid) do
       # Port.open links the native port to this GenServer. Trap exits so an
@@ -537,7 +651,8 @@ defmodule Arbor.Shell.PortSession do
         owner_pid: owner_pid,
         owner_ref: Process.monitor(owner_pid),
         start_ref: start_ref,
-        tracked: tracked
+        tracked: tracked,
+        launcher: launcher
       }
 
       if deferred do
@@ -570,8 +685,9 @@ defmodule Arbor.Shell.PortSession do
 
     with true <- remaining > 0,
          {:ok, executable} <- resolve_executable(state.executable),
+         {:ok, opener} <- process_group_opener(state.launcher),
          {:ok, handle} <-
-           ProcessGroup.open(
+           opener.(
              executable,
              state.args,
              opts,
@@ -775,6 +891,10 @@ defmodule Arbor.Shell.PortSession do
 
   defp resolve_executable(%ExecutablePolicy.Executable{} = executable), do: {:ok, executable}
   defp resolve_executable(executable), do: ExecutablePolicy.resolve(executable)
+
+  defp process_group_opener(:oci_unit), do: {:ok, &ProcessGroup.open_oci_unit/6}
+  defp process_group_opener(:generic), do: {:ok, &ProcessGroup.open/6}
+  defp process_group_opener(_other), do: {:error, :invalid_port_session_launcher}
 
   defp subscriber_set(opts) do
     case Keyword.get(opts, :stream_to) do

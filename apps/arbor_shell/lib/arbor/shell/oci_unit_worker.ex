@@ -4,8 +4,8 @@ defmodule Arbor.Shell.OciUnitWorker do
   # Temporary supervised OCI/Podman unit owner (Phase 6).
   #
   # Drives every lifecycle transition through OciUnitCore. Runs
-  # structured argv via AppleContainerUnitRuntime (PortSession) — never shell
-  # text. Holds Core terminals privately until durable journal completion, then
+  # structured argv via OciUnitRuntime (oci-unit launcher / PortSession) —
+  # never shell text. Holds Core terminals privately until durable journal completion, then
   # publishes once to ExecutionRegistry / controller. Never publishes or
   # completes the journal before positive unit absence when create was
   # attempted. Owned by OciExecutor via execute_spawn_capable/3. Reuses the
@@ -42,13 +42,13 @@ defmodule Arbor.Shell.OciUnitWorker do
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
   alias Arbor.Shell.AppleContainerUnitJournal
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: JournalCore
-  alias Arbor.Shell.AppleContainerUnitRuntime
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
   alias Arbor.Shell.OciExecutionCore
   alias Arbor.Shell.OciHostEnv
   alias Arbor.Shell.OciPlanCore
   alias Arbor.Shell.OciUnitCore, as: UnitCore
+  alias Arbor.Shell.OciUnitRuntime
   alias Arbor.Shell.SpawnCapableTimeout
 
   @supervisor Arbor.Shell.AppleContainerUnitSupervisor
@@ -221,7 +221,7 @@ defmodule Arbor.Shell.OciUnitWorker do
           execution_id,
           start_ref,
           controller_pid,
-          AppleContainerUnitRuntime,
+          OciUnitRuntime,
           @pre_begin_timeout_ms,
           journal_record,
           operation_deadline,
@@ -257,7 +257,7 @@ defmodule Arbor.Shell.OciUnitWorker do
   def start_for_test(spec, executable, execution_id, start_ref, opts)
       when is_map(spec) and is_binary(execution_id) and is_reference(start_ref) and is_list(opts) do
     if Keyword.keyword?(opts) do
-      runtime = Keyword.get(opts, :runtime, AppleContainerUnitRuntime)
+      runtime = Keyword.get(opts, :runtime, OciUnitRuntime)
       pre_begin_timeout_ms = Keyword.get(opts, :pre_begin_timeout_ms, @pre_begin_timeout_ms)
       # Test-only journal injection. Production paths hardcode @journal.
       journal_module = Keyword.get(opts, :journal_module, @journal)
@@ -410,7 +410,7 @@ defmodule Arbor.Shell.OciUnitWorker do
     execution_id = Map.fetch!(args, :execution_id)
     spec = Map.fetch!(args, :spec)
     executable = Map.fetch!(args, :executable)
-    runtime = Map.get(args, :runtime, AppleContainerUnitRuntime)
+    runtime = Map.get(args, :runtime, OciUnitRuntime)
     pre_begin_timeout_ms = Map.fetch!(args, :pre_begin_timeout_ms)
     journal_record = Map.fetch!(args, :journal_record)
     operation_deadline = Map.fetch!(args, :operation_deadline)
@@ -1187,7 +1187,9 @@ defmodule Arbor.Shell.OciUnitWorker do
 
   defp emit_drain_receipt(state), do: state
 
-  defp request_session_cancel(%{active_session: session, runtime: runtime, active_session_id: id})
+  defp request_session_cancel(
+         %{active_session: session, runtime: runtime, active_session_id: id} = state
+       )
        when is_pid(session) do
     if is_binary(id) do
       send(session, {:cancel_shell_execution, id})
@@ -1195,6 +1197,7 @@ defmodule Arbor.Shell.OciUnitWorker do
       runtime.kill(session)
     end
 
+    maybe_reap_unit(runtime, state)
     :ok
   end
 
@@ -1219,12 +1222,32 @@ defmodule Arbor.Shell.OciUnitWorker do
     }
   end
 
-  defp kill_active_session(%{active_session: session, runtime: runtime}) when is_pid(session) do
+  defp kill_active_session(%{active_session: session, runtime: runtime} = state)
+       when is_pid(session) do
     runtime.kill(session)
+    maybe_reap_unit(runtime, state)
     :ok
   end
 
   defp kill_active_session(_), do: :ok
+
+  defp maybe_reap_unit(runtime, state) do
+    if function_exported?(runtime, :reap, 1) do
+      case unit_name_from_state(state) do
+        {:ok, name} -> runtime.reap(name)
+        :error -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp unit_name_from_state(%{spec: %{plan: %{unit_name: name}}})
+       when is_binary(name) and name != "" do
+    {:ok, name}
+  end
+
+  defp unit_name_from_state(_state), do: :error
 
   defp cancel_cleanup_timer(%{cleanup_timer: timer_ref} = state) when is_reference(timer_ref) do
     _ = :erlang.cancel_timer(timer_ref)
@@ -1758,7 +1781,7 @@ defmodule Arbor.Shell.OciUnitWorker do
 
   defp authorized_ownership_caller?(_ownership, _caller_pid), do: false
 
-  defp validate_runtime_module(AppleContainerUnitRuntime), do: :ok
+  defp validate_runtime_module(OciUnitRuntime), do: :ok
 
   defp validate_runtime_module(runtime) when is_atom(runtime) do
     case Code.ensure_loaded(runtime) do

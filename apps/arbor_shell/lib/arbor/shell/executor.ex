@@ -84,6 +84,30 @@ defmodule Arbor.Shell.Executor do
   end
 
   @doc false
+  @spec run_oci_probe(Executable.t(), [String.t()], keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def run_oci_probe(%Executable{} = executable, args, opts) do
+    run_bound_with(
+      &ProcessGroup.run_oci_probe_executable/6,
+      executable,
+      args,
+      opts
+    )
+  end
+
+  @doc false
+  @spec run_oci_unit(Executable.t(), [String.t()], keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def run_oci_unit(%Executable{} = executable, args, opts) do
+    run_bound_with(
+      &ProcessGroup.run_oci_unit_executable/6,
+      executable,
+      args,
+      opts
+    )
+  end
+
+  @doc false
   @spec run_trusted_build(pid(), reference()) :: {:ok, result()} | {:error, term()}
   def run_trusted_build(lease_pid, launch_permit)
       when is_pid(lease_pid) and is_reference(launch_permit) do

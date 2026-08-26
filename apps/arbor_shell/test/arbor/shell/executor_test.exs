@@ -146,6 +146,50 @@ defmodule Arbor.Shell.ExecutorTest do
                  max_output_bytes: 8_192
                )
     end
+
+    test "security regression: generic run_bound cannot enable oci-probe through options" do
+      {:ok, executable} = ExecutablePolicy.resolve("python3")
+
+      {:ok, result} =
+        Executor.run_bound(
+          executable,
+          ["-c", "import os; os.fork(); print('unexpected-oci-fork')"],
+          allow_fork: true,
+          execution_mode: :oci_probe,
+          launcher_command: "oci-probe",
+          timeout: 5_000
+        )
+
+      assert result.exit_code != 0
+      refute result.stdout =~ "unexpected-oci-fork"
+      refute result.timed_out
+      refute result.killed
+    end
+
+    test "security regression: native oci-probe mode rejects non-podman executables" do
+      {:ok, executable} = ExecutablePolicy.resolve("sh")
+      digest = "sha256:" <> String.duplicate("a", 64)
+
+      assert {:error, {:launcher_error, "unreviewed OCI probe command"}} =
+               Executor.run_oci_probe(executable, ["image", "inspect", digest],
+                 cwd: "/",
+                 clear_env: true,
+                 timeout: 5_000,
+                 max_output_bytes: 8_192
+               )
+    end
+
+    test "security regression: native oci-unit mode rejects non-podman executables" do
+      {:ok, executable} = ExecutablePolicy.resolve("sh")
+
+      assert {:error, {:launcher_error, "unreviewed OCI unit command"}} =
+               Executor.run_oci_unit(executable, ["ps", "-a", "--format", "json"],
+                 cwd: "/",
+                 clear_env: true,
+                 timeout: 5_000,
+                 max_output_bytes: 8_192
+               )
+    end
   end
 
   describe "security regression: absolute timeout and output bounds" do

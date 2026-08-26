@@ -90,6 +90,30 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionTest do
       refute inspect(envelope) =~ "/var/lib"
     end
 
+    test "projects a closed nonzero-exit tail without host paths or digests" do
+      status = %{"state" => "pinned", "driver" => "podman"}
+
+      assert {:ok, envelope} =
+               ValidationRuntimeAdmissionCore.observe(
+                 status,
+                 {:error,
+                  {:probe_nonzero_exit,
+                   %{
+                     exit_code: 2,
+                     output_tail:
+                       "runtime/cgo: pthread_create failed: Operation not permitted at /home/arbor/.local"
+                   }}},
+                 "linux"
+               )
+
+      assert envelope["probe"] == "failed"
+      assert envelope["probe_exit_code"] == "2"
+      assert envelope["probe_output_tail"] =~ "pthread_create"
+      assert envelope["probe_output_tail"] =~ "runtime/cgo"
+      refute envelope["probe_output_tail"] =~ "/home"
+      refute inspect(envelope) =~ "sha256"
+    end
+
     test "maps untrusted HOME to a closed probe label without a host path" do
       status = %{"state" => "pinned", "driver" => "podman"}
 

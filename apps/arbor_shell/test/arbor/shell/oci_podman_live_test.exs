@@ -26,4 +26,34 @@ defmodule Arbor.Shell.OciPodmanLiveTest do
     assert {:ok, %Executable{path: "/usr/bin/podman"}} =
              OciProbeRuntime.resolve_executable("/usr/bin/podman")
   end
+
+  test "oci-probe inspect of a missing digest is a podman error, not clone EPERM" do
+    assert {:ok, executable} = OciProbeRuntime.resolve_executable(@podman_path)
+
+    {:ok, env} = Arbor.Shell.OciHostEnv.resolve()
+    digest = "sha256:" <> String.duplicate("0", 64)
+
+    result =
+      Arbor.Shell.Executor.run_oci_probe(
+        executable,
+        ["image", "inspect", digest],
+        cwd: "/",
+        clear_env: true,
+        env: env,
+        timeout: 30_000,
+        max_output_bytes: 8_192
+      )
+
+    case result do
+      {:ok, run} ->
+        refute run.stdout =~ "pthread_create"
+        refute run.stdout =~ "Operation not permitted"
+        refute run.killed
+        assert run.exit_code != 0
+
+      {:error, reason} ->
+        refute inspect(reason) =~ "pthread_create"
+        flunk("oci-probe launcher failed before podman ran: #{inspect(reason)}")
+    end
+  end
 end

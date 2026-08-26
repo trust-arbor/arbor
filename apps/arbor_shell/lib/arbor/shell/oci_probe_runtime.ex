@@ -89,7 +89,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
          {:ok, max_output_bytes} <- reviewed_probe(args),
          :ok <- validate_probe_opts(opts, max_output_bytes),
          {:ok, execution_opts} <- debit_probe_timeout(opts, started_at) do
-      case Executor.run_bound(executable, args, execution_opts) do
+      case Executor.run_oci_probe(executable, args, execution_opts) do
         {:ok, result} when is_map(result) -> {:ok, result}
         {:error, reason} -> {:error, bound_reason(reason)}
       end

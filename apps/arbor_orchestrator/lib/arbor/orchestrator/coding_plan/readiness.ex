@@ -486,7 +486,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                "runtime_probe_failed",
                observed_at,
                "The validation runtime probe failed.",
-               runtime_probe_failed_remedy(driver),
+               runtime_probe_failed_remedy(driver, %{}),
+               driver
+             )}
+
+          {:error, :probe_failed, driver, extras} when is_map(extras) ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "runtime_probe_failed",
+               observed_at,
+               "The validation runtime probe failed.",
+               runtime_probe_failed_remedy(driver, extras),
                driver
              )}
 
@@ -1214,15 +1225,31 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
     "No validation runtime is configured. Configure a reviewed validation runtime, then restart."
   end
 
-  defp runtime_probe_failed_remedy("podman") do
-    "The podman driver could not probe the validation image. Restore podman and retry."
+  defp runtime_probe_failed_remedy("podman", extras) when is_map(extras) do
+    exit_part =
+      case Map.get(extras, "probe_exit_code") do
+        code when is_binary(code) -> " The podman probe exited " <> code <> "."
+        _other -> ""
+      end
+
+    tail_part =
+      case Map.get(extras, "probe_output_tail") do
+        tail when is_binary(tail) and tail != "" -> " Tail: " <> tail
+        _other -> ""
+      end
+
+    if exit_part == "" and tail_part == "" do
+      "The podman probe failed. Inspect the probe exit code and output tail, then retry."
+    else
+      String.trim("The podman probe failed." <> exit_part <> tail_part)
+    end
   end
 
-  defp runtime_probe_failed_remedy("apple_container") do
+  defp runtime_probe_failed_remedy("apple_container", _extras) do
     "The apple_container driver could not probe the validation image. Restore Apple Container and retry."
   end
 
-  defp runtime_probe_failed_remedy(_driver) do
+  defp runtime_probe_failed_remedy(_driver, _extras) do
     "The validation runtime probe failed. Restore the reviewed driver and retry."
   end
 

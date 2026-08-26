@@ -34,6 +34,8 @@ defmodule Arbor.Shell.ProcessGroup do
 
   @generic_launcher_command "exec"
   @apple_container_probe_launcher_command "apple-container-probe"
+  @oci_probe_launcher_command "oci-probe"
+  @oci_unit_launcher_command "oci-unit"
   @trusted_build_launcher_command "trusted-build"
 
   defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes, stdin_open: true]
@@ -107,6 +109,48 @@ defmodule Arbor.Shell.ProcessGroup do
       ) do
     run_executable_with_launcher(
       @apple_container_probe_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  @doc false
+  @spec run_oci_probe_executable(
+          Executable.t(),
+          [String.t()],
+          keyword(),
+          integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: {:ok, map()} | {:error, term()}
+  def run_oci_probe_executable(executable, args, opts, start_time, timeout, max_output_bytes) do
+    run_executable_with_launcher(
+      @oci_probe_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  @doc false
+  @spec run_oci_unit_executable(
+          Executable.t(),
+          [String.t()],
+          keyword(),
+          integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: {:ok, map()} | {:error, term()}
+  def run_oci_unit_executable(executable, args, opts, start_time, timeout, max_output_bytes) do
+    run_executable_with_launcher(
+      @oci_unit_launcher_command,
       executable,
       args,
       opts,
@@ -543,6 +587,28 @@ defmodule Arbor.Shell.ProcessGroup do
       when is_list(args) do
     open_with_launcher(
       @generic_launcher_command,
+      executable,
+      args,
+      opts,
+      start_time,
+      timeout,
+      max_output_bytes
+    )
+  end
+
+  @doc false
+  @spec open_oci_unit(
+          Executable.t(),
+          [String.t()],
+          keyword(),
+          integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: {:ok, t()} | {:error, term()}
+  def open_oci_unit(%Executable{} = executable, args, opts, start_time, timeout, max_output_bytes)
+      when is_list(args) do
+    open_with_launcher(
+      @oci_unit_launcher_command,
       executable,
       args,
       opts,
