@@ -7,6 +7,8 @@ defmodule Arbor.Shell.Config do
   output when resolving Apple Container or Linux dependency-baseline locators.
   """
 
+  alias Arbor.Shell.Sha256Digest
+
   @app :arbor_shell
   @max_path_bytes 4_096
 
@@ -53,7 +55,6 @@ defmodule Arbor.Shell.Config do
     :toolchain,
     :platform
   ]
-  @sha256_digest_re ~r/\Asha256:[0-9a-f]{64}\z/
   @allowed_oci_image_policy_keys MapSet.new(
                                    @logical_oci_image_policy_keys ++
                                      Enum.map(@logical_oci_image_policy_keys, &Atom.to_string/1)
@@ -812,10 +813,9 @@ defmodule Arbor.Shell.Config do
       {:ok, _value} ->
         case required_bounded_string(acc, :image_id, :missing_image_id, :invalid_image_id) do
           {:ok, id} ->
-            if Regex.match?(@sha256_digest_re, id) do
-              {:ok, id}
-            else
-              {:error, :invalid_image_id}
+            case Sha256Digest.normalize(id) do
+              {:ok, digest} -> {:ok, digest}
+              {:error, _} -> {:error, :invalid_image_id}
             end
 
           error ->

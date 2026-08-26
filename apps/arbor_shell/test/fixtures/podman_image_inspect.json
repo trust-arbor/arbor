@@ -1,0 +1,69 @@
+[
+  {
+    "Id": "14433cef00000000000000000000000000000000000000000000000000002e9b",
+    "Digest": "sha256:c591dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "RepoTags": ["localhost/arbor/validation:latest"],
+    "RepoDigests": [
+      "localhost/arbor/validation@sha256:c591dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ],
+    "Parent": "",
+    "Comment": "",
+    "Created": "2026-08-26T23:00:00.000000000Z",
+    "Config": {
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "ARBOR_VALIDATION=1"
+      ],
+      "Cmd": null,
+      "WorkingDir": "/",
+      "Labels": {
+        "org.arbor.validation.schema": "1",
+        "org.arbor.validation.role": "spawn-containment",
+        "org.arbor.validation.platform": "linux/amd64",
+        "org.arbor.validation.erlang": "28.4.1",
+        "org.arbor.validation.elixir": "1.19.5-otp-28",
+        "org.arbor.validation.mix-lock-sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "org.arbor.validation.deps-tree-sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    "Version": "podman",
+    "Author": "",
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Size": 123456789,
+    "VirtualSize": 123456789,
+    "GraphDriver": {
+      "Name": "overlay",
+      "Data": {
+        "UpperDir": "/var/lib/containers/storage/overlay/upper",
+        "WorkDir": "/var/lib/containers/storage/overlay/work"
+      }
+    },
+    "RootFS": {
+      "Type": "layers",
+      "Layers": [
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    "Labels": {
+      "org.arbor.validation.schema": "1",
+      "org.arbor.validation.role": "spawn-containment",
+      "org.arbor.validation.platform": "linux/amd64",
+      "org.arbor.validation.erlang": "28.4.1",
+      "org.arbor.validation.elixir": "1.19.5-otp-28",
+      "org.arbor.validation.mix-lock-sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "org.arbor.validation.deps-tree-sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "Annotations": {},
+    "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+    "User": "",
+    "History": [
+      {
+        "created": "2026-08-26T23:00:00.000000000Z",
+        "created_by": "/bin/sh -c #(nop) LABEL org.arbor.validation.schema=1",
+        "empty_layer": true
+      }
+    ],
+    "NamesHistory": ["localhost/arbor/validation:latest"]
+  }
+]

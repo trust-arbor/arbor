@@ -114,6 +114,20 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionTest do
       refute inspect(envelope) =~ "sha256"
     end
 
+    test "maps baseline authority unavailable to failed_starting without a host path" do
+      status = %{"state" => "pinned", "driver" => "podman"}
+
+      assert {:ok, envelope} =
+               ValidationRuntimeAdmissionCore.observe(
+                 status,
+                 {:error, :linux_dependency_baseline_authority_unavailable},
+                 "linux"
+               )
+
+      assert envelope["probe"] == "failed_starting"
+      refute inspect(envelope) =~ "linux_dependency"
+    end
+
     test "maps untrusted HOME to a closed probe label without a host path" do
       status = %{"state" => "pinned", "driver" => "podman"}
 

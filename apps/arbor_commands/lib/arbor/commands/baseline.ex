@@ -422,19 +422,21 @@ defmodule Arbor.Commands.Baseline do
     {:ok, image}
   end
 
-  defp with_image_id(image, "sha256:" <> hex = image_id)
-       when is_binary(hex) and byte_size(hex) == 64 do
-    if Regex.match?(~r/\A[0-9a-f]{64}\z/, hex) do
-      {:ok, Map.put(image, :image_id, image_id)}
-    else
-      {:error, :invalid_image_id}
+  defp with_image_id(image, image_id) when is_binary(image_id) do
+    case Shell.normalize_sha256_digest(image_id) do
+      {:ok, digest} -> {:ok, Map.put(image, :image_id, digest)}
+      {:error, _} -> {:error, :invalid_image_id}
     end
   end
 
   defp with_image_id(_image, _image_id), do: {:error, :invalid_image_id}
 
-  defp bare_sha256("sha256:" <> hex), do: hex
-  defp bare_sha256(other), do: other
+  defp sha256_digest_equal?(left, right) do
+    case {Shell.normalize_sha256_digest(left), Shell.normalize_sha256_digest(right)} do
+      {{:ok, same}, {:ok, same}} -> true
+      _other -> false
+    end
+  end
 
   defp inspect_built_image(iidfile) do
     with {:ok, contents} <- File.read(iidfile),
@@ -458,8 +460,8 @@ defmodule Arbor.Commands.Baseline do
             {:error, :image_inspect_failed}
 
           # `--iidfile` writes `sha256:<hex>`; Podman's inspect `.Id` is the
-          # bare hex. Compare the hex (V7-8, 2026-08-26).
-          bare_sha256(inspect_id) != bare_sha256(image_id) ->
+          # bare hex. Compare through the shell digest helper (V7-8 / V7-12).
+          not sha256_digest_equal?(inspect_id, image_id) ->
             {:error, :image_id_mismatch}
 
           true ->

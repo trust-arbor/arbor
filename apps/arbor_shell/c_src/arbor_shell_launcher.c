@@ -533,6 +533,11 @@ static int oci_guest_destination(const char *s) {
   return 0;
 }
 
+static int oci_read_only_destination(const char *s) {
+  return s != NULL &&
+         (strcmp(s, "/arbor/validation/runner") == 0 || strcmp(s, "/arbor/bin") == 0);
+}
+
 static int oci_mount_spec(const char *s) {
   static const char prefix[] = "type=bind,source=";
   static const char dest_key[] = ",destination=";
@@ -565,6 +570,7 @@ static int oci_mount_spec(const char *s) {
   if (dest_len == 0 || dest_len > OCI_MAX_ARG_BYTES) return 0;
   memcpy(dest, dest_start, dest_len);
   dest[dest_len] = '\0';
+  if (oci_read_only_destination(dest) && ro_at == NULL) return 0;
   return oci_absolute_path(source) && oci_guest_destination(dest);
 }
 

@@ -17,6 +17,10 @@ defmodule Arbor.Shell.OciUnitArgv do
                         "/arbor/validation/result",
                         "/arbor/bin"
                       ])
+  @read_only_guest_destinations MapSet.new([
+                                  "/arbor/validation/runner",
+                                  "/arbor/bin"
+                                ])
   @env_keys MapSet.new([
               "HOME",
               "TMPDIR",
@@ -111,14 +115,15 @@ defmodule Arbor.Shell.OciUnitArgv do
       "type=bind,source=" <> rest ->
         case String.split(rest, ",destination=", parts: 2) do
           [source, dest_and_maybe_ro] ->
-            {dest, ro_ok?} =
+            {dest, read_only?} =
               case String.split(dest_and_maybe_ro, ",ro=true", parts: 2) do
-                [only] -> {only, true}
                 [destination, ""] -> {destination, true}
+                [only] -> {only, false}
                 _other -> {dest_and_maybe_ro, false}
               end
 
-            ro_ok? and absolute_path?(source) and MapSet.member?(@guest_destinations, dest)
+            MapSet.member?(@guest_destinations, dest) and absolute_path?(source) and
+              (read_only? or not MapSet.member?(@read_only_guest_destinations, dest))
 
           _other ->
             false

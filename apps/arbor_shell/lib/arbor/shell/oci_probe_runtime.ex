@@ -15,6 +15,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
   alias Arbor.Shell.LinuxDependencyBaselineAuthority
   alias Arbor.Shell.OciHostEnv
   alias Arbor.Shell.OciHostEnvCore
+  alias Arbor.Shell.Sha256Digest
   alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.ValidationRuntime.Authority, as: ValidationRuntimeAuthority
@@ -152,10 +153,9 @@ defmodule Arbor.Shell.OciProbeRuntime do
     # locally built images by manifest digest (V7-5).
     case policy_image_id(policy) do
       id when is_binary(id) ->
-        if Regex.match?(@sha256_digest_re, id) do
-          {:ok, id}
-        else
-          {:error, :invalid_image_id}
+        case Sha256Digest.normalize(id) do
+          {:ok, digest} -> {:ok, digest}
+          {:error, _} -> {:error, :invalid_image_id}
         end
 
       _missing ->

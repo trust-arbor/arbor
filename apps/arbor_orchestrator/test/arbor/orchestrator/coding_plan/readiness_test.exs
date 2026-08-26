@@ -394,6 +394,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert ReadinessLiveCore.validation_runtime({:ok, untrusted_home}) ==
              {:error, :probe_failed_untrusted_home, "podman"}
 
+    starting = runtime_envelope(probe: "failed_starting")
+
+    assert ReadinessLiveCore.validation_runtime({:ok, starting}) ==
+             {:error, :probe_failed_starting, "podman"}
+
     assert ReadinessLiveCore.validation_runtime({:ok, Map.put(passed, "digest", "x")}) ==
              {:error, :malformed}
 
@@ -508,6 +513,27 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     refute diagnostic["remediation"] =~ "Restore podman"
     refute diagnostic["remediation"] =~ "sha256"
     refute diagnostic["remediation"] =~ "/home"
+  end
+
+  test "live starting probe failure asks to retry without restore podman",
+       ctx do
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok, runtime_envelope(probe: "failed_starting")}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          flunk("mix.lock must not run when the runtime is still starting")
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "runtime_probe_failed"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["remediation"] =~ "still starting"
+    assert diagnostic["remediation"] =~ "Retry"
+    refute diagnostic["remediation"] =~ "Restore podman"
+    refute diagnostic["remediation"] =~ "/"
   end
 
   test "live untrusted HOME probe failure names chmod go-w, not restore podman",

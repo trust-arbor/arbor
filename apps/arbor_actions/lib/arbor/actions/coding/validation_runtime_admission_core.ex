@@ -76,37 +76,27 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionCore do
   defp canonical_state(_state), do: "unavailable"
 
   defp bound_probe(probe, state) do
-    configured? = MapSet.member?(@configured_states, state)
-
-    cond do
-      configured? and match?({:ok, _}, probe) ->
-        {:ok, "passed"}
-
-      configured? and match?({:error, :untrusted_home}, probe) ->
-        {:ok, "failed_untrusted_home"}
-
-      configured? and match?({:error, {:probe_nonzero_exit, _detail}}, probe) ->
-        {:ok, "failed"}
-
-      configured? and match?({:error, _}, probe) ->
-        {:ok, "failed"}
-
-      configured? ->
-        {:error, :malformed}
-
-      probe == :skipped ->
-        {:ok, "skipped"}
-
-      match?({:error, _}, probe) ->
-        {:ok, "skipped"}
-
-      match?({:ok, _}, probe) ->
-        {:ok, "skipped"}
-
-      true ->
-        {:error, :malformed}
+    if MapSet.member?(@configured_states, state) do
+      bound_configured_probe(probe)
+    else
+      bound_unconfigured_probe(probe)
     end
   end
+
+  defp bound_configured_probe({:ok, _}), do: {:ok, "passed"}
+  defp bound_configured_probe({:error, :untrusted_home}), do: {:ok, "failed_untrusted_home"}
+
+  defp bound_configured_probe({:error, :linux_dependency_baseline_authority_unavailable}),
+    do: {:ok, "failed_starting"}
+
+  defp bound_configured_probe({:error, {:probe_nonzero_exit, _detail}}), do: {:ok, "failed"}
+  defp bound_configured_probe({:error, _reason}), do: {:ok, "failed"}
+  defp bound_configured_probe(_other), do: {:error, :malformed}
+
+  defp bound_unconfigured_probe(:skipped), do: {:ok, "skipped"}
+  defp bound_unconfigured_probe({:error, _reason}), do: {:ok, "skipped"}
+  defp bound_unconfigured_probe({:ok, _}), do: {:ok, "skipped"}
+  defp bound_unconfigured_probe(_other), do: {:error, :malformed}
 
   defp bound_probe_extras({:error, {:probe_nonzero_exit, detail}}, "failed")
        when is_map(detail) do

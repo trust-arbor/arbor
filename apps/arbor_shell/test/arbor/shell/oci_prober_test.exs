@@ -229,6 +229,15 @@ defmodule Arbor.Shell.OciProberTest do
       assert run.args == ["image", "inspect", @image_id]
     end
 
+    test "admits Podman inspect whose Id is the bare 64-hex" do
+      bare = String.duplicate("1", 64)
+      FakeRuntime.set_policy(Map.put(valid_policy(), :image_id, @image_id))
+      FakeRuntime.set_inspect_json(inspect_json(%{"Id" => bare}))
+
+      assert {:ok, admission} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
+      assert admission["image"]["execution_reference"] == @image_id
+    end
+
     test "maps arm64 hosts to linux/arm64" do
       FakeRuntime.set_arch("aarch64-unknown-linux-gnu")
       labels = Map.put(@labels, "org.arbor.validation.platform", "linux/arm64")

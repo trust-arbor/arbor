@@ -81,6 +81,37 @@ defmodule Arbor.Shell.OciProbeCoreTest do
       assert Jason.encode!(Core.show(projection))
     end
 
+    test "normalizes Podman's bare-hex inspect Id to sha256: prefix" do
+      bare = String.duplicate("b", 64)
+      json = inspect_json(%{"Id" => bare})
+
+      assert {:ok, projection} = Core.project(valid_input(%{image_inspect_json: json}))
+      assert projection.inspect["Id"] == "sha256:" <> bare
+      assert projection.inspect["Digest"] == @digest
+    end
+
+    test "projects a captured podman image inspect document" do
+      json =
+        Path.expand("../../fixtures/podman_image_inspect.json", __DIR__)
+        |> File.read!()
+
+      assert {:ok, projection} =
+               Core.project(%{
+                 system_architecture: "x86_64-pc-linux-gnu",
+                 image_inspect_json: json
+               })
+
+      assert projection.inspect["Id"] ==
+               "sha256:14433cef00000000000000000000000000000000000000000000000000002e9b"
+
+      assert projection.inspect["Digest"] ==
+               "sha256:c591dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+      assert projection.inspect["Architecture"] == "amd64"
+      assert projection.inspect["Os"] == "linux"
+      assert projection.inspect["Labels"]["org.arbor.validation.schema"] == "1"
+    end
+
     test "falls back to Id when Digest is missing" do
       json = inspect_json() |> Jason.decode!() |> hd() |> Map.delete("Digest") |> List.wrap()
 

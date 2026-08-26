@@ -56,6 +56,57 @@ defmodule Arbor.Shell.OciAdmissionCoreTest do
     assert receipt["execution_image"] == @image_id
   end
 
+  test "admits a prefixed policy image_id against Podman's bare inspect Id" do
+    bare = String.duplicate("1", 64)
+    policy = Map.put(@policy, :image_id, @image_id)
+    evidence = put_in(@evidence, [:inspect, "Id"], bare)
+
+    assert {:ok, receipt} = OciAdmissionCore.new(%{policy: policy, evidence: evidence})
+    assert receipt["execution_image"] == @image_id
+  end
+
+  test "admits a captured podman inspect projection against a local image_id" do
+    json =
+      Path.expand("../../fixtures/podman_image_inspect.json", __DIR__)
+      |> File.read!()
+
+    assert {:ok, projection} =
+             Arbor.Shell.OciProbeCore.project(%{
+               system_architecture: "x86_64-pc-linux-gnu",
+               image_inspect_json: json
+             })
+
+    policy =
+      @policy
+      |> Map.put(
+        :image_id,
+        "sha256:14433cef00000000000000000000000000000000000000000000000000002e9b"
+      )
+      |> Map.put(
+        :manifest_digest,
+        "sha256:c591dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      )
+      |> Map.put(
+        :image,
+        "docker.io/arbor/validation@sha256:c591dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      )
+      |> Map.put(:labels, projection.inspect["Labels"])
+      |> Map.put(
+        :mix_lock_digest,
+        projection.inspect["Labels"]["org.arbor.validation.mix-lock-sha256"]
+      )
+      |> Map.put(
+        :baseline_tree_digest,
+        projection.inspect["Labels"]["org.arbor.validation.deps-tree-sha256"]
+      )
+
+    assert {:ok, receipt} =
+             OciAdmissionCore.new(%{policy: policy, evidence: %{inspect: projection.inspect}})
+
+    assert receipt["execution_image"] ==
+             "sha256:14433cef00000000000000000000000000000000000000000000000000002e9b"
+  end
+
   test "security regression: label digest mismatch is rejected" do
     labels = Map.put(@labels, "org.arbor.validation.mix-lock-sha256", String.duplicate("e", 64))
     policy = Map.put(@policy, :labels, labels)

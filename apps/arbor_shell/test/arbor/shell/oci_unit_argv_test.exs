@@ -58,6 +58,39 @@ defmodule Arbor.Shell.OciUnitArgvTest do
              OciUnitArgv.review(["create", "--name", @name, "--network", "bridge"])
   end
 
+  test "security regression: rw mount of a read-only guest destination is refused" do
+    assert {:ok, plan} = OciPlanCore.new(@valid_request)
+    create = strip(plan.argv.create)
+    assert :ok = OciUnitArgv.review(create)
+
+    rw_bin =
+      "type=bind,source=/tmp/arbor-oci/bin,destination=/arbor/bin"
+
+    rw_runner =
+      "type=bind,source=/tmp/arbor-oci/runner,destination=/arbor/validation/runner"
+
+    refused =
+      create
+      |> Enum.map(fn
+        "type=bind,source=/tmp/arbor-oci/bin,destination=/arbor/bin,ro=true" -> rw_bin
+        other -> other
+      end)
+
+    assert {:error, :unreviewed_oci_unit_command} = OciUnitArgv.review(refused)
+
+    refused_runner =
+      create
+      |> Enum.map(fn
+        "type=bind,source=/tmp/arbor-oci/runner,destination=/arbor/validation/runner,ro=true" ->
+          rw_runner
+
+        other ->
+          other
+      end)
+
+    assert {:error, :unreviewed_oci_unit_command} = OciUnitArgv.review(refused_runner)
+  end
+
   test "security regression: inspect-like unit argv cannot smuggle a tag" do
     assert {:error, :unreviewed_oci_unit_command} =
              OciUnitArgv.review(["image", "inspect", "validation:latest"])
@@ -77,6 +110,7 @@ defmodule Arbor.Shell.OciUnitArgvTest do
     assert source =~ "reviewed_oci_unit"
     assert source =~ "unreviewed OCI unit command"
     assert source =~ "\"oci-unit\""
+    assert source =~ "oci_read_only_destination"
   end
 
   defp strip(["/usr/bin/podman" | rest]), do: rest

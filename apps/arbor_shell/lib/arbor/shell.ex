@@ -70,6 +70,7 @@ defmodule Arbor.Shell do
     PortSession,
     RegularTreeInventory,
     Sandbox,
+    Sha256Digest,
     SpawnCapableArgvLimits,
     SpawnCapableTimeout,
     TrustedBuild,
@@ -1042,6 +1043,14 @@ defmodule Arbor.Shell do
   @doc false
   @spec canonicalize_absolute_path(term()) :: {:ok, String.t()} | {:error, atom()}
   def canonicalize_absolute_path(path), do: TrustedPath.canonicalize_absolute(path)
+
+  @doc """
+  Normalize a sha256 digest to `sha256:` plus 64 lowercase hex.
+
+  Accepts the prefixed form or Podman's bare 64-hex inspect `.Id`.
+  """
+  @spec normalize_sha256_digest(term()) :: {:ok, String.t()} | {:error, :invalid_sha256_digest}
+  def normalize_sha256_digest(value), do: Sha256Digest.normalize(value)
 
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this
   # string is never parsed or passed to a process.

@@ -8,6 +8,8 @@ defmodule Arbor.Shell.OciProbeCore do
   GenServer calls, ETS, time, randomness, or logging.
   """
 
+  alias Arbor.Shell.Sha256Digest
+
   @logical_request_keys [:system_architecture, :image_inspect_json]
   @allowed_request_keys MapSet.new(
                           @logical_request_keys ++
@@ -22,7 +24,6 @@ defmodule Arbor.Shell.OciProbeCore do
   @max_label_value_bytes 1_024
   @max_status_bytes 64
 
-  @digest_re ~r/\Asha256:[0-9a-f]{64}\z/
   @linux_arch_re ~r/\A(?:x86_64|amd64|aarch64|arm64)(?:-[\w.-]*)?-linux(?:-[\w.-]*)?\z/
   @linux_uname_re ~r/\A(?:x86_64|amd64|aarch64|arm64)\z/
 
@@ -162,11 +163,12 @@ defmodule Arbor.Shell.OciProbeCore do
     end
   end
 
-  defp admit_optional_sha256(value) when is_binary(value) do
-    if Regex.match?(@digest_re, value), do: {:ok, value}, else: :skip
+  defp admit_optional_sha256(value) do
+    case Sha256Digest.normalize(value) do
+      {:ok, digest} -> {:ok, digest}
+      {:error, _} -> :skip
+    end
   end
-
-  defp admit_optional_sha256(_value), do: :skip
 
   defp unwrap_inspect_resource(resource) when is_map(resource), do: {:ok, resource}
 
@@ -199,9 +201,10 @@ defmodule Arbor.Shell.OciProbeCore do
   end
 
   defp admit_sha256_digest(value) do
-    if Regex.match?(@digest_re, value),
-      do: {:ok, value},
-      else: {:error, :inspect_digest_not_sha256}
+    case Sha256Digest.normalize(value) do
+      {:ok, digest} -> {:ok, digest}
+      {:error, _} -> {:error, :inspect_digest_not_sha256}
+    end
   end
 
   defp fetch_labels(resource) do

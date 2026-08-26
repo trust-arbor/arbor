@@ -512,6 +512,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                driver
              )}
 
+          {:error, :probe_failed_starting, driver} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "runtime_probe_failed",
+               observed_at,
+               "The validation runtime is still starting.",
+               runtime_probe_failed_starting_remedy(driver),
+               driver
+             )}
+
           {:error, :malformed} ->
             {:blocked, runtime_invalid_diagnostic(observed_at)}
         end
@@ -1251,6 +1262,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp runtime_probe_failed_remedy(_driver, _extras) do
     "The validation runtime probe failed. Restore the reviewed driver and retry."
+  end
+
+  defp runtime_probe_failed_starting_remedy(_driver) do
+    "The validation runtime is still starting. Retry the live check."
   end
 
   defp runtime_probe_failed_untrusted_home_remedy("podman") do

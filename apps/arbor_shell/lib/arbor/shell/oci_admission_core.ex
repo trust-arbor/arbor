@@ -11,7 +11,10 @@ defmodule Arbor.Shell.OciAdmissionCore do
   Digest must equal that provisioning digest and `manifest_digest`. When
   `image_id` is present, inspect Id must equal it and create argv uses that id
   (Podman does not address local builds by manifest digest). Labels still bind.
+  Inspect `.Id` may be Podman's bare 64-hex; comparison uses `Sha256Digest`.
   """
+
+  alias Arbor.Shell.Sha256Digest
 
   @allowed_platforms MapSet.new(["linux/amd64", "linux/arm64"])
 
@@ -293,12 +296,14 @@ defmodule Arbor.Shell.OciAdmissionCore do
         {:ok, execution_digest}
 
       image_id when is_binary(image_id) ->
-        if Regex.match?(@sha256_digest_re, image_id) do
-          with :ok <- match_inspect_id(inspect_map, image_id) do
-            {:ok, image_id}
-          end
-        else
-          {:error, :invalid_image_id}
+        case Sha256Digest.normalize(image_id) do
+          {:ok, normalized} ->
+            with :ok <- match_inspect_id(inspect_map, normalized) do
+              {:ok, normalized}
+            end
+
+          {:error, _} ->
+            {:error, :invalid_image_id}
         end
 
       _other ->
@@ -307,10 +312,20 @@ defmodule Arbor.Shell.OciAdmissionCore do
   end
 
   defp match_inspect_id(inspect_map, image_id) do
-    case Map.get(inspect_map, "Id") || Map.get(inspect_map, "id") do
-      ^image_id -> :ok
-      nil -> {:error, :missing_inspect_id}
-      _other -> {:error, :image_id_mismatch}
+    inspect_id = Map.get(inspect_map, "Id") || Map.get(inspect_map, "id")
+
+    cond do
+      is_nil(inspect_id) ->
+        {:error, :missing_inspect_id}
+
+      Sha256Digest.equal?(inspect_id, image_id) ->
+        :ok
+
+      match?({:ok, _}, Sha256Digest.normalize(inspect_id)) ->
+        {:error, :image_id_mismatch}
+
+      true ->
+        {:error, :missing_inspect_id}
     end
   end
 
