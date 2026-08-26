@@ -2148,6 +2148,95 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
   end
 
+  test "dual finalizers preserve registered non-success without legacy success finalization", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_finalize, {:error, :success_only})
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_registered_non_success"
+    outcome = registered_outcome("validation_capacity_exceeded")
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "preserve capacity outcome"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    result = %{
+      "status" => "validation_capacity_exceeded",
+      "canonical_status" => "validation_capacity_exceeded",
+      "branch" => "test/capacity-terminal",
+      "outcome" => outcome,
+      "artifacts" => coding_artifacts()
+    }
+
+    send(runner_pid, {:finish, {:ok, result}})
+
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert envelope["evidence"]["result"] == result
+    refute Map.has_key?(envelope, "prior_outcome")
+    refute envelope["outcome"]["code"] == "task_finalization_failed"
+
+    assert_eventually(fn ->
+      assert {:ok, completed} = TaskStore.result(task_id, name: store)
+      assert completed.raw == result
+      assert completed.payload.outcome == outcome
+
+      assert {:ok, %{state: :done, outcome: status_outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert status_outcome == outcome
+    end)
+
+    refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
+  end
+
+  test "dual finalizers retain legacy behavior for generic success without TaskOutcome", %{
+    supervisor: supervisor
+  } do
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_generic_compatibility"
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "generic compatibility"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    result = %{"content" => "generic success"}
+    send(runner_pid, {:finish, {:ok, result}})
+
+    assert_receive {:dual_finalize_task_called, "agent_1", ^result, [], ^context}
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+
+    assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+    assert envelope["evidence"]["result"]["finalized"] == true
+
+    assert_eventually(fn ->
+      assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+      assert {:ok, %{state: :failed, outcome: status_outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert status_outcome == envelope["outcome"]
+    end)
+
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+    refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
+  end
+
   test "dual legacy finalizer failure is acknowledged as task_finalization_failed once", %{
     supervisor: supervisor
   } do

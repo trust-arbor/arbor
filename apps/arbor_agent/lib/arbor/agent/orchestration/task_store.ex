@@ -171,6 +171,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
     ReadinessReport,
+    TaskOutcome,
     TaskTerminalEnvelope
   }
 
@@ -11692,6 +11693,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       Map.get(record, :terminal_finalized, false) ->
         record
 
+      record.state == :done and legacy_finalizer?(module) and all_terminal_finalizer?(module) and
+          registered_non_success_outcome?(runner_result) ->
+        finalize_all_terminal(record, {:runner_result, runner_result}, state, module)
+
       record.state == :done and legacy_finalizer?(module) and all_terminal_finalizer?(module) ->
         finalize_legacy_then_all_terminal(record, runner_result, state, module)
 
@@ -11728,6 +11733,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp legacy_finalizer?(module) do
     is_atom(module) and Code.ensure_loaded?(module) and
       function_exported?(module, :finalize_task, 4)
+  end
+
+  defp registered_non_success_outcome?(runner_result) do
+    with {:ok, outcome} <- TaskArtifacts.extract_outcome(runner_result),
+         {:ok, registered} <- TaskOutcome.validate_registered(outcome) do
+      registered.disposition != "succeeded"
+    else
+      _failure -> false
+    end
   end
 
   defp finalize_legacy_then_all_terminal(record, runner_result, state, module) do
