@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 688,
+  "entry_count": 689,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8488,8 +8488,21 @@
       "source_incident": "found 2026-08-26 during P1E-1 acceptance",
       "always_loaded": false,
       "content_sha256": "a8bc4c387ab08d8e9264f33a079c4a786d6b55ca43e93196870fe6c124488ae6"
+    },
+    {
+      "source_ordinal": 689,
+      "source_kind": "post-migration",
+      "slug": "in-zsh-harness-scripts-never-use-path-as-a-scalar-variable",
+      "title": "In zsh harness scripts, never use `path` as a scalar variable.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-in-zsh-harness-scripts-never-use-path-as-a-scalar-variable",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 during P1E-1 worktree cleanup",
+      "always_loaded": false,
+      "content_sha256": "d577fae4164c7267d4dfb62be913629670461a2a56193d309992bc2d847f927c"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 227
+  "post_migration_entry_count": 228
 }

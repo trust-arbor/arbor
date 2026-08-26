@@ -914,3 +914,11 @@ or a named harness that retains full-profile roots, while fresh restricted peers
 prove the safe profile neither loads nor starts them. Do not add providers back to
 the safe application spec to repair the test runner (found 2026-08-26 during
 P1E-1 acceptance).
+
+<!-- applied-learning: in-zsh-harness-scripts-never-use-path-as-a-scalar-variable -->
+<a id="applied-learning-in-zsh-harness-scripts-never-use-path-as-a-scalar-variable"></a>
+**In zsh harness scripts, never use `path` as a scalar variable.** `path` is the
+special array tied to `PATH`; assigning one worktree pathname to it erases normal
+command lookup for the rest of the loop, producing misleading `command not found`
+errors for tools that ran immediately beforehand. Use a specific name such as
+`worktree_path` (found 2026-08-26 during P1E-1 worktree cleanup).
