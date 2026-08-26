@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.Shell
+  alias Arbor.Actions.Mix, as: MixAction
 
   @moduletag :fast
 
@@ -60,7 +61,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test", "apps/beta/test"],
-        60_000,
+        launchable_op_ms(),
         120_000
       )
 
@@ -72,11 +73,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     # App test root boundary forces separate per-app batches.
     assert_receive {:mix_invocation, ^worktree, alpha_batch, opts_a}
     assert alpha_batch == ["test", "--", "apps/alpha/test/alpha_test.exs"]
-    assert Keyword.get(opts_a, :timeout) == 60_000
+    assert Keyword.get(opts_a, :timeout) == launchable_op_ms()
 
     assert_receive {:mix_invocation, ^worktree, beta_batch, opts_b}
     assert beta_batch == ["test", "--", "apps/beta/test/beta_test.exs"]
-    assert Keyword.get(opts_b, :timeout) == 60_000
+    assert Keyword.get(opts_b, :timeout) == launchable_op_ms()
 
     # Never a raw directory; only exact admitted file paths.
     refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test"], _}
@@ -114,7 +115,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
 
     assert check["passed"]
     assert String.contains?(check["stdout_excerpt"], "cross_app_refinement")
@@ -154,7 +161,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
 
     refute check["passed"]
     assert check["reason"] == "tests_failed"
@@ -170,7 +183,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     paths = write_numbered_tests!(worktree, "alpha", 6)
     assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
-    {:ok, clock} = Agent.start_link(fn -> [0, 0, 1, 20_000] end)
+    {:ok, clock} = Agent.start_link(fn -> [0, 0, 1, launchable_stage_ms()] end)
 
     Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
       Agent.get_and_update(clock, fn
@@ -184,7 +197,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 20_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
 
     assert check["reason"] == "validation_capacity_exceeded"
     handoff = check["capacity_handoff"]
@@ -227,7 +246,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        60_000,
+        launchable_op_ms(),
         120_000
       )
 
@@ -258,18 +277,20 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    # 2 app batches * 5_000 ceiling > 5_000 stage budget, but residual > 0.
+    # 2 app batches * op ceiling > stage budget, but residual is Mix-launchable.
+    op = launchable_op_ms()
+
     check =
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test", "apps/beta/test"],
-        5_000,
-        5_000
+        op,
+        op
       )
 
     assert check["passed"] == true
     assert_receive {:mix_invocation, ["test", "--" | _paths], opts}
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == op
     assert_receive {:mix_invocation, ["test", "--" | _], _}
   end
 
@@ -326,13 +347,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
       # Consume the entire remaining budget so post-child deadline check fails.
-      Agent.update(clock_agent, fn _ -> 10_000 end)
+      Agent.update(clock_agent, fn _ -> launchable_stage_ms() end)
 
       {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
     end)
 
     check =
-      Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 10_000)
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
@@ -363,7 +389,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == launchable_op_ms()
     refute_received {:mix_invocation, _, _}
   end
 
@@ -395,7 +421,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
         ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
           # Final batch returns success and consumes the shared deadline.
-          Agent.update(clock_agent, fn _ -> 20_000 end)
+          Agent.update(clock_agent, fn _ -> launchable_stage_ms() end)
           {:ok, %{exit_code: 0, stdout: "batch2 ok", stderr: "", timed_out: false}}
 
         other ->
@@ -404,7 +430,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end)
 
     check =
-      Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 10_000)
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
 
     # Design G: passing final child is completed success even at residual zero.
     assert check["passed"]
@@ -417,10 +448,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | r1], opts1}
     assert r1 == batch1.paths
-    assert Keyword.get(opts1, :timeout) == 5_000
+    assert Keyword.get(opts1, :timeout) == launchable_op_ms()
     assert_receive {:mix_invocation, ["test", "--" | r2], opts2}
     assert r2 == batch2.paths
-    assert Keyword.get(opts2, :timeout) == 5_000
+    assert Keyword.get(opts2, :timeout) == launchable_op_ms()
     refute_received {:mix_invocation, _, _}
   end
 
@@ -441,15 +472,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Agent.get(clock_agent, & &1)
     end)
 
-    # operation_timeout 10_000, aggregate 5_000 => first child budget is 5_000 < op.
+    op = mix_reserve_ms() * 2
+    stage = mix_reserve_ms() + 5_000
+
+    # Reduced aggregate remainder launches below the intensive ceiling.
     # Runner times out with residual exhausted => aggregate interruption of batch1.
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
-      Agent.update(clock_agent, fn _ -> 10_000 end)
+      Agent.update(clock_agent, fn _ -> stage end)
       {:ok, %{exit_code: nil, stdout: "", stderr: "", timed_out: true}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
@@ -471,7 +505,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute Map.has_key?(handoff["interrupted_batch"], "paths")
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == stage
     refute_received {:mix_invocation, _, _}
   end
 
@@ -492,6 +526,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Agent.get(clock_agent, & &1)
     end)
 
+    op = mix_reserve_ms() * 2
+    stage = mix_reserve_ms() + 5_000
+
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
 
@@ -501,7 +538,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
         ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
-          Agent.update(clock_agent, fn _ -> 5_000 end)
+          Agent.update(clock_agent, fn _ -> stage end)
           {:ok, %{exit_code: nil, stdout: "", stderr: "", timed_out: true}}
 
         other ->
@@ -509,7 +546,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
@@ -524,11 +561,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received1], opts1}
     assert received1 == batch1.paths
-    assert Keyword.get(opts1, :timeout) == 5_000
+    assert Keyword.get(opts1, :timeout) == stage
 
     assert_receive {:mix_invocation, ["test", "--" | received2], opts2}
     assert received2 == batch2.paths
-    assert Keyword.get(opts2, :timeout) == 4_000
+    assert Keyword.get(opts2, :timeout) == stage - 1_000
     refute_received {:mix_invocation, _, _}
   end
 
@@ -545,14 +582,210 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end)
 
     # Equal ceilings: budget_ms == operation_timeout => ordinary child timeout.
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 5_000)
+    op = launchable_op_ms()
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, op)
 
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
     refute Map.has_key?(check, "capacity_handoff")
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == op
+  end
+
+  test "reduced-budget timeout leftover equal to Mix postflight reserve is runtime capacity", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    reserve = mix_reserve_ms()
+    op = reserve * 2
+    stage = reserve + 30_000
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      timeout = Keyword.fetch!(opts, :timeout)
+      assert {:ok, child_ms} = MixAction.allocate_spawn_child_timeout(timeout, true)
+      Agent.update(clock_agent, fn t -> t + child_ms end)
+      {:ok, %{exit_code: nil, stdout: "", stderr: "", timed_out: true}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert handoff["schema_version"] == 3
+    assert handoff["phase"] == "runtime"
+    assert handoff["available_budget_ms"] == 0
+    assert handoff["interrupted_batch"]["index"] == batch1.index
+    assert handoff["interrupted_batch"]["label"] == batch1.label
+    refute Map.has_key?(handoff["interrupted_batch"], "paths")
+    refute handoff["interrupted_batch"]["label"] =~ "refine-"
+    assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
+    refute Jason.encode!(handoff) =~ "\"paths\""
+
+    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert received == batch1.paths
+    assert Keyword.get(opts, :timeout) == stage
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "passing prefix leaving Mix postflight residual hands off unstarted suffix", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    reserve = mix_reserve_ms()
+    op = reserve * 2
+    stage = reserve + 30_000
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      Agent.update(clock_agent, fn _ -> stage - reserve end)
+      {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["schema_version"] == 3
+    assert handoff["phase"] == "runtime"
+    assert handoff["available_budget_ms"] == 0
+    assert handoff["completed_batch_count"] == 1
+    assert handoff["interrupted_batch"] == nil
+    assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
+
+    assert_receive {:mix_invocation, ["test", "--" | received], _opts}
+    assert received == batch1.paths
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "prelaunch residual at Mix postflight reserve is capacity without Mix launch", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    reserve = mix_reserve_ms()
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:unexpected_mix_invocation, args})
+      flunk("residual equal to Mix postflight reserve must not launch: #{inspect(args)}")
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], reserve * 2, reserve)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["phase"] == "structural"
+    assert handoff["interrupted_batch"] == nil
+
+    assert handoff["unstarted_batches"] == [
+             compact_capacity_batch(batch1),
+             compact_capacity_batch(batch2)
+           ]
+
+    refute_received {:unexpected_mix_invocation, _}
+  end
+
+  test "operation timeout at or below Mix postflight reserve cannot launch Mix", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:unexpected_mix_invocation, args})
+      flunk("low operation timeout must not launch Mix: #{inspect(args)}")
+    end)
+
+    # Aggregate residual exceeds the reserve, but Mix spawn timeout is min(op, remaining).
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, launchable_stage_ms())
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["phase"] == "structural"
+    assert handoff["interrupted_batch"] == nil
+
+    assert handoff["unstarted_batches"] == [
+             compact_capacity_batch(batch1),
+             compact_capacity_batch(batch2)
+           ]
+
+    refute_received {:unexpected_mix_invocation, _}
+  end
+
+  test "Mix operation_deadline_exceeded with residual at postflight reserve is capacity", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    reserve = mix_reserve_ms()
+    op = reserve * 2
+    stage = reserve + 30_000
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      Agent.update(clock_agent, fn _ -> stage - 1 end)
+      {:error, :operation_deadline_exceeded}
+    end)
+
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["phase"] == "runtime"
+    assert handoff["interrupted_batch"] == nil
+
+    assert handoff["unstarted_batches"] == [
+             compact_capacity_batch(batch1),
+             compact_capacity_batch(batch2)
+           ]
+
+    assert_receive {:mix_invocation, ["test", "--" | received], _opts}
+    assert received == batch1.paths
+    refute_received {:mix_invocation, _, _}
   end
 
   test "security regression: prelaunch probe_timeout with exhausted aggregate budget hands off unstarted suffix",
@@ -576,7 +809,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
       case args do
         ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
-          Agent.update(clock_agent, fn _ -> 10_000 end)
+          Agent.update(clock_agent, fn _ -> mix_reserve_ms() + 5_000 end)
           # Live Mix.invoke_spawn_capable/4 inspects spawn-capable errors.
           {:error, ":probe_timeout"}
 
@@ -585,7 +818,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+    op = mix_reserve_ms() * 2
+    stage = mix_reserve_ms() + 5_000
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
@@ -611,7 +846,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == stage
     refute_received {:mix_invocation, _, _}
   end
 
@@ -645,13 +880,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
+    op = launchable_op_ms()
+    stage = launchable_stage_ms()
+
     assert {:execution_error, {:test_execution_failed, label, :probe_timeout}} =
-             catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000))
+             catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage))
 
     assert label == batch1.label
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == op
     refute_received {:mix_invocation, _, _}
   end
 
@@ -680,7 +918,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
         ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
-          Agent.update(clock_agent, fn _ -> 10_000 end)
+          Agent.update(clock_agent, fn _ -> mix_reserve_ms() + 5_000 end)
           {:error, :probe_timeout}
 
         other ->
@@ -688,7 +926,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000)
+    op = mix_reserve_ms() * 2
+    stage = mix_reserve_ms() + 5_000
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
 
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
@@ -702,10 +942,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received1], opts1}
     assert received1 == batch1.paths
-    assert Keyword.get(opts1, :timeout) == 5_000
+    assert Keyword.get(opts1, :timeout) == stage
     assert_receive {:mix_invocation, ["test", "--" | received2], opts2}
     assert received2 == batch2.paths
-    assert Keyword.get(opts2, :timeout) == 4_000
+    assert Keyword.get(opts2, :timeout) == stage - 1_000
     refute_received {:mix_invocation, _, _}
   end
 
@@ -726,7 +966,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Agent.get(clock_agent, & &1)
     end)
 
-    Enum.each([:probe_failed, :operation_deadline_exceeded], fn injected_reason ->
+    op = mix_reserve_ms() * 2
+    stage = mix_reserve_ms() + 5_000
+
+    Enum.each([:probe_failed, :probe_cancelled, :deadline_exhausted], fn injected_reason ->
       Agent.update(clock_agent, fn _ -> 0 end)
 
       Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
@@ -734,7 +977,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
         case args do
           ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
-            Agent.update(clock_agent, fn _ -> 10_000 end)
+            Agent.update(clock_agent, fn _ -> stage end)
             {:error, injected_reason}
 
           other ->
@@ -743,12 +986,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end)
 
       assert {:execution_error, {:test_execution_failed, label, ^injected_reason}} =
-               catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 5_000))
+               catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage))
 
       assert label == batch1.label
       assert_receive {:mix_invocation, ["test", "--" | received], opts, ^injected_reason}
       assert received == batch1.paths
-      assert Keyword.get(opts, :timeout) == 5_000
+      assert Keyword.get(opts, :timeout) == stage
     end)
 
     refute_received {:mix_invocation, _, _, _}
@@ -776,7 +1019,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
       case args do
         ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
-          Agent.update(clock_agent, fn _ -> 5_000 end)
+          Agent.update(clock_agent, fn _ -> launchable_op_ms() end)
           {:error, :probe_timeout}
 
         other ->
@@ -784,7 +1027,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 5_000, 5_000)
+    op = launchable_op_ms()
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, op)
 
     refute check["passed"]
     refute check["reason"] == "tests_timed_out"
@@ -801,7 +1045,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "--" | received], opts}
     assert received == batch1.paths
-    assert Keyword.get(opts, :timeout) == 5_000
+    assert Keyword.get(opts, :timeout) == op
     refute_received {:mix_invocation, _, _}
   end
 
@@ -838,7 +1082,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000
+        launchable_op_ms()
       )
 
     refute text_fail["passed"]
@@ -865,7 +1109,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000
+        launchable_op_ms()
       )
 
     refute exact["passed"]
@@ -908,7 +1152,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000
+        launchable_op_ms()
       )
 
     refute check["passed"]
@@ -942,7 +1186,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000
+        launchable_op_ms()
       )
 
     refute check["passed"]
@@ -979,7 +1223,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
       Agent.get_and_update(clock_agent, fn
         {:init, t} -> {t, {:armed, t}}
-        {:armed, t} -> {t + 10_000, {:armed, t}}
+        {:armed, t} -> {t + launchable_stage_ms(), {:armed, t}}
       end)
     end)
 
@@ -992,8 +1236,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test", "apps/beta/test"],
-        5_000,
-        10_000
+        launchable_op_ms(),
+        launchable_stage_ms()
       )
 
     refute check["passed"]
@@ -1080,8 +1324,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       Shell.run_app_tests(
         worktree,
         ["apps/alpha/test"],
-        10_000,
-        20_000
+        launchable_op_ms(),
+        launchable_stage_ms()
       )
 
     refute check["passed"]
@@ -1117,7 +1361,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               30_000,
+               launchable_op_ms(),
                resource
              )
 
@@ -1128,18 +1372,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
     assert Keyword.get(dev_opts, :validation_resource) == resource
-    assert Keyword.get(dev_opts, :timeout) == 30_000
+    assert Keyword.get(dev_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(dev_opts, :resource_profile) == :intensive
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
     assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
     assert Keyword.get(xref_opts, :validation_resource) == resource
-    assert Keyword.get(xref_opts, :timeout) == 30_000
+    assert Keyword.get(xref_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(xref_opts, :resource_profile) == :intensive
 
     assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
     assert Keyword.get(test_opts, :validation_resource) == resource
-    assert Keyword.get(test_opts, :timeout) == 30_000
+    assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(test_opts, :resource_profile) == :intensive
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
 
@@ -1147,7 +1391,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
                     test_run_opts}
 
     assert Keyword.get(test_run_opts, :validation_resource) == resource
-    assert Keyword.get(test_run_opts, :timeout) == 30_000
+    assert Keyword.get(test_run_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(test_run_opts, :resource_profile) == :intensive
 
     refute_received {:mix_invocation, _, _, _}
@@ -1172,7 +1416,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
        }}
     end)
 
-    assert {:ok, checks_3} = Shell.run_validation_checks(worktree, ["apps/alpha/test"], 30_000)
+    op = launchable_op_ms()
+    stage = launchable_stage_ms()
+
+    assert {:ok, checks_3} = Shell.run_validation_checks(worktree, ["apps/alpha/test"], op)
     assert checks_3.test["passed"]
     assert_receive {:validation_invocation, ["compile", "--warnings-as-errors"]}
     assert_receive {:validation_invocation, ["xref", "graph"]}
@@ -1184,7 +1431,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               30_000,
+               op,
                resource
              )
 
@@ -1192,7 +1439,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     # 4-arity with explicit test-stage timeout
     assert {:ok, checks_4_timeout} =
-             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 30_000, 40_000)
+             Shell.run_validation_checks(worktree, ["apps/alpha/test"], op, stage)
 
     assert checks_4_timeout.test["passed"]
 
@@ -1201,8 +1448,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               30_000,
-               40_000,
+               op,
+               stage,
                resource
              )
 
@@ -1213,9 +1460,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               30_000,
-               40_000,
-               50_000,
+               op,
+               stage,
+               stage + op,
                resource
              )
 
@@ -1315,13 +1562,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
+    op = launchable_op_ms()
+    stage = launchable_stage_ms()
+
     assert {:ok, checks} =
              Shell.run_validation_checks(
                worktree,
                selection,
-               30_000,
-               30_000,
-               60_000,
+               op,
+               op,
+               stage,
                %{id: "res"}
              )
 
@@ -1342,7 +1592,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
                     _actions_test}
 
     assert Enum.drop(security_args, 2) != []
-    assert Keyword.get(security_run_opts, :timeout) == 30_000
+    assert Keyword.get(security_run_opts, :timeout) == op
     refute_received {:mix_invocation, ["test", "--", _], _}
   end
 
@@ -1450,7 +1700,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         args == ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] ->
-          Agent.update(clock_agent, fn _ -> 10_000 end)
+          Agent.update(clock_agent, fn _ -> launchable_stage_ms() end)
           {:ok, %{exit_code: 0, stdout: "security ok", stderr: "", timed_out: false}}
 
         args == ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"] ->
@@ -1465,9 +1715,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                selection,
-               5_000,
-               5_000,
-               20_000,
+               launchable_op_ms(),
+               launchable_stage_ms(),
+               launchable_stage_ms(),
                %{id: "res"}
              )
 
@@ -1571,7 +1821,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
         ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
-          Agent.update(clock_agent, fn _ -> 5_000 end)
+          Agent.update(clock_agent, fn _ -> launchable_op_ms() end)
           {:ok, %{exit_code: 0, stdout: "late test success", stderr: "", timed_out: false}}
 
         other ->
@@ -1583,9 +1833,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               5_000,
-               20_000,
-               5_000,
+               launchable_op_ms(),
+               launchable_stage_ms(),
+               launchable_op_ms(),
                %{id: "res"}
              )
 
@@ -1593,7 +1843,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.test["reason"] == nil
 
     assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts}
-    assert Keyword.get(test_opts, :timeout) == 5_000
+    assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end
 
   test "operation timeout above 600000 reaches Mix execution with resource_profile intensive", %{
@@ -1700,7 +1950,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     end)
 
     assert {:ok, checks} =
-             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 5_000, %{id: "res"})
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               launchable_op_ms(),
+               launchable_stage_ms(),
+               %{id: "res"}
+             )
 
     assert checks.compile["passed"]
     assert checks.xref["passed"]
@@ -1708,7 +1964,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.test["passed"]
 
     # Two compile invocations (dev + test env) and xref consume 60_000ms of wall
-    # clock before tests; the test stage still receives the full 5_000 budget.
+    # clock before tests; the test stage still receives the full per-op budget.
     assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], dev_opts, 0}
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
@@ -1722,7 +1978,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
                     60_000}
 
-    assert Keyword.get(test_opts, :timeout) == 5_000
+    assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end
 
   test "fail-closed skips later stages after compile, xref, or test_compile failure", %{
@@ -1874,8 +2130,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              Shell.run_validation_checks(
                worktree,
                ["apps/alpha/test"],
-               30_000,
-               60_000,
+               launchable_op_ms(),
+               launchable_stage_ms(),
                %{id: "res"}
              )
 
@@ -1910,7 +2166,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 30_000, 60_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
+
     assert check["passed"]
 
     # Runtime batch cap admits up to 5 exact files; three-file inventory is one child.
@@ -1926,7 +2189,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     ]
 
     assert_receive {:mix_invocation, ^expected_batch, opts1}
-    assert Keyword.get(opts1, :timeout) == 30_000
+    assert Keyword.get(opts1, :timeout) == launchable_op_ms()
     refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/helper.exs"], _}
     refute_received {:mix_invocation, _, _}
   end
@@ -1956,7 +2219,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 100_000)
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], launchable_op_ms(), 100_000)
     assert check["passed"]
 
     for batch <- batches do
@@ -1971,7 +2234,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
       arg_bytes = Enum.reduce(received, 0, fn p, acc -> acc + byte_size(p) + 1 end)
       assert arg_bytes <= Core.max_test_batch_arg_bytes()
-      assert Keyword.get(opts, :timeout) == 10_000
+      assert Keyword.get(opts, :timeout) == launchable_op_ms()
     end
 
     refute_received {:mix_invocation, _, _}
@@ -1988,17 +2251,24 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test", "apps/beta/test"], 10_000, 100_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        launchable_op_ms(),
+        100_000
+      )
+
     assert check["passed"]
 
     # App root boundary forces separate per-app batches.
     assert_receive {:mix_invocation, alpha_args, opts_a}
     assert alpha_args == ["test", "--", "apps/alpha/test/alpha_test.exs"]
-    assert Keyword.get(opts_a, :timeout) == 10_000
+    assert Keyword.get(opts_a, :timeout) == launchable_op_ms()
 
     assert_receive {:mix_invocation, beta_args, opts_b}
     assert beta_args == ["test", "--", "apps/beta/test/beta_test.exs"]
-    assert Keyword.get(opts_b, :timeout) == 10_000
+    assert Keyword.get(opts_b, :timeout) == launchable_op_ms()
 
     refute_received {:mix_invocation, _, _}
   end
@@ -2016,7 +2286,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 20_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
+
     assert check["passed"]
 
     assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
@@ -2042,7 +2319,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], 10_000, 20_000)
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        launchable_op_ms(),
+        launchable_stage_ms()
+      )
+
     assert check["passed"]
 
     assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
@@ -2157,17 +2441,23 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    # Per-op 5s, aggregate stage 8s — pre-test stages burn 150s of wall clock
+    # Per-op ceiling is Mix-launchable; pre-test stages burn 150s of wall clock
     # but must not reduce the aggregate stage budget started after test compile.
     assert {:ok, checks} =
-             Shell.run_validation_checks(worktree, ["apps/alpha/test"], 5_000, 8_000, %{id: "res"})
+             Shell.run_validation_checks(
+               worktree,
+               ["apps/alpha/test"],
+               launchable_op_ms(),
+               launchable_stage_ms(),
+               %{id: "res"}
+             )
 
     assert checks.test["passed"]
 
     assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
                     _}
 
-    assert Keyword.get(test_opts, :timeout) == 5_000
+    assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end
 
   test "resolve_selection: base app removed or merged forces full remaining candidate", %{
@@ -2512,6 +2802,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       )
     end
   end
+
+  defp mix_reserve_ms, do: MixAction.postflight_tree_binding_reserve_ms()
+  defp launchable_op_ms, do: mix_reserve_ms() + 5_000
+  defp launchable_stage_ms, do: mix_reserve_ms() + 20_000
 
   defp compact_capacity_batch(batch) when is_map(batch) do
     %{

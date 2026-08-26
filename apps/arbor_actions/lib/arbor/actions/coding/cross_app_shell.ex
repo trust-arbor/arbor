@@ -781,14 +781,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
             {available_ms, validation_test_deadline} =
               validation_test_budget(test_stage_timeout, validation_deadline)
 
-            case Core.admit_test_batches(batches, available_ms, operation_timeout) do
+            reserve_ms = MixAction.postflight_tree_binding_reserve_ms()
+
+            case Core.admit_test_batches(
+                   batches,
+                   available_ms,
+                   operation_timeout,
+                   reserve_ms
+                 ) do
               :ok ->
                 # One shared absolute monotonic deadline for the whole test
                 # stage, additionally capped by the whole-validation deadline.
                 deadline =
                   validation_test_deadline || monotonic_ms() + test_stage_timeout
 
-                case Core.new_test_execution(batches, operation_timeout) do
+                case Core.new_test_execution(batches, operation_timeout, reserve_ms) do
                   {:ok, execution} ->
                     run_tests_sequential(path, execution, deadline, resource)
 
@@ -800,7 +807,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                 check
 
               {:error, reason} ->
-                case Core.next_test_step(test_stage_timeout, batches, operation_timeout) do
+                case Core.next_test_step(
+                       test_stage_timeout,
+                       batches,
+                       operation_timeout,
+                       reserve_ms
+                     ) do
                   {:error, invalid_step} ->
                     throw({:execution_error, {:invalid_test_step, invalid_step}})
 

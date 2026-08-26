@@ -10,11 +10,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   the pure `test_execution` state and every refinement decision; the shell only
   interprets the resulting effects.
 
-  Test-stage admission is residual-budget based: a positive aggregate remainder
-  starts the first exact batch under one shared deadline. Per-batch intensive
-  ceilings are never multiplied as a predicted total duration. Capacity handoffs
-  emit schema-v3 evidence with `available_budget_ms == 0` only, including an
-  optional aggregate-deadline interrupted batch descriptor.
+  Test-stage admission is residual-budget based: a Mix-launchable child timeout
+  `min(operation_timeout, remaining)` strictly above the injected Mix postflight
+  tree-binding reserve starts the first exact batch under one shared deadline.
+  Residual or per-operation ceiling at or below that reserve is logical capacity,
+  not executable test budget. Per-batch intensive ceilings are never multiplied
+  as a predicted total duration. Capacity handoffs emit schema-v3 evidence with
+  `available_budget_ms == 0` only, including an optional aggregate-deadline
+  interrupted batch descriptor.
   """
 
   alias Arbor.Actions.Coding.BlobManifest
@@ -254,7 +257,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           refined?: boolean(),
           refined_child_count: non_neg_integer(),
           total_attempt_count: non_neg_integer(),
-          operation_timeout: pos_integer()
+          operation_timeout: pos_integer(),
+          postflight_reserve_ms: non_neg_integer()
         }
 
   @typedoc "Bounded evidence for a validation capacity handoff."
@@ -787,27 +791,79 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc """
+  True when Mix can spawn a child that honors postflight reserve.
+
+  Mix receives `min(operation_timeout, remaining)` as the outer child timeout and
+  requires that value strictly greater than its owned postflight tree-binding
+  reserve. Aggregate residual above the reserve is not enough when the
+  per-operation ceiling is at or below the reserve. CrossApp must not subtract
+  the reserve from launched timeouts; this predicate is only the logical launch
+  floor.
+  """
+  @spec residual_allows_mix_launch?(term(), term(), term()) :: boolean()
+  def residual_allows_mix_launch?(remaining_ms, operation_timeout_ms, postflight_reserve_ms)
+      when is_integer(remaining_ms) and is_integer(operation_timeout_ms) and
+             operation_timeout_ms > 0 and is_integer(postflight_reserve_ms) and
+             postflight_reserve_ms >= 0 do
+    min(operation_timeout_ms, remaining_ms) > postflight_reserve_ms
+  end
+
+  def residual_allows_mix_launch?(
+        _remaining_ms,
+        _operation_timeout_ms,
+        _postflight_reserve_ms
+      ),
+      do: false
+
+  @doc """
   True only for aggregate-deadline interruption of a launched child.
 
-  Requires trusted runner timeout evidence, non-positive residual after the
-  child, and a launched budget strictly below the intensive operation ceiling.
-  Equal ceilings remain an ordinary child timeout.
+  Requires trusted runner timeout evidence, a launched budget strictly below the
+  intensive operation ceiling, and residual that cannot honor the injected Mix
+  postflight reserve. Equal ceilings remain an ordinary child timeout.
   """
-  @spec aggregate_deadline_interrupted?(boolean(), integer(), pos_integer(), pos_integer()) ::
-          boolean()
+  @spec aggregate_deadline_interrupted?(
+          boolean(),
+          integer(),
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: boolean()
   def aggregate_deadline_interrupted?(
         runner_timed_out?,
         remaining_after,
         budget_ms,
-        operation_timeout
+        operation_timeout,
+        postflight_reserve_ms \\ 0
+      )
+
+  def aggregate_deadline_interrupted?(
+        runner_timed_out?,
+        remaining_after,
+        budget_ms,
+        operation_timeout,
+        postflight_reserve_ms
       )
       when is_boolean(runner_timed_out?) and is_integer(remaining_after) and
              is_integer(budget_ms) and budget_ms > 0 and is_integer(operation_timeout) and
-             operation_timeout > 0 do
-    runner_timed_out? == true and remaining_after <= 0 and budget_ms < operation_timeout
+             operation_timeout > 0 and is_integer(postflight_reserve_ms) and
+             postflight_reserve_ms >= 0 do
+    runner_timed_out? == true and budget_ms < operation_timeout and
+      not residual_allows_mix_launch?(
+        remaining_after,
+        operation_timeout,
+        postflight_reserve_ms
+      )
   end
 
-  def aggregate_deadline_interrupted?(_runner, _remaining, _budget, _operation), do: false
+  def aggregate_deadline_interrupted?(
+        _runner,
+        _remaining,
+        _budget,
+        _operation,
+        _postflight_reserve_ms
+      ),
+      do: false
 
   @doc """
   True only for a closed prelaunch Apple Container probe timeout after the
@@ -828,26 +884,61 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   def prelaunch_probe_timeout_capacity?(_reason, _remaining_ms_after), do: false
 
+  defp prelaunch_capacity_reason?(:probe_timeout), do: true
+  defp prelaunch_capacity_reason?(":probe_timeout"), do: true
+  defp prelaunch_capacity_reason?(:operation_deadline_exceeded), do: true
+  defp prelaunch_capacity_reason?(":operation_deadline_exceeded"), do: true
+  defp prelaunch_capacity_reason?(_reason), do: false
+
+  defp prelaunch_residual_capacity?(
+         reason,
+         remaining_after,
+         operation_timeout_ms,
+         postflight_reserve_ms
+       )
+       when is_integer(remaining_after) and is_integer(operation_timeout_ms) and
+              operation_timeout_ms > 0 and is_integer(postflight_reserve_ms) and
+              postflight_reserve_ms >= 0 do
+    prelaunch_capacity_reason?(reason) and
+      not residual_allows_mix_launch?(
+        remaining_after,
+        operation_timeout_ms,
+        postflight_reserve_ms
+      )
+  end
+
+  defp prelaunch_residual_capacity?(
+         _reason,
+         _remaining_after,
+         _operation_timeout_ms,
+         _postflight_reserve_ms
+       ),
+       do: false
+
   @doc """
   Construct bounded pure state for sequential test execution with timeout refinement.
 
   The supplied batches remain the immutable capacity-handoff plan. Refined
   attempts are runtime-only descriptors and can never replace plan entries.
   """
-  @spec new_test_execution([test_batch()], pos_integer()) ::
+  @spec new_test_execution([test_batch()], pos_integer(), non_neg_integer()) ::
           {:ok, test_execution()} | {:error, term()}
-  def new_test_execution([], operation_timeout)
-      when is_integer(operation_timeout) and operation_timeout > 0 do
-    {:ok, empty_test_execution(operation_timeout)}
+  def new_test_execution(batches, operation_timeout, postflight_reserve_ms \\ 0)
+
+  def new_test_execution([], operation_timeout, postflight_reserve_ms)
+      when is_integer(operation_timeout) and operation_timeout > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
+    {:ok, empty_test_execution(operation_timeout, postflight_reserve_ms)}
   end
 
-  def new_test_execution(batches, operation_timeout)
-      when is_list(batches) and is_integer(operation_timeout) and operation_timeout > 0 do
+  def new_test_execution(batches, operation_timeout, postflight_reserve_ms)
+      when is_list(batches) and is_integer(operation_timeout) and operation_timeout > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
     if valid_remaining_batches?(batches) do
       [current | suffix] = batches
 
       {:ok,
-       empty_test_execution(operation_timeout)
+       empty_test_execution(operation_timeout, postflight_reserve_ms)
        |> Map.merge(%{
          original_batches: batches,
          current_original: current,
@@ -859,7 +950,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     end
   end
 
-  def new_test_execution(_batches, _operation_timeout), do: {:error, :invalid_test_batch_plan}
+  def new_test_execution(_batches, _operation_timeout, _postflight_reserve_ms),
+    do: {:error, :invalid_test_batch_plan}
 
   @doc """
   Decide the next process effect under the caller-supplied shared-deadline residual.
@@ -878,20 +970,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         nil ->
           {:complete, aggregate_test_check(state.original_results)}
 
-        current when remaining_ms <= 0 ->
-          if state.current_started do
-            {:capacity, state.completed_originals, current, state.original_suffix}
+        current ->
+          if residual_allows_mix_launch?(
+               remaining_ms,
+               state.operation_timeout,
+               state.postflight_reserve_ms
+             ) do
+            case state.work_queue do
+              [attempt | _] ->
+                {:run, attempt, min(state.operation_timeout, remaining_ms)}
+
+              _ ->
+                {:error, :invalid_refinement_state}
+            end
           else
-            {:capacity, state.completed_originals, nil, [current | state.original_suffix]}
-          end
-
-        _current ->
-          case state.work_queue do
-            [attempt | _] ->
-              {:run, attempt, min(state.operation_timeout, remaining_ms)}
-
-            _ ->
-              {:error, :invalid_refinement_state}
+            if state.current_started do
+              {:capacity, state.completed_originals, current, state.original_suffix}
+            else
+              {:capacity, state.completed_originals, nil, [current | state.original_suffix]}
+            end
           end
       end
     end
@@ -903,7 +1000,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Purely reduce one launched process result into the next refinement state/effect.
 
   Non-timeout failures win over deadline exhaustion. Multi-path ordinary
-  timeouts refine only while positive aggregate residual remains.
+  timeouts refine only while residual can still launch a Mix child.
   """
   @spec record_test_execution_attempt(
           test_execution(),
@@ -941,6 +1038,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       }
 
       passed = feedback_value(feedback, :passed) == true
+      reserve = state.postflight_reserve_ms
 
       cond do
         not runner_timeout and not passed ->
@@ -951,7 +1049,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           runner_timeout,
           remaining_after,
           launched_budget,
-          state.operation_timeout
+          state.operation_timeout,
+          reserve
         ) ->
           {:capacity, state.completed_originals, state.current_original, state.original_suffix}
 
@@ -959,8 +1058,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           result = original_result(state, feedback, false, true)
           {:terminal, aggregate_test_check(state.original_results ++ [result])}
 
-        runner_timeout and remaining_after <= 0 ->
-          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+        runner_timeout and
+            not residual_allows_mix_launch?(
+              remaining_after,
+              state.operation_timeout,
+              reserve
+            ) ->
+          result = original_result(state, feedback, false, true)
+          {:terminal, aggregate_test_check(state.original_results ++ [result])}
 
         runner_timeout ->
           with {:ok, left, right} <- split_attempt(state.current_original, attempt) do
@@ -997,8 +1102,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @doc """
   Classify a process that failed before launch.
 
-  An exhausted probe timeout during refinement interrupts the immutable
-  original batch; before a root launch it leaves that original unstarted.
+  A closed Mix/prelaunch capacity token with residual that cannot honor the
+  injected postflight reserve interrupts the immutable original during
+  refinement and leaves that original unstarted before a root launch.
+  Ordinary prelaunch errors stay execution failures.
   """
   @spec record_test_execution_prelaunch_error(test_execution(), term(), integer()) ::
           {:capacity, [test_batch()], test_batch() | nil, [test_batch()]}
@@ -1007,7 +1114,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def record_test_execution_prelaunch_error(state, reason, remaining_after)
       when is_map(state) and is_integer(remaining_after) do
     with :ok <- validate_test_execution(state) do
-      if prelaunch_probe_timeout_capacity?(reason, remaining_after) do
+      if prelaunch_residual_capacity?(
+           reason,
+           remaining_after,
+           state.operation_timeout,
+           state.postflight_reserve_ms
+         ) do
         if state.current_started do
           {:capacity, state.completed_originals, state.current_original, state.original_suffix}
         else
@@ -1024,7 +1136,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def record_test_execution_prelaunch_error(_state, _reason, _remaining_after),
     do: {:error, :invalid_refinement_state}
 
-  defp empty_test_execution(operation_timeout) do
+  defp empty_test_execution(operation_timeout, postflight_reserve_ms) do
     %{
       original_batches: [],
       completed_originals: [],
@@ -1038,7 +1150,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       refined?: false,
       refined_child_count: 0,
       total_attempt_count: 0,
-      operation_timeout: operation_timeout
+      operation_timeout: operation_timeout,
+      postflight_reserve_ms: postflight_reserve_ms
     }
   end
 
@@ -1047,7 +1160,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     state = %{state | accepted_paths: accepted_paths, work_queue: rest}
 
     cond do
-      rest != [] and remaining_after <= 0 ->
+      rest != [] and
+          not residual_allows_mix_launch?(
+            remaining_after,
+            state.operation_timeout,
+            state.postflight_reserve_ms
+          ) ->
         {:capacity, state.completed_originals, state.current_original, state.original_suffix}
 
       rest != [] ->
@@ -1270,7 +1388,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :refined?,
       :refined_child_count,
       :total_attempt_count,
-      :operation_timeout
+      :operation_timeout,
+      :postflight_reserve_ms
     ]
 
     cond do
@@ -1278,6 +1397,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         {:error, :invalid_refinement_state}
 
       not is_integer(state.operation_timeout) or state.operation_timeout <= 0 ->
+        {:error, :invalid_refinement_state}
+
+      not is_integer(state.postflight_reserve_ms) or state.postflight_reserve_ms < 0 ->
         {:error, :invalid_refinement_state}
 
       not is_list(state.original_batches) or not is_list(state.completed_originals) or
@@ -1540,33 +1662,35 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   - `{:timeout, batch, rest}` when budget is exhausted with batches left
   - `{:error, reason}` when arguments are malformed (fail closed; never skip)
   """
-  @spec next_test_step(term(), term(), term()) :: test_step()
-  def next_test_step(_remaining_ms, [], operation_timeout_ms)
-      when is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+  @spec next_test_step(term(), term(), term(), term()) :: test_step()
+  def next_test_step(remaining_ms, batches, operation_timeout_ms, postflight_reserve_ms \\ 0)
+
+  def next_test_step(_remaining_ms, [], operation_timeout_ms, postflight_reserve_ms)
+      when is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
     :complete
   end
 
-  def next_test_step(remaining_ms, [batch | rest], operation_timeout_ms)
-      when is_integer(remaining_ms) and remaining_ms <= 0 and is_map(batch) and is_list(rest) and
-             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+  def next_test_step(remaining_ms, [batch | rest], operation_timeout_ms, postflight_reserve_ms)
+      when is_integer(remaining_ms) and is_map(batch) and is_list(rest) and
+             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
     if valid_remaining_batches?([batch | rest]) do
-      {:timeout, batch, rest}
+      if residual_allows_mix_launch?(
+           remaining_ms,
+           operation_timeout_ms,
+           postflight_reserve_ms
+         ) do
+        {:run, batch, min(operation_timeout_ms, remaining_ms), rest}
+      else
+        {:timeout, batch, rest}
+      end
     else
       invalid_test_step_input(remaining_ms, [batch | rest], operation_timeout_ms)
     end
   end
 
-  def next_test_step(remaining_ms, [batch | rest], operation_timeout_ms)
-      when is_integer(remaining_ms) and remaining_ms > 0 and is_map(batch) and is_list(rest) and
-             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
-    if valid_remaining_batches?([batch | rest]) do
-      {:run, batch, min(operation_timeout_ms, remaining_ms), rest}
-    else
-      invalid_test_step_input(remaining_ms, [batch | rest], operation_timeout_ms)
-    end
-  end
-
-  def next_test_step(remaining_ms, batches, operation_timeout_ms) do
+  def next_test_step(remaining_ms, batches, operation_timeout_ms, _postflight_reserve_ms) do
     invalid_test_step_input(remaining_ms, batches, operation_timeout_ms)
   end
 
@@ -1575,14 +1699,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   Batches run sequentially under one shared aggregate deadline. Each child is
   capped by `min(operation_timeout_ms, remaining_ms)`. Admission therefore
-  checks only whether residual budget can start the first child — never whether
-  `batch_count * per-batch ceiling` fits the aggregate as a predicted total.
+  checks whether that Mix outer timeout can honor postflight reserve — never
+  whether `batch_count * per-batch ceiling` fits the aggregate as a predicted
+  total.
   """
-  @spec admit_test_batches([test_batch()], integer(), pos_integer()) ::
+  @spec admit_test_batches([test_batch()], integer(), pos_integer(), non_neg_integer()) ::
           :ok | {:capacity_exceeded, map()} | {:error, term()}
-  def admit_test_batches(batches, available_ms, operation_timeout_ms)
+  def admit_test_batches(
+        batches,
+        available_ms,
+        operation_timeout_ms,
+        postflight_reserve_ms \\ 0
+      )
+
+  def admit_test_batches(batches, available_ms, operation_timeout_ms, postflight_reserve_ms)
       when is_list(batches) and is_integer(available_ms) and
-             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 do
+             is_integer(operation_timeout_ms) and operation_timeout_ms > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
     cond do
       batches == [] ->
         :ok
@@ -1590,11 +1723,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       not valid_remaining_batches?(batches) ->
         {:error, :invalid_test_batch_plan}
 
-      available_ms > 0 ->
+      residual_allows_mix_launch?(
+        available_ms,
+        operation_timeout_ms,
+        postflight_reserve_ms
+      ) ->
         :ok
 
       true ->
-        # Residual exhausted before the first child — structural handoff.
+        # Residual cannot honor Mix postflight reserve before the first child.
         case capacity_handoff(:structural, 0, operation_timeout_ms, [], nil, batches) do
           {:ok, check} -> {:capacity_exceeded, check}
           {:error, reason} -> {:error, reason}
@@ -1602,14 +1739,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     end
   end
 
-  def admit_test_batches(_batches, _available_ms, _operation_timeout_ms),
+  def admit_test_batches(_batches, _available_ms, _operation_timeout_ms, _postflight_reserve_ms),
     do: {:error, :invalid_test_batch_plan}
 
   @doc """
   Build the bounded, JSON-clean handoff check for residual capacity evidence.
 
-  Residual available budget on a handoff is always 0: any positive remainder is
-  executable via `next_test_step/3`. Batch paths are already admitted and
+  Residual available budget on a handoff is always 0: any Mix-launchable
+  remainder is executable via `next_test_step/4`. Batch paths are already admitted and
   normalized by partition_test_batches/1. Schema v3 binds either an unstarted
   suffix (`interrupted_batch` null) or one aggregate-deadline interrupted batch
   plus optional unstarted suffix — path-free labels, counts, and digests only.
