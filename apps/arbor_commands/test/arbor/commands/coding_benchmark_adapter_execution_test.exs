@@ -658,8 +658,15 @@ defmodule Arbor.Commands.CodingBenchmarkAdapterExecutionTest do
   test "security regression: source object alternates fail closed before executor observation" do
     scenario = production_scenario!()
     fixture = Path.join(scenario.root, "fixtures/happy")
+    alternate = Path.join(scenario.root, "other")
+    File.mkdir_p!(alternate)
+    git!(alternate, ["init", "--quiet"])
     File.mkdir_p!(Path.join(fixture, ".git/objects/info"))
-    File.write!(Path.join(fixture, ".git/objects/info/alternates"), "/tmp/other.git/objects\n")
+
+    File.write!(
+      Path.join(fixture, ".git/objects/info/alternates"),
+      Path.join(alternate, ".git/objects") <> "\n"
+    )
 
     install_leased_executors()
     Application.put_env(:arbor_commands, :coding_benchmark_test_mode, :leased)
