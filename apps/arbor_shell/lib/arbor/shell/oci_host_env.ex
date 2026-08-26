@@ -44,9 +44,9 @@ defmodule Arbor.Shell.OciHostEnv do
   end
 
   defp pin_home(path) do
-    case TrustedPath.pin_operator_owned_directory(path) do
+    case TrustedPath.pin_operator_owned_directory(path, others: :no_write) do
       {:ok, identity} -> {:ok, identity}
-      {:error, :untrusted_path} -> {:error, :untrusted_path}
+      {:error, :untrusted_path} -> {:error, :untrusted_home}
       {:error, reason} -> {:error, reason}
     end
   end

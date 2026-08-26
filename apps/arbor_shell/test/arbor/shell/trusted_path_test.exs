@@ -343,6 +343,34 @@ defmodule Arbor.Shell.TrustedPathTest do
       end
     end
 
+    test "security regression: 0755 HOME is admitted only with others: :no_write" do
+      {dir, _file} = operator_fixture("home-755")
+      File.chmod!(dir, 0o755)
+
+      try do
+        assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_directory(dir)
+
+        assert {:ok, %Identity{} = identity} =
+                 TrustedPath.pin_operator_owned_directory(dir, others: :no_write)
+
+        assert identity.pin_family == :operator_owned
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: group-writable HOME is still refused with others: :no_write" do
+      {dir, _file} = operator_fixture("home-770")
+      File.chmod!(dir, 0o770)
+
+      try do
+        assert {:error, :untrusted_path} =
+                 TrustedPath.pin_operator_owned_directory(dir, others: :no_write)
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
     test "security regression: rejects a symlink locator" do
       {dir, file} = operator_fixture("symlink")
       link = Path.join(dir, "alias.json")

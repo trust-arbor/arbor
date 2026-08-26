@@ -490,6 +490,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
                driver
              )}
 
+          {:error, :probe_failed_untrusted_home, driver} ->
+            {:blocked,
+             blocked(
+               "dependency_baseline",
+               "runtime_probe_failed",
+               observed_at,
+               "The validation runtime probe failed: HOME is not writable-only by its owner.",
+               runtime_probe_failed_untrusted_home_remedy(driver),
+               driver
+             )}
+
           {:error, :malformed} ->
             {:blocked, runtime_invalid_diagnostic(observed_at)}
         end
@@ -1213,6 +1224,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp runtime_probe_failed_remedy(_driver) do
     "The validation runtime probe failed. Restore the reviewed driver and retry."
+  end
+
+  defp runtime_probe_failed_untrusted_home_remedy("podman") do
+    "The podman driver could not pin HOME. chmod go-w $HOME so it is not group- or " <>
+      "world-writable (0755 is OK; 0770 and 0777 are not)."
+  end
+
+  defp runtime_probe_failed_untrusted_home_remedy(_driver) do
+    "The validation runtime could not pin HOME. chmod go-w $HOME so it is not group- or " <>
+      "world-writable (0755 is OK; 0770 and 0777 are not)."
   end
 
   defp runtime_invalid_diagnostic(observed_at) do

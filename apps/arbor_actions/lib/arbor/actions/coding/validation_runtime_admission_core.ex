@@ -78,6 +78,9 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionCore do
       configured? and match?({:ok, _}, probe) ->
         {:ok, "passed"}
 
+      configured? and match?({:error, :untrusted_home}, probe) ->
+        {:ok, "failed_untrusted_home"}
+
       configured? and match?({:error, _}, probe) ->
         {:ok, "failed"}
 

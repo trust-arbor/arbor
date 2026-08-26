@@ -373,6 +373,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert ReadinessLiveCore.validation_runtime({:ok, probe_failed}) ==
              {:error, :probe_failed, "podman"}
 
+    untrusted_home = runtime_envelope(probe: "failed_untrusted_home")
+
+    assert ReadinessLiveCore.validation_runtime({:ok, untrusted_home}) ==
+             {:error, :probe_failed_untrusted_home, "podman"}
+
     assert ReadinessLiveCore.validation_runtime({:ok, Map.put(passed, "digest", "x")}) ==
              {:error, :malformed}
 
@@ -455,6 +460,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     refute diagnostic["remediation"] =~ "/"
     refute diagnostic["remediation"] =~ "Restore the reviewed Linux dependency baseline"
     refute_received :mix_lock_called
+  end
+
+  test "live untrusted HOME probe failure names chmod go-w, not restore podman",
+       ctx do
+    opts =
+      live_opts(ctx,
+        coding_validation_runtime_admission: fn ->
+          {:ok, runtime_envelope(probe: "failed_untrusted_home")}
+        end,
+        coding_dependency_baseline_admission: fn _repo, _ref ->
+          flunk("mix.lock must not run when the runtime probe failed")
+        end
+      )
+
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), opts)
+    assert blocked_code(report) == "runtime_probe_failed"
+    diagnostic = diagnostic(report, "dependency_baseline")
+    assert diagnostic["evidence_ref"] == "podman"
+    assert diagnostic["remediation"] =~ "chmod go-w"
+    assert diagnostic["remediation"] =~ "0755"
+    refute diagnostic["remediation"] =~ "Restore podman"
+    refute diagnostic["remediation"] =~ "/home"
   end
 
   test "live mix.lock unavailable keeps the existing authority remedy after a passing runtime",

@@ -118,18 +118,28 @@ defmodule Arbor.Shell.TrustedPath do
 
   def pin_operator_owned_regular_file(_path, _opts), do: {:error, :invalid_path}
 
-  @spec pin_operator_owned_directory(term()) :: {:ok, Identity.t()} | {:error, atom()}
-  def pin_operator_owned_directory(path) when is_binary(path) do
-    with {:ok, canonical} <- canonicalize_absolute(path),
+  @doc """
+  Pin a directory owned by the current euid.
+
+  Default `others: :none` requires no group/other bits (artifact trees).
+  `others: :no_write` allows a typical 0755 HOME used only as a rootless
+  storage locator. Does not weaken `pin_root_owned_directory/1`.
+  """
+  @spec pin_operator_owned_directory(term(), term()) :: {:ok, Identity.t()} | {:error, atom()}
+  def pin_operator_owned_directory(path, opts \\ [])
+
+  def pin_operator_owned_directory(path, opts) when is_binary(path) do
+    with {:ok, others} <- closed_directory_option(opts),
+         {:ok, canonical} <- canonicalize_absolute(path),
          :ok <- require_canonical(path, canonical),
          {:ok, euid} <- current_euid(),
          :ok <- operator_path_chain(canonical, euid),
-         {:ok, stat} <- operator_directory_stat(canonical, euid) do
+         {:ok, stat} <- operator_directory_stat(canonical, euid, others) do
       {:ok, build_identity(canonical, stat, nil, false, :operator_owned)}
     end
   end
 
-  def pin_operator_owned_directory(_path), do: {:error, :invalid_path}
+  def pin_operator_owned_directory(_path, _opts), do: {:error, :invalid_path}
 
   @spec verify_pinned(Identity.t()) :: :ok | {:error, atom()}
   def verify_pinned(
@@ -212,6 +222,38 @@ defmodule Arbor.Shell.TrustedPath do
   end
 
   defp closed_executable_option(_opts), do: {:error, :malformed_options}
+
+  # `:none` (default) is 0700-class: no group/other bits. Used for directories
+  # that hold pinned artifacts. `:no_write` is 0o022: euid-owned and not
+  # group/world-writable, so a typical 0755 HOME can locate rootless storage.
+  defp closed_directory_option(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      case Enum.reduce_while(opts, {:ok, :absent}, fn
+             {:others, :none}, {:ok, :absent} ->
+               {:cont, {:ok, :none}}
+
+             {:others, :no_write}, {:ok, :absent} ->
+               {:cont, {:ok, :no_write}}
+
+             {:others, _value}, {:ok, :absent} ->
+               {:halt, {:error, :malformed_options}}
+
+             {:others, _value}, {:ok, _already} ->
+               {:halt, {:error, :duplicate_option}}
+
+             {_other, _value}, _acc ->
+               {:halt, {:error, :unknown_option}}
+           end) do
+        {:ok, :absent} -> {:ok, :none}
+        {:ok, value} -> {:ok, value}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :malformed_options}
+    end
+  end
+
+  defp closed_directory_option(_opts), do: {:error, :malformed_options}
 
   defp validate_absolute_path(path) do
     with :ok <- validate_path_text(path) do
@@ -458,10 +500,10 @@ defmodule Arbor.Shell.TrustedPath do
     end
   end
 
-  defp operator_directory_stat(path, euid) do
+  defp operator_directory_stat(path, euid, others) do
     case File.stat(path, time: :posix) do
       {:ok, %File.Stat{type: :directory} = stat} ->
-        if operator_target_ownership?(stat, euid),
+        if operator_target_ownership?(stat, euid, others),
           do: {:ok, stat},
           else: {:error, :untrusted_path}
 
@@ -495,13 +537,19 @@ defmodule Arbor.Shell.TrustedPath do
     end)
   end
 
-  # Target: current euid, no group/other bits.
-  defp operator_target_ownership?(%File.Stat{uid: uid, mode: mode}, euid)
+  # Target: current euid. Artifact dirs (`:none`) forbid any group/other bits.
+  # Env locators (`:no_write`) forbid only group/other write.
+  defp operator_target_ownership?(stat, euid, others \\ :none)
+
+  defp operator_target_ownership?(%File.Stat{uid: uid, mode: mode}, euid, others)
        when uid == euid and is_integer(euid) do
-    (mode &&& 0o077) == 0
+    (mode &&& others_mode_mask(others)) == 0
   end
 
-  defp operator_target_ownership?(_stat, _euid), do: false
+  defp operator_target_ownership?(_stat, _euid, _others), do: false
+
+  defp others_mode_mask(:none), do: 0o077
+  defp others_mode_mask(:no_write), do: 0o022
 
   # Root-owned ancestors are the host path to the operator tree (`/`, `/Users`,
   # sticky `/tmp`). Load-bearing immutability is euid ownership + no group/other

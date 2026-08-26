@@ -102,6 +102,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
           {:ok, :passed, String.t()}
           | {:error, :unconfigured, String.t(), String.t()}
           | {:error, :probe_failed, String.t()}
+          | {:error, :probe_failed_untrusted_home, String.t()}
           | {:error, :malformed}
   def validation_runtime({:ok, envelope})
       when is_map(envelope) and not is_struct(envelope) do
@@ -370,6 +371,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
        when state in ["pinned", "available"],
        do: {:error, :probe_failed, driver}
 
+  defp classify_runtime(driver, state, "failed_untrusted_home", _host_os)
+       when state in ["pinned", "available"],
+       do: {:error, :probe_failed_untrusted_home, driver}
+
   defp classify_runtime(_driver, _state, _probe, _host_os), do: {:error, :malformed}
 
   defp admit_runtime_driver(driver)
@@ -383,8 +388,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessLiveCore do
 
   defp admit_runtime_state(_state), do: {:error, :malformed}
 
-  defp admit_runtime_probe(probe) when probe in ["passed", "failed", "skipped"],
-    do: {:ok, probe}
+  defp admit_runtime_probe(probe)
+       when probe in ["passed", "failed", "skipped", "failed_untrusted_home"],
+       do: {:ok, probe}
 
   defp admit_runtime_probe(_probe), do: {:error, :malformed}
 

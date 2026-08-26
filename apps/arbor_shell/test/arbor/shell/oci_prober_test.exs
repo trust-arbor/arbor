@@ -148,7 +148,7 @@ defmodule Arbor.Shell.OciProberTest do
           {:ok, closed_host_env()}
 
         :untrusted_home ->
-          {:error, :untrusted_path}
+          {:error, :untrusted_home}
 
         :extra_keys ->
           {:ok, Map.put(closed_host_env(), "SECRET", "1")}
@@ -273,7 +273,7 @@ defmodule Arbor.Shell.OciProberTest do
     test "security regression: HOME that fails the operator pin is refused" do
       FakeRuntime.set_host_env_mode(:untrusted_home)
 
-      assert {:error, :untrusted_path} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
+      assert {:error, :untrusted_home} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
       assert FakeRuntime.runs() == []
     end
 

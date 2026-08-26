@@ -90,6 +90,20 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionTest do
       refute inspect(envelope) =~ "/var/lib"
     end
 
+    test "maps untrusted HOME to a closed probe label without a host path" do
+      status = %{"state" => "pinned", "driver" => "podman"}
+
+      assert {:ok, envelope} =
+               ValidationRuntimeAdmissionCore.observe(
+                 status,
+                 {:error, :untrusted_home},
+                 "linux"
+               )
+
+      assert envelope["probe"] == "failed_untrusted_home"
+      refute inspect(envelope) =~ "/home"
+    end
+
     test "rejects digest-like drivers" do
       status = %{"state" => "pinned", "driver" => "sha256:" <> String.duplicate("b", 64)}
 
