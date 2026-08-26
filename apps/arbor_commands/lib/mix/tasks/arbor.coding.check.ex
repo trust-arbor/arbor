@@ -26,7 +26,11 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
   @max_plan_bytes 256_000
   @max_path_bytes 4_096
   @max_id_bytes 256
-  @rpc_timeout_ms 5_000
+  # Live readiness does real work on the node since PR 6: a validation-runtime
+  # probe (`podman image inspect`, ~4 s on the VM) plus the baseline tree
+  # re-verify (~3 s over 6k files). 5 s tripped on every Linux run and the
+  # timeout was reported as a bare "rpc_unavailable" (V7-7, 2026-08-26).
+  @rpc_timeout_ms 60_000
   @verification_rpc_grace_ms 10_000
   @max_verification_rpc_timeout_ms 86_410_000
   @requester_shutdown_timeout_ms 1_000
@@ -735,8 +739,12 @@ defmodule Mix.Tasks.Arbor.Coding.Check do
       {:ok, report} ->
         {:ok, report}
 
-      {:badrpc, _reason} when location in [:remote, :verification] ->
-        command_error(location_field(location), "rpc_unavailable")
+      {:badrpc, reason} when location in [:remote, :verification] ->
+        # Keep the stable "rpc_unavailable" contract value; the badrpc reason
+        # (:timeout, :nodedown, an EXIT) goes into the bounded detail so the
+        # operator can tell "node down" from "readiness took longer than the
+        # timeout".
+        command_error(location_field(location), "rpc_unavailable", reason)
 
       {:error, reason} ->
         # Keep the stable CLI "reason" contract value; surface the real fault
