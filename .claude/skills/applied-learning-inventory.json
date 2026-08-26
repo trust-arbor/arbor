@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 687,
+  "entry_count": 688,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8475,8 +8475,21 @@
       "source_incident": "found 2026-08-25 when arbor.recompile rejected a dashboard port override whose only semantic difference was keyword order",
       "always_loaded": false,
       "content_sha256": "a7146b866925f5877ee7b687f7e0ca1d4e673eacfdba4c3404a94c9818b2f541"
+    },
+    {
+      "source_ordinal": 688,
+      "source_kind": "post-migration",
+      "slug": "omitted-runtime-providers-can-be-pruned-before-app-local-full-profile-tests-start",
+      "title": "Omitted runtime providers can be pruned before app-local full-profile tests start.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-omitted-runtime-providers-can-be-pruned-before-app-local-full-profile-tests-start",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 during P1E-1 acceptance",
+      "always_loaded": false,
+      "content_sha256": "a8bc4c387ab08d8e9264f33a079c4a786d6b55ca43e93196870fe6c124488ae6"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 226
+  "post_migration_entry_count": 227
 }

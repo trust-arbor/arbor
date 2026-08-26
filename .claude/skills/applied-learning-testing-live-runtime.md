@@ -902,3 +902,15 @@ candidate. Subtract the exact `git ls-files --deleted` inventory before lstat an
 batching, while still failing closed on any other `ENOENT` after enumeration.
 Found 2026-08-25 when cross-app validation rejected P1E-1 before running tests
 because a deliberately deleted Core test remained in the index.
+
+<!-- applied-learning: omitted-runtime-providers-can-be-pruned-before-app-local-full-profile-tests-start -->
+<a id="applied-learning-omitted-runtime-providers-can-be-pruned-before-app-local-full-profile-tests-start"></a>
+**Omitted runtime providers can be pruned before app-local full-profile tests
+start.** Mix 1.19 builds the code path from an application's declared OTP roots;
+if a safe application spec deliberately omits `:os_mon` or network providers, an
+app-directory `mix test` can remove them before the host application starts and
+fail before ExUnit. Run these app-owned files through an isolated umbrella build
+or a named harness that retains full-profile roots, while fresh restricted peers
+prove the safe profile neither loads nor starts them. Do not add providers back to
+the safe application spec to repair the test runner (found 2026-08-26 during
+P1E-1 acceptance).
