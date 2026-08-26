@@ -183,7 +183,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     paths = write_numbered_tests!(worktree, "alpha", 6)
     assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
-    {:ok, clock} = Agent.start_link(fn -> [0, 0, 1, launchable_stage_ms()] end)
+    {:ok, clock} = Agent.start(fn -> [0, 0, 1, launchable_stage_ms()] end)
+
+    on_exit(fn ->
+      if Process.alive?(clock), do: Agent.stop(clock)
+    end)
 
     Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
       Agent.get_and_update(clock, fn
@@ -334,7 +338,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
     # Shared clock: stays at 0 until a mix run consumes the whole budget.
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -400,7 +404,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -462,7 +466,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -516,7 +520,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -603,7 +607,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     op = reserve * 2
     stage = reserve + 30_000
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -653,7 +657,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     op = reserve * 2
     stage = reserve + 30_000
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -754,7 +758,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     op = reserve * 2
     stage = reserve + 30_000
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -794,7 +798,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -858,7 +862,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, _batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -899,7 +903,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -956,7 +960,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, _batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1004,7 +1008,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1214,7 +1218,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert beta_batch.paths == ["apps/beta/test/beta_test.exs"]
 
     # First clock read establishes deadline; subsequent reads are past it.
-    {:ok, clock_agent} = Agent.start_link(fn -> {:init, 0} end)
+    {:ok, clock_agent} = Agent.start(fn -> {:init, 0} end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1474,7 +1478,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   } do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1679,7 +1683,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       root_wide: false
     }
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1764,7 +1768,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   } do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1800,7 +1804,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   } do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -1917,7 +1921,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
@@ -2411,7 +2415,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
 
-    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+    {:ok, clock_agent} = Agent.start(fn -> 0 end)
 
     on_exit(fn ->
       if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
