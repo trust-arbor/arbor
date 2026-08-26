@@ -90,10 +90,17 @@ defmodule Arbor.Security.FileGuardTest do
 
   describe "authorize/3" do
     test "authorizes when capability matches exactly", %{agent_id: agent_id} do
-      {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace/file.ex")
+      n = System.unique_integer([:positive])
+      parent = Path.join(System.tmp_dir!(), "file_guard_exact_#{n}")
+      target = Path.join(parent, "missing_file.ex")
 
-      assert {:ok, "/workspace/file.ex"} =
-               FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
+      File.mkdir_p!(parent)
+      on_exit(fn -> File.rm_rf!(parent) end)
+
+      refute File.exists?(target)
+      {:ok, _cap} = grant_fs_capability(agent_id, :read, target)
+
+      assert {:ok, ^target} = FileGuard.authorize(agent_id, target, :read)
     end
 
     test "authorizes via parent capability", %{agent_id: agent_id} do
@@ -438,6 +445,34 @@ defmodule Arbor.Security.FileGuardTest do
 
       assert {:error, :symlink_escape} = result,
              "create under a deeply-nested ancestor symlink must be rejected (needs both controls). " <>
+               "Got: #{inspect(result)}"
+    end
+
+    test "security regression (missing immediate parent): higher ancestor symlink is rejected",
+         %{agent_id: agent_id, workspace: workspace, outside: outside} do
+      now = DateTime.utc_now()
+
+      CapabilityStore.put(%Capability{
+        id: "cap_missing_parent_#{agent_id}",
+        principal_id: agent_id,
+        resource_uri: "arbor://fs/write#{workspace}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      })
+
+      escape_link = Path.join(workspace, "escape_missing_parent")
+      missing_parent = Path.join(escape_link, "missing_parent")
+      requested = Path.join(missing_parent, "new_file.txt")
+
+      File.ln_s!(outside, escape_link)
+
+      refute File.exists?(missing_parent)
+      refute File.exists?(requested)
+
+      result = FileGuard.authorize(agent_id, requested, :write)
+
+      assert {:error, :symlink_escape} = result,
+             "a missing immediate parent must not hide a higher symlink escape. " <>
                "Got: #{inspect(result)}"
     end
   end

@@ -489,22 +489,10 @@ defmodule Arbor.Security.FileGuard do
         check_real_within(real, root, normalized)
 
       {:error, :not_found} ->
-        # Target doesn't exist yet (legitimate for write/create). Resolve the
-        # parent's real path instead and verify it's within root — that
-        # prevents a symlink in the parent chain from pointing the future
-        # file at an outside path.
-        parent = Path.dirname(normalized)
-
-        case SafePath.resolve_real(parent) do
-          {:ok, real_parent} ->
-            check_real_within(real_parent, root, normalized)
-
-          {:error, :not_found} ->
-            # Whole prefix is missing; the normalized path is the best we
-            # can do. Fall back to it (no symlink escape possible if no
-            # symlinks exist on the path).
-            {:ok, normalized}
-        end
+        # Target doesn't exist yet (legitimate for write/create). Walk the
+        # full ancestor chain so a missing immediate parent cannot hide a
+        # higher symlink that redirects the future file outside the root.
+        verify_ancestor_chain(normalized, root, normalized)
     end
   end
 
