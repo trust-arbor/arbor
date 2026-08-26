@@ -2,6 +2,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.CrossApp.Core
+  alias Arbor.Actions.Mix, as: MixAction
 
   @moduletag :fast
 
@@ -2273,6 +2274,42 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     refute Core.aggregate_deadline_interrupted?(true, 0, 1_000, 1_000)
     refute Core.aggregate_deadline_interrupted?(false, 0, 500, 1_000)
     refute Core.aggregate_deadline_interrupted?(true, 1, 500, 1_000)
+
+    reserve = MixAction.postflight_tree_binding_reserve_ms()
+    operation_timeout = reserve * 2
+    reduced_budget = reserve + 30_000
+
+    assert Core.aggregate_deadline_interrupted?(
+             true,
+             1,
+             reduced_budget,
+             operation_timeout,
+             reserve
+           )
+
+    assert Core.aggregate_deadline_interrupted?(
+             true,
+             reserve,
+             reduced_budget,
+             operation_timeout,
+             reserve
+           )
+
+    refute Core.aggregate_deadline_interrupted?(
+             true,
+             reserve + 1,
+             reduced_budget,
+             operation_timeout,
+             reserve
+           )
+
+    refute Core.aggregate_deadline_interrupted?(
+             true,
+             reserve,
+             operation_timeout,
+             operation_timeout,
+             reserve
+           )
   end
 
   test "prelaunch_probe_timeout_capacity? converts only closed probe timeout after residual exhaustion" do
@@ -2302,6 +2339,273 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   test "malformed batch plan fails closed at admission" do
     assert {:error, :invalid_test_batch_plan} =
              Core.admit_test_batches([%{not: :a_batch}], 10_000, 1_000)
+  end
+
+  test "Mix postflight reserve is a trusted launch floor for residual capacity" do
+    reserve = MixAction.postflight_tree_binding_reserve_ms()
+    op = reserve * 2
+    assert Core.residual_allows_mix_launch?(reserve + 1, op, reserve)
+    assert Core.residual_allows_mix_launch?(op, reserve + 1, reserve)
+    refute Core.residual_allows_mix_launch?(reserve, op, reserve)
+    refute Core.residual_allows_mix_launch?(1, op, reserve)
+    refute Core.residual_allows_mix_launch?(0, op, reserve)
+    refute Core.residual_allows_mix_launch?(-1, op, reserve)
+    refute Core.residual_allows_mix_launch?(reserve + 1, op, -1)
+    refute Core.residual_allows_mix_launch?("1", op, reserve)
+    # Mix spawn timeout is min(op, remaining); a low op ceiling cannot launch.
+    refute Core.residual_allows_mix_launch?(op, 5_000, reserve)
+    refute Core.residual_allows_mix_launch?(op, reserve, reserve)
+
+    files = [
+      "apps/alpha/test/a1_test.exs",
+      "apps/alpha/test/a2_test.exs",
+      "apps/alpha/test/a3_test.exs",
+      "apps/alpha/test/a4_test.exs",
+      "apps/alpha/test/a5_test.exs",
+      "apps/alpha/test/a6_test.exs"
+    ]
+
+    assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(files)
+    op = reserve * 2
+    reduced = reserve + 30_000
+
+    assert {:capacity_exceeded, exact_reserve} =
+             Core.admit_test_batches(batches, reserve, op, reserve)
+
+    assert exact_reserve["reason"] == "validation_capacity_exceeded"
+    assert exact_reserve["capacity_handoff"]["phase"] == "structural"
+    refute Map.has_key?(exact_reserve["capacity_handoff"], "required_budget_ms")
+
+    assert {:capacity_exceeded, interior} =
+             Core.admit_test_batches(batches, 1, op, reserve)
+
+    assert interior["capacity_handoff"]["phase"] == "structural"
+    assert :ok = Core.admit_test_batches(batches, reserve + 1, op, reserve)
+
+    assert {:capacity_exceeded, low_op} =
+             Core.admit_test_batches(batches, op, 5_000, reserve)
+
+    assert low_op["capacity_handoff"]["phase"] == "structural"
+    refute Map.has_key?(low_op["capacity_handoff"], "required_budget_ms")
+
+    assert {:capacity_exceeded, equal_reserve_op} =
+             Core.admit_test_batches(batches, op, reserve, reserve)
+
+    assert equal_reserve_op["capacity_handoff"]["phase"] == "structural"
+
+    assert {:timeout, ^original, [^suffix]} =
+             Core.next_test_step(reserve, batches, op, reserve)
+
+    assert {:run, ^original, ^reduced, [^suffix]} =
+             Core.next_test_step(reduced, batches, op, reserve)
+
+    assert {:timeout, ^original, [^suffix]} =
+             Core.next_test_step(op, batches, 5_000, reserve)
+
+    assert {:ok, execution} = Core.new_test_execution(batches, op, reserve)
+    assert execution.postflight_reserve_ms == reserve
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.next_test_execution_step(execution, reserve)
+
+    assert {:ok, low_op_execution} = Core.new_test_execution(batches, 5_000, reserve)
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.next_test_execution_step(low_op_execution, op)
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.record_test_execution_prelaunch_error(
+               low_op_execution,
+               :operation_deadline_exceeded,
+               op
+             )
+
+    assert {:run, root, ^reduced} = Core.next_test_execution_step(execution, reduced)
+    assert root.paths == original.paths
+    assert reduced == min(op, reduced)
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "reduced-budget timeout"),
+               true,
+               reduced,
+               reserve
+             )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "reduced-budget timeout"),
+               true,
+               reduced,
+               1
+             )
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "reduced-budget timeout"),
+               true,
+               reduced,
+               reserve + 1
+             )
+
+    assert {:run, _left, _} = Core.next_test_execution_step(refined, reserve + 1)
+
+    assert {:ok, equal_execution} = Core.new_test_execution(batches, reduced, reserve)
+
+    assert {:run, equal_root, ^reduced} =
+             Core.next_test_execution_step(equal_execution, reduced)
+
+    assert {:terminal, equal_timeout} =
+             Core.record_test_execution_attempt(
+               equal_execution,
+               equal_root,
+               test_feedback(nil, "equal-ceiling leftover"),
+               true,
+               reduced,
+               reserve
+             )
+
+    assert equal_timeout["reason"] == "tests_timed_out"
+    refute Map.has_key?(equal_timeout, "capacity_handoff")
+
+    assert {:continue, _equal_refined} =
+             Core.record_test_execution_attempt(
+               equal_execution,
+               equal_root,
+               test_feedback(nil, "equal-ceiling executable leftover"),
+               true,
+               reduced,
+               reserve + 1
+             )
+
+    assert {:ok, [singleton]} =
+             Core.partition_test_batches(["apps/alpha/test/only_test.exs"])
+
+    assert {:ok, singleton_execution} = Core.new_test_execution([singleton], op, reserve)
+
+    assert {:run, singleton_attempt, ^reduced} =
+             Core.next_test_execution_step(singleton_execution, reduced)
+
+    assert {:capacity, [], ^singleton, []} =
+             Core.record_test_execution_attempt(
+               singleton_execution,
+               singleton_attempt,
+               test_feedback(nil, "singleton reduced-budget"),
+               true,
+               reduced,
+               reserve
+             )
+
+    assert {:ok, singleton_equal} = Core.new_test_execution([singleton], reduced, reserve)
+
+    assert {:run, singleton_equal_attempt, ^reduced} =
+             Core.next_test_execution_step(singleton_equal, reduced)
+
+    assert {:terminal, singleton_equal_timeout} =
+             Core.record_test_execution_attempt(
+               singleton_equal,
+               singleton_equal_attempt,
+               test_feedback(nil, "singleton equal-ceiling"),
+               true,
+               reduced,
+               reserve
+             )
+
+    assert singleton_equal_timeout["reason"] == "tests_timed_out"
+
+    assert {:terminal, failed} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(1, "assertion failed"),
+               false,
+               reduced,
+               reserve
+             )
+
+    assert failed["reason"] == "tests_failed"
+    refute failed["reason"] == "tests_timed_out"
+    refute Map.has_key?(failed, "capacity_handoff")
+
+    assert {:continue, passing} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(0, "root pass"),
+               false,
+               reduced,
+               reserve
+             )
+
+    assert {:capacity, [^original], nil, [^suffix]} =
+             Core.next_test_execution_step(passing, reserve)
+
+    assert passing.completed_originals == [original]
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.record_test_execution_prelaunch_error(
+               execution,
+               :operation_deadline_exceeded,
+               reserve
+             )
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.record_test_execution_prelaunch_error(
+               execution,
+               ":operation_deadline_exceeded",
+               reserve
+             )
+
+    assert {:capacity, [], nil, [^original, ^suffix]} =
+             Core.record_test_execution_prelaunch_error(execution, :probe_timeout, reserve)
+
+    assert {:execution_error, {:test_execution_failed, _, :probe_failed}} =
+             Core.record_test_execution_prelaunch_error(execution, :probe_failed, reserve)
+
+    assert {:execution_error, {:test_execution_failed, _, :probe_timeout}} =
+             Core.record_test_execution_prelaunch_error(
+               execution,
+               :probe_timeout,
+               reserve + 1
+             )
+
+    assert {:error, :invalid_test_batch_plan} = Core.new_test_execution(batches, op, -1)
+
+    assert {:error, :invalid_refinement_state} =
+             Core.next_test_execution_step(Map.delete(execution, :postflight_reserve_ms), 1)
+
+    assert {:error, :invalid_refinement_state} =
+             Core.next_test_execution_step(%{execution | postflight_reserve_ms: -1}, 1)
+
+    assert {:run, split_root, _} = Core.next_test_execution_step(execution, reserve + 1)
+
+    assert {:continue, split_state} =
+             Core.record_test_execution_attempt(
+               execution,
+               split_root,
+               test_feedback(nil, "timeout to split"),
+               true,
+               reduced,
+               reserve + 1
+             )
+
+    assert {:run, left, _} = Core.next_test_execution_step(split_state, reserve + 1)
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.record_test_execution_attempt(
+               split_state,
+               left,
+               test_feedback(0, "left pass leftover reserve"),
+               false,
+               reduced,
+               reserve
+             )
   end
 
   defp test_feedback(exit_code, stdout) do
