@@ -922,3 +922,25 @@ special array tied to `PATH`; assigning one worktree pathname to it erases norma
 command lookup for the rest of the loop, producing misleading `command not found`
 errors for tools that ran immediately beforehand. Use a specific name such as
 `worktree_path` (found 2026-08-26 during P1E-1 worktree cleanup).
+
+<!-- applied-learning: exunit-only-filters-match-tag-presence-not-truthiness -->
+<a id="applied-learning-exunit-only-filters-match-tag-presence-not-truthiness"></a>
+**ExUnit `--only tag` filters match tag presence, not truthiness.** A test tagged
+`fast: false` still has the `:fast` key and runs under `--only fast`. When one test
+in a `@moduletag :fast` file is slow, remove the module tag, mark each genuinely
+fast test with `@tag :fast`, and give the slow test `@tag :slow` plus its measured
+timeout. Verify the selected and excluded test counts instead of trusting the tag
+declaration (found 2026-08-26 while isolating the 10,001-record Security hydration
+regression).
+
+<!-- applied-learning: supervision-topology-changes-require-managed-restarts-before-live-verification -->
+<a id="applied-learning-supervision-topology-changes-require-managed-restarts-before-live-verification"></a>
+**Supervision-topology changes require managed restarts before live
+verification.** Hot-loading a facade or module does not start a newly added
+supervised child. Live calls can therefore execute code from the new commit while
+its authority process is absent, producing misleading runtime failures. After a
+commit changes child specs, application startup, or named process ownership, wait
+for active work to quiesce, perform a managed `arbor.restart`, then verify both the
+child PID and public status before dispatching work (found 2026-08-26 when
+`ValidationRuntime.Authority` was compiled but absent from the live supervision
+tree).

@@ -808,8 +808,15 @@ Read the active plan contract before dispatching optional retry or rework
 settings; plan v2 currently admits `rework.max_cycles` only from zero through
 two. An out-of-range value fails admission before a worker starts, so copying a
 plausible higher retry count into a task wastes an orchestration attempt rather
-than granting more recovery capacity (found 2026-07-28 when the first Phase F
-pending-approval settlement dispatch used `max_cycles: 3`).
+than granting more recovery capacity. That field is also only the shared total
+ceiling: the reviewed DOT has separate category ceilings (currently one
+validation repair, one operator commit-gate repair, and two council repairs).
+Diagnose `rework_exhausted` from the terminal counters and completed path, not
+from `max_cycles` alone; a task can stop with `total_rework_count: 1` after its
+single operator repair is spent. Make the first operator ledger exhaustive or
+change the reviewed policy explicitly instead of assuming a second operator
+turn remains (found 2026-07-28 when the first Phase F pending-approval
+settlement dispatch used `max_cycles: 3`; reinforced 2026-08-26 by P1B-2A).
 
 <!-- applied-learning: design-required-checkpoint-turns-must-be-observational -->
 <a id="applied-learning-design-required-checkpoint-turns-must-be-observational"></a>

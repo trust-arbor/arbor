@@ -219,3 +219,14 @@ while legacy unknown lineage is admitted only to cleanup recovery (found
 <!-- applied-learning: shared-durable-storage-does-not-make-hot-projections-cluster-global -->
 <a id="applied-learning-shared-durable-storage-does-not-make-hot-projections-cluster-global"></a>
 **Shared durable storage does not make hot projections cluster-global.** A GenServer that replays a shared EventLog on startup and after local writes will not observe another node's append until it replays again. Describe the implemented guarantee as restart durability, add an explicit bounded reconciliation or cluster-owned authority for live convergence, and use signals only as latency hints rather than control-plane truth (found 2026-07-31 reviewing provider-route evidence before Phase E rollout).
+
+<!-- applied-learning: durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections -->
+<a id="applied-learning-durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections"></a>
+**Durable inventory scans must not run inside journal-owner critical sections.**
+Full list/fetch/decode scans grow with history and can exceed ordinary GenServer
+call timeouts, starving effect-receipt writes and turning successful execution
+into `:journal_unavailable`. Collect and validate in a bounded worker, keep the
+owner responsive, then apply conflict-safely against a hot-state snapshot so
+concurrent durable-first writes win; regress both responsiveness and stale
+overwrite (found 2026-08-26 when a 29,034-row RunJournal refresh took about 5.8
+seconds and terminalized P1B-2A).

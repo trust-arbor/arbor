@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 689,
+  "entry_count": 692,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -6899,8 +6899,8 @@
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-coding-plan-numeric-bounds-are-runtime-contracts-not-advisory-tuning",
       "source_date": "2026-07-28",
-      "source_incident": "found 2026-07-28 when the first Phase F pending-approval settlement dispatch used `max_cycles: 3`).",
-      "content_sha256": "d092163092d00ca9d7daad44893fb96d172e4e8829f07230b35f942f746a6df2",
+      "source_incident": "found 2026-07-28 when the first Phase F pending-approval settlement dispatch used `max_cycles: 3`; reinforced 2026-08-26 when P1B-2A exhausted its one operator repair with shared total count still at one).",
+      "content_sha256": "95f87f83820687dee1df52987b5a458b25f2d8587abe214325380a98c0de3dd3",
       "always_loaded": false
     },
     {
@@ -8501,8 +8501,47 @@
       "source_incident": "found 2026-08-26 during P1E-1 worktree cleanup",
       "always_loaded": false,
       "content_sha256": "d577fae4164c7267d4dfb62be913629670461a2a56193d309992bc2d847f927c"
+    },
+    {
+      "source_ordinal": 690,
+      "source_kind": "post-migration",
+      "slug": "exunit-only-filters-match-tag-presence-not-truthiness",
+      "title": "ExUnit `--only tag` filters match tag presence, not truthiness.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-exunit-only-filters-match-tag-presence-not-truthiness",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 while isolating the 10,001-record Security hydration regression",
+      "always_loaded": false,
+      "content_sha256": "3397e0566c3cc66f22031883c70b999dec378725e471d9518a9e4d7de1c16831"
+    },
+    {
+      "source_ordinal": 691,
+      "source_kind": "post-migration",
+      "slug": "supervision-topology-changes-require-managed-restarts-before-live-verification",
+      "title": "Supervision-topology changes require managed restarts before live verification.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-supervision-topology-changes-require-managed-restarts-before-live-verification",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 when ValidationRuntime.Authority was compiled but absent from the live supervision tree",
+      "always_loaded": false,
+      "content_sha256": "72295bcb2df673e57c8ee84332f3afcc3885c5ac04f2df61fdb7d766f760cf9e"
+    },
+    {
+      "source_ordinal": 692,
+      "source_kind": "post-migration",
+      "slug": "durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections",
+      "title": "Durable inventory scans must not run inside journal-owner critical sections.",
+      "topic": "persistence-database",
+      "destination": ".claude/skills/applied-learning-persistence-database.md",
+      "anchor": "applied-learning-durable-inventory-scans-must-not-run-inside-journal-owner-critical-sections",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26 when a 29,034-row RunJournal refresh took about 5.8 seconds and terminalized P1B-2A",
+      "always_loaded": false,
+      "content_sha256": "4e502a249c905aa32dc59d984c5ce94fca0586918cb198347b1e5e827128913b"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 228
+  "post_migration_entry_count": 231
 }
