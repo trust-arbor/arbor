@@ -362,9 +362,21 @@ defmodule Arbor.Commands.Baseline do
   defp normalize_image_result(_other), do: {:error, :invalid_image_inspect}
 
   defp podman_build(request) do
+    # `podman image inspect --latest` does not exist (the flag belongs to
+    # `podman inspect` for containers); it failed every build with
+    # `image_inspect_failed` on the first V7 run (2026-08-26). Capture the
+    # built image id with `--iidfile` and inspect exactly that image.
+    iidfile =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-baseline-#{System.unique_integer([:positive])}.iid"
+      )
+
     args = [
       "build",
       "--pull=never",
+      "--iidfile",
+      iidfile,
       "--platform",
       request.platform,
       "--build-arg",
@@ -382,22 +394,27 @@ defmodule Arbor.Commands.Baseline do
       request.context
     ]
 
-    case System.cmd("/usr/bin/podman", args, stderr_to_stdout: true) do
-      {output, 0} ->
-        inspect_built_image(output, request.platform)
+    try do
+      case System.cmd("/usr/bin/podman", args, stderr_to_stdout: true) do
+        {_output, 0} ->
+          inspect_built_image(iidfile)
 
-      {_output, _status} ->
-        {:error, :image_build_failed}
+        {_output, _status} ->
+          {:error, :image_build_failed}
+      end
+    after
+      File.rm(iidfile)
     end
   end
 
-  defp inspect_built_image(_build_output, _platform) do
-    case System.cmd("/usr/bin/podman", ["image", "inspect", "--latest"], stderr_to_stdout: true) do
-      {json, 0} ->
-        parse_inspect(json)
-
-      {_output, _status} ->
-        {:error, :image_inspect_failed}
+  defp inspect_built_image(iidfile) do
+    with {:ok, contents} <- File.read(iidfile),
+         "sha256:" <> hex = image_id when byte_size(hex) == 64 <- String.trim(contents),
+         {json, 0} <-
+           System.cmd("/usr/bin/podman", ["image", "inspect", image_id], stderr_to_stdout: true) do
+      parse_inspect(json)
+    else
+      _other -> {:error, :image_inspect_failed}
     end
   end
 
