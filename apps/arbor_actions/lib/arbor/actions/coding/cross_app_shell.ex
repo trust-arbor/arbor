@@ -93,6 +93,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   @doc false
+  @spec run_test_execution(String.t(), Core.test_execution(), integer(), map() | nil) :: map()
+  def run_test_execution(worktree_path, execution, deadline, resource \\ nil)
+      when is_binary(worktree_path) and is_map(execution) and is_integer(deadline) and
+             (is_map(resource) or is_nil(resource)) do
+    run_tests_sequential(worktree_path, execution, deadline, resource)
+  end
+
+  @doc false
   # Test seam: full compile → xref → test-compile → tests pipeline without lease setup.
   # Single timeout applies to per-operation and aggregate stage budgets.
   @spec run_validation_checks(String.t(), [String.t()], pos_integer()) ::
@@ -783,7 +791,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                     run_tests_sequential(path, execution, deadline, resource)
 
                   {:error, reason} ->
-                    throw({:execution_error, {:invalid_test_execution, reason}})
+                    invalid_test_execution!(reason)
                 end
 
               {:capacity_exceeded, check} ->
@@ -906,7 +914,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                 )
 
               {:error, reason} ->
-                throw({:execution_error, {:invalid_refinement_state, reason}})
+                invalid_test_execution!(reason)
             end
 
           {:error, reason} ->
@@ -929,15 +937,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                 throw({:execution_error, bounded_reason})
 
               {:error, invalid_reason} ->
-                throw({:execution_error, {:invalid_refinement_state, invalid_reason}})
+                invalid_test_execution!(invalid_reason)
             end
         end
 
       {:error, reason} ->
         # Malformed state must never silently complete as success.
-        throw({:execution_error, {:invalid_test_step, reason}})
+        invalid_test_execution!(reason)
     end
   end
+
+  defp invalid_test_execution!({:invalid_test_execution_state, reason}),
+    do: invalid_test_execution!(reason)
+
+  defp invalid_test_execution!(reason),
+    do: throw({:execution_error, {:invalid_test_execution_state, reason}})
 
   defp emit_runtime_handoff(completed, interrupted, unstarted, operation_timeout) do
     case Core.capacity_handoff(

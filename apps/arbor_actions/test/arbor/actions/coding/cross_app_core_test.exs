@@ -575,6 +575,37 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                7_000
              )
 
+    inconsistent_completed =
+      put_in(
+        complete,
+        [:original_results, Access.at(0), :refinement, :refined_child_count],
+        4
+      )
+
+    oversized_completed =
+      put_in(
+        complete,
+        [:original_results, Access.at(0), :refinement, :refined_child_count],
+        10
+      )
+
+    odd_completed =
+      complete
+      |> put_in(
+        [:original_results, Access.at(0), :refinement, :attempt_count],
+        4
+      )
+      |> put_in(
+        [:original_results, Access.at(0), :refinement, :refined_child_count],
+        3
+      )
+      |> Map.put(:total_attempt_count, 5)
+
+    for malformed <- [inconsistent_completed, oversized_completed, odd_completed] do
+      assert {:error, :invalid_refinement_state} =
+               Core.next_test_execution_step(malformed, 7_000)
+    end
+
     assert {:complete, check} = Core.next_test_execution_step(complete, 7_000)
     assert check["passed"]
     assert check["reason"] == nil
@@ -730,6 +761,35 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                ),
                1
              )
+
+    for bad_count <- [0, 4, 10] do
+      assert {:error, :invalid_refinement_state} =
+               Core.next_test_execution_step(
+                 %{refined | refined_child_count: bad_count},
+                 1
+               )
+    end
+
+    [left, right] = refined.work_queue
+    split_at = div(left.count + 1, 2)
+    {left_left_paths, left_right_paths} = Enum.split(left.paths, split_at)
+
+    odd_but_relation_consistent = %{
+      refined
+      | work_queue: [
+          test_refined_attempt(original, "rootLL", left_left_paths),
+          test_refined_attempt(original, "rootLR", left_right_paths),
+          right
+        ],
+        refined_child_count: 3
+    }
+
+    assert length(odd_but_relation_consistent.attempt_records) +
+             length(odd_but_relation_consistent.work_queue) - 1 ==
+             odd_but_relation_consistent.refined_child_count
+
+    assert {:error, :invalid_refinement_state} =
+             Core.next_test_execution_step(odd_but_relation_consistent, 1)
   end
 
   test "malformed refinement maps are total and cannot change capacity classification" do
@@ -909,19 +969,6 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     # Empty remaining batches still require a positive operation ceiling.
     assert {:error, {:invalid_test_step_input, _}} =
              Core.next_test_step(10_000, [], 0)
-  end
-
-  defp test_feedback(exit_code, stdout) do
-    %{
-      "exit_code" => exit_code,
-      "passed" => exit_code == 0,
-      "stdout_excerpt" => stdout,
-      "stderr_excerpt" => "",
-      "stdout_truncated" => false,
-      "stderr_truncated" => false,
-      "stdout_sha256" => :crypto.hash(:sha256, stdout) |> Base.encode16(case: :lower),
-      "stderr_sha256" => :crypto.hash(:sha256, "") |> Base.encode16(case: :lower)
-    }
   end
 
   test "next_test_step rejects forged batch metadata and incoherent remaining lists" do
@@ -2255,6 +2302,38 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   test "malformed batch plan fails closed at admission" do
     assert {:error, :invalid_test_batch_plan} =
              Core.admit_test_batches([%{not: :a_batch}], 10_000, 1_000)
+  end
+
+  defp test_feedback(exit_code, stdout) do
+    %{
+      "exit_code" => exit_code,
+      "passed" => exit_code == 0,
+      "stdout_excerpt" => stdout,
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => :crypto.hash(:sha256, stdout) |> Base.encode16(case: :lower),
+      "stderr_sha256" => :crypto.hash(:sha256, "") |> Base.encode16(case: :lower)
+    }
+  end
+
+  defp test_refined_attempt(original, position, paths) do
+    count = length(paths)
+
+    inventory_sha256 =
+      paths
+      |> Enum.join(<<0>>)
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    %{
+      label: "#{original.label}:refine-#{position}-n#{count}-#{inventory_sha256}",
+      paths: paths,
+      count: count,
+      inventory_sha256: inventory_sha256,
+      position: position,
+      original_index: original.index
+    }
   end
 
   defp signed_batch(paths, index, total) do

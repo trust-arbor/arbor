@@ -31,6 +31,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     %{worktree: worktree}
   end
 
+  test "malformed Core execution state has one stable Shell error tag", %{worktree: worktree} do
+    deadline = System.monotonic_time(:millisecond) + 10_000
+
+    assert {:execution_error, {:invalid_test_execution_state, :invalid_refinement_state}} =
+             catch_throw(Shell.run_test_execution(worktree, %{}, deadline))
+  end
+
   test "two affected app files form separate per-app batch mix test invocations", %{
     worktree: worktree
   } do

@@ -176,6 +176,38 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     refute ValidationCapacityHandoff.valid_archived_v2?(Map.put(v2, "available_budget_ms", 1))
   end
 
+  test "archive-only APIs retain the exact historical 343-batch plan" do
+    batches = historical_max_batches()
+    assert length(batches) == 343
+    assert Enum.sum(Enum.map(batches, & &1["count"])) == 2_000
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
+
+    v1 =
+      valid_v1_attrs(batches, ordered_plan_sha256)
+      |> Map.merge(%{
+        "required_budget_ms" => 343 * 1_200_000,
+        "unstarted_batch_count" => 343,
+        "total_batch_count" => 343
+      })
+
+    v2 =
+      valid_v2_attrs(batches, ordered_plan_sha256)
+      |> Map.merge(%{
+        "unstarted_batch_count" => 343,
+        "total_batch_count" => 343
+      })
+
+    assert {:ok, normalized_v1} = ValidationCapacityHandoff.normalize_archived_v1(v1)
+    assert normalized_v1["total_batch_count"] == 343
+    assert normalized_v1["total_file_count"] == 2_000
+    assert ValidationCapacityHandoff.valid_archived_v1?(v1)
+
+    assert {:ok, normalized_v2} = ValidationCapacityHandoff.normalize_archived_v2(v2)
+    assert normalized_v2["total_batch_count"] == 343
+    assert normalized_v2["total_file_count"] == 2_000
+    assert ValidationCapacityHandoff.valid_archived_v2?(v2)
+  end
+
   defp valid_v3_structural_attrs(batches, ordered_plan_sha256) do
     %{
       "schema_version" => 3,
@@ -256,6 +288,23 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
         |> Base.encode16(case: :lower)
 
       batch(index, 604, count, inventory_sha256)
+    end)
+  end
+
+  defp historical_max_batches do
+    Enum.map(1..343, fn index ->
+      count =
+        cond do
+          index <= 255 -> 1
+          index <= 342 -> 20
+          true -> 5
+        end
+
+      inventory_sha256 =
+        :crypto.hash(:sha256, "historical-inventory-#{index}")
+        |> Base.encode16(case: :lower)
+
+      batch(index, 343, count, inventory_sha256)
     end)
   end
 end

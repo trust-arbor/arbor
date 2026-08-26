@@ -166,18 +166,26 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         }
 
   @typedoc "One completed (or budget-exhausted) batch test invocation record."
+  @type refinement_metadata :: %{
+          strategy: String.t(),
+          attempt_count: pos_integer(),
+          refined_child_count: pos_integer(),
+          attempted_outputs_sha256: String.t()
+        }
+
   @type app_test_result :: %{
-          path: String.t(),
-          passed: boolean(),
-          timed_out: boolean(),
-          exit_code: integer() | nil,
-          reason: String.t() | nil,
-          stdout_excerpt: String.t(),
-          stderr_excerpt: String.t(),
-          stdout_truncated: boolean(),
-          stderr_truncated: boolean(),
-          stdout_sha256: String.t(),
-          stderr_sha256: String.t()
+          required(:path) => String.t(),
+          required(:passed) => boolean(),
+          required(:timed_out) => boolean(),
+          required(:exit_code) => integer() | nil,
+          required(:reason) => String.t() | nil,
+          required(:stdout_excerpt) => String.t(),
+          required(:stderr_excerpt) => String.t(),
+          required(:stdout_truncated) => boolean(),
+          required(:stderr_truncated) => boolean(),
+          required(:stdout_sha256) => String.t(),
+          required(:stderr_sha256) => String.t(),
+          optional(:refinement) => refinement_metadata()
         }
 
   @typedoc "Pure decision for the next sequential batch Mix invocation."
@@ -197,8 +205,46 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           original_index: pos_integer()
         }
 
-  @typedoc "Opaque pure state for deterministic timeout refinement."
-  @type test_execution :: map()
+  @typedoc "One bounded output record retained while refining an original batch."
+  @type test_attempt_record :: %{
+          original_label: String.t(),
+          attempt_label: String.t(),
+          sequence: pos_integer(),
+          count: pos_integer(),
+          inventory_sha256: String.t(),
+          timed_out: boolean(),
+          exit_code: integer() | nil,
+          stdout_excerpt: String.t(),
+          stderr_excerpt: String.t(),
+          stdout_truncated: boolean(),
+          stderr_truncated: boolean(),
+          stdout_sha256: String.t(),
+          stderr_sha256: String.t()
+        }
+
+  @typedoc """
+  Complete pure state for deterministic timeout refinement.
+
+  `original_batches` is immutable. `completed_originals`, `current_original`,
+  and `original_suffix` are its exact ordered partition. `work_queue` contains
+  only runtime attempt descriptors for the current original; Shell may read
+  `operation_timeout` but all state transitions and validation stay in Core.
+  """
+  @type test_execution :: %{
+          original_batches: [test_batch()],
+          completed_originals: [test_batch()],
+          current_original: test_batch() | nil,
+          original_suffix: [test_batch()],
+          work_queue: [test_attempt()],
+          accepted_paths: [String.t()],
+          original_results: [app_test_result()],
+          attempt_records: [test_attempt_record()],
+          current_started: boolean(),
+          refined?: boolean(),
+          refined_child_count: non_neg_integer(),
+          total_attempt_count: non_neg_integer(),
+          operation_timeout: pos_integer()
+        }
 
   @typedoc "Bounded evidence for a validation capacity handoff."
   @type capacity_handoff :: %{required(String.t()) => term()}
@@ -1292,6 +1338,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     current = state.current_original
     current_count = Map.get(current, :count)
     valid_queue? = Enum.all?(state.work_queue, &valid_attempt?(&1, current))
+    max_refined_children = if is_integer(current_count), do: 2 * (current_count - 1), else: -1
+
+    canonical_refined_children =
+      length(state.attempt_records) + length(state.work_queue) - 1
 
     cond do
       not is_integer(current_count) or current_count <= 0 ->
@@ -1316,7 +1366,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         {:error, :invalid_refinement_state}
 
       state.refined? and
-          (state.refined_child_count < 2 or rem(state.refined_child_count, 2) != 0) ->
+          (state.refined_child_count < 2 or
+             rem(state.refined_child_count, 2) != 0 or
+             state.refined_child_count != canonical_refined_children or
+             state.refined_child_count > max_refined_children) ->
         {:error, :invalid_refinement_state}
 
       not state.refined? and
@@ -1402,12 +1455,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
       {true, refinement} when is_map(refinement) ->
         max_attempts = 2 * Map.get(batch, :count, 0) - 1
+        max_refined_children = 2 * (Map.get(batch, :count, 0) - 1)
         attempts = Map.get(refinement, :attempt_count)
         children = Map.get(refinement, :refined_child_count)
 
         if Map.get(refinement, :strategy) == "ordered_binary_split_v1" and
              is_integer(attempts) and attempts >= 3 and attempts <= max_attempts and
-             is_integer(children) and children >= 2 and rem(children, 2) == 0 and
+             is_integer(children) and children == attempts - 1 and
+             rem(children, 2) == 0 and
+             children <= max_refined_children and
              valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)) do
           {:ok, attempts}
         else
