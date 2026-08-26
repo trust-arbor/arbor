@@ -538,20 +538,21 @@ defmodule Mix.Tasks.Arbor.Setup do
 
       Database: #{adapter_name}#{if opts[:skip_db], do: " (skipped)", else: ""}
 
-      Next steps:
-        See docs/QUICKSTART.md for clone-to-first-reply (SQLite, free LLM,
-        arbor.start, conversationalist).
+      Next steps (docs/QUICKSTART.md walks through each one):
 
-        mix arbor.start       # Start the Arbor server
-        mix phx.server        # Or start interactively
-        open http://localhost:4001  # Dashboard
+        ./bin/mix arbor.doctor --configure   # pick an LLM — no API key needed
+                                             # (keyless OpenCode Zen free tier)
+        ./bin/mix arbor.start                # start the server (daemon)
+        ./bin/mix arbor.user.init            # your local operator identity
+        ./bin/mix arbor.agent start conversationalist --name river
+        ./bin/mix arbor.agent chat river "Hello"
 
-      Configure LLM:
-        mix arbor.doctor --configure  # Prefers OpenRouter / local / ACP
+        Dashboard: http://localhost:4001
 
       Optional:
-        Add OPENROUTER_API_KEY (or start Ollama/LM Studio) in .env
-        See .env.example for all available settings
+        Have an OpenRouter key, Ollama/LM Studio, or Claude Code? Add the key to
+        .env or start the runtime BEFORE `arbor.doctor --configure` and it will
+        be preferred. See .env.example for every setting.
     """)
 
     if clustering do

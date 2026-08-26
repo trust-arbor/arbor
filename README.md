@@ -20,7 +20,7 @@ Arbor is built on the [BEAM](https://www.erlang.org/) — the same runtime that 
 
 **Continuity of experience.** AI agents maintain memory and identity across sessions through event sourcing and checkpoints. No more starting from zero every conversation. Context accumulates, patterns emerge, and the partnership deepens over time.
 
-**Earned autonomy.** Trust tiers let agents grow their capabilities through demonstrated reliability. New agents start with limited permissions. As trust builds, autonomy expands — the same way you'd gradually hand more responsibility to a colleague you've come to rely on.
+**Earned autonomy.** Per-resource trust policies let agents grow their capabilities through demonstrated reliability. New agents start with most actions blocked or requiring approval. As trust builds, individual permissions graduate toward autonomy — the same way you'd gradually hand more responsibility to a colleague you've come to rely on.
 
 **Security that enables freedom.** Zero-trust architecture with a capability-based security kernel. Every action requires an explicit, unforgeable capability grant. Convention breaks; architecture holds. This isn't about constraining AI — it's about creating boundaries safe enough that genuine autonomy is possible inside them.
 
@@ -35,18 +35,27 @@ Arbor is built on the [BEAM](https://www.erlang.org/) — the same runtime that 
 
 ## Getting Started
 
-Clone-to-first-reply (mise, SQLite, free OpenRouter, `arbor.start`,
-conversationalist) is in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
+The clone-to-first-reply walkthrough — mise, SQLite, a keyless free LLM,
+`arbor.start`, and a first chat with a `conversationalist` agent — is in
+**[docs/QUICKSTART.md](docs/QUICKSTART.md)**. In short:
 
 ```bash
 git clone https://github.com/trust-arbor/arbor.git
 cd arbor
 mise install
-./bin/mix arbor.setup
-# add OPENROUTER_API_KEY to .env, then:
-./bin/mix arbor.doctor --configure
-./bin/mix arbor.start
+./bin/mix deps.get
+./bin/mix arbor.setup                 # SQLite DB, .env, operator key
+./bin/mix arbor.doctor --configure    # picks an LLM; no API key required
+./bin/mix arbor.start                 # gateway :4000, dashboard :4001
+./bin/mix arbor.user.init             # local operator identity (dev only)
+./bin/mix arbor.agent start conversationalist --name river
+./bin/mix arbor.agent chat river "Hello — what should we talk about?"
 ```
+
+No API key is needed: `arbor.doctor --configure` falls back to the keyless
+OpenCode Zen free tier after you acknowledge its data disclosure. If you have an
+OpenRouter key, a local Ollama/LM Studio, or an ACP CLI such as Claude Code,
+it prefers those instead.
 
 Use `./bin/mix` so Mix runs under the pinned toolchain. `ARBOR_DB=postgres` is
 opt-in, not the getting-started path.

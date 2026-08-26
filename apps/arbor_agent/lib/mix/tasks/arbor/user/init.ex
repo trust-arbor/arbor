@@ -101,6 +101,8 @@ defmodule Mix.Tasks.Arbor.User.Init do
 
             mix arbor.user.link cannot prove possession until a key file is written.
             """)
+
+            exit({:shutdown, 1})
         end
 
       {:error, :local_human_identity_disabled} ->
@@ -110,6 +112,8 @@ defmodule Mix.Tasks.Arbor.User.Init do
         This is the default. It is enabled only in dev.exs via
         `config :arbor_security, allow_local_human_identity: true`.
         """)
+
+        exit({:shutdown, 1})
 
       {:error, :oidc_configured} ->
         Mix.shell().error("""
@@ -121,8 +125,13 @@ defmodule Mix.Tasks.Arbor.User.Init do
             mix arbor.user.link <oidc_id> --to <existing_id>
         """)
 
+        exit({:shutdown, 1})
+
       {:error, reason} ->
+        # Every failure branch used to exit 0 — `:store_unavailable` while the
+        # server was mid-restart looked like success to a script.
         Mix.shell().error("Failed to create local identity: #{inspect(reason)}")
+        exit({:shutdown, 1})
     end
   end
 

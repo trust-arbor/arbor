@@ -505,9 +505,14 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
   end
 
+  # Both RPC entry points go through `Arbor.KernelRuntime.RemoteCall.apply_quiet/3`
+  # on the server so the server's Logger output stays in the server log instead
+  # of being echoed onto the operator's terminal (see that module's docs).
+  @remote_call Arbor.KernelRuntime.RemoteCall
+
   @doc "Makes an RPC call, returning nil on badrpc."
   def rpc(node, mod, fun, args) do
-    case :rpc.call(node, mod, fun, args) do
+    case :rpc.call(node, @remote_call, :apply_quiet, [mod, fun, args]) do
       {:badrpc, _reason} -> nil
       result -> result
     end
@@ -541,7 +546,7 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   @doc "Makes an RPC call, raising on failure."
   def rpc!(node, mod, fun, args) do
-    case :rpc.call(node, mod, fun, args) do
+    case :rpc.call(node, @remote_call, :apply_quiet, [mod, fun, args]) do
       {:badrpc, reason} ->
         Mix.shell().error("RPC failed: #{inspect(reason)}")
         exit({:shutdown, 1})

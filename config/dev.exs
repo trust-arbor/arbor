@@ -67,6 +67,11 @@ else
       System.get_env("ARBOR_SQLITE_PATH", Path.expand("~/.arbor/arbor_dev.db"))
       |> Path.expand(),
     busy_timeout: 5_000,
+    # Match the Postgres branch above. Without this every query is logged at
+    # :debug, which floods `~/.arbor/logs/arbor-dev.log` (15k lines in the
+    # first three minutes of a fresh install) and, because `mix arbor.*` tasks
+    # RPC into the server, echoes raw SQL onto the operator's terminal.
+    log: false,
     journal_mode: :wal,
     cache_size: -64_000,
     temp_store: :memory,

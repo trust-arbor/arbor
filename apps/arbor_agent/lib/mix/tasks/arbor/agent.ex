@@ -23,8 +23,10 @@ defmodule Mix.Tasks.Arbor.Agent do
   ## Options
 
     * `--name` / `-n` — display name (default: template's character name)
-    * `--model` / `-m` — model ID (default: openai/gpt-oss-120b:free)
-    * `--provider` — provider atom (default: openrouter)
+    * `--model` / `-m` — model ID (default: the template's model, else
+      `ARBOR_DEFAULT_MODEL` from `.env` as written by `mix arbor.doctor --configure`)
+    * `--provider` — provider atom (default: the template's provider, else
+      `ARBOR_DEFAULT_PROVIDER` from `.env`; e.g. `opencode_zen`, `openrouter`, `acp`)
     * `--auto-start` — set auto-start on creation (with start)
     * `--timeout` — response timeout in seconds (default: 300, with chat;
       capped at 300 by the authenticated delivery path)
@@ -145,11 +147,20 @@ defmodule Mix.Tasks.Arbor.Agent do
 
         running_entries ++ stopped_entries
       else
+        # The registry entry carries no template, so the running-only list
+        # printed "?" in TEMPLATE for every agent. Look the profile up the same
+        # way `--all` does.
+        profiles = remote(Arbor.Agent.Lifecycle, :list_agents, [])
+
         Enum.map(running, fn entry ->
+          profile = Enum.find(profiles, &(&1.agent_id == entry.agent_id))
+
           %{
             agent_id: entry.agent_id,
-            name: Map.get(entry.metadata, :display_name, "?"),
-            template: "?",
+            name:
+              Map.get(entry.metadata, :display_name) || (profile && profile.display_name) ||
+                "?",
+            template: (profile && format_template(profile.template)) || "?",
             status: "running",
             model: Arbor.Agent.model_id_from_metadata(entry.metadata) || "?"
           }
@@ -518,9 +529,14 @@ defmodule Mix.Tasks.Arbor.Agent do
             # Report the EFFECTIVE wait, not the requested one — the signed
             # delivery path clamps to @authenticated_delivery_max_ms.
             Mix.shell().error("Response timed out after #{effective_s}s.")
+            exit({:shutdown, 1})
 
           {:error, reason} ->
+            # A failed turn used to exit 0, so scripts (and the quickstart's
+            # "first reply" check) could not tell a reply from a failure.
             Mix.shell().error("Chat failed: #{inspect(reason)}")
+            Mix.shell().error("  Server log: #{Config.log_file()}")
+            exit({:shutdown, 1})
         end
 
       :not_found ->
@@ -534,6 +550,8 @@ defmodule Mix.Tasks.Arbor.Agent do
           :not_found ->
             Mix.shell().error("Agent '#{ref}' not found.")
         end
+
+        exit({:shutdown, 1})
     end
   end
 

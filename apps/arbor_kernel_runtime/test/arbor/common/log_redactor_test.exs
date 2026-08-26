@@ -66,6 +66,56 @@ defmodule Arbor.Common.LogRedactorTest do
       assert ^event = LogRedactor.filter(event, [])
     end
 
+    test "regression: an OTP crash report over the node budget still carries its reason" do
+      # A GenServer terminate report with a big state exceeds the 256-node
+      # budget. It used to collapse to %{redacted: true}, which the OTP
+      # translator rendered as a bare "nil" — every crash logged as
+      # `[error] nil`. The reason must survive and secrets must still go.
+      big_state = Map.new(1..300, fn i -> {:"k#{i}", "v#{i}"} end)
+
+      report = %{
+        label: {:gen_server, :terminate},
+        name: SomeServer,
+        report: [
+          name: SomeServer,
+          last_message: {:call, :boom},
+          state: Map.put(big_state, :api_key, "sk-ant-api03-SECRETSECRETSECRET"),
+          reason: {%RuntimeError{message: "resume exploded"}, []}
+        ]
+      }
+
+      event = %{level: :error, msg: {:report, report}, meta: %{}}
+
+      assert %{msg: msg} = LogRedactor.filter(event, :log)
+
+      rendered =
+        case msg do
+          {:string, str} ->
+            str
+
+          {:report, %{label: {:gen_server, :terminate}, report: kw}} when is_list(kw) ->
+            inspect(kw)
+        end
+
+      assert rendered =~ "resume exploded"
+      refute rendered =~ "SECRETSECRET"
+    end
+
+    test "an OTP crash report within budget is kept as a report for the translator" do
+      report = %{
+        label: {:gen_server, :terminate},
+        name: SomeServer,
+        report: [name: SomeServer, last_message: :ping, state: %{}, reason: :normal]
+      }
+
+      event = %{level: :error, msg: {:report, report}, meta: %{}}
+
+      assert %{msg: {:report, %{label: {:gen_server, :terminate}, report: kw}}} =
+               LogRedactor.filter(event, :log)
+
+      assert Keyword.keys(kw) == [:name, :last_message, :state, :reason]
+    end
+
     test "walks keyword-list reports without raising" do
       secret = "AKIA" <> "IOSFODNN7EXAMPLE"
       event = %{level: :info, meta: %{}, msg: {:report, [a: 1, detail: "key=#{secret}"]}}

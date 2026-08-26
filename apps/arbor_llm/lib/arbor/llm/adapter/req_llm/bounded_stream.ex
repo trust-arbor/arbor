@@ -58,7 +58,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
   @spec process(t(), keyword()) :: {:ok, ReqLLM.Response.t()} | {:error, term()}
   def process(%__MODULE__{} = response, callbacks \\ []) do
-    tracker_limits = json_limits(response.limits, response.limits.max_response_bytes)
+    # The trackers accumulate across every chunk of the stream, so they get the
+    # stream-level term caps, not the per-event ones (see `build_limits/2`).
+    tracker_limits = stream_json_limits(response.limits)
 
     with {:ok, event_tracker} <- ResponseBudget.tracker(tracker_limits),
          {:ok, callback_tracker} <- ResponseBudget.tracker(tracker_limits) do
@@ -128,10 +130,24 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          max_events: max_events,
          max_event_bytes: max_event_bytes,
          max_work: max_events * 16,
+         # Per-EVENT decoded-term caps: one SSE event is one JSON document.
          max_nodes: 100_000,
          max_depth: 32,
          max_map_keys: 10_000,
          max_list_items: 100_000,
+         # Whole-STREAM decoded-term caps. These were the per-event numbers
+         # until 2026-08-25, which made them a cumulative budget over every
+         # chunk: an OpenAI-style chunk carries ~9 map keys, so any reply
+         # longer than ~1,100 chunks (a reasoning model thinking for ~20s)
+         # failed with {:stream_limit_exceeded, :decoded_map_keys, 10_000}
+         # — the first OpenCode Zen turn of a fresh install. Derive the
+         # stream totals from the byte cap instead: a serialized map key
+         # costs at least 4 bytes (`"":` plus a one-byte value), a node or
+         # list item at least one, so a stream under `max_response_bytes`
+         # cannot exceed these and they stay integer-bounded.
+         stream_max_nodes: maximum,
+         stream_max_map_keys: div(maximum, 4),
+         stream_max_list_items: maximum,
          timeout: receipt.timeout_ms,
          deadline_ms: receipt.deadline_ms
        }}
@@ -713,18 +729,24 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     map_keys = state.decoded_map_keys + Map.get(measurements, :map_keys, 0)
     list_items = state.decoded_list_items + Map.get(measurements, :list_items, 0)
 
+    # These counters accumulate over the WHOLE stream, so compare them with the
+    # stream caps — the per-event caps are enforced by `decode_sse_json_event/3`.
+    max_nodes = stream_limit(state.limits, :stream_max_nodes)
+    max_map_keys = stream_limit(state.limits, :stream_max_map_keys)
+    max_list_items = stream_limit(state.limits, :stream_max_list_items)
+
     cond do
-      nodes > state.limits.max_nodes ->
-        {:error, {:stream_limit_exceeded, :decoded_nodes, state.limits.max_nodes}}
+      nodes > max_nodes ->
+        {:error, {:stream_limit_exceeded, :decoded_nodes, max_nodes}}
 
       bytes > state.limits.max_response_bytes ->
         {:error, {:stream_limit_exceeded, :decoded_bytes, state.limits.max_response_bytes}}
 
-      map_keys > state.limits.max_map_keys ->
-        {:error, {:stream_limit_exceeded, :decoded_map_keys, state.limits.max_map_keys}}
+      map_keys > max_map_keys ->
+        {:error, {:stream_limit_exceeded, :decoded_map_keys, max_map_keys}}
 
-      list_items > state.limits.max_list_items ->
-        {:error, {:stream_limit_exceeded, :decoded_list_items, state.limits.max_list_items}}
+      list_items > max_list_items ->
+        {:error, {:stream_limit_exceeded, :decoded_list_items, max_list_items}}
 
       true ->
         {:ok,
@@ -789,6 +811,30 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       max_number_bytes: 128
     ]
   end
+
+  # Limits for accounting that spans the whole stream (the `process/2`
+  # trackers and the final assembled response). Node / key / item totals are
+  # the stream caps from `build_limits/2`; bytes stay `max_response_bytes`.
+  defp stream_json_limits(limits) do
+    [
+      max_bytes: limits.max_response_bytes,
+      max_nodes: stream_limit(limits, :stream_max_nodes),
+      max_depth: limits.max_depth,
+      max_map_keys: stream_limit(limits, :stream_max_map_keys),
+      max_list_items: stream_limit(limits, :stream_max_list_items),
+      max_string_bytes: limits.max_response_bytes,
+      max_number_bytes: 128
+    ]
+  end
+
+  # Limits maps built by `build_limits/2` always carry the `stream_max_*` keys;
+  # a hand-built map (tests, callers constructing the struct directly) may not.
+  # Fall back to the same byte-derived bounds rather than raising.
+  defp stream_limit(limits, :stream_max_map_keys),
+    do: Map.get(limits, :stream_max_map_keys, div(limits.max_response_bytes, 4))
+
+  defp stream_limit(limits, key) when key in [:stream_max_nodes, :stream_max_list_items],
+    do: Map.get(limits, key, limits.max_response_bytes)
 
   defp collect_chunk(%ReqLLM.StreamChunk{type: :meta, metadata: metadata} = chunk, acc, limits) do
     {tool_args, metadata} = Map.pop(metadata || %{}, :tool_call_args)

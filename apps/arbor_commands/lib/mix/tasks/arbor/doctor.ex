@@ -20,7 +20,18 @@ defmodule Mix.Tasks.Arbor.Doctor do
     * `--refresh`   - Force refresh the provider catalog cache
     * `--json`      - Output as JSON instead of table format
     * `--verbose`   - Show detailed check results for each provider
-    * `--configure` - Auto-detect best LLM provider and write to .env
+    * `--configure` - Choose the default LLM provider and write it to .env.
+      On a terminal this shows a numbered menu of the ready providers plus
+      any that only need an API key (pick one and paste the key; it is
+      saved to .env). Enter takes the recommended one. With piped stdin,
+      `--provider`, or `--non-interactive` it takes the recommended one
+      automatically.
+    * `--provider <name>` - Skip the menu and configure this provider
+      (catalog key, e.g. `opencode_zen`, `lm_studio`, `acp`)
+    * `--acp-agent <id>` - With ACP, use this installed agent (`claude`,
+      `codex`, `gemini`, …) instead of the preferred one. On the menu each
+      installed agent is its own row.
+    * `--non-interactive` - Never prompt; take the recommended provider
 
   ### Runtime-axis introspection
 
@@ -44,10 +55,13 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   ## Auto-Configuration
 
-  `mix arbor.doctor --configure` picks the best available provider and writes
-  `ARBOR_DEFAULT_PROVIDER` and `ARBOR_DEFAULT_MODEL` to your `.env` file.
+  `mix arbor.doctor --configure` lets you choose among the providers that are
+  ready (API key set, local server up, ACP agent installed, or the keyless
+  free tier) and writes `ARBOR_DEFAULT_PROVIDER` and `ARBOR_DEFAULT_MODEL` to
+  your `.env` file. On a terminal it shows a numbered menu; otherwise it takes
+  the recommended provider.
 
-  Priority: OpenRouter > Ollama > LM Studio > ACP > OpenCode Zen (keyless) > Anthropic > OpenAI > Gemini > xAI
+  Recommended order: OpenRouter > Ollama > LM Studio > ACP > OpenCode Zen (keyless) > Anthropic > OpenAI > Gemini > xAI
 
   Model selection uses LLMDB to find the best available model for the chosen
   provider (requires chat capability). Falls back to hardcoded defaults if
@@ -94,7 +108,9 @@ defmodule Mix.Tasks.Arbor.Doctor do
           json: :boolean,
           verbose: :boolean,
           configure: :boolean,
+          non_interactive: :boolean,
           provider: :string,
+          acp_agent: :string,
           runtimes: :boolean,
           model: :string,
           fallback: :keep,
@@ -446,7 +462,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   defp recommend_default(entries, opts) do
     ready = Enum.filter(entries, & &1.available?)
 
-    case pick_best_provider(ready, opts[:provider]) do
+    case choose_provider(entries, ready, opts) do
       nil ->
         Mix.shell().info(
           "  No LLM providers available. Add an API key to .env or start a local model."
@@ -467,9 +483,13 @@ defmodule Mix.Tasks.Arbor.Doctor do
         current_provider = System.get_env("ARBOR_DEFAULT_PROVIDER")
         current_model = System.get_env("ARBOR_DEFAULT_MODEL")
 
+        # In --configure mode the line reports what was chosen (possibly from the
+        # menu), not merely what the doctor would suggest.
+        label = if opts[:configure], do: "Configuring", else: "Recommended"
+
         if current_provider do
           Mix.shell().info("  Default LLM: #{current_provider} / #{current_model || "(not set)"}")
-          Mix.shell().info("  Recommended: #{provider_str} / #{model}")
+          Mix.shell().info("  #{label}: #{provider_str} / #{model}")
 
           if current_provider != to_string(provider_atom) and not opts[:configure] do
             Mix.shell().info("  Run: mix arbor.doctor --configure  to update")
@@ -542,18 +562,181 @@ defmodule Mix.Tasks.Arbor.Doctor do
     end)
   end
 
+  # ── Interactive picker (--configure on a terminal) ───────────────────
+  #
+  # `--configure` used to silently take the first ready provider in
+  # @provider_priority, which meant a user who set ANTHROPIC_API_KEY was handed
+  # the keyless free tier without being asked. On a terminal we now show the
+  # ready providers as a numbered menu (the priority order still decides which
+  # one is "recommended" / the default answer). The automatic choice remains
+  # the behaviour for `--provider`, `--non-interactive`, and piped stdin, so
+  # scripts and CI are unchanged.
+  alias Mix.Tasks.Arbor.Doctor.ProviderPicker
+
+  defp choose_provider(entries, ready, opts) do
+    cond do
+      is_binary(opts[:provider]) and opts[:provider] != "" ->
+        ready
+        |> pick_best_provider(opts[:provider])
+        |> override_acp_agent(opts[:acp_agent])
+
+      opts[:configure] && !opts[:non_interactive] && interactive_stdin?() ->
+        pick_provider_interactively(entries)
+
+      true ->
+        ready
+        |> pick_best_provider(nil)
+        |> override_acp_agent(opts[:acp_agent])
+    end
+  end
+
+  # `--acp-agent codex` with `--provider acp` (or when ACP is the automatic
+  # choice): use that agent instead of the preference order, if it's installed.
+  defp override_acp_agent({"acp", :acp, _auto_agent}, agent) when is_binary(agent) do
+    agents = detected_acp_agents()
+
+    if agent in agents do
+      {"acp", :acp, agent}
+    else
+      Mix.raise(
+        "--acp-agent #{agent} is not installed. Detected ACP agents: " <>
+          if(agents == [], do: "none", else: Enum.join(agents, ", "))
+      )
+    end
+  end
+
+  defp override_acp_agent(choice, _agent), do: choice
+
+  @max_picker_attempts 3
+
+  # The menu offers ready providers AND providers that are only missing an API
+  # key (marked "needs <VAR>"); picking one of those prompts for the key.
+  defp pick_provider_interactively(entries) do
+    case ProviderPicker.options(entries, @provider_priority, acp_agents: detected_acp_agents()) do
+      [] ->
+        nil
+
+      [%{needs_key: nil} = only] ->
+        Mix.shell().info("  Only one LLM provider is available: #{only.display_name}")
+        to_choice(only)
+
+      options ->
+        Mix.shell().info("")
+        Mix.shell().info(ProviderPicker.render(options))
+        Mix.shell().info("")
+        prompt_for_choice(options, @max_picker_attempts)
+    end
+  end
+
+  # Reads the key without echo when the terminal supports it, stores it in
+  # `.env` (the same file `ARBOR_DEFAULT_*` go to) and in this process's env so
+  # the rest of `--configure` sees the provider as configured. Nothing is
+  # printed back except the variable NAME.
+  defp collect_api_key(%{needs_key: var, display_name: name} = option) do
+    Mix.shell().info("  #{name} needs #{var}.")
+
+    case ProviderPicker.parse_api_key(read_secret("  Paste #{var} (input hidden): ")) do
+      {:ok, key} ->
+        env_path = Path.join(File.cwd!(), ".env")
+
+        unless File.exists?(env_path) do
+          Mix.raise("No .env file found. Run ./bin/mix arbor.setup first.")
+        end
+
+        write_env_key(env_path, var, key)
+        System.put_env(var, key)
+        Mix.shell().info("  ✓ Saved #{var} to .env")
+        Mix.shell().info("")
+        to_choice(%{option | needs_key: nil})
+
+      {:error, :empty} ->
+        Mix.raise("No #{var} entered. Re-run `mix arbor.doctor --configure` when you have it.")
+
+      {:error, :multiline} ->
+        Mix.raise("#{var} must be a single line.")
+    end
+  end
+
+  # Same technique as `mix hex.user` (Hex's `password_get/1`): read the line
+  # with `IO.gets` while a helper keeps rewriting the prompt over the echoed
+  # characters, so the key never sits visible on screen. It works on every
+  # terminal; `:io.get_password/0` was tried first and blocks under some ptys.
+  defp read_secret(prompt) do
+    clearer = spawn_link(fn -> clear_echo_loop(prompt) end)
+    value = IO.gets(prompt)
+    send(clearer, :done)
+    IO.write("\n")
+    if is_binary(value), do: value, else: nil
+  end
+
+  defp clear_echo_loop(prompt) do
+    receive do
+      :done -> :ok
+    after
+      1 ->
+        IO.write("\e[2K\r#{prompt}")
+        clear_echo_loop(prompt)
+    end
+  end
+
+  defp prompt_for_choice(options, attempts_left) when attempts_left > 0 do
+    answer = Mix.shell().prompt("  Choose a provider [1]: ")
+
+    case ProviderPicker.parse_selection(answer, options) do
+      {:ok, %{needs_key: var} = option} when is_binary(var) ->
+        Mix.shell().info("")
+        collect_api_key(option)
+
+      {:ok, option} ->
+        Mix.shell().info("")
+        to_choice(option)
+
+      {:error, {:out_of_range, n}} ->
+        Mix.shell().error("  #{n} is not on the menu (1-#{length(options)}).")
+        prompt_for_choice(options, attempts_left - 1)
+
+      {:error, {:unknown, input}} ->
+        Mix.shell().error(
+          "  #{inspect(input)} is not a listed provider; type its number or name."
+        )
+
+        prompt_for_choice(options, attempts_left - 1)
+
+      {:error, :empty_menu} ->
+        nil
+    end
+  end
+
+  defp prompt_for_choice(_options, _attempts_left) do
+    Mix.raise("No valid provider selected. Re-run, or pass --provider <name>.")
+  end
+
+  defp to_choice(%{acp_agent: agent} = option) when is_binary(agent) do
+    {option.catalog_key, option.config_atom, agent}
+  end
+
+  defp to_choice(option) do
+    {option.catalog_key, option.config_atom,
+     select_best_model(option.llmdb_atom, option.config_atom)}
+  end
+
+  # A pipe or a here-doc is not a terminal; then the menu would block on a
+  # read nobody answers, so fall back to the automatic choice.
+  defp interactive_stdin? do
+    :standard_io
+    |> :io.getopts()
+    |> Keyword.get(:stdin, false)
+  rescue
+    _ -> false
+  end
+
   # ACP "model" is the agent name, not an LLMDB model.
   # Pick best detected CLI agent by quality priority.
   @acp_agent_priority ~w(claude gemini codex goose aider opencode cline)
 
-  defp select_best_model(:opencode_zen, :opencode_zen) do
-    case Arbor.LLM.OpenCodeZen.admitted_ids() do
-      [id | _] -> id
-      _ -> nil
-    end
-  end
-
-  defp select_best_model(:acp, :acp) do
+  # Installed ACP agents, best first (quality preference, then any others the
+  # adapter knows about that we have no opinion on).
+  defp detected_acp_agents do
     acp_mod = Arbor.AI.LLM.Adapter.Acp
 
     agents =
@@ -563,7 +746,21 @@ defmodule Mix.Tasks.Arbor.Doctor do
         []
       end
 
-    Enum.find(@acp_agent_priority, "claude", fn agent -> agent in agents end)
+    Enum.filter(@acp_agent_priority, &(&1 in agents)) ++ (agents -- @acp_agent_priority)
+  end
+
+  defp select_best_model(:opencode_zen, :opencode_zen) do
+    case Arbor.LLM.OpenCodeZen.admitted_ids() do
+      [id | _] -> id
+      _ -> nil
+    end
+  end
+
+  defp select_best_model(:acp, :acp) do
+    case detected_acp_agents() do
+      [best | _] -> best
+      [] -> "claude"
+    end
   end
 
   # Use LLMDB to find the best model for a provider.

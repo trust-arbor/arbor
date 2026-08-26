@@ -336,6 +336,7 @@ arbor_user_id = System.get_env("ARBOR_USER_ID") || "operator"
 if signal_account do
   signal_config =
     Application.get_env(:arbor_comms, :signal, [])
+    |> Keyword.put(:enabled, true)
     |> Keyword.put(:account, signal_account)
     |> then(fn cfg ->
       if signal_cli_path, do: Keyword.put(cfg, :signal_cli_path, signal_cli_path), else: cfg
@@ -378,6 +379,7 @@ limitless_api_key = System.get_env("LIMITLESS_API_KEY")
 if limitless_api_key do
   limitless_config =
     Application.get_env(:arbor_comms, :limitless, [])
+    |> Keyword.put(:enabled, true)
     |> Keyword.put(:api_key, limitless_api_key)
 
   config :arbor_comms, :limitless, limitless_config
@@ -575,7 +577,13 @@ known_providers = %{
   "lmstudio" => :lmstudio,
   "opencode" => :opencode,
   "opencode_zen" => :opencode_zen,
-  "qwen" => :qwen
+  "qwen" => :qwen,
+  # `mix arbor.doctor --configure` ranks ACP (Claude Code / Codex / Gemini CLI)
+  # above OpenCode Zen and writes `ARBOR_DEFAULT_PROVIDER=acp`. Until 2026-08-25
+  # this map did not know "acp", so the value was silently dropped, the agent fell
+  # back to :openrouter, and the first chat failed with a missing
+  # OPENROUTER_API_KEY — the doctor's own top recommendation was unusable.
+  "acp" => :acp
 }
 
 parse_provider = fn str ->

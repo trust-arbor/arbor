@@ -13,13 +13,21 @@ config :logger, :default_formatter, metadata: :all
 
 # Comms channels — secrets loaded from .env via runtime.exs
 config :arbor_comms, :signal,
-  enabled: true,
+  # Off until SIGNAL_FROM / SIGNAL_ACCOUNT is set (see runtime.exs). A fresh
+  # install used to spawn `signal-cli -u ''` every 10s, log a warning each
+  # time, and journal every failure into SQLite — enough write contention to
+  # produce "database is locked" and a Trust.Store timeout during the first
+  # `mix arbor.agent start`.
+  enabled: false,
   poll_interval_ms: 10_000,
   log_dir: "~/.arbor/logs/signal_chat"
 
 # Limitless pendant channel (inbound only)
 config :arbor_comms, :limitless,
-  enabled: true,
+  # Off until LIMITLESS_API_KEY is set (see runtime.exs). Unconfigured, the
+  # poller raised "LIMITLESS_API_KEY not configured" and crash-looped once a
+  # minute on every fresh install.
+  enabled: false,
   base_url: "https://api.limitless.ai/v1",
   poll_interval_ms: 60_000,
   log_dir: "~/.arbor/logs/limitless_chat",

@@ -529,6 +529,44 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     _ = Task.await(server, 2_000)
   end
 
+  test "regression: a long stream of realistic chunks is not rejected by the per-event term caps" do
+    # Until 2026-08-25 the per-event decoded-term caps (10_000 map keys,
+    # 100_000 nodes) were also applied CUMULATIVELY over the stream. A real
+    # OpenAI-style chunk carries ~9 keys, so a reasoning model's ~1,200-chunk
+    # reply — the first OpenCode Zen turn of a fresh install — failed with
+    # {:stream_limit_exceeded, :decoded_map_keys, 10_000}.
+    chunk_count = 1_500
+    chunks = for i <- 1..chunk_count, do: realistic_openai_sse("t#{i}")
+    {url, server} = start_chunked_server(chunks ++ ["data: [DONE]\n\n"], 0)
+
+    assert {:ok, stream} = Client.stream(req_llm_client(), request(), transport_opts(url))
+    events = Enum.to_list(stream)
+
+    refute Enum.any?(events, &match?(%StreamEvent{type: :error}, &1)),
+           "long stream failed closed: #{inspect(Enum.filter(events, &match?(%StreamEvent{type: :error}, &1)))}"
+
+    assert Enum.count(events, &match?(%StreamEvent{type: :delta}, &1)) == chunk_count
+
+    _ = Task.await(server, 5_000)
+  end
+
+  defp realistic_openai_sse(text) do
+    Jason.encode!(%{
+      "id" => "chatcmpl-regression",
+      "object" => "chat.completion.chunk",
+      "created" => 1_787_694_537,
+      "model" => "x-preview-f-free",
+      "choices" => [
+        %{
+          "index" => 0,
+          "delta" => %{"role" => "assistant", "content" => text},
+          "finish_reason" => nil
+        }
+      ]
+    })
+    |> then(&("data: " <> &1 <> "\n\n"))
+  end
+
   defp request do
     %Request{
       provider: "lm_studio",

@@ -32,6 +32,9 @@ defmodule Arbor.Common.LogRedactor do
         {:string, str} when is_binary(str) ->
           %{log_event | msg: {:string, redact_binary(str)}}
 
+        {:report, %{label: label, report: _} = report} when is_tuple(label) ->
+          redact_otp_report(log_event, report)
+
         {:report, report} ->
           {redacted, _budget} = walk(report, @max_depth, @max_nodes)
           %{log_event | msg: {:report, redacted}}
@@ -51,6 +54,76 @@ defmodule Arbor.Common.LogRedactor do
   end
 
   def filter(log_event, _extra), do: log_event
+
+  # OTP crash reports (`%{label: {:gen_server, :terminate}, report: [...]}`,
+  # supervisor / proc_lib reports) are the logs you need most and the ones the
+  # node budget hits first: a GenServer state plus a stacktrace is far more than
+  # 256 nodes, so the whole report collapsed to `%{redacted: true}` and Elixir's
+  # OTP translator — which needs `label` and a keyword `report` — rendered it
+  # as `[error] nil`. Every crash in Arbor logged as "nil" until 2026-08-25.
+  #
+  # Walk the report as usual. If the OTP shape survived, keep it as a report so
+  # the translator formats it. If the budget ate the structure, downgrade to a
+  # bounded, redacted string instead of an empty line: `inspect/2` with limits
+  # caps the allocation, and the string goes through the same
+  # `SensitiveData.redact/1` as every `{:string, _}` message.
+  defp redact_otp_report(log_event, %{label: label, report: report} = full) do
+    {redacted, _budget} = walk(full, @max_depth, @max_nodes)
+
+    if otp_shape_preserved?(full, redacted) do
+      %{log_event | msg: {:report, redacted}}
+    else
+      %{log_event | msg: {:string, otp_report_string(label, report)}}
+    end
+  end
+
+  defp otp_shape_preserved?(%{report: original}, %{label: label, report: redacted})
+       when is_tuple(label) and is_list(original) and is_list(redacted) do
+    keyword_keys(original) == keyword_keys(redacted)
+  end
+
+  defp otp_shape_preserved?(%{report: original}, %{label: label, report: redacted})
+       when is_tuple(label) and is_map(original) and is_map(redacted) do
+    not Map.has_key?(redacted, :redacted) and Map.keys(original) == Map.keys(redacted)
+  end
+
+  defp otp_shape_preserved?(_original, _redacted), do: false
+
+  # Keys of a proper keyword list, or :improper when it is not one (an
+  # exhaustion marker in the spine makes the translator raise).
+  defp keyword_keys(list), do: keyword_keys(list, [])
+  defp keyword_keys([], acc), do: Enum.reverse(acc)
+  defp keyword_keys([{k, _v} | rest], acc) when is_atom(k), do: keyword_keys(rest, [k | acc])
+  defp keyword_keys(_other, _acc), do: :improper
+
+  @otp_inspect_opts [limit: 100, printable_limit: 4_096, pretty: true, width: 100]
+  # `inspect/2`'s :limit is global across the term, so a big `state` would eat
+  # the whole budget and turn `reason` — the one field that matters — into
+  # "...". Render keyword reports entry by entry, each with its own limit.
+  @otp_report_key_order [:reason, :last_message, :name, :client_info, :state]
+
+  defp otp_report_string(label, report) do
+    rendered =
+      try do
+        case keyword_keys(report) do
+          :improper ->
+            inspect(report, @otp_inspect_opts)
+
+          keys ->
+            ordered =
+              Enum.filter(@otp_report_key_order, &(&1 in keys)) ++
+                (keys -- @otp_report_key_order)
+
+            Enum.map_join(ordered, "\n", fn key ->
+              "  #{key}: " <> inspect(Keyword.get(report, key), @otp_inspect_opts)
+            end)
+        end
+      rescue
+        _ -> "<report not inspectable>"
+      end
+
+    redact_binary("#{inspect(label)} (report exceeded redaction budget)\n" <> rendered)
+  end
 
   # Top-level fail-closed: never rewrite {:report, _} into {:string, _}.
   defp fail_closed(log_event, {:string, _}),

@@ -149,10 +149,19 @@ defmodule Arbor.AI.AcpSession.Config do
     # NOTE (2026-07-03): an eval Claude run hit Layer 2 (denied `cd; grep`) despite this :bypass
     # default — the eval's `acp_start_session` wasn't threading the catalog adapter_opts. Fix:
     # ensure the ACP start path merges these adapter_opts (or pass permission_mode explicitly).
+    # `:default` since 2026-08-25: the CLI asks before every tool and
+    # `Arbor.AI.AcpSession.Handler.handle_permission_request/4` answers from
+    # `Arbor.Security.authorize/4` — a fresh agent can talk but cannot touch
+    # files until it is granted that, which is Arbor's earned-trust model. The
+    # previous `:bypass` default made the quickstart's `conversationalist` an
+    # unrestricted Claude Code in the repo (its first reply summarised the
+    # uncommitted diff). Callers that need bypass (recon evals, the legacy
+    # `Claude.query` path in Agent.Manager) pass `permission_mode: :bypass`
+    # explicitly.
     claude: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.ClaudeSDK,
-      adapter_opts: [model: "sonnet", permission_mode: :bypass]
+      adapter_opts: [model: "sonnet", permission_mode: :default]
     },
     codex: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
