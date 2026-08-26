@@ -188,29 +188,23 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbe do
   defp install_activation_only_profile do
     case Application.get_env(:arbor_kernel, :kernel_runtime, []) do
       current when is_list(current) ->
-        if Keyword.keyword?(current) and Keyword.has_key?(current, :boot_profile) do
-          Application.put_env(
-            :arbor_kernel,
-            :kernel_runtime,
-            Keyword.put(current, :start_profile, :activation_only)
-          )
-        else
-          {:error, :boot_profile_missing}
-        end
+        cond do
+          not Keyword.keyword?(current) ->
+            {:error, :malformed_kernel_runtime_namespace}
 
-      current when is_map(current) and not is_struct(current) ->
-        if Map.has_key?(current, :boot_profile) do
-          Application.put_env(
-            :arbor_kernel,
-            :kernel_runtime,
-            Map.put(current, :start_profile, :activation_only)
-          )
-        else
-          {:error, :boot_profile_missing}
+          not Keyword.has_key?(current, :boot_profile) ->
+            {:error, :boot_profile_missing}
+
+          true ->
+            Application.put_env(
+              :arbor_kernel,
+              :kernel_runtime,
+              Keyword.put(current, :start_profile, :activation_only)
+            )
         end
 
       _other ->
-        {:error, :boot_profile_missing}
+        {:error, :malformed_kernel_runtime_namespace}
     end
   end
 

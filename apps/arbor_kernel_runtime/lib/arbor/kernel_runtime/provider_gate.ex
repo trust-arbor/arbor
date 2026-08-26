@@ -1,9 +1,9 @@
 defmodule Arbor.KernelRuntime.ProviderGate do
   @moduledoc """
-  Startup-ordering barrier for Kernel Runtime provider roots.
+  Generic startup-ordering barrier for closed provider roots.
 
   After this process wins its exact registered name, `init/1` admits
-  `Core.roots()` via `Application.ensure_all_started/1`. It is not an
+  its ordered roots via `Application.ensure_all_started/1`. It is not an
   application owner, rollback coordinator, or liveness bridge. Provider
   applications are VM-global monotonic state. A `rest_for_one` restart may
   re-call `ensure_all_started/1` (idempotent) and restart later Arbor
@@ -15,21 +15,20 @@ defmodule Arbor.KernelRuntime.ProviderGate do
 
   use GenServer
 
-  alias Arbor.KernelRuntime.ProviderGate.Core
+  @roots [:os_mon, :recon, :mint, :finch, :req]
 
   @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_opts) do
-    %{
-      id: __MODULE__,
-      start: {__MODULE__, :start_link, [[]]},
-      type: :worker,
-      restart: :permanent
-    }
+    Arbor.KernelRuntime.provider_gate_child_spec(__MODULE__, @roots)
   end
 
-  @spec start_link(term()) :: {:ok, pid()} | {:error, term()}
-  def start_link(_opts) do
-    case GenServer.start_link(__MODULE__, :ok, name: __MODULE__) do
+  @doc false
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
+  def start_link(opts) when is_list(opts) do
+    name = Keyword.fetch!(opts, :name)
+    roots = Keyword.fetch!(opts, :roots)
+
+    case GenServer.start_link(__MODULE__, roots, name: name) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -42,8 +41,8 @@ defmodule Arbor.KernelRuntime.ProviderGate do
   end
 
   @impl true
-  def init(:ok) do
-    case start_each(Core.roots()) do
+  def init(roots) do
+    case start_each(roots) do
       :ok -> {:ok, %{}}
       {:error, reason} -> {:stop, reason}
     end

@@ -42,62 +42,16 @@ defmodule Arbor.Security.Application do
   end
 
   defp start_security_supervisor(:full, children) do
-    start_named([ProviderGate.child_spec([]) | children])
+    Arbor.KernelRuntime.start_provider_gate_supervisor(
+      [ProviderGate.child_spec([]) | children],
+      @supervisor,
+      @provider_gate
+    )
   end
 
   defp start_security_supervisor(_profile, children) do
     Supervisor.start_link(children, strategy: :rest_for_one, name: @supervisor)
   end
-
-  defp start_named(children) do
-    case Supervisor.start_link(children, strategy: :rest_for_one, name: @supervisor) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, reason} -> {:error, normalize_gate_start_error(reason)}
-    end
-  end
-
-  defp normalize_gate_start_error(reason) do
-    case gate_child_reason(reason) do
-      {:already_started, pid} when is_pid(pid) ->
-        {:provider_gate_name_collision, pid}
-
-      {:provider_gate_name_collision, pid} = typed when is_pid(pid) ->
-        typed
-
-      {:provider_start_failed, root, _inner} = typed when is_atom(root) ->
-        typed
-
-      _other ->
-        reason
-    end
-  end
-
-  defp gate_child_reason({:shutdown, inner}), do: gate_child_reason(inner)
-
-  defp gate_child_reason({:failed_to_start_child, id, inner}) when id == @provider_gate,
-    do: inner
-
-  # OTP 28 Supervisor.start_link wraps as {reason, #child{}}.
-  # Id is elem 2 and MFA is elem 3 on OTP 24 (size 8) and OTP 25+ (size 9).
-  defp gate_child_reason({inner, child})
-       when is_tuple(child) and tuple_size(child) >= 4 and elem(child, 0) == :child do
-    if provider_gate_child_record?(child), do: inner, else: :not_gate
-  end
-
-  defp gate_child_reason({inner, {mod, fun, args}})
-       when mod == @provider_gate and is_atom(fun) and is_list(args),
-       do: inner
-
-  defp gate_child_reason(_), do: :not_gate
-
-  defp provider_gate_child_record?(child)
-       when is_tuple(child) and tuple_size(child) >= 4 and elem(child, 0) == :child do
-    id = elem(child, 2)
-    mfargs = elem(child, 3)
-    id == @provider_gate or match?({@provider_gate, :start_link, _}, mfargs)
-  end
-
-  defp provider_gate_child_record?(_), do: false
 
   defp children_from_snapshot(%{start_children: false}, _signing_authority_owner_token), do: []
   defp children_from_snapshot(%{start_children: nil}, _signing_authority_owner_token), do: []
@@ -149,9 +103,13 @@ defmodule Arbor.Security.Application do
       # peer counts as a replay peer (fail closed).
       {Arbor.Security.Identity.ReplayPeers, []},
       {Arbor.Security.SystemAuthority, []},
-      # Persistent metadata outlives broker-only restarts; keys remain in SigningKeyStore.
+      # The StateOwner/Broker pair is ordered for rest_for_one recovery. The
+      # owner precedes the broker so owner loss restarts both and no broker can
+      # retain stale owner authority; broker-only loss restarts only the broker
+      # and preserves owner-held metadata. Their shared opaque startup token
+      # binds the pair. The key/identity stores and registries above must
+      # already be live before either child starts.
       {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
-      # After key/identity stores + registry so open can fail-closed on status/key.
       {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []},

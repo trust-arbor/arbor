@@ -107,6 +107,24 @@ defmodule Arbor.Commands.SafeRecoveryClosure.PeerProbeTest do
              PeerProbe.__test_install_activation_only_profile__()
   end
 
+  test "security regression: activation_only overlay distinguishes malformed namespaces" do
+    malformed = [
+      %{boot_profile: []},
+      %URI{},
+      [{:boot_profile, []} | :improper],
+      [:boot_profile, []],
+      :invalid,
+      nil
+    ]
+
+    Enum.each(malformed, fn namespace ->
+      Application.put_env(:arbor_kernel, :kernel_runtime, namespace)
+
+      assert {:error, :malformed_kernel_runtime_namespace} =
+               PeerProbe.__test_install_activation_only_profile__()
+    end)
+  end
+
   defp create_owned_root!(prefix) do
     path = root_path(prefix)
     {:ok, identity} = Arbor.Shell.create_private_owned_tree(path)
