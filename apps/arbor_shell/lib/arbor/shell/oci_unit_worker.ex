@@ -46,6 +46,7 @@ defmodule Arbor.Shell.OciUnitWorker do
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
   alias Arbor.Shell.OciExecutionCore
+  alias Arbor.Shell.OciHostEnv
   alias Arbor.Shell.OciPlanCore
   alias Arbor.Shell.OciUnitCore, as: UnitCore
   alias Arbor.Shell.SpawnCapableTimeout
@@ -727,12 +728,14 @@ defmodule Arbor.Shell.OciUnitWorker do
          {:ok, args} <- strip_runtime_prefix(argv, state.executable),
          {:ok, timeout_ms} <- phase_timeout(state, phase),
          {:ok, max_output} <- phase_max_output(state, phase),
-         {:ok, resource_profile} <- launch_resource_profile(state) do
+         {:ok, resource_profile} <- launch_resource_profile(state),
+         {:ok, host_env} <- OciHostEnv.resolve() do
       # Profile is a distinct trusted argument — never a raw ceiling override in opts.
+      # Host CLI env is the closed rootless-Podman allowlist, never the caller envelope.
       opts = [
         cwd: "/",
         clear_env: true,
-        env: %{},
+        env: host_env,
         stream_to: self(),
         timeout: timeout_ms,
         max_output_bytes: max_output

@@ -14,6 +14,8 @@ defmodule Arbor.Shell.OciProber do
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.LinuxDependencyBaselineCore
   alias Arbor.Shell.OciAdmissionCore
+  alias Arbor.Shell.OciHostEnv
+  alias Arbor.Shell.OciHostEnvCore
   alias Arbor.Shell.OciProbeCore
   alias Arbor.Shell.OciProbeRuntime
   alias Arbor.Shell.SpawnCapableTimeout
@@ -213,14 +215,40 @@ defmodule Arbor.Shell.OciProber do
         {:error, :output_budget_exhausted}
 
       true ->
-        opts = [
-          cwd: "/",
-          clear_env: true,
-          timeout: remaining_ms,
-          max_output_bytes: min(cap, remaining_out)
-        ]
+        with {:ok, host_env} <- fetch_host_env(state) do
+          opts = [
+            cwd: "/",
+            clear_env: true,
+            env: host_env,
+            timeout: remaining_ms,
+            max_output_bytes: min(cap, remaining_out)
+          ]
 
-        invoke_run_bound(state, executable, path, args, opts)
+          invoke_run_bound(state, executable, path, args, opts)
+        end
+    end
+  end
+
+  defp fetch_host_env(state) do
+    result =
+      if function_exported?(state.runtime, :rootless_host_env, 0) do
+        state.runtime.rootless_host_env()
+      else
+        OciHostEnv.resolve()
+      end
+
+    case result do
+      {:ok, env} ->
+        case OciHostEnvCore.require_closed(env) do
+          :ok -> {:ok, env}
+          error -> error
+        end
+
+      {:error, reason} ->
+        {:error, bound_reason(reason, :rootless_host_env_unavailable)}
+
+      _other ->
+        {:error, :rootless_host_env_unavailable}
     end
   end
 

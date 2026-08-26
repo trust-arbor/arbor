@@ -47,6 +47,7 @@ defmodule Arbor.Shell.OciProberTest do
       :persistent_term.put({__MODULE__, :arch}, "x86_64-pc-linux-gnu")
       :persistent_term.put({__MODULE__, :runs}, [])
       :persistent_term.put({__MODULE__, :resolves}, [])
+      :persistent_term.put({__MODULE__, :host_env_mode}, :ok)
     end
 
     def set_executables(map), do: :persistent_term.put({__MODULE__, :executables}, map)
@@ -141,6 +142,32 @@ defmodule Arbor.Shell.OciProberTest do
       Arbor.Shell.OciProbeRuntime.execution_digest(policy)
     end
 
+    def rootless_host_env do
+      case :persistent_term.get({__MODULE__, :host_env_mode}, :ok) do
+        :ok ->
+          {:ok, closed_host_env()}
+
+        :untrusted_home ->
+          {:error, :untrusted_path}
+
+        :extra_keys ->
+          {:ok, Map.put(closed_host_env(), "SECRET", "1")}
+
+        other ->
+          other
+      end
+    end
+
+    def closed_host_env do
+      %{
+        "HOME" => "/home/operator",
+        "XDG_RUNTIME_DIR" => "/run/user/1000",
+        "PATH" => "/usr/bin:/bin"
+      }
+    end
+
+    def set_host_env_mode(mode), do: :persistent_term.put({__MODULE__, :host_env_mode}, mode)
+
     defp maybe_callback do
       case :persistent_term.get({__MODULE__, :callback_mode}, :ok) do
         :ok -> :ok
@@ -175,6 +202,11 @@ defmodule Arbor.Shell.OciProberTest do
       [run] = FakeRuntime.runs()
       assert run.path == @podman
       assert run.args == ["image", "inspect", @digest]
+      assert run.opts[:clear_env] == true
+      assert run.opts[:env] == FakeRuntime.closed_host_env()
+
+      assert Map.keys(run.opts[:env]) |> Enum.sort() ==
+               ["HOME", "PATH", "XDG_RUNTIME_DIR"]
     end
 
     test "inspects a locally built image by id and still binds Digest and labels" do
@@ -222,6 +254,24 @@ defmodule Arbor.Shell.OciProberTest do
     @tag :security_regression
     test "security regression: user-local podman path is rejected" do
       FakeRuntime.set_resolve_mode(:wrong_path)
+
+      assert {:error, :untrusted_path} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
+      assert FakeRuntime.runs() == []
+    end
+
+    @tag :security_regression
+    test "security regression: caller extra host-env keys are refused" do
+      FakeRuntime.set_host_env_mode(:extra_keys)
+
+      assert {:error, :invalid_rootless_host_env} =
+               Prober.probe_for_test(5_000, runtime: FakeRuntime)
+
+      assert FakeRuntime.runs() == []
+    end
+
+    @tag :security_regression
+    test "security regression: HOME that fails the operator pin is refused" do
+      FakeRuntime.set_host_env_mode(:untrusted_home)
 
       assert {:error, :untrusted_path} = Prober.probe_for_test(5_000, runtime: FakeRuntime)
       assert FakeRuntime.runs() == []

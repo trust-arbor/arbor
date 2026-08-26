@@ -1018,7 +1018,7 @@ defmodule Arbor.Shell.ProcessGroup do
   # values remain for the launcher/target. Trusted system callers leave
   # `clear_env` false unless they opt in.
   defp build_env(env, child_path, clear_env?) when is_map(env) do
-    desired = Map.put(env, "PATH", child_path)
+    desired = Map.put_new(env, "PATH", child_path)
     entries = encode_env_entries(desired)
 
     if clear_env? do

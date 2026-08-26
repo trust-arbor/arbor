@@ -13,6 +13,8 @@ defmodule Arbor.Shell.OciProbeRuntime do
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.Executor
   alias Arbor.Shell.LinuxDependencyBaselineAuthority
+  alias Arbor.Shell.OciHostEnv
+  alias Arbor.Shell.OciHostEnvCore
   alias Arbor.Shell.SpawnCapableTimeout
   alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.ValidationRuntime.Authority, as: ValidationRuntimeAuthority
@@ -21,7 +23,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
   @runtime_path "/usr/bin/podman"
   @max_probe_deadline_ms SpawnCapableTimeout.max_probe_deadline_ms()
   @max_image_json_bytes 262_144
-  @probe_option_keys [:clear_env, :cwd, :max_output_bytes, :timeout]
+  @probe_option_keys [:clear_env, :cwd, :env, :max_output_bytes, :timeout]
   @sha256_digest_re ~r/\Asha256:[0-9a-f]{64}\z/
 
   @callback monotonic_ms() :: integer()
@@ -32,6 +34,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
               {:ok, map()} | {:error, term()}
   @callback checkout_image_policy() :: {:ok, map()} | {:error, term()}
   @callback checkout_baseline_plan() :: {:ok, map()} | {:error, term()}
+  @callback rootless_host_env() :: {:ok, %{String.t() => String.t()}} | {:error, term()}
 
   @doc false
   @spec runtime_path() :: String.t()
@@ -106,6 +109,10 @@ defmodule Arbor.Shell.OciProbeRuntime do
   end
 
   def authorize_probe_args(_args, _policy), do: {:error, :unreviewed_oci_probe_command}
+
+  @doc false
+  @spec rootless_host_env() :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  def rootless_host_env, do: OciHostEnv.resolve()
 
   @doc false
   @spec checkout_image_policy() :: {:ok, map()} | {:error, term()}
@@ -219,7 +226,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
            Keyword.get(opts, :clear_env) == true and is_integer(timeout) and timeout > 0 and
            timeout <= @max_probe_deadline_ms and is_integer(output_bytes) and output_bytes > 0 and
            output_bytes <= max_output_bytes do
-        :ok
+        OciHostEnvCore.require_closed(Keyword.get(opts, :env))
       else
         {:error, :invalid_oci_probe_options}
       end
