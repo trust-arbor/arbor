@@ -277,4 +277,96 @@ defmodule Arbor.Shell.TrustedPathTest do
       "arbor_trusted_path_#{tag}_#{System.unique_integer([:positive])}"
     )
   end
+
+  describe "pin_operator_owned_regular_file/2" do
+    test "pins an euid-owned 0400 file and verifies it" do
+      {dir, file} = operator_fixture("ok")
+
+      try do
+        assert {:ok, %Identity{} = identity} =
+                 TrustedPath.pin_operator_owned_regular_file(file)
+
+        assert identity.pin_family == :operator_owned
+        assert identity.uid != 0
+        assert identity.sha256 =~ ~r/\A[0-9a-f]{64}\z/
+        assert TrustedPath.verify_pinned(identity) == :ok
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: rejects a group-writable operator file" do
+      {dir, file} = operator_fixture("group-write")
+      File.chmod!(file, 0o640)
+
+      try do
+        assert {:error, :untrusted_path} =
+                 TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: root-owned pin still rejects the same user file" do
+      {dir, file} = operator_fixture("root-still-closed")
+
+      try do
+        assert {:error, reason} = TrustedPath.pin_root_owned_regular_file(file)
+        assert reason in [:untrusted_path, :path_not_found]
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: digest drift fails operator verify" do
+      {dir, file} = operator_fixture("drift")
+
+      try do
+        assert {:ok, identity} = TrustedPath.pin_operator_owned_regular_file(file)
+        File.chmod!(file, 0o600)
+        File.write!(file, "tampered\n")
+        File.chmod!(file, 0o400)
+        assert {:error, :identity_mismatch} = TrustedPath.verify_pinned(identity)
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: rejects a group-writable operator directory" do
+      {dir, _file} = operator_fixture("group-write-dir")
+      File.chmod!(dir, 0o770)
+
+      try do
+        assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_directory(dir)
+      after
+        File.rm_rf!(dir)
+      end
+    end
+
+    test "security regression: rejects a symlink locator" do
+      {dir, file} = operator_fixture("symlink")
+      link = Path.join(dir, "alias.json")
+      File.ln_s!(file, link)
+
+      try do
+        assert {:error, :noncanonical_path} =
+                 TrustedPath.pin_operator_owned_regular_file(link)
+      after
+        File.rm_rf!(dir)
+      end
+    end
+  end
+
+  defp operator_fixture(tag) do
+    raw = tmp_root(tag)
+    File.mkdir_p!(raw)
+    {:ok, dir} = TrustedPath.canonicalize_absolute(raw)
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+    file = Path.join(dir, "validation-runtime.json")
+    File.write!(file, "{\"runtime\":\"oci\"}\n")
+    File.chmod!(file, 0o400)
+    {:ok, canonical_file} = TrustedPath.canonicalize_absolute(file)
+    {dir, canonical_file}
+  end
 end

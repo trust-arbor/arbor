@@ -52,17 +52,21 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
   """
   @spec pin(term(), term(), trusted_path_module()) ::
           {:ok, Binding.t()} | {:error, term()}
-  def pin(source_root, manifest_path, trusted_path \\ TrustedPath)
+  @spec pin(term(), term(), trusted_path_module(), keyword()) ::
+          {:ok, Binding.t()} | {:error, term()}
+  def pin(source_root, manifest_path, trusted_path \\ TrustedPath, opts \\ [])
 
-  def pin(source_root, manifest_path, trusted_path)
-      when is_binary(source_root) and is_binary(manifest_path) and is_atom(trusted_path) do
+  def pin(source_root, manifest_path, trusted_path, opts)
+      when is_binary(source_root) and is_binary(manifest_path) and is_atom(trusted_path) and
+             is_list(opts) do
     limits = Core.limits()
+    pin_family = Keyword.get(opts, :pin_family, :root_owned)
 
     with {:ok, source_root} <- require_lexical_absolute(source_root, limits),
          {:ok, manifest_path} <- require_lexical_absolute(manifest_path, limits),
          :ok <- reject_locator_overlap(source_root, manifest_path),
-         {:ok, source_identity} <- pin_source_root(source_root, trusted_path),
-         {:ok, manifest_identity} <- pin_manifest(manifest_path, trusted_path),
+         {:ok, source_identity} <- pin_source_root(source_root, trusted_path, pin_family),
+         {:ok, manifest_identity} <- pin_manifest(manifest_path, trusted_path, pin_family),
          :ok <- enforce_manifest_size(manifest_identity),
          {:ok, declared_state, declared_entries} <-
            read_and_validate_declared(manifest_identity, trusted_path),
@@ -83,7 +87,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     end
   end
 
-  def pin(_source_root, _manifest_path, _trusted_path), do: {:error, :invalid_locator}
+  def pin(_source_root, _manifest_path, _trusted_path, _opts), do: {:error, :invalid_locator}
 
   @doc """
   Re-verify every retained source, manifest, and entry identity.
@@ -260,18 +264,18 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
 
   # --- Pinning ---
 
-  defp pin_source_root(source_root, trusted_path) do
+  defp pin_source_root(source_root, trusted_path, pin_family) do
     with {:ok, lstat} <- lstat_entry(source_root),
          :ok <- require_directory_lstat(lstat),
-         {:ok, identity} <- do_pin_source_root(source_root, trusted_path),
+         {:ok, identity} <- do_pin_source_root(source_root, trusted_path, pin_family),
          :ok <-
            match_pinned_identity(identity, lstat, source_root, :directory, identity.device) do
       {:ok, identity}
     end
   end
 
-  defp do_pin_source_root(source_root, trusted_path) do
-    case trusted_path.pin_root_owned_directory(source_root) do
+  defp do_pin_source_root(source_root, trusted_path, pin_family) do
+    case pin_directory(trusted_path, source_root, pin_family) do
       {:ok, %Identity{type: :directory, path: ^source_root} = identity} ->
         {:ok, identity}
 
@@ -292,9 +296,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
   # Preflight with File.lstat before TrustedPath so an already-oversized manifest
   # is rejected as :manifest_too_large without TrustedPath's generic 512 MiB
   # hash pass. TrustedPath is intentionally not expanded.
-  defp pin_manifest(manifest_path, trusted_path) do
+  defp pin_manifest(manifest_path, trusted_path, pin_family) do
     with {:ok, lstat} <- preflight_manifest_lstat(manifest_path),
-         {:ok, identity} <- do_pin_manifest(manifest_path, trusted_path),
+         {:ok, identity} <- do_pin_manifest(manifest_path, trusted_path, pin_family),
          :ok <-
            match_pinned_identity(identity, lstat, manifest_path, :regular, lstat.major_device) do
       {:ok, identity}
@@ -338,8 +342,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     end
   end
 
-  defp do_pin_manifest(manifest_path, trusted_path) do
-    case trusted_path.pin_root_owned_regular_file(manifest_path, executable: false) do
+  defp do_pin_manifest(manifest_path, trusted_path, pin_family) do
+    case pin_regular_file(trusted_path, manifest_path, pin_family) do
       {:ok, %Identity{type: :regular, path: ^manifest_path} = identity} ->
         {:ok, identity}
 
@@ -467,68 +471,42 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
 
   # --- Source tree walk ---
 
-  defp walk_source_tree(%Identity{path: source_root, device: root_device}, limits, trusted_path) do
-    case walk_directory(
-           source_root,
-           "",
-           root_device,
-           limits,
-           trusted_path,
-           [],
-           %{},
-           MapSet.new(),
-           0,
-           0
-         ) do
-      {:ok, entries, identities, _seen, _total_bytes, _entry_count} ->
-        {:ok, Enum.reverse(entries), identities}
+  defp walk_source_tree(%Identity{} = source_identity, limits, trusted_path) do
+    ctx = %{
+      root_device: source_identity.device,
+      limits: limits,
+      trusted_path: trusted_path,
+      pin_family: source_identity.pin_family
+    }
+
+    acc = %{
+      entries: [],
+      identities: %{},
+      seen_inodes: MapSet.new(),
+      total_bytes: 0,
+      entry_count: 0
+    }
+
+    case walk_directory(source_identity.path, "", ctx, acc) do
+      {:ok, walked} ->
+        {:ok, Enum.reverse(walked.entries), walked.identities}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp walk_directory(
-         abs_dir,
-         rel_prefix,
-         root_device,
-         limits,
-         trusted_path,
-         entries,
-         identities,
-         seen_inodes,
-         total_bytes,
-         entry_count
-       ) do
-    remaining = limits.max_entries - entry_count
+  defp walk_directory(abs_dir, rel_prefix, ctx, acc) do
+    remaining = ctx.limits.max_entries - acc.entry_count
 
     case list_directory_names(abs_dir, remaining) do
       {:ok, names} ->
-        Enum.reduce_while(
-          names,
-          {:ok, entries, identities, seen_inodes, total_bytes, entry_count},
-          fn name, {:ok, acc_entries, acc_identities, acc_seen, acc_bytes, acc_count} ->
-            case admit_child(
-                   abs_dir,
-                   rel_prefix,
-                   name,
-                   root_device,
-                   limits,
-                   trusted_path,
-                   acc_entries,
-                   acc_identities,
-                   acc_seen,
-                   acc_bytes,
-                   acc_count
-                 ) do
-              {:ok, next_entries, next_identities, next_seen, next_bytes, next_count} ->
-                {:cont, {:ok, next_entries, next_identities, next_seen, next_bytes, next_count}}
-
-              {:error, reason} ->
-                {:halt, {:error, reason}}
-            end
+        Enum.reduce_while(names, {:ok, acc}, fn name, {:ok, next_acc} ->
+          case admit_child(abs_dir, rel_prefix, name, ctx, next_acc) do
+            {:ok, admitted} -> {:cont, {:ok, admitted}}
+            {:error, reason} -> {:halt, {:error, reason}}
           end
-        )
+        end)
 
       {:error, reason} ->
         {:error, reason}
@@ -576,55 +554,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     take_names_bounded(rest, remaining, count + 1, [name | acc])
   end
 
-  defp admit_child(
-         abs_dir,
-         rel_prefix,
-         name,
-         root_device,
-         limits,
-         trusted_path,
-         entries,
-         identities,
-         seen_inodes,
-         total_bytes,
-         entry_count
-       ) do
-    with :ok <- validate_name_component(name, limits),
+  defp admit_child(abs_dir, rel_prefix, name, ctx, acc) do
+    with :ok <- validate_name_component(name, ctx.limits),
          rel_path = join_rel(rel_prefix, name),
-         :ok <- validate_relative_path(rel_path, limits),
+         :ok <- validate_relative_path(rel_path, ctx.limits),
          abs_path = Path.join(abs_dir, name),
          {:ok, lstat} <- lstat_entry(abs_path),
-         :ok <- reject_device_crossing(lstat, root_device) do
+         :ok <- reject_device_crossing(lstat, ctx.root_device) do
       case lstat.type do
         :directory ->
-          admit_directory(
-            abs_path,
-            rel_path,
-            lstat,
-            root_device,
-            limits,
-            trusted_path,
-            entries,
-            identities,
-            seen_inodes,
-            total_bytes,
-            entry_count
-          )
+          admit_directory(abs_path, rel_path, lstat, ctx, acc)
 
         :regular ->
-          admit_regular(
-            abs_path,
-            rel_path,
-            lstat,
-            root_device,
-            limits,
-            trusted_path,
-            entries,
-            identities,
-            seen_inodes,
-            total_bytes,
-            entry_count
-          )
+          admit_regular(abs_path, rel_path, lstat, ctx, acc)
 
         :symlink ->
           {:error, :symlink_rejected}
@@ -635,82 +577,50 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     end
   end
 
-  defp admit_directory(
-         abs_path,
-         rel_path,
-         lstat,
-         root_device,
-         limits,
-         trusted_path,
-         entries,
-         identities,
-         seen_inodes,
-         total_bytes,
-         entry_count
-       ) do
-    if entry_count >= limits.max_entries do
+  defp admit_directory(abs_path, rel_path, lstat, ctx, acc) do
+    if acc.entry_count >= ctx.limits.max_entries do
       {:error, :too_many_entries}
     else
-      with {:ok, identity} <- pin_entry_directory(abs_path, trusted_path),
-           :ok <- match_pinned_identity(identity, lstat, abs_path, :directory, root_device) do
-        entry = %{path: rel_path, type: "directory"}
-        next_entries = [entry | entries]
-        next_identities = Map.put(identities, rel_path, identity)
+      with {:ok, identity} <- pin_entry_directory(abs_path, ctx.trusted_path, ctx.pin_family),
+           :ok <-
+             match_pinned_identity(identity, lstat, abs_path, :directory, ctx.root_device) do
+        next_acc = %{
+          acc
+          | entries: [%{path: rel_path, type: "directory"} | acc.entries],
+            identities: Map.put(acc.identities, rel_path, identity),
+            entry_count: acc.entry_count + 1
+        }
 
-        walk_directory(
-          abs_path,
-          rel_path,
-          root_device,
-          limits,
-          trusted_path,
-          next_entries,
-          next_identities,
-          seen_inodes,
-          total_bytes,
-          entry_count + 1
-        )
+        walk_directory(abs_path, rel_path, ctx, next_acc)
       end
     end
   end
 
-  defp admit_regular(
-         abs_path,
-         rel_path,
-         lstat,
-         root_device,
-         limits,
-         trusted_path,
-         entries,
-         identities,
-         seen_inodes,
-         total_bytes,
-         entry_count
-       ) do
+  defp admit_regular(abs_path, rel_path, lstat, ctx, acc) do
     inode_key = {lstat.major_device, lstat.inode}
     size = lstat.size
 
     cond do
-      entry_count >= limits.max_entries ->
+      acc.entry_count >= ctx.limits.max_entries ->
         {:error, :too_many_entries}
 
       not valid_link_count?(lstat.links) ->
         {:error, :hardlink_rejected}
 
-      MapSet.member?(seen_inodes, inode_key) ->
+      MapSet.member?(acc.seen_inodes, inode_key) ->
         {:error, :hardlink_rejected}
 
       not is_integer(size) or size < 0 ->
         {:error, :invalid_stat}
 
-      total_bytes + size > limits.max_total_bytes ->
+      acc.total_bytes + size > ctx.limits.max_total_bytes ->
         {:error, :total_bytes_exceeded}
 
       true ->
-        with {:ok, identity} <- pin_entry_regular(abs_path, trusted_path),
-             :ok <- match_pinned_identity(identity, lstat, abs_path, :regular, root_device),
-             :ok <- confirm_pinned_regular_size(identity, size, total_bytes, limits) do
-          new_total = total_bytes + identity.size
-
+        with {:ok, identity} <- pin_entry_regular(abs_path, ctx.trusted_path, ctx.pin_family),
+             :ok <-
+               match_pinned_identity(identity, lstat, abs_path, :regular, ctx.root_device),
+             :ok <- confirm_pinned_regular_size(identity, size, acc.total_bytes, ctx.limits) do
           entry = %{
             path: rel_path,
             type: "regular",
@@ -719,8 +629,15 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
             executable: executable_mode?(identity.mode)
           }
 
-          {:ok, [entry | entries], Map.put(identities, rel_path, identity),
-           MapSet.put(seen_inodes, inode_key), new_total, entry_count + 1}
+          {:ok,
+           %{
+             acc
+             | entries: [entry | acc.entries],
+               identities: Map.put(acc.identities, rel_path, identity),
+               seen_inodes: MapSet.put(acc.seen_inodes, inode_key),
+               total_bytes: acc.total_bytes + identity.size,
+               entry_count: acc.entry_count + 1
+           }}
         end
     end
   end
@@ -743,8 +660,24 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     {:error, :invalid_identity}
   end
 
-  defp pin_entry_directory(abs_path, trusted_path) do
-    case trusted_path.pin_root_owned_directory(abs_path) do
+  defp pin_directory(trusted_path, path, :operator_owned) do
+    trusted_path.pin_operator_owned_directory(path)
+  end
+
+  defp pin_directory(trusted_path, path, _pin_family) do
+    trusted_path.pin_root_owned_directory(path)
+  end
+
+  defp pin_regular_file(trusted_path, path, :operator_owned) do
+    trusted_path.pin_operator_owned_regular_file(path, executable: false)
+  end
+
+  defp pin_regular_file(trusted_path, path, _pin_family) do
+    trusted_path.pin_root_owned_regular_file(path, executable: false)
+  end
+
+  defp pin_entry_directory(abs_path, trusted_path, pin_family) do
+    case pin_directory(trusted_path, abs_path, pin_family) do
       {:ok, %Identity{type: :directory, path: ^abs_path} = identity} ->
         {:ok, identity}
 
@@ -762,8 +695,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSource do
     end
   end
 
-  defp pin_entry_regular(abs_path, trusted_path) do
-    case trusted_path.pin_root_owned_regular_file(abs_path, executable: false) do
+  defp pin_entry_regular(abs_path, trusted_path, pin_family) do
+    case pin_regular_file(trusted_path, abs_path, pin_family) do
       {:ok, %Identity{type: :regular, path: ^abs_path, sha256: sha256} = identity}
       when is_binary(sha256) ->
         {:ok, identity}

@@ -28,7 +28,16 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
         }
 
   @spec load(String.t()) :: {:ok, config()} | {:error, atom() | tuple()}
-  def load(path), do: load_with_trusted_path(path, TrustedPath)
+  def load(path), do: load_with_trusted_path(path, TrustedPath, :root_owned)
+
+  @doc """
+  Load an operator-owned validation-runtime document.
+
+  Uses `TrustedPath.pin_operator_owned_regular_file/1`. The Apple/root-owned
+  `load/1` path is unchanged.
+  """
+  @spec load_operator_owned(String.t()) :: {:ok, config()} | {:error, atom() | tuple()}
+  def load_operator_owned(path), do: load_with_trusted_path(path, TrustedPath, :operator_owned)
 
   # Test-only injection point. Production callers use load/1, which is always
   # bound to Arbor.Shell.TrustedPath.
@@ -36,9 +45,17 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
   @spec load_with_trusted_path(String.t(), module()) ::
           {:ok, config()} | {:error, atom() | tuple()}
   def load_with_trusted_path(path, trusted_path) when is_atom(trusted_path) do
+    load_with_trusted_path(path, trusted_path, :root_owned)
+  end
+
+  @doc false
+  @spec load_with_trusted_path(String.t(), module(), :root_owned | :operator_owned) ::
+          {:ok, config()} | {:error, atom() | tuple()}
+  def load_with_trusted_path(path, trusted_path, pin_family)
+      when is_atom(trusted_path) and pin_family in [:root_owned, :operator_owned] do
     with {:ok, canonical_path} <- validate_locator(path, trusted_path),
          :ok <- reject_obviously_oversized(canonical_path),
-         {:ok, identity} <- pin_file(canonical_path, trusted_path),
+         {:ok, identity} <- pin_file(canonical_path, trusted_path, pin_family),
          :ok <- enforce_document_size(identity),
          {:ok, contents} <- read_bounded(canonical_path),
          :ok <- verify_file(identity, trusted_path),
@@ -68,8 +85,16 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
 
   defp validate_locator(_path, _trusted_path), do: {:error, :config_locator_malformed}
 
-  defp pin_file(path, trusted_path) do
-    case trusted_path.pin_root_owned_regular_file(path) do
+  defp pin_file(path, trusted_path, :root_owned) do
+    map_pin_error(trusted_path.pin_root_owned_regular_file(path))
+  end
+
+  defp pin_file(path, trusted_path, :operator_owned) do
+    map_pin_error(trusted_path.pin_operator_owned_regular_file(path))
+  end
+
+  defp map_pin_error(result) do
+    case result do
       {:ok, identity} -> {:ok, identity}
       {:error, :path_not_found} -> {:error, :config_file_missing}
       {:error, :not_a_regular_file} -> {:error, :config_file_not_regular}

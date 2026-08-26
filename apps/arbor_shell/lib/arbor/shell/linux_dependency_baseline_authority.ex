@@ -38,14 +38,16 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
           required(String.t()) => String.t() | nil
         }
 
-  @allowed_start_keys MapSet.new([:name, :source, :trusted_path, :boot_epoch])
+  @allowed_start_keys MapSet.new([:name, :source, :trusted_path, :boot_epoch, :pin_family])
 
   @doc """
   Start the Linux dependency-baseline authority owner.
 
   Production callers pass only the application-generated `:boot_epoch` token.
-  Direct-start tests may additionally inject `:name`, `:source`, and/or
-  `:trusted_path`.
+  Direct-start tests may additionally inject `:name`, `:source`,
+  `:trusted_path`, and/or `:pin_family`. Production Application startup keeps
+  the default `:root_owned` family; OCI activation selects `:operator_owned`
+  from the boot-pinned runtime rather than from Mix callers.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -129,7 +131,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
         source = Map.fetch!(start_opts, :source)
         trusted_path = Map.fetch!(start_opts, :trusted_path)
         boot_epoch = Map.fetch!(start_opts, :boot_epoch)
-        {:ok, bootstrap(source, trusted_path, boot_epoch)}
+        pin_family = Map.fetch!(start_opts, :pin_family)
+        {:ok, bootstrap(source, trusted_path, boot_epoch, pin_family)}
 
       {:error, reason} ->
         # Reject authority-bearing start injection without crashing the app:
@@ -247,7 +250,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   # --- Bootstrap -------------------------------------------------------------
 
-  defp bootstrap(source, trusted_path, boot_epoch) do
+  defp bootstrap(source, trusted_path, boot_epoch, pin_family) do
     base = %{
       status: :unavailable,
       reason: nil,
@@ -260,11 +263,11 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     case StartupEpoch.status(@epoch_namespace, boot_epoch) do
       :unbound ->
         base
-        |> bootstrap_fresh(source, trusted_path)
+        |> bootstrap_fresh(source, trusted_path, pin_family)
         |> persist_initial_epoch()
 
       :bound ->
-        repin_boot_epoch(base, source, trusted_path)
+        repin_boot_epoch(base, source, trusted_path, pin_family)
 
       {:sealed, :unavailable} ->
         %{base | status: :unavailable, reason: :boot_epoch_unavailable}
@@ -279,8 +282,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     end
   end
 
-  defp bootstrap_fresh(base, source, trusted_path) do
-    pin_from_config(base, source, trusted_path)
+  defp bootstrap_fresh(base, source, trusted_path, pin_family) do
+    pin_from_config(base, source, trusted_path, pin_family)
   end
 
   defp persist_initial_epoch(%{boot_epoch: nil} = state), do: state
@@ -315,8 +318,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     end
   end
 
-  defp repin_boot_epoch(base, source, trusted_path) do
-    case pin_from_config(base, source, trusted_path) do
+  defp repin_boot_epoch(base, source, trusted_path, pin_family) do
+    case pin_from_config(base, source, trusted_path, pin_family) do
       %{status: :pinned, binding: binding} = state when not is_nil(binding) ->
         case StartupEpoch.bind(
                @epoch_namespace,
@@ -345,10 +348,10 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     end
   end
 
-  defp pin_from_config(base, source, trusted_path) do
+  defp pin_from_config(base, source, trusted_path, pin_family) do
     case Config.linux_dependency_baseline() do
       {:ok, %{source_root: source_root, manifest_path: manifest_path}} ->
-        case source.pin(source_root, manifest_path, trusted_path) do
+        case source.pin(source_root, manifest_path, trusted_path, pin_family: pin_family) do
           {:ok, binding} ->
             %{base | status: :pinned, reason: nil, binding: binding}
 
@@ -503,7 +506,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     %{
       source: LinuxDependencyBaselineSource,
       trusted_path: TrustedPath,
-      boot_epoch: nil
+      boot_epoch: nil,
+      pin_family: :root_owned
     }
   end
 
@@ -529,6 +533,12 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
   defp normalize_start_value(:source, _module),
     do: {:error, :invalid_linux_dependency_baseline_source}
 
+  defp normalize_start_value(:pin_family, family) when family in [:root_owned, :operator_owned],
+    do: {:ok, family}
+
+  defp normalize_start_value(:pin_family, _family),
+    do: {:error, :invalid_linux_dependency_baseline_pin_family}
+
   defp duplicate_start_option_error(:name),
     do: :duplicate_linux_dependency_baseline_authority_name
 
@@ -540,6 +550,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   defp duplicate_start_option_error(:boot_epoch),
     do: :duplicate_linux_dependency_baseline_authority_boot_epoch
+
+  defp duplicate_start_option_error(:pin_family),
+    do: :duplicate_linux_dependency_baseline_authority_pin_family
 
   defp start_name(opts) when is_list(opts) do
     if Keyword.keyword?(opts) do

@@ -91,8 +91,48 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSourceTest do
 
     def pin_root_owned_regular_file(_path, _opts), do: {:error, :invalid_path}
 
+    def pin_operator_owned_directory(path) do
+      case pin_root_owned_directory(path) do
+        {:ok, identity} -> {:ok, %{identity | pin_family: :operator_owned}}
+        other -> other
+      end
+    end
+
+    def pin_operator_owned_regular_file(path, opts \\ []) do
+      case pin_root_owned_regular_file(path, opts) do
+        {:ok, identity} -> {:ok, %{identity | pin_family: :operator_owned}}
+        other -> other
+      end
+    end
+
+    def verify_pinned(%Identity{type: :directory, pin_family: :operator_owned} = pinned) do
+      case pin_operator_owned_directory(pinned.path) do
+        {:ok, current} ->
+          if same_identity?(pinned, current), do: :ok, else: {:error, :identity_mismatch}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+
     def verify_pinned(%Identity{type: :directory} = pinned) do
       case pin_root_owned_directory(pinned.path) do
+        {:ok, current} ->
+          if same_identity?(pinned, current), do: :ok, else: {:error, :identity_mismatch}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+
+    def verify_pinned(
+          %Identity{
+            type: :regular,
+            pin_family: :operator_owned,
+            executable_required: executable_required
+          } = pinned
+        ) do
+      case pin_operator_owned_regular_file(pinned.path, executable: executable_required) do
         {:ok, current} ->
           if same_identity?(pinned, current), do: :ok, else: {:error, :identity_mismatch}
 
@@ -295,7 +335,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSourceTest do
         identity.uid,
         identity.gid,
         identity.sha256,
-        identity.executable_required
+        identity.executable_required,
+        identity.pin_family
       }
     end
   end
@@ -305,6 +346,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSourceTest do
 
     def pin_root_owned_directory(_path), do: {:error, :untrusted_path}
     def pin_root_owned_regular_file(_path, _opts \\ []), do: {:error, :untrusted_path}
+    def pin_operator_owned_directory(_path), do: {:error, :untrusted_path}
+    def pin_operator_owned_regular_file(_path, _opts \\ []), do: {:error, :untrusted_path}
     def verify_pinned(_identity), do: {:error, :untrusted_path}
     def canonicalize_absolute(path) when is_binary(path), do: {:ok, path}
     def canonicalize_absolute(_), do: {:error, :invalid_path}
@@ -640,6 +683,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSourceTest do
   # --- Positive path ---
 
   describe "positive pin/verify/plan" do
+    test "pins operator-owned source root and manifest when pin_family is set", %{root: root} do
+      %{source: source, manifest: manifest} = fixture_tree!(root)
+
+      assert {:ok, %Binding{} = binding} =
+               Source.pin(source, manifest, FakeTrustedPath, pin_family: :operator_owned)
+
+      assert binding.source_identity.pin_family == :operator_owned
+      assert binding.manifest_identity.pin_family == :operator_owned
+      assert binding.entry_identities["hex"].pin_family == :operator_owned
+      assert binding.entry_identities["hex/mix.exs"].pin_family == :operator_owned
+      assert Source.verify(binding, FakeTrustedPath) == :ok
+    end
+
     test "pins nested source matching declared inventory and derives executable bit", %{
       root: root
     } do
@@ -657,6 +713,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineSourceTest do
 
       assert binding.entry_identities["hex"].type == :directory
       assert binding.entry_identities["hex/mix.exs"].type == :regular
+      assert binding.source_identity.pin_family == :root_owned
+      assert binding.manifest_identity.pin_family == :root_owned
       assert binding.entry_identities["hex_core/priv/native.so"].type == :regular
 
       assert (binding.entry_identities["hex_core/priv/native.so"].mode &&& 0o111) != 0

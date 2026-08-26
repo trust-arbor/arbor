@@ -10,7 +10,11 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
 
     def canonicalize_absolute(path), do: Arbor.Shell.TrustedPath.canonicalize_absolute(path)
 
-    def pin_root_owned_regular_file(path) do
+    def pin_root_owned_regular_file(path), do: pin_regular(path, :root_owned)
+
+    def pin_operator_owned_regular_file(path), do: pin_regular(path, :operator_owned)
+
+    defp pin_regular(path, pin_family) do
       with {:ok, %File.Stat{type: :regular} = stat} <- File.stat(path, time: :posix),
            {:ok, contents} <- File.read(path) do
         {:ok,
@@ -26,10 +30,19 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
            uid: stat.uid,
            gid: stat.gid,
            sha256: Base.encode16(:crypto.hash(:sha256, contents), case: :lower),
-           executable_required: false
+           executable_required: false,
+           pin_family: pin_family
          }}
       else
         {:ok, %File.Stat{}} -> {:error, :not_a_regular_file}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    def verify_pinned(%Identity{path: path, pin_family: :operator_owned} = expected) do
+      case pin_operator_owned_regular_file(path) do
+        {:ok, ^expected} -> :ok
+        {:ok, _current} -> {:error, :identity_mismatch}
         {:error, reason} -> {:error, reason}
       end
     end
@@ -94,6 +107,18 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
     end)
 
     {:ok, root: root}
+  end
+
+  test "load_operator_owned pins through the operator-owned TrustedPath family", %{root: root} do
+    path = write_document(root, @valid_document)
+    File.chmod!(root, 0o700)
+    File.chmod!(path, 0o400)
+
+    assert {:ok, values} =
+             RuntimeConfigLoader.load_with_trusted_path(path, TestTrustedPath, :operator_owned)
+
+    assert values.linux_dependency_baseline.source_root ==
+             @valid_document["linux_dependency_baseline"]["source_root"]
   end
 
   test "loads a valid document and produces values accepted by Config", %{root: root} do

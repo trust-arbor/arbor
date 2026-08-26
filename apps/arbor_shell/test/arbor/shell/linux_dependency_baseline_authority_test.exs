@@ -48,6 +48,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       :persistent_term.put({__MODULE__, :plan_mode}, :ok)
       :persistent_term.put({__MODULE__, :binding_token}, "baseline-v1")
       :persistent_term.put({__MODULE__, :mix_lock_digest}, nil)
+      :persistent_term.put({__MODULE__, :last_pin_family}, :root_owned)
     end
 
     # Opt-in only: existing tests never set this, so their exact-equality
@@ -57,6 +58,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       do: :persistent_term.put({__MODULE__, :mix_lock_digest}, digest)
 
     def pin_attempts, do: :persistent_term.get({__MODULE__, :pin_attempts}, [])
+    def last_pin_family, do: :persistent_term.get({__MODULE__, :last_pin_family}, :root_owned)
     def verify_attempts, do: :persistent_term.get({__MODULE__, :verify_attempts}, [])
     def plan_attempts, do: :persistent_term.get({__MODULE__, :plan_attempts}, [])
 
@@ -67,11 +69,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
     def set_binding_token(token),
       do: :persistent_term.put({__MODULE__, :binding_token}, token)
 
-    def pin(source_root, manifest_path, trusted_path)
-        when is_binary(source_root) and is_binary(manifest_path) and is_atom(trusted_path) do
+    def pin(source_root, manifest_path, trusted_path, opts \\ [])
+
+    def pin(source_root, manifest_path, trusted_path, opts)
+        when is_binary(source_root) and is_binary(manifest_path) and is_atom(trusted_path) and
+               is_list(opts) do
       :persistent_term.put(
         {__MODULE__, :pin_attempts},
         pin_attempts() ++ [{source_root, manifest_path, trusted_path}]
+      )
+
+      :persistent_term.put(
+        {__MODULE__, :last_pin_family},
+        Keyword.get(opts, :pin_family, :root_owned)
       )
 
       case :persistent_term.get({__MODULE__, :pin_mode}, :ok) do
@@ -83,7 +93,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       end
     end
 
-    def pin(_source_root, _manifest_path, _trusted_path), do: {:error, :invalid_locator}
+    def pin(_source_root, _manifest_path, _trusted_path, _opts), do: {:error, :invalid_locator}
 
     def verify(%Binding{} = binding, trusted_path) when is_atom(trusted_path) do
       :persistent_term.put(
@@ -213,6 +223,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
 
       assert Process.alive?(pid)
       assert FakeSource.pin_attempts() == [{@source_root, @manifest_path, FakeTrustedPath}]
+      assert FakeSource.last_pin_family() == :root_owned
 
       status = Authority.public_status(pid)
       assert status == %{"state" => "pinned", "reason" => nil}
@@ -246,6 +257,22 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       refute Map.has_key?(plan, :entry_identities)
       assert FakeSource.verify_attempts() == [{"baseline-v1", FakeTrustedPath}]
       assert FakeSource.plan_attempts() == ["baseline-v1"]
+    end
+
+    test "operator-owned pin family is selected from authority start, not Mix callers" do
+      put_valid_config()
+
+      {:ok, pid} =
+        start_authority(
+          name: unique_name(),
+          source: FakeSource,
+          trusted_path: FakeTrustedPath,
+          pin_family: :operator_owned
+        )
+
+      assert Process.alive?(pid)
+      assert FakeSource.last_pin_family() == :operator_owned
+      assert Authority.public_status(pid)["state"] == "pinned"
     end
 
     test "missing config stays unavailable and seals no-repin across restart" do

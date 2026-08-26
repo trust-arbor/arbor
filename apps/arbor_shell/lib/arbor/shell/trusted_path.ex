@@ -25,7 +25,7 @@ defmodule Arbor.Shell.TrustedPath do
       :sha256,
       :executable_required
     ]
-    defstruct @enforce_keys
+    defstruct @enforce_keys ++ [pin_family: :root_owned]
 
     @type t :: %__MODULE__{
             path: String.t(),
@@ -39,7 +39,8 @@ defmodule Arbor.Shell.TrustedPath do
             uid: non_neg_integer(),
             gid: non_neg_integer(),
             sha256: String.t() | nil,
-            executable_required: boolean()
+            executable_required: boolean(),
+            pin_family: :root_owned | :operator_owned
           }
   end
 
@@ -90,7 +91,73 @@ defmodule Arbor.Shell.TrustedPath do
 
   def pin_root_owned_directory(_path), do: {:error, :invalid_path}
 
+  @doc """
+  Pin a regular file owned by the current euid with no group/other bits.
+
+  Used for the Linux operator-owned validation-runtime config. Does not
+  weaken `pin_root_owned_regular_file/2`.
+  """
+  @spec pin_operator_owned_regular_file(term(), term()) ::
+          {:ok, Identity.t()} | {:error, atom()}
+  def pin_operator_owned_regular_file(path, opts \\ [])
+
+  def pin_operator_owned_regular_file(path, opts) when is_binary(path) do
+    with {:ok, executable_required} <- closed_executable_option(opts),
+         {:ok, canonical} <- canonicalize_absolute(path),
+         :ok <- require_canonical(path, canonical),
+         {:ok, euid} <- current_euid(),
+         :ok <- operator_path_chain(canonical, euid),
+         {:ok, before_stat} <- operator_regular_stat(canonical, executable_required, euid),
+         :ok <- enforce_max_file_size(before_stat.size),
+         {:ok, digest} <- hash_regular_file(canonical, before_stat.size),
+         {:ok, after_stat} <- operator_regular_stat(canonical, executable_required, euid),
+         :ok <- require_stable_stat(before_stat, after_stat) do
+      {:ok, build_identity(canonical, before_stat, digest, executable_required, :operator_owned)}
+    end
+  end
+
+  def pin_operator_owned_regular_file(_path, _opts), do: {:error, :invalid_path}
+
+  @spec pin_operator_owned_directory(term()) :: {:ok, Identity.t()} | {:error, atom()}
+  def pin_operator_owned_directory(path) when is_binary(path) do
+    with {:ok, canonical} <- canonicalize_absolute(path),
+         :ok <- require_canonical(path, canonical),
+         {:ok, euid} <- current_euid(),
+         :ok <- operator_path_chain(canonical, euid),
+         {:ok, stat} <- operator_directory_stat(canonical, euid) do
+      {:ok, build_identity(canonical, stat, nil, false, :operator_owned)}
+    end
+  end
+
+  def pin_operator_owned_directory(_path), do: {:error, :invalid_path}
+
   @spec verify_pinned(Identity.t()) :: :ok | {:error, atom()}
+  def verify_pinned(
+        %Identity{
+          type: :regular,
+          pin_family: :operator_owned,
+          executable_required: executable_required
+        } = pinned
+      ) do
+    case pin_operator_owned_regular_file(pinned.path, executable: executable_required) do
+      {:ok, current} ->
+        if same_identity?(pinned, current), do: :ok, else: {:error, :identity_mismatch}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def verify_pinned(%Identity{type: :directory, pin_family: :operator_owned} = pinned) do
+    case pin_operator_owned_directory(pinned.path) do
+      {:ok, current} ->
+        if same_identity?(pinned, current), do: :ok, else: {:error, :identity_mismatch}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   def verify_pinned(%Identity{type: :regular, executable_required: executable_required} = pinned) do
     case pin_root_owned_regular_file(pinned.path, executable: executable_required) do
       {:ok, current} ->
@@ -325,7 +392,12 @@ defmodule Arbor.Shell.TrustedPath do
     }
   end
 
-  defp build_identity(path, %File.Stat{} = stat, sha256, executable_required) do
+  defp build_identity(path, stat, sha256, executable_required) do
+    build_identity(path, stat, sha256, executable_required, :root_owned)
+  end
+
+  defp build_identity(path, %File.Stat{} = stat, sha256, executable_required, pin_family)
+       when pin_family in [:root_owned, :operator_owned] do
     %Identity{
       path: path,
       type: stat.type,
@@ -338,7 +410,8 @@ defmodule Arbor.Shell.TrustedPath do
       uid: stat.uid,
       gid: stat.gid,
       sha256: sha256,
-      executable_required: executable_required
+      executable_required: executable_required,
+      pin_family: pin_family
     }
   end
 
@@ -355,8 +428,141 @@ defmodule Arbor.Shell.TrustedPath do
       identity.uid,
       identity.gid,
       identity.sha256,
-      identity.executable_required
+      identity.executable_required,
+      identity.pin_family
     }
+  end
+
+  defp require_canonical(path, path), do: :ok
+  defp require_canonical(_path, _canonical), do: {:error, :noncanonical_path}
+
+  defp require_stable_stat(before_stat, after_stat) do
+    if stable_identity_stat?(before_stat, after_stat), do: :ok, else: {:error, :identity_changed}
+  end
+
+  defp operator_regular_stat(path, executable_required, euid) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{} = stat} ->
+        cond do
+          stat.type != :regular -> {:error, :not_a_regular_file}
+          not operator_target_ownership?(stat, euid) -> {:error, :untrusted_path}
+          executable_required and not executable_mode?(stat.mode) -> {:error, :not_executable}
+          true -> {:ok, stat}
+        end
+
+      {:error, :enoent} ->
+        {:error, :path_not_found}
+
+      {:error, _reason} ->
+        {:error, :path_not_found}
+    end
+  end
+
+  defp operator_directory_stat(path, euid) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        if operator_target_ownership?(stat, euid),
+          do: {:ok, stat},
+          else: {:error, :untrusted_path}
+
+      {:ok, %File.Stat{}} ->
+        {:error, :not_a_directory}
+
+      {:error, :enoent} ->
+        {:error, :path_not_found}
+
+      {:error, _reason} ->
+        {:error, :path_not_found}
+    end
+  end
+
+  defp operator_path_chain(path, euid) do
+    path
+    |> Path.dirname()
+    |> directory_chain()
+    |> Enum.reduce_while(:ok, fn directory, :ok ->
+      case File.stat(directory, time: :posix) do
+        {:ok, %File.Stat{type: :directory} = stat} ->
+          if operator_ancestor_ownership?(stat, euid) do
+            {:cont, :ok}
+          else
+            {:halt, {:error, :untrusted_path}}
+          end
+
+        _other ->
+          {:halt, {:error, :untrusted_path}}
+      end
+    end)
+  end
+
+  # Target: current euid, no group/other bits.
+  defp operator_target_ownership?(%File.Stat{uid: uid, mode: mode}, euid)
+       when uid == euid and is_integer(euid) do
+    (mode &&& 0o077) == 0
+  end
+
+  defp operator_target_ownership?(_stat, _euid), do: false
+
+  # Root-owned ancestors are the host path to the operator tree (`/`, `/Users`,
+  # sticky `/tmp`). Load-bearing immutability is euid ownership + no group/other
+  # write on the target and every euid-owned ancestor. Do not require the
+  # world-writable sticky bit off `/tmp`.
+  defp operator_ancestor_ownership?(%File.Stat{uid: 0, type: :directory}, _euid), do: true
+
+  defp operator_ancestor_ownership?(%File.Stat{uid: uid, mode: mode}, euid)
+       when uid == euid and is_integer(euid),
+       do: (mode &&& 0o022) == 0
+
+  defp operator_ancestor_ownership?(_stat, _euid), do: false
+
+  @euid_probe_retries 4
+
+  defp current_euid do
+    case Process.get({__MODULE__, :euid}) do
+      uid when is_integer(uid) ->
+        {:ok, uid}
+
+      _other ->
+        case probe_euid() do
+          {:ok, uid} = ok ->
+            Process.put({__MODULE__, :euid}, uid)
+            ok
+
+          :error ->
+            {:error, :untrusted_path}
+        end
+    end
+  end
+
+  defp probe_euid do
+    probe_euid_attempt(System.tmp_dir!(), @euid_probe_retries)
+  end
+
+  defp probe_euid_attempt(_dir, 0), do: :error
+
+  defp probe_euid_attempt(dir, remaining) when remaining > 0 do
+    name = ".arbor-euid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    path = Path.join(dir, name)
+
+    case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} ->
+        _ = :file.close(io)
+
+        try do
+          case File.lstat(path, time: :posix) do
+            {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
+            _other -> :error
+          end
+        after
+          _ = File.rm(path)
+        end
+
+      {:error, :eexist} ->
+        probe_euid_attempt(dir, remaining - 1)
+
+      {:error, _reason} ->
+        :error
+    end
   end
 
   defp resolve_links(_path, count) when count > @max_symlinks,
