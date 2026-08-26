@@ -21,7 +21,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
   # --- Fixed v1 constants ---
 
   @schema "1"
-  @platform "linux/arm64"
+  @allowed_platforms MapSet.new(["linux/amd64", "linux/arm64"])
   @domain_tag "arbor-linux-dependency-baseline-v1\0"
 
   @max_map_keys 64
@@ -373,14 +373,17 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCore do
       nil ->
         {:error, :missing_platform}
 
-      @platform ->
-        {:ok, @platform}
+      platform when is_binary(platform) ->
+        cond do
+          MapSet.member?(@allowed_platforms, platform) ->
+            {:ok, platform}
 
-      value when is_binary(value) ->
-        with :ok <- bounded_string(value, @max_status_bytes, :platform_too_long),
-             :ok <- require_valid_utf8(value),
-             :ok <- reject_control_or_whitespace(value, :unsafe_platform) do
-          {:error, :unsupported_platform}
+          true ->
+            with :ok <- bounded_string(platform, @max_status_bytes, :platform_too_long),
+                 :ok <- require_valid_utf8(platform),
+                 :ok <- reject_control_or_whitespace(platform, :unsafe_platform) do
+              {:error, :unsupported_platform}
+            end
         end
 
       _other ->

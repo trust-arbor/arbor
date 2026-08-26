@@ -1,0 +1,72 @@
+# Arbor validation-runtime image (spawn-containment).
+#
+# ARG defaults for ERLANG_VERSION / ELIXIR_VERSION must match `.tool-versions`.
+# Mix arbor.baseline.build fills lock/tree digest ARGs and platform.
+# The Arbor Mix wrapper lives on the host and is bind-mounted at /arbor/bin/mix.
+#
+# First-time operator preflight (builds use --pull=never and will not fetch
+# the base image):
+#
+#     podman pull debian:bookworm-slim
+
+FROM debian:bookworm-slim
+
+ARG ERLANG_VERSION=28.4.1
+ARG ELIXIR_VERSION=1.19.5-otp-28
+ARG ARBOR_VALIDATION_PLATFORM=linux/amd64
+ARG MIX_LOCK_SHA256
+ARG DEPS_TREE_SHA256
+
+ENV LANG=C.UTF-8 \
+    MIX_HOME=/usr/local/.mix \
+    MIX_ARCHIVES=/usr/local/.mix/archives \
+    ELIXIR_MAKE_CACHE_DIR=/usr/local/.cache/elixir_make \
+    PATH=/usr/local/bin:/usr/local/lib/erlang/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      autoconf \
+      build-essential \
+      ca-certificates \
+      curl \
+      libncurses-dev \
+      libssl-dev \
+      linux-libc-dev \
+      m4 \
+      pkg-config \
+      unixodbc-dev \
+      unzip \
+      wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# OTP prefix /usr/local installs the runtime at /usr/local/lib/erlang.
+RUN curl -fsSL \
+      "https://github.com/erlang/otp/releases/download/OTP-${ERLANG_VERSION}/otp_src_${ERLANG_VERSION}.tar.gz" \
+      -o /tmp/otp.tar.gz \
+    && mkdir -p /tmp/otp \
+    && tar -xzf /tmp/otp.tar.gz -C /tmp/otp --strip-components=1 \
+    && cd /tmp/otp \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/otp /tmp/otp.tar.gz
+
+# ELIXIR_VERSION is <version>-otp-28; the GitHub tag is v<version>.
+RUN elixir_tag="$(printf '%s\n' "${ELIXIR_VERSION}" | cut -d- -f1)" \
+    && curl -fsSL \
+      "https://github.com/elixir-lang/elixir/releases/download/v${elixir_tag}/elixir-otp-28.zip" \
+      -o /tmp/elixir.zip \
+    && unzip /tmp/elixir.zip -d /usr/local \
+    && rm -f /tmp/elixir.zip
+
+RUN mkdir -p /usr/local/.mix/archives /usr/local/.cache/elixir_make \
+    && mix local.hex --force \
+    && mix local.rebar --force
+
+LABEL org.arbor.validation.schema="1" \
+      org.arbor.validation.role="spawn-containment" \
+      org.arbor.validation.platform="${ARBOR_VALIDATION_PLATFORM}" \
+      org.arbor.validation.erlang="${ERLANG_VERSION}" \
+      org.arbor.validation.elixir="${ELIXIR_VERSION}" \
+      org.arbor.validation.mix-lock-sha256="${MIX_LOCK_SHA256}" \
+      org.arbor.validation.deps-tree-sha256="${DEPS_TREE_SHA256}"

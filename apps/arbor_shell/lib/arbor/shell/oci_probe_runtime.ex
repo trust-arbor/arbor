@@ -8,6 +8,7 @@ defmodule Arbor.Shell.OciProbeRuntime do
   """
 
   alias Arbor.Shell.AppleContainerImagePolicyAuthority
+  alias Arbor.Shell.Config
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.Executor
@@ -107,9 +108,18 @@ defmodule Arbor.Shell.OciProbeRuntime do
   @doc false
   @spec checkout_image_policy() :: {:ok, map()} | {:error, term()}
   def checkout_image_policy do
-    case AppleContainerImagePolicyAuthority.checkout_policy() do
-      {:ok, policy} when is_map(policy) -> {:ok, policy}
-      {:error, reason} -> {:error, bound_reason(reason)}
+    case Config.validation_runtime_kind() do
+      :oci ->
+        case Config.oci_image_policy() do
+          {:ok, policy} when is_map(policy) -> {:ok, policy}
+          {:error, reason} -> {:error, bound_reason(reason)}
+        end
+
+      _other ->
+        case AppleContainerImagePolicyAuthority.checkout_policy() do
+          {:ok, policy} when is_map(policy) -> {:ok, policy}
+          {:error, reason} -> {:error, bound_reason(reason)}
+        end
     end
   end
 

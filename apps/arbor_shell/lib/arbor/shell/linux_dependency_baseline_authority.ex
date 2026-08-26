@@ -45,9 +45,9 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
   Production callers pass only the application-generated `:boot_epoch` token.
   Direct-start tests may additionally inject `:name`, `:source`,
-  `:trusted_path`, and/or `:pin_family`. Production Application startup keeps
-  the default `:root_owned` family; OCI activation selects `:operator_owned`
-  from the boot-pinned runtime rather than from Mix callers.
+  `:trusted_path`, and/or `:pin_family`. Production start reads
+  `Config.validation_runtime_kind/0`: `:oci` selects `:operator_owned`,
+  otherwise `:root_owned`. Mix callers cannot set the pin family.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -507,8 +507,15 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
       source: LinuxDependencyBaselineSource,
       trusted_path: TrustedPath,
       boot_epoch: nil,
-      pin_family: :root_owned
+      pin_family: default_pin_family()
     }
+  end
+
+  defp default_pin_family do
+    case Config.validation_runtime_kind() do
+      :oci -> :operator_owned
+      _other -> :root_owned
+    end
   end
 
   defp normalize_start_value(:name, name), do: validate_start_name(name)

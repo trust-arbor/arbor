@@ -8,16 +8,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
   entries are rejected before the resulting document is admitted by
   `LinuxDependencyBaselineCore`.
 
-  The fixed `linux/arm64` platform requires regular files whose names identify
-  shared objects (`.so` or versioned `.so.N` forms) to be ELF64, little-endian,
-  and identify AArch64 (`e_machine` 183). There is no compatibility bypass:
-  the manifest format cannot record one.
+  The closed guest platforms `linux/arm64` and `linux/amd64` require regular
+  files whose names identify shared objects (`.so` or versioned `.so.N` forms)
+  to be ELF64 little-endian with `e_machine` 183 (AArch64) or 62 (x86-64).
+  There is no host-arch bypass and no qemu translation.
   """
 
   alias Arbor.Shell.LinuxDependencyBaselineCore, as: Core
   alias Arbor.Shell.RegularTreeInventory
 
   @schema "1"
+  @allowed_platforms MapSet.new(["linux/amd64", "linux/arm64"])
+  @elf_machine_aarch64 183
+  @elf_machine_x86_64 62
   @metadata_keys [
     :platform,
     :image_index_digest,
@@ -37,12 +40,34 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
   def build(source_root, metadata, []) do
     with {:ok, normalized_metadata} <- normalize_metadata(metadata),
          {:ok, facts} <- scan_source(source_root),
-         :ok <- validate_linux_native_artifacts(facts.regular_files) do
+         :ok <-
+           validate_linux_native_artifacts(
+             facts.regular_files,
+             normalized_metadata.platform
+           ) do
       finish_document(normalized_metadata, facts)
     end
   end
 
   def build(_source_root, _metadata, _opts), do: {:error, :invalid_options}
+
+  @doc """
+  Inventory a source tree and return only the canonical baseline tree digest.
+
+  Applies the same native-artifact architecture check as `build/2` but does
+  not require image or mix.lock metadata.
+  """
+  @spec tree_digest(term(), term()) :: {:ok, String.t()} | {:error, term()}
+  def tree_digest(source_root, platform) when is_binary(platform) do
+    with :ok <- require_platform(platform),
+         {:ok, facts} <- scan_source(source_root),
+         :ok <- validate_linux_native_artifacts(facts.regular_files, platform),
+         {:ok, digest} <- Core.tree_digest(project_linux_entries(facts)) do
+      {:ok, digest}
+    end
+  end
+
+  def tree_digest(_source_root, _platform), do: {:error, :unsupported_platform}
 
   defp finish_document(metadata, facts) do
     entries = project_linux_entries(facts)
@@ -68,11 +93,11 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
     end
   end
 
-  defp validate_linux_native_artifacts([]), do: :ok
+  defp validate_linux_native_artifacts([], _platform), do: :ok
 
-  defp validate_linux_native_artifacts([%{path: path, prefix: prefix} | rest]) do
-    case validate_native_artifact(prefix, path) do
-      :ok -> validate_linux_native_artifacts(rest)
+  defp validate_linux_native_artifacts([%{path: path, prefix: prefix} | rest], platform) do
+    case validate_native_artifact(prefix, path, platform) do
+      :ok -> validate_linux_native_artifacts(rest, platform)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -87,22 +112,28 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
     %{path: path, type: "regular", size: size, sha256: sha256, executable: executable}
   end
 
-  defp validate_native_artifact(prefix, path) do
+  defp validate_native_artifact(prefix, path, platform) do
     if native_artifact_path?(path) do
-      match_linux_arm64_elf(prefix)
+      match_linux_elf(prefix, platform)
     else
       :ok
     end
   end
 
-  defp match_linux_arm64_elf(
+  defp match_linux_elf(prefix, "linux/arm64"), do: match_elf64_le(prefix, @elf_machine_aarch64)
+  defp match_linux_elf(prefix, "linux/amd64"), do: match_elf64_le(prefix, @elf_machine_x86_64)
+  defp match_linux_elf(_prefix, _platform), do: {:error, :unsupported_platform}
+
+  defp match_elf64_le(
          <<0x7F, "ELF", 2, 1, _version, _osabi, _abiversion, _padding::binary-size(7),
-           _type::little-unsigned-16, 183::little-unsigned-16, _rest::binary>>
-       ) do
+           _type::little-unsigned-16, machine::little-unsigned-16, _rest::binary>>,
+         expected
+       )
+       when machine == expected do
     :ok
   end
 
-  defp match_linux_arm64_elf(_prefix), do: {:error, :native_artifact_wrong_architecture}
+  defp match_elf64_le(_prefix, _expected), do: {:error, :native_artifact_wrong_architecture}
 
   defp native_artifact_path?(path) do
     filename = Path.basename(path)
@@ -135,7 +166,14 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilder do
 
   defp normalize_metadata(_metadata), do: {:error, :invalid_metadata}
 
-  defp require_platform("linux/arm64"), do: :ok
+  defp require_platform(platform) when is_binary(platform) do
+    if MapSet.member?(@allowed_platforms, platform) do
+      :ok
+    else
+      {:error, :unsupported_platform}
+    end
+  end
+
   defp require_platform(_platform), do: {:error, :unsupported_platform}
 
   defp normalize_toolchain(toolchain) when is_map(toolchain) do

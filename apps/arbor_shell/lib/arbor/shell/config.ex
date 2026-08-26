@@ -42,6 +42,28 @@ defmodule Arbor.Shell.Config do
                                  Enum.map(@logical_image_policy_keys, &Atom.to_string/1)
                              )
 
+  @logical_oci_image_policy_keys [
+    :image,
+    :manifest_digest,
+    :env,
+    :labels,
+    :mix_lock_digest,
+    :baseline_tree_digest,
+    :toolchain,
+    :platform
+  ]
+  @allowed_oci_image_policy_keys MapSet.new(
+                                   @logical_oci_image_policy_keys ++
+                                     Enum.map(@logical_oci_image_policy_keys, &Atom.to_string/1)
+                                 )
+  @allowed_oci_platforms MapSet.new(["linux/amd64", "linux/arm64"])
+  @forbidden_oci_image_policy_keys MapSet.new([
+                                     :vminit_image,
+                                     :vminit_manifest_digest,
+                                     "vminit_image",
+                                     "vminit_manifest_digest"
+                                   ])
+
   @logical_image_policy_toolchain_keys [:erlang, :elixir]
   @allowed_image_policy_toolchain_keys MapSet.new(
                                          @logical_image_policy_toolchain_keys ++
@@ -138,6 +160,53 @@ defmodule Arbor.Shell.Config do
           | :apple_container_unit_journal_path_malformed
           | {:invalid_apple_container_unit_journal_path, atom()}
 
+  @type validation_runtime_kind :: :apple | :oci | :unavailable
+
+  @type oci_image_policy :: %{
+          image: String.t(),
+          manifest_digest: String.t(),
+          env: [String.t()],
+          labels: %{optional(String.t()) => String.t()},
+          mix_lock_digest: String.t(),
+          baseline_tree_digest: String.t(),
+          toolchain: %{erlang: String.t(), elixir: String.t()},
+          platform: String.t()
+        }
+
+  @type oci_image_policy_error ::
+          :oci_image_policy_config_absent
+          | :oci_image_policy_config_malformed
+          | :unknown_oci_image_policy_config_key
+          | :duplicate_oci_image_policy_config_key
+          | :apple_only_policy_key
+          | :missing_image
+          | :missing_manifest_digest
+          | :missing_env
+          | :missing_labels
+          | :missing_mix_lock_digest
+          | :missing_baseline_tree_digest
+          | :missing_toolchain
+          | :missing_platform
+          | :invalid_image
+          | :invalid_manifest_digest
+          | :invalid_env
+          | :invalid_labels
+          | :invalid_mix_lock_digest
+          | :invalid_baseline_tree_digest
+          | :invalid_toolchain
+          | :invalid_platform
+          | :unsupported_platform
+          | :missing_toolchain_erlang
+          | :missing_toolchain_elixir
+          | :invalid_toolchain_erlang
+          | :invalid_toolchain_elixir
+          | :duplicate_image_policy_toolchain_key
+          | :unknown_image_policy_toolchain_key
+          | :image_policy_config_too_large
+          | :image_policy_string_too_long
+          | :image_policy_env_too_large
+          | :image_policy_labels_too_large
+
   @doc """
   Read and validate the closed Apple Container operator locator config.
 
@@ -200,6 +269,42 @@ defmodule Arbor.Shell.Config do
 
       config ->
         normalize_apple_container_image_policy(config)
+    end
+  end
+
+  @doc """
+  Boot-pinned validation-runtime kind from the loaded operator document.
+
+  Set once at host boot by `config/runtime.exs`. Performs no HOME IO and
+  ignores retired Mix-set keys such as `:spawn_backend`.
+  """
+  @spec validation_runtime_kind() :: validation_runtime_kind()
+  def validation_runtime_kind do
+    case Application.get_env(@app, :validation_runtime_kind) do
+      :apple -> :apple
+      :oci -> :oci
+      :unavailable -> :unavailable
+      nil -> :unavailable
+      _other -> :unavailable
+    end
+  end
+
+  @doc """
+  Read and validate the closed OCI image admission policy.
+
+  Accepts the operator policy surface consumed by `OciAdmissionCore` (image
+  and manifest digests, env, labels, mix-lock/tree digests, toolchain,
+  platform). Rejects Apple `vminit_*` keys. Does not replace
+  `apple_container_image_policy/0`.
+  """
+  @spec oci_image_policy() :: {:ok, oci_image_policy()} | {:error, oci_image_policy_error()}
+  def oci_image_policy do
+    case Application.get_env(@app, :oci_image_policy) do
+      nil ->
+        {:error, :oci_image_policy_config_absent}
+
+      config ->
+        normalize_oci_image_policy(config)
     end
   end
 
@@ -532,6 +637,135 @@ defmodule Arbor.Shell.Config do
          baseline_tree_digest: baseline_tree_digest,
          toolchain: toolchain
        }}
+    end
+  end
+
+  # --- OCI image policy ------------------------------------------------------
+
+  defp normalize_oci_image_policy(config) when is_list(config) do
+    if Keyword.keyword?(config) do
+      if length(config) > @max_image_policy_map_keys do
+        {:error, :image_policy_config_too_large}
+      else
+        config
+        |> Enum.reduce_while({:ok, %{}, MapSet.new()}, &accumulate_oci_image_policy_pair/2)
+        |> finish_oci_image_policy()
+      end
+    else
+      {:error, :oci_image_policy_config_malformed}
+    end
+  end
+
+  defp normalize_oci_image_policy(config) when is_map(config) do
+    if map_size(config) > @max_image_policy_map_keys do
+      {:error, :image_policy_config_too_large}
+    else
+      config
+      |> Map.to_list()
+      |> Enum.reduce_while({:ok, %{}, MapSet.new()}, &accumulate_oci_image_policy_pair/2)
+      |> finish_oci_image_policy()
+    end
+  end
+
+  defp normalize_oci_image_policy(_config), do: {:error, :oci_image_policy_config_malformed}
+
+  defp accumulate_oci_image_policy_pair({key, value}, {:ok, acc, seen}) do
+    case normalize_oci_image_policy_key(key) do
+      {:ok, logical} ->
+        if MapSet.member?(seen, logical) do
+          {:halt, {:error, :duplicate_oci_image_policy_config_key}}
+        else
+          {:cont, {:ok, Map.put(acc, logical, value), MapSet.put(seen, logical)}}
+        end
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
+    end
+  end
+
+  defp normalize_oci_image_policy_key(key) when is_atom(key) or is_binary(key) do
+    cond do
+      MapSet.member?(@forbidden_oci_image_policy_keys, key) ->
+        {:error, :apple_only_policy_key}
+
+      MapSet.member?(@allowed_oci_image_policy_keys, key) ->
+        logical =
+          case key do
+            atom when is_atom(atom) -> atom
+            "image" -> :image
+            "manifest_digest" -> :manifest_digest
+            "env" -> :env
+            "labels" -> :labels
+            "mix_lock_digest" -> :mix_lock_digest
+            "baseline_tree_digest" -> :baseline_tree_digest
+            "toolchain" -> :toolchain
+            "platform" -> :platform
+          end
+
+        {:ok, logical}
+
+      true ->
+        {:error, :unknown_oci_image_policy_config_key}
+    end
+  end
+
+  defp normalize_oci_image_policy_key(_key), do: {:error, :oci_image_policy_config_malformed}
+
+  defp finish_oci_image_policy({:error, reason}), do: {:error, reason}
+
+  defp finish_oci_image_policy({:ok, acc, _seen}) do
+    with {:ok, image} <-
+           required_bounded_string(acc, :image, :missing_image, :invalid_image),
+         {:ok, manifest_digest} <-
+           required_bounded_string(
+             acc,
+             :manifest_digest,
+             :missing_manifest_digest,
+             :invalid_manifest_digest
+           ),
+         {:ok, env} <- required_env_list(acc),
+         {:ok, labels} <- required_labels_map(acc),
+         {:ok, mix_lock_digest} <-
+           required_bounded_string(
+             acc,
+             :mix_lock_digest,
+             :missing_mix_lock_digest,
+             :invalid_mix_lock_digest
+           ),
+         {:ok, baseline_tree_digest} <-
+           required_bounded_string(
+             acc,
+             :baseline_tree_digest,
+             :missing_baseline_tree_digest,
+             :invalid_baseline_tree_digest
+           ),
+         {:ok, toolchain} <- required_toolchain(acc),
+         {:ok, platform} <- required_oci_platform(acc) do
+      {:ok,
+       %{
+         image: image,
+         manifest_digest: manifest_digest,
+         env: env,
+         labels: labels,
+         mix_lock_digest: mix_lock_digest,
+         baseline_tree_digest: baseline_tree_digest,
+         toolchain: toolchain,
+         platform: platform
+       }}
+    end
+  end
+
+  defp required_oci_platform(acc) do
+    case required_bounded_string(acc, :platform, :missing_platform, :invalid_platform) do
+      {:ok, platform} ->
+        if MapSet.member?(@allowed_oci_platforms, platform) do
+          {:ok, platform}
+        else
+          {:error, :unsupported_platform}
+        end
+
+      error ->
+        error
     end
   end
 

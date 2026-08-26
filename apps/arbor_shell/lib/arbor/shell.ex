@@ -114,6 +114,17 @@ defmodule Arbor.Shell do
   def build_linux_dependency_baseline(_source_root, _metadata, _opts),
     do: {:error, :invalid_options}
 
+  @doc """
+  Canonical Linux dependency-baseline tree digest of one explicit source tree.
+
+  Applies the closed guest-platform native-artifact check. Does not require
+  image or mix.lock metadata and never writes files.
+  """
+  @spec linux_dependency_baseline_tree_digest(term(), term()) ::
+          {:ok, String.t()} | {:error, term()}
+  def linux_dependency_baseline_tree_digest(source_root, platform),
+    do: LinuxDependencyBaselineBuilder.tree_digest(source_root, platform)
+
   @doc false
   @spec read_verified_regular_file(String.t(), pos_integer()) ::
           {:ok, binary()} | {:error, term()}
@@ -969,6 +980,17 @@ defmodule Arbor.Shell do
   end
 
   @doc """
+  Redacted public status of the Linux dependency-baseline authority owner.
+
+  Returns an ordinary JSON-clean map with state/reason labels only.
+  Never exposes Binding, paths, inventory, or digests.
+  """
+  @spec linux_dependency_baseline_status() :: map()
+  def linux_dependency_baseline_status do
+    Arbor.Shell.LinuxDependencyBaselineAuthority.public_status()
+  end
+
+  @doc """
   Redacted public status of the Apple Container control-plane authority owner.
 
   Returns an ordinary JSON-clean map with state/reason/platform labels only.
@@ -989,6 +1011,16 @@ defmodule Arbor.Shell do
   @spec validation_runtime_status() :: map()
   def validation_runtime_status do
     ValidationRuntime.public_status()
+  end
+
+  @doc """
+  Probe the boot-pinned validation runtime.
+
+  Thin public facade over `Arbor.Shell.ValidationRuntime.probe/0`.
+  """
+  @spec validation_runtime_probe() :: {:ok, map()} | {:error, term()}
+  def validation_runtime_probe do
+    ValidationRuntime.probe()
   end
 
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this

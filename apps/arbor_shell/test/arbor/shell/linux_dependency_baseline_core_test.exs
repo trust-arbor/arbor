@@ -321,9 +321,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
                  Map.put(shown, "schema", "2")
                )
 
-      assert {:error, :unsupported_platform} =
+      assert {:ok, %{"platform" => "linux/amd64"}} =
                LinuxDependencyBaselineCore.normalize_compact_receipt(
                  Map.put(shown, "platform", "linux/amd64")
+               )
+
+      assert {:error, :unsupported_platform} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "platform", "linux/riscv64")
+               )
+
+      assert {:error, :unsupported_platform} =
+               LinuxDependencyBaselineCore.normalize_compact_receipt(
+                 Map.put(shown, "platform", "darwin/arm64")
                )
 
       assert {:error, :invalid_toolchain_erlang} =
@@ -523,9 +533,19 @@ defmodule Arbor.Shell.LinuxDependencyBaselineCoreTest do
                  put_manifest(build_input(fixture_entries()), :schema, "2")
                )
 
-      assert {:error, :unsupported_platform} =
+      assert {:ok, %{platform: "linux/amd64"}} =
                LinuxDependencyBaselineCore.new(
                  put_manifest(build_input(fixture_entries()), :platform, "linux/amd64")
+               )
+
+      assert {:error, :unsupported_platform} =
+               LinuxDependencyBaselineCore.new(
+                 put_manifest(build_input(fixture_entries()), :platform, "linux/riscv64")
+               )
+
+      assert {:error, :unsupported_platform} =
+               LinuxDependencyBaselineCore.new(
+                 put_manifest(build_input(fixture_entries()), :platform, "darwin/arm64")
                )
     end
 

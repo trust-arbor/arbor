@@ -190,9 +190,13 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilderTest do
     assert {:error, :non_canonical_source_root} = Builder.build(root <> "/", @metadata)
   end
 
-  test "rejects a platform other than linux/arm64 before walking", %{root: root} do
+  test "rejects a platform other than the closed linux/amd64 and linux/arm64 enum before walking",
+       %{root: root} do
     assert {:error, :unsupported_platform} =
-             Builder.build(root, Map.put(@metadata, :platform, "linux/amd64"))
+             Builder.build(root, Map.put(@metadata, :platform, "linux/riscv64"))
+
+    assert {:error, :unsupported_platform} =
+             Builder.build(root, Map.put(@metadata, :platform, "darwin/arm64"))
   end
 
   test "rejects a wrong-architecture native artifact by default", %{root: root} do
@@ -226,6 +230,49 @@ defmodule Arbor.Shell.LinuxDependencyBaselineBuilderTest do
 
   test "treats versioned shared objects as native artifacts", %{root: root} do
     File.write!(Path.join(root, "libfoo.so.1"), "not an ELF")
+
+    assert {:error, :native_artifact_wrong_architecture} = Builder.build(root, @metadata)
+  end
+
+  test "accepts a bounded ELF64 little-endian x86-64 native artifact for linux/amd64", %{
+    root: root
+  } do
+    amd64_header =
+      <<0x7F, "ELF", 2, 1, 1, 0::size(72), 3::little-unsigned-16, 62::little-unsigned-16>>
+
+    File.write!(Path.join(root, "vec0.so"), amd64_header)
+
+    assert {:ok, document, _receipt} =
+             Builder.build(root, Map.put(@metadata, :platform, "linux/amd64"))
+
+    assert document.manifest.platform == "linux/amd64"
+    assert Enum.any?(document.entries, &(&1.path == "vec0.so"))
+  end
+
+  test "rejects an AArch64 native artifact on linux/amd64", %{root: root} do
+    aarch64_header =
+      <<0x7F, "ELF", 2, 1, 1, 0::size(72), 3::little-unsigned-16, 183::little-unsigned-16>>
+
+    File.write!(Path.join(root, "vec0.so"), aarch64_header)
+
+    assert {:error, :native_artifact_wrong_architecture} =
+             Builder.build(root, Map.put(@metadata, :platform, "linux/amd64"))
+  end
+
+  test "tree_digest/2 inventories without image metadata", %{root: root} do
+    File.write!(Path.join(root, "ok"), "ok\n")
+
+    assert {:ok, digest} = Builder.tree_digest(root, "linux/amd64")
+    assert digest =~ ~r/\A[0-9a-f]{64}\z/
+    assert {:ok, same} = Shell.linux_dependency_baseline_tree_digest(root, "linux/amd64")
+    assert same == digest
+  end
+
+  test "rejects an x86-64 native artifact on linux/arm64", %{root: root} do
+    amd64_header =
+      <<0x7F, "ELF", 2, 1, 1, 0::size(72), 3::little-unsigned-16, 62::little-unsigned-16>>
+
+    File.write!(Path.join(root, "vec0.so"), amd64_header)
 
     assert {:error, :native_artifact_wrong_architecture} = Builder.build(root, @metadata)
   end

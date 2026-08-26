@@ -1,0 +1,38 @@
+# Validation runtime image
+
+Reviewed OCI image for Linux spawn-containment (`org.arbor.validation.role=spawn-containment`).
+
+Guest toolchain roots match `OciPlanCore`:
+
+| Tool | Guest path |
+|---|---|
+| Erlang/OTP | `/usr/local/lib/erlang` |
+| Elixir | `/usr/local` |
+| `MIX_HOME` | `/usr/local/.mix` |
+| `MIX_ARCHIVES` | `/usr/local/.mix/archives` |
+| `ELIXIR_MAKE_CACHE_DIR` | `/usr/local/.cache/elixir_make` |
+
+The Arbor Mix wrapper is **not** in this image. Production create argv bind-mounts the host wrapper at `/arbor/bin/mix`.
+
+## Closed platforms
+
+Native arch only. `linux/amd64` or `linux/arm64`. No qemu-user translation.
+
+## Operator preflight
+
+Builds pass `--pull=never` for the **base** image. Pull it once:
+
+```
+podman pull debian:bookworm-slim
+```
+
+Then:
+
+```
+mix arbor.baseline.build
+mix arbor.baseline.activate <tree-digest>
+```
+
+Restart the Arbor node so `config/runtime.exs` re-pins `$ARBOR_HOME/validation-runtime.json`.
+
+Toolchain ARG defaults must match `.tool-versions`. The drift test parses both; do not hardcode a third copy.

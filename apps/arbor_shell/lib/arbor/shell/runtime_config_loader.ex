@@ -7,25 +7,46 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
 
   @max_document_bytes 64 * 1024
   @read_chunk_bytes 8 * 1024
-  @top_level_keys MapSet.new([
-                    "apple_container",
-                    "linux_dependency_baseline",
-                    "image_policy",
-                    "unit_journal_path"
-                  ])
-  @config_keys [
+  @apple_top_level_keys MapSet.new([
+                          "apple_container",
+                          "linux_dependency_baseline",
+                          "image_policy",
+                          "unit_journal_path"
+                        ])
+  @oci_top_level_keys MapSet.new([
+                        "runtime",
+                        "linux_dependency_baseline",
+                        "image_policy",
+                        "unit_journal_path"
+                      ])
+  @apple_config_keys [
     :apple_container,
     :linux_dependency_baseline,
     :apple_container_image_policy,
     :apple_container_unit_journal_path
   ]
+  @oci_config_keys [
+    :linux_dependency_baseline,
+    :oci_image_policy,
+    :apple_container_unit_journal_path
+  ]
 
-  @type config :: %{
+  @type apple_config :: %{
+          kind: :apple,
           apple_container: map(),
           linux_dependency_baseline: map(),
           apple_container_image_policy: map(),
           apple_container_unit_journal_path: String.t()
         }
+
+  @type oci_config :: %{
+          kind: :oci,
+          linux_dependency_baseline: map(),
+          oci_image_policy: map(),
+          apple_container_unit_journal_path: String.t()
+        }
+
+  @type config :: apple_config() | oci_config()
 
   @spec load(String.t()) :: {:ok, config()} | {:error, atom() | tuple()}
   def load(path), do: load_with_trusted_path(path, TrustedPath, :root_owned)
@@ -220,58 +241,136 @@ defmodule Arbor.Shell.RuntimeConfigLoader do
   end
 
   defp validate_top_level(document) do
+    case Map.get(document, "runtime") do
+      "oci" ->
+        validate_oci_top_level(document)
+
+      nil ->
+        validate_apple_top_level(document)
+
+      _other ->
+        {:error, :config_schema_unknown_runtime}
+    end
+  end
+
+  defp validate_apple_top_level(document) do
     keys = Map.keys(document) |> MapSet.new()
 
     cond do
-      keys != @top_level_keys ->
-        if MapSet.subset?(@top_level_keys, keys),
+      keys != @apple_top_level_keys ->
+        if MapSet.subset?(@apple_top_level_keys, keys),
           do: {:error, :config_schema_extra_key},
           else: {:error, :config_schema_missing_key}
 
       true ->
-        validate_nested(document)
+        validate_apple_nested(document)
     end
   end
 
-  defp validate_nested(document) do
-    values = %{
-      :apple_container => Map.fetch!(document, "apple_container"),
-      :linux_dependency_baseline => Map.fetch!(document, "linux_dependency_baseline"),
-      :apple_container_image_policy => Map.fetch!(document, "image_policy"),
-      :apple_container_unit_journal_path => Map.fetch!(document, "unit_journal_path")
-    }
+  defp validate_oci_top_level(document) do
+    keys = Map.keys(document) |> MapSet.new()
 
-    validate_with_config(values)
+    cond do
+      Map.has_key?(document, "apple_container") ->
+        {:error, :config_schema_apple_only_key}
+
+      keys != @oci_top_level_keys ->
+        if MapSet.subset?(@oci_top_level_keys, keys),
+          do: {:error, :config_schema_extra_key},
+          else: {:error, :config_schema_missing_key}
+
+      true ->
+        validate_oci_nested(document)
+    end
   end
 
-  defp validate_with_config(values) do
+  defp validate_apple_nested(document) do
+    values = %{
+      apple_container: Map.fetch!(document, "apple_container"),
+      linux_dependency_baseline: Map.fetch!(document, "linux_dependency_baseline"),
+      apple_container_image_policy: Map.fetch!(document, "image_policy"),
+      apple_container_unit_journal_path: Map.fetch!(document, "unit_journal_path")
+    }
+
+    validate_with_config(@apple_config_keys, values, :apple)
+  end
+
+  defp validate_oci_nested(document) do
+    image_policy = Map.fetch!(document, "image_policy")
+
+    with :ok <- reject_apple_only_image_policy_keys(image_policy) do
+      values = %{
+        linux_dependency_baseline: Map.fetch!(document, "linux_dependency_baseline"),
+        oci_image_policy: image_policy,
+        apple_container_unit_journal_path: Map.fetch!(document, "unit_journal_path")
+      }
+
+      validate_with_config(@oci_config_keys, values, :oci)
+    end
+  end
+
+  defp reject_apple_only_image_policy_keys(image_policy) when is_map(image_policy) do
+    if Map.has_key?(image_policy, "vminit_image") or
+         Map.has_key?(image_policy, "vminit_manifest_digest") or
+         Map.has_key?(image_policy, :vminit_image) or
+         Map.has_key?(image_policy, :vminit_manifest_digest) do
+      {:error, :config_schema_apple_only_key}
+    else
+      :ok
+    end
+  end
+
+  defp reject_apple_only_image_policy_keys(_image_policy),
+    do: {:error, {:config_nested_malformed, :oci_image_policy_config_malformed}}
+
+  defp validate_with_config(config_keys, values, kind) do
     previous =
-      Map.new(@config_keys, fn key ->
+      Map.new(config_keys, fn key ->
         {key, Application.get_env(:arbor_shell, key)}
       end)
 
     try do
       Enum.each(values, fn {key, value} -> Application.put_env(:arbor_shell, key, value) end)
-
-      with {:ok, apple_container} <- Config.apple_container(),
-           {:ok, linux_dependency_baseline} <- Config.linux_dependency_baseline(),
-           {:ok, image_policy} <- Config.apple_container_image_policy(),
-           {:ok, unit_journal_path} <- Config.apple_container_unit_journal_path() do
-        {:ok,
-         %{
-           apple_container: apple_container,
-           linux_dependency_baseline: linux_dependency_baseline,
-           apple_container_image_policy: image_policy,
-           apple_container_unit_journal_path: unit_journal_path
-         }}
-      else
-        {:error, reason} -> {:error, {:config_nested_malformed, reason}}
-      end
+      finish_validated_config(kind)
     after
       Enum.each(previous, fn
         {key, nil} -> Application.delete_env(:arbor_shell, key)
         {key, value} -> Application.put_env(:arbor_shell, key, value)
       end)
+    end
+  end
+
+  defp finish_validated_config(:apple) do
+    with {:ok, apple_container} <- Config.apple_container(),
+         {:ok, linux_dependency_baseline} <- Config.linux_dependency_baseline(),
+         {:ok, image_policy} <- Config.apple_container_image_policy(),
+         {:ok, unit_journal_path} <- Config.apple_container_unit_journal_path() do
+      {:ok,
+       %{
+         kind: :apple,
+         apple_container: apple_container,
+         linux_dependency_baseline: linux_dependency_baseline,
+         apple_container_image_policy: image_policy,
+         apple_container_unit_journal_path: unit_journal_path
+       }}
+    else
+      {:error, reason} -> {:error, {:config_nested_malformed, reason}}
+    end
+  end
+
+  defp finish_validated_config(:oci) do
+    with {:ok, linux_dependency_baseline} <- Config.linux_dependency_baseline(),
+         {:ok, image_policy} <- Config.oci_image_policy(),
+         {:ok, unit_journal_path} <- Config.apple_container_unit_journal_path() do
+      {:ok,
+       %{
+         kind: :oci,
+         linux_dependency_baseline: linux_dependency_baseline,
+         oci_image_policy: image_policy,
+         apple_container_unit_journal_path: unit_journal_path
+       }}
+    else
+      {:error, reason} -> {:error, {:config_nested_malformed, reason}}
     end
   end
 end

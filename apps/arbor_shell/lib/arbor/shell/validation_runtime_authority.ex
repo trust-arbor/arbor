@@ -7,20 +7,21 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
   Mix, probes a VM, or interprets a plan: `Arbor.Shell.ValidationRuntime`
   applies the pinned module in the caller.
 
-  Production start pins `ValidationRuntime.AppleContainer`. Application env
-  cannot select a backend. Narrow `:implementation` injection is reserved for
-  same-library tests.
+  Production start reads `Config.validation_runtime_kind/0`: `:oci` pins
+  `ValidationRuntime.Oci`, otherwise `ValidationRuntime.AppleContainer`.
+  Retired Mix-set keys such as `:spawn_backend` cannot select a backend.
+  Narrow `:implementation` injection is reserved for same-library tests.
   """
 
   use GenServer
 
+  alias Arbor.Shell.Config
   alias Arbor.Shell.StartupEpoch
   alias Arbor.Shell.ValidationRuntime.AppleContainer
   alias Arbor.Shell.ValidationRuntime.Oci
 
   @epoch_namespace __MODULE__
   @checkout_timeout_ms 5_000
-  @default_implementation AppleContainer
   @allowed_start_keys MapSet.new([:name, :boot_epoch, :implementation])
 
   @type status :: :unavailable | :pinned
@@ -317,7 +318,14 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
   defp finish_start_opts({:error, reason}), do: {:error, reason}
 
   defp default_start_opts do
-    %{implementation: @default_implementation, boot_epoch: nil}
+    %{implementation: default_implementation(), boot_epoch: nil}
+  end
+
+  defp default_implementation do
+    case Config.validation_runtime_kind() do
+      :oci -> Oci
+      _other -> AppleContainer
+    end
   end
 
   defp normalize_start_value(:name, name), do: validate_start_name(name)

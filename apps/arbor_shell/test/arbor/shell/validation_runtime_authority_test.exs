@@ -50,6 +50,29 @@ defmodule Arbor.Shell.ValidationRuntime.AuthorityTest do
       refute_receive :fake_runtime_execute, 50
     end
 
+    test "Config oci kind pins ValidationRuntime.Oci without Mix backend keys" do
+      previous = Application.get_env(:arbor_shell, :validation_runtime_kind)
+      Application.put_env(:arbor_shell, :validation_runtime_kind, :oci)
+      Application.put_env(:arbor_shell, :spawn_backend, FakeRuntime)
+
+      on_exit(fn ->
+        if previous do
+          Application.put_env(:arbor_shell, :validation_runtime_kind, previous)
+        else
+          Application.delete_env(:arbor_shell, :validation_runtime_kind)
+        end
+
+        Application.delete_env(:arbor_shell, :spawn_backend)
+      end)
+
+      name = unique_name()
+      boot_epoch = make_ref()
+      {:ok, pid} = start_authority(name: name, boot_epoch: boot_epoch)
+
+      assert {:ok, Arbor.Shell.ValidationRuntime.Oci} = Authority.checkout_implementation(pid)
+      assert Authority.public_status(pid)["driver"] == "podman"
+    end
+
     test "public status never includes the implementation module" do
       status = Authority.public_status()
       refute inspect(status) =~ "AppleContainer"

@@ -1131,7 +1131,10 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
 
   defp require_exact_receipt(_plan_receipt, _normalized_receipt), do: {:error, :receipt_mismatch}
 
-  defp require_platform(%{platform: "linux/arm64"}), do: :ok
+  defp require_platform(%{platform: platform})
+       when platform in ["linux/amd64", "linux/arm64"],
+       do: :ok
+
   defp require_platform(_), do: {:error, :unsupported_platform}
 
   defp plan_fingerprint(source_root, manifest_path, receipt, core_state) do

@@ -92,6 +92,7 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
       :apple_container,
       :linux_dependency_baseline,
       :apple_container_image_policy,
+      :oci_image_policy,
       :apple_container_unit_journal_path
     ]
 
@@ -197,9 +198,57 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
              String.split(loader_and_rest, "# Development creates", parts: 2)
 
     assert loader_branch =~ "ARBOR_APPLE_CONTAINER_CONFIG_PATH"
+    assert loader_branch =~ "ARBOR_VALIDATION_RUNTIME_CONFIG_PATH"
+    assert loader_branch =~ "validation-runtime.json"
+    assert loader_branch =~ "load_operator_owned"
     assert loader_branch =~ "if config_env() != :test do"
     refute loader_branch =~ "Arbor.Orchestrator"
     refute loader_branch =~ "Arbor.Agent"
+  end
+
+  test "load_operator_owned accepts an OCI document without vminit", %{root: root} do
+    path = write_document(root, oci_document())
+    File.chmod!(root, 0o700)
+    File.chmod!(path, 0o400)
+
+    assert {:ok, values} =
+             RuntimeConfigLoader.load_with_trusted_path(path, TestTrustedPath, :operator_owned)
+
+    assert values.kind == :oci
+    assert values.oci_image_policy.platform == "linux/amd64"
+    refute Map.has_key?(values, :apple_container)
+    refute Map.has_key?(values.oci_image_policy, :vminit_image)
+  end
+
+  test "Apple load still requires vminit", %{root: root} do
+    document =
+      put_in(
+        @valid_document,
+        ["image_policy"],
+        Map.delete(@valid_document["image_policy"], "vminit_image")
+      )
+
+    assert {:error, {:config_nested_malformed, :missing_vminit_image}} =
+             load_document(root, document)
+  end
+
+  test "OCI document with vminit keys fails", %{root: root} do
+    document =
+      oci_document()
+      |> put_in(
+        ["image_policy", "vminit_image"],
+        "docker.io/arbor/vminit@sha256:" <> String.duplicate("c", 64)
+      )
+
+    assert {:error, :config_schema_apple_only_key} = load_oci(root, document)
+  end
+
+  test "group-writable operator-owned config still fails", %{root: root} do
+    path = write_document(root, oci_document())
+    File.chmod!(root, 0o700)
+    File.chmod!(path, 0o640)
+
+    assert {:error, :config_file_untrusted} = RuntimeConfigLoader.load_operator_owned(path)
   end
 
   test "rejects blank, relative, noncanonical, and missing locators", %{root: root} do
@@ -263,5 +312,33 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
     path = Path.join(root, "config.json")
     File.write!(path, text)
     load_path(path)
+  end
+
+  defp load_oci(root, document) do
+    path = write_document(root, document)
+    RuntimeConfigLoader.load_with_trusted_path(path, TestTrustedPath, :operator_owned)
+  end
+
+  defp oci_document do
+    %{
+      "runtime" => "oci",
+      "linux_dependency_baseline" => %{
+        "source_root" =>
+          "/home/operator/.arbor/baseline/" <> String.duplicate("a", 64) <> "/tree",
+        "manifest_path" =>
+          "/home/operator/.arbor/baseline/" <> String.duplicate("a", 64) <> "/manifest.json"
+      },
+      "image_policy" => %{
+        "image" => "docker.io/arbor/validation@sha256:" <> String.duplicate("a", 64),
+        "manifest_digest" => "sha256:" <> String.duplicate("b", 64),
+        "env" => ["MIX_HOME=/usr/local/.mix"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => String.duplicate("e", 64),
+        "baseline_tree_digest" => String.duplicate("f", 64),
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      },
+      "unit_journal_path" => "/home/operator/.arbor/oci-unit-journal.json"
+    }
   end
 end

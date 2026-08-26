@@ -7,6 +7,8 @@ defmodule Arbor.Shell.ConfigTest do
   @key :apple_container
   @linux_key :linux_dependency_baseline
   @image_key :apple_container_image_policy
+  @oci_image_key :oci_image_policy
+  @kind_key :validation_runtime_kind
   @journal_path_key :apple_container_unit_journal_path
 
   @index_hex String.duplicate("a", 64)
@@ -35,6 +37,8 @@ defmodule Arbor.Shell.ConfigTest do
     previous = Application.get_env(@app, @key)
     previous_linux = Application.get_env(@app, @linux_key)
     previous_image = Application.get_env(@app, @image_key)
+    previous_oci_image = Application.get_env(@app, @oci_image_key)
+    previous_kind = Application.get_env(@app, @kind_key)
     previous_journal_path = Application.get_env(@app, @journal_path_key)
     previous_home = System.get_env("HOME")
 
@@ -42,6 +46,8 @@ defmodule Arbor.Shell.ConfigTest do
       restore_env(@key, previous)
       restore_env(@linux_key, previous_linux)
       restore_env(@image_key, previous_image)
+      restore_env(@oci_image_key, previous_oci_image)
+      restore_env(@kind_key, previous_kind)
       restore_env(@journal_path_key, previous_journal_path)
       restore_system_env("HOME", previous_home)
     end)
@@ -646,6 +652,93 @@ defmodule Arbor.Shell.ConfigTest do
 
       assert {:error, :relative_path} = Config.validate_unit_journal_path("unit-journal.json")
       assert {:error, :invalid_path} = Config.validate_unit_journal_path(123)
+    end
+  end
+
+  describe "validation_runtime_kind/0" do
+    test "absent config is unavailable and ignores HOME" do
+      Application.delete_env(@app, @kind_key)
+      System.put_env("HOME", "/tmp/should-not-matter")
+      assert Config.validation_runtime_kind() == :unavailable
+    end
+
+    test "admits apple and oci and ignores retired backend keys" do
+      previous_spawn = Application.get_env(@app, :spawn_backend)
+      previous_runtime = Application.get_env(@app, :validation_runtime)
+
+      on_exit(fn ->
+        restore_env(:spawn_backend, previous_spawn)
+        restore_env(:validation_runtime, previous_runtime)
+      end)
+
+      Application.put_env(@app, @kind_key, :oci)
+      Application.put_env(@app, :spawn_backend, :podman)
+      Application.put_env(@app, :validation_runtime, Arbor.Shell.ValidationRuntime.Oci)
+      assert Config.validation_runtime_kind() == :oci
+
+      Application.put_env(@app, @kind_key, :apple)
+      assert Config.validation_runtime_kind() == :apple
+    end
+  end
+
+  describe "oci_image_policy/0" do
+    test "absent config is a stable error" do
+      Application.delete_env(@app, @oci_image_key)
+      assert {:error, :oci_image_policy_config_absent} = Config.oci_image_policy()
+    end
+
+    test "accepts a policy without vminit and requires a closed platform" do
+      Application.put_env(@app, @oci_image_key, %{
+        "image" => "docker.io/arbor/validation@sha256:#{@index_hex}",
+        "manifest_digest" => "sha256:#{@manifest_hex}",
+        "env" => ["MIX_HOME=/usr/local/.mix"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => @mix_lock_hex,
+        "baseline_tree_digest" => @tree_hex,
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      })
+
+      assert {:ok, policy} = Config.oci_image_policy()
+      assert policy.platform == "linux/amd64"
+      refute Map.has_key?(policy, :vminit_image)
+    end
+
+    test "rejects vminit keys and unsupported platforms" do
+      Application.put_env(
+        @app,
+        @oci_image_key,
+        %{
+          image: "docker.io/arbor/validation@sha256:#{@index_hex}",
+          manifest_digest: "sha256:#{@manifest_hex}",
+          env: [],
+          labels: %{},
+          mix_lock_digest: @mix_lock_hex,
+          baseline_tree_digest: @tree_hex,
+          toolchain: %{erlang: "28.4.1", elixir: "1.19.5-otp-28"},
+          platform: "linux/amd64",
+          vminit_image: "docker.io/arbor/vminit@sha256:#{@vminit_index_hex}"
+        }
+      )
+
+      assert {:error, :apple_only_policy_key} = Config.oci_image_policy()
+
+      Application.put_env(
+        @app,
+        @oci_image_key,
+        %{
+          image: "docker.io/arbor/validation@sha256:#{@index_hex}",
+          manifest_digest: "sha256:#{@manifest_hex}",
+          env: [],
+          labels: %{},
+          mix_lock_digest: @mix_lock_hex,
+          baseline_tree_digest: @tree_hex,
+          toolchain: %{erlang: "28.4.1", elixir: "1.19.5-otp-28"},
+          platform: "linux/riscv64"
+        }
+      )
+
+      assert {:error, :unsupported_platform} = Config.oci_image_policy()
     end
   end
 
