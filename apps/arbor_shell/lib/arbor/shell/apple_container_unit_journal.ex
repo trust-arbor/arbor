@@ -23,8 +23,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: Core
   alias Arbor.Shell.Config
-  alias Arbor.Shell.ExecutablePolicy
-  alias Arbor.Shell.Executor
+  alias Arbor.Shell.TrustedPath
 
   # Raised deliberately for schema-v2 known records at max_active=1024 with
   # max-length owner IDs (proven by journal core size tests). Process/BEAM
@@ -42,13 +41,12 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   # closed without deleting any candidate.
   @max_startup_stale_temp_candidates 64
 
-  # Cross-BEAM singleton ownership. shlock is startup-pinned via ExecutablePolicy
-  # at the exact absolute path below — never PATH-resolved or caller-selected.
-  @shlock_path "/usr/bin/shlock"
-  @shlock_timeout_ms 5_000
-  @shlock_max_output_bytes 256
+  # Cross-BEAM singleton ownership. Exclusive create (`O_EXCL`) plus a
+  # descriptor-bound uid/pid file; never PATH-resolved, never Darwin `shlock`.
   @lock_suffix ".lock"
   @max_lock_bytes 32
+  @kill_path "/bin/kill"
+  @kill0_timeout_ms 1_000
 
   @allowed_start_keys MapSet.new([:name, :path])
 
@@ -124,9 +122,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
   `#{inspect(__MODULE__)}`.
 
   Absent configuration starts a live **disabled** owner so Shell can still boot
-  on hosts that do not configure durable unit journaling. Invalid configured
-  paths and corrupt existing journal files fail process start and never
-  replace or delete the existing file.
+  on hosts that do not configure durable unit journaling. Direct `start_link/1`
+  still fails closed on invalid paths and corrupt journals without replacing
+  the file. The Application child uses `start_link_supervised/1` so a start
+  failure becomes a live disabled owner instead of taking Shell down.
 
   Direct-start tests may inject only `:name` and/or `:path`.
   """
@@ -146,12 +145,42 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
     %{
       id: __MODULE__,
-      start: {__MODULE__, :start_link, [opts]},
+      start: {__MODULE__, :start_link_supervised, [opts]},
       type: :worker,
       restart: :permanent,
       shutdown: 5_000
     }
   end
+
+  @doc false
+  @spec start_link_supervised(keyword()) :: GenServer.on_start()
+  def start_link_supervised(opts) when is_list(opts) do
+    previous_trap = Process.flag(:trap_exit, true)
+
+    try do
+      case start_link(opts) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        {:error, {:already_started, pid}} ->
+          {:error, {:already_started, pid}}
+
+        {:error, reason} ->
+          flush_supervised_start_exit()
+          name = supervised_name(opts)
+
+          GenServer.start_link(
+            __MODULE__,
+            {:disabled, {:journal_start_failed, bound_reason(reason)}},
+            name: name
+          )
+      end
+    after
+      Process.flag(:trap_exit, previous_trap)
+    end
+  end
+
+  def start_link_supervised(opts), do: start_link_supervised(List.wrap(opts))
 
   @doc """
   Reserve a unit intent for the exact `unit_name` + `execution_id` + known owner.
@@ -507,6 +536,21 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
       {:ok, _other} ->
         {:error, :invalid_apple_container_unit_journal_name}
+    end
+  end
+
+  defp supervised_name(opts) when is_list(opts) do
+    case start_name(opts) do
+      {:ok, name} -> name
+      {:error, _reason} -> __MODULE__
+    end
+  end
+
+  defp flush_supervised_start_exit do
+    receive do
+      {:EXIT, _pid, _reason} -> :ok
+    after
+      0 -> :ok
     end
   end
 
@@ -1096,10 +1140,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
     end
   end
 
-  defp owns_canonical_path_claim?(path) when is_binary(path) do
-    :global.whereis_name({__MODULE__, path}) == self()
-  end
-
   defp acquire_os_lock(canonical_path) when is_binary(canonical_path) do
     lock_path = lock_path_for(canonical_path)
     os_pid = System.pid()
@@ -1107,10 +1147,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
 
     with {:ok, expected_uid} <- expected_uid_from_parent(parent),
          :ok <- preflight_existing_lock(lock_path, expected_uid),
-         {:ok, executable} <- resolve_shlock_executable(),
-         {:ok, result} <- run_shlock(executable, lock_path, os_pid),
-         :ok <- interpret_shlock_result(result, lock_path, canonical_path, os_pid, expected_uid),
-         :ok <- finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid) do
+         :ok <- claim_or_create_lock(lock_path, canonical_path, os_pid, expected_uid) do
       :ok
     end
   end
@@ -1139,10 +1176,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
     end
   end
 
-  # Missing lock is fine (shlock will create). An existing target is admitted only
-  # when it is already a same-UID private regular single-link file with bounded
-  # valid decimal PID content and stable descriptor-bound identity. Symlinks,
-  # hardlinks, wrong owner/mode/type, and malformed content fail before shlock.
+  # Missing lock is fine (exclusive create will make it). An existing target is
+  # admitted only when it is already a same-UID private regular single-link file
+  # with bounded valid decimal PID content and stable descriptor-bound identity.
+  # Symlinks, hardlinks, wrong owner/mode/type, and malformed content fail
+  # before create or reclaim.
   defp preflight_existing_lock(lock_path, expected_uid)
        when is_binary(lock_path) and is_integer(expected_uid) do
     case File.lstat(lock_path, time: :posix) do
@@ -1163,102 +1201,153 @@ defmodule Arbor.Shell.AppleContainerUnitJournal do
     end
   end
 
-  defp resolve_shlock_executable do
-    case ExecutablePolicy.resolve(@shlock_path) do
-      {:ok, executable} ->
-        {:ok, executable}
+  defp claim_or_create_lock(lock_path, canonical_path, os_pid, expected_uid)
+       when is_binary(lock_path) and is_binary(canonical_path) and is_binary(os_pid) and
+              is_integer(expected_uid) do
+    case exclusive_create_lock(lock_path, os_pid) do
+      :ok ->
+        finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid)
 
-      {:error, :executable_policy_unavailable} ->
-        {:error, :journal_lock_executable_unavailable}
-
-      {:error, :executable_not_found} ->
-        {:error, :journal_lock_executable_unavailable}
+      {:error, :eexist} ->
+        adopt_or_reclaim_lock(lock_path, canonical_path, os_pid, expected_uid)
 
       {:error, reason} ->
-        {:error, {:journal_lock_executable_unavailable, reason}}
+        {:error, {:journal_lock_open_failed, reason}}
     end
   end
 
-  defp run_shlock(executable, lock_path, os_pid)
+  defp exclusive_create_lock(lock_path, os_pid)
        when is_binary(lock_path) and is_binary(os_pid) do
-    Executor.run_bound(
-      executable,
-      ["-f", lock_path, "-p", os_pid],
-      clear_env: true,
-      env: %{},
-      cwd: "/",
-      timeout: @shlock_timeout_ms,
-      max_output_bytes: @shlock_max_output_bytes
+    case :file.open(String.to_charlist(lock_path), [:write, :exclusive, :raw, :binary]) do
+      {:ok, io} ->
+        try do
+          case :file.write(io, os_pid <> "\n") do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              _ = File.rm(lock_path)
+              {:error, reason}
+          end
+        after
+          _ = :file.close(io)
+        end
+
+      {:error, :eexist} ->
+        {:error, :eexist}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp adopt_or_reclaim_lock(lock_path, canonical_path, os_pid, expected_uid) do
+    case read_lock_pid_descriptor_bound(lock_path, expected_uid) do
+      {:ok, ^os_pid} ->
+        # Same BEAM OS PID: leftover from a previous child in this VM. The
+        # in-BEAM path claim already serialized this start. Adopt.
+        finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid)
+
+      {:ok, other_pid} ->
+        case os_pid_liveness(other_pid) do
+          :alive ->
+            {:error, :journal_lock_held}
+
+          :dead ->
+            reclaim_stale_lock(lock_path, canonical_path, os_pid, expected_uid, other_pid)
+
+          :unknown ->
+            {:error, :journal_lock_held}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reclaim_stale_lock(lock_path, canonical_path, os_pid, expected_uid, stale_pid) do
+    case read_lock_pid_descriptor_bound(lock_path, expected_uid) do
+      {:ok, ^stale_pid} ->
+        case File.rm(lock_path) do
+          :ok ->
+            case exclusive_create_lock(lock_path, os_pid) do
+              :ok ->
+                finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid)
+
+              {:error, :eexist} ->
+                {:error, :journal_lock_held}
+
+              {:error, reason} ->
+                {:error, {:journal_lock_open_failed, reason}}
+            end
+
+          {:error, _reason} ->
+            {:error, :journal_lock_held}
+        end
+
+      {:ok, ^os_pid} ->
+        finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid)
+
+      {:ok, _other} ->
+        {:error, :journal_lock_held}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp os_pid_liveness(pid) when is_binary(pid) do
+    case Integer.parse(pid) do
+      {n, ""} when n > 1 ->
+        if proc_fs_present?() do
+          if linux_proc_alive?(n), do: :alive, else: :dead
+        else
+          unix_kill0_liveness(n)
+        end
+
+      _other ->
+        :unknown
+    end
+  end
+
+  defp proc_fs_present? do
+    match?({:ok, %File.Stat{type: :directory}}, File.lstat("/proc", time: :posix))
+  end
+
+  defp linux_proc_alive?(n) when is_integer(n) do
+    match?(
+      {:ok, %File.Stat{type: :directory}},
+      File.lstat("/proc/" <> Integer.to_string(n), time: :posix)
     )
   end
 
-  # Only an exact clean exit 0 may acquire. Exact clean exit 1 may adopt only
-  # when this process owns the path claim and the lock names this OS PID.
-  # Every Executor containment anomaly (timeout, cancel, output limit, kill,
-  # containment failure) fails closed — never treat a polluted result as success.
-  defp interpret_shlock_result(result, lock_path, canonical_path, os_pid, expected_uid)
-       when is_map(result) and is_binary(lock_path) and is_binary(canonical_path) and
-              is_binary(os_pid) and is_integer(expected_uid) do
-    cond do
-      executor_result_unclean?(result) ->
-        interpret_unclean_shlock_result(result)
-
-      Map.get(result, :exit_code) == 0 ->
-        :ok
-
-      Map.get(result, :exit_code) == 1 ->
-        adopt_existing_lock(lock_path, canonical_path, os_pid, expected_uid)
-
-      true ->
-        {:error, :journal_lock_failed}
-    end
-  end
-
-  defp interpret_shlock_result(_result, _lock_path, _canonical_path, _os_pid, _expected_uid),
-    do: {:error, :journal_lock_failed}
-
-  defp adopt_existing_lock(lock_path, canonical_path, os_pid, expected_uid) do
-    if owns_canonical_path_claim?(canonical_path) do
-      case read_lock_pid_descriptor_bound(lock_path, expected_uid) do
-        {:ok, ^os_pid} ->
-          :ok
-
-        {:ok, _other_pid} ->
-          {:error, :journal_lock_held}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+  defp unix_kill0_liveness(n) when is_integer(n) and n > 1 do
+    with {:ok, identity} <- TrustedPath.pin_root_owned_regular_file(@kill_path, executable: true),
+         :ok <- TrustedPath.verify_pinned(identity) do
+      probe_kill0(identity.path, n)
     else
-      {:error, :journal_lock_held}
+      _other -> :unknown
     end
   end
 
-  defp executor_result_unclean?(result) when is_map(result) do
-    flag_true?(result, :timed_out) or flag_true?(result, :killed) or
-      flag_true?(result, :output_truncated) or flag_true?(result, :output_limit_exceeded) or
-      flag_true?(result, :cancelled) or flag_true?(result, :containment_failure)
-  end
+  defp probe_kill0(path, n) when is_binary(path) and is_integer(n) do
+    port =
+      Port.open({:spawn_executable, String.to_charlist(path)}, [
+        :exit_status,
+        :nouse_stdio,
+        {:args, [~c"-0", Integer.to_charlist(n)]}
+      ])
 
-  defp flag_true?(map, key), do: Map.get(map, key) == true
-
-  defp interpret_unclean_shlock_result(result) when is_map(result) do
-    cond do
-      flag_true?(result, :timed_out) ->
-        {:error, :journal_lock_timeout}
-
-      flag_true?(result, :cancelled) ->
-        {:error, :journal_lock_cancelled}
-
-      flag_true?(result, :output_limit_exceeded) or flag_true?(result, :output_truncated) ->
-        {:error, :journal_lock_output_limit}
-
-      flag_true?(result, :containment_failure) ->
-        {:error, :journal_lock_containment_failure}
-
-      true ->
-        {:error, :journal_lock_failed}
+    receive do
+      {^port, {:exit_status, 0}} -> :alive
+      {^port, {:exit_status, _status}} -> :dead
+    after
+      @kill0_timeout_ms ->
+        _ = Port.close(port)
+        :unknown
     end
+  rescue
+    _error -> :unknown
   end
 
   defp finalize_lock_file(lock_path, canonical_path, os_pid, expected_uid)

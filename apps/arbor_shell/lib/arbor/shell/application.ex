@@ -119,7 +119,8 @@ defmodule Arbor.Shell.Application do
       {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one},
       # Durable unit-intent journal outlives unit-supervisor and coordinator
       # failures so recovery/admission can re-read authoritative intent. Missing
-      # journal config starts a live disabled owner (Shell still boots).
+      # journal config or a start failure starts a live disabled owner so a
+      # validation-runtime problem cannot take Shell (chat/MCP) down.
       Arbor.Shell.AppleContainerUnitJournal,
       # Recovery composite (worker DS + reconciler). Loss turns over later unit
       # owners before a replacement startup sweep. shutdown: :infinity.

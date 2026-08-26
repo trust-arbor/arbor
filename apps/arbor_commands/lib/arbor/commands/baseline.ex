@@ -94,7 +94,9 @@ defmodule Arbor.Commands.Baseline do
          {:ok, bytes} <- read_regular_file(source),
          {:ok, document} <- decode_json(bytes),
          :ok <- ActivateCore.require_oci_document(document),
-         :ok <- write_mode_0400(dest, bytes) do
+         :ok <- write_mode_0400(dest, bytes),
+         {:ok, canonical_dest} <- Shell.canonicalize_absolute_path(dest),
+         :ok <- admit_activated_document(canonical_dest) do
       {:ok,
        %{
          "path" => dest,
@@ -546,6 +548,22 @@ defmodule Arbor.Commands.Baseline do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp admit_activated_document(path) when is_binary(path) do
+    case Shell.admit_operator_owned_runtime_config(path) do
+      {:ok, %{kind: :oci}} ->
+        :ok
+
+      {:ok, _other} ->
+        {:error, :apple_only_policy_key}
+
+      {:error, :config_file_untrusted} ->
+        {:error, {:validation_runtime_untrusted, :config_file_untrusted}}
+
+      {:error, reason} ->
+        {:error, {:validation_runtime_untrusted, reason}}
+    end
   end
 
   defp write_mode_0400(path, bytes) when is_binary(path) and is_binary(bytes) do

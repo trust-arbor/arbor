@@ -70,15 +70,7 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     File.mkdir_p!(baseline_dir)
     File.chmod!(baseline_dir, 0o700)
 
-    document = %{
-      "runtime" => "oci",
-      "linux_dependency_baseline" => %{
-        "source_root" => Path.join(baseline_dir, "tree"),
-        "manifest_path" => Path.join(baseline_dir, "manifest.json")
-      },
-      "image_policy" => %{"image" => "docker.io/arbor/validation@" <> @index},
-      "unit_journal_path" => Path.join(root, "oci-unit-journal.json")
-    }
+    document = valid_oci_document(root, baseline_dir)
 
     source = Path.join(baseline_dir, "baseline.json")
     File.write!(source, Jason.encode!(document))
@@ -100,6 +92,30 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert {:ok, %File.Stat{type: :regular} = stat} = File.lstat(dest)
     assert (stat.mode &&& 0o777) == 0o400
     refute_received {:network, _}
+  end
+
+  test "activate refuses a group-writable ancestor with a pin remedy", %{root: root} do
+    digest = @hex64
+    baseline_dir = Path.join([root, "baseline", digest])
+    File.mkdir_p!(baseline_dir)
+    File.chmod!(baseline_dir, 0o700)
+    source = Path.join(baseline_dir, "baseline.json")
+    File.write!(source, Jason.encode!(valid_oci_document(root, baseline_dir)))
+    File.chmod!(source, 0o400)
+
+    dest_dir = Path.join(root, "config")
+    dest = Path.join(dest_dir, "validation-runtime.json")
+    File.chmod!(root, 0o775)
+
+    assert {:error, {:validation_runtime_untrusted, :config_file_untrusted}} =
+             Activate.execute([digest],
+               arbor_home: root,
+               config_path: dest,
+               network: fn _ -> flunk("activate must not fetch") end
+             )
+
+    assert File.exists?(dest)
+    File.chmod!(root, 0o700)
   end
 
   test "build does not overwrite active validation-runtime.json", %{root: root} do
@@ -172,6 +188,27 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert report["image_reachable"] == true
     assert report["mix_lock_matches_head"] == true
     assert report["guest_platform"] == "linux/amd64"
+  end
+
+  defp valid_oci_document(root, baseline_dir) do
+    %{
+      "runtime" => "oci",
+      "linux_dependency_baseline" => %{
+        "source_root" => Path.join(baseline_dir, "tree"),
+        "manifest_path" => Path.join(baseline_dir, "manifest.json")
+      },
+      "image_policy" => %{
+        "image" => "docker.io/arbor/validation@" <> @index,
+        "manifest_digest" => @manifest,
+        "env" => ["MIX_HOME=/usr/local/.mix"],
+        "labels" => %{"org.arbor.validation.schema" => "1"},
+        "mix_lock_digest" => String.duplicate("e", 64),
+        "baseline_tree_digest" => @hex64,
+        "toolchain" => %{"erlang" => "28.4.1", "elixir" => "1.19.5-otp-28"},
+        "platform" => "linux/amd64"
+      },
+      "unit_journal_path" => Path.join(root, "oci-unit-journal.json")
+    }
   end
 
   defp fixture_repo!(root) do

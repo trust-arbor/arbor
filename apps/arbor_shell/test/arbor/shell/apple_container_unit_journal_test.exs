@@ -13,18 +13,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   alias Arbor.Shell.AppleContainerUnitJournal, as: Journal
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: Core
   alias Arbor.Shell.Config
-  alias Arbor.Shell.ExecutablePolicy
-  alias Arbor.Shell.ExecutablePolicy.Executable
-  alias Arbor.Shell.Executor
 
   @app :arbor_shell
   @config_key :apple_container_unit_journal_path
   @test_only_temp_cleanup_replace_key :__test_only_apple_container_unit_journal_temp_cleanup_replace
-  @shlock_path "/usr/bin/shlock"
-  @shlock_skip if(File.regular?(@shlock_path),
-                 do: false,
-                 else: "requires /usr/bin/shlock for active journal startup"
-               )
   @moduletag :fast
 
   @hex32_a String.duplicate("a", 32)
@@ -109,6 +101,74 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
     end
   end
 
+  describe "portable exclusive lock" do
+    @tag :security_regression
+    test "security regression: exclusive lock starts ready and is uid/pid-bound without shlock",
+         %{
+           path: path,
+           root: root
+         } do
+      name = unique_name()
+      assert {:ok, pid} = start_journal!(name, path)
+      assert Process.alive?(pid)
+
+      status = Journal.status(name)
+      assert status["status"] == "ready"
+
+      lock_path = journal_lock_path(path)
+
+      assert {:ok, %File.Stat{type: :regular, uid: lock_uid, links: 1} = stat} =
+               File.lstat(lock_path)
+
+      assert {:ok, %File.Stat{uid: parent_uid}} = File.lstat(root)
+      assert lock_uid == parent_uid
+      assert (stat.mode &&& 0o777) == 0o600
+      assert String.trim_trailing(File.read!(lock_path), "\n") == System.pid()
+
+      assert {:ok, token} = Journal.reserve(@unit_a, @exec_a, @owner_a, name)
+      assert Regex.match?(~r/\A[0-9a-f]{64}\z/, token)
+      GenServer.stop(pid)
+    end
+
+    @tag :security_regression
+    test "security regression: supervised start degrades a held lock so Shell still boots", %{
+      path: path
+    } do
+      port =
+        Port.open(
+          {:spawn_executable, ~c"/bin/sleep"},
+          [:binary, :exit_status, args: [~c"60"]]
+        )
+
+      foreign_pid =
+        case Port.info(port, :os_pid) do
+          {:os_pid, pid} when is_integer(pid) and pid > 0 -> Integer.to_string(pid)
+          other -> flunk("expected live Port os_pid, got: #{inspect(other)}")
+        end
+
+      lock_path = journal_lock_path(path)
+
+      on_exit(fn ->
+        cleanup_foreign_os_pid(port, foreign_pid)
+        _ = File.rm(lock_path)
+      end)
+
+      write_lock_pid!(lock_path, foreign_pid)
+      name = unique_name()
+
+      assert {:ok, pid} = Journal.start_link_supervised(name: name, path: path)
+      assert Process.alive?(pid)
+      status = Journal.status(name)
+      assert status["status"] == "disabled"
+      assert status["reason"] =~ "journal_lock_held"
+
+      assert {:error, :apple_container_unit_journal_disabled} =
+               Journal.reserve(@unit_a, @exec_a, @owner_a, name)
+
+      GenServer.stop(pid)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Path validation (config + start seams)
   # ---------------------------------------------------------------------------
@@ -150,9 +210,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "reserve complete and restart" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "persists exact snapshot on disk before replying the token", %{path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
@@ -257,9 +314,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "reserve_record" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "returned record exactly matches recovery_entries and persisted restart state", %{
       path: path
     } do
@@ -427,8 +481,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       refute File.exists?(path)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     test "security regression: non-private existing target fails startup without replacement", %{
       path: path
     } do
@@ -442,8 +494,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert File.read!(path) == before
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: hardlinked existing target fails startup without replacement", %{
       root: root,
@@ -466,8 +516,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert after_stat.links == 2
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     test "security regression: symlink journal target fails startup without following or replacing",
          %{
            root: root,
@@ -486,8 +534,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       assert {:ok, %File.Stat{type: :symlink}} = File.lstat(path)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     test "security regression: corrupt journal fails startup without replacement or delete", %{
       path: path
     } do
@@ -513,8 +559,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
                start_link_result(name: unique_name(), path: path)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     test "security regression: oversize journal fails startup without truncation", %{path: path} do
       # Just over the 2 MiB schema-v2 snapshot ceiling.
       oversize = String.duplicate("x", 2_097_153)
@@ -536,8 +580,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
                start_link_result(name: name, path: path)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     test "security regression: deterministic persist failure preserves prior snapshot and poisons",
          %{
            root: root,
@@ -579,8 +621,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       GenServer.stop(pid)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: parent replacement after start fails persist and poisons", %{
       root: root,
@@ -624,8 +664,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       _ = File.rm_rf(moved)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: target replacement after start fails persist and poisons", %{
       path: path
@@ -656,8 +694,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       GenServer.stop(pid)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: expected-present target disappearance fails persist and poisons",
          %{
@@ -685,8 +721,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       GenServer.stop(pid)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: reserve/complete/restart refreshes bound target identity", %{
       path: path
@@ -726,8 +760,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       GenServer.stop(pid2)
     end
 
-    @tag :requires_shlock
-    @tag skip: @shlock_skip
     @tag :security_regression
     test "security regression: loaded descriptor and path identity are stable", %{path: path} do
       write_private_file!(path, empty_snapshot_json())
@@ -763,8 +795,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "security regression atomic publication slice B" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
     @describetag :security_regression
 
     test "security regression: same-size in-place target mutation is detected before persist", %{
@@ -1077,9 +1107,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   end
 
   describe "security regression ordered JSON decode" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "security regression: duplicate root keys fail without replacement", %{path: path} do
       corrupt = ~s({"schema_version":1,"generation":0,"generation":99,"active":[]}\n)
       write_private_file!(path, corrupt)
@@ -1144,9 +1171,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "capacity" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "loads a full 1,024 journal and rejects the next reserve without mutation", %{path: path} do
       max = Core.limits().max_active
       assert max == 1_024
@@ -1195,9 +1219,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "owner binding and inventory" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "incomplete owner is rejected before unit creation", %{path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
@@ -1334,9 +1355,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "redaction" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "status and format_status never leak tokens or path", %{path: path} do
       name = unique_name()
       assert {:ok, pid} = start_journal!(name, path)
@@ -1380,9 +1398,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "config path production start" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     test "uses Config path when no explicit path opt is provided", %{path: path} do
       Application.put_env(@app, @config_key, path)
       name = unique_name()
@@ -1401,8 +1416,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "security regression startup stale-temp cleanup" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
     @describetag :security_regression
 
     test "security regression: valid stale temp is removed before existing journal load", %{
@@ -1607,20 +1620,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
         _ = File.rm(lock_path)
       end)
 
-      assert {:ok, %Executable{} = shlock} = ExecutablePolicy.resolve(@shlock_path)
-
-      assert {:ok, %{exit_code: 0, timed_out: false}} =
-               Executor.run_bound(
-                 shlock,
-                 ["-f", lock_path, "-p", foreign_pid],
-                 clear_env: true,
-                 env: %{},
-                 cwd: "/",
-                 timeout: 5_000,
-                 max_output_bytes: 256
-               )
-
-      assert :ok = File.chmod(lock_path, 0o600)
+      write_lock_pid!(lock_path, foreign_pid)
 
       stale_path =
         Path.join(root, reserved_temp_name(String.duplicate("8", 32)))
@@ -1713,12 +1713,12 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Pre-shlock lock target rejection (no shlock mutation required)
+  # Pre-create lock target rejection (no lock mutation required)
   # ---------------------------------------------------------------------------
 
-  describe "security regression pre-shlock lock target rejection" do
+  describe "security regression pre-create lock target rejection" do
     @tag :security_regression
-    test "security regression: malformed lock content is rejected without shlock mutation", %{
+    test "security regression: malformed lock content is rejected without lock mutation", %{
       path: path
     } do
       lock_path = journal_lock_path(path)
@@ -1801,9 +1801,6 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   # ---------------------------------------------------------------------------
 
   describe "security regression cross-BEAM singleton lock" do
-    @describetag :requires_shlock
-    @describetag skip: @shlock_skip
-
     @tag :security_regression
     test "security regression: second same-BEAM journal owner for same canonical path is denied",
          %{
@@ -1868,7 +1865,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
            path: path
          } do
       # Direct Port-owned harmless process supplies a live foreign OS PID.
-      # Production lock path stays shell-free via pinned shlock + Executor.
+      # Production lock path is exclusive-create plus uid/pid descriptor checks.
       port =
         Port.open(
           {:spawn_executable, ~c"/bin/sleep"},
@@ -1893,21 +1890,8 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       end)
 
       assert foreign_pid != System.pid()
-      assert {:ok, %Executable{} = shlock} = ExecutablePolicy.resolve(@shlock_path)
+      write_lock_pid!(lock_path, foreign_pid)
 
-      assert {:ok, %{exit_code: 0, timed_out: false}} =
-               Executor.run_bound(
-                 shlock,
-                 ["-f", lock_path, "-p", foreign_pid],
-                 clear_env: true,
-                 env: %{},
-                 cwd: "/",
-                 timeout: 5_000,
-                 max_output_bytes: 256
-               )
-
-      # Preflight requires private same-UID shape before interpreting live hold.
-      assert :ok = File.chmod(lock_path, 0o600)
       before = File.read!(lock_path)
       assert String.trim_trailing(before, "\n") == foreign_pid
       before_stat = File.lstat!(lock_path)
@@ -1926,7 +1910,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
       root: root,
       path: path
     } do
-      # --- Stale foreign PID reclamation (when the platform shlock reclaims) ---
+      # --- Stale foreign PID reclamation (when the liveness probe observes death) ---
       port =
         Port.open(
           {:spawn_executable, ~c"/bin/sleep"},
@@ -1946,23 +1930,10 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
         _ = File.rm(lock_path)
       end)
 
-      assert {:ok, %Executable{} = shlock} = ExecutablePolicy.resolve(@shlock_path)
-
-      assert {:ok, %{exit_code: 0, timed_out: false}} =
-               Executor.run_bound(
-                 shlock,
-                 ["-f", lock_path, "-p", foreign_pid],
-                 clear_env: true,
-                 env: %{},
-                 cwd: "/",
-                 timeout: 5_000,
-                 max_output_bytes: 256
-               )
-
-      assert :ok = File.chmod(lock_path, 0o600)
+      write_lock_pid!(lock_path, foreign_pid)
 
       # Port.close alone is not a process-group kill; SIGKILL the foreign OS PID
-      # so shlock's kill(0) probe observes death, then wait for mtime stability.
+      # so the exclusive-lock liveness probe observes death.
       cleanup_foreign_os_pid(port, foreign_pid)
       assert wait_os_pid_dead(foreign_pid, 50)
       Process.sleep(1_100)
@@ -1977,7 +1948,7 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
           GenServer.stop(pid)
 
         {:error, {:apple_container_unit_journal_start_failed, :journal_lock_held}} ->
-          # Platform shlock may refuse reclaim under mtime races on some volumes;
+          # Liveness probe may refuse reclaim under mtime races on some volumes;
           # the required adopt/same-BEAM/foreign-live cases are covered elsewhere.
           _ = File.rm(lock_path)
 
@@ -2012,6 +1983,11 @@ defmodule Arbor.Shell.AppleContainerUnitJournalTest do
   defp start_journal!(name, path) do
     assert {:ok, _} = Config.validate_unit_journal_path(path)
     Journal.start_link(name: name, path: path)
+  end
+
+  defp write_lock_pid!(lock_path, pid) when is_binary(lock_path) and is_binary(pid) do
+    File.write!(lock_path, pid <> "\n")
+    assert :ok = File.chmod(lock_path, 0o600)
   end
 
   defp journal_lock_path(path) when is_binary(path) do

@@ -206,6 +206,7 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
     assert loader_branch =~ "load_operator_owned"
     assert loader_branch =~ "validation_runtime_config_path"
     assert loader_branch =~ "validation_runtime_pin_family"
+    assert loader_branch =~ "reason="
     assert loader_branch =~ "if config_env() != :test do"
     refute loader_branch =~ "validation_runtime_kind"
     refute loader_branch =~ "Arbor.Orchestrator"

@@ -46,6 +46,7 @@ defmodule Arbor.Shell.AppleContainerUnitApplicationSupervisionTest do
       coord_spec = Supervisor.child_spec(Enum.at(children, 14), [])
 
       assert match?(%{id: Journal, restart: :permanent}, journal_spec)
+      assert match?({Journal, :start_link_supervised, [_opts]}, journal_spec.start)
       assert match?(%{id: RecoverySupervisor, shutdown: :infinity}, recovery_spec)
       assert match?(%{id: UnitSupervisor, shutdown: :infinity}, unit_spec)
       assert match?(%{id: Coordinator, shutdown: :infinity}, coord_spec)

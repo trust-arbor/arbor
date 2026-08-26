@@ -71,6 +71,14 @@ defmodule Mix.Tasks.Arbor.Baseline.Activate do
     """
   end
 
+  defp format_error({:validation_runtime_untrusted, :config_file_untrusted}) do
+    "operator-owned pin rejected the document; chmod go-w on each ancestor directory of the config path"
+  end
+
+  defp format_error({:validation_runtime_untrusted, reason}) do
+    "operator-owned pin rejected the document: #{inspect(reason)}"
+  end
+
   defp format_error(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_error(reason), do: inspect(reason)
 end

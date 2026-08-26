@@ -73,6 +73,8 @@ defmodule Arbor.Shell do
     SpawnCapableArgvLimits,
     SpawnCapableTimeout,
     TrustedBuild,
+    RuntimeConfigLoader,
+    TrustedPath,
     ValidationRuntime
   }
 
@@ -1022,6 +1024,24 @@ defmodule Arbor.Shell do
   def validation_runtime_probe do
     ValidationRuntime.probe()
   end
+
+  @doc """
+  Re-pin an operator-owned validation-runtime document through TrustedPath.
+
+  Used by `mix arbor.baseline.activate` so a group-writable ancestor is
+  refused with the same pin the next boot will run.
+  """
+  @spec admit_operator_owned_runtime_config(term()) ::
+          {:ok, map()} | {:error, atom() | tuple()}
+  def admit_operator_owned_runtime_config(path) when is_binary(path) do
+    RuntimeConfigLoader.load_operator_owned(path)
+  end
+
+  def admit_operator_owned_runtime_config(_path), do: {:error, :config_locator_malformed}
+
+  @doc false
+  @spec canonicalize_absolute_path(term()) :: {:ok, String.t()} | {:error, atom()}
+  def canonicalize_absolute_path(path), do: TrustedPath.canonicalize_absolute(path)
 
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this
   # string is never parsed or passed to a process.

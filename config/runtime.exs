@@ -184,12 +184,12 @@ if config_env() != :test do
             {:ok, values} ->
               apply_validation_runtime.(validation_path, :root_owned, values)
 
-            {:error, _reason} ->
-              raise "invalid ARBOR_VALIDATION_RUNTIME_CONFIG_PATH configuration"
+            {:error, reason} ->
+              raise "invalid ARBOR_VALIDATION_RUNTIME_CONFIG_PATH configuration path=#{inspect(validation_path)} reason=#{inspect(reason)}"
           end
 
-        {:error, _reason} ->
-          raise "invalid ARBOR_VALIDATION_RUNTIME_CONFIG_PATH configuration"
+        {:error, reason} ->
+          raise "invalid ARBOR_VALIDATION_RUNTIME_CONFIG_PATH configuration path=#{inspect(validation_path)} reason=#{inspect(reason)}"
       end
 
     is_binary(apple_path) and apple_path != "" ->
@@ -197,8 +197,8 @@ if config_env() != :test do
         {:ok, values} ->
           apply_validation_runtime.(apple_path, :root_owned, values)
 
-        {:error, _reason} ->
-          raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration"
+        {:error, reason} ->
+          raise "invalid ARBOR_APPLE_CONTAINER_CONFIG_PATH configuration path=#{inspect(apple_path)} reason=#{inspect(reason)}"
       end
 
     true ->
@@ -211,18 +211,18 @@ if config_env() != :test do
             {:ok, values} ->
               apply_validation_runtime.(default_path, :operator_owned, values)
 
-            {:error, _reason} ->
-              raise "invalid validation-runtime configuration"
+            {:error, reason} ->
+              raise "invalid validation-runtime configuration path=#{inspect(default_path)} reason=#{inspect(reason)}"
           end
 
         {:error, :enoent} ->
           :ok
 
         {:ok, _stat} ->
-          raise "invalid validation-runtime configuration"
+          raise "invalid validation-runtime configuration path=#{inspect(default_path)} reason=:not_regular"
 
-        {:error, _reason} ->
-          raise "invalid validation-runtime configuration"
+        {:error, reason} ->
+          raise "invalid validation-runtime configuration path=#{inspect(default_path)} reason=#{inspect(reason)}"
       end
   end
 end
