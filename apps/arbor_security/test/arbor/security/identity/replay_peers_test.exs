@@ -130,7 +130,7 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
 
   defp start_foreign_peer(prefix) do
     peer_name = String.to_atom("#{prefix}_#{System.unique_integer([:positive])}")
-    {:ok, peer, peer_node} = :peer.start_link(%{name: peer_name})
+    {:ok, peer, peer_node} = start_peer(peer_name)
     {peer, peer_node}
   end
 
@@ -198,9 +198,42 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
     if Node.alive?() do
       false
     else
-      name = String.to_atom("replay_peers_test_#{System.unique_integer([:positive, :monotonic])}")
+      start_epmd!()
+
+      name =
+        String.to_atom(
+          "replay_peers_test_#{System.unique_integer([:positive, :monotonic])}@localhost"
+        )
+
       {:ok, _} = :net_kernel.start([name, :shortnames])
       true
+    end
+  end
+
+  defp start_epmd! do
+    epmd = System.find_executable("epmd") || flunk("epmd executable is unavailable")
+
+    case System.cmd(epmd, ["-daemon"], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, code} -> flunk("epmd failed to start (#{code}): #{output}")
+    end
+  end
+
+  defp start_peer(name) do
+    with {:ok, peer, peer_node} <-
+           :peer.start_link(%{
+             name: name,
+             host: ~c"localhost",
+             connection: :standard_io
+           }) do
+      case Node.connect(peer_node) do
+        true ->
+          {:ok, peer, peer_node}
+
+        other ->
+          safely_stop_peer(peer)
+          {:error, {:distribution_connection_failed, peer_node, other}}
+      end
     end
   end
 

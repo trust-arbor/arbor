@@ -138,7 +138,12 @@ defmodule Arbor.Security.DistributedPeerIntegrationTest do
       false
     else
       start_epmd!()
-      name = String.to_atom("sec_replay_test_#{System.unique_integer([:positive, :monotonic])}")
+
+      name =
+        String.to_atom(
+          "sec_replay_test_#{System.unique_integer([:positive, :monotonic])}@localhost"
+        )
+
       {:ok, _} = :net_kernel.start([name, :shortnames])
       true
     end

@@ -23,7 +23,7 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
   @peer_rpc_timeout_ms 2_000
   @peer_stop_timeout_ms 3_000
   @peer_name :c2b_peer
-  @distributed_name :c2b_test
+  @distributed_name :c2b_test@localhost
   @dead_stop_supervisor :c2b_dead_sup
 
   # ---------------------------------------------------------------------------
@@ -1527,7 +1527,7 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
   # control PID stays DISTINCT from peer_node and remote_pid throughout.
   defp with_remote_owner(agent_id, body) do
     ensure_distributed!()
-    {:ok, control, peer_node} = :peer.start_link(%{name: @peer_name})
+    {:ok, control, peer_node} = start_peer(@peer_name)
 
     # Setup is outside the body-capture try so remote_pid is bound before
     # teardown. A setup failure stops the peer (best-effort) then re-raises so
@@ -1742,10 +1742,38 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
 
   defp ensure_distributed! do
     unless Node.alive?() do
+      start_epmd!()
       {:ok, _} = :net_kernel.start([@distributed_name, :shortnames])
     end
 
     :ok
+  end
+
+  defp start_epmd! do
+    epmd = System.find_executable("epmd") || flunk("epmd executable is unavailable")
+
+    case System.cmd(epmd, ["-daemon"], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, code} -> flunk("epmd failed to start (#{code}): #{output}")
+    end
+  end
+
+  defp start_peer(name) do
+    with {:ok, control, peer_node} <-
+           :peer.start_link(%{
+             name: name,
+             host: ~c"localhost",
+             connection: :standard_io
+           }) do
+      case Node.connect(peer_node) do
+        true ->
+          {:ok, control, peer_node}
+
+        other ->
+          stop_peer_safely(control, peer_node)
+          {:error, {:distribution_connection_failed, peer_node, other}}
+      end
+    end
   end
 
   defp empty_owned, do: %{ids: MapSet.new(), pids: MapSet.new(), profiles: MapSet.new()}

@@ -948,10 +948,11 @@ tree).
 <!-- applied-learning: networkless-peer-tests-need-out-of-band-boot-control -->
 <a id="applied-learning-networkless-peer-tests-need-out-of-band-boot-control"></a>
 **Networkless `:peer` tests need out-of-band boot control.** Under a contained
-`--network none` profile, `:peer`'s default distribution-backed control handshake
-can time out against the container hostname even when local distributed nodes are
-otherwise viable. Start the peer with `connection: :standard_io` and
-`host: ~c"localhost"`, then explicitly require `Node.connect(peer_node) == true` so
-stdio controls only peer lifecycle while the test still proves real distribution.
-Starting EPMD alone is necessary but does not repair this handshake (found
-2026-08-26 during P1B-2A contained validation).
+`--network none` profile, start EPMD inside the isolated namespace and bind the
+initiating node explicitly as `name@localhost`; an implicit container hostname can
+make distribution fail before the peer starts. Start each peer with
+`connection: :standard_io` and `host: ~c"localhost"`, then explicitly require
+`Node.connect(peer_node) == true` so stdio controls only peer lifecycle while the
+test still proves real distribution. EPMD alone is necessary but does not repair
+the default distribution-backed peer-control handshake (found 2026-08-26 during
+P1B-2A contained validation).
