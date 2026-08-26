@@ -608,6 +608,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
+               Arbor.Shell.ValidationRuntime.Authority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
@@ -621,7 +622,8 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
       authority_child = Enum.at(children, 3)
       linux_child = Enum.at(children, 4)
       image_child = Enum.at(children, 5)
-      materializer_sup = Enum.at(children, 6)
+      runtime_child = Enum.at(children, 6)
+      materializer_sup = Enum.at(children, 7)
 
       assert authority_child ==
                {Arbor.Shell.AppleContainerControlPlaneAuthority, [boot_epoch: boot_epoch]}
@@ -631,6 +633,9 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
 
       assert image_child ==
                {Arbor.Shell.AppleContainerImagePolicyAuthority, [boot_epoch: boot_epoch]}
+
+      assert runtime_child ==
+               {Arbor.Shell.ValidationRuntime.Authority, [boot_epoch: boot_epoch]}
 
       assert match?(
                %{id: Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor},
@@ -796,6 +801,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
       )
 
+    {:ok, _runtime} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ValidationRuntime.Authority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -858,6 +869,12 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
         {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
       )
 
+    {:ok, _runtime} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ValidationRuntime.Authority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -914,6 +931,7 @@ defmodule Arbor.Shell.AppleContainerControlPlaneAuthorityTest do
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
           Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+          Arbor.Shell.ValidationRuntime.Authority,
           Arbor.Shell.AppleContainerImagePolicyAuthority,
           Arbor.Shell.LinuxDependencyBaselineAuthority,
           Authority

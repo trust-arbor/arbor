@@ -29,6 +29,11 @@ Supervisor.start_child(
 
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
+  {Arbor.Shell.ValidationRuntime.Authority, []}
+)
+
+Supervisor.start_child(
+  Arbor.Shell.Supervisor,
   Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec()
 )
 

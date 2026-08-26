@@ -7,8 +7,9 @@ defmodule Arbor.Shell do
   * **`execute/2`** — native host command execution with sandbox modes,
     timeout handling, and observability through signals.
   * **`execute_spawn_capable/3`** — trusted-system Mix tool execution inside an
-    admitted Apple Container unit (descendant-spawning workloads). Requires a
-    closed `:unit_owner` binding from source-owned validation lineage.
+    admitted validation-runtime unit (descendant-spawning workloads). Requires a
+    closed `:unit_owner` binding from source-owned validation lineage. The
+    boot-pinned runtime is Apple Container in this slice.
 
   ## Native execution (`execute/2`)
 
@@ -29,13 +30,13 @@ defmodule Arbor.Shell do
       {:ok, result} = Arbor.Shell.execute("ls", sandbox: :strict)
       {:ok, result} = Arbor.Shell.execute("git status", cwd: "/path/to/repo")
 
-  ## Apple Container execution (`execute_spawn_capable/3`)
+  ## Spawn-capable execution (`execute_spawn_capable/3`)
 
-  Runs a validated Mix wrapper path inside a journal-reserved Apple Container
-  unit. Callers must pass closed filesystem projections and a complete
-  `:unit_owner` map (`validation_resource_id`, `workspace_id`, `task_id`,
-  `principal_id`) obtained from the source-owned validation resource — never
-  from arbitrary action context.
+  Runs a validated Mix wrapper path inside a journal-reserved validation unit
+  (Apple Container in this slice). Callers must pass closed filesystem
+  projections and a complete `:unit_owner` map (`validation_resource_id`,
+  `workspace_id`, `task_id`, `principal_id`) obtained from the source-owned
+  validation resource — never from arbitrary action context.
 
   ## Unit inventory
 
@@ -56,7 +57,6 @@ defmodule Arbor.Shell do
   @behaviour Arbor.Contracts.API.Shell
 
   alias Arbor.Shell.{
-    AppleContainerExecutor,
     AppleContainerUnitDrainCoordinator,
     AppleContainerUnitJournal,
     CapShell,
@@ -72,7 +72,8 @@ defmodule Arbor.Shell do
     Sandbox,
     SpawnCapableArgvLimits,
     SpawnCapableTimeout,
-    TrustedBuild
+    TrustedBuild,
+    ValidationRuntime
   }
 
   alias Arbor.Signals
@@ -466,8 +467,8 @@ defmodule Arbor.Shell do
   timeout, cancellation, launcher failure, or owner loss becomes terminal.
 
   The native backend is deliberately childless. Commands that need descendants
-  must use `execute_spawn_capable/3`, which routes through the internal Apple
-  Container unit executor with pure preflight, admission, ownership, and
+  must use `execute_spawn_capable/3`, which routes through the boot-pinned
+  validation runtime with pure preflight, admission, ownership, and
   positive settlement. Repository policy, config auditing, and workspace
   authorization belong in the higher caller, not in this Shell contract.
 
@@ -603,13 +604,13 @@ defmodule Arbor.Shell do
   defp multi_call_safe_argv0?(_name), do: false
 
   @doc """
-  Execute a descendant-spawning Mix tool via the internal Apple Container unit.
+  Execute a descendant-spawning Mix tool via the boot-pinned validation runtime.
 
-  Thin public facade over `Arbor.Shell.AppleContainerExecutor.execute/3`.
-  Production dependencies (prober, runtime pin, registry, unit worker, drain
-  coordinator) are hardcoded inside that adapter — Application env cannot
-  select a backend, inject modules, or re-enable the retired
-  `:spawn_backend` / `:spawn_executable_manifest` configuration.
+  Thin public facade over `Arbor.Shell.ValidationRuntime.execute/3`. Production
+  start pins Apple Container; that adapter hardcodes prober, runtime pin,
+  registry, unit worker, and drain coordinator. Application env cannot select
+  a backend, inject modules, or re-enable the retired `:spawn_backend` /
+  `:spawn_executable_manifest` configuration.
 
   Pure preflight runs first: relative tool names (for example `"mix"`),
   malformed opts, and other request shape errors fail closed before admission,
@@ -650,7 +651,7 @@ defmodule Arbor.Shell do
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
   def execute_spawn_capable(tool_name, args, opts \\ []) do
-    AppleContainerExecutor.execute(tool_name, args, opts)
+    ValidationRuntime.execute(tool_name, args, opts)
   end
 
   @doc """
@@ -977,6 +978,17 @@ defmodule Arbor.Shell do
   @spec apple_container_control_plane_status() :: map()
   def apple_container_control_plane_status do
     Arbor.Shell.AppleContainerControlPlaneAuthority.public_status()
+  end
+
+  @doc """
+  Redacted public status of the boot-pinned validation runtime.
+
+  Returns an ordinary JSON-clean map with state/reason/driver labels only.
+  Never exposes the implementation module.
+  """
+  @spec validation_runtime_status() :: map()
+  def validation_runtime_status do
+    ValidationRuntime.public_status()
   end
 
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this

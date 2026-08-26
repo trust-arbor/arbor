@@ -48,6 +48,19 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     defp probe, do: Application.fetch_env!(:arbor_shell, :legacy_spawn_regression_probe)
   end
 
+  defmodule EnvSelectedRuntime do
+    def execute(_tool, _args, _opts) do
+      send(regression_probe().test_pid, :env_runtime_execute)
+      {:error, :env_selected_runtime_executed}
+    end
+
+    def probe, do: {:error, :env_selected_runtime_probe}
+    def public_status, do: %{"state" => "injected"}
+
+    defp regression_probe,
+      do: Application.fetch_env!(:arbor_shell, :legacy_spawn_regression_probe)
+  end
+
   defmodule NoisyLegacyBackend do
     @process_name Arbor.Shell.LegacySpawnRegressionProcess
 
@@ -156,6 +169,22 @@ defmodule Arbor.Shell.SpawnCapableSecurityRegressionTest do
     # available?/1 — proves Application-configured backend is ignored.
     assert yielded == {:ok, @relative_preflight}
     refute_receive :legacy_admission_called, 50
+    refute_receive :legacy_execute_called, 50
+  end
+
+  test "security regression: Application env cannot select a validation runtime" do
+    root = fixture_root("validation-runtime-env")
+    on_exit(fn -> File.rm_rf!(root) end)
+    configure_legacy_backend!(EnvSelectedRuntime, root)
+
+    previous = Application.get_env(:arbor_shell, :validation_runtime)
+    Application.put_env(:arbor_shell, :validation_runtime, EnvSelectedRuntime)
+    on_exit(fn -> restore(:validation_runtime, previous) end)
+
+    assert @relative_preflight ==
+             Shell.execute_spawn_capable("mix", ["compile"], cwd: root)
+
+    refute_receive :env_runtime_execute, 50
     refute_receive :legacy_execute_called, 50
   end
 

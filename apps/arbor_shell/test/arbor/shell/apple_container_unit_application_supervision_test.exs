@@ -26,6 +26,7 @@ defmodule Arbor.Shell.AppleContainerUnitApplicationSupervisionTest do
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
+               Arbor.Shell.ValidationRuntime.Authority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
@@ -39,10 +40,10 @@ defmodule Arbor.Shell.AppleContainerUnitApplicationSupervisionTest do
       assert Arbor.Shell.Application.supervisor_options() ==
                [strategy: :rest_for_one, name: Arbor.Shell.Supervisor]
 
-      journal_spec = Supervisor.child_spec(Enum.at(children, 10), [])
-      recovery_spec = Supervisor.child_spec(Enum.at(children, 11), [])
-      unit_spec = Supervisor.child_spec(Enum.at(children, 12), [])
-      coord_spec = Supervisor.child_spec(Enum.at(children, 13), [])
+      journal_spec = Supervisor.child_spec(Enum.at(children, 11), [])
+      recovery_spec = Supervisor.child_spec(Enum.at(children, 12), [])
+      unit_spec = Supervisor.child_spec(Enum.at(children, 13), [])
+      coord_spec = Supervisor.child_spec(Enum.at(children, 14), [])
 
       assert match?(%{id: Journal, restart: :permanent}, journal_spec)
       assert match?(%{id: RecoverySupervisor, shutdown: :infinity}, recovery_spec)

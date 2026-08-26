@@ -115,7 +115,7 @@ Without it, live readiness stops at
 `dependency_baseline: dependency_baseline_unavailable` and nothing can be
 dispatched. **On Linux there is no validation runtime yet** — every step up to
 readiness works, readiness does not. A Podman/Docker-based runtime is planned
-(`.arbor/roadmap/0-inbox/linux-validation-runtime-for-the-software-factory.md`);
+(`.arbor/roadmap/3-in-progress/linux-validation-runtime-for-the-software-factory.md`);
 this section will be rewritten when it lands.
 
 ### Coding roots

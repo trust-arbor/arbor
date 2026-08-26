@@ -939,6 +939,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
                Arbor.Shell.AppleContainerControlPlaneAuthority,
                Arbor.Shell.LinuxDependencyBaselineAuthority,
                Arbor.Shell.AppleContainerImagePolicyAuthority,
+               Arbor.Shell.ValidationRuntime.Authority,
                Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
                Arbor.Shell.TrustedBuild.LeaseSupervisor,
                Arbor.Shell.ExecutionRegistry,
@@ -958,7 +959,10 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
       assert Enum.at(children, 5) ==
                {Arbor.Shell.AppleContainerImagePolicyAuthority, [boot_epoch: boot_epoch]}
 
-      materializer_sup = Enum.at(children, 6)
+      assert Enum.at(children, 6) ==
+               {Arbor.Shell.ValidationRuntime.Authority, [boot_epoch: boot_epoch]}
+
+      materializer_sup = Enum.at(children, 7)
 
       assert match?(
                %{id: Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor},
@@ -1119,6 +1123,12 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
         {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
       )
 
+    {:ok, _runtime} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ValidationRuntime.Authority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -1182,6 +1192,12 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
         {Arbor.Shell.AppleContainerImagePolicyAuthority, []}
       )
 
+    {:ok, _runtime} =
+      Supervisor.start_child(
+        Arbor.Shell.Supervisor,
+        {Arbor.Shell.ValidationRuntime.Authority, []}
+      )
+
     {:ok, _materializer} =
       Supervisor.start_child(
         Arbor.Shell.Supervisor,
@@ -1238,6 +1254,7 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthorityTest do
           Arbor.Shell.PortSessionSupervisor,
           Arbor.Shell.ExecutionRegistry,
           Arbor.Shell.LinuxDependencyBaselineMaterializerSupervisor,
+          Arbor.Shell.ValidationRuntime.Authority,
           Arbor.Shell.AppleContainerImagePolicyAuthority,
           Authority,
           Arbor.Shell.AppleContainerControlPlaneAuthority

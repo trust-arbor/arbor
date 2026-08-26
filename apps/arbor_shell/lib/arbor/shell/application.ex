@@ -107,6 +107,10 @@ defmodule Arbor.Shell.Application do
       # Baseline/control-plane turnover tears this down; its own turnover
       # tears down every later execution owner (materializer/registry/ports).
       {Arbor.Shell.AppleContainerImagePolicyAuthority, authority_opts},
+      # Pins the spawn-capable implementation (Apple Container in this slice)
+      # before any execution owner. Image-policy turnover tears this down;
+      # its own turnover tears down materializer/registry/ports/units.
+      {Arbor.Shell.ValidationRuntime.Authority, authority_opts},
       # Temporary materialization workers. Authority failure rest_for_one-stops
       # this supervisor (and every later execution owner) before replacement.
       Arbor.Shell.LinuxDependencyBaselineMaterializer.supervisor_child_spec(),
@@ -172,6 +176,7 @@ defmodule Arbor.Shell.Application do
     Arbor.Shell.AppleContainerControlPlaneAuthority.clear_boot_epoch(startup_epoch)
     Arbor.Shell.LinuxDependencyBaselineAuthority.clear_boot_epoch(startup_epoch)
     Arbor.Shell.AppleContainerImagePolicyAuthority.clear_boot_epoch(startup_epoch)
+    Arbor.Shell.ValidationRuntime.Authority.clear_boot_epoch(startup_epoch)
     Arbor.Shell.TrustedBuildToolchainAuthority.clear_boot_epoch(startup_epoch)
     :ok
   end
