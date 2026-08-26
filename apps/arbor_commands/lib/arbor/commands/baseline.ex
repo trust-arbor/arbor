@@ -279,7 +279,11 @@ defmodule Arbor.Commands.Baseline do
   defp fetch_deps(%{deps_path: deps_path, repo_root: repo_root}) do
     File.mkdir_p!(deps_path)
 
-    case System.cmd("./bin/mix", ["deps.get"],
+    # Absolute wrapper path: `System.cmd/3` hands the command to Erlang's
+    # `spawn_executable`, which does not resolve a relative `./bin/mix` against
+    # `:cd` — on Linux it fails with :enoent before the child starts (V7,
+    # 2026-08-26). Same absolute-wrapper contract as `Arbor.Actions.Mix`.
+    case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.get"],
            cd: repo_root,
            env: [{"MIX_DEPS_PATH", deps_path}],
            stderr_to_stdout: true
