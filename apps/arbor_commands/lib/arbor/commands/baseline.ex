@@ -433,6 +433,9 @@ defmodule Arbor.Commands.Baseline do
 
   defp with_image_id(_image, _image_id), do: {:error, :invalid_image_id}
 
+  defp bare_sha256("sha256:" <> hex), do: hex
+  defp bare_sha256(other), do: other
+
   defp inspect_built_image(iidfile) do
     with {:ok, contents} <- File.read(iidfile),
          "sha256:" <> hex = image_id when byte_size(hex) == 64 <- String.trim(contents),
@@ -454,7 +457,9 @@ defmodule Arbor.Commands.Baseline do
           not is_binary(digest) ->
             {:error, :image_inspect_failed}
 
-          inspect_id != image_id ->
+          # `--iidfile` writes `sha256:<hex>`; Podman's inspect `.Id` is the
+          # bare hex. Compare the hex (V7-8, 2026-08-26).
+          bare_sha256(inspect_id) != bare_sha256(image_id) ->
             {:error, :image_id_mismatch}
 
           true ->
