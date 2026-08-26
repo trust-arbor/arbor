@@ -50,6 +50,14 @@ registered in no settings file, firing on nothing since 2026-01.
 
 Do these together, never the producer alone:
 
+0. Give the scripts a credential. Since `15e3d4966` (2026-02-07) every `/api/*`
+   route on the gateway requires signed-request or JWT auth; an unauthenticated
+   `curl` gets `401 Missing API key`. This is exactly how the old
+   `arbor_bridge_authorize.sh` PreToolUse hook silently died — it read the 401
+   body as "no decision" and passed every tool call through for months
+   (found and removed 2026-08-26). Route these through `mix arbor.signer`-style
+   signing or a scoped API key, and make a non-2xx response *visible*.
+
 1. Build a consumer that subscribes to `claude.*` and does something a human
    can observe.
 2. Add `--max-time 2` to every `curl` here. They currently have no timeout; a

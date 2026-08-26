@@ -96,10 +96,12 @@ reckless nor permission-for-everything — the prompt's exact ask.
 
 Arbor's own gates are the model the harness should imitate, with two notes:
 
-- **Keep the deliberate fail-OPEN in `arbor_bridge_authorize.sh`** — it's
-  scoped to dev tooling, documented, and does NOT exist in the product's
-  in-process `authorize/4`. Correct as-is; the header already forbids
-  porting it to the product.
+- **`arbor_bridge_authorize.sh` is gone (2026-08-26).** Its documented
+  fail-open was meant for "gateway unreachable"; in practice it failed open on
+  every call from 2026-02-07 on, because `/api/*` gained auth and the hook
+  read the `401` body as "no decision". A gate that cannot tell "unreachable"
+  from "rejected" is not a gate. Harness tool authorization is the signed-MCP
+  / ACP path; the product's in-process `authorize/4` was never affected.
 - **Two forward gaps already tracked, not new:** (1) the granular-trust-
   policy migration must finish so "earned autonomy" is one authorization
   path, not tier remnants (1.0 gate #1); (2) the F4 **right to decline** —

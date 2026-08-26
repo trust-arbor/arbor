@@ -154,11 +154,11 @@ for the exact, current deps — this graph is a snapshot.
   - `can?/3` — boolean check for file access authorization
 - **Agent Security Gates**: Arbor (the product) fails **closed** — a missing grant or
   wrong trust mode doesn't error loudly; it denies or escalates to an `:ask` an
-  autonomous run can't answer (so the agent loops/times out). **One deliberate
-  exception, scoped to dev tooling:** the Claude Code harness bridge
-  (`.claude/hooks/arbor_bridge_authorize.sh`) fails *open* (`passthrough`) when the
-  gateway is unreachable, so local development isn't blocked — see the header comment
-  there. The in-process `authorize/4` path this rule governs is unaffected. Before
+  autonomous run can't answer (so the agent loops/times out). The coding harness
+  (Claude Code) is **not** gated by Arbor at all: the old `arbor_bridge_authorize.sh`
+  PreToolUse hook was removed 2026-08-26 after it had silently passed every tool
+  call through since the gateway gained `/api/*` auth (2026-02-07). Harness tool
+  authorization is the signed-MCP / ACP path, never an HTTP side door. Before
   wiring an agent to run tools,
   subscribe to signals, or egress, consult [`.claude/skills/agent-security-gates.md`](.claude/skills/agent-security-gates.md)
   — a living checklist of each gate (restricted `security.*` topics, shell's `:ask`
