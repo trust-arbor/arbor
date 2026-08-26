@@ -6,6 +6,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   decides the affected-app closure and formats JSON-clean validation evidence
   without filesystem, process, clock, or registry operations.
 
+  Multi-path test batches use deterministic timeout refinement. This module owns
+  the pure `test_execution` state and every refinement decision; the shell only
+  interprets the resulting effects.
+
   Test-stage admission is residual-budget based: a positive aggregate remainder
   starts the first exact batch under one shared deadline. Per-batch intensive
   ceilings are never multiplied as a predicted total duration. Capacity handoffs
@@ -165,7 +169,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           inventory_sha256: String.t()
         }
 
-  @typedoc "One completed (or budget-exhausted) batch test invocation record."
+  @typedoc """
+  Bounded evidence for a deterministically refined original batch.
+
+  `attempted_outputs_sha256` binds the ordered attempted-record projection:
+  original and attempt labels, sequence, file count, inventory digest, timeout
+  flag, exit code, and stdout/stderr digests.
+  """
   @type refinement_metadata :: %{
           strategy: String.t(),
           attempt_count: pos_integer(),
@@ -173,6 +183,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           attempted_outputs_sha256: String.t()
         }
 
+  @typedoc "One completed (or budget-exhausted) batch test invocation record."
   @type app_test_result :: %{
           required(:path) => String.t(),
           required(:passed) => boolean(),
@@ -1341,7 +1352,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     max_refined_children = if is_integer(current_count), do: 2 * (current_count - 1), else: -1
 
     canonical_refined_children =
-      length(state.attempt_records) + length(state.work_queue) - 1
+      canonical_refined_child_count(length(state.attempt_records) + length(state.work_queue))
 
     cond do
       not is_integer(current_count) or current_count <= 0 ->
@@ -1461,7 +1472,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
         if Map.get(refinement, :strategy) == "ordered_binary_split_v1" and
              is_integer(attempts) and attempts >= 3 and attempts <= max_attempts and
-             is_integer(children) and children == attempts - 1 and
+             is_integer(children) and children == canonical_refined_child_count(attempts) and
              rem(children, 2) == 0 and
              children <= max_refined_children and
              valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)) do
@@ -1476,6 +1487,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp completed_result_attempt_count(_batch, _result), do: :error
+
+  # The root is not a refined child, so its materialized tree has node_count - 1 children.
+  defp canonical_refined_child_count(materialized_node_count), do: materialized_node_count - 1
 
   defp valid_refined_origin_record?([record | _], original) do
     Map.get(record, :attempt_label) == Map.get(original, :label) and

@@ -93,7 +93,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   @doc false
-  @spec run_test_execution(String.t(), Core.test_execution(), integer(), map() | nil) :: map()
+  # Fail-closed test seam for Shell interpretation of Core execution state,
+  # including intentionally malformed state maps.
+  @spec run_test_execution(String.t(), map(), integer(), map() | nil) :: map()
   def run_test_execution(worktree_path, execution, deadline, resource \\ nil)
       when is_binary(worktree_path) and is_map(execution) and is_integer(deadline) and
              (is_map(resource) or is_nil(resource)) do
