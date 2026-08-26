@@ -76,10 +76,6 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
     defstruct [:token, :worker, :owner, :root_path, :root_device, :root_inode]
   end
 
-  defimpl Inspect, for: Lease do
-    def inspect(_lease, _opts), do: "#Arbor.Shell.LinuxDependencyBaselineLease<redacted>"
-  end
-
   # ---------------------------------------------------------------------------
   # Supervision
   # ---------------------------------------------------------------------------
@@ -2074,4 +2070,8 @@ defmodule Arbor.Shell.LinuxDependencyBaselineMaterializer do
   defp has_control_char_bytes?(<<>>), do: false
   defp has_control_char_bytes?(<<c, _rest::binary>>) when c < 32 or c == 127, do: true
   defp has_control_char_bytes?(<<_c, rest::binary>>), do: has_control_char_bytes?(rest)
+end
+
+defimpl Inspect, for: Arbor.Shell.LinuxDependencyBaselineMaterializer.Lease do
+  def inspect(_lease, _opts), do: "#Arbor.Shell.LinuxDependencyBaselineLease<redacted>"
 end
