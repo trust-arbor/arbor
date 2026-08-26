@@ -23,5 +23,21 @@ defmodule Arbor.Web.EndpointTest do
         """)
       end
     end
+
+    test "only code_reloader is compile-time endpoint configuration" do
+      require Endpoint
+
+      expanded =
+        quote do
+          Endpoint.__using__(otp_app: :arbor_dashboard)
+        end
+        |> Macro.expand_once(__ENV__)
+        |> Macro.to_string()
+
+      assert expanded =~
+               "Application.compile_env(:arbor_dashboard, [__MODULE__, :code_reloader], false)"
+
+      refute expanded =~ "Application.compile_env(:arbor_dashboard, __MODULE__)"
+    end
   end
 end

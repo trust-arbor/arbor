@@ -245,6 +245,10 @@ routing; mutation tests must remove or bypass each increment and fail before exe
 <a id="applied-learning-umbrella-runtime-config-must-not-execute-modules-from-an-optional-child-app"></a>
 **Umbrella runtime config must not execute modules from an optional child app.** `config/runtime.exs` is evaluated when a lower-level child runs independently, so calling `Arbor.Agent.Config` there made `arbor_security` fail before its tests because `arbor_agent` was not compiled or loaded. Keep runtime config data-only; validate an app-specific environment selector inside that app's startup boundary, where the module and its dependencies are guaranteed to exist (found 2026-07-11 running the isolated Security suite).
 
+<!-- applied-learning: compile-env-reads-must-target-the-exact-runtime-invariant -->
+<a id="applied-learning-compile-env-reads-must-target-the-exact-runtime-invariant"></a>
+**Compile-time config reads must target the exact invariant, not a runtime-overridable parent.** `Application.compile_env(app, Module)` records the whole keyword list; changing a sibling runtime value such as an endpoint port then fails Mix's compile-env validation even when the compile-time `:code_reloader` flag is unchanged. Use a nested path such as `[Module, :code_reloader]` with an explicit default whenever sibling values are configured in `runtime.exs` (found 2026-08-25 when `arbor.recompile` rejected a dashboard port override whose only semantic difference was keyword order).
+
 <!-- applied-learning: a-mismatched-reference-regression-does-not-cover-an-exactly-copied-internal-message -->
 <a id="applied-learning-a-mismatched-reference-regression-does-not-cover-an-exactly-copied-internal-message"></a>
 **A mismatched-reference regression does not cover an exactly copied internal message.** If a completion PID/ref/token is visible in GenServer state, an attacker can copy the entire expected tuple rather than guess one field. Regress the exact copied envelope and raw OTP protocol messages; bind completion to cryptorandom one-shot authority that is absent from observable owner state (found 2026-07-11 forging TaskStore approval-cleanup completion).

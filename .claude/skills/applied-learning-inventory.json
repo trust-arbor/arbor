@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 686,
+  "entry_count": 687,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8462,8 +8462,21 @@
       "source_incident": "found 2026-08-25 fixing deleted-test enumeration in cross-app validation",
       "always_loaded": false,
       "content_sha256": "e97c72dddb7bb10dee64741555c591d75617a61dd3955dd512fd3b1feb75165f"
+    },
+    {
+      "source_ordinal": 687,
+      "source_kind": "post-migration",
+      "slug": "compile-env-reads-must-target-the-exact-runtime-invariant",
+      "title": "Compile-time config reads must target the exact invariant, not a runtime-overridable parent.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-compile-env-reads-must-target-the-exact-runtime-invariant",
+      "source_date": "2026-08-25",
+      "source_incident": "found 2026-08-25 when arbor.recompile rejected a dashboard port override whose only semantic difference was keyword order",
+      "always_loaded": false,
+      "content_sha256": "a7146b866925f5877ee7b687f7e0ca1d4e673eacfdba4c3404a94c9818b2f541"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 225
+  "post_migration_entry_count": 226
 }

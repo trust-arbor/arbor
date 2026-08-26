@@ -62,7 +62,11 @@ defmodule Arbor.Web.Endpoint do
       )
 
       # Code reloading in dev (use config check to avoid macro hygiene issues)
-      if Application.compile_env(unquote(otp_app), __MODULE__)[:code_reloader] do
+      if Application.compile_env(
+           unquote(otp_app),
+           [__MODULE__, :code_reloader],
+           false
+         ) do
         plug(Phoenix.CodeReloader)
       end
 
