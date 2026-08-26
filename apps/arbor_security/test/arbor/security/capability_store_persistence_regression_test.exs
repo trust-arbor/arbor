@@ -88,7 +88,6 @@ end
 defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   use ExUnit.Case, async: false
 
-  @moduletag :fast
   @security_supervisor Arbor.Security.Supervisor
   @capability_store :arbor_security_capabilities
 
@@ -106,6 +105,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Security.Store.JSONFile
   alias Arbor.Security.TestBootstrap
 
+  @tag :fast
   test "security regression: replacement removes the superseded JSON record" do
     principal_id = "agent_capability_store_persistence_regression"
     resource_uri = "arbor://fs/read/capability-store-persistence-regression"
@@ -163,6 +163,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              AuthorityStore.authoritative_get(replacement.id, name: @capability_store)
   end
 
+  @tag :fast
   test "security regression: failed replacement compensates durable state" do
     principal_id = "agent_capability_store_compensation_regression"
     resource_uri = "arbor://fs/read/capability-store-compensation-regression"
@@ -189,6 +190,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              AuthorityStore.authoritative_list(name: @capability_store)
   end
 
+  @tag :fast
   test "security regression: same-id replacement compensation retains restored record" do
     principal_id = "agent_capability_store_same_id_regression"
     resource_uri = "arbor://fs/read/capability-store-same-id-regression"
@@ -214,6 +216,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              AuthorityStore.authoritative_get(original_id, name: @capability_store)
   end
 
+  @tag :fast
   test "security regression: unknown replacement compensation never reports success" do
     principal_id = "agent_capability_store_unknown_outcome_regression"
     resource_uri = "arbor://fs/read/capability-store-unknown-outcome-regression"
@@ -240,6 +243,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert length(persisted_ids) == 2
   end
 
+  @tag :fast
   test "security regression: remote replacement revocation removes durable projection" do
     principal_id = "agent_capability_store_remote_revoke_regression"
     resource_uri = "arbor://fs/read/capability-store-remote-revoke-regression"
@@ -287,6 +291,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              AuthorityStore.authoritative_get(original.id, name: @capability_store)
   end
 
+  @tag :fast
   test "security regression: delegated capability remains authorized after persistence restart" do
     backend_dir = Path.join("var", "capability-store-delegation-#{unique_integer()}")
     tmp_dir = Path.expand(backend_dir, File.cwd!())
@@ -322,6 +327,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(worker.agent_id, resource, nil, verify_identity: false)
   end
 
+  @tag :fast
   test "security regression: limited-use capability cannot regain uses after restart" do
     principal_id = "agent_capability_store_limited_restart"
     resource_uri = "arbor://fs/read/capability-store-limited-restart"
@@ -346,6 +352,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     assert %{restore_rejected: 1, restore_active: 0} = CapabilityStore.stats()
   end
 
+  @tag slow: true, timeout: 180_000
   test "security regression: authorize survives full AuthorityStore+CapabilityStore restart above 10_000 durable records" do
     backend_dir = Path.join("var", "capability-store-hydrate-10k-#{unique_integer()}")
     tmp_dir = Path.expand(backend_dir, File.cwd!())
@@ -407,6 +414,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
              Security.authorize(target_principal, target_resource, nil, verify_identity: false)
   end
 
+  @tag :fast
   test "security regression: acknowledged mutation fails closed on a CAS-unsupported backend" do
     # Use an explicit CRUD-only double (no compare_and_swap/compare_and_delete)
     # so acknowledged CAS admission fails closed (:outcome_unknown) and never
@@ -460,6 +468,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   # Store-layer causal ABA evidence: JSONFileDurableCasTest (P2) and pre-P2
   # baseline 4582ec8de9acb2280109b76c6d797d8872240a2d. This test adds the
   # public facade + AuthorityStore + CapabilityStore dual-restart path.
+  @tag :fast
   test "security regression: public acknowledged grant/revoke on JSONFile survives full two-process restart with generation fence (ABA)" do
     principal = "agent_ack_jsonfile_public"
     resource = "arbor://fs/read/ack-jsonfile-public"
