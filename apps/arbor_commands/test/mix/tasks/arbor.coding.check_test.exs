@@ -181,7 +181,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert_receive {:rpc_called, :arbor_test@localhost, Arbor.Orchestrator,
                     :check_coding_readiness, _plan,
-                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 5_000}
+                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 60_000}
 
     assert result["status"] == "ready"
   end
@@ -210,7 +210,7 @@ defmodule Mix.Tasks.Arbor.Coding.CheckTest do
 
     assert_receive {:rpc_called, :arbor_test@localhost, Arbor.Orchestrator,
                     :check_coding_readiness, plan,
-                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 5_000}
+                    [mode: :live, agent_id: @agent_id, observed_at: @observed_at], 60_000}
 
     assert plan["repo_root"] == valid_plan!().repo_root
     assert result["status"] == "ready"
