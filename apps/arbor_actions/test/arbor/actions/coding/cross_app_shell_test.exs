@@ -601,6 +601,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [batch1, _batch2]} = Core.partition_test_batches(paths)
 
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
+
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
       {:ok, %{exit_code: nil, stdout: "", stderr: "", timed_out: true}}
