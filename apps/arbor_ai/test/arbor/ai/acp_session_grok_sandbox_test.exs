@@ -72,6 +72,14 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
           send_signal(test_signal_pid(opts), {:grok_client_started, opts, self()})
           Process.sleep(:infinity)
 
+        :sandbox_unapplied ->
+          write_unapplied_sandbox_log(opts)
+
+          with {:ok, pid} <- Agent.start_link(fn -> %{opts: opts} end) do
+            send_signal(test_pid(pid), {:grok_client_started, opts, pid})
+            {:ok, pid}
+          end
+
         _ ->
           with {:ok, pid} <- Agent.start_link(fn -> %{opts: opts} end) do
             send_signal(test_pid(pid), {:grok_client_started, opts, pid})
@@ -155,6 +163,21 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       do: send(pid, message)
 
     defp send_signal(_pid, _message), do: :ok
+
+    defp write_unapplied_sandbox_log(opts) when is_list(opts) do
+      grok_home =
+        opts
+        |> Keyword.get(:env, [])
+        |> Map.new()
+        |> Map.get("GROK_HOME")
+
+      if is_binary(grok_home) and grok_home != "" do
+        File.write!(
+          Path.join(grok_home, "grok.log"),
+          "warning: sandbox could not be applied: Custom sandbox profile 'arbor-grok-strict-deadbeef' not found\n"
+        )
+      end
+    end
   end
 
   defp fixture_suffix do
@@ -182,6 +205,16 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
   defp project_backup_path(worktree) do
     Path.join([worktree, ".grok", ".sandbox.toml.arbor-backup"])
   end
+
+  defp grok_home_from_opts(opts) do
+    opts
+    |> Keyword.fetch!(:env)
+    |> Map.new()
+    |> Map.fetch!("GROK_HOME")
+  end
+
+  defp runtime_profile_path(opts),
+    do: GrokSandbox.runtime_profile_path(grok_home_from_opts(opts))
 
   defp canonical_repo_common_dir(repository_root) do
     case SafePath.resolve_real(repository_root) do
@@ -557,31 +590,35 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert reason in [:grok_worktree_authority_changed, :invalid_grok_directory]
     end
 
-    test "with_launch installs a scoped profile only for callback scope and restores after callback" do
+    test "with_launch installs the generated profile in GROK_HOME, not the worktree" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
 
       canonical_repository_root = canonical_repo_common_dir(repository_root)
       expected_profile = expected_profile_name(canonical_repository_root)
-      profile_path = project_profile_path(worktree_root)
+      opts = grok_client_opts()
+      runtime_path = runtime_profile_path(opts)
+      worktree_path = project_profile_path(worktree_root)
 
       assert {:ok, :callback_seen} =
                GrokSandbox.with_launch(
                  :grok,
-                 grok_client_opts(),
+                 opts,
                  worktree_root,
                  authority,
                  self(),
                  fn prepared ->
-                   assert profile_path |> File.exists?()
+                   assert File.exists?(runtime_path)
+                   refute File.exists?(worktree_path)
                    assert Keyword.get(prepared, :command) != @expected_grok_command
                    assert Enum.at(Keyword.get(prepared, :command), 2) == expected_profile
                    :callback_seen
                  end
                )
 
-      refute File.exists?(profile_path)
-      refute File.dir?(Path.dirname(profile_path))
+      assert File.exists?(runtime_path)
+      refute File.exists?(worktree_path)
+      refute File.dir?(Path.dirname(worktree_path))
     end
 
     test "TOML escaping for quoted and backslash paths remains parseable" do
@@ -591,11 +628,12 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
 
       canonical_repository_root = canonical_repo_common_dir(repository_root)
       expected_profile = expected_profile_name(canonical_repository_root)
-      profile_path = project_profile_path(worktree_root)
+      opts = grok_client_opts()
+      profile_path = runtime_profile_path(opts)
       backup_path = project_backup_path(worktree_root)
 
       denied_paths = [
-        profile_path,
+        project_profile_path(worktree_root),
         backup_path,
         Path.join([worktree_root, ".grok", "config.toml"]),
         Path.join(worktree_root, ".mcp.json"),
@@ -607,7 +645,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:ok, :toml_ok} =
                GrokSandbox.with_launch(
                  :grok,
-                 grok_client_opts(),
+                 opts,
                  worktree_root,
                  authority,
                  self(),
@@ -622,64 +660,66 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                    profile = get_in(decoded, ["profiles", expected_profile])
                    assert profile["read_only"] == [canonical_repo_common_dir(repository_root)]
                    assert profile["deny"] == denied_paths
+                   refute Enum.member?(profile["deny"], profile_path)
 
                    :toml_ok
                  end
                )
     end
 
-    test "pre-existing project profile bytes and mode restore exactly" do
-      {repository_root, worktree_root} = create_linked_fixture!()
-      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
-
-      profile_path = project_profile_path(worktree_root)
-      File.mkdir_p!(Path.dirname(profile_path))
-      original = "pre-existing bytes\n"
-
-      File.write!(profile_path, original)
-      File.chmod(profile_path, 0o640)
-      original_mode = File.lstat!(profile_path).mode &&& 0o777
-
-      assert {:ok, :mutated} =
-               GrokSandbox.with_launch(
-                 :grok,
-                 grok_client_opts(),
-                 worktree_root,
-                 authority,
-                 self(),
-                 fn _ ->
-                   assert File.read!(profile_path) != original
-                   :mutated
-                 end
-               )
-
-      assert File.read!(profile_path) == original
-      assert (File.lstat!(profile_path).mode &&& 0o777) == original_mode
-      assert File.exists?(profile_path)
-      refute File.exists?(project_backup_path(worktree_root))
-    end
-
-    test "global same-name collision is rejected" do
+    test "security regression: a worktree-supplied sandbox.toml is left in place and denied" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
 
       profile_name = expected_profile_name(canonical_repo_common_dir(repository_root))
-      global_sandbox = Path.join(System.get_env("GROK_HOME"), "sandbox.toml")
-      File.mkdir_p!(Path.dirname(global_sandbox))
+      worktree_path = project_profile_path(worktree_root)
+      File.mkdir_p!(Path.dirname(worktree_path))
 
-      File.write!(
-        global_sandbox,
-        [
-          "[profiles.#{profile_name}]\n",
-          "extends = \"strict\"\n"
-        ]
-        |> Enum.join()
-      )
+      original = """
+      [profiles.#{profile_name}]
+      extends = "workspace"
+      """
 
-      assert {:error, :grok_global_profile_conflict} =
+      File.write!(worktree_path, original)
+      File.chmod(worktree_path, 0o640)
+      original_mode = File.lstat!(worktree_path).mode &&& 0o777
+      opts = grok_client_opts()
+      runtime_path = runtime_profile_path(opts)
+
+      assert {:ok, :shadow_ignored} =
                GrokSandbox.with_launch(
                  :grok,
-                 grok_client_opts(),
+                 opts,
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ ->
+                   assert File.read!(worktree_path) == original
+                   content = File.read!(runtime_path)
+                   assert content =~ ~s(extends = "strict")
+                   assert content =~ worktree_path
+                   refute content =~ ~s(extends = "workspace")
+                   :shadow_ignored
+                 end
+               )
+
+      assert File.read!(worktree_path) == original
+      assert (File.lstat!(worktree_path).mode &&& 0o777) == original_mode
+      refute File.exists?(project_backup_path(worktree_root))
+    end
+
+    test "a pre-existing runtime-home sandbox.toml is rejected" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      opts = grok_client_opts()
+      runtime_path = runtime_profile_path(opts)
+      File.write!(runtime_path, "[profiles.untrusted]\nextends = \"workspace\"\n")
+
+      assert {:error, :grok_runtime_profile_conflict} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 opts,
                  worktree_root,
                  authority,
                  self(),
@@ -687,24 +727,28 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
                )
     end
 
-    test "standalone worktree receives a transient strict profile and requires no authority" do
+    test "standalone worktree receives a runtime-home strict profile and requires no authority" do
       worktree_root = create_standalone_fixture!()
       expected_profile = expected_profile_name(canonical_path(worktree_root))
+      opts = grok_client_opts()
+      runtime_path = runtime_profile_path(opts)
 
       assert {:ok, :standalone_done} =
                GrokSandbox.with_launch(
                  :grok,
-                 grok_client_opts(),
+                 opts,
                  worktree_root,
                  nil,
                  self(),
                  fn prepared ->
                    assert Enum.at(Keyword.get(prepared, :command), 2) == expected_profile
-                   assert File.exists?(project_profile_path(worktree_root))
+                   assert File.exists?(runtime_path)
+                   refute File.exists?(project_profile_path(worktree_root))
                    :standalone_done
                  end
                )
 
+      assert File.exists?(runtime_path)
       refute File.exists?(project_profile_path(worktree_root))
 
       assert {:error, :unexpected_grok_sandbox_authority} =
@@ -915,7 +959,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       end
     end
 
-    test "callback raise still restores transient profile state" do
+    test "callback raise still leaves the worktree without a generated profile" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
 
@@ -932,6 +976,56 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
 
       refute File.exists?(project_profile_path(worktree_root))
       refute File.dir?(Path.dirname(project_profile_path(worktree_root)))
+    end
+
+    test "security regression: grok.log sandbox-not-applied fails closed even if the callback succeeds" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      opts = grok_client_opts()
+      grok_home = grok_home_from_opts(opts)
+
+      File.write!(
+        Path.join(grok_home, "grok.log"),
+        "warning: sandbox could not be applied: Custom sandbox profile 'arbor-grok-strict-deadbeef' not found\n"
+      )
+
+      assert {:ok, {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 opts,
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> :would_have_continued_unsandboxed end
+               )
+
+      assert tail =~ "sandbox could not be applied"
+      refute File.exists?(project_profile_path(worktree_root))
+    end
+
+    test "security regression: grok spawn errors keep a bounded grok.log tail" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      opts = grok_client_opts()
+      grok_home = grok_home_from_opts(opts)
+
+      File.write!(
+        Path.join(grok_home, "grok.log"),
+        "ERROR config file unreadable: Permission denied\nNo auth credentials\n"
+      )
+
+      assert {:ok, {:error, {:grok_external_auth_unavailable, %{output_tail: tail}}}} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 opts,
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> {:error, :grok_external_auth_unavailable} end
+               )
+
+      assert tail =~ "No auth credentials"
+      refute tail =~ "sandbox could not be applied"
     end
 
     test "concurrent second launch on same worktree is rejected as busy" do
@@ -1030,7 +1124,7 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert :ok = AcpSession.close(session)
     end
 
-    test "startup timeout on stalled client restores transient profile" do
+    test "startup timeout on stalled client leaves the worktree without a generated profile" do
       install_client_module(ProbeAcpClient)
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
@@ -1050,6 +1144,29 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, :timeout} = AcpSession.await_ready(session, timeout: 1_000)
       refute File.exists?(project_profile_path(worktree_root))
 
+      assert :ok = AcpSession.close(session)
+    end
+
+    test "security regression: a Linux launch whose grok.log says sandbox could not be applied fails the session" do
+      Process.flag(:trap_exit, true)
+      install_client_module(ProbeAcpClient)
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      assert {:ok, session} =
+               AcpSession.start_link(
+                 provider: :grok,
+                 workspace: {:directory, worktree_root},
+                 client_opts: probe_client_opts(test_pid: self(), start_mode: :sandbox_unapplied),
+                 grok_sandbox_authority: authority,
+                 timeout: 2_000
+               )
+
+      assert {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}} =
+               AcpSession.await_ready(session, timeout: 2_000)
+
+      assert tail =~ "sandbox could not be applied"
+      refute File.exists?(project_profile_path(worktree_root))
       assert :ok = AcpSession.close(session)
     end
 

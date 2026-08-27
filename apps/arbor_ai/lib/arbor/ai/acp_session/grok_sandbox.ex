@@ -3,9 +3,8 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
   import Bitwise
 
-  alias Arbor.Common.SafePath
   alias Arbor.AI.AcpSession.RuntimeHome
-  alias Toml
+  alias Arbor.Common.SafePath
 
   defmodule Authority do
     @moduledoc false
@@ -25,13 +24,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   defmodule ProfileLease do
     @moduledoc false
 
-    @enforce_keys [
-      :profile_path,
-      :backup_path,
-      :generated_binding,
-      :had_backup,
-      :profile_dir_created
-    ]
+    @enforce_keys [:profile_path, :generated_binding]
     defstruct @enforce_keys
   end
 
@@ -76,6 +69,10 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @profile_marker "# Managed transiently by Arbor."
   @max_metadata_bytes 4_096
   @max_profile_bytes 65_536
+  @max_log_tail_bytes 2_048
+  @sandbox_unapplied_marker "sandbox could not be applied"
+  @custom_profile_marker "custom sandbox profile"
+  @profile_not_found_marker "not found"
   @ambient_mcp_relative_paths [
     [".grok", "config.toml"],
     [".mcp.json"],
@@ -191,6 +188,41 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   def with_launch(_provider, _client_opts, _cwd, _authority, _owner, _mcp_servers, _fun),
     do: {:error, :invalid_acp_client_options}
 
+  @doc false
+  @spec runtime_profile_path(String.t()) :: String.t()
+  def runtime_profile_path(grok_home) when is_binary(grok_home),
+    do: Path.join(grok_home, @profile_filename)
+
+  @doc false
+  @spec verify_launch_enforcement(atom(), keyword()) :: :ok | {:error, term()}
+  def verify_launch_enforcement(:grok, client_opts) when is_list(client_opts) do
+    with {:ok, grok_home} <- effective_grok_home(client_opts) do
+      reject_unapplied_sandbox(grok_home)
+    end
+  end
+
+  def verify_launch_enforcement(_provider, _client_opts), do: :ok
+
+  @doc false
+  @spec wrap_launch_error(atom(), keyword(), term()) :: term()
+  def wrap_launch_error(:grok, client_opts, reason) when is_list(client_opts) do
+    case verify_launch_enforcement(:grok, client_opts) do
+      {:error, sandbox_reason} ->
+        sandbox_reason
+
+      :ok ->
+        case effective_grok_home(client_opts) do
+          {:ok, grok_home} ->
+            attach_log_tail(reason, read_grok_log_tail(grok_home))
+
+          _other ->
+            reason
+        end
+    end
+  end
+
+  def wrap_launch_error(_provider, _client_opts, reason), do: reason
+
   defp run_linked_launch(client_opts, %Authority{} = authority, mcp_servers, fun) do
     with_profile_lock(authority.worktree_root, fn ->
       do_run_linked_launch(client_opts, authority, mcp_servers, fun)
@@ -200,14 +232,14 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   defp run_standalone_launch(client_opts, worktree_root, mcp_servers, fun) do
     with_profile_lock(worktree_root, fn ->
       with :ok <- reject_ambient_mcp_sources(worktree_root),
+           {:ok, grok_home} <- effective_grok_home(client_opts),
            {:ok, profile_name} <- profile_name(worktree_root),
            {:ok, profile_content} <- profile_content(profile_name, worktree_root, []),
-           :ok <- reject_global_profile_collision(profile_name, client_opts),
            :ok <- reject_preexisting_backup(worktree_root),
-           :ok <- recover_orphaned_profile(worktree_root, profile_content),
-           {:ok, lease} <- install_profile(worktree_root, profile_content) do
+           {:ok, lease} <- ensure_runtime_profile(grok_home, profile_content) do
         execute_profiled_launch(
           client_opts,
+          grok_home,
           profile_name,
           lease,
           fn -> :ok end,
@@ -239,15 +271,15 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   defp do_run_linked_launch(client_opts, authority, mcp_servers, fun) do
     with :ok <- verify_authority(authority, authority.owner, authority.worktree_root),
          :ok <- reject_ambient_mcp_sources(authority.worktree_root),
+         {:ok, grok_home} <- effective_grok_home(client_opts),
          {:ok, profile_name} <- profile_name(authority.common_dir),
          {:ok, profile_content} <-
            profile_content(profile_name, authority.worktree_root, [authority.common_dir]),
-         :ok <- reject_global_profile_collision(profile_name, client_opts),
          :ok <- reject_preexisting_backup(authority.worktree_root),
-         :ok <- recover_orphaned_profile(authority.worktree_root, profile_content),
-         {:ok, lease} <- install_profile(authority.worktree_root, profile_content) do
+         {:ok, lease} <- ensure_runtime_profile(grok_home, profile_content) do
       execute_profiled_launch(
         client_opts,
+        grok_home,
         profile_name,
         lease,
         fn -> verify_authority(authority, authority.owner, authority.worktree_root) end,
@@ -257,7 +289,15 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     end
   end
 
-  defp execute_profiled_launch(client_opts, profile_name, lease, verify, mcp_servers, fun) do
+  defp execute_profiled_launch(
+         client_opts,
+         grok_home,
+         profile_name,
+         lease,
+         verify,
+         mcp_servers,
+         fun
+       ) do
     result =
       with :ok <- validate_client_opts(client_opts, mcp_servers),
            :ok <- verify.() do
@@ -271,17 +311,19 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
         fun.(prepared_opts)
       end
 
-    case restore_profile(lease) do
+    result = overlay_launch_diagnostics(grok_home, result)
+
+    case attest_runtime_profile(lease) do
       :ok -> {:ok, result}
       {:error, reason} -> {:error, {:grok_sandbox_cleanup_failed, reason}, result}
     end
   rescue
     exception ->
-      _ = restore_profile(lease)
+      _ = attest_runtime_profile(lease)
       reraise exception, __STACKTRACE__
   catch
     kind, reason ->
-      _ = restore_profile(lease)
+      _ = attest_runtime_profile(lease)
       :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
@@ -637,28 +679,123 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     |> Enum.any?(fn codepoint -> codepoint < 0x20 or codepoint == 0x7F end)
   end
 
-  defp reject_global_profile_collision(profile_name, client_opts) do
-    with {:ok, grok_home} <- effective_grok_home(client_opts) do
-      profile_path = Path.join(grok_home, @profile_filename)
+  defp ensure_runtime_profile(grok_home, generated_content) do
+    profile_path = runtime_profile_path(grok_home)
 
-      case File.lstat(profile_path) do
-        {:error, :enoent} ->
-          :ok
+    case regular_file_state(profile_path) do
+      :missing ->
+        install_runtime_profile(grok_home, generated_content)
 
-        {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_profile_bytes ->
-          with {:ok, raw} <- File.read(profile_path),
-               {:ok, decoded} <- Toml.decode(raw, keys: :strings),
-               profiles when is_map(profiles) <- Map.get(decoded, "profiles", %{}) do
-            if Map.has_key?(profiles, profile_name),
-              do: {:error, :grok_global_profile_conflict},
-              else: :ok
-          else
-            _other -> {:error, :invalid_grok_global_profile}
+      {:ok, %{content: ^generated_content}} ->
+        with {:ok, generated_binding} <- file_binding(profile_path, @max_profile_bytes) do
+          {:ok,
+           %ProfileLease{
+             profile_path: profile_path,
+             generated_binding: generated_binding
+           }}
+        end
+
+      {:ok, _other} ->
+        {:error, :grok_runtime_profile_conflict}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp overlay_launch_diagnostics(grok_home, result) do
+    tail = read_grok_log_tail(grok_home)
+
+    cond do
+      sandbox_unapplied?(tail) ->
+        {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}
+
+      match?({:error, _reason}, result) ->
+        {:error, attach_log_tail(elem(result, 1), tail)}
+
+      true ->
+        result
+    end
+  end
+
+  defp reject_unapplied_sandbox(grok_home) do
+    tail = read_grok_log_tail(grok_home)
+
+    if sandbox_unapplied?(tail),
+      do: {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}},
+      else: :ok
+  end
+
+  defp attach_log_tail(reason, ""), do: reason
+
+  defp attach_log_tail({:grok_sandbox_not_applied, %{output_tail: _}} = reason, _tail),
+    do: reason
+
+  defp attach_log_tail({reason, %{output_tail: _tail} = detail}, tail)
+       when is_atom(reason) and is_map(detail),
+       do: {reason, Map.put(detail, :output_tail, tail)}
+
+  defp attach_log_tail({reason, detail}, tail) when is_atom(reason) and is_map(detail),
+    do: {reason, Map.put(detail, :output_tail, tail)}
+
+  defp attach_log_tail(reason, tail) when is_atom(reason),
+    do: {reason, %{output_tail: tail}}
+
+  defp attach_log_tail(reason, tail),
+    do: {reason, %{output_tail: tail}}
+
+  defp sandbox_unapplied?(tail) when is_binary(tail) and tail != "" do
+    lowered = String.downcase(tail)
+
+    String.contains?(lowered, @sandbox_unapplied_marker) or
+      (String.contains?(lowered, @custom_profile_marker) and
+         String.contains?(lowered, @profile_not_found_marker))
+  end
+
+  defp sandbox_unapplied?(_tail), do: false
+
+  defp read_grok_log_tail(grok_home) when is_binary(grok_home) do
+    path = Path.join(grok_home, "grok.log")
+
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, size: size}} when size > 0 ->
+        read_file_tail(path, size, @max_log_tail_bytes)
+
+      _other ->
+        ""
+    end
+  end
+
+  defp read_file_tail(path, size, max_bytes) do
+    offset = max(size - max_bytes, 0)
+    length = min(size, max_bytes)
+
+    case :file.open(path, [:raw, :binary, :read]) do
+      {:ok, io} ->
+        result =
+          case :file.pread(io, offset, length) do
+            {:ok, data} when is_binary(data) -> utf8_tail(data)
+            _other -> ""
           end
 
-        _other ->
-          {:error, :invalid_grok_global_profile}
-      end
+        _ = :file.close(io)
+        result
+
+      {:error, _reason} ->
+        ""
+    end
+  end
+
+  defp utf8_tail(data) when is_binary(data) do
+    if String.valid?(data) do
+      data
+    else
+      size = byte_size(data)
+
+      Enum.find_value(0..min(3, max(size - 1, 0)), fn n ->
+        candidate = binary_part(data, n, size - n)
+        if String.valid?(candidate), do: candidate
+      end) || <<>>
     end
   end
 
@@ -716,33 +853,6 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
   defp normalize_env(_env), do: :error
 
-  defp recover_orphaned_profile(worktree_root, generated_content) do
-    profile_path = Path.join([worktree_root, ".grok", @profile_filename])
-    backup_path = Path.join([worktree_root, ".grok", @backup_filename])
-
-    case {regular_file_state(profile_path), regular_file_state(backup_path)} do
-      {{:ok, _profile}, {:ok, _backup}} ->
-        {:error, :ambiguous_grok_profile_recovery}
-
-      {:missing, {:ok, _backup}} ->
-        {:error, :ambiguous_grok_profile_recovery}
-
-      {{:ok, profile}, :missing} ->
-        if profile.content == generated_content do
-          with :ok <- File.rm(profile_path),
-               do: remove_empty_recovered_profile_dir(Path.dirname(profile_path))
-        else
-          :ok
-        end
-
-      {:missing, :missing} ->
-        :ok
-
-      _other ->
-        {:error, :invalid_grok_profile_recovery_state}
-    end
-  end
-
   defp reject_preexisting_backup(worktree_root) do
     backup_path = Path.join([worktree_root, ".grok", @backup_filename])
 
@@ -752,130 +862,49 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     end
   end
 
-  defp remove_empty_recovered_profile_dir(profile_dir) do
-    case File.ls(profile_dir) do
-      {:ok, []} -> File.rmdir(profile_dir)
-      {:ok, _entries} -> :ok
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, {:grok_profile_dir_restore_failed, reason}}
+  defp install_runtime_profile(grok_home, generated_content) do
+    profile_path = runtime_profile_path(grok_home)
+
+    case do_install_runtime_profile(grok_home, profile_path, generated_content) do
+      {:ok, _lease} = success ->
+        success
+
+      {:error, reason} ->
+        case rollback_runtime_profile(profile_path, generated_content) do
+          :ok ->
+            {:error, reason}
+
+          {:error, cleanup_reason} ->
+            {:error, {:grok_profile_install_rollback_failed, reason, cleanup_reason}}
+        end
     end
   end
 
-  defp install_profile(worktree_root, generated_content) do
-    profile_dir = Path.join(worktree_root, ".grok")
-    profile_path = Path.join(profile_dir, @profile_filename)
-    backup_path = Path.join(profile_dir, @backup_filename)
-
-    with {:ok, profile_dir_created} <- ensure_profile_dir(profile_dir) do
-      case do_install_profile(
-             profile_dir,
-             profile_path,
-             backup_path,
-             generated_content,
-             profile_dir_created
-           ) do
-        {:ok, _lease} = success ->
-          success
-
-        {:error, reason} ->
-          cleanup_result =
-            with :ok <- rollback_profile_install(profile_path, backup_path, generated_content),
-                 do: cleanup_failed_profile_dir(profile_dir, profile_dir_created)
-
-          case cleanup_result do
-            :ok ->
-              {:error, reason}
-
-            {:error, cleanup_reason} ->
-              {:error, {:grok_profile_install_rollback_failed, reason, cleanup_reason}}
-          end
-      end
-    end
-  end
-
-  defp do_install_profile(
-         profile_dir,
-         profile_path,
-         backup_path,
-         generated_content,
-         profile_dir_created
-       ) do
-    with {:ok, had_backup} <- move_existing_profile(profile_path, backup_path),
-         :ok <- write_generated_profile(profile_dir, profile_path, generated_content),
-         {:ok, generated_binding} <- file_binding(profile_path, @max_profile_bytes) do
+  defp do_install_runtime_profile(grok_home, profile_path, generated_content) do
+    with :ok <- write_generated_profile(grok_home, profile_path, generated_content),
+         {:ok, generated_binding} <- file_binding(profile_path, @max_profile_bytes),
+         {:ok, file} <- regular_file_state(profile_path),
+         true <- file.content == generated_content do
       {:ok,
        %ProfileLease{
          profile_path: profile_path,
-         backup_path: backup_path,
-         generated_binding: generated_binding,
-         had_backup: had_backup,
-         profile_dir_created: profile_dir_created
+         generated_binding: generated_binding
        }}
+    else
+      false -> {:error, :grok_generated_profile_changed}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_grok_runtime_profile}
     end
   end
 
-  defp cleanup_failed_profile_dir(_profile_dir, false), do: :ok
-
-  defp cleanup_failed_profile_dir(profile_dir, true) do
-    case File.ls(profile_dir) do
-      {:ok, []} -> File.rmdir(profile_dir)
-      {:ok, _entries} -> {:error, :grok_profile_dir_not_empty}
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, {:grok_profile_dir_restore_failed, reason}}
+  defp write_generated_profile(_profile_dir, profile_path, content) do
+    with :ok <- write_exclusive(profile_path, content),
+         :ok <- File.chmod(profile_path, 0o600) do
+      :ok
+    else
+      {:error, :eexist} -> {:error, :grok_runtime_profile_conflict}
+      {:error, reason} -> {:error, {:grok_profile_write_failed, reason}}
     end
-  end
-
-  defp ensure_profile_dir(profile_dir) do
-    case File.lstat(profile_dir) do
-      {:ok, %File.Stat{type: :directory}} ->
-        {:ok, false}
-
-      {:error, :enoent} ->
-        case File.mkdir(profile_dir) do
-          :ok -> {:ok, true}
-          {:error, reason} -> {:error, {:grok_profile_dir_create_failed, reason}}
-        end
-
-      _other ->
-        {:error, :invalid_grok_profile_root}
-    end
-  end
-
-  defp move_existing_profile(profile_path, backup_path) do
-    case {regular_file_state(profile_path), File.lstat(backup_path)} do
-      {:missing, {:error, :enoent}} ->
-        {:ok, false}
-
-      {{:ok, _profile}, {:error, :enoent}} ->
-        case File.rename(profile_path, backup_path) do
-          :ok -> {:ok, true}
-          {:error, reason} -> {:error, {:grok_profile_backup_failed, reason}}
-        end
-
-      _other ->
-        {:error, :invalid_grok_profile_install_state}
-    end
-  end
-
-  defp write_generated_profile(profile_dir, profile_path, content) do
-    temp_path =
-      Path.join(
-        profile_dir,
-        ".sandbox.toml.arbor-" <>
-          Base.encode16(:crypto.strong_rand_bytes(12), case: :lower) <> ".tmp"
-      )
-
-    result =
-      with :ok <- write_exclusive(temp_path, content),
-           :ok <- File.chmod(temp_path, 0o600),
-           :ok <- File.rename(temp_path, profile_path) do
-        :ok
-      else
-        {:error, reason} -> {:error, {:grok_profile_write_failed, reason}}
-      end
-
-    _ = File.rm(temp_path)
-    result
   end
 
   defp write_exclusive(path, content) do
@@ -887,12 +916,9 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     end
   end
 
-  defp restore_profile(%ProfileLease{} = lease) do
+  defp attest_runtime_profile(%ProfileLease{} = lease) do
     with {:ok, current_binding} <- file_binding(lease.profile_path, @max_profile_bytes),
-         true <- current_binding == lease.generated_binding,
-         :ok <- File.rm(lease.profile_path),
-         :ok <- maybe_restore_backup(lease),
-         :ok <- maybe_remove_profile_dir(lease) do
+         true <- current_binding == lease.generated_binding do
       :ok
     else
       false -> {:error, :grok_generated_profile_changed}
@@ -901,61 +927,11 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     end
   end
 
-  defp maybe_restore_backup(%ProfileLease{had_backup: true} = lease) do
-    case File.rename(lease.backup_path, lease.profile_path) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:grok_profile_restore_failed, reason}}
-    end
-  end
-
-  defp maybe_restore_backup(%ProfileLease{had_backup: false}), do: :ok
-
-  defp maybe_remove_profile_dir(%ProfileLease{profile_dir_created: true, profile_path: path}) do
-    profile_dir = Path.dirname(path)
-
-    case File.ls(profile_dir) do
-      {:ok, []} ->
-        case File.rmdir(profile_dir) do
-          :ok -> :ok
-          {:error, reason} -> {:error, {:grok_profile_dir_restore_failed, reason}}
-        end
-
-      {:ok, _entries} ->
-        :ok
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, reason} ->
-        {:error, {:grok_profile_dir_restore_failed, reason}}
-    end
-  end
-
-  defp maybe_remove_profile_dir(%ProfileLease{profile_dir_created: false}), do: :ok
-
-  defp rollback_profile_install(profile_path, backup_path, generated_content) do
-    with :ok <- remove_generated_for_rollback(profile_path, generated_content),
-         do: restore_backup_for_rollback(profile_path, backup_path)
-  end
-
-  defp remove_generated_for_rollback(profile_path, generated_content) do
+  defp rollback_runtime_profile(profile_path, generated_content) do
     case regular_file_state(profile_path) do
       {:ok, %{content: ^generated_content}} -> File.rm(profile_path)
       :missing -> :ok
       _other -> {:error, :ambiguous_grok_profile_rollback}
-    end
-  end
-
-  defp restore_backup_for_rollback(profile_path, backup_path) do
-    case {File.lstat(profile_path), File.lstat(backup_path)} do
-      {{:error, :enoent}, {:ok, %File.Stat{type: :regular}}} ->
-        File.rename(backup_path, profile_path)
-
-      {_profile, {:error, :enoent}} ->
-        :ok
-
-      _other ->
-        {:error, :ambiguous_grok_profile_rollback}
     end
   end
 

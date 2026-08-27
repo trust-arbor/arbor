@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 693,
+  "entry_count": 694,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8553,8 +8553,21 @@
       "source_incident": "found 2026-08-26 during P1B-2A contained validation",
       "always_loaded": false,
       "content_sha256": "78ee54ea6ac28c3fa51621b950ca4e74e10c6127ce169c2d4df1679762cee898"
+    },
+    {
+      "source_ordinal": 694,
+      "source_kind": "post-migration",
+      "slug": "host-generated-grok-sandbox-profiles-in-runtime-grok-home",
+      "title": "Host generated Grok sandbox profiles in the runtime `GROK_HOME`, never the worktree.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-host-generated-grok-sandbox-profiles-in-runtime-grok-home",
+      "source_date": "2026-08-26",
+      "source_incident": "found 2026-08-26, V7-13, task_13b256be6e742fb6bfe25c1d42c4ccd5",
+      "always_loaded": false,
+      "content_sha256": "78c0354689a0467dcd46e2fbb26b89b4cbe3f9f66291aa4059776efa9d9a7934"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 232
+  "post_migration_entry_count": 233
 }

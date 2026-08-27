@@ -1219,22 +1219,25 @@ defmodule Arbor.AI.AcpSession do
        ) do
     case start_acp_client(client_opts) do
       {:ok, client} ->
-        case authenticate_and_scrub_provider_client(
-               provider,
-               client,
-               auth_opts,
-               runtime_home_cleanup
-             ) do
-          :ok ->
-            {:ok, client}
-
+        with :ok <- GrokSandbox.verify_launch_enforcement(provider, client_opts),
+             :ok <-
+               authenticate_and_scrub_provider_client(
+                 provider,
+                 client,
+                 auth_opts,
+                 runtime_home_cleanup
+               ) do
+          {:ok, client}
+        else
           {:error, reason} ->
+            wrapped = GrokSandbox.wrap_launch_error(provider, client_opts, reason)
+            if is_pid(client) and Process.alive?(client), do: Process.unlink(client)
             terminate_client(client)
-            {:error, reason}
+            {:error, wrapped}
         end
 
-      {:error, _reason} = error ->
-        error
+      {:error, reason} ->
+        {:error, GrokSandbox.wrap_launch_error(provider, client_opts, reason)}
     end
   end
 
