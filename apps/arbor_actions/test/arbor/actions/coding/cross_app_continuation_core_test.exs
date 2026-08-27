@@ -13,7 +13,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
   @claimed_at "2026-08-27T12:00:00Z"
   @mid "2026-08-27T12:30:00Z"
   @expires_at "2026-08-27T13:00:00Z"
-  @after "2026-08-27T14:00:00Z"
+  @after_expiry "2026-08-27T14:00:00Z"
   @later_expires "2026-08-27T15:00:00Z"
   @base_oid String.duplicate("1", 40)
   @base_tree_oid String.duplicate("2", 40)
@@ -46,7 +46,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :malformed_state} = Core.new(raw_packet)
 
     with_commit = Map.put(identities(plan), "candidate_commit", String.duplicate("9", 40))
-    assert {:error, :malformed_state} = Core.new(Map.put(fresh_attrs(), "identities", with_commit))
+
+    assert {:error, :malformed_state} =
+             Core.new(Map.put(fresh_attrs(), "identities", with_commit))
   end
 
   test "new/1 rejects mixed keys, identity gaps, paths, order, digest mismatch, and extra fields" do
@@ -125,7 +127,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
                })
              )
 
-    {:ok, expired, _} = Core.expire_claim(after_second, fence(after_second, @after))
+    {:ok, expired, _} = Core.expire_claim(after_second, fence(after_second, @after_expiry))
     {:ok, reclaimed, _} = Core.claim(expired, reclaim_attrs())
     assert reclaimed["fence_generation"] == 2
     assert reclaimed["claim"]["fence_token"] == @token
@@ -136,7 +138,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
                %{
                  "fence_token" => @token,
                  "fence_generation" => 1,
-                 "now" => @after,
+                 "now" => @after_expiry,
                  "receipt" => passed(first)
                }
              )
@@ -145,6 +147,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
   test "receipt errors follow duplicate, skipped, reordered, then contradictory precedence" do
     claimed = claimed_state()
     [first, second] = plan()
+
     {:ok, after_first, _} =
       Core.accept_passed_receipt(
         claimed,
@@ -256,6 +259,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
       batch(1, 2, 1, String.duplicate("8", 64)),
       batch(2, 2, 1, String.duplicate("9", 64))
     ]
+
     wrong_suffix = v3_handoff(other_plan, [], nil, other_plan, "structural")
 
     assert {:error, :non_canonical_capacity_handoff} =
@@ -330,6 +334,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
 
     {:ok, reclaimed, _} =
       Core.claim(open, reclaim_attrs(%{"now" => @mid, "claimed_at" => @mid}))
+
     assert reclaimed["fence_generation"] == 2
 
     assert {:ok, completed, effects} = Core.complete(reclaimed, fence(reclaimed, @mid))
@@ -398,18 +403,18 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :stale_fence} =
              Core.accept_passed_receipt(
                claimed,
-               fence(claimed, @after, %{"receipt" => passed(first)})
+               fence(claimed, @after_expiry, %{"receipt" => passed(first)})
              )
 
     assert {:ok, expired, [%{"op" => "persist"}]} =
-             Core.expire_claim(claimed, fence(claimed, @after))
+             Core.expire_claim(claimed, fence(claimed, @after_expiry))
 
     assert expired["claim"] == nil
 
     claimed2 = claimed_state()
 
     assert {:ok, revoked, [%{"op" => "persist"}]} =
-             Core.revoke_claim(claimed2, fence(claimed2, @after))
+             Core.revoke_claim(claimed2, fence(claimed2, @after_expiry))
 
     assert revoked["claim"] == nil
     assert revoked["fence_generation"] == 1
@@ -420,7 +425,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :not_expired} = Core.expire_claim(claimed, fence(claimed, @mid))
     assert claimed["claim"] != nil
 
-    assert {:ok, revoked, [%{"op" => "persist"}]} = Core.revoke_claim(claimed, fence(claimed, @mid))
+    assert {:ok, revoked, [%{"op" => "persist"}]} =
+             Core.revoke_claim(claimed, fence(claimed, @mid))
+
     assert revoked["claim"] == nil
     assert revoked["status"] == "open"
   end
@@ -431,14 +438,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :wrong_fence} = Core.expire_claim(claimed, wrong)
     assert {:error, :wrong_fence} = Core.revoke_claim(claimed, wrong)
 
-    expired_wrong = fence(claimed, @after, %{"fence_token" => "wrong-token"})
+    expired_wrong = fence(claimed, @after_expiry, %{"fence_token" => "wrong-token"})
     assert {:error, :wrong_fence} = Core.expire_claim(claimed, expired_wrong)
     assert {:error, :wrong_fence} = Core.revoke_claim(claimed, expired_wrong)
   end
 
   test "stale generation after reclaim is :stale_fence even when the token is reused" do
     claimed = claimed_state()
-    {:ok, expired, _} = Core.expire_claim(claimed, fence(claimed, @after))
+    {:ok, expired, _} = Core.expire_claim(claimed, fence(claimed, @after_expiry))
     {:ok, reclaimed, _} = Core.claim(expired, reclaim_attrs())
     assert reclaimed["fence_generation"] == 2
     assert reclaimed["claim"]["fence_token"] == @token
@@ -446,7 +453,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     stale = %{
       "fence_token" => @token,
       "fence_generation" => 1,
-      "now" => @after
+      "now" => @after_expiry
     }
 
     assert {:error, :stale_fence} = Core.expire_claim(reclaimed, stale)
@@ -476,13 +483,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     {:ok, open} = Core.new(fresh_attrs())
 
     assert {:error, :malformed_state} =
-             Core.claim(open, claim_attrs(%{"claimed_at" => @after, "now" => @claimed_at}))
+             Core.claim(open, claim_attrs(%{"claimed_at" => @after_expiry, "now" => @claimed_at}))
 
     assert {:error, :malformed_state} =
              Core.claim(open, claim_attrs(%{"now" => @expires_at}))
 
     assert {:error, :malformed_state} =
-             Core.claim(open, claim_attrs(%{"now" => @after}))
+             Core.claim(open, claim_attrs(%{"now" => @after_expiry}))
 
     assert {:error, :malformed_state} =
              Core.claim(open, claim_attrs(%{"expires_at" => @claimed_at}))
@@ -602,6 +609,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
 
     {:ok, _failed, fail_effects} =
       Core.fail(failed_state, fence(failed_state, @mid))
+
     terminal = Enum.find(fail_effects, &(&1["op"] == "terminal"))
     assert byte_size(Jason.encode!(terminal)) <= Core.limits()["max_terminal_effect_bytes"]
   end
@@ -669,9 +677,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     Map.merge(
       %{
         "fence_token" => @token,
-        "claimed_at" => @after,
+        "claimed_at" => @after_expiry,
         "expires_at" => @later_expires,
-        "now" => @after
+        "now" => @after_expiry
       },
       extra
     )

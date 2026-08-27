@@ -1125,9 +1125,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
       true ->
         Enum.reduce_while(@identity_keys, :ok, fn key, :ok ->
           case Map.fetch(input, key) do
-            :error -> {:cont, :ok}
-            {:ok, value} when value === identities[key] -> {:cont, :ok}
-            {:ok, _} -> {:halt, {:error, :identity_drift}}
+            :error ->
+              {:cont, :ok}
+
+            {:ok, value} ->
+              if value === identities[key],
+                do: {:cont, :ok},
+                else: {:halt, {:error, :identity_drift}}
           end
         end)
     end
@@ -1135,9 +1139,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp check_owner_id(state, input) do
     case Map.fetch(input, "owner_id") do
-      :error -> :ok
-      {:ok, owner} when owner === state["identities"]["principal_id"] -> :ok
-      {:ok, _} -> {:error, :identity_drift}
+      :error ->
+        :ok
+
+      {:ok, owner} ->
+        if owner === state["identities"]["principal_id"],
+          do: :ok,
+          else: {:error, :identity_drift}
     end
   end
 
