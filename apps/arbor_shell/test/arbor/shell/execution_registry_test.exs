@@ -1,5 +1,6 @@
 defmodule Arbor.Shell.ExecutionRegistryTest do
   use ExUnit.Case, async: false
+  import ExUnit.CaptureLog
 
   @moduletag :fast
 
@@ -220,6 +221,45 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
 
     assert {:ok, %{terminal_source: :owner_down, result: %{killed: true, cancelled: true}}} =
              ExecutionRegistry.get(id)
+  end
+
+  test "controller death names registry_controller_down on the owner cancel" do
+    parent = self()
+
+    controller =
+      spawn(fn ->
+        {:ok, id} = ExecutionRegistry.register("sleep 5")
+        send(parent, {:id, id})
+
+        receive do
+          {:owner, owner} ->
+            :ok = ExecutionRegistry.adopt(id, owner)
+            send(parent, :adopted)
+            Process.sleep(:infinity)
+        end
+      end)
+
+    assert_receive {:id, id}, 1_000
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:cancel_shell_execution, ^id} ->
+            send(parent, :owner_saw_controller_down_cancel)
+            Process.sleep(:infinity)
+        end
+      end)
+
+    send(controller, {:owner, owner})
+    assert_receive :adopted, 1_000
+
+    log =
+      capture_log(fn ->
+        Process.exit(controller, :kill)
+        assert_receive :owner_saw_controller_down_cancel, 1_000
+      end)
+
+    assert log =~ "shell unit cancel source=registry_controller_down"
   end
 
   defp raw_call(registry, request) do

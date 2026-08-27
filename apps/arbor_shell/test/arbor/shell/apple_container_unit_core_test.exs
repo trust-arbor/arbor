@@ -754,6 +754,19 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
       refute Enum.any?(effects, &match?({:terminal, _}, &1))
     end
 
+    test "cancel during cleanup does not restart force_stop", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:ok, state, [{:run, :force_stop, _}]} =
+               Unit.apply_result(state, :start, success(%{exit_code: 1, stdout: "x"}))
+
+      assert state.stage == :cleanup
+      assert {:ok, state, []} = Unit.cancel(state)
+      assert state.stage == :cleanup
+      assert state.cleanup_step == :force_stop
+      assert state.candidate_result.exit_code == 1
+    end
+
     test "cleanup-time cancel does not rewrite a start-phase candidate", %{plan: plan} do
       state = through_start_pending(plan)
       stdout = "** (ErlangError) Erlang error: :enoent\n"
@@ -768,6 +781,7 @@ defmodule Arbor.Shell.AppleContainerUnitCoreTest do
 
       assert {:ok, state, effects} = Unit.cancel(state)
       assert state.stage == :cleanup
+      assert effects == []
       assert state.candidate_result.exit_code == 1
       assert state.candidate_result.stdout == stdout
       assert state.candidate_result.killed == false

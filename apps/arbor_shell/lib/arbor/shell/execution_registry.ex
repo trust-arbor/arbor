@@ -11,6 +11,8 @@ defmodule Arbor.Shell.ExecutionRegistry do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Identifiers
 
   @terminal_statuses [:completed, :failed, :timed_out, :killed]
@@ -194,7 +196,7 @@ defmodule Arbor.Shell.ExecutionRegistry do
             {:reply, :ok, state}
 
           true ->
-            send(execution.owner_pid, {:cancel_shell_execution, id})
+            request_owner_cancel(execution, :registry_request_cancel)
             updated = %{execution | status: :cancelling}
             {:reply, :ok, put_in(state, [:executions, id], updated)}
         end
@@ -266,7 +268,7 @@ defmodule Arbor.Shell.ExecutionRegistry do
             {id, apply_terminal(execution, status, result, :owner_down)}
 
           controller_down? ->
-            send(execution.owner_pid, {:cancel_shell_execution, id})
+            request_owner_cancel(execution, :registry_controller_down)
 
             # Cancellation request only — remains nonterminal with nil provenance.
             {id,
@@ -296,7 +298,7 @@ defmodule Arbor.Shell.ExecutionRegistry do
   def terminate(_reason, state) do
     Enum.each(state.executions, fn {_id, execution} ->
       if execution.status not in @terminal_statuses do
-        send(execution.owner_pid, {:cancel_shell_execution, execution.id})
+        request_owner_cancel(execution, :registry_terminate)
       end
     end)
 
@@ -354,6 +356,15 @@ defmodule Arbor.Shell.ExecutionRegistry do
       true -> :completed
     end
   end
+
+  defp request_owner_cancel(%{owner_pid: owner, id: id}, source)
+       when is_pid(owner) and is_binary(id) and is_atom(source) do
+    Logger.warning("shell unit cancel source=#{source}")
+    send(owner, {:cancel_shell_execution, id})
+    :ok
+  end
+
+  defp request_owner_cancel(_execution, _source), do: :ok
 
   defp cancellation_result(execution) do
     %{

@@ -39,6 +39,8 @@ defmodule Arbor.Shell.OciUnitWorker do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
   alias Arbor.Shell.AppleContainerUnitJournal
   alias Arbor.Shell.AppleContainerUnitJournalCore, as: JournalCore
@@ -540,6 +542,7 @@ defmodule Arbor.Shell.OciUnitWorker do
 
   @impl true
   def handle_info({:cancel_shell_execution, id}, %{execution_id: id} = state) do
+    log_cancel(state, :mailbox)
     handle_cancel(state)
   end
 
@@ -550,6 +553,7 @@ defmodule Arbor.Shell.OciUnitWorker do
         %{controller_ref: ref, controller_pid: pid} = state
       ) do
     state = %{state | controller_ref: nil, controller_pid: nil}
+    log_cancel(state, :worker_controller_down)
     handle_cancel(state)
   end
 
@@ -879,8 +883,9 @@ defmodule Arbor.Shell.OciUnitWorker do
     if core.stage == :terminal do
       {:noreply, state}
     else
-      # Apply UnitCore.cancel exactly once even when already in cleanup so
-      # teardown restarts safely. A completed start candidate is preserved.
+      # Apply UnitCore.cancel exactly once. Cleanup-stage cancel is a no-op
+      # so a stray cancel cannot restart force_stop. A completed start
+      # candidate is preserved.
       case UnitCore.cancel(core) do
         {:ok, core, effects} ->
           dispatch_effects(%{state | core: core, cancel_applied: true}, effects)
@@ -1066,6 +1071,28 @@ defmodule Arbor.Shell.OciUnitWorker do
     |> do_handle_cancel()
   end
 
+  defp log_cancel(state, source) when is_atom(source) do
+    stage =
+      case state do
+        %{core: %{stage: core_stage}} when is_atom(core_stage) -> core_stage
+        %{status: status} -> status
+        _ -> :unknown
+      end
+
+    step =
+      case state do
+        %{core: %{cleanup_step: cleanup_step}} -> cleanup_step
+        _ -> nil
+      end
+
+    has_candidate =
+      match?(%{core: %{candidate_result: candidate}} when is_map(candidate), state)
+
+    Logger.warning(
+      "shell unit cancel received source=#{source} stage=#{stage} cleanup_step=#{inspect(step)} has_candidate=#{has_candidate} pending=#{state.pending_result == true}"
+    )
+  end
+
   defp do_handle_cancel(%{status: :waiting} = state) do
     # Preflight not begun — no create attempted.
     hold_terminal_for_gate(state, {:error, :preflight_cancelled})
@@ -1075,6 +1102,12 @@ defmodule Arbor.Shell.OciUnitWorker do
 
   defp do_handle_cancel(%{held_terminal: held} = state) when not is_nil(held) do
     # Private held terminal must not be overwritten by later cancellation.
+    {:noreply, %{state | cancel_requested: true}}
+  end
+
+  defp do_handle_cancel(%{pending_result: true, core: %{stage: :cleanup}} = state) do
+    # Cleanup is already enforcing absence. A stray cancel must not kill the
+    # in-flight force_stop/delete/verify session.
     {:noreply, %{state | cancel_requested: true}}
   end
 

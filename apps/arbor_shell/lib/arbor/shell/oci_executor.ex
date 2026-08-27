@@ -17,6 +17,8 @@ defmodule Arbor.Shell.OciExecutor do
   # uncertain and requires positive settlement. No finite operation deadline
   # abandons cleanup/settlement once a unit start was attempted.
 
+  require Logger
+
   alias Arbor.Shell.AppleContainerUnitDrainCoordinator
   alias Arbor.Shell.AppleContainerUnitJournalCore
   alias Arbor.Shell.AppleContainerUnitName
@@ -658,6 +660,7 @@ defmodule Arbor.Shell.OciExecutor do
 
   defp cancel_known_worker(worker, execution_id)
        when is_pid(worker) and is_binary(execution_id) do
+    Logger.warning("shell unit cancel source=executor_settle_uncertain")
     send(worker, {:cancel_shell_execution, execution_id})
     :ok
   end

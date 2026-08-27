@@ -189,7 +189,12 @@ defmodule Arbor.Shell.OciUnitCore do
 
         {:ok, state, [{:terminal, terminal}]}
 
-      state.stage in [:create, :start, :cleanup] or state.create_attempted ->
+      state.stage == :cleanup ->
+        # Already tearing down. A later cancel must not restart force_stop or
+        # rewrite a completed start-phase candidate.
+        {:ok, preserve_start_candidate_on_cancel(state), []}
+
+      state.stage in [:create, :start] or state.create_attempted ->
         enter_cleanup(preserve_start_candidate_on_cancel(state))
 
       true ->
