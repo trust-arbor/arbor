@@ -28,11 +28,7 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     real_git = System.find_executable("git")
     assert is_binary(real_git), "git must be on PATH for Mix.SCM.Git.lock_status"
 
-    {elixir_root, 0} = System.cmd("mise", ["where", "elixir"], stderr_to_stdout: true)
-    {erlang_root, 0} = System.cmd("mise", ["where", "erlang"], stderr_to_stdout: true)
-    elixir_root = String.trim(elixir_root)
-    erlang_root = String.trim(erlang_root)
-    mix = Path.join(elixir_root, "bin/mix")
+    {elixir_root, erlang_root, mix} = current_vm_toolchain()
     assert File.regular?(mix)
 
     root =
@@ -197,11 +193,7 @@ defmodule Arbor.Actions.MixCompileArgvTest do
   end
 
   test "cold compile uses a pre-fetched dep artifact and does not download" do
-    {elixir_root, 0} = System.cmd("mise", ["where", "elixir"], stderr_to_stdout: true)
-    {erlang_root, 0} = System.cmd("mise", ["where", "erlang"], stderr_to_stdout: true)
-    elixir_root = String.trim(elixir_root)
-    erlang_root = String.trim(erlang_root)
-    mix = Path.join(elixir_root, "bin/mix")
+    {elixir_root, erlang_root, mix} = current_vm_toolchain()
     assert File.regular?(mix)
 
     root =
@@ -304,5 +296,19 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     assert status == 0, output
     refute output =~ "would download"
     assert File.read!(Path.join(project, "download_payload_ran")) == "skip"
+  end
+
+  defp current_vm_toolchain do
+    elixir_root =
+      :code.lib_dir(:elixir)
+      |> to_string()
+      |> Path.expand()
+      |> Path.dirname()
+      |> Path.dirname()
+
+    erlang_root = :code.root_dir() |> to_string() |> Path.expand()
+    mix = Path.join(elixir_root, "bin/mix")
+
+    {elixir_root, erlang_root, mix}
   end
 end
