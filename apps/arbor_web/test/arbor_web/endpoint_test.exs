@@ -39,5 +39,9 @@ defmodule Arbor.Web.EndpointTest do
 
       refute expanded =~ "Application.compile_env(:arbor_dashboard, __MODULE__)"
     end
+
+    test "umbrella registers the Phoenix code reloader Mix listener" do
+      assert Phoenix.CodeReloader in Keyword.fetch!(Arbor.MixProject.project(), :listeners)
+    end
   end
 end

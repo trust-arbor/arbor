@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 698,
+  "entry_count": 699,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8618,8 +8618,21 @@
       "source_incident": "found 2026-08-27, V7-16, Linux factory run 11n",
       "always_loaded": false,
       "content_sha256": "a19cf49ebb40449ca67096b9c9677e9f0928d0ded7200b8e5bc07d5370b74cf0"
+    },
+    {
+      "source_ordinal": 699,
+      "source_kind": "post-migration",
+      "slug": "mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes",
+      "title": "Register `Phoenix.CodeReloader` as a Mix listener in long-lived dev runtimes.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-27 during P1B-2A validation",
+      "always_loaded": false,
+      "content_sha256": "6ade713c04eca76b8827902a40bb77d11893ae25be1d79831003b0a5620372d5"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 237
+  "post_migration_entry_count": 238
 }

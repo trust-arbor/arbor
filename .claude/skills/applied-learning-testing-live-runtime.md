@@ -979,3 +979,7 @@ validation image has no `git`, and baseline `deps/<git-dep>` trees have no
 `Arbor.Actions.Mix.compile_argv/1` and admit that exact argv in the reviewed
 Mix shapes. Installing git in the image is belt-and-braces, not the fix (found
 2026-08-27, V7-15, Linux factory run 11n).
+
+<!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
+<a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>
+**Register `Phoenix.CodeReloader` as a Mix listener in long-lived dev runtimes.** Tidewave calls `Phoenix.CodeReloader.reload/2` before each live eval even when the endpoint plug's `code_reloader` config is false. Without root `listeners: [Phoenix.CodeReloader]`, externally compiled umbrella apps take Phoenix's fallback `:code.purge/1` path, which can kill durable factory processes still referencing old code and surface only `:task_owner_died`. Keep the listener in the umbrella `mix.exs`; after adding it, restart the server before trusting live eval (found 2026-08-27 during P1B-2A validation).
