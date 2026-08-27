@@ -72,7 +72,7 @@ defmodule Arbor.Commands.Baseline do
              env: [],
              labels: labels
            }),
-         :ok <- persist(layout, document, ctx.deps_path, image_policy) do
+         :ok <- persist(layout, document, ctx.deps_path, image_policy, ctx.repo_root) do
       {:ok,
        %{
          "tree_digest" => tree_digest,
@@ -543,7 +543,7 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
-  defp persist(layout, document, source_tree, image_policy) do
+  defp persist(layout, document, source_tree, image_policy, repo_root) do
     # The collection dir (`$ARBOR_HOME/baseline`) is an ANCESTOR of everything
     # the operator-owned pin walks; created by `mkdir_p` under a 002 umask it
     # came out 775 and every pin failed with :untrusted_path even though the
@@ -563,7 +563,7 @@ defmodule Arbor.Commands.Baseline do
     with :ok <- mkdir_owner_only(collection),
          :ok <- mkdir_owner_only(staging),
          :ok <- copy_tree(source_tree, Path.join(staging, "tree")),
-         :ok <- maybe_copy_compiled_build(source_tree, Path.join(staging, "build")),
+         :ok <- maybe_copy_compiled_build(source_tree, Path.join(staging, "build"), repo_root),
          :ok <- write_mode_0400(Path.join(staging, "manifest.json"), Jason.encode!(document)),
          :ok <-
            write_mode_0400(
@@ -580,7 +580,7 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
-  defp maybe_copy_compiled_build(source_tree, dest) when is_binary(source_tree) do
+  defp maybe_copy_compiled_build(source_tree, dest, repo_root) when is_binary(source_tree) do
     source = source_tree <> "-build"
 
     if File.dir?(source) do
@@ -588,7 +588,8 @@ defmodule Arbor.Commands.Baseline do
         source,
         dest,
         source_tree,
-        Path.join(Path.dirname(dest), "tree")
+        Path.join(Path.dirname(dest), "tree"),
+        repo_root
       )
     else
       :ok
@@ -598,18 +599,60 @@ defmodule Arbor.Commands.Baseline do
   # Mix `_build/<env>/lib/<dep>/{priv,src,include}` entries are relative
   # symlinks into the deps tree. Recreate those that resolve inside the
   # compiled build or the deps checkout; refuse absolute and outside links.
-  defp copy_compiled_build_tree(source, dest, tree_source, tree_dest) do
+  # In-umbrella `lib/<app>` entries point at `repo/apps/<app>` and must not
+  # be seeded — the unit compiles those apps from `/workspace` (V7-20c).
+  defp copy_compiled_build_tree(source, dest, tree_source, tree_dest, repo_root) do
     bounds = %{
       build_source: Path.expand(source),
       build_dest: Path.expand(dest),
       tree_source: Path.expand(tree_source),
-      tree_dest: Path.expand(tree_dest)
+      tree_dest: Path.expand(tree_dest),
+      umbrella_apps: umbrella_app_names(repo_root)
     }
 
     copy_compiled_entry(source, dest, bounds)
   end
 
+  defp umbrella_app_names(repo_root) when is_binary(repo_root) do
+    apps = Path.join(repo_root, "apps")
+
+    case File.ls(apps) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(fn name ->
+          match?({:ok, %File.Stat{type: :directory}}, File.lstat(Path.join(apps, name)))
+        end)
+        |> MapSet.new()
+
+      _other ->
+        MapSet.new()
+    end
+  end
+
+  defp umbrella_app_names(_repo_root), do: MapSet.new()
+
+  defp skip_umbrella_app_entry?(source, %{build_source: root, umbrella_apps: apps}) do
+    case path_relative(source, root) do
+      rel when is_binary(rel) ->
+        case Path.split(rel) do
+          ["lib", name | _rest] -> MapSet.member?(apps, name)
+          _other -> false
+        end
+
+      _other ->
+        false
+    end
+  end
+
   defp copy_compiled_entry(source, dest, bounds) do
+    if skip_umbrella_app_entry?(source, bounds) do
+      :ok
+    else
+      copy_compiled_entry_body(source, dest, bounds)
+    end
+  end
+
+  defp copy_compiled_entry_body(source, dest, bounds) do
     case File.lstat(source) do
       {:ok, %File.Stat{type: :directory}} ->
         copy_compiled_directory(source, dest, bounds)

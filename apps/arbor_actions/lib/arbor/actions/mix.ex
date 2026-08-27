@@ -1859,13 +1859,16 @@ defmodule Arbor.Actions.Mix do
            ),
          {:ok, untracked_paths} <- untracked_paths_from_listing(untracked, budget) do
       paths =
-        (tracked_paths ++ untracked_paths)
+        (tracked_paths ++ Enum.reject(untracked_paths, &runtime_excluded_committable_path?/1))
         |> Enum.uniq()
         |> Enum.sort()
 
       validate_committable_paths(paths, budget)
     end
   end
+
+  defp runtime_excluded_committable_path?(path),
+    do: Arbor.AI.grok_excluded_worktree_path?(path)
 
   # Parse `git ls-files --stage -z` entries. Fail closed on gitlinks (160000)
   # and any other unsupported tracked mode rather than silently omitting them.

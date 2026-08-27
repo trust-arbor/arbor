@@ -157,6 +157,24 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
     defp send_signal(_pid, _message), do: :ok
   end
 
+  test "registers the worktree runtime exclusion paths" do
+    paths = GrokSandbox.worktree_exclusion_relative_paths()
+
+    assert paths == [
+             ".grok/config.toml",
+             ".mcp.json",
+             ".cursor/mcp.json",
+             ".grok/plugins",
+             ".claude/plugins",
+             ".grok/sandbox.toml",
+             ".grok/.sandbox.toml.arbor-backup"
+           ]
+
+    assert GrokSandbox.excluded_worktree_path?(".mcp.json")
+    assert GrokSandbox.excluded_worktree_path?(".grok/plugins/extra")
+    refute GrokSandbox.excluded_worktree_path?("docs/arbor/SOFTWARE_FACTORY.md")
+  end
+
   defp fixture_suffix do
     :crypto.strong_rand_bytes(16)
     |> Base.encode16(case: :lower)

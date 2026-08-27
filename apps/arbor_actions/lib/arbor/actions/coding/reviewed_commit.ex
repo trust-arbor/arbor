@@ -179,7 +179,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
            :ok <- verify_workspace_binding(path, workspace_id, context),
            # Lease/path authority first — only then probe tree/fingerprint/Git.
            {:ok, bindings} <- resolve_candidate_bindings(path, params),
-           git_params = git_commit_params(path, message, params, bindings),
+           {:ok, git_params} <- git_commit_params(path, message, params, bindings),
            # Approval identity carries fingerprint + prior; nested Git only gets
            # exact head/tree bindings.
            auth_params =
@@ -988,14 +988,18 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   end
 
   defp git_commit_params(path, message, params, bindings) do
-    %{
-      path: path,
-      message: message,
-      all: truthy?(Map.get(params, :all, true)),
-      allow_empty: truthy?(Map.get(params, :allow_empty, false)),
-      expected_head_commit: bindings.head,
-      expected_tree_oid: bindings.tree_oid
-    }
+    with {:ok, files} <- Workspace.committable_changed_paths(path) do
+      {:ok,
+       %{
+         path: path,
+         message: message,
+         files: files,
+         all: false,
+         allow_empty: truthy?(Map.get(params, :allow_empty, false)),
+         expected_head_commit: bindings.head,
+         expected_tree_oid: bindings.tree_oid
+       }}
+    end
   end
 
   defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")

@@ -140,6 +140,43 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
            )
   end
 
+  test "reviewed commit stages only the candidate paths and ignores runtime placeholders" do
+    {repo, head} = init_dirty_repo!()
+    File.mkdir_p!(Path.join(repo, ".grok"))
+    File.mkdir_p!(Path.join(repo, ".cursor"))
+    File.mkdir_p!(Path.join(repo, ".claude"))
+    File.write!(Path.join(repo, ".mcp.json"), "")
+    File.write!(Path.join(repo, ".grok/config.toml"), "")
+    File.write!(Path.join(repo, ".grok/sandbox.toml"), "")
+    File.write!(Path.join(repo, ".grok/.sandbox.toml.arbor-backup"), "")
+    File.write!(Path.join(repo, ".cursor/mcp.json"), "")
+    File.touch!(Path.join(repo, ".grok/plugins"))
+    File.touch!(Path.join(repo, ".claude/plugins"))
+
+    agent_id = unique_agent("placeholders")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+    params = dirty_params(repo, head)
+
+    task = Task.async(fn -> ReviewedCommit.run(params, context) end)
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+    commit = payload["commit_hash"]
+
+    {names, 0} =
+      System.cmd("git", ["-C", repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commit])
+
+    assert String.trim(names) == "change.txt"
+  end
+
   test "security regression: active lease authorizes its linked-worktree Git storage" do
     {repo, _head} = init_clean_repo!()
     agent_id = unique_agent("linked_storage")

@@ -396,6 +396,61 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     refute File.exists?(Path.join(report["baseline_root"], "tree/d/_build"))
   end
 
+  test "compiled build copy skips in-umbrella app lib entries", %{root: root} do
+    {repo, deps} = mix_layout_fixture!(root)
+    File.mkdir_p!(Path.join(repo, "apps/foo/priv"))
+    File.write!(Path.join(repo, "apps/foo/priv/keep"), "app\n")
+
+    assert {:ok, report} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               active_config_path: Path.join(root, "validation-runtime.json"),
+               image_build: fn _request ->
+                 {:ok,
+                  %{
+                    index_digest: @index,
+                    manifest_digest: @manifest,
+                    image: "docker.io/arbor/validation@" <> @index,
+                    image_id: "sha256:" <> String.duplicate("1", 64)
+                  }}
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn ctx ->
+                 priv = Path.join(ctx.deps_path, "dep/priv")
+                 File.mkdir_p!(priv)
+                 File.write!(Path.join(priv, "keep"), "dep\n")
+
+                 dep_dir = Path.join(ctx.deps_path <> "-build", "lib/dep")
+                 File.mkdir_p!(dep_dir)
+
+                 File.ln_s!(
+                   "../../../" <> Path.basename(ctx.deps_path) <> "/dep/priv",
+                   Path.join(dep_dir, "priv")
+                 )
+
+                 foo_dir = Path.join(ctx.deps_path <> "-build", "lib/foo")
+                 File.mkdir_p!(foo_dir)
+
+                 File.ln_s!(
+                   "../../../../repo/apps/foo/priv",
+                   Path.join(foo_dir, "priv")
+                 )
+
+                 :ok
+               end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert {:ok, %File.Stat{type: :symlink}} =
+             File.lstat(Path.join(report["baseline_root"], "build/lib/dep/priv"))
+
+    refute File.exists?(Path.join(report["baseline_root"], "build/lib/foo"))
+  end
+
   test "status uses the Shell facade and never names Authority modules" do
     task_path =
       Path.expand("../../../lib/mix/tasks/arbor.baseline.status.ex", Path.dirname(__ENV__.file))

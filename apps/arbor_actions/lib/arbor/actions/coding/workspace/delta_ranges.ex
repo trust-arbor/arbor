@@ -129,6 +129,18 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRanges do
     end
   end
 
+  defp parse_line("new file mode " <> mode, %{old_path: nil, new_path: :pending} = state) do
+    with :ok <- validate_ordinary_mode(mode) do
+      {:ok, record_current_path(state, state.header_new_path)}
+    end
+  end
+
+  defp parse_line("deleted file mode " <> mode, %{old_path: nil, new_path: :pending} = state) do
+    with :ok <- validate_ordinary_mode(mode) do
+      {:ok, record_current_path(state, state.header_old_path)}
+    end
+  end
+
   defp parse_line("old mode " <> mode, %{old_path: nil, new_path: :pending} = state) do
     with :ok <- validate_ordinary_mode(mode) do
       {:ok, %{state | old_mode: mode}}

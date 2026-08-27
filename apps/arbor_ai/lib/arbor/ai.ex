@@ -1519,6 +1519,18 @@ defmodule Arbor.AI do
     Arbor.AI.AcpSession.GrokSandbox.bind(repository_root, worktree_root)
   end
 
+  @doc false
+  @spec grok_worktree_exclusion_relative_paths() :: [String.t()]
+  def grok_worktree_exclusion_relative_paths do
+    Arbor.AI.AcpSession.GrokSandbox.worktree_exclusion_relative_paths()
+  end
+
+  @doc false
+  @spec grok_excluded_worktree_path?(term()) :: boolean()
+  def grok_excluded_worktree_path?(path) do
+    Arbor.AI.AcpSession.GrokSandbox.excluded_worktree_path?(path)
+  end
+
   @doc """
   Send a message on a managed ACP session.
 

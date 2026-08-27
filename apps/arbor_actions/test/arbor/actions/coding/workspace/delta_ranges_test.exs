@@ -28,6 +28,40 @@ defmodule Arbor.Actions.Coding.Workspace.DeltaRangesTest do
     assert {:ok, %{"lib/example.ex" => [[2, 4]]}} = DeltaRanges.parse(diff)
   end
 
+  test "accepts empty added and deleted files with no hunks" do
+    added = """
+    diff --git a/.mcp.json b/.mcp.json
+    new file mode 100644
+    index 0000000..e69de29
+    """
+
+    assert {:ok, ranges} = DeltaRanges.parse(added)
+    assert ranges == %{}
+
+    deleted = """
+    diff --git a/.grok/config.toml b/.grok/config.toml
+    deleted file mode 100644
+    index e69de29..0000000
+    """
+
+    assert {:ok, deleted_ranges} = DeltaRanges.parse(deleted)
+    assert deleted_ranges == %{}
+
+    mixed =
+      added <>
+        """
+        diff --git a/docs/note.md b/docs/note.md
+        index 1111111..2222222 100644
+        --- a/docs/note.md
+        +++ b/docs/note.md
+        @@ -1 +1,2 @@
+         keep
+        +added
+        """
+
+    assert {:ok, %{"docs/note.md" => [[1, 2]]}} = DeltaRanges.parse(mixed)
+  end
+
   test "merges adjacent and overlapping hunks while retaining disjoint ranges" do
     diff = """
     diff --git a/lib/example.ex b/lib/example.ex

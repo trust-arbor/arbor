@@ -790,10 +790,11 @@ defmodule Arbor.Actions.Coding.Workspace do
     do: {:error, :workspace_fingerprint_manifest_too_large}
 
   defp fingerprint_paths(unstaged, untracked) do
+    unstaged_paths = nul_paths(unstaged)
+    untracked_paths = Enum.reject(nul_paths(untracked), &runtime_excluded_path?/1)
+
     paths =
-      [unstaged, untracked]
-      |> Enum.flat_map(&:binary.split(&1, <<0>>, [:global]))
-      |> Enum.reject(&(&1 == ""))
+      (unstaged_paths ++ untracked_paths)
       |> Enum.uniq()
       |> Enum.sort()
 
@@ -1686,16 +1687,38 @@ defmodule Arbor.Actions.Coding.Workspace do
     {:error, "failed to resolve base_ref #{inspect(ref)}"}
   end
 
+  @doc false
+  @spec committable_changed_paths(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def committable_changed_paths(worktree_path) when is_binary(worktree_path) do
+    with {:ok, tracked} <- git(worktree_path, ["diff", "--name-only", "-z", "HEAD", "--"]),
+         {:ok, untracked} <-
+           git(worktree_path, ["ls-files", "-z", "--others", "--exclude-standard"]) do
+      paths =
+        (nul_paths(tracked) ++ Enum.reject(nul_paths(untracked), &runtime_excluded_path?/1))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      {:ok, paths}
+    end
+  end
+
+  def committable_changed_paths(_worktree_path), do: {:error, :invalid_worktree}
+
   defp worktree_dirty?(worktree_path) do
-    # Command-line policy overrides repository/user config such as
-    # status.showUntrackedFiles=no so authoritative workspace inspection never
-    # hides useful untracked files.
-    case git(worktree_path, ["status", "--porcelain", "--untracked-files=all"]) do
-      {:ok, ""} -> false
-      {:ok, output} -> String.trim(output) != ""
+    case committable_changed_paths(worktree_path) do
+      {:ok, []} -> false
+      {:ok, _files} -> true
       {:error, _reason} -> true
     end
   end
+
+  defp nul_paths(blob) when is_binary(blob) do
+    blob
+    |> :binary.split(<<0>>, [:global])
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp runtime_excluded_path?(path), do: Arbor.AI.grok_excluded_worktree_path?(path)
 
   defp head_commit(worktree_path) do
     case git(worktree_path, ["rev-parse", "HEAD"]) do

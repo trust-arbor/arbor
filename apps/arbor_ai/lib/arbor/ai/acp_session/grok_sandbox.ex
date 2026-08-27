@@ -87,7 +87,30 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
     [".claude", "plugins"]
   ]
 
+  @worktree_exclusion_relative_paths Enum.map(
+                                       @ambient_mcp_relative_paths ++
+                                         [
+                                           [".grok", @profile_filename],
+                                           [".grok", @backup_filename]
+                                         ],
+                                       &Path.join/1
+                                     )
+
   @opaque authority :: %Authority{}
+
+  @doc false
+  @spec worktree_exclusion_relative_paths() :: [String.t()]
+  def worktree_exclusion_relative_paths, do: @worktree_exclusion_relative_paths
+
+  @doc false
+  @spec excluded_worktree_path?(term()) :: boolean()
+  def excluded_worktree_path?(path) when is_binary(path) and path != "" do
+    Enum.any?(@worktree_exclusion_relative_paths, fn prefix ->
+      path == prefix or String.starts_with?(path, prefix <> "/")
+    end)
+  end
+
+  def excluded_worktree_path?(_path), do: false
 
   @doc false
   @spec adopt_authority(pid(), term()) ::
