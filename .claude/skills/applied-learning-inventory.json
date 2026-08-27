@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 697,
+  "entry_count": 698,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8605,8 +8605,21 @@
       "source_incident": "found 2026-08-27, V7-15, Linux factory run 11n",
       "always_loaded": false,
       "content_sha256": "c41bd8bcb88b19fb73f8ef5fbf209ca296a46364a0e52060b0ac308051670b0a"
+    },
+    {
+      "source_ordinal": 698,
+      "source_kind": "post-migration",
+      "slug": "cleanup-time-cancel-must-not-rewrite-a-completed-start-phase-candidate",
+      "title": "Cleanup-time cancel must not rewrite a completed start-phase candidate.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-cleanup-time-cancel-must-not-rewrite-a-completed-start-phase-candidate",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-27, V7-16, Linux factory run 11n",
+      "always_loaded": false,
+      "content_sha256": "a19cf49ebb40449ca67096b9c9677e9f0928d0ded7200b8e5bc07d5370b74cf0"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 236
+  "post_migration_entry_count": 237
 }

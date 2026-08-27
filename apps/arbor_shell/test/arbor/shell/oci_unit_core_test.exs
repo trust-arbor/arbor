@@ -161,6 +161,51 @@ defmodule Arbor.Shell.OciUnitCoreTest do
       assert effects == [{:run, :force_stop, plan.argv.force_stop}]
       refute Enum.any?(effects, &match?({:terminal, _}, &1))
     end
+
+    test "cleanup-time cancel does not rewrite a start-phase candidate", %{plan: plan} do
+      state = through_start_pending(plan)
+      stdout = "** (ErlangError) Erlang error: :enoent\n"
+
+      assert {:ok, state, _} =
+               Unit.apply_result(state, :start, success(%{exit_code: 1, stdout: stdout}))
+
+      assert state.stage == :cleanup
+      assert state.candidate_result.exit_code == 1
+      assert state.candidate_result.killed == false
+      refute Map.get(state.candidate_result, :cancelled) == true
+
+      assert {:ok, state, effects} = Unit.cancel(state)
+      assert state.stage == :cleanup
+      assert state.candidate_result.exit_code == 1
+      assert state.candidate_result.stdout == stdout
+      assert state.candidate_result.killed == false
+      refute Map.get(state.candidate_result, :cancelled) == true
+      refute Enum.any?(effects, &match?({:terminal, _}, &1))
+
+      assert {:ok, state, [{:terminal, {:ok, result}}]} = finish_cleanup_absent(state)
+      assert result.exit_code == 1
+      assert result.stdout == stdout
+      assert result.killed == false
+      refute Map.get(result, :cancelled) == true
+      assert state.stage == :terminal
+    end
+
+    test "start-phase timeout flags survive cleanup-time cancel", %{plan: plan} do
+      state = through_start_pending(plan)
+
+      assert {:ok, state, _} =
+               Unit.apply_result(
+                 state,
+                 :start,
+                 success(%{timed_out: true, killed: true, exit_code: 137, stdout: "t"})
+               )
+
+      assert {:ok, state, _} = Unit.cancel(state)
+      assert {:ok, _state, [{:terminal, {:ok, result}}]} = finish_cleanup_absent(state)
+      assert result.exit_code == 137
+      assert result.timed_out == true
+      assert result.killed == true
+    end
   end
 
   describe "cleanup after create" do

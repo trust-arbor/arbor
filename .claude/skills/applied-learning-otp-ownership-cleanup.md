@@ -346,3 +346,12 @@ Concurrency tests that must hold an owner alive across shutdown should use a
 controlled trap-exit owner, and tests that need exact message ordering should queue
 the messages at the receiving owner before resuming it (found 2026-08-11 while
 repairing runtime-admission settlement regressions).
+
+<!-- applied-learning: cleanup-time-cancel-must-not-rewrite-a-completed-start-phase-candidate -->
+<a id="applied-learning-cleanup-time-cancel-must-not-rewrite-a-completed-start-phase-candidate"></a>
+**Cleanup-time cancel must not rewrite a completed start-phase candidate.** Once
+start has produced an exit code, that result is the candidate terminal.
+Stamping `cancelled`/`killed` during later cleanup makes Mix project
+`validation_capacity_exceeded` and hides the real compile failure. Capacity
+flags must come from the start phase itself (found 2026-08-27, V7-16, Linux
+factory run 11n).

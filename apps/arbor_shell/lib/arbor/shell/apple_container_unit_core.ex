@@ -167,8 +167,10 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
   Before create is attempted, terminates as `{:error, :preflight_cancelled}`.
   At or after create (including while create/start is pending), records
   cancellation and enters enforcing cleanup without emitting a terminal
-  effect. The future shell must first exhaust any active local PortSession,
-  then interpret cleanup effects.
+  effect. A completed start-phase candidate is left unchanged: cleanup-time
+  cancel must not stamp `cancelled`/`killed` onto a real start exit. The
+  future shell must first exhaust any active local PortSession, then
+  interpret cleanup effects.
   """
   @spec cancel(state()) :: {:ok, state(), [effect()]} | {:error, term()}
   def cancel(%{stage: :terminal} = _state), do: {:error, :lifecycle_already_terminal}
@@ -188,12 +190,7 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
         {:ok, state, [{:terminal, terminal}]}
 
       state.stage in [:create, :start, :cleanup] or state.create_attempted ->
-        state =
-          state
-          |> Map.put(:error_reason, state.error_reason || :cancelled)
-          |> maybe_mark_candidate_cancelled()
-
-        enter_cleanup(state)
+        enter_cleanup(preserve_start_candidate_on_cancel(state))
 
       true ->
         terminal = {:error, :cancelled}
@@ -714,16 +711,15 @@ defmodule Arbor.Shell.AppleContainerUnitCore do
 
   defp finalize_terminal(_state), do: {:error, :missing_primary_outcome}
 
-  defp maybe_mark_candidate_cancelled(%{candidate_result: nil} = state), do: state
-
-  defp maybe_mark_candidate_cancelled(%{candidate_result: candidate} = state)
+  # Completed start result is the candidate terminal. Cleanup-time cancel
+  # drains the unit without rewriting start-phase exit/flags into cancelled/killed.
+  defp preserve_start_candidate_on_cancel(%{candidate_result: candidate} = state)
        when is_map(candidate) do
-    updated =
-      candidate
-      |> Map.put(:cancelled, true)
-      |> Map.put(:killed, true)
+    state
+  end
 
-    %{state | candidate_result: updated}
+  defp preserve_start_candidate_on_cancel(state) when is_map(state) do
+    %{state | error_reason: state.error_reason || :cancelled}
   end
 
   defp record_cleanup_diag(state, step, result) do

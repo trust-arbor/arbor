@@ -872,8 +872,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorker do
     if core.stage == :terminal do
       {:noreply, state}
     else
-      # Apply UnitCore.cancel exactly once even when already in cleanup, so a
-      # retained candidate is marked cancelled and cleanup restarts safely.
+      # Apply UnitCore.cancel exactly once even when already in cleanup so
+      # teardown restarts safely. A completed start candidate is preserved.
       case UnitCore.cancel(core) do
         {:ok, core, effects} ->
           dispatch_effects(%{state | core: core, cancel_applied: true}, effects)
