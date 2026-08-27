@@ -150,6 +150,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_metric_usage_string_bytes 1_024
   @max_metric_usage_encoded_bytes 16_384
   @max_validation_failure_reason_bytes 512
+  @prior_validation_stage_fields ~w(preflight compile xref test_compile test candidate base)
+  @prior_validation_stage_excerpt_fields ~w(stdout_excerpt stderr_excerpt reason)
+  @max_prior_validation_stage_source_bytes 16_384
   @max_pipeline_failure_reason_bytes 512
   @max_workspace_recovery_items 16
   @max_workspace_recovery_string_bytes 512
@@ -3535,6 +3538,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       context
     )
     |> maybe_put_pipeline_timeout_evidence(error_code, context)
+    |> maybe_put_prior_validation(error_code, context)
   end
 
   # A synthesized pipeline timeout is not a registered DOT pipeline_error
@@ -3639,6 +3643,80 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp maybe_put_worker_provider_account_exhausted_reason(detail, _error_code, _context),
     do: detail
+
+  defp maybe_put_prior_validation(detail, "worker_turn_no_progress", context) do
+    with "validation" <- context_get(context, "rework_kind"),
+         candidate_tree_oid when is_binary(candidate_tree_oid) <-
+           context_get(context, "validation_candidate_tree_oid"),
+         true <- valid_git_oid?(candidate_tree_oid),
+         reason when is_binary(reason) <- prior_validation_field(context, "reason"),
+         true <- valid_prior_validation_text?(reason),
+         bounded_reason when is_binary(bounded_reason) and bounded_reason != "" <-
+           RunLifecycleAdapter.bound_failure_reason(reason),
+         {stage, excerpt} <- prior_validation_failed_stage(context),
+         bounded_excerpt when is_binary(bounded_excerpt) and bounded_excerpt != "" <-
+           RunLifecycleAdapter.bound_failure_reason(excerpt) do
+      Map.put(detail, "prior_validation", %{
+        "candidate_tree_oid" => candidate_tree_oid,
+        "reason" => bounded_reason,
+        "failed_stage" => stage,
+        "stage_excerpt" => bounded_excerpt
+      })
+    else
+      _other -> detail
+    end
+  end
+
+  defp maybe_put_prior_validation(detail, _error_code, _context), do: detail
+
+  defp prior_validation_field(context, field) do
+    case context_get(context, "validation") do
+      value when is_map(value) and not is_struct(value) ->
+        Map.get(value, field)
+
+      _other ->
+        context_get(context, "validation." <> field)
+    end
+  end
+
+  defp prior_validation_failed_stage(context) do
+    Enum.find_value(@prior_validation_stage_fields, fn stage ->
+      case prior_validation_field(context, stage) do
+        %{"passed" => false} = result ->
+          Enum.find_value(@prior_validation_stage_excerpt_fields, fn field ->
+            case Map.get(result, field) do
+              excerpt when is_binary(excerpt) ->
+                if valid_prior_validation_stage_source?(excerpt), do: {stage, excerpt}
+
+              _other ->
+                nil
+            end
+          end)
+
+        _other ->
+          nil
+      end
+    end)
+  end
+
+  defp valid_prior_validation_text?(value) when is_binary(value) do
+    byte_size(value) in 1..@max_validation_failure_reason_bytes and String.valid?(value) and
+      String.trim(value) != ""
+  end
+
+  defp valid_prior_validation_text?(_value), do: false
+
+  defp valid_prior_validation_stage_source?(value) when is_binary(value) do
+    byte_size(value) in 1..@max_prior_validation_stage_source_bytes and String.valid?(value) and
+      String.trim(value) != ""
+  end
+
+  defp valid_prior_validation_stage_source?(_value), do: false
+
+  defp valid_git_oid?(oid) when byte_size(oid) in [40, 64],
+    do: String.match?(oid, ~r/\A[0-9a-f]+\z/)
+
+  defp valid_git_oid?(_oid), do: false
 
   defp attach_workspace_release_artifact(artifacts, result) do
     case Map.take(result, ["workspace_release_status", "workspace_expires_at"]) do

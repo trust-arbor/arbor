@@ -4781,6 +4781,159 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert detail["outcome"]["code"] == "pipeline_error"
     end
 
+    test "validation-rework worker_turn_no_progress preserves bounded prior validation cause" do
+      actionable = "lib/example.ex:42 assertion failed: expected :ok, got :error"
+      stage_source = actionable <> String.duplicate(" additional failure context", 40)
+      assert byte_size(stage_source) > 512
+
+      assert {:error, {:pipeline_error, detail}} =
+               run_with_engine_result(%{
+                 "status" => "pipeline_error",
+                 "error" => "worker_turn_no_progress",
+                 "rework_kind" => "validation",
+                 "validation_candidate_tree_oid" => @verification_tree_oid,
+                 "validation.reason" => "tests_failed",
+                 "validation.test" => %{
+                   "passed" => false,
+                   "reason" => "test_stage_failed",
+                   "status" => "completed",
+                   "exit_code" => 1,
+                   "stdout_excerpt" => stage_source,
+                   "stderr_excerpt" => "less useful test runner output",
+                   "stdout" => "complete command output must not be exposed",
+                   "unrelated" => "unrelated validation context"
+                 },
+                 "release.status" => "retained",
+                 "release.expires_at" => "2026-08-28T12:00:00Z",
+                 "unrelated_context" => "ambient context must not be exposed"
+               })
+
+      assert detail["status"] == "pipeline_error"
+      assert detail["error"] == "worker_turn_no_progress"
+      assert detail["outcome"]["code"] == "worker_turn_no_progress"
+      assert detail["outcome"]["retry"] == "same_session"
+      assert detail["workspace_release_status"] == "retained"
+
+      assert %{"stage_excerpt" => bounded_excerpt} = detail["prior_validation"]
+
+      assert detail["prior_validation"] == %{
+               "candidate_tree_oid" => @verification_tree_oid,
+               "reason" => "tests_failed",
+               "failed_stage" => "test",
+               "stage_excerpt" => bounded_excerpt
+             }
+
+      assert byte_size(bounded_excerpt) == 512
+      assert String.starts_with?(bounded_excerpt, actionable)
+      refute bounded_excerpt == stage_source
+      refute Map.has_key?(detail, "validation")
+      refute inspect(detail) =~ "less useful test runner output"
+      refute inspect(detail) =~ "test_stage_failed"
+      refute inspect(detail) =~ "complete command output"
+      refute inspect(detail) =~ "unrelated validation context"
+      refute inspect(detail) =~ "ambient context"
+
+      assert {:ok, envelope} =
+               TaskTerminalEnvelope.preserve(detail["outcome"], "failed", %{
+                 "kind" => "pipeline_failure",
+                 "result" => detail
+               })
+
+      assert envelope["outcome"]["code"] == "worker_turn_no_progress"
+      assert {:ok, encoded} = Jason.encode(envelope)
+      assert byte_size(encoded) <= 65_536
+    end
+
+    test "non-validation no-progress terminals do not expose stale validation context" do
+      for rework_kind <- ["review", "operator_approval", "design_checkpoint", nil] do
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_engine_result(%{
+                   "status" => "pipeline_error",
+                   "error" => "worker_turn_no_progress",
+                   "rework_kind" => rework_kind,
+                   "validation_candidate_tree_oid" => @verification_tree_oid,
+                   "validation.reason" => "tests_failed",
+                   "validation.test" => %{
+                     "passed" => false,
+                     "stderr_excerpt" => "stale prior validation reason"
+                   }
+                 })
+
+        assert detail["outcome"]["code"] == "worker_turn_no_progress"
+        refute Map.has_key?(detail, "prior_validation")
+        refute inspect(detail) =~ "stale prior validation reason"
+      end
+    end
+
+    test "no-progress prior validation projection rejects malformed and oversized values" do
+      invalid_prior_validation = [
+        %{
+          "validation_candidate_tree_oid" => "not-a-git-object",
+          "validation.reason" => "tests_failed",
+          "validation.test" => %{"passed" => false, "stderr_excerpt" => "actionable"}
+        },
+        %{
+          "validation_candidate_tree_oid" => @verification_tree_oid,
+          "validation.reason" => String.duplicate("x", 513),
+          "validation.test" => %{"passed" => false, "stderr_excerpt" => "actionable"}
+        },
+        %{
+          "validation_candidate_tree_oid" => @verification_tree_oid,
+          "validation.reason" => <<255>>,
+          "validation.test" => %{
+            "passed" => false,
+            "stderr_excerpt" => "actionable",
+            "raw_secret" => "must not escape"
+          }
+        },
+        %{
+          "validation_candidate_tree_oid" => @verification_tree_oid,
+          "validation.reason" => "tests_failed",
+          "validation.test" => %{
+            "passed" => false,
+            "stdout_excerpt" => String.duplicate("x", 16_385),
+            "raw_secret" => "must not escape"
+          }
+        },
+        %{
+          "validation_candidate_tree_oid" => @verification_tree_oid,
+          "validation.reason" => "tests_failed",
+          "validation.test" => %{
+            "passed" => false,
+            "stdout_excerpt" => <<255>>,
+            "raw_secret" => "must not escape"
+          }
+        },
+        %{
+          "validation_candidate_tree_oid" => @verification_tree_oid,
+          "validation.reason" => "tests_failed",
+          "validation.test" => %{"passed" => true, "stderr_excerpt" => "not a failed stage"},
+          "validation.unreviewed_stage" => %{
+            "passed" => false,
+            "stderr_excerpt" => "must not escape"
+          }
+        }
+      ]
+
+      for prior_context <- invalid_prior_validation do
+        context =
+          Map.merge(
+            %{
+              "status" => "pipeline_error",
+              "error" => "worker_turn_no_progress",
+              "rework_kind" => "validation"
+            },
+            prior_context
+          )
+
+        assert {:error, {:pipeline_error, detail}} = run_with_engine_result(context)
+        assert detail["outcome"]["code"] == "worker_turn_no_progress"
+        refute Map.has_key?(detail, "prior_validation")
+        refute inspect(detail) =~ "must not escape"
+        assert {:ok, _encoded} = Jason.encode(detail)
+      end
+    end
+
     test "missing and unknown terminal statuses are task errors" do
       assert {:error, :missing_terminal_status} = run_with_context(%{"branch" => "b1"})
 
