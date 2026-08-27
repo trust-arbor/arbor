@@ -409,6 +409,8 @@ defmodule Arbor.Actions.MixTest do
       Arbor.Actions.TestMixShell.clear_last_invocation()
       Arbor.Actions.TestMixShell.clear_canned_spawn_result()
 
+      # This contract is env projection, not nested Mix execution. The canned
+      # result keeps the assertion on the captured structured invocation.
       Arbor.Actions.TestMixShell.set_canned_spawn_result(%{
         exit_code: 0,
         stdout: "canned MIX_ENV projection\n"
@@ -437,32 +439,6 @@ defmodule Arbor.Actions.MixTest do
         Arbor.Actions.TestMixShell.clear_canned_spawn_result()
         Arbor.Actions.TestMixShell.clear_last_invocation()
       end
-    end
-
-    test "TestMixShell real execution returns canonical flags at its finite timeout", %{
-      project_path: project_path
-    } do
-      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
-      started_at = System.monotonic_time(:millisecond)
-
-      assert {:ok, result} =
-               Arbor.Actions.TestMixShell.execute_spawn_capable(
-                 wrapper,
-                 ["run", "--no-halt"],
-                 cwd: project_path,
-                 env: %{},
-                 timeout: 250
-               )
-
-      elapsed = System.monotonic_time(:millisecond) - started_at
-
-      assert result.exit_code == 137
-      assert result.timed_out == true
-      assert result.killed == true
-      assert result.cancelled == false
-      assert result.output_truncated == false
-      assert result.output_limit_exceeded == false
-      assert elapsed < 5_000
     end
 
     test "security regression: closed wrapper identity and caller path env scrubbing", %{
@@ -616,6 +592,51 @@ defmodule Arbor.Actions.MixTest do
 
       assert reason =~ "rejected invalid test_paths"
       assert reason =~ "external_test.exs"
+    end
+  end
+
+  describe "TestMixShell bounded execution" do
+    test "real execution returns canonical flags at its finite timeout", %{
+      project_path: project_path
+    } do
+      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:ok, result} =
+               Arbor.Actions.TestMixShell.execute_spawn_capable(
+                 wrapper,
+                 ["run", "--no-halt"],
+                 cwd: project_path,
+                 env: %{},
+                 timeout: 250
+               )
+
+      elapsed = System.monotonic_time(:millisecond) - started_at
+
+      assert result.exit_code == 137
+      assert result.timed_out == true
+      assert result.killed == true
+      assert result.cancelled == false
+      assert result.output_truncated == false
+      assert result.output_limit_exceeded == false
+      assert elapsed < 5_000
+    end
+
+    test "real execution rejects malformed timeouts instead of becoming unbounded", %{
+      project_path: project_path
+    } do
+      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+
+      for invalid_timeout <- [-1, "250"] do
+        assert {:error, :invalid_timeout} =
+                 Arbor.Actions.TestMixShell.execute_spawn_capable(
+                   wrapper,
+                   ["--version"],
+                   cwd: project_path,
+                   env: %{},
+                   timeout: invalid_timeout
+                 )
+      end
     end
   end
 

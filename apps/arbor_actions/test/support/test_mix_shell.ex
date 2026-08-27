@@ -14,6 +14,7 @@ defmodule Arbor.Actions.TestMixShell do
   """
 
   @fallback_wrapper Path.expand("../../../../bin/mix", __DIR__)
+  @default_real_mix_timeout_ms 120_000
 
   @doc """
   Absolute repository Mix wrapper accepted by this test shell.
@@ -106,7 +107,9 @@ defmodule Arbor.Actions.TestMixShell do
                cancelled: false
              }}
           else
-            run_real_mix(wrapper, args, cwd, env, Keyword.get(opts, :timeout), started_at)
+            with {:ok, timeout} <- normalize_real_mix_timeout(Keyword.get(opts, :timeout)) do
+              run_real_mix(wrapper, args, cwd, env, timeout, started_at)
+            end
           end
       end
     end
@@ -194,6 +197,8 @@ defmodule Arbor.Actions.TestMixShell do
   end
 
   defp run_real_mix(wrapper, args, cwd, env, timeout, started_at) do
+    # System.cmd/3 cannot terminate a stuck child. The Port gives this test
+    # fixture a deadline and projects timeout through the canonical shell flags.
     port =
       Port.open(
         {:spawn_executable, String.to_charlist(wrapper)},
@@ -207,14 +212,7 @@ defmodule Arbor.Actions.TestMixShell do
         ]
       )
 
-    deadline =
-      if is_integer(timeout) and timeout >= 0 do
-        started_at + timeout
-      else
-        :infinity
-      end
-
-    collect_real_mix(port, deadline, started_at, [])
+    collect_real_mix(port, started_at + timeout, started_at, [])
   end
 
   defp collect_real_mix(port, deadline, started_at, output) do
@@ -245,11 +243,16 @@ defmodule Arbor.Actions.TestMixShell do
     }
   end
 
-  defp remaining_timeout(:infinity), do: :infinity
-
   defp remaining_timeout(deadline) do
     max(deadline - System.monotonic_time(:millisecond), 0)
   end
+
+  defp normalize_real_mix_timeout(nil), do: {:ok, @default_real_mix_timeout_ms}
+
+  defp normalize_real_mix_timeout(timeout) when is_integer(timeout) and timeout >= 0,
+    do: {:ok, timeout}
+
+  defp normalize_real_mix_timeout(_timeout), do: {:error, :invalid_timeout}
 
   defp close_port(port) do
     if Port.info(port) do

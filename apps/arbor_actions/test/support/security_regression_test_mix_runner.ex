@@ -58,7 +58,8 @@ defmodule Arbor.Actions.SecurityRegressionTestMixRunner do
          {:ok, result} <-
            TestMixShell.execute_spawn_capable("mix", args,
              cwd: path,
-             env: env
+             env: env,
+             timeout: timeout
            ),
          {:ok, after_binding} <- maybe_tree_binding(path, bind_tree?, deadline_ms),
          :ok <- assert_tree_stable(before_binding, after_binding) do

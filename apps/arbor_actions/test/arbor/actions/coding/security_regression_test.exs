@@ -266,6 +266,9 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         assert_receive {:stage_timeout_invocation, :base, base_timeout}, 5_000
         assert candidate_timeout == stage_timeout
         assert base_timeout == stage_timeout - candidate_elapsed
+
+        invocation = Arbor.Actions.TestMixShell.last_invocation()
+        assert Keyword.fetch!(invocation.opts, :timeout) == base_timeout
       end
     )
   end
