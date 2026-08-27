@@ -84,6 +84,17 @@ defmodule Arbor.Shell.SpawnCapableTimeout do
 
   def validate_timeout_ms(_timeout, _profile), do: {:error, :invalid_timeout}
 
+  @doc """
+  Project a trusted prelaunch deadline failure to the canonical operation token.
+
+  Callers must establish that candidate unit work has not begun before using
+  this projection. Only the exact closed atom is normalized; arbitrary terms
+  and already-canonical errors pass through unchanged.
+  """
+  @spec project_prelaunch_error(term()) :: term()
+  def project_prelaunch_error(:deadline_exhausted), do: :operation_deadline_exceeded
+  def project_prelaunch_error(reason), do: reason
+
   @doc "Hard maximum for the admission probe sub-deadline (ms)."
   @spec max_probe_deadline_ms() :: pos_integer()
   def max_probe_deadline_ms, do: @max_probe_deadline_ms

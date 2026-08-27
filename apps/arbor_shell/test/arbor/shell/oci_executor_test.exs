@@ -327,6 +327,49 @@ defmodule Arbor.Shell.OciExecutorTest do
     end
   end
 
+  describe "prelaunch deadline projection" do
+    test "trusted probe deadline exhaustion projects canonical operation error", %{agent: agent} do
+      timeout = 5_000
+
+      deps =
+        base_deps(agent, %{
+          probe: fn remaining ->
+            record(agent, :probe_calls, remaining)
+            advance_mono(agent, timeout)
+            {:error, :deadline_exhausted}
+          end
+        })
+
+      assert {:error, :operation_deadline_exceeded} =
+               Executor.execute_for_test(
+                 @mix_wrapper,
+                 ["compile"],
+                 valid_opts(timeout: timeout),
+                 deps
+               )
+
+      assert get_state(agent, :probe_calls) == [timeout]
+      assert get_state(agent, :resolve_calls) == 0
+      assert get_state(agent, :random_calls) == 0
+      assert get_state(agent, :register_calls) == 0
+      assert get_state(agent, :start_calls) == []
+      assert get_state(agent, :begin_calls) == []
+    end
+
+    test "non-deadline setup errors remain unchanged", %{agent: agent} do
+      deps =
+        base_deps(agent, %{
+          probe: fn _remaining -> {:error, :probe_cancelled} end
+        })
+
+      assert {:error, :probe_cancelled} =
+               Executor.execute_for_test(@mix_wrapper, ["compile"], valid_opts(), deps)
+
+      assert get_state(agent, :start_calls) == []
+      assert get_state(agent, :begin_calls) == []
+    end
+  end
+
   describe "happy path" do
     test "execute_for_test uses /usr/bin/podman and arbor-v1 names", %{agent: agent} do
       assert {:ok, result} =

@@ -771,7 +771,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:unexpected_mix_invocation, _}
   end
 
-  test "Mix operation_deadline_exceeded with residual at postflight reserve is capacity", %{
+  test "trusted operation deadline after a completed prefix hands off the unstarted suffix", %{
     worktree: worktree
   } do
     parent = self()
@@ -793,8 +793,19 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
-      Agent.update(clock_agent, fn _ -> stage - 1 end)
-      {:error, :operation_deadline_exceeded}
+
+      case args do
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
+          Agent.update(clock_agent, fn _ -> 1_000 end)
+          {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
+
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
+          Agent.update(clock_agent, fn _ -> stage end)
+          {:error, ":operation_deadline_exceeded"}
+
+        other ->
+          flunk("must not launch an unexpected child: #{inspect(other)}")
+      end
     end)
 
     check = Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage)
@@ -802,16 +813,20 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "validation_capacity_exceeded"
     handoff = check["capacity_handoff"]
+    assert Arbor.Contracts.Coding.ValidationCapacityHandoff.valid?(handoff)
+    assert handoff["schema_version"] == 3
     assert handoff["phase"] == "runtime"
+    assert handoff["completed_batch_count"] == 1
     assert handoff["interrupted_batch"] == nil
+    assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
 
-    assert handoff["unstarted_batches"] == [
-             compact_capacity_batch(batch1),
-             compact_capacity_batch(batch2)
-           ]
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received1], opts1}
+    assert received1 == batch1.paths
+    assert Keyword.get(opts1, :timeout) == stage
 
-    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], _opts}
-    assert received == batch1.paths
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received2], opts2}
+    assert received2 == batch2.paths
+    assert Keyword.get(opts2, :timeout) == stage - 1_000
     refute_received {:mix_invocation, _, _}
   end
 

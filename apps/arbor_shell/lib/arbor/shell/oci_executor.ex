@@ -214,7 +214,10 @@ defmodule Arbor.Shell.OciExecutor do
       after_register_before_start(reduced_spec, executable, execution_id, deadline, deps)
     else
       {:error, reason} ->
-        {:error, bound_reason(reason)}
+        # Every failure above occurs before Worker.start, so the trusted
+        # runtime may project its exact deadline atom to the canonical
+        # operation token. No candidate unit work has begun.
+        {:error, project_prelaunch_error(reason)}
     end
   end
 
@@ -260,7 +263,7 @@ defmodule Arbor.Shell.OciExecutor do
         # No Worker.start was attempted — fail controller-owned entry and return
         # without settlement (no unit ownership was ever transferred).
         _ = terminalize_controller_owned(execution_id, deps, :deadline_exhausted)
-        {:error, :deadline_exhausted}
+        {:error, project_prelaunch_error(:deadline_exhausted)}
     end
   end
 
@@ -445,7 +448,13 @@ defmodule Arbor.Shell.OciExecutor do
 
       {:error, :deadline_exhausted} ->
         # Do not begin candidate work: cancel exact waiting worker and settle.
-        settle_uncertain(execution_id, worker, mon_ref, deps, :deadline_exhausted)
+        settle_uncertain(
+          execution_id,
+          worker,
+          mon_ref,
+          deps,
+          project_prelaunch_error(:deadline_exhausted)
+        )
     end
   end
 
@@ -762,6 +771,12 @@ defmodule Arbor.Shell.OciExecutor do
 
     :throw, _reason ->
       {:error, :call_error}
+  end
+
+  defp project_prelaunch_error(reason) do
+    reason
+    |> SpawnCapableTimeout.project_prelaunch_error()
+    |> bound_reason()
   end
 
   defp bound_reason(reason) when is_atom(reason), do: reason

@@ -45,4 +45,22 @@ defmodule Arbor.Shell.SpawnCapableTimeoutTest do
     assert {:error, :timeout_too_small} = SpawnCapableTimeout.validate_timeout_ms(0, :standard)
     assert {:error, :invalid_timeout} = SpawnCapableTimeout.validate_timeout_ms(1.5, :standard)
   end
+
+  test "projects only the exact trusted prelaunch deadline atom" do
+    assert SpawnCapableTimeout.project_prelaunch_error(:deadline_exhausted) ==
+             :operation_deadline_exceeded
+
+    for unchanged <- [
+          :operation_deadline_exceeded,
+          :probe_failed,
+          :probe_cancelled,
+          "deadline_exhausted",
+          ":deadline_exhausted",
+          {:deadline_exhausted, :untrusted},
+          %{error: :deadline_exhausted},
+          nil
+        ] do
+      assert SpawnCapableTimeout.project_prelaunch_error(unchanged) == unchanged
+    end
+  end
 end

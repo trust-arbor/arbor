@@ -869,7 +869,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       do: false
 
   @doc """
-  True only for a closed prelaunch Apple Container probe timeout after the
+  True only for a closed prelaunch validation-runtime probe timeout after the
   shared aggregate deadline is already exhausted.
 
   The Mix child never launched. Positive residual, every other probe error,
