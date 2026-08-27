@@ -549,6 +549,96 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
              Core.new(Map.put(snapshot, "capacity_handoff", interrupted))
   end
 
+  test "security regression: tampered nested snapshot fields cannot emit transition effects" do
+    claimed = claimed_state()
+    [first, second] = plan()
+    claimed_snap = Core.show(claimed)
+    structural = v3_handoff(plan(), [], nil, plan(), "structural")
+
+    other_plan = [
+      batch(1, 2, 1, String.duplicate("8", 64)),
+      batch(2, 2, 1, String.duplicate("9", 64))
+    ]
+
+    other_handoff = v3_handoff(other_plan, [], nil, other_plan, "structural")
+
+    {:ok, open} = Core.new(fresh_attrs())
+    open_snap = Core.show(open)
+
+    forged_open_head =
+      put_in(open_snap, ["identities", "candidate_head"], String.duplicate("7", 40))
+
+    assert {:error, :identity_drift} = Core.claim(forged_open_head, claim_attrs())
+
+    forged_head =
+      put_in(claimed_snap, ["identities", "candidate_head"], String.duplicate("7", 40))
+
+    assert {:error, :identity_drift} =
+             Core.accept_passed_receipt(
+               forged_head,
+               fence(claimed, @mid, %{"receipt" => passed(first)})
+             )
+
+    assert {:error, :identity_drift} =
+             Core.accept_capacity_handoff(
+               forged_head,
+               fence(claimed, @mid, %{"handoff" => structural})
+             )
+
+    forged_plan = Map.put(claimed_snap, "planned_batches", other_plan)
+
+    assert {:error, :identity_drift} =
+             Core.accept_capacity_handoff(
+               forged_plan,
+               fence(claimed, @mid, %{"handoff" => other_handoff})
+             )
+
+    assert {:error, :identity_drift} = Core.expire_claim(forged_plan, fence(claimed, @mid))
+
+    forged_receipts = Map.put(claimed_snap, "accepted_receipts", [passed(second)])
+    assert {:error, :malformed_state} = Core.expire_claim(forged_receipts, fence(claimed, @mid))
+
+    forged_owner =
+      put_in(claimed_snap, ["claim", "owner_id"], identities(plan())["validator_id"])
+
+    assert {:error, :malformed_state} =
+             Core.accept_passed_receipt(
+               forged_owner,
+               fence(claimed, @mid, %{"receipt" => passed(first)})
+             )
+
+    forged_token = put_in(claimed_snap, ["claim", "fence_token"], "not a token")
+    assert {:error, :malformed_state} = Core.expire_claim(forged_token, fence(claimed, @mid))
+
+    forged_gen = put_in(claimed_snap, ["claim", "fence_generation"], 99)
+
+    assert {:error, :malformed_state} =
+             Core.accept_passed_receipt(
+               forged_gen,
+               fence(forged_gen, @mid, %{"receipt" => passed(first)})
+             )
+
+    forged_window = put_in(claimed_snap, ["claim", "claimed_at"], @later_expires)
+
+    assert {:error, :malformed_state} =
+             Core.accept_passed_receipt(
+               forged_window,
+               fence(claimed, @mid, %{"receipt" => passed(first)})
+             )
+
+    {:ok, handed, _} =
+      Core.accept_capacity_handoff(
+        claimed,
+        fence(claimed, @mid, %{"handoff" => structural})
+      )
+
+    handed_snap = Core.show(handed)
+    forged_handoff = Map.put(handed_snap, "capacity_handoff", other_handoff)
+
+    assert {:error, :malformed_state} =
+             Core.claim(forged_handoff, reclaim_attrs(%{"now" => @mid, "claimed_at" => @mid}))
+  end
+
   test "new/1 rejects reachable oversized identities, plan, receipts, claim, and handoff JSON" do
     pad = String.duplicate("x", 5_000)
     padded_ids = Map.put(identities(plan()), "pad", pad)

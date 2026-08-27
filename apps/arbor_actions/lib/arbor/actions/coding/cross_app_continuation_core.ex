@@ -16,10 +16,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   Public transitions: new/1, show/1, claim/2, accept_passed_receipt/2,
   accept_capacity_handoff/2, fail/2, cancel/2, expire_claim/2, revoke_claim/2,
-  complete/2. Claimed live mutations require matching fence_generation+token
-  and now < expires_at. expire_claim matches the fence then requires
-  now >= expires_at. revoke_claim matches the fence and ignores time.
-  Receipts are an ordered prefix of the immutable path-free plan; complete
+  complete/2. Mutating transitions rehydrate the state argument as untrusted
+  persisted JSON before effects. Claimed live mutations require matching
+  fence_generation+token and now < expires_at. expire_claim matches the fence
+  then requires now >= expires_at. revoke_claim matches the fence and ignores
+  time. Receipts are an ordered prefix of the immutable path-free plan; complete
   requires an active unexpired claim and exactly one passed receipt per batch.
 
   Identities bind task, work-packet (`sha256:` digest), base_commit/base_tree_oid,
@@ -409,11 +410,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp snapshot_state(state) do
     with :ok <- require_json_object(state),
-         :ok <- require_allowed_keys(state, @state_keys),
-         :ok <- require_keys(state, @state_keys),
-         :ok <- require_schema(state["schema_version"]),
-         {:ok, _status} <- parse_status(state["status"]) do
-      {:ok, state}
+         {:ok, admitted} <- rehydrate(state) do
+      {:ok, admitted}
     end
   end
 
