@@ -30,7 +30,7 @@ defmodule Arbor.Security.ProviderGateLifecycleSecurityRegressionTest do
       _ = Application.stop(:arbor_security)
       restore_env(:arbor_security, :start_children, start_children)
       restore_env(:arbor_kernel, :kernel_runtime, runtime)
-      {:ok, _} = Application.ensure_all_started(:arbor_security)
+      :ok = Arbor.Security.TestBootstrap.restore_supervised_tree!()
     end)
 
     :ok
