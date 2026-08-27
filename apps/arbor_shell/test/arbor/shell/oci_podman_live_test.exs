@@ -49,6 +49,7 @@ defmodule Arbor.Shell.OciPodmanLiveTest do
         refute run.stdout =~ "pthread_create"
         refute run.stdout =~ "Operation not permitted"
         refute run.killed
+        refute Map.get(run, :cancelled) == true
         assert run.exit_code != 0
 
       {:error, reason} ->

@@ -64,6 +64,7 @@ extern char **environ;
 #define CANCEL_SUB_LIVE_DESCENDANTS 8
 #define CANCEL_SUB_START_PACKET 9
 #define CANCEL_SUB_STDIN_WRITE 10
+#define SUB_DESCENDANTS_REAPED 11
 
 #define IO_CHUNK 8192
 #define MAX_CONTROL_PACKET (16U * 1024U * 1024U)
@@ -1187,6 +1188,20 @@ static int tracked_descendants_live(const pid_tracker *tracker, pid_t root) {
   return live;
 }
 
+static int wait_descendants_grace(pid_tracker *tracker, pid_t child) {
+  int64_t deadline = monotonic_ms() + GROUP_KILL_GRACE_MS;
+  for (;;) {
+    int added = discover_descendants(tracker, child);
+    if (added < 0) return -1;
+    int live = tracked_descendants_live(tracker, child);
+    if (live < 0) return -1;
+    if (live == 0) return 0;
+    if (monotonic_ms() >= deadline) return live;
+    struct timespec delay = {.tv_sec = 0, .tv_nsec = 20000000};
+    (void)nanosleep(&delay, NULL);
+  }
+}
+
 /* Darwin can return EPERM for killpg while a short-lived group leader is in
    its exit transition. Enumerate the kernel's pgrp view and signal each member
    in that case; never translate the ambiguous EPERM into containment success. */
@@ -1856,6 +1871,14 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   int live_descendants =
       teardown_discovery < 0 ? -1 : tracked_descendants_live(&tracker, child);
   if (live_descendants < 0) reason = REASON_CONTAINMENT_FAILURE;
+  int reaped_count = 0;
+  if (reason == REASON_NORMAL && live_descendants > 0 &&
+      execution_mode != EXECUTION_NO_FORK) {
+    reaped_count = live_descendants;
+    if (wait_descendants_grace(&tracker, child) < 0) {
+      reason = REASON_CONTAINMENT_FAILURE;
+    }
+  }
   int contained = contain_group(child, child, &status, &tracker);
 
   int flags = fcntl(output_pipe[0], F_GETFL);
@@ -1878,8 +1901,11 @@ static int run_exec(int argc, char **argv, int execution_mode) {
 
   if (contained != 0) {
     send_error("contained process final cleanup failed");
-  } else if (reason == REASON_NORMAL && live_descendants > 0) {
+  } else if (reason == REASON_NORMAL && live_descendants > 0 &&
+             execution_mode == EXECUTION_NO_FORK) {
     send_terminal_ex(REASON_CANCELLED, child_code, CANCEL_SUB_LIVE_DESCENDANTS, 0);
+  } else if (reason == REASON_NORMAL && reaped_count > 0) {
+    send_terminal_ex(REASON_NORMAL, child_code, SUB_DESCENDANTS_REAPED, reaped_count);
   } else if (reason == REASON_NORMAL) {
     send_terminal_ex(REASON_NORMAL, child_code, CANCEL_SUB_NONE, 0);
   } else if (reason == REASON_CANCELLED && sub_reason != CANCEL_SUB_CMD_CANCEL &&

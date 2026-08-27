@@ -25,6 +25,18 @@ defmodule Arbor.Shell.ProcessGroupTerminalTest do
              ProcessGroup.decode_terminal_payload(cancelled)
   end
 
+  test "decodes V7-21 descendants_reaped as a normal non-cancel frame" do
+    payload = <<0, 0::signed-big-32, 11, 2::signed-big-32>>
+
+    assert {:ok, :normal, 0, %{sub_reason: :descendants_reaped, errno: 2}} =
+             ProcessGroup.decode_terminal_payload(payload)
+
+    no_fork = <<3, 0::signed-big-32, 8, 0::signed-big-32>>
+
+    assert {:ok, :cancelled, 0, %{sub_reason: :live_descendants, errno: 0}} =
+             ProcessGroup.decode_terminal_payload(no_fork)
+  end
+
   test "rejects truncated terminal payloads" do
     assert :error = ProcessGroup.decode_terminal_payload(<<3>>)
     assert :error = ProcessGroup.decode_terminal_payload(<<>>)

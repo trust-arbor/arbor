@@ -556,11 +556,140 @@ defmodule Arbor.Commands.Baseline do
     source = source_tree <> "-build"
 
     if File.dir?(source) do
-      copy_tree(source, dest)
+      copy_compiled_build_tree(
+        source,
+        dest,
+        source_tree,
+        Path.join(Path.dirname(dest), "tree")
+      )
     else
       :ok
     end
   end
+
+  # Mix `_build/<env>/lib/<dep>/{priv,src,include}` entries are relative
+  # symlinks into the deps tree. Recreate those that resolve inside the
+  # compiled build or the deps checkout; refuse absolute and outside links.
+  defp copy_compiled_build_tree(source, dest, tree_source, tree_dest) do
+    bounds = %{
+      build_source: Path.expand(source),
+      build_dest: Path.expand(dest),
+      tree_source: Path.expand(tree_source),
+      tree_dest: Path.expand(tree_dest)
+    }
+
+    copy_compiled_entry(source, dest, bounds)
+  end
+
+  defp copy_compiled_entry(source, dest, bounds) do
+    case File.lstat(source) do
+      {:ok, %File.Stat{type: :directory}} ->
+        copy_compiled_directory(source, dest, bounds)
+
+      {:ok, %File.Stat{type: :regular}} ->
+        copy_regular(source, dest)
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        recreate_compiled_symlink(source, dest, bounds)
+
+      _other ->
+        {:error, :tree_copy_failed}
+    end
+  end
+
+  defp copy_compiled_directory(source, dest, bounds) do
+    File.mkdir_p!(dest)
+    File.chmod!(dest, @dir_mode)
+
+    case File.ls(source) do
+      {:ok, names} ->
+        reduce_children(names, fn name ->
+          copy_compiled_entry(Path.join(source, name), Path.join(dest, name), bounds)
+        end)
+
+      {:error, _reason} ->
+        {:error, :tree_copy_failed}
+    end
+  end
+
+  defp recreate_compiled_symlink(source, dest, bounds) do
+    with {:ok, target} <- File.read_link(source),
+         :ok <- require_relative_symlink(target),
+         {:ok, dest_target} <- compiled_symlink_dest(target, source, dest, bounds),
+         :ok <- File.ln_s(dest_target, dest) do
+      :ok
+    else
+      {:error, :symlink_rejected} -> {:error, :symlink_rejected}
+      {:error, _reason} -> {:error, :symlink_rejected}
+    end
+  end
+
+  defp require_relative_symlink(target) when is_binary(target) do
+    if Path.type(target) == :relative and target != "" do
+      :ok
+    else
+      {:error, :symlink_rejected}
+    end
+  end
+
+  defp compiled_symlink_dest(target, source, dest, bounds) do
+    resolved = Path.expand(target, Path.dirname(source))
+
+    cond do
+      (rel = path_relative(resolved, bounds.build_source)) != nil ->
+        {:ok, relative_symlink(dest, join_under(bounds.build_dest, rel))}
+
+      (rel = path_relative(resolved, bounds.tree_source)) != nil ->
+        {:ok, relative_symlink(dest, join_under(bounds.tree_dest, rel))}
+
+      true ->
+        {:error, :symlink_rejected}
+    end
+  end
+
+  defp relative_symlink(link_path, target_path) do
+    relative_from(Path.dirname(Path.expand(link_path)), Path.expand(target_path))
+  end
+
+  defp join_under(root, "."), do: root
+  defp join_under(root, rel), do: Path.join(root, rel)
+
+  defp path_relative(path, root) do
+    path_parts = Path.split(Path.expand(path))
+    root_parts = Path.split(Path.expand(root))
+
+    if List.starts_with?(path_parts, root_parts) do
+      case Enum.drop(path_parts, length(root_parts)) do
+        [] -> "."
+        rest -> Path.join(rest)
+      end
+    end
+  end
+
+  defp relative_from(from_dir, to_path) do
+    from_parts = Path.split(Path.expand(from_dir))
+    to_parts = Path.split(Path.expand(to_path))
+    {from_rest, to_rest} = drop_common_prefix(from_parts, to_parts)
+
+    cond do
+      from_rest == [] and to_rest == [] ->
+        "."
+
+      from_rest == [] ->
+        Path.join(to_rest)
+
+      to_rest == [] ->
+        Path.join(Enum.map(from_rest, fn _ -> ".." end))
+
+      true ->
+        Path.join(Enum.map(from_rest, fn _ -> ".." end) ++ to_rest)
+    end
+  end
+
+  defp drop_common_prefix([same | from_rest], [same | to_rest]),
+    do: drop_common_prefix(from_rest, to_rest)
+
+  defp drop_common_prefix(from_rest, to_rest), do: {from_rest, to_rest}
 
   defp install_baseline_root(dest, staging) do
     backup =
@@ -666,6 +795,7 @@ defmodule Arbor.Commands.Baseline do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :directory}} -> chmod_directory(path)
       {:ok, %File.Stat{type: :regular}} -> chmod_regular(path)
+      {:ok, %File.Stat{type: :symlink}} -> :ok
       _other -> {:error, :baseline_write_failed}
     end
   end

@@ -250,6 +250,87 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert (rebuilt.mode &&& 0o777) == 0o400
   end
 
+  test "compiled build copy recreates Mix priv links into the seeded tree", %{root: root} do
+    {repo, deps} = mix_layout_fixture!(root)
+
+    assert {:ok, report} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               active_config_path: Path.join(root, "validation-runtime.json"),
+               image_build: fn _request ->
+                 {:ok,
+                  %{
+                    index_digest: @index,
+                    manifest_digest: @manifest,
+                    image: "docker.io/arbor/validation@" <> @index,
+                    image_id: "sha256:" <> String.duplicate("1", 64)
+                  }}
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn ctx ->
+                 priv = Path.join(ctx.deps_path, "x/priv")
+                 File.mkdir_p!(priv)
+                 File.write!(Path.join(priv, "keep"), "ok\n")
+
+                 link_dir = Path.join(ctx.deps_path <> "-build", "test/lib/x")
+                 File.mkdir_p!(link_dir)
+                 File.ln_s!("../../../../deps/x/priv", Path.join(link_dir, "priv"))
+                 :ok
+               end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    link = Path.join(report["baseline_root"], "build/test/lib/x/priv")
+    assert {:ok, %File.Stat{type: :symlink}} = File.lstat(link)
+    target = File.read_link!(link)
+    assert Path.type(target) == :relative
+    resolved = Path.expand(target, Path.dirname(link))
+    tree_priv = Path.join(report["baseline_root"], "tree/x/priv")
+    assert Path.expand(resolved) == Path.expand(tree_priv)
+    assert File.read!(Path.join(resolved, "keep")) == "ok\n"
+  end
+
+  test "compiled build copy refuses absolute and outside Mix links", %{root: root} do
+    {repo, deps} = mix_layout_fixture!(root)
+
+    opts = fn link_target ->
+      [
+        arbor_home: root,
+        repo_root: repo,
+        deps_path: deps,
+        platform: "linux/amd64",
+        active_config_path: Path.join(root, "validation-runtime.json"),
+        image_build: fn _request ->
+          {:ok,
+           %{
+             index_digest: @index,
+             manifest_digest: @manifest,
+             image: "docker.io/arbor/validation@" <> @index,
+             image_id: "sha256:" <> String.duplicate("1", 64)
+           }}
+        end,
+        deps_fetch: fn _ctx -> :ok end,
+        deps_compile: fn ctx ->
+          File.mkdir_p!(Path.join(ctx.deps_path, "x/priv"))
+          link_dir = Path.join(ctx.deps_path <> "-build", "test/lib/x")
+          File.rm_rf!(link_dir)
+          File.mkdir_p!(link_dir)
+          File.ln_s!(link_target, Path.join(link_dir, "priv"))
+          :ok
+        end,
+        smoke_test: fn _copy, _platform -> :ok end,
+        shell: FakeShell
+      ]
+    end
+
+    assert {:error, :symlink_rejected} = Build.execute([], opts.("/etc/passwd"))
+    assert {:error, :symlink_rejected} = Build.execute([], opts.("../../../../../../tmp/outside"))
+  end
+
   test "status uses the Shell facade and never names Authority modules" do
     task_path =
       Path.expand("../../../lib/mix/tasks/arbor.baseline.status.ex", Path.dirname(__ENV__.file))
@@ -307,6 +388,17 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
   defp fixture_repo!(root) do
     repo = Path.join(root, "repo")
     deps = Path.join(root, "deps-tree")
+    File.mkdir_p!(repo)
+    File.mkdir_p!(deps)
+    File.write!(Path.join(repo, ".tool-versions"), "erlang 28.4.1\nelixir 1.19.5-otp-28\n")
+    File.write!(Path.join(repo, "mix.lock"), "%{}\n")
+    File.write!(Path.join(deps, "ok"), "ok\n")
+    {repo, deps}
+  end
+
+  defp mix_layout_fixture!(root) do
+    repo = Path.join(root, "repo")
+    deps = Path.join(root, "deps")
     File.mkdir_p!(repo)
     File.mkdir_p!(deps)
     File.write!(Path.join(repo, ".tool-versions"), "erlang 28.4.1\nelixir 1.19.5-otp-28\n")

@@ -1009,6 +1009,28 @@ defmodule Arbor.Shell do
 
   def seed_linux_compiled_dependency_build(_dest), do: {:error, :invalid_compiled_build_dest}
 
+  @doc false
+  @spec copy_linux_compiled_dependency_build(String.t(), String.t()) ::
+          :ok | {:error, term()}
+  def copy_linux_compiled_dependency_build(source, dest)
+      when is_binary(source) and is_binary(dest) do
+    marker = Path.join(dest, ".arbor-compiled-build-seeded")
+
+    cond do
+      Path.type(source) != :absolute or Path.type(dest) != :absolute ->
+        {:error, :invalid_compiled_build_dest}
+
+      true ->
+        case File.lstat(dest) do
+          {:ok, %File.Stat{type: :directory}} ->
+            copy_compiled_build(source, dest, marker)
+
+          _other ->
+            {:error, :invalid_compiled_build_dest}
+        end
+    end
+  end
+
   @doc """
   Redacted public status of the Apple Container control-plane authority owner.
 
@@ -1723,7 +1745,7 @@ defmodule Arbor.Shell do
         case File.lstat(dest) do
           {:ok, %File.Stat{type: :directory}} ->
             case LinuxDependencyBaselineAuthority.checkout_compiled_build_source() do
-              {:ok, source} -> copy_compiled_build(source, dest, marker)
+              {:ok, source} -> copy_linux_compiled_dependency_build(source, dest)
               {:error, :compiled_build_unavailable} -> :ok
               {:error, :linux_dependency_baseline_unavailable} -> :ok
               {:error, reason} -> {:error, reason}
@@ -1735,9 +1757,19 @@ defmodule Arbor.Shell do
     end
   end
 
+  @guest_deps_path "/arbor/deps"
+  @guest_build_path "/arbor/build"
+
   defp copy_compiled_build(source, dest, marker) do
+    tree = Path.join(Path.dirname(source), "tree")
+
+    bounds = %{
+      build_source: Path.expand(source),
+      tree_source: Path.expand(tree)
+    }
+
     with {:ok, names} <- File.ls(source),
-         :ok <- copy_named_entries(source, dest, names),
+         :ok <- copy_seed_names(source, dest, names, bounds),
          :ok <- chmod_seeded_tree(dest),
          :ok <- File.write(marker, "ok\n") do
       :ok
@@ -1746,15 +1778,84 @@ defmodule Arbor.Shell do
     end
   end
 
-  defp copy_named_entries(_source, _dest, []), do: :ok
+  defp copy_seed_names(_source, _dest, [], _bounds), do: :ok
 
-  defp copy_named_entries(source, dest, [name | rest]) do
-    from = Path.join(source, name)
-    to = Path.join(dest, name)
+  defp copy_seed_names(source, dest, [name | rest], bounds) do
+    case copy_seed_entry(Path.join(source, name), Path.join(dest, name), bounds) do
+      :ok -> copy_seed_names(source, dest, rest, bounds)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-    case File.cp_r(from, to) do
-      {:ok, _paths} -> copy_named_entries(source, dest, rest)
-      {:error, reason, _path} -> {:error, reason}
+  defp copy_seed_entry(source, dest, bounds) do
+    case File.lstat(source) do
+      {:ok, %File.Stat{type: :directory}} ->
+        with :ok <- File.mkdir_p(dest),
+             {:ok, names} <- File.ls(source) do
+          copy_seed_names(source, dest, names, bounds)
+        end
+
+      {:ok, %File.Stat{type: :regular}} ->
+        case File.copy(source, dest) do
+          {:ok, _count} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        recreate_seed_symlink(source, dest, bounds)
+
+      _other ->
+        {:error, :compiled_build_seed_failed}
+    end
+  end
+
+  defp recreate_seed_symlink(source, dest, bounds) do
+    with {:ok, target} <- File.read_link(source),
+         :ok <- require_relative_seed_symlink(target),
+         {:ok, guest} <- seed_guest_target(target, source, bounds),
+         :ok <- File.ln_s(guest, dest) do
+      :ok
+    else
+      {:error, :symlink_rejected} -> {:error, :symlink_rejected}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp require_relative_seed_symlink(target) when is_binary(target) do
+    if Path.type(target) == :relative and target != "" do
+      :ok
+    else
+      {:error, :symlink_rejected}
+    end
+  end
+
+  defp seed_guest_target(target, source, bounds) do
+    resolved = Path.expand(target, Path.dirname(source))
+
+    cond do
+      (rel = seed_path_relative(resolved, bounds.build_source)) != nil ->
+        {:ok, join_guest(@guest_build_path, rel)}
+
+      (rel = seed_path_relative(resolved, bounds.tree_source)) != nil ->
+        {:ok, join_guest(@guest_deps_path, rel)}
+
+      true ->
+        {:error, :symlink_rejected}
+    end
+  end
+
+  defp join_guest(root, "."), do: root
+  defp join_guest(root, rel), do: Path.join(root, rel)
+
+  defp seed_path_relative(path, root) do
+    path_parts = Path.split(Path.expand(path))
+    root_parts = Path.split(Path.expand(root))
+
+    if List.starts_with?(path_parts, root_parts) do
+      case Enum.drop(path_parts, length(root_parts)) do
+        [] -> "."
+        rest -> Path.join(rest)
+      end
     end
   end
 

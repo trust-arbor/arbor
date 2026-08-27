@@ -1478,6 +1478,7 @@ defmodule Arbor.Shell.ProcessGroup do
   defp decode_sub_reason(8), do: :live_descendants
   defp decode_sub_reason(9), do: :start_packet
   defp decode_sub_reason(10), do: :stdin_write
+  defp decode_sub_reason(11), do: :descendants_reaped
   defp decode_sub_reason(_), do: :unknown
 
   defp normalize_requested_reason(:cancelled, requested), do: requested

@@ -26,6 +26,9 @@ defmodule Arbor.Shell.PortSessionTest do
 
       assert_receive {:port_exit, ^id, 0, output}, 5_000
       assert String.trim(output) == "hello"
+      {:ok, result} = PortSession.get_result(pid)
+      refute result.cancelled
+      refute result.killed
     end
 
     test "captures non-zero exit code" do
