@@ -48,6 +48,16 @@ defmodule Arbor.Shell.ExecutorTest do
       assert String.contains?(result.stdout, "test input")
     end
 
+    test "a megabyte of child output with exit 0 is not cancelled" do
+      {:ok, result} =
+        Executor.run_direct("python3", ["-c", "print('x'*1024*1024, end='')"], timeout: 10_000)
+
+      assert result.exit_code == 0
+      refute Map.get(result, :cancelled) == true
+      refute result.killed
+      assert byte_size(result.stdout) == 1_048_576
+    end
+
     test "one-shot closes stdin so EOF readers exit with exact bytes" do
       # Pre-fix: C launcher left input_pipe[1] open after optional stdin, so
       # programs that read until EOF (cat) hung until timeout. Candidate sends

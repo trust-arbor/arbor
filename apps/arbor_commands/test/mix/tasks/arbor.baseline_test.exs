@@ -207,6 +207,9 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
         File.mkdir_p!(dest)
         path = Path.join(dest, "vec0.so")
         unless File.exists?(path), do: File.write!(path, "native\n")
+        compiled = ctx.deps_path <> "-build"
+        File.mkdir_p!(Path.join(compiled, "lib/test"))
+        File.write!(Path.join(compiled, "lib/test/Elixir.Payload.beam"), "beam\n")
         :ok
       end,
       smoke_test: fn _copy, _platform -> :ok end,
@@ -218,6 +221,11 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert File.read!(tree_file) == "native\n"
     assert {:ok, %File.Stat{type: :regular} = stat} = File.lstat(tree_file)
     assert (stat.mode &&& 0o777) == 0o400
+
+    compiled_beam =
+      Path.join(first["baseline_root"], "build/lib/test/Elixir.Payload.beam")
+
+    assert File.read!(compiled_beam) == "beam\n"
     assert_received {:deps_compile, ^deps}
 
     Agent.update(agent, fn _ -> second_id end)

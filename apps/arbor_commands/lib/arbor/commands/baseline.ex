@@ -311,7 +311,11 @@ defmodule Arbor.Commands.Baseline do
 
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.compile"],
            cd: repo_root,
-           env: [{"MIX_DEPS_PATH", deps_path}, {"MIX_BUILD_PATH", build_path}],
+           env: [
+             {"MIX_DEPS_PATH", deps_path},
+             {"MIX_BUILD_PATH", build_path},
+             {"MIX_ENV", "test"}
+           ],
            stderr_to_stdout: true
          ) do
       {_output, 0} -> :ok
@@ -531,6 +535,7 @@ defmodule Arbor.Commands.Baseline do
     with :ok <- mkdir_owner_only(collection),
          :ok <- mkdir_owner_only(staging),
          :ok <- copy_tree(source_tree, Path.join(staging, "tree")),
+         :ok <- maybe_copy_compiled_build(source_tree, Path.join(staging, "build")),
          :ok <- write_mode_0400(Path.join(staging, "manifest.json"), Jason.encode!(document)),
          :ok <-
            write_mode_0400(
@@ -544,6 +549,16 @@ defmodule Arbor.Commands.Baseline do
       error ->
         _ = File.rm_rf(staging)
         error
+    end
+  end
+
+  defp maybe_copy_compiled_build(source_tree, dest) when is_binary(source_tree) do
+    source = source_tree <> "-build"
+
+    if File.dir?(source) do
+      copy_tree(source, dest)
+    else
+      :ok
     end
   end
 

@@ -1181,7 +1181,10 @@ defmodule Arbor.Actions.Mix do
     if is_map(resource) do
       case contained_mix_env_owned(Keyword.put(opts, :project_path, project_path)) do
         {:ok, env, nil} ->
-          {:ok, env, nil}
+          case seed_compiled_build(env) do
+            :ok -> {:ok, env, nil}
+            {:error, reason} -> {:error, reason}
+          end
 
         {:ok, _env, ephemeral_root} when is_binary(ephemeral_root) ->
           case cleanup_ephemeral_root(ephemeral_root) do
@@ -1196,6 +1199,12 @@ defmodule Arbor.Actions.Mix do
       {:error, :validation_resource_required}
     end
   end
+
+  defp seed_compiled_build(%{"MIX_BUILD_PATH" => dest}) when is_binary(dest) and dest != "" do
+    Arbor.Shell.seed_linux_compiled_dependency_build(dest)
+  end
+
+  defp seed_compiled_build(_env), do: :ok
 
   defp format_prepare_error({:invalid_mix_shell_module, _} = error), do: {:error, error}
 

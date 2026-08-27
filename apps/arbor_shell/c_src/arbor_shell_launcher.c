@@ -53,6 +53,18 @@ extern char **environ;
 #define REASON_CANCELLED 3
 #define REASON_CONTAINMENT_FAILURE 4
 
+#define CANCEL_SUB_NONE 0
+#define CANCEL_SUB_HUP 1
+#define CANCEL_SUB_READ_EOF 2
+#define CANCEL_SUB_READ_ERR 3
+#define CANCEL_SUB_WRITE_ERR 4
+#define CANCEL_SUB_POLL_ERR 5
+#define CANCEL_SUB_BAD_FRAME 6
+#define CANCEL_SUB_CMD_CANCEL 7
+#define CANCEL_SUB_LIVE_DESCENDANTS 8
+#define CANCEL_SUB_START_PACKET 9
+#define CANCEL_SUB_STDIN_WRITE 10
+
 #define IO_CHUNK 8192
 #define MAX_CONTROL_PACKET (16U * 1024U * 1024U)
 #define GROUP_KILL_GRACE_MS 1500
@@ -1317,12 +1329,19 @@ static int child_exit_code(int status) {
   return 1;
 }
 
-static void send_terminal(uint8_t reason, int exit_code) {
-  uint8_t payload[5];
-  uint32_t encoded = htonl((uint32_t)exit_code);
+static void send_terminal_ex(uint8_t reason, int exit_code, uint8_t sub_reason, int errn) {
+  uint8_t payload[10];
+  uint32_t encoded_exit = htonl((uint32_t)exit_code);
+  uint32_t encoded_errno = htonl((uint32_t)errn);
   payload[0] = reason;
-  memcpy(payload + 1, &encoded, sizeof(encoded));
+  memcpy(payload + 1, &encoded_exit, sizeof(encoded_exit));
+  payload[5] = sub_reason;
+  memcpy(payload + 6, &encoded_errno, sizeof(encoded_errno));
   (void)write_packet(TAG_TERMINAL, payload, sizeof(payload));
+}
+
+static void send_terminal(uint8_t reason, int exit_code) {
+  send_terminal_ex(reason, exit_code, CANCEL_SUB_NONE, 0);
 }
 
 static void child_exec(int target_fd, int cwd_fd, const char *path, char **target_argv,
@@ -1607,7 +1626,7 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   if (packet_result != 1 || command != CMD_START || payload_length != 0) {
     int status = 0;
     if (contain_group(child, child, &status, &tracker) == 0) {
-      send_terminal(REASON_CANCELLED, 137);
+      send_terminal_ex(REASON_CANCELLED, 137, CANCEL_SUB_START_PACKET, 0);
     } else {
       send_error("contained process cancellation cleanup failed");
     }
@@ -1630,6 +1649,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   int status = 0;
   int child_done = 0;
   uint8_t reason = REASON_NORMAL;
+  uint8_t sub_reason = CANCEL_SUB_NONE;
+  int saved_errno = 0;
   uint8_t output[IO_CHUNK];
   /* Parent write end of child stdin. Closed only via CMD_CLOSE_STDIN or teardown.
    * Tracking -1 after close keeps close idempotent and blocks writes to a closed fd.
@@ -1693,6 +1714,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
     if (wait > 25) wait = 25;
     int polled = poll(fds, nfds, wait);
     if (polled < 0 && errno != EINTR) {
+      saved_errno = errno;
+      sub_reason = CANCEL_SUB_POLL_ERR;
       reason = REASON_CANCELLED;
       break;
     }
@@ -1705,6 +1728,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
         uint64_t available = max_output - output_bytes;
         uint32_t retained = (uint32_t)((uint64_t)count < available ? (uint64_t)count : available);
         if (retained > 0 && write_packet(TAG_OUTPUT, output, retained) != 0) {
+          saved_errno = errno;
+          sub_reason = CANCEL_SUB_WRITE_ERR;
           reason = REASON_CANCELLED;
           break;
         }
@@ -1718,6 +1743,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
 
     /* 2) Controller hangup/error cancels even when POLLIN is also set. */
     if (fds[idx_controller].revents & (POLLHUP | POLLERR)) {
+      saved_errno = 0;
+      sub_reason = CANCEL_SUB_HUP;
       reason = REASON_CANCELLED;
       break;
     }
@@ -1725,6 +1752,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
     /* 3) Progress any pending nonblocking stdin write. */
     if (pending_input != NULL) {
       if (try_write_pending(input_write_fd, &pending_input, &pending_len, &pending_off) != 0) {
+        saved_errno = errno;
+        sub_reason = CANCEL_SUB_STDIN_WRITE;
         reason = REASON_CANCELLED;
         break;
       }
@@ -1741,6 +1770,19 @@ static int run_exec(int argc, char **argv, int execution_mode) {
 
       if (input_result != 1 || input_tag == CMD_CANCEL) {
         free(input_payload);
+        if (input_tag == CMD_CANCEL && input_result == 1) {
+          sub_reason = CANCEL_SUB_CMD_CANCEL;
+          saved_errno = 0;
+        } else if (input_result == 0) {
+          sub_reason = CANCEL_SUB_READ_EOF;
+          saved_errno = 0;
+        } else if (input_result < 0) {
+          sub_reason = CANCEL_SUB_READ_ERR;
+          saved_errno = errno;
+        } else {
+          sub_reason = CANCEL_SUB_BAD_FRAME;
+          saved_errno = 0;
+        }
         reason = REASON_CANCELLED;
         break;
       }
@@ -1749,6 +1791,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
         free(input_payload);
         /* Payload must be empty; close is idempotent when already closed. */
         if (input_length != 0) {
+          sub_reason = CANCEL_SUB_BAD_FRAME;
+          saved_errno = 0;
           reason = REASON_CANCELLED;
           break;
         }
@@ -1762,6 +1806,8 @@ static int run_exec(int argc, char **argv, int execution_mode) {
          * native frames above IO_CHUNK (Elixir must frame at this bound). */
         if (input_write_fd < 0 || input_length > (uint32_t)IO_CHUNK) {
           free(input_payload);
+          sub_reason = CANCEL_SUB_BAD_FRAME;
+          saved_errno = 0;
           reason = REASON_CANCELLED;
           break;
         }
@@ -1773,16 +1819,20 @@ static int run_exec(int argc, char **argv, int execution_mode) {
           pending_off = 0;
           if (try_write_pending(input_write_fd, &pending_input, &pending_len, &pending_off) !=
               0) {
+            saved_errno = errno;
             free(pending_input);
             pending_input = NULL;
             pending_len = 0;
             pending_off = 0;
+            sub_reason = CANCEL_SUB_STDIN_WRITE;
             reason = REASON_CANCELLED;
             break;
           }
         }
       } else {
         free(input_payload);
+        sub_reason = CANCEL_SUB_BAD_FRAME;
+        saved_errno = 0;
         reason = REASON_CANCELLED;
         break;
       }
@@ -1823,14 +1873,24 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   }
   close(output_pipe[0]);
 
+  int have_child_status = WIFEXITED(status) || WIFSIGNALED(status);
+  int child_code = have_child_status ? child_exit_code(status) : 137;
+
   if (contained != 0) {
     send_error("contained process final cleanup failed");
   } else if (reason == REASON_NORMAL && live_descendants > 0) {
-    send_terminal(REASON_CANCELLED, 137);
+    send_terminal_ex(REASON_CANCELLED, child_code, CANCEL_SUB_LIVE_DESCENDANTS, 0);
   } else if (reason == REASON_NORMAL) {
-    send_terminal(REASON_NORMAL, child_exit_code(status));
+    send_terminal_ex(REASON_NORMAL, child_code, CANCEL_SUB_NONE, 0);
+  } else if (reason == REASON_CANCELLED && sub_reason != CANCEL_SUB_CMD_CANCEL &&
+             WIFEXITED(status)) {
+    /* Controller-side cancel after a real child exit is not a candidate cancel.
+     * Report the waitpid status (V7-16 / 11s: Mix compile exited 0). */
+    send_terminal_ex(REASON_NORMAL, child_code, sub_reason, saved_errno);
+  } else if (reason == REASON_TIMEOUT || reason == REASON_OUTPUT_LIMIT) {
+    send_terminal_ex(reason, 137, sub_reason, saved_errno);
   } else {
-    send_terminal(reason, 137);
+    send_terminal_ex(reason, child_code, sub_reason, saved_errno);
   }
   return 0;
 }

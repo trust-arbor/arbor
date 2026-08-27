@@ -38,6 +38,8 @@ defmodule Arbor.Shell.ProcessGroup do
   @oci_unit_launcher_command "oci-unit"
   @trusted_build_launcher_command "trusted-build"
 
+  require Logger
+
   defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes, stdin_open: true]
 
   @type t :: %__MODULE__{
@@ -51,6 +53,11 @@ defmodule Arbor.Shell.ProcessGroup do
 
   @type terminal_reason ::
           :normal | :timeout | :output_limit | :cancelled | :containment_failure
+
+  @type terminal_meta :: %{
+          optional(:sub_reason) => atom(),
+          optional(:errno) => integer()
+        }
 
   @spec run(String.t(), [String.t()], keyword(), integer(), pos_integer(), pos_integer()) ::
           {:ok,
@@ -797,17 +804,18 @@ defmodule Arbor.Shell.ProcessGroup do
 
   @spec decode_message(t(), term()) ::
           {:output, binary()}
-          | {:terminal, terminal_reason(), non_neg_integer()}
+          | {:terminal, terminal_reason(), non_neg_integer(), terminal_meta()}
           | {:error, term()}
           | :ignore
   def decode_message(%__MODULE__{port: port}, {port, {:data, <<@output, data::binary>>}}),
     do: {:output, data}
 
-  def decode_message(
-        %__MODULE__{port: port},
-        {port, {:data, <<@terminal, reason, exit_code::signed-big-32>>}}
-      ),
-      do: {:terminal, decode_reason(reason), max(exit_code, 0)}
+  def decode_message(%__MODULE__{port: port}, {port, {:data, <<@terminal, rest::binary>>}}) do
+    case decode_terminal_payload(rest) do
+      {:ok, reason, exit_code, meta} -> {:terminal, reason, exit_code, meta}
+      :error -> :ignore
+    end
+  end
 
   def decode_message(%__MODULE__{port: port}, {port, {:data, <<@error, message::binary>>}}),
     do: {:error, {:launcher_error, message}}
@@ -819,6 +827,7 @@ defmodule Arbor.Shell.ProcessGroup do
   # trap_exit port owner such as PortSession.
   def decode_message(%__MODULE__{port: port}, {:EXIT, port, reason})
       when reason != :normal do
+    Logger.warning("shell process group port EXIT reason=#{inspect(reason)}")
     {:error, {:port_exited, reason}}
   end
 
@@ -836,19 +845,26 @@ defmodule Arbor.Shell.ProcessGroup do
         {port, {:data, <<@output, data::binary>>}} when port == handle.port ->
           collect(handle, cancel_id, [data | acc], bytes + byte_size(data), caller_mon, caller)
 
-        {port, {:data, <<@terminal, reason, exit_code::signed-big-32>>}}
-        when port == handle.port ->
-          # Terminal frame is the launcher's containment proof (terminate/2).
-          # Do not re-kill the process group on normal terminals — PGID may be
-          # reused and substring ps matches on launcher argv are false positives.
-          settle_terminal_port(port)
+        {port, {:data, <<@terminal, rest::binary>>}} when port == handle.port ->
+          case decode_terminal_payload(rest) do
+            {:ok, reason, exit_code, meta} ->
+              # Terminal frame is the launcher's containment proof (terminate/2).
+              # Do not re-kill the process group on normal terminals — PGID may be
+              # reused and substring ps matches on launcher argv are false positives.
+              settle_terminal_port(port)
 
-          {:ok,
-           %{
-             reason: decode_reason(reason),
-             exit_code: max(exit_code, 0),
-             output: acc_to_binary(acc)
-           }}
+              {:ok,
+               %{
+                 reason: reason,
+                 exit_code: exit_code,
+                 output: acc_to_binary(acc),
+                 sub_reason: Map.get(meta, :sub_reason),
+                 errno: Map.get(meta, :errno)
+               }}
+
+            :error ->
+              cleanup_error(handle, :invalid_terminal_frame)
+          end
 
         {port, {:data, <<@error, message::binary>>}} when port == handle.port ->
           cleanup_error(handle, {:launcher_error, message})
@@ -976,8 +992,11 @@ defmodule Arbor.Shell.ProcessGroup do
       {:error, :teardown_timeout}
     else
       receive do
-        {^port, {:data, <<@terminal, reason, exit_code::signed-big-32>>}} ->
-          {:ok, decode_reason(reason), max(exit_code, 0)}
+        {^port, {:data, <<@terminal, rest::binary>>}} ->
+          case decode_terminal_payload(rest) do
+            {:ok, reason, exit_code, _meta} -> {:ok, reason, exit_code}
+            :error -> {:error, :invalid_terminal_frame}
+          end
 
         {^port, {:data, <<@output, _data::binary>>}} ->
           await_terminal(port, deadline)
@@ -1051,7 +1070,21 @@ defmodule Arbor.Shell.ProcessGroup do
     ]
 
     try do
-      {:ok, Port.open({:spawn_executable, to_charlist(launcher)}, port_opts)}
+      port = Port.open({:spawn_executable, to_charlist(launcher)}, port_opts)
+
+      if launcher_command == @oci_unit_launcher_command do
+        connected =
+          case :erlang.port_info(port, :connected) do
+            {:connected, pid} -> pid
+            _other -> nil
+          end
+
+        Logger.warning(
+          "shell process group port open launcher=oci-unit connected=#{inspect(connected)} self=#{inspect(self())}"
+        )
+      end
+
+      {:ok, port}
     catch
       :error, reason -> {:error, {:port_open_failed, reason}}
     end
@@ -1414,12 +1447,38 @@ defmodule Arbor.Shell.ProcessGroup do
 
   defp remaining_ms(deadline), do: deadline - System.monotonic_time(:millisecond)
 
+  # Legacy 5-byte frame and V7-16 10-byte frame (sub-reason + errno).
+  @doc false
+  def decode_terminal_payload(<<reason, exit_code::signed-big-32>>) do
+    {:ok, decode_reason(reason), max(exit_code, 0), %{}}
+  end
+
+  def decode_terminal_payload(<<reason, exit_code::signed-big-32, sub, errno::signed-big-32>>) do
+    {:ok, decode_reason(reason), max(exit_code, 0),
+     %{sub_reason: decode_sub_reason(sub), errno: errno}}
+  end
+
+  def decode_terminal_payload(_other), do: :error
+
   defp decode_reason(@normal), do: :normal
   defp decode_reason(@timeout), do: :timeout
   defp decode_reason(@output_limit), do: :output_limit
   defp decode_reason(@cancelled), do: :cancelled
   defp decode_reason(@containment_failure), do: :containment_failure
   defp decode_reason(_unknown), do: :containment_failure
+
+  defp decode_sub_reason(0), do: :none
+  defp decode_sub_reason(1), do: :hup
+  defp decode_sub_reason(2), do: :read_eof
+  defp decode_sub_reason(3), do: :read_err
+  defp decode_sub_reason(4), do: :write_err
+  defp decode_sub_reason(5), do: :poll_err
+  defp decode_sub_reason(6), do: :bad_frame
+  defp decode_sub_reason(7), do: :cmd_cancel
+  defp decode_sub_reason(8), do: :live_descendants
+  defp decode_sub_reason(9), do: :start_packet
+  defp decode_sub_reason(10), do: :stdin_write
+  defp decode_sub_reason(_), do: :unknown
 
   defp normalize_requested_reason(:cancelled, requested), do: requested
   defp normalize_requested_reason(reason, _requested), do: reason

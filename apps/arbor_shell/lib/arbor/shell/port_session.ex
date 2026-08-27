@@ -554,8 +554,8 @@ defmodule Arbor.Shell.PortSession do
              output_bytes: state.output_bytes + byte_size(data)
          }}
 
-      {:terminal, reason, exit_code} ->
-        completed = complete(state, reason, exit_code, :process_group_terminal)
+      {:terminal, reason, exit_code, meta} ->
+        completed = complete(state, reason, exit_code, :process_group_terminal, meta)
         Process.send_after(self(), :self_terminate, @retention_ms)
         {:noreply, completed}
 
@@ -722,10 +722,13 @@ defmodule Arbor.Shell.PortSession do
     end
   end
 
-  defp complete(state, reason, exit_code, handler) do
-    if reason != :normal or handler != :process_group_terminal do
+  defp complete(state, reason, exit_code, handler, meta \\ %{}) do
+    sub = Map.get(meta, :sub_reason)
+
+    if reason != :normal or handler != :process_group_terminal or
+         sub not in [nil, :none] do
       Logger.warning(
-        "shell port session complete handler=#{inspect(handler)} reason=#{inspect(reason)} exit=#{inspect(exit_code)} owner=#{inspect(state.owner_pid)} status=#{state.status} id=#{state.id}"
+        "shell port session complete handler=#{inspect(handler)} reason=#{inspect(reason)} exit=#{inspect(exit_code)} sub=#{inspect(sub)} errno=#{inspect(Map.get(meta, :errno))} owner=#{inspect(state.owner_pid)} status=#{state.status} id=#{state.id}"
       )
     end
 

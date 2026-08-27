@@ -106,6 +106,13 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
     call(server, :checkout_mix_lock_digest)
   end
 
+  @doc false
+  @spec checkout_compiled_build_source(GenServer.server()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def checkout_compiled_build_source(server \\ __MODULE__) do
+    call(server, :checkout_compiled_build_source)
+  end
+
   @doc """
   Redacted public status map. Never includes Binding, paths, inventory, or digests.
   """
@@ -230,6 +237,23 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
     {:stop, {:linux_dependency_baseline_drift, bounded},
      {:error, {:linux_dependency_baseline_drift, bounded}}, state}
+  end
+
+  def handle_call(:checkout_compiled_build_source, _from, %{status: :unavailable} = state) do
+    {:reply, {:error, :compiled_build_unavailable}, state}
+  end
+
+  def handle_call(
+        :checkout_compiled_build_source,
+        _from,
+        %{status: :pinned, binding: binding} = state
+      )
+      when not is_nil(binding) do
+    {:reply, compiled_build_source_from_binding(binding), state}
+  end
+
+  def handle_call(:checkout_compiled_build_source, _from, state) do
+    {:reply, {:error, :compiled_build_unavailable}, state}
   end
 
   def handle_call(_request, _from, state) do
@@ -382,6 +406,25 @@ defmodule Arbor.Shell.LinuxDependencyBaselineAuthority do
 
       :exit, _reason ->
         {:error, :source_verify_or_plan_failed}
+    end
+  end
+
+  defp compiled_build_source_from_binding(binding) do
+    source_root =
+      case binding do
+        %{source_identity: %{path: path}} when is_binary(path) -> path
+        _other -> nil
+      end
+
+    if is_binary(source_root) do
+      build = Path.join(Path.dirname(source_root), "build")
+
+      case File.lstat(build) do
+        {:ok, %File.Stat{type: :directory}} -> {:ok, build}
+        _other -> {:error, :compiled_build_unavailable}
+      end
+    else
+      {:error, :compiled_build_unavailable}
     end
   end
 

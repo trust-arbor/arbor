@@ -64,6 +64,7 @@ defmodule Arbor.Shell do
     ExecutionRegistry,
     ExecutionWorker,
     Executor,
+    LinuxDependencyBaselineAuthority,
     LinuxDependencyBaselineBuilder,
     LinuxDependencyBaselineFilesystem,
     OwnedTreeRegistry,
@@ -994,6 +995,21 @@ defmodule Arbor.Shell do
   end
 
   @doc """
+  Copy the pinned baseline compiled Mix build into an owner-created destination.
+
+  **Trusted system API only.** `dest` must be an existing absolute directory
+  (the validation resource `MIX_BUILD_PATH`). Missing compiled-build artifacts
+  are a no-op so older baselines still compile from source. Destinations that
+  already contain a seed marker are left unchanged.
+  """
+  @spec seed_linux_compiled_dependency_build(term()) :: :ok | {:error, term()}
+  def seed_linux_compiled_dependency_build(dest) when is_binary(dest) do
+    seed_compiled_build(dest)
+  end
+
+  def seed_linux_compiled_dependency_build(_dest), do: {:error, :invalid_compiled_build_dest}
+
+  @doc """
   Redacted public status of the Apple Container control-plane authority owner.
 
   Returns an ordinary JSON-clean map with state/reason/platform labels only.
@@ -1693,6 +1709,79 @@ defmodule Arbor.Shell do
   # Shared authorization dispatch — validate and bind the executable before
   # Security/approval work, then execute the exact prepared argv only after an
   # authorized decision. All sync/async/streaming variants use this path.
+  defp seed_compiled_build(dest) do
+    marker = Path.join(dest, ".arbor-compiled-build-seeded")
+
+    cond do
+      Path.type(dest) != :absolute ->
+        {:error, :invalid_compiled_build_dest}
+
+      File.regular?(marker) ->
+        :ok
+
+      true ->
+        case File.lstat(dest) do
+          {:ok, %File.Stat{type: :directory}} ->
+            case LinuxDependencyBaselineAuthority.checkout_compiled_build_source() do
+              {:ok, source} -> copy_compiled_build(source, dest, marker)
+              {:error, :compiled_build_unavailable} -> :ok
+              {:error, :linux_dependency_baseline_unavailable} -> :ok
+              {:error, reason} -> {:error, reason}
+            end
+
+          _other ->
+            :ok
+        end
+    end
+  end
+
+  defp copy_compiled_build(source, dest, marker) do
+    with {:ok, names} <- File.ls(source),
+         :ok <- copy_named_entries(source, dest, names),
+         :ok <- chmod_seeded_tree(dest),
+         :ok <- File.write(marker, "ok\n") do
+      :ok
+    else
+      {:error, reason} -> {:error, {:compiled_build_seed_failed, reason}}
+    end
+  end
+
+  defp copy_named_entries(_source, _dest, []), do: :ok
+
+  defp copy_named_entries(source, dest, [name | rest]) do
+    from = Path.join(source, name)
+    to = Path.join(dest, name)
+
+    case File.cp_r(from, to) do
+      {:ok, _paths} -> copy_named_entries(source, dest, rest)
+      {:error, reason, _path} -> {:error, reason}
+    end
+  end
+
+  defp chmod_seeded_tree(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        with :ok <- File.chmod(path, 0o700),
+             {:ok, names} <- File.ls(path) do
+          Enum.reduce_while(names, :ok, fn name, :ok ->
+            case chmod_seeded_tree(Path.join(path, name)) do
+              :ok -> {:cont, :ok}
+              error -> {:halt, error}
+            end
+          end)
+        end
+
+      {:ok, %File.Stat{type: :regular}} ->
+        File.chmod(path, 0o600)
+
+      {:ok, _other} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
     with {:ok, prepared} <- prepare_agent_command(command, opts) do
       case authorize_prepared_agent_command(agent_id, command, prepared, opts) do
