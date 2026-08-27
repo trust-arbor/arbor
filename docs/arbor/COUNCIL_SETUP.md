@@ -127,6 +127,13 @@ llama.cpp or LM Studio on `:1234` is `lm_studio`, not `ollama`. Pointing
 `ARBOR_OLLAMA_BASE_URL` at a host that does not serve those names produces
 failed seats, which the reducer records as abstentions.
 
+If `ollama` is not a configured provider on the node at all, those six
+seats abstain with `{:unknown_provider, "ollama"}`. Live coding readiness
+still reports READY — there is no panel-provider gate today. Observed
+2026-08-27 on 10.42.42.42 run 11w: 8 of 10 reviewers abstained; quorum
+still met on the remaining `openai_oauth` and `xai_oauth` seats. Tracked
+in `.arbor/roadmap/0-inbox/binding-council-provider-availability.md`.
+
 ### Capabilities
 
 The factory caller must already hold the review horizon (see

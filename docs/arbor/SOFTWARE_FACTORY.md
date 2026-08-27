@@ -157,6 +157,13 @@ mode `0400`. Override the path with `ARBOR_VALIDATION_RUNTIME_CONFIG_PATH`.
 `runtime_probe_failed` and names the `podman` driver; it is not hidden behind
 `validation_capacity`.
 
+**Time (measured 2026-08-27 on 10.42.42.42, native, fresh HOME, run 11w)**
+
+- First `./bin/mix arbor.baseline.build` ≈13 min (image + `deps.compile` +
+  persist compiled `_build`).
+- After activate + restart, a seeded validation unit is ≈170 s (~3 min). A
+  cold unit without the compiled `_build` seed is 8–16 min.
+
 #### macOS (Apple Container)
 
 Candidate validation on Darwin runs in an isolated VM against a **reviewed,
@@ -173,7 +180,7 @@ Without it, live readiness stops at `dependency_baseline: runtime_unconfigured`
 and nothing can be dispatched.
 
 Implementation notes for the Linux Podman path live in
-`.arbor/roadmap/3-in-progress/linux-validation-runtime-for-the-software-factory.md`.
+`.arbor/roadmap/5-completed/linux-validation-runtime-for-the-software-factory.md`.
 
 ### Coding roots
 
