@@ -1121,7 +1121,7 @@ defmodule Arbor.Actions.Mix do
          {:ok, wrapper} <- resolve_execution_mix_wrapper(shell_module),
          :ok <- validate_validation_mix_lock(resource, revision, canonical_path),
          {:ok, _} <- remaining_timeout(deadline_ms) do
-      case build_contained_env(canonical_path, opts) do
+      case build_contained_env(canonical_path, opts, shell_module) do
         {:ok, env, ephemeral_root} ->
           case remaining_timeout(deadline_ms) do
             {:ok, _} ->
@@ -1173,7 +1173,7 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp build_contained_env(project_path, opts) do
+  defp build_contained_env(project_path, opts, shell_module) do
     # Always require a live validation resource — never allocate a production
     # ephemeral execution root for project code.
     resource = Keyword.get(opts, :validation_resource)
@@ -1181,7 +1181,7 @@ defmodule Arbor.Actions.Mix do
     if is_map(resource) do
       case contained_mix_env_owned(Keyword.put(opts, :project_path, project_path)) do
         {:ok, env, nil} ->
-          case seed_compiled_build(env) do
+          case seed_compiled_build(env, shell_module) do
             :ok -> {:ok, env, nil}
             {:error, reason} -> {:error, reason}
           end
@@ -1200,11 +1200,53 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  defp seed_compiled_build(%{"MIX_BUILD_PATH" => dest}) when is_binary(dest) and dest != "" do
-    Arbor.Shell.seed_linux_compiled_dependency_build(dest)
+  defp seed_compiled_build(%{"MIX_BUILD_PATH" => dest}, shell_module)
+       when is_binary(dest) and dest != "" and is_atom(shell_module) do
+    invoke_compiled_build_seed(shell_module, dest)
   end
 
-  defp seed_compiled_build(_env), do: :ok
+  defp seed_compiled_build(_env, _shell_module), do: :ok
+
+  defp invoke_compiled_build_seed(shell_module, dest) do
+    if function_exported?(shell_module, :seed_linux_compiled_dependency_build, 1) do
+      try do
+        shell_module
+        |> apply(:seed_linux_compiled_dependency_build, [dest])
+        |> validate_compiled_build_seed_result()
+      rescue
+        _ -> {:error, :compiled_dependency_build_seed_callback_failed}
+      catch
+        _, _ -> {:error, :compiled_dependency_build_seed_callback_failed}
+      end
+    else
+      {:error, :compiled_dependency_build_seed_callback_failed}
+    end
+  end
+
+  defp validate_compiled_build_seed_result(:ok), do: :ok
+
+  defp validate_compiled_build_seed_result(
+         {:error, :linux_dependency_baseline_authority_unavailable} = error
+       ),
+       do: error
+
+  defp validate_compiled_build_seed_result(
+         {:error, {:linux_dependency_baseline_drift, reason}} = error
+       )
+       when is_atom(reason),
+       do: error
+
+  defp validate_compiled_build_seed_result({:error, :invalid_compiled_build_dest} = error),
+    do: error
+
+  defp validate_compiled_build_seed_result(
+         {:error, {:compiled_build_seed_failed, reason}} = error
+       )
+       when is_atom(reason),
+       do: error
+
+  defp validate_compiled_build_seed_result(_result),
+    do: {:error, :compiled_dependency_build_seed_callback_failed}
 
   defp format_prepare_error({:invalid_mix_shell_module, _} = error), do: {:error, error}
 

@@ -210,6 +210,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     tmp_dir: tmp_dir
   } do
     fixture = leased_umbrella(tmp_dir)
+    Arbor.Actions.TestMixShell.clear_last_seed_destination()
 
     # Change only alpha (behavior-preserving) — beta depends on alpha so both
     # apps' tests should be selected and still pass.
@@ -245,6 +246,12 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert result.test["passed"]
     assert is_binary(result.feedback_json)
     assert Jason.decode!(result.feedback_json)["passed"] == true
+
+    seed_destination = Arbor.Actions.TestMixShell.last_seed_destination()
+    assert is_binary(seed_destination)
+    assert Path.type(seed_destination) == :absolute
+    assert Path.basename(seed_destination) == "build"
+
     # Does not claim zero-cycle validation.
     refute Map.has_key?(result, :cycles)
     refute Map.has_key?(result, "cycles")

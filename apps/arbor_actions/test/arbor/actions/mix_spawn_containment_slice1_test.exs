@@ -19,22 +19,26 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
 
   defmodule MalformedWrapperShell do
     def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def seed_linux_compiled_dependency_build(_dest), do: :ok
     def resolve_mix_wrapper, do: :not_a_result_tuple
   end
 
   defmodule RelativeWrapperShell do
     def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def seed_linux_compiled_dependency_build(_dest), do: :ok
     def resolve_mix_wrapper, do: {:ok, "bin/mix"}
   end
 
   defmodule CallbackErrorWrapperShell do
     def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def seed_linux_compiled_dependency_build(_dest), do: :ok
     # Custom callback error must not leak; execution fails closed.
     def resolve_mix_wrapper, do: {:error, :custom_callback_reason}
   end
 
   defmodule RaisingWrapperShell do
     def execute_spawn_capable(_tool, _args, _opts), do: {:error, :not_used}
+    def seed_linux_compiled_dependency_build(_dest), do: :ok
     def resolve_mix_wrapper, do: raise("hostile wrapper callback")
   end
 
@@ -487,6 +491,8 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     assert Path.basename(shell_wrapper) == "mix"
     assert File.regular?(shell_wrapper)
 
+    Arbor.Actions.TestMixShell.clear_last_seed_destination()
+
     MixAction.with_validation_resource(fixture.lease.workspace_id, fixture.context, fn resource ->
       # Public API still resolves via the configured shell callback.
       assert {:ok, candidate} = MixAction.projections_for_resource(resource, :candidate)
@@ -511,6 +517,7 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
       assert Path.basename(invocation.tool) == "mix"
       assert File.regular?(invocation.tool)
       assert executable?(invocation.tool)
+      assert Arbor.Actions.TestMixShell.last_seed_destination() == resource.candidate_build_path
 
       {:ok, :ok}
     end)

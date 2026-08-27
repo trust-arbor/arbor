@@ -11,6 +11,11 @@ defmodule Arbor.Actions.TestMixShell do
   `Arbor.Actions.Mix` projections and `run_mix/3` when this module is installed
   as `:mix_shell_module`. Production `Arbor.Shell` does not export that
   callback and continues to use code-root wrapper authority.
+
+  `seed_linux_compiled_dependency_build/1` is a hermetic observation seam. It
+  validates and records the owner-created build destination without copying
+  artifacts or consulting the production Linux dependency baseline authority.
+  It makes no production containment or baseline-authority claim.
   """
 
   @fallback_wrapper Path.expand("../../../../bin/mix", __DIR__)
@@ -38,6 +43,26 @@ defmodule Arbor.Actions.TestMixShell do
       _ -> {:error, :mix_wrapper_unavailable}
     end
   end
+
+  @doc """
+  Validate and record an owner-created compiled-build destination for tests.
+
+  This callback deliberately performs no production baseline checkout or copy.
+  """
+  @spec seed_linux_compiled_dependency_build(term()) ::
+          :ok | {:error, :invalid_compiled_build_dest}
+  def seed_linux_compiled_dependency_build(dest) when is_binary(dest) and dest != "" do
+    with true <- Path.type(dest) == :absolute,
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(dest) do
+      Process.put({__MODULE__, :last_seed_destination}, dest)
+      :ok
+    else
+      _ -> {:error, :invalid_compiled_build_dest}
+    end
+  end
+
+  def seed_linux_compiled_dependency_build(_dest),
+    do: {:error, :invalid_compiled_build_dest}
 
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -123,6 +148,13 @@ defmodule Arbor.Actions.TestMixShell do
 
   @doc false
   def clear_last_invocation, do: Process.delete({__MODULE__, :last_invocation})
+
+  @doc false
+  def last_seed_destination, do: Process.get({__MODULE__, :last_seed_destination})
+
+  @doc false
+  def clear_last_seed_destination,
+    do: Process.delete({__MODULE__, :last_seed_destination})
 
   @doc false
   def force_worktree_mutation(rel_path, contents)

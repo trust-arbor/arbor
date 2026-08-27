@@ -308,12 +308,15 @@ defmodule Arbor.Actions.Config do
   Production defaults to `Arbor.Shell`. Tests may configure a trusted named
   module with `:mix_shell_module` so action behavior can be exercised without
   claiming production process containment. A configured module must export
-  `execute_spawn_capable/3`. Optionally it may export zero-arity
-  `resolve_mix_wrapper/0` for the exact absolute Mix wrapper it accepts;
-  `Arbor.Shell` does not and continues to use Mix's production code-root
-  resolver. This seam is operator/test configuration only; actions never
-  resolve it from params or context, and function values are not accepted.
-  Misconfigured modules fail closed before dispatch.
+  both `execute_spawn_capable/3` and
+  `seed_linux_compiled_dependency_build/1`, binding execution and compiled
+  dependency build seeding to one trusted facade selection. Optionally it may
+  export zero-arity `resolve_mix_wrapper/0` for the exact absolute Mix wrapper
+  it accepts; `Arbor.Shell` does not and continues to use Mix's production
+  code-root resolver. This seam is operator/test configuration only; actions
+  never resolve modules, seed sources, destinations, or authority controls
+  from params or context, and function values are not accepted. Misconfigured
+  modules fail closed before preparation or dispatch.
   """
   @type mix_shell_module_error ::
           {:invalid_mix_shell_module,
@@ -333,6 +336,11 @@ defmodule Arbor.Actions.Config do
             {:error,
              {:invalid_mix_shell_module,
               {:callback_not_exported, module, :execute_spawn_capable, 3}}}
+
+          not function_exported?(module, :seed_linux_compiled_dependency_build, 1) ->
+            {:error,
+             {:invalid_mix_shell_module,
+              {:callback_not_exported, module, :seed_linux_compiled_dependency_build, 1}}}
 
           true ->
             {:ok, module}

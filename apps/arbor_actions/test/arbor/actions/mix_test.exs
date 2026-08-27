@@ -23,6 +23,33 @@ defmodule Arbor.Actions.MixTest do
     def execute_spawn_capable(_tool, _args), do: {:error, :wrong_arity}
   end
 
+  defmodule MissingSeedCallbackMixShell do
+    def resolve_mix_wrapper, do: Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+
+    def execute_spawn_capable(_tool, _args, _opts) do
+      Process.put({__MODULE__, :dispatched}, true)
+      {:error, :unexpected_dispatch}
+    end
+  end
+
+  defmodule SeedCallbackMixShell do
+    def resolve_mix_wrapper, do: Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+
+    def seed_linux_compiled_dependency_build(_dest) do
+      case Process.get({__MODULE__, :seed_result}) do
+        :raise -> raise "seed callback raised"
+        :throw -> throw(:seed_callback_threw)
+        :exit -> exit(:seed_callback_exited)
+        result -> result
+      end
+    end
+
+    def execute_spawn_capable(_tool, _args, _opts) do
+      Process.put({__MODULE__, :dispatched}, true)
+      {:error, :unexpected_dispatch}
+    end
+  end
+
   setup_all do
     case Process.whereis(Arbor.Shell.ExecutionRegistry) do
       nil -> {:ok, _} = Application.ensure_all_started(:arbor_shell)
@@ -46,6 +73,9 @@ defmodule Arbor.Actions.MixTest do
 
   describe "Mix.Compile" do
     test "passes for a compiling project", %{project_path: project_path, fixture: fixture} do
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      Arbor.Actions.TestMixShell.clear_last_seed_destination()
+
       assert {:ok, result} =
                MixPrincipalHelpers.run(
                  MixAction.Compile,
@@ -65,6 +95,12 @@ defmodule Arbor.Actions.MixTest do
       assert result.feedback["exit_code"] == 0
       assert result.feedback["passed"]
       assert Jason.decode!(result.feedback_json) == result.feedback
+
+      seed_destination = Arbor.Actions.TestMixShell.last_seed_destination()
+      assert is_binary(seed_destination)
+      assert Path.type(seed_destination) == :absolute
+      assert Path.basename(seed_destination) == "build"
+      assert is_map(Arbor.Actions.TestMixShell.last_invocation())
     end
 
     test "selects system-owned intensive containment for spawn-capable compile", %{
@@ -258,6 +294,50 @@ defmodule Arbor.Actions.MixTest do
          {:callback_not_exported, WrongCallbackMixShell, :execute_spawn_capable, 3}}
 
       assert_mix_shell_error(fixture, WrongCallbackMixShell, error)
+    end
+
+    test "action shell seam fails closed when the seed callback is absent", %{fixture: fixture} do
+      Process.delete({MissingSeedCallbackMixShell, :dispatched})
+
+      error =
+        {:invalid_mix_shell_module,
+         {:callback_not_exported, MissingSeedCallbackMixShell,
+          :seed_linux_compiled_dependency_build, 1}}
+
+      assert_mix_shell_error(fixture, MissingSeedCallbackMixShell, error)
+      refute Process.get({MissingSeedCallbackMixShell, :dispatched})
+    end
+
+    test "invalid seed callback outcomes are bounded and fail before dispatch", %{
+      fixture: fixture
+    } do
+      oversized = String.duplicate("must-not-leak", 10_000)
+
+      for result <- [
+            :malformed,
+            {:ok, :unsupported},
+            {:error, oversized},
+            :raise,
+            :throw,
+            :exit
+          ] do
+        assert_seed_callback_error(
+          fixture,
+          result,
+          :compiled_dependency_build_seed_callback_failed
+        )
+      end
+    end
+
+    test "seed callback preserves bounded authority failures and never dispatches", %{
+      fixture: fixture
+    } do
+      for reason <- [
+            :linux_dependency_baseline_authority_unavailable,
+            {:linux_dependency_baseline_drift, :identity_mismatch}
+          ] do
+        assert_seed_callback_error(fixture, {:error, reason}, reason)
+      end
     end
 
     test "builds deterministic, bounded, JSON-clean compile feedback" do
@@ -853,6 +933,36 @@ defmodule Arbor.Actions.MixTest do
 
       assert reason == expected or reason == inspect(expected)
     after
+      restore_env(:arbor_actions, :mix_shell_module, previous)
+    end
+  end
+
+  defp assert_seed_callback_error(fixture, callback_result, expected_reason) do
+    previous = Application.get_env(:arbor_actions, :mix_shell_module)
+    Process.put({SeedCallbackMixShell, :seed_result}, callback_result)
+    Process.delete({SeedCallbackMixShell, :dispatched})
+
+    try do
+      Application.put_env(:arbor_actions, :mix_shell_module, SeedCallbackMixShell)
+      assert {:ok, SeedCallbackMixShell} = Config.mix_shell_module()
+
+      assert {:error, reason} =
+               MixAction.run_with_required_workspace(
+                 fixture.project_path,
+                 ["compile"],
+                 %{
+                   path: fixture.project_path,
+                   workspace_id: fixture.lease.workspace_id
+                 },
+                 fixture.context,
+                 []
+               )
+
+      assert reason == expected_reason or reason == inspect(expected_reason)
+      refute Process.get({SeedCallbackMixShell, :dispatched})
+    after
+      Process.delete({SeedCallbackMixShell, :seed_result})
+      Process.delete({SeedCallbackMixShell, :dispatched})
       restore_env(:arbor_actions, :mix_shell_module, previous)
     end
   end
