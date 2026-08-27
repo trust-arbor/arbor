@@ -8,6 +8,28 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   not grandfathered. Live schema-v3 capacity evidence is admitted only through
   `Arbor.Contracts.Coding.ValidationCapacityHandoff.normalize/1`.
 
+  Closed state keys: schema_version, status, identities, planned_batches,
+  accepted_receipts, claim, fence_generation, per_batch_budget_ms,
+  static_stage_receipt_digest, capacity_handoff, terminal_reason.
+
+  Statuses: open | claimed | failed | cancelled | completed.
+
+  Public transitions: new/1, show/1, claim/2, accept_passed_receipt/2,
+  accept_capacity_handoff/2, fail/2, cancel/2, expire_claim/2, revoke_claim/2,
+  complete/2. Claimed live mutations require matching fence_generation+token
+  and now < expires_at. expire_claim matches the fence then requires
+  now >= expires_at. revoke_claim matches the fence and ignores time.
+  Receipts are an ordered prefix of the immutable path-free plan; complete
+  requires an active unexpired claim and exactly one passed receipt per batch.
+
+  Identities bind task, work-packet (`sha256:` digest), base_commit/base_tree_oid,
+  candidate_head/candidate_tree_oid, validation-plan, toolchain,
+  dependency-baseline, wrapper, validator implementation, principal (claim
+  owner), and configuration. CrossApp is pre-commit: candidate_head MUST equal
+  base_commit (exact parent/HEAD). candidate_tree_oid is the staged committable
+  tree, independently bound and immutable; it MUST NOT be required to equal
+  base_tree_oid, and differs when the task has real changes.
+
   Derived JSON ceilings (v3 handoff max_json_bytes is 256_000; compact plans
   fit that bound; receipts add `outcome` still under 256_000; identities 4_096;
   claim 1_024; envelope 1_024):
@@ -18,7 +40,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   * effects list: 1_294_848
 
   CRC: no filesystem, process, registry, clock, randomness, or Application env.
-  Identities, timestamps, expiry, and fence values are injected.
+  Identities, timestamps, expiry, and fence values are injected. Transitions
+  encode the full state and the effects list once; persist size uses the
+  documented 128-byte envelope plus the already-measured state.
   """
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
@@ -34,6 +58,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   @max_mint_effect_bytes 516_352
   @max_terminal_effect_bytes 512
   @max_effects_json_bytes 1_294_848
+  @persist_envelope_bytes 128
   @max_id_bytes 256
   @max_reason_bytes 256
   @max_fence_generation 1_000_000
@@ -139,6 +164,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
       "max_mint_effect_bytes" => @max_mint_effect_bytes,
       "max_terminal_effect_bytes" => @max_terminal_effect_bytes,
       "max_effects_json_bytes" => @max_effects_json_bytes,
+      "persist_envelope_bytes" => @persist_envelope_bytes,
       "max_fence_generation" => @max_fence_generation
     }
   end
@@ -159,10 +185,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
     _, _ -> {:error, :malformed_state}
   end
 
-  @doc "JSON snapshot; identical to internal state."
-  @spec show(state()) :: state()
-  def show(state) when is_map(state), do: state
-  def show(_state), do: %{"schema_version" => @schema_version}
+  @doc "JSON snapshot; identical to internal state. Non-maps fail closed."
+  @spec show(term()) :: state() | {:error, :malformed_state}
+  def show(state) when is_map(state) and not is_struct(state), do: state
+  def show(_state), do: {:error, :malformed_state}
 
   @doc "Open a fenced single-owner window. Core assigns fence_generation."
   @spec claim(term(), term()) :: {:ok, state(), effects()} | {:error, error()}
@@ -360,7 +386,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
          {:ok, receipts} <- parse_receipts(input["accepted_receipts"], planned),
          {:ok, generation} <- parse_generation(input["fence_generation"]),
          {:ok, claim} <- parse_claim(input["claim"], status, identities, generation),
-         {:ok, handoff} <- parse_stored_handoff(input["capacity_handoff"], per_batch),
+         {:ok, handoff} <-
+           parse_stored_handoff(input["capacity_handoff"], planned, receipts, per_batch),
          {:ok, reason} <- parse_terminal_reason(input["terminal_reason"], status),
          :ok <- require_completed_shape(status, receipts, planned) do
       {:ok,
@@ -382,9 +409,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp snapshot_state(state) do
     with :ok <- require_json_object(state),
-         {:ok, validated} <- rehydrate(state),
-         :ok <- bound_state(validated) do
-      {:ok, validated}
+         :ok <- require_allowed_keys(state, @state_keys),
+         :ok <- require_keys(state, @state_keys),
+         :ok <- require_schema(state["schema_version"]),
+         {:ok, _status} <- parse_status(state["status"]) do
+      {:ok, state}
     end
   end
 
@@ -526,6 +555,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
       String.valid?(reason) and printable?(reason) and not String.contains?(reason, <<0>>)
   end
 
+  # Receipt errors after the live fence: malformed, then duplicate (index already
+  # accepted), skipped (index > next), reordered (index == next but compact
+  # matches a different planned slot), then contradictory.
   defp receipt_decision(state, receipt) do
     planned = state["planned_batches"]
     accepted = state["accepted_receipts"]
@@ -634,51 +666,71 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   end
 
   defp bind_capacity_handoff(state, handoff) do
-    receipts = state["accepted_receipts"]
-    planned = state["planned_batches"]
-    next = length(receipts) + 1
-    suffix = Enum.drop(planned, length(receipts))
+    case bind_handoff(
+           handoff,
+           state["planned_batches"],
+           state["accepted_receipts"],
+           state["per_batch_budget_ms"],
+           :live
+         ) do
+      :ok ->
+        remaining = remaining_batches(handoff["interrupted_batch"], handoff["unstarted_batches"])
+        {:ok, handoff, remaining}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp bind_handoff(handoff, planned, receipts, per_batch, mode) do
+    completed = handoff["completed_batch_count"]
     interrupted = handoff["interrupted_batch"]
     unstarted = handoff["unstarted_batches"]
     remaining = remaining_batches(interrupted, unstarted)
-    completed_files = Enum.reduce(receipts, 0, fn receipt, acc -> acc + receipt["count"] end)
+    suffix = Enum.drop(planned, completed)
+    prefix = Enum.take(receipts, completed)
+    prefix_files = Enum.reduce(prefix, 0, fn receipt, acc -> acc + receipt["count"] end)
+    error = if mode == :live, do: :non_canonical_capacity_handoff, else: :malformed_state
 
     cond do
-      json_size(handoff) > @max_handoff_json_bytes ->
-        {:error, :non_canonical_capacity_handoff}
+      not is_integer(completed) or completed < 0 ->
+        {:error, error}
+
+      mode == :live and completed != length(receipts) ->
+        {:error, error}
+
+      mode == :stored and completed > length(receipts) ->
+        {:error, error}
 
       handoff["available_budget_ms"] != 0 ->
-        {:error, :non_canonical_capacity_handoff}
+        {:error, error}
 
-      handoff["per_batch_budget_ms"] != state["per_batch_budget_ms"] ->
-        {:error, :non_canonical_capacity_handoff}
-
-      handoff["completed_batch_count"] != length(receipts) ->
-        {:error, :non_canonical_capacity_handoff}
-
-      handoff["completed_file_count"] != completed_files ->
-        {:error, :non_canonical_capacity_handoff}
+      handoff["per_batch_budget_ms"] != per_batch ->
+        {:error, error}
 
       remaining != suffix or suffix == [] ->
-        {:error, :non_canonical_capacity_handoff}
+        {:error, error}
 
-      is_nil(interrupted) and hd(unstarted) != Enum.at(planned, next - 1) ->
-        {:error, :non_canonical_capacity_handoff}
+      handoff["completed_file_count"] != prefix_files ->
+        {:error, error}
 
-      is_nil(interrupted) and handoff["phase"] == "structural" and receipts != [] ->
-        {:error, :non_canonical_capacity_handoff}
+      is_nil(interrupted) and hd(unstarted) != Enum.at(planned, completed) ->
+        {:error, error}
 
-      is_map(interrupted) and interrupted != Enum.at(planned, next - 1) ->
-        {:error, :non_canonical_capacity_handoff}
+      is_nil(interrupted) and handoff["phase"] == "structural" and completed != 0 ->
+        {:error, error}
 
-      is_map(interrupted) and unstarted != Enum.drop(planned, next) ->
-        {:error, :non_canonical_capacity_handoff}
+      is_map(interrupted) and interrupted != Enum.at(planned, completed) ->
+        {:error, error}
+
+      is_map(interrupted) and unstarted != Enum.drop(planned, completed + 1) ->
+        {:error, error}
 
       is_map(interrupted) and handoff["phase"] != "runtime" ->
-        {:error, :non_canonical_capacity_handoff}
+        {:error, error}
 
       true ->
-        {:ok, handoff, remaining}
+        :ok
     end
   end
 
@@ -734,63 +786,64 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
     ok_effects(state, [persist_effect(state), terminal])
   end
 
-  defp persist_effect(state) do
+  defp persist_effect(state) when is_map(state) do
     %{
       "op" => "persist",
       "schema_version" => @schema_version,
-      "snapshot" => show(state)
+      "snapshot" => state
     }
   end
 
   defp ok_effects(state, effects) do
-    with :ok <- bound_state(state),
-         :ok <- bound_effects(effects) do
+    state_bytes = json_size(state)
+
+    with :ok <- bound_measured(state_bytes, @max_state_json_bytes, :oversized_state),
+         :ok <- bound_effects(effects, state_bytes) do
       {:ok, state, effects}
     end
   end
 
-  defp bound_state(state) do
-    with :ok <- bound_json(state["identities"], @max_identities_json_bytes, :oversized_state),
-         :ok <- bound_json(state["planned_batches"], @max_plan_json_bytes, :oversized_state),
-         :ok <- bound_json(state["accepted_receipts"], @max_receipts_json_bytes, :oversized_state),
-         :ok <- bound_optional_json(state["claim"], @max_claim_json_bytes, :oversized_state),
-         :ok <-
-           bound_optional_json(
-             state["capacity_handoff"],
-             @max_handoff_json_bytes,
-             :oversized_state
-           ),
-         :ok <- bound_json(state, @max_state_json_bytes, :oversized_state) do
-      :ok
-    end
-  end
+  defp bound_state(state), do: bound_json(state, @max_state_json_bytes, :oversized_state)
 
-  defp bound_effects(effects) when is_list(effects) do
+  defp bound_effects(effects, state_bytes) when is_list(effects) do
     with :ok <- bound_json(effects, @max_effects_json_bytes, :oversized_effects),
-         :ok <- bound_each_effect(effects) do
+         :ok <- bound_effect_ops(effects, state_bytes) do
       :ok
     end
   end
 
-  defp bound_effects(_effects), do: {:error, :oversized_effects}
+  defp bound_effects(_effects, _state_bytes), do: {:error, :oversized_effects}
 
-  defp bound_each_effect([]), do: :ok
+  defp bound_effect_ops([], _state_bytes), do: :ok
 
-  defp bound_each_effect([effect | rest]) do
-    ceiling = effect_ceiling(effect)
-
-    with :ok <- bound_json(effect, ceiling, :oversized_effects) do
-      bound_each_effect(rest)
+  defp bound_effect_ops([%{"op" => "persist"} | rest], state_bytes) do
+    with :ok <-
+           bound_measured(
+             state_bytes + @persist_envelope_bytes,
+             @max_persist_effect_bytes,
+             :oversized_effects
+           ) do
+      bound_effect_ops(rest, state_bytes)
     end
   end
 
-  defp effect_ceiling(%{"op" => "persist"}), do: @max_persist_effect_bytes
-  defp effect_ceiling(%{"op" => "mint_successor"}), do: @max_mint_effect_bytes
-  defp effect_ceiling(%{"op" => "terminal"}), do: @max_terminal_effect_bytes
-  defp effect_ceiling(_effect), do: 0
+  defp bound_effect_ops([%{"op" => "mint_successor"} = mint | rest], state_bytes) do
+    with :ok <- bound_json(mint, @max_mint_effect_bytes, :oversized_effects) do
+      bound_effect_ops(rest, state_bytes)
+    end
+  end
 
-  defp bound_optional_json(nil, _max, _error), do: :ok
-  defp bound_optional_json(value, max, error), do: bound_json(value, max, error)
+  defp bound_effect_ops([%{"op" => "terminal"} = terminal | rest], state_bytes) do
+    with :ok <- bound_json(terminal, @max_terminal_effect_bytes, :oversized_effects) do
+      bound_effect_ops(rest, state_bytes)
+    end
+  end
+
+  defp bound_effect_ops(_effects, _state_bytes), do: {:error, :oversized_effects}
+
+  defp bound_measured(size, max, error) when is_integer(size) do
+    if size <= max, do: :ok, else: {:error, error}
+  end
 
   defp bound_json(value, max, error) do
     if json_size(value) <= max, do: :ok, else: {:error, error}
@@ -800,10 +853,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp parse_identities(identities) do
     with :ok <- require_json_object(identities),
+         :ok <- bound_json(identities, @max_identities_json_bytes, :oversized_state),
          :ok <- require_allowed_keys(identities, @identity_keys),
          :ok <- require_keys(identities, @identity_keys),
-         :ok <- validate_identity_fields(identities),
-         :ok <- bound_json(identities, @max_identities_json_bytes, :oversized_state) do
+         :ok <- validate_identity_fields(identities) do
       {:ok, Map.take(identities, @identity_keys)}
     end
   end
@@ -812,12 +865,19 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
     with :ok <- require_all(@id_keys, identities, &parse_id/1),
          :ok <- require_work_packet_digest(identities["work_packet_digest"]),
          :ok <- require_all(@oid_keys, identities, &parse_oid/1),
-         :ok <- require_all(@hex_identity_keys, identities, &parse_hex/1) do
+         :ok <- require_all(@hex_identity_keys, identities, &parse_hex/1),
+         :ok <- require_precommit_head(identities) do
       :ok
     else
       {:error, _reason} = error -> error
       {:ok, _value} -> :ok
     end
+  end
+
+  defp require_precommit_head(identities) do
+    if identities["candidate_head"] === identities["base_commit"],
+      do: :ok,
+      else: {:error, :identity_drift}
   end
 
   defp require_all([], _map, _fun), do: :ok
@@ -989,9 +1049,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp parse_claim(claim, "claimed", identities, generation) when is_map(claim) do
     with :ok <- require_json_object(claim),
+         :ok <- bound_json(claim, @max_claim_json_bytes, :oversized_state),
          :ok <- require_allowed_keys(claim, @claim_keys),
          :ok <- require_keys(claim, @claim_keys),
-         :ok <- bound_json(claim, @max_claim_json_bytes, :oversized_state),
          {:ok, token} <- parse_token(claim["fence_token"]),
          {:ok, claim_generation} <- parse_generation(claim["fence_generation"]),
          true <- claim_generation == generation and generation >= 1,
@@ -1015,24 +1075,26 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   defp parse_claim(_claim, _status, _identities, _generation), do: {:error, :malformed_state}
 
-  defp parse_stored_handoff(nil, _per_batch), do: {:ok, nil}
+  defp parse_stored_handoff(nil, _planned, _receipts, _per_batch), do: {:ok, nil}
 
-  defp parse_stored_handoff(handoff, per_batch) when is_map(handoff) do
-    case ValidationCapacityHandoff.normalize(handoff) do
-      {:ok, canonical} ->
-        if canonical["per_batch_budget_ms"] == per_batch and
-             canonical["available_budget_ms"] == 0 do
-          {:ok, canonical}
-        else
-          {:error, :malformed_state}
-        end
-
-      {:error, _} ->
-        {:error, :malformed_state}
+  defp parse_stored_handoff(handoff, planned, receipts, per_batch) when is_map(handoff) do
+    with :ok <- require_json_object(handoff),
+         :ok <- bound_json(handoff, @max_handoff_json_bytes, :oversized_state),
+         {:ok, canonical} <- normalize_live_handoff(handoff),
+         :ok <- bind_handoff(canonical, planned, receipts, per_batch, :stored) do
+      {:ok, canonical}
     end
   end
 
-  defp parse_stored_handoff(_handoff, _per_batch), do: {:error, :malformed_state}
+  defp parse_stored_handoff(_handoff, _planned, _receipts, _per_batch),
+    do: {:error, :malformed_state}
+
+  defp normalize_live_handoff(handoff) do
+    case ValidationCapacityHandoff.normalize(handoff) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _} -> {:error, :malformed_state}
+    end
+  end
 
   defp parse_terminal_reason(nil, status) when status in ["open", "claimed", "completed"],
     do: {:ok, nil}

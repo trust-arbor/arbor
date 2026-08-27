@@ -16,7 +16,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
   @after "2026-08-27T14:00:00Z"
   @later_expires "2026-08-27T15:00:00Z"
   @base_oid String.duplicate("1", 40)
-  @tree_oid String.duplicate("2", 40)
+  @base_tree_oid String.duplicate("2", 40)
+  @candidate_tree_oid String.duplicate("3", 40)
 
   test "new/1 binds identities, equal candidate_head, and round-trips show/1" do
     plan = plan()
@@ -32,6 +33,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert state["terminal_reason"] == nil
     assert state["planned_batches"] == plan
     assert state["identities"]["candidate_head"] == state["identities"]["base_commit"]
+    assert state["identities"]["candidate_tree_oid"] != state["identities"]["base_tree_oid"]
     assert state["identities"]["validation_plan_digest"] == expected_digest
     assert state["identities"]["work_packet_digest"] == "sha256:" <> @hex
     assert state["identities"]["principal_id"] != state["identities"]["validator_id"]
@@ -451,6 +453,159 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :stale_fence} = Core.revoke_claim(reclaimed, stale)
   end
 
+  test "show/1 fails closed on non-map input" do
+    assert {:error, :malformed_state} = Core.show(nil)
+    assert {:error, :malformed_state} = Core.show([])
+  end
+
+  test "candidate_head must equal base_commit; candidate_tree_oid may differ" do
+    plan = plan()
+    drifted_head = Map.put(identities(plan), "candidate_head", String.duplicate("7", 40))
+
+    assert {:error, :identity_drift} =
+             Core.new(Map.put(fresh_attrs(), "identities", drifted_head))
+
+    {:ok, state} = Core.new(fresh_attrs())
+    assert state["identities"]["candidate_head"] == state["identities"]["base_commit"]
+    assert state["identities"]["candidate_tree_oid"] == @candidate_tree_oid
+    assert state["identities"]["base_tree_oid"] == @base_tree_oid
+    assert state["identities"]["candidate_tree_oid"] != state["identities"]["base_tree_oid"]
+  end
+
+  test "claim/2 rejects inverted, expired, and zero-length windows" do
+    {:ok, open} = Core.new(fresh_attrs())
+
+    assert {:error, :malformed_state} =
+             Core.claim(open, claim_attrs(%{"claimed_at" => @after, "now" => @claimed_at}))
+
+    assert {:error, :malformed_state} =
+             Core.claim(open, claim_attrs(%{"now" => @expires_at}))
+
+    assert {:error, :malformed_state} =
+             Core.claim(open, claim_attrs(%{"now" => @after}))
+
+    assert {:error, :malformed_state} =
+             Core.claim(open, claim_attrs(%{"expires_at" => @claimed_at}))
+  end
+
+  test "rehydration binds stored handoffs to this plan and receipt prefix" do
+    claimed = claimed_state()
+    plan = plan()
+    structural = v3_handoff(plan, [], nil, plan, "structural")
+
+    {:ok, handed, _} =
+      Core.accept_capacity_handoff(
+        claimed,
+        fence(claimed, @mid, %{"handoff" => structural})
+      )
+
+    assert Core.new(Core.show(handed)) == {:ok, handed}
+
+    {:ok, reclaimed, _} =
+      Core.claim(handed, reclaim_attrs(%{"now" => @mid, "claimed_at" => @mid}))
+
+    [first, second] = plan
+
+    {:ok, after_first, _} =
+      Core.accept_passed_receipt(
+        reclaimed,
+        fence(reclaimed, @mid, %{"receipt" => passed(first)})
+      )
+
+    {:ok, continued, _} =
+      Core.accept_passed_receipt(
+        after_first,
+        fence(after_first, @mid, %{"receipt" => passed(second)})
+      )
+
+    assert Core.new(Core.show(continued)) == {:ok, continued}
+
+    other_plan = [
+      batch(1, 2, 1, String.duplicate("8", 64)),
+      batch(2, 2, 1, String.duplicate("9", 64))
+    ]
+
+    other = v3_handoff(other_plan, [], nil, other_plan, "structural")
+    snapshot = Core.show(handed)
+
+    assert {:error, :malformed_state} =
+             Core.new(Map.put(snapshot, "capacity_handoff", other))
+
+    mismatched = v3_handoff(plan, [first], nil, [second], "runtime")
+
+    assert {:error, :malformed_state} =
+             Core.new(Map.put(snapshot, "capacity_handoff", mismatched))
+
+    interrupted = v3_handoff(other_plan, [], hd(other_plan), tl(other_plan), "runtime")
+
+    assert {:error, :malformed_state} =
+             Core.new(Map.put(snapshot, "capacity_handoff", interrupted))
+  end
+
+  test "new/1 rejects reachable oversized identities, plan, receipts, claim, and handoff JSON" do
+    pad = String.duplicate("x", 5_000)
+    padded_ids = Map.put(identities(plan()), "pad", pad)
+    assert {:error, :oversized_state} = Core.new(Map.put(fresh_attrs(), "identities", padded_ids))
+
+    junk_plan =
+      Enum.map(1..2_000, fn i ->
+        %{"pad" => String.duplicate("x", 200), "n" => i}
+      end)
+
+    assert {:error, :oversized_state} =
+             Core.new(Map.put(fresh_attrs(), "planned_batches", junk_plan))
+
+    {:ok, open} = Core.new(fresh_attrs())
+    snapshot = Core.show(open)
+
+    junk_receipts =
+      Enum.map(1..2_000, fn i ->
+        %{"pad" => String.duplicate("x", 200), "n" => i}
+      end)
+
+    assert {:error, :oversized_state} =
+             Core.new(Map.put(snapshot, "accepted_receipts", junk_receipts))
+
+    claimed = claimed_state()
+    claimed_snapshot = Core.show(claimed)
+    padded_claim = Map.put(claimed_snapshot["claim"], "pad", String.duplicate("x", 2_000))
+
+    assert {:error, :oversized_state} =
+             Core.new(Map.put(claimed_snapshot, "claim", padded_claim))
+
+    huge_handoff = %{"pad" => String.duplicate("x", 300_000)}
+
+    assert {:error, :oversized_state} =
+             Core.new(Map.put(snapshot, "capacity_handoff", huge_handoff))
+
+    assert byte_size(Jason.encode!(snapshot)) <= Core.max_json_bytes()
+  end
+
+  test "persist mint and terminal effects stay under documented ceilings" do
+    claimed = claimed_state()
+    plan = plan()
+    structural = v3_handoff(plan, [], nil, plan, "structural")
+
+    {:ok, _handed, mint_effects} =
+      Core.accept_capacity_handoff(
+        claimed,
+        fence(claimed, @mid, %{"handoff" => structural})
+      )
+
+    assert byte_size(Jason.encode!(mint_effects)) <= Core.limits()["max_effects_json_bytes"]
+    persist = Enum.find(mint_effects, &(&1["op"] == "persist"))
+    mint = Enum.find(mint_effects, &(&1["op"] == "mint_successor"))
+    assert byte_size(Jason.encode!(persist)) <= Core.limits()["max_persist_effect_bytes"]
+    assert byte_size(Jason.encode!(mint)) <= Core.limits()["max_mint_effect_bytes"]
+
+    failed_state = claimed_state()
+
+    {:ok, _failed, fail_effects} =
+      Core.fail(failed_state, fence(failed_state, @mid))
+    terminal = Enum.find(fail_effects, &(&1["op"] == "terminal"))
+    assert byte_size(Jason.encode!(terminal)) <= Core.limits()["max_terminal_effect_bytes"]
+  end
+
   defp plan do
     [batch(1, 2, 1, @inv1), batch(2, 2, 1, @inv2)]
   end
@@ -474,9 +629,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
       "task_id" => "task_continuation_slice1",
       "work_packet_digest" => "sha256:" <> @hex,
       "base_commit" => @base_oid,
-      "base_tree_oid" => @tree_oid,
+      "base_tree_oid" => @base_tree_oid,
       "candidate_head" => @base_oid,
-      "candidate_tree_oid" => @tree_oid,
+      "candidate_tree_oid" => @candidate_tree_oid,
       "validation_plan_digest" => digest,
       "toolchain_digest" => String.duplicate("3", 64),
       "dependency_baseline_digest" => String.duplicate("4", 64),
