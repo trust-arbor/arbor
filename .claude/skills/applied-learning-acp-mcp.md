@@ -1057,7 +1057,9 @@ same-session follow-ups: while the owner action is still design-only, steering m
 refine the design but must not say to apply, edit, cherry-pick, or commit. If source
 is produced anyway, checkpoint that exact tree and continue from its commit rather
 than replaying the packet (found 2026-08-13 during PK-K0 design rework; reinforced
-2026-08-20 when an untargeted follow-up caused `design_turn_modified_workspace`).
+2026-08-20 when an untargeted follow-up caused `design_turn_modified_workspace`;
+reconfirmed 2026-08-27 when an `implement`-targeted exact-replay steer was delivered
+before the design workspace check and caused the same fail-closed terminal).
 
 <!-- applied-learning: inline-load-bearing-nested-repository-context-in-delegated-work-packets -->
 <a id="applied-learning-inline-load-bearing-nested-repository-context-in-delegated-work-packets"></a>

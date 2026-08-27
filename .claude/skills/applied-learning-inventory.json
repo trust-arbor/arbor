@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 694,
+  "entry_count": 695,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -7901,7 +7901,7 @@
       "anchor": "applied-learning-do-not-queue-future-stage-controls-before-the-semantic-phase-advances",
       "source_date": "2026-08-13",
       "source_incident": "found 2026-08-13 during PK-K0 design rework).",
-      "content_sha256": "79cb1684aa0ebf8274a5ecf8a040a1120c9ed83f178d093006b6863bc95f55b1",
+      "content_sha256": "2e511bf1081682cb4671b8fdefe9d5d2bc8122beebb36288ba64d0529602c977",
       "always_loaded": false
     },
     {
@@ -8566,8 +8566,21 @@
       "source_incident": "found 2026-08-26, V7-13, task_13b256be6e742fb6bfe25c1d42c4ccd5",
       "always_loaded": false,
       "content_sha256": "78c0354689a0467dcd46e2fbb26b89b4cbe3f9f66291aa4059776efa9d9a7934"
+    },
+    {
+      "source_ordinal": 695,
+      "source_kind": "post-migration",
+      "slug": "application-restart-tests-must-restore-the-canonical-test-topology",
+      "title": "Application-restart tests must restore the canonical test topology.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-application-restart-tests-must-restore-the-canonical-test-topology",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-26 in P1B-2A CrossApp batch 17 and verified 2026-08-27",
+      "always_loaded": false,
+      "content_sha256": "07e6a9ca30b04dd647b67f6830d09a0d2cc9a9bfd01ce1622d580cb95d79a3f1"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 233
+  "post_migration_entry_count": 234
 }

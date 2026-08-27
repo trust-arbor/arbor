@@ -956,3 +956,16 @@ make distribution fail before the peer starts. Start each peer with
 test still proves real distribution. EPMD alone is necessary but does not repair
 the default distribution-backed peer-control handshake (found 2026-08-26 during
 P1B-2A contained validation).
+
+<!-- applied-learning: application-restart-tests-must-restore-the-canonical-test-topology -->
+<a id="applied-learning-application-restart-tests-must-restore-the-canonical-test-topology"></a>
+**Application-restart tests must restore the canonical test topology.** A test can
+stop an application, restore `start_children: false`, and call
+`Application.ensure_all_started/1` successfully while leaving the deliberately
+empty test supervisor running. Every later test that expects owners such as
+`:arbor_reflex_registry` then fails, often far from the contaminating file. Teardown
+must call the app's idempotent canonical bootstrap boundary (for Security,
+`Arbor.Security.TestBootstrap.restore_supervised_tree!/0`) rather than merely restart
+the OTP application. Prove this with a same-BEAM multi-file batch whose following
+file needs the restored owner (found 2026-08-26 in P1B-2A CrossApp batch 17; fixed
+and verified 2026-08-27 with 1,634 Security tests passing).
