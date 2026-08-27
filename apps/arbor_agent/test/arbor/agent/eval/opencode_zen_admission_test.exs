@@ -36,8 +36,14 @@ defmodule Arbor.Agent.Eval.OpenCodeZenAdmissionTest do
 
   test "mix arbor.eval.opencode_zen derive reproduces the committed admitted list" do
     {admitted, rejected} = Mix.Tasks.Arbor.Eval.OpencodeZen.derive_from_recorded()
-    assert admitted == ["glm-4.6-flash"]
-    assert Enum.any?(rejected, &(&1["id"] == "nemotron-3-nano-free"))
+
+    assert admitted == [
+             "x-preview-f-free",
+             "nemotron-3-ultra-free",
+             "nemotron-3.5-lightning-free"
+           ]
+
+    assert Enum.any?(rejected, &(&1["id"] == "laguna-s-2.1-free"))
   end
 end
 
@@ -46,7 +52,6 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLiveTest do
   @moduletag :fast
 
   alias Arbor.Agent.Eval.OpenCodeZenLive
-  alias Arbor.LLM.OpenCodeZen
   alias Arbor.LLM.OpenCodeZen.AdmissionCore
 
   test "live probe runs both advertised tiers and updates the recorded catalog" do
@@ -60,7 +65,7 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLiveTest do
       OpenCodeZenLive.run(
         ids: ["glm-4.6-flash", "nemotron-3-nano-free"],
         max_heartbeats: 2,
-        existing: OpenCodeZen.catalog(),
+        existing: AdmissionCore.new(%{"models" => []}),
         now: "2026-08-21",
         complete: fn id ->
           send(parent, {:tier1, id})
