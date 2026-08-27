@@ -199,6 +199,7 @@ defmodule Arbor.Security.UriRegistry do
 
     # Orchestrator middleware gate (supplementary)
     "arbor://orchestrator/execute",
+    "arbor://orchestrator/cross_app_continuation",
     # Composition dispatch capability (arbor://orchestrator/map/dispatch) — binds
     # the map/compose handler. Registered after the Security Sentinel found it.
     "arbor://orchestrator/map",

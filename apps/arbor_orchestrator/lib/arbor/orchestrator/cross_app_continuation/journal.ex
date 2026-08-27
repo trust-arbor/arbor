@@ -49,6 +49,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
   def open(input, opts \\ []), do: call(opts, {:open, input})
   def get(continuation_id, opts \\ []), do: call(opts, {:get, continuation_id})
+  def subject(continuation_id, opts \\ []), do: call(opts, {:subject, continuation_id})
 
   def claim(continuation_id, input, opts \\ []),
     do: call(opts, {:mutate, "claim", continuation_id, input})
@@ -171,6 +172,11 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
   def handle_call({:get, continuation_id}, _from, state) do
     {reply, state} = do_get(continuation_id, state, :redact)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:subject, continuation_id}, _from, state) do
+    {reply, state} = do_subject(continuation_id, state)
     {:reply, reply, state}
   end
 
@@ -356,6 +362,24 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
       {:error, reason} ->
         {{:error, reason}, maybe_poison(state, reason)}
+    end
+  end
+
+  defp do_subject(continuation_id, state) do
+    with {:ok, continuation_id} <- Envelope.continuation_id(continuation_id),
+         {:ok, _record, data} <- load_admitted(continuation_id, state),
+         %{"principal_id" => principal_id, "task_id" => task_id} <-
+           data["snapshot"]["identities"] do
+      {{:ok,
+        %{
+          "continuation_id" => continuation_id,
+          "principal_id" => principal_id,
+          "task_id" => task_id
+        }}, state}
+    else
+      {:error, :not_found} -> {{:error, :not_found}, state}
+      {:error, reason} -> {{:error, reason}, maybe_poison(state, reason)}
+      _other -> {{:error, :malformed_record}, maybe_poison(state, :malformed_record)}
     end
   end
 

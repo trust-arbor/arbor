@@ -3,7 +3,6 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.JournalTest do
 
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
   alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Orchestrator
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.CrossAppContinuation.FakeStore
   alias Arbor.Orchestrator.CrossAppContinuation.Journal
@@ -43,7 +42,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.JournalTest do
   end
 
   test "application child is disabled in test and facade reports that status" do
-    status = Orchestrator.coding_cross_app_continuation_durability_status()
+    status = Journal.durability_status()
     assert status["ready"] == false
     assert status["reason"] == "disabled"
     assert status["backend"] == nil
