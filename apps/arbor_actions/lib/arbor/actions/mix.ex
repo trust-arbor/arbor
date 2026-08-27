@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Mix do
 
   | Action | Description |
   |--------|-------------|
-  | `Compile` | Compile attested dependencies, then run `mix compile --no-deps-check` |
+  | `Compile` | Run `mix compile` (Mix compiles attested deps into `MIX_BUILD_PATH`) |
   | `Test` | Run `mix test` (optionally with paths/args) |
   | `Quality` | Run `mix quality` (format-check + credo) |
   | `Format` | Run `mix format` (write or check-only) |
@@ -137,20 +137,17 @@ defmodule Arbor.Actions.Mix do
   @doc false
   @spec compile_argv(map()) :: [String.t()]
   def compile_argv(params \\ %{}) when is_map(params) do
-    compile_args = ["compile", "--no-deps-check"]
+    # Sources-only baselines populate MIX_DEPS_PATH and leave MIX_BUILD_PATH
+    # empty. Mix.Tasks.Compile -> deps.loadpaths compiles those deps;
+    # --no-deps-check skips that and leaves dep-provided compilers missing.
+    # Git must be on PATH so Mix.SCM.Git.lock_status can read checkout .git.
+    compile_args = ["compile"]
 
-    compile_args =
-      if params[:warnings_as_errors] do
-        compile_args ++ ["--warnings-as-errors"]
-      else
-        compile_args
-      end
-
-    # A validation resource starts with an empty MIX_BUILD_PATH. Compile every
-    # available attested dependency without running SCM lock-status checks, then
-    # compile the project in the same Mix VM so dependency-provided compiler
-    # tasks (for example compile.boundary) are already loaded.
-    ["do", "deps.compile", "--skip-umbrella-children", "+" | compile_args]
+    if params[:warnings_as_errors] do
+      compile_args ++ ["--warnings-as-errors"]
+    else
+      compile_args
+    end
   end
 
   @doc false
@@ -3585,7 +3582,7 @@ defmodule Arbor.Actions.Mix do
     use Jido.Action,
       name: "mix_compile",
       description:
-        "Compile attested dependencies, then run `mix compile --no-deps-check` in a project directory",
+        "Run `mix compile` in a project directory (Mix compiles attested dependencies)",
       category: "mix",
       tags: ["mix", "compile", "elixir"],
       schema: [

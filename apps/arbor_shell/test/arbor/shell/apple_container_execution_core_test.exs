@@ -186,7 +186,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == args
     end
 
-    test "dependency-bootstrapped warning-strict compile" do
+    test "legacy dependency-bootstrapped warning-strict compile" do
       args = [
         "do",
         "deps.compile",
@@ -202,7 +202,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     end
 
     @tag :security_regression
-    test "dependency bootstrap remains an exact reviewed compile form" do
+    test "legacy dependency bootstrap remains an exact reviewed compile form" do
       suffix = ["+", "compile", "--no-deps-check", "--warnings-as-errors"]
 
       near_misses = [
@@ -1240,6 +1240,19 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   describe "public spawn facade: ContractChange preflight containment" do
     @contract_change_preflight_argv [
       "do",
+      "compile",
+      "--warnings-as-errors",
+      "+",
+      "xref",
+      "graph",
+      "--no-deps-check",
+      "+",
+      "arbor.contracts.census",
+      "--fail-on-violation"
+    ]
+
+    @legacy_dependency_bootstrapped_preflight_argv [
+      "do",
       "deps.compile",
       "--skip-umbrella-children",
       "+",
@@ -1261,6 +1274,13 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
                Shell.execute_spawn_capable(
                  @mix_wrapper,
                  @contract_change_preflight_argv,
+                 valid_opts()
+               )
+
+      assert {:error, :apple_container_unit_owner_required} =
+               Shell.execute_spawn_capable(
+                 @mix_wrapper,
+                 @legacy_dependency_bootstrapped_preflight_argv,
                  valid_opts()
                )
     end

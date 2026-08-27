@@ -21,6 +21,7 @@ defmodule Arbor.Shell.ValidationRuntimeToolchainTest do
 
     assert String.contains?(containerfile, "org.arbor.validation.erlang=\"${ERLANG_VERSION}\"")
     assert String.contains?(containerfile, "org.arbor.validation.elixir=\"${ELIXIR_VERSION}\"")
+    assert containerfile =~ ~r/^\s+git \\$/m
     refute Regex.match?(~r/^\s*COPY\s+/m, containerfile)
   end
 

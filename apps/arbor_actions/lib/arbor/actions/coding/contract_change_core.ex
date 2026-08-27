@@ -36,13 +36,11 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
   @excerpt_omission_marker "\n...[omitted]...\n"
   @utf8_replacement <<0xEF, 0xBF, 0xBD>>
   @test_argv_prefix ["test", "--no-deps-check", "--warnings-as-errors", "--"]
+  # First task compiles attested deps via Mix.Tasks.Compile deps.loadpaths.
+  # Later xref keeps --no-deps-check against the populated private build.
   @preflight_argv [
     "do",
-    "deps.compile",
-    "--skip-umbrella-children",
-    "+",
     "compile",
-    "--no-deps-check",
     "--warnings-as-errors",
     "+",
     "xref",

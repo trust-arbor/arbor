@@ -16,12 +16,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   later worktree read (ABA / changed-path skew defense). The same tree OID is
   the validation before-binding and evidence `validated_tree_oid`.
 
-  Each compile is one exact `mix do` invocation: first
-  `deps.compile --skip-umbrella-children`, then
-  `compile --no-deps-check --warnings-as-errors`. This initializes the fresh
-  private build path without asking Mix to inspect SCM locks. The
-  test-environment invocation runs under owner-controlled `MIX_ENV=test`.
-  Xref and test children also pass `--no-deps-check`. The aggregate app-test monotonic deadline
+  Each compile is one exact `mix compile --warnings-as-errors` child. Mix
+  compiles attested deps into the fresh private `MIX_BUILD_PATH` via
+  `deps.loadpaths` (the validation image includes git so Git lock-status
+  succeeds against checkout `.git`). The test-environment invocation runs
+  under owner-controlled `MIX_ENV=test`. Xref and test children pass
+  `--no-deps-check` against that populated build. The aggregate app-test monotonic deadline
   starts only after that stage succeeds, so cold test-env compilation cannot
   consume the full test-stage budget.
 

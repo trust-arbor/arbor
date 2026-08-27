@@ -21,11 +21,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   focused downstream closure when topology is unchanged). Then runs (fail-closed,
   later stages skipped on earlier failure):
 
-  1. compile attested dependencies, then umbrella compile with
-     `--no-deps-check --warnings-as-errors` (dev environment)
+  1. umbrella compile with `--warnings-as-errors` (dev environment; Mix
+     compiles attested deps into the empty private `MIX_BUILD_PATH`)
   2. xref graph evidence with `--no-deps-check` (does not claim zero cycles)
-  3. repeat the dependency bootstrap and warning-strict compile under
-     explicit `MIX_ENV=test`
+  3. repeat the warning-strict compile under explicit `MIX_ENV=test`
   4. focused per-file tests under an aggregate monotonic budget that starts
      only after the test-environment compile succeeds. Batches run
      sequentially under one shared absolute deadline. Each Mix child is

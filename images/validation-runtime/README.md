@@ -14,6 +14,10 @@ Guest toolchain roots match `OciPlanCore`:
 
 The Arbor Mix wrapper is **not** in this image. Production create argv bind-mounts the host wrapper at `/arbor/bin/mix`.
 
+`git` is installed so Mix can run `Mix.SCM.Git.lock_status` against git-dep
+checkouts in the sources-only baseline (`jido_sandbox/.git` and similar). The
+baseline tree pin is unchanged; only the image needs rebuild/activate.
+
 ## Closed platforms
 
 Native arch only. `linux/amd64` or `linux/arm64`. No qemu-user translation.

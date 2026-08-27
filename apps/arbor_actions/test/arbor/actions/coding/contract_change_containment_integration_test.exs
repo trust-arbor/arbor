@@ -13,11 +13,7 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
   @worktree "/private/tmp/arbor-val/worktree"
   @contract_change_preflight_argv [
     "do",
-    "deps.compile",
-    "--skip-umbrella-children",
-    "+",
     "compile",
-    "--no-deps-check",
     "--warnings-as-errors",
     "+",
     "xref",

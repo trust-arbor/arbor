@@ -5,8 +5,8 @@ defmodule Arbor.Actions.Coding.ContractChange.Shell do
   Resolves an authorized workspace lease, freezes the candidate committable tree,
   diffs immutable base/candidate blob manifests, admits only recognized contract
   surfaces, and runs two owner-owned Mix children under the validation resource
-  owner. The preflight bootstraps attested dependencies into the fresh private
-  build before warning-strict compile, xref, and census. Compile and xref are
+  owner. The preflight warning-strict compile loads attested dependencies into
+  the fresh private build, then xref and census. Compile and xref are
   source-compatibility evidence; census is CONTRACT_RULES admission. Binding
   council owns semantic compatibility.
   """

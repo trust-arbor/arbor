@@ -138,11 +138,11 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
   @xref_formats MapSet.new(["stats", "cycles", "linked"])
 
-  # Exact cold-build compile forms. `deps.compile` intentionally has no
-  # dependency names: Mix compiles every available attested dependency while
-  # skipping umbrella children, without invoking SCM lock-status checks. The
-  # second task stays `--no-deps-check` so the Git executable is unnecessary.
-  @dependency_bootstrapped_compile_argv [
+  # Legacy 267913a91 / V7-15 cold-build compile forms. Current candidate
+  # compile is ["compile"] / ["compile", "--warnings-as-errors"]; Mix compiles
+  # attested deps via deps.loadpaths because git is in the validation image.
+  # Keep these exact lists admitted so in-flight plans do not fail closed.
+  @legacy_dependency_bootstrapped_compile_argv [
     "do",
     "deps.compile",
     "--skip-umbrella-children",
@@ -150,12 +150,26 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     "compile",
     "--no-deps-check"
   ]
-  @dependency_bootstrapped_strict_compile_argv @dependency_bootstrapped_compile_argv ++
-                                                 ["--warnings-as-errors"]
+  @legacy_dependency_bootstrapped_strict_compile_argv @legacy_dependency_bootstrapped_compile_argv ++
+                                                        ["--warnings-as-errors"]
 
-  # Exact ContractChange cold-build preflight only. `+` separators keep every
-  # task in one Mix VM without the deprecated comma syntax.
+  # Exact ContractChange cold-build preflight. `+` separators keep every task
+  # in one Mix VM without the deprecated comma syntax. First compile loads
+  # attested deps; xref then skips a second lock check against that build.
   @contract_change_preflight_argv [
+    "do",
+    "compile",
+    "--warnings-as-errors",
+    "+",
+    "xref",
+    "graph",
+    "--no-deps-check",
+    "+",
+    "arbor.contracts.census",
+    "--fail-on-violation"
+  ]
+
+  @legacy_dependency_bootstrapped_preflight_argv [
     "do",
     "deps.compile",
     "--skip-umbrella-children",
@@ -1048,8 +1062,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
     do: {:ok, ["compile", "--no-deps-check", "--warnings-as-errors"]}
 
   defp match_reviewed_mix_shape(args)
-       when args == @dependency_bootstrapped_compile_argv or
-              args == @dependency_bootstrapped_strict_compile_argv,
+       when args == @legacy_dependency_bootstrapped_compile_argv or
+              args == @legacy_dependency_bootstrapped_strict_compile_argv,
        do: {:ok, args}
 
   defp match_reviewed_mix_shape(["quality"]), do: {:ok, ["quality"]}
@@ -1106,10 +1120,9 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   # Do not parse generic `mix do`. Whole-list == is structural/value equality:
   # runtime-built binaries with these exact bytes remain admitted.
   defp match_reviewed_mix_shape(args)
-       when is_list(args) and length(args) == length(@contract_change_preflight_argv) and
-              args == @contract_change_preflight_argv do
-    {:ok, @contract_change_preflight_argv}
-  end
+       when args == @contract_change_preflight_argv or
+              args == @legacy_dependency_bootstrapped_preflight_argv,
+       do: {:ok, args}
 
   defp match_reviewed_mix_shape(_args), do: {:error, :unsupported_mix_command}
 

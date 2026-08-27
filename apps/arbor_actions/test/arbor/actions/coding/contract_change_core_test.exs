@@ -296,11 +296,7 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
     test "is owner-owned cold-build Mix.do compile/xref/census" do
       assert Core.preflight_argv() == [
                "do",
-               "deps.compile",
-               "--skip-umbrella-children",
-               "+",
                "compile",
-               "--no-deps-check",
                "--warnings-as-errors",
                "+",
                "xref",

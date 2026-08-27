@@ -100,7 +100,7 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
       assert spec.plan.command_args == args
     end
 
-    test "dependency-bootstrapped warning-strict compile is a reviewed mix shape" do
+    test "legacy dependency-bootstrapped warning-strict compile remains a reviewed mix shape" do
       args = [
         "do",
         "deps.compile",
@@ -116,7 +116,7 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
     end
 
     @tag :security_regression
-    test "dependency bootstrap remains an exact reviewed compile form" do
+    test "legacy dependency bootstrap remains an exact reviewed compile form" do
       suffix = ["+", "compile", "--no-deps-check", "--warnings-as-errors"]
 
       near_misses = [
@@ -159,6 +159,19 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
     test "ContractChange cold-build commands remain exact reviewed OCI shapes" do
       preflight = [
         "do",
+        "compile",
+        "--warnings-as-errors",
+        "+",
+        "xref",
+        "graph",
+        "--no-deps-check",
+        "+",
+        "arbor.contracts.census",
+        "--fail-on-violation"
+      ]
+
+      legacy_preflight = [
+        "do",
         "deps.compile",
         "--skip-umbrella-children",
         "+",
@@ -184,6 +197,8 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
 
       assert {:ok, preflight_spec} = Core.new(valid_request(%{args: preflight}))
       assert preflight_spec.plan.command_args == preflight
+      assert {:ok, legacy_spec} = Core.new(valid_request(%{args: legacy_preflight}))
+      assert legacy_spec.plan.command_args == legacy_preflight
       assert {:ok, test_spec} = Core.new(valid_request(%{args: test}))
       assert test_spec.plan.command_args == test
 

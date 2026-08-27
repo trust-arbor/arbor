@@ -1,7 +1,8 @@
 defmodule Arbor.Actions.MixCompileArgvTest do
   @moduledoc """
-  Pins the reviewed cold-build Mix compile argv and proves it loads a
-  dependency-provided compiler without consulting Git lock state.
+  Pins the reviewed candidate Mix compile argv and proves a sources-only
+  layout compiles a git dep plus a dependency-provided compiler when git is
+  on PATH and the checkout has `.git`.
   """
 
   use ExUnit.Case, async: false
@@ -9,22 +10,24 @@ defmodule Arbor.Actions.MixCompileArgvTest do
   alias Arbor.Actions.Mix, as: MixAction
 
   @moduletag :fast
-  @moduletag timeout: 30_000
+  @moduletag timeout: 60_000
 
-  test "compile argv bootstraps attested dependencies before no-deps-check compile" do
-    prefix = ["do", "deps.compile", "--skip-umbrella-children", "+"]
-
-    assert MixAction.compile_argv() == prefix ++ ["compile", "--no-deps-check"]
-    assert MixAction.compile_argv(%{}) == prefix ++ ["compile", "--no-deps-check"]
-
-    assert MixAction.compile_argv(%{warnings_as_errors: false}) ==
-             prefix ++ ["compile", "--no-deps-check"]
+  test "candidate compile argv has no --no-deps-check" do
+    assert MixAction.compile_argv() == ["compile"]
+    assert MixAction.compile_argv(%{}) == ["compile"]
+    assert MixAction.compile_argv(%{warnings_as_errors: false}) == ["compile"]
 
     assert MixAction.compile_argv(%{warnings_as_errors: true}) ==
-             prefix ++ ["compile", "--no-deps-check", "--warnings-as-errors"]
+             ["compile", "--warnings-as-errors"]
+
+    refute "--no-deps-check" in MixAction.compile_argv()
+    refute "--no-deps-check" in MixAction.compile_argv(%{warnings_as_errors: true})
   end
 
-  test "cold compile loads a dependency compiler without invoking git" do
+  test "cold compile loads a dependency compiler when git can read the checkout" do
+    real_git = System.find_executable("git")
+    assert is_binary(real_git), "git must be on PATH for Mix.SCM.Git.lock_status"
+
     {elixir_root, 0} = System.cmd("mise", ["where", "elixir"], stderr_to_stdout: true)
     {erlang_root, 0} = System.cmd("mise", ["where", "erlang"], stderr_to_stdout: true)
     elixir_root = String.trim(elixir_root)
@@ -35,7 +38,7 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "mix-no-deps-check-#{System.unique_integer([:positive])}"
+        "mix-git-dep-compile-#{System.unique_integer([:positive])}"
       )
 
     File.mkdir_p!(root)
@@ -43,8 +46,9 @@ defmodule Arbor.Actions.MixCompileArgvTest do
 
     project = Path.join(root, "project")
     stub_bin = Path.join(root, "bin")
+    git_dep = Path.join(project, "deps/jido_sandbox")
     File.mkdir_p!(Path.join(project, "lib"))
-    File.mkdir_p!(Path.join(project, "deps/jido_sandbox"))
+    File.mkdir_p!(git_dep)
     File.mkdir_p!(Path.join(project, "deps/boundary/lib/mix/tasks/compile"))
     File.mkdir_p!(stub_bin)
 
@@ -71,19 +75,13 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     end
     """)
 
-    File.write!(Path.join(project, "mix.lock"), """
-    %{
-      "jido_sandbox": {:git, "https://example.invalid/jido_sandbox.git", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []},
-    }
-    """)
-
     File.write!(Path.join(project, "lib/git_dep_fixture.ex"), """
     defmodule GitDepFixture do
       def ok, do: :ok
     end
     """)
 
-    File.write!(Path.join(project, "deps/jido_sandbox/mix.exs"), """
+    File.write!(Path.join(git_dep, "mix.exs"), """
     defmodule JidoSandbox.MixProject do
       use Mix.Project
 
@@ -91,6 +89,37 @@ defmodule Arbor.Actions.MixCompileArgvTest do
         [app: :jido_sandbox, version: "0.0.1"]
       end
     end
+    """)
+
+    git_env = [
+      {"GIT_AUTHOR_NAME", "Arbor Test"},
+      {"GIT_AUTHOR_EMAIL", "test@example.invalid"},
+      {"GIT_COMMITTER_NAME", "Arbor Test"},
+      {"GIT_COMMITTER_EMAIL", "test@example.invalid"}
+    ]
+
+    {_, 0} =
+      System.cmd(real_git, ["-c", "init.defaultBranch=main", "init", "--quiet"], cd: git_dep)
+
+    {_, 0} = System.cmd(real_git, ["add", "mix.exs"], cd: git_dep, env: git_env)
+
+    {_, 0} =
+      System.cmd(real_git, ["commit", "--quiet", "-m", "init"], cd: git_dep, env: git_env)
+
+    {_, 0} =
+      System.cmd(
+        real_git,
+        ["remote", "add", "origin", "https://example.invalid/jido_sandbox.git"],
+        cd: git_dep
+      )
+
+    {rev, 0} = System.cmd(real_git, ["rev-parse", "HEAD"], cd: git_dep)
+    rev = String.trim(rev)
+
+    File.write!(Path.join(project, "mix.lock"), """
+    %{
+      "jido_sandbox": {:git, "https://example.invalid/jido_sandbox.git", "#{rev}", []},
+    }
     """)
 
     File.write!(Path.join(project, "deps/boundary/mix.exs"), """
@@ -110,22 +139,24 @@ defmodule Arbor.Actions.MixCompileArgvTest do
         use Mix.Task.Compiler
 
         @impl true
-        def run(_args), do: {:ok, []}
+        def run(_args) do
+          File.write!("fixture_boundary_ran", "ok")
+          {:ok, []}
+        end
       end
       """
     )
 
-    git_stub = Path.join(stub_bin, "git")
-    git_marker = Path.join(root, "git-invoked")
+    git_log = Path.join(root, "git-invoked.log")
+    git_wrapper = Path.join(stub_bin, "git")
 
-    File.write!(git_stub, """
+    File.write!(git_wrapper, """
     #!/bin/sh
-    echo invoked > "#{git_marker}"
-    echo "git must not be invoked for digest-pinned compile" >&2
-    exit 127
+    printf '%s\\n' "$*" >> "#{git_log}"
+    exec "#{real_git}" "$@"
     """)
 
-    File.chmod!(git_stub, 0o755)
+    File.chmod!(git_wrapper, 0o755)
 
     path =
       Enum.join(
@@ -143,8 +174,9 @@ defmodule Arbor.Actions.MixCompileArgvTest do
       |> Map.put("PATH", path)
       |> Map.put("MIX_ENV", "dev")
       |> Map.put("MIX_BUILD_PATH", Path.join(root, "build"))
-      |> Map.delete("MIX_DEPS_PATH")
-      |> Map.delete("MIX_EXS")
+      # nil removes inherited keys; Map.delete leaves the test-process value.
+      |> Map.put("MIX_DEPS_PATH", nil)
+      |> Map.put("MIX_EXS", nil)
 
     task =
       Task.async(fn ->
@@ -155,9 +187,12 @@ defmodule Arbor.Actions.MixCompileArgvTest do
         )
       end)
 
-    assert {:ok, {output, status}} = Task.yield(task, 20_000) || Task.shutdown(task, :brutal_kill)
+    assert {:ok, {output, status}} = Task.yield(task, 50_000) || Task.shutdown(task, :brutal_kill)
     assert status == 0, output
-    refute File.exists?(git_marker)
-    refute output =~ "git must not be invoked"
+    refute output =~ "could not be found"
+    assert File.read!(Path.join(project, "fixture_boundary_ran")) == "ok"
+    assert File.exists?(git_log)
+    git_invocations = File.read!(git_log)
+    assert git_invocations =~ "rev-parse"
   end
 end

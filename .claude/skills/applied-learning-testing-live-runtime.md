@@ -970,17 +970,18 @@ the OTP application. Prove this with a same-BEAM multi-file batch whose followin
 file needs the restored owner (found 2026-08-26 in P1B-2A CrossApp batch 17; fixed
 and verified 2026-08-27 with 1,634 Security tests passing).
 
-<!-- applied-learning: digest-pinned-validation-compiles-must-skip-mix-lock-git-checks -->
-<a id="applied-learning-digest-pinned-validation-compiles-must-skip-mix-lock-git-checks"></a>
-**Cold digest-pinned validation builds must bootstrap dependencies without SCM
-lock checks.** A bare `mix compile --no-deps-check` avoids Git lock inspection,
-but it does not populate an empty private `MIX_BUILD_PATH`; project compilers such
-as `compile.boundary` are then unavailable. In one exact `mix do` child, run
-`deps.compile --skip-umbrella-children` followed by
-`compile --no-deps-check`, then retain `--no-deps-check` on xref and test children
-that reuse the build. Pin these argv shapes in containment and prove with a cold
-fixture that a dependency-provided compiler loads while a fake `git` is never
-invoked (found 2026-08-27 during P1B-2A Linux factory replay).
+<!-- applied-learning: sources-only-validation-compiles-need-git-and-a-normal-mix-compile -->
+<a id="applied-learning-sources-only-validation-compiles-need-git-and-a-normal-mix-compile"></a>
+**Sources-only validation compiles need git and a normal Mix compile.**
+`--no-deps-check` skips both lock inspection and compiling missing deps via
+`deps.loadpaths`. On a sources-only baseline (`MIX_DEPS_PATH` filled,
+`MIX_BUILD_PATH` empty) that leaves `compile.boundary` missing. Put `git` in
+`images/validation-runtime/Containerfile` so `Mix.SCM.Git.lock_status` can
+read checkout `.git`, and emit `mix compile` (plus optional
+`--warnings-as-errors`) as the candidate compile argv. Later xref/test
+children may keep `--no-deps-check` once `_build` is populated. Do not skip
+the in-unit deps compile until a pre-compiled baseline `_build/test` is
+digest-pinned (found 2026-08-26, V7-17 / run 11o; supersedes V7-15).
 
 <!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
 <a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>

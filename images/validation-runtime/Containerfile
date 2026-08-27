@@ -42,6 +42,7 @@ RUN apt-get update \
       build-essential \
       ca-certificates \
       curl \
+      git \
       libncurses-dev \
       libssl-dev \
       linux-libc-dev \
