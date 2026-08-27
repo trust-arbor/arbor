@@ -40,6 +40,7 @@ defmodule Arbor.Commands.Baseline do
          {:ok, mix_lock_digest} <- hash_mix_lock(ctx.repo_root),
          :ok <- fetch_deps(ctx),
          :ok <- compile_deps(ctx),
+         :ok <- scrub_rebar_build_artifacts(ctx.deps_path),
          :ok <- smoke_test_copy(ctx, platform),
          {:ok, tree_digest} <-
            ctx.shell.linux_dependency_baseline_tree_digest(ctx.deps_path, platform),
@@ -320,6 +321,33 @@ defmodule Arbor.Commands.Baseline do
          ) do
       {_output, 0} -> :ok
       {_output, _status} -> {:error, :deps_compile_failed}
+    end
+  end
+
+  # Rebar3 writes `<dep>/_build/` (absolute plugin links) and `.rebar3/`
+  # into the checkout. Those are compile scratch, not the pinned tree
+  # (sqlite_vec `priv/` stays). Strip them before digest/copy so the tree
+  # does not contain absolute links (V7-20b).
+  defp scrub_rebar_build_artifacts(deps_path) when is_binary(deps_path) do
+    case File.ls(deps_path) do
+      {:ok, names} ->
+        Enum.each(names, fn name ->
+          dep = Path.join(deps_path, name)
+
+          case File.lstat(dep) do
+            {:ok, %File.Stat{type: :directory}} ->
+              _ = File.rm_rf(Path.join(dep, "_build"))
+              _ = File.rm_rf(Path.join(dep, ".rebar3"))
+
+            _other ->
+              :ok
+          end
+        end)
+
+        :ok
+
+      {:error, _reason} ->
+        {:error, :tree_copy_failed}
     end
   end
 
@@ -765,12 +793,15 @@ defmodule Arbor.Commands.Baseline do
 
     case File.ls(source) do
       {:ok, names} ->
+        names = Enum.reject(names, &tree_copy_excluded?/1)
         reduce_children(names, &copy_tree(Path.join(source, &1), Path.join(dest, &1)))
 
       {:error, _reason} ->
         {:error, :tree_copy_failed}
     end
   end
+
+  defp tree_copy_excluded?(name), do: name in ["_build", ".rebar3"]
 
   # The tree digest covers each entry's `executable` flag
   # (`LinuxDependencyBaselineCore` `@logical_regular_keys`), and the digest is

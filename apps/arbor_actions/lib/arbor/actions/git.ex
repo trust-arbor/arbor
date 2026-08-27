@@ -72,6 +72,21 @@ defmodule Arbor.Actions.Git do
           required(:worktree_registration) => worktree_registration_identity()
         }
 
+  # Linux no-fork seccomp denies clone(2). git's index preload (default on
+  # above ~1000 entries) and pack/grep/checkout/fetch thread pools then
+  # die with "unable to create threaded lstat". Pin single-threaded
+  # config in the hermetic env so every Git.execute/2 invocation is
+  # single-threaded by construction (V7-22). Do not weaken the launcher.
+  @single_threaded_git_config [
+    {"core.preloadIndex", "false"},
+    {"index.threads", "1"},
+    {"pack.threads", "1"},
+    {"grep.threads", "1"},
+    {"checkout.workers", "1"},
+    {"fetch.parallel", "1"},
+    {"core.fsmonitor", "false"}
+  ]
+
   # Git command defaults - used by all nested action modules
   @doc false
   def git_timeout do
@@ -91,70 +106,83 @@ defmodule Arbor.Actions.Git do
   def git_sandbox, do: :basic
 
   @git_prefix [
-    "--no-pager",
-    "--no-replace-objects",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.attributesFile=/dev/null",
-    "-c",
-    "core.excludesFile=/dev/null",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "pager.diff=false",
-    "-c",
-    "pager.log=false",
-    "-c",
-    "diff.external=",
-    "-c",
-    "commit.gpgSign=false",
-    "-c",
-    "credential.helper=",
-    "-c",
-    "gc.auto=0",
-    "-c",
-    "maintenance.auto=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    "submodule.recurse=false"
-  ]
+                "--no-pager",
+                "--no-replace-objects",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "core.excludesFile=/dev/null",
+                "-c",
+                "core.pager=cat",
+                "-c",
+                "pager.diff=false",
+                "-c",
+                "pager.log=false",
+                "-c",
+                "diff.external=",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "submodule.recurse=false"
+              ] ++
+                Enum.flat_map(@single_threaded_git_config, fn
+                  {"core.fsmonitor", _value} -> []
+                  {key, value} -> ["-c", key <> "=" <> value]
+                end)
 
-  @git_env %{
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES" => false,
-    "GIT_CONFIG" => false,
-    "GIT_CONFIG_NOSYSTEM" => "1",
-    "GIT_CONFIG_COUNT" => "0",
-    "GIT_CONFIG_GLOBAL" => "/dev/null",
-    "GIT_CONFIG_KEY_0" => false,
-    "GIT_CONFIG_PARAMETERS" => false,
-    "GIT_CONFIG_SYSTEM" => "/dev/null",
-    "GIT_CONFIG_VALUE_0" => false,
-    "GIT_COMMON_DIR" => false,
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM" => "0",
-    "GIT_DIR" => false,
-    "GIT_EXEC_PATH" => false,
-    "GIT_ATTR_NOSYSTEM" => "1",
-    "GIT_EXTERNAL_DIFF" => false,
-    "GIT_INDEX_FILE" => false,
-    "GIT_NAMESPACE" => false,
-    "GIT_OBJECT_DIRECTORY" => false,
-    "GIT_PAGER" => "cat",
-    "GIT_QUARANTINE_PATH" => false,
-    "GIT_REPLACE_REF_BASE" => false,
-    "GIT_SHALLOW_FILE" => false,
-    "GIT_SSH" => false,
-    "GIT_ASKPASS" => false,
-    "SSH_ASKPASS" => false,
-    "GIT_SSH_COMMAND" => false,
-    "GIT_EDITOR" => "false",
-    "GIT_SEQUENCE_EDITOR" => "false",
-    "GIT_TERMINAL_PROMPT" => "0",
-    "GIT_WORK_TREE" => false
-  }
+  @git_env Enum.reduce(
+             Enum.with_index(@single_threaded_git_config),
+             %{
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES" => false,
+               "GIT_CONFIG" => false,
+               "GIT_CONFIG_NOSYSTEM" => "1",
+               "GIT_CONFIG_COUNT" => Integer.to_string(length(@single_threaded_git_config)),
+               "GIT_CONFIG_GLOBAL" => "/dev/null",
+               "GIT_CONFIG_PARAMETERS" => false,
+               "GIT_CONFIG_SYSTEM" => "/dev/null",
+               "GIT_COMMON_DIR" => false,
+               "GIT_DISCOVERY_ACROSS_FILESYSTEM" => "0",
+               "GIT_DIR" => false,
+               "GIT_EXEC_PATH" => false,
+               "GIT_ATTR_NOSYSTEM" => "1",
+               "GIT_EXTERNAL_DIFF" => false,
+               "GIT_INDEX_FILE" => false,
+               "GIT_NAMESPACE" => false,
+               "GIT_OBJECT_DIRECTORY" => false,
+               "GIT_PAGER" => "cat",
+               "GIT_QUARANTINE_PATH" => false,
+               "GIT_REPLACE_REF_BASE" => false,
+               "GIT_SHALLOW_FILE" => false,
+               "GIT_SSH" => false,
+               "GIT_ASKPASS" => false,
+               "SSH_ASKPASS" => false,
+               "GIT_SSH_COMMAND" => false,
+               "GIT_EDITOR" => "false",
+               "GIT_SEQUENCE_EDITOR" => "false",
+               "GIT_TERMINAL_PROMPT" => "0",
+               "GIT_WORK_TREE" => false
+             },
+             fn {{key, value}, index}, acc ->
+               acc
+               |> Map.put("GIT_CONFIG_KEY_#{index}", key)
+               |> Map.put("GIT_CONFIG_VALUE_#{index}", value)
+             end
+           )
+
+  @doc false
+  def hermetic_git_env, do: @git_env
 
   @unsafe_config_pattern "^(include\\.|includeif\\.|filter\\..*\\.(clean|smudge|process)$|diff\\..*\\.(command|textconv)$|diff\\.external$|merge\\..*\\.driver$|credential\\.helper$|core\\.(attributesfile|editor|excludesfile|hookspath|fsmonitor|pager|sshcommand)$|pager\\.|interactive\\.difffilter$|maintenance\\.|submodule\\..*\\.update$|commit\\.gpgsign$|gpg\\.program$|sequence\\.editor$)"
 

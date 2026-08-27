@@ -331,6 +331,71 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert {:error, :symlink_rejected} = Build.execute([], opts.("../../../../../../tmp/outside"))
   end
 
+  test "compiled build copy translates source-staging Mix links and omits rebar _build",
+       %{root: root} do
+    {repo, deps} = mix_layout_fixture!(root)
+
+    assert {:ok, report} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               active_config_path: Path.join(root, "validation-runtime.json"),
+               image_build: fn _request ->
+                 {:ok,
+                  %{
+                    index_digest: @index,
+                    manifest_digest: @manifest,
+                    image: "docker.io/arbor/validation@" <> @index,
+                    image_id: "sha256:" <> String.duplicate("1", 64)
+                  }}
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn ctx ->
+                 priv = Path.join(ctx.deps_path, "d/priv")
+                 File.mkdir_p!(priv)
+                 File.write!(Path.join(priv, "keep"), "ok\n")
+
+                 default_plugin = Path.join(ctx.deps_path, "d/_build/default/plugins")
+                 File.mkdir_p!(default_plugin)
+                 File.write!(Path.join(default_plugin, "p"), "plugin\n")
+                 prod_plugin = Path.join(ctx.deps_path, "d/_build/prod/plugins")
+                 File.mkdir_p!(prod_plugin)
+
+                 File.ln_s!(
+                   Path.join(default_plugin, "p"),
+                   Path.join(prod_plugin, "p")
+                 )
+
+                 link_dir = Path.join(ctx.deps_path <> "-build", "lib/d")
+                 File.mkdir_p!(link_dir)
+
+                 File.ln_s!(
+                   "../../../" <> Path.basename(ctx.deps_path) <> "/d/priv",
+                   Path.join(link_dir, "priv")
+                 )
+
+                 :ok
+               end,
+               smoke_test: fn copy, _platform ->
+                 refute File.exists?(Path.join(copy, "d/_build"))
+                 :ok
+               end,
+               shell: FakeShell
+             )
+
+    link = Path.join(report["baseline_root"], "build/lib/d/priv")
+    assert {:ok, %File.Stat{type: :symlink}} = File.lstat(link)
+    target = File.read_link!(link)
+    assert Path.type(target) == :relative
+    resolved = Path.expand(target, Path.dirname(link))
+    tree_priv = Path.join(report["baseline_root"], "tree/d/priv")
+    assert Path.expand(resolved) == Path.expand(tree_priv)
+    assert File.read!(Path.join(resolved, "keep")) == "ok\n"
+    refute File.exists?(Path.join(report["baseline_root"], "tree/d/_build"))
+  end
+
   test "status uses the Shell facade and never names Authority modules" do
     task_path =
       Path.expand("../../../lib/mix/tasks/arbor.baseline.status.ex", Path.dirname(__ENV__.file))

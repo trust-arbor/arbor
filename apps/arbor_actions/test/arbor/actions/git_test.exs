@@ -32,6 +32,55 @@ defmodule Arbor.Actions.GitTest do
     Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
   end
 
+  describe "hermetic no-fork git config" do
+    test "pins the reviewed single-threaded GIT_CONFIG_COUNT shape" do
+      env = Git.hermetic_git_env()
+
+      assert env["GIT_CONFIG_COUNT"] == "7"
+      assert env["GIT_CONFIG_KEY_0"] == "core.preloadIndex"
+      assert env["GIT_CONFIG_VALUE_0"] == "false"
+      assert env["GIT_CONFIG_KEY_1"] == "index.threads"
+      assert env["GIT_CONFIG_VALUE_1"] == "1"
+      assert env["GIT_CONFIG_KEY_2"] == "pack.threads"
+      assert env["GIT_CONFIG_VALUE_2"] == "1"
+      assert env["GIT_CONFIG_KEY_3"] == "grep.threads"
+      assert env["GIT_CONFIG_VALUE_3"] == "1"
+      assert env["GIT_CONFIG_KEY_4"] == "checkout.workers"
+      assert env["GIT_CONFIG_VALUE_4"] == "1"
+      assert env["GIT_CONFIG_KEY_5"] == "fetch.parallel"
+      assert env["GIT_CONFIG_VALUE_5"] == "1"
+      assert env["GIT_CONFIG_KEY_6"] == "core.fsmonitor"
+      assert env["GIT_CONFIG_VALUE_6"] == "false"
+      refute Map.has_key?(env, "GIT_CONFIG_KEY_7")
+    end
+
+    test "Git.execute sees the pinned single-threaded config", %{repo_path: repo_path} do
+      assert {:ok, %{exit_code: 0, stdout: preload}} =
+               Git.execute(repo_path, ["config", "--get", "core.preloadIndex"])
+
+      assert String.trim(preload) == "false"
+
+      assert {:ok, %{exit_code: 0, stdout: threads}} =
+               Git.execute(repo_path, ["config", "--get", "index.threads"])
+
+      assert String.trim(threads) == "1"
+    end
+
+    test "commits a >1000-entry index under the no-fork launcher", %{repo_path: repo_path} do
+      for i <- 1..1100 do
+        File.write!(Path.join(repo_path, "f#{i}"), "#{i}\n")
+      end
+
+      assert {:ok, %{exit_code: 0}} = Git.execute(repo_path, ["add", "."])
+      assert {:ok, %{exit_code: 0}} = Git.execute(repo_path, ["commit", "-m", "bulk index"])
+
+      assert {:ok, %{exit_code: 0, stdout: status}} =
+               Git.execute(repo_path, ["status", "--porcelain"])
+
+      assert String.trim(status) == ""
+    end
+  end
+
   describe "read_bounded_blob_at_commit/4" do
     test "reads the blob content exactly matching git show at the exact commit", %{
       repo_path: repo_path

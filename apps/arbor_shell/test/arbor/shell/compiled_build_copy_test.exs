@@ -3,6 +3,27 @@ defmodule Arbor.Shell.CompiledBuildCopyTest do
 
   @moduletag :fast
 
+  test "seeded Mix priv link without an env segment is rewritten to the guest deps path" do
+    {source, dest} = fixture_roots()
+    tree_priv = Path.join(source, "tree/d/priv")
+    File.mkdir_p!(tree_priv)
+    File.write!(Path.join(tree_priv, "keep"), "ok\n")
+
+    link_dir = Path.join(source, "build/lib/d")
+    File.mkdir_p!(link_dir)
+    File.ln_s!("../../../tree/d/priv", Path.join(link_dir, "priv"))
+
+    assert :ok =
+             Arbor.Shell.copy_linux_compiled_dependency_build(
+               Path.join(source, "build"),
+               dest
+             )
+
+    link = Path.join(dest, "lib/d/priv")
+    assert {:ok, %File.Stat{type: :symlink}} = File.lstat(link)
+    assert File.read_link!(link) == "/arbor/deps/d/priv"
+  end
+
   test "seeded Mix priv link is rewritten to the guest deps path" do
     {source, dest} = fixture_roots()
     tree_priv = Path.join(source, "tree/x/priv")
