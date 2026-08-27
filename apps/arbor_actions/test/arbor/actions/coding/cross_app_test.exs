@@ -251,6 +251,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert is_binary(seed_destination)
     assert Path.type(seed_destination) == :absolute
     assert Path.basename(seed_destination) == "build"
+    refute File.exists?(seed_destination)
 
     # Does not claim zero-cycle validation.
     refute Map.has_key?(result, :cycles)

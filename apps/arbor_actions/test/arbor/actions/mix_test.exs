@@ -100,6 +100,7 @@ defmodule Arbor.Actions.MixTest do
       assert is_binary(seed_destination)
       assert Path.type(seed_destination) == :absolute
       assert Path.basename(seed_destination) == "build"
+      refute File.exists?(seed_destination)
       assert is_map(Arbor.Actions.TestMixShell.last_invocation())
     end
 
