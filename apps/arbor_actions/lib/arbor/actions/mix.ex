@@ -99,6 +99,10 @@ defmodule Arbor.Actions.Mix do
   # - Fail closed before launch when remaining cannot cover this reserve
   #   plus a positive child timeout; never extend the outer deadline.
   @postflight_tree_binding_reserve_ms 60_000
+  # LinuxDependencyBaselineAuthority bounds drift details to atoms or flat,
+  # non-empty tuples of atoms. Cap tuple arity again at this facade boundary so
+  # a drifting/custom implementation cannot return an unbounded diagnostic.
+  @max_baseline_drift_reason_tuple_size 8
 
   # Path-bearing / code-loading Mix variables are module-owned under contained
   # execution. Caller opts and ambient Application env never become wrapper or
@@ -1232,9 +1236,13 @@ defmodule Arbor.Actions.Mix do
 
   defp validate_compiled_build_seed_result(
          {:error, {:linux_dependency_baseline_drift, reason}} = error
-       )
-       when is_atom(reason),
-       do: error
+       ) do
+    if bounded_baseline_drift_reason?(reason) do
+      error
+    else
+      {:error, :compiled_dependency_build_seed_callback_failed}
+    end
+  end
 
   defp validate_compiled_build_seed_result({:error, :invalid_compiled_build_dest} = error),
     do: error
@@ -1247,6 +1255,18 @@ defmodule Arbor.Actions.Mix do
 
   defp validate_compiled_build_seed_result(_result),
     do: {:error, :compiled_dependency_build_seed_callback_failed}
+
+  defp bounded_baseline_drift_reason?(reason) when is_atom(reason), do: true
+
+  defp bounded_baseline_drift_reason?(reason) when is_tuple(reason) do
+    tuple_size(reason) > 0 and
+      tuple_size(reason) <= @max_baseline_drift_reason_tuple_size and
+      reason
+      |> Tuple.to_list()
+      |> Enum.all?(&is_atom/1)
+  end
+
+  defp bounded_baseline_drift_reason?(_reason), do: false
 
   defp format_prepare_error({:invalid_mix_shell_module, _} = error), do: {:error, error}
 

@@ -317,6 +317,12 @@ defmodule Arbor.Actions.MixTest do
             :malformed,
             {:ok, :unsupported},
             {:error, oversized},
+            {:error, {:linux_dependency_baseline_drift, {}}},
+            {:error,
+             {:linux_dependency_baseline_drift,
+              {:one, :two, :three, :four, :five, :six, :seven, :eight, :nine}}},
+            {:error, {:linux_dependency_baseline_drift, {:identity_mismatch, {:nested}}}},
+            {:error, {:linux_dependency_baseline_drift, {:identity_mismatch, "path"}}},
             :raise,
             :throw,
             :exit
@@ -334,7 +340,8 @@ defmodule Arbor.Actions.MixTest do
     } do
       for reason <- [
             :linux_dependency_baseline_authority_unavailable,
-            {:linux_dependency_baseline_drift, :identity_mismatch}
+            {:linux_dependency_baseline_drift, :identity_mismatch},
+            {:linux_dependency_baseline_drift, {:identity_mismatch, :device_changed}}
           ] do
         assert_seed_callback_error(fixture, {:error, reason}, reason)
       end
