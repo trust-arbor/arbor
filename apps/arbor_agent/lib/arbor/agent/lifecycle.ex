@@ -1045,11 +1045,11 @@ defmodule Arbor.Agent.Lifecycle do
       try do
         template_mod.heartbeat()
       rescue
-        _ -> %{enabled: true, interval: 30_000, graph: "heartbeat.dot"}
+        _ -> %{enabled: true, interval: 60_000, graph: "heartbeat.dot"}
       end
     else
       # Default heartbeat config when template doesn't define one
-      %{enabled: true, interval: 30_000, graph: "heartbeat.dot"}
+      %{enabled: true, interval: 60_000, graph: "heartbeat.dot"}
     end
   end
 

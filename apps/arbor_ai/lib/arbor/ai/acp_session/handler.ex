@@ -413,33 +413,67 @@ defmodule Arbor.AI.AcpSession.Handler do
   # interaction directly here. After submission, the wait path is
   # shared with the capability-layer escalation via await_human_approval.
   defp escalate_for_trust_approval(agent_id, resource_uri, state) do
-    if interaction_router_available?() do
-      attrs = %{
-        kind: :approval,
-        agent_id: agent_id,
-        user_id: operator_user_id_for(agent_id),
-        description: "Trust gate: #{resource_uri} requires human approval",
-        resource_uri: resource_uri,
-        metadata: %{source: :trust_policy_gated}
-      }
+    cond do
+      not interaction_router_available?() ->
+        Logger.warning(
+          "[AcpSession.Handler] trust-gated #{resource_uri} but InteractionRouter unavailable — failing closed"
+        )
 
-      case apply(Arbor.Comms.InteractionRouter, :request, [attrs, []]) do
-        {:ok, request_id} ->
-          await_human_approval(agent_id, request_id, resource_uri, state)
+        {:denied, "trust-gated and HITL routing unavailable"}
 
-        {:error, reason} ->
-          Logger.warning(
-            "[AcpSession.Handler] trust-gate escalation failed for #{resource_uri}: #{bounded_reason(reason)} — failing closed"
-          )
+      not operator_reachable?(agent_id) ->
+        # Nobody is attached to answer (no dashboard/Signal/HITL presence for
+        # this agent's operator): waiting `permission_timeout_ms` would only
+        # stall the turn. Deny now; the agent learns the reason immediately.
+        {:denied, "requires operator approval but no approval channel is attached"}
 
-          {:denied, "trust gate escalation failed: #{bounded_reason(reason)}"}
+      true ->
+        submit_trust_escalation(agent_id, resource_uri, state)
+    end
+  end
+
+  # Is any approval channel present for this agent's operator? Answered by the
+  # comms presence tracker (dashboard sessions, Signal presence, HITL
+  # consumers). Injectable via `:presence_module` (`active_channels/1`); when
+  # no presence source is available we keep the historical behaviour (wait).
+  @doc false
+  def operator_reachable?(agent_id) do
+    module = Application.get_env(:arbor_ai, :presence_module, Arbor.Comms.PresenceTracker)
+
+    if Code.ensure_loaded?(module) and function_exported?(module, :active_channels, 1) do
+      case module.active_channels(operator_user_id_for(agent_id)) do
+        channels when is_list(channels) -> channels != []
+        _other -> true
       end
     else
-      Logger.warning(
-        "[AcpSession.Handler] trust-gated #{resource_uri} but InteractionRouter unavailable — failing closed"
-      )
+      true
+    end
+  rescue
+    _ -> true
+  catch
+    _, _ -> true
+  end
 
-      {:denied, "trust-gated and HITL routing unavailable"}
+  defp submit_trust_escalation(agent_id, resource_uri, state) do
+    attrs = %{
+      kind: :approval,
+      agent_id: agent_id,
+      user_id: operator_user_id_for(agent_id),
+      description: "Trust gate: #{resource_uri} requires human approval",
+      resource_uri: resource_uri,
+      metadata: %{source: :trust_policy_gated}
+    }
+
+    case apply(Arbor.Comms.InteractionRouter, :request, [attrs, []]) do
+      {:ok, request_id} ->
+        await_human_approval(agent_id, request_id, resource_uri, state)
+
+      {:error, reason} ->
+        Logger.warning(
+          "[AcpSession.Handler] trust-gate escalation failed for #{resource_uri}: #{bounded_reason(reason)} — failing closed"
+        )
+
+        {:denied, "trust gate escalation failed: #{bounded_reason(reason)}"}
     end
   rescue
     e ->

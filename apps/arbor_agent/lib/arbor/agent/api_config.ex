@@ -23,7 +23,7 @@ defmodule Arbor.Agent.APIConfig do
     temperature: 0.7,
     max_turns: 10,
     heartbeat_enabled: true,
-    heartbeat_interval_ms: 10_000
+    heartbeat_interval_ms: 60_000
   }
 
   @configurable_keys [

@@ -37,6 +37,16 @@ defmodule Arbor.AI.AcpSession.HandlerUngrantedToolNoWaitTest do
       do: held == uri or String.starts_with?(uri, held <> "/")
   end
 
+  defmodule NoPresence do
+    @moduledoc false
+    def active_channels(_user_id), do: []
+  end
+
+  defmodule DashboardPresence do
+    @moduledoc false
+    def active_channels(_user_id), do: [:dashboard]
+  end
+
   defmodule LegacySecurity do
     @moduledoc false
     # No enumeration API: the handler must keep escalating (historical behaviour).
@@ -108,6 +118,27 @@ defmodule Arbor.AI.AcpSession.HandlerUngrantedToolNoWaitTest do
     assert %{"outcome" => %{"outcome" => "selected", "optionId" => "reject_once"}} = outcome
     refute Handler.holds_capability?("agent_test_ungranted", "arbor://acp/tool/Bash")
     assert Handler.holds_capability?("agent_test_ungranted", "arbor://acp/tool/Read")
+  end
+
+  test "security regression: a held, gated tool is denied at once when no approval channel is attached" do
+    Application.put_env(:arbor_ai, :security_module, HoldsToolSecurity)
+    original = Application.get_env(:arbor_ai, :presence_module)
+    Application.put_env(:arbor_ai, :presence_module, NoPresence)
+    on_exit(fn -> restore(:presence_module, original) end)
+
+    state = state(5_000)
+    {elapsed_us, {:ok, outcome, _}} = :timer.tc(fn -> request(state, "Read") end)
+
+    assert %{"outcome" => %{"outcome" => "selected", "optionId" => "reject_once"}} = outcome
+    assert elapsed_us < 1_000_000
+    refute Handler.operator_reachable?("agent_test_ungranted")
+  end
+
+  test "an attached approval channel keeps the escalation path" do
+    original = Application.get_env(:arbor_ai, :presence_module)
+    Application.put_env(:arbor_ai, :presence_module, DashboardPresence)
+    on_exit(fn -> restore(:presence_module, original) end)
+    assert Handler.operator_reachable?("agent_test_ungranted")
   end
 
   test "a security module without capability enumeration keeps the escalating behaviour" do

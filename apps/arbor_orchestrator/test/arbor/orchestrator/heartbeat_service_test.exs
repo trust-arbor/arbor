@@ -48,7 +48,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
       state = HeartbeatService.get_state(pid)
       assert state.agent_id == "agent_test_heartbeat"
-      assert state.heartbeat_interval == 30_000
+      assert state.heartbeat_interval == 60_000
       assert state.heartbeat_in_flight == false
       assert state.heartbeat_ref != nil
       assert state.signing_authority == nil
@@ -97,6 +97,47 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
   end
 
   describe "heartbeat_result handling" do
+    test "the interval is a gap between beats: no timer while in flight, timer armed on completion" do
+      # Regression (2026-08-27): the next beat used to be scheduled at the START
+      # of a cycle, so a beat slower than the interval (an ACP heartbeat: ~14 s
+      # of Claude Code on a 10 s timer) ran back-to-back with no gap.
+      test_pid = self()
+
+      {:ok, pid} =
+        start_test_service(
+          identity_checker: fn _ -> true end,
+          heartbeat_config: %{enabled: true, interval: 100},
+          engine_runner: fn _graph, _opts ->
+            send(test_pid, {:beat_started, self()})
+
+            receive do
+              :finish_beat -> :ok
+            after
+              5_000 -> :ok
+            end
+
+            {:ok, %{final_outcome: %{status: :success}, context: %{"__completed_nodes__" => []}}}
+          end
+        )
+
+      send(pid, :heartbeat)
+      assert_receive {:beat_started, runner}, 2_000
+
+      assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_in_flight end)
+      # A beat is running: no successor timer is pending, even past the interval.
+      Process.sleep(250)
+      assert HeartbeatService.get_state(pid).heartbeat_ref == nil
+
+      send(runner, :finish_beat)
+
+      assert eventually(fn ->
+               state = HeartbeatService.get_state(pid)
+               state.heartbeat_in_flight == false and state.heartbeat_ref != nil
+             end)
+
+      GenServer.stop(pid)
+    end
+
     test "success result clears in_flight flag" do
       fake_result = %{
         final_outcome: %{status: :success},
@@ -453,7 +494,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
         heartbeat_config:
           Keyword.get(extra_opts, :heartbeat_config, %{
             enabled: true,
-            interval: 30_000
+            interval: 60_000
           })
       ]
       |> Keyword.merge(extra_opts)

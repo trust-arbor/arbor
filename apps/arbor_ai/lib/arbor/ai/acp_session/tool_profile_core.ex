@@ -84,15 +84,28 @@ defmodule Arbor.AI.AcpSession.ToolProfileCore do
   Adapter-facing keyword options for the profile. Adapters that understand
   them restrict the CLI at launch; adapters that do not simply ignore them.
   Nothing is emitted for a wildcard profile (the CLI may offer every tool).
+
+  - `tools` — the complete built-in tool set the CLI may offer at all
+    (allowed + askable). Claude Code: `--tools`; an empty list is
+    `--tools ""`, i.e. no built-in tools — the agent cannot even propose one.
+  - `allowed_tools` — tools the CLI may run without asking (`--allowedTools`).
+  - `askable_tools` — held tools that still go through the permission prompt.
+  - `deny_unlisted_tools` — always `true` for a non-wildcard profile.
   """
   @spec adapter_opts(profile()) :: keyword()
   def adapter_opts(%{wildcard?: true}), do: []
 
   def adapter_opts(%{allowed_tools: allowed, gated_tools: gated}) do
-    [allowed_tools: allowed, askable_tools: gated, deny_unlisted_tools: true]
+    [
+      tools: Enum.sort(Enum.uniq(allowed ++ gated)),
+      allowed_tools: allowed,
+      askable_tools: gated,
+      deny_unlisted_tools: true
+    ]
   end
 
-  def adapter_opts(_), do: [allowed_tools: [], askable_tools: [], deny_unlisted_tools: true]
+  def adapter_opts(_),
+    do: [tools: [], allowed_tools: [], askable_tools: [], deny_unlisted_tools: true]
 
   # -- private ------------------------------------------------------------------
 

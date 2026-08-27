@@ -19,7 +19,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
       %{
         enabled: true,           # whether to start at all
-        interval: 30_000,        # ms between heartbeat cycles
+        interval: 60_000,        # ms between heartbeat cycles (from the end of the previous one)
         graph: "heartbeat.dot"   # DOT graph relative to session pipeline dir
       }
 
@@ -57,7 +57,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   require Logger
 
-  @default_interval 30_000
+  # 60 s: an ACP-backed beat (a Claude Code call) took ~14 s on a 10 s timer
+  # and API beats routinely exceed 30 s, so shorter defaults ran back-to-back.
+  # The interval is measured from the END of a beat (see handle_heartbeat_success).
+  @default_interval 60_000
   @admitted_final_statuses [:success, :partial_success]
 
   # After this many CONSECUTIVE heartbeat failures with no known-terminal reason, disable the
@@ -218,9 +221,23 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   def handle_info(:heartbeat, state) do
+    state = %{state | heartbeat_ref: nil}
+
     if state.identity_checker.(state.agent_id) do
       state = start_heartbeat_task(state)
-      state = if state.heartbeat_disabled, do: state, else: schedule_heartbeat(state)
+
+      # A beat that actually started schedules its successor when it finishes
+      # (success or failure), so the interval is a gap between beats, never an
+      # overlapping cadence. A beat that did not start (busy, unauthorized)
+      # reschedules here unless the failure path already did.
+      state =
+        cond do
+          state.heartbeat_disabled -> state
+          state.heartbeat_in_flight -> state
+          state.heartbeat_ref != nil -> state
+          true -> schedule_heartbeat(state)
+        end
+
       {:noreply, %{state | heartbeat_no_identity_beats: 0}}
     else
       # (B) No registered identity — do NOT run the beat (skipping means zero pipelines, so no
@@ -298,15 +315,16 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     # not directly into the chat context window.
     apply_heartbeat_result(state, result)
 
-    {:noreply,
-     %{
-       state
-       | heartbeat_in_flight: false,
-         heartbeat_failures: 0,
-         heartbeat_last_error: nil,
-         heartbeat_last_completed_at: DateTime.utc_now(),
-         heartbeat_last_result: result
-     }}
+    state = %{
+      state
+      | heartbeat_in_flight: false,
+        heartbeat_failures: 0,
+        heartbeat_last_error: nil,
+        heartbeat_last_completed_at: DateTime.utc_now(),
+        heartbeat_last_result: result
+    }
+
+    {:noreply, schedule_heartbeat(state)}
   end
 
   defp record_heartbeat_failure(state, reason) do
@@ -333,7 +351,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         disable_heartbeat(state, "#{failures} consecutive heartbeat failures")
 
       true ->
-        %{state | heartbeat_in_flight: false}
+        schedule_heartbeat(%{state | heartbeat_in_flight: false})
     end
   end
 

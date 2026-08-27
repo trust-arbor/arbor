@@ -18,6 +18,7 @@ defmodule Arbor.AI.AcpSession.ToolProfileCoreTest do
            }
 
     assert Core.adapter_opts(profile) == [
+             tools: [],
              allowed_tools: [],
              askable_tools: [],
              deny_unlisted_tools: true
@@ -48,6 +49,7 @@ defmodule Arbor.AI.AcpSession.ToolProfileCoreTest do
     assert profile.deny_unlisted?
 
     assert Core.adapter_opts(profile) == [
+             tools: ["Bash", "Read"],
              allowed_tools: ["Read"],
              askable_tools: ["Bash"],
              deny_unlisted_tools: true
