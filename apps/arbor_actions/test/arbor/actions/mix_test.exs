@@ -966,7 +966,7 @@ defmodule Arbor.Actions.MixTest do
                  []
                )
 
-      assert reason == expected_reason or reason == inspect(expected_reason)
+      assert reason == inspect(expected_reason)
       refute Process.get({SeedCallbackMixShell, :dispatched})
     after
       Process.delete({SeedCallbackMixShell, :seed_result})
