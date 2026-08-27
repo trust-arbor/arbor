@@ -211,6 +211,10 @@ config :arbor_comms, :handler, enabled: false
 # must never hydrate or mutate the development interaction journal.
 config :arbor_comms, :durable_interaction_store, backend: nil
 
+# Isolated continuation tests inject a private node-restart CAS fake. The
+# Application child must not hydrate operator continuation state.
+config :arbor_orchestrator, :cross_app_continuation, backend: nil
+
 # Test database — adapter-aware
 # Note: The Ecto SQLite3 adapter does not support async tests
 # when used with Ecto.Adapters.SQL.Sandbox

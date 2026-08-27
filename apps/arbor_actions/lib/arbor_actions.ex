@@ -1027,6 +1027,149 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Core.maximum_stage_timeout()
   end
 
+  @doc "Continuation schema version owned by CrossApp ContinuationCore."
+  @spec coding_cross_app_continuation_schema_version() :: 1
+  def coding_cross_app_continuation_schema_version do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.schema_version()
+    end)
+  end
+
+  @doc "Derived JSON ceilings for CrossApp continuation state and effects."
+  @spec coding_cross_app_continuation_limits() :: %{required(String.t()) => pos_integer()}
+  def coding_cross_app_continuation_limits do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.limits()
+    end)
+  end
+
+  @doc "Construct or rehydrate a closed CrossApp continuation snapshot."
+  @spec coding_cross_app_continuation_new(term()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_new(input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.new(input)
+    end)
+  end
+
+  @doc "Return the JSON snapshot of an admitted continuation, or fail closed."
+  @spec coding_cross_app_continuation_show(term()) :: map() | {:error, atom()}
+  def coding_cross_app_continuation_show(input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.show(input)
+    end)
+  end
+
+  @doc "Deterministic `xappc_` lineage key for an admitted continuation."
+  @spec coding_cross_app_continuation_lineage_key(term()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_continuation_lineage_key(input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.lineage_key(input)
+    end)
+  end
+
+  @doc """
+  Derive persist, successor, and terminal from a fully rehydrated snapshot.
+
+  Orchestrator durability must exact-match stored successor/terminal to this
+  result. Shape checks are insufficient.
+  """
+  @spec coding_cross_app_continuation_retained_effects(term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_retained_effects(input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.retained_effects(input)
+    end)
+  end
+
+  @doc "Canonical SHA-256 digest of a JSON-clean continuation value."
+  @spec coding_cross_app_continuation_digest(term()) :: {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_continuation_digest(input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(input)
+    end)
+  end
+
+  @doc "Open a fenced single-owner continuation window."
+  @spec coding_cross_app_continuation_claim(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_claim(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.claim(state, input)
+    end)
+  end
+
+  @doc "Accept the next planned batch as passed under a live claim."
+  @spec coding_cross_app_continuation_accept_passed_receipt(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_accept_passed_receipt(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.accept_passed_receipt(state, input)
+    end)
+  end
+
+  @doc "Admit live schema-v3 capacity evidence and emit persist plus mint_successor."
+  @spec coding_cross_app_continuation_accept_capacity_handoff(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_accept_capacity_handoff(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.accept_capacity_handoff(state, input)
+    end)
+  end
+
+  @doc "Terminal failure under a live unexpired claim."
+  @spec coding_cross_app_continuation_fail(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_fail(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.fail(state, input)
+    end)
+  end
+
+  @doc "Terminal cancellation under a live unexpired claim."
+  @spec coding_cross_app_continuation_cancel(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_cancel(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.cancel(state, input)
+    end)
+  end
+
+  @doc "Clear an expired claim."
+  @spec coding_cross_app_continuation_expire_claim(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_expire_claim(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.expire_claim(state, input)
+    end)
+  end
+
+  @doc "Revoke the active claim. Time is parsed and ignored by the core."
+  @spec coding_cross_app_continuation_revoke_claim(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_revoke_claim(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.revoke_claim(state, input)
+    end)
+  end
+
+  @doc "Complete only under an active matching unexpired claim with a full receipt prefix."
+  @spec coding_cross_app_continuation_complete(term(), term()) ::
+          {:ok, map(), [map()]} | {:error, atom()}
+  def coding_cross_app_continuation_complete(state, input) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationCore.complete(state, input)
+    end)
+  end
+
+  defp wrap_cross_app_continuation(fun) when is_function(fun, 0) do
+    fun.()
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
   @doc """
   Reviewed hard maximum for a security-regression per-revision Mix child timeout
   in milliseconds.

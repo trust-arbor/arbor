@@ -879,4 +879,161 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   defp normalize_configured_root(_root), do: :error
+
+  # ===========================================================================
+  # CrossApp continuation durability
+  # ===========================================================================
+
+  @default_cross_app_continuation [
+    backend: nil,
+    store_name: :arbor_cross_app_continuations,
+    backend_opts: [],
+    start_store: false,
+    store_child_opts: [],
+    max_items: 256,
+    max_data_bytes: 1_311_744,
+    claim_ttl_ms: 3_600_000,
+    hydration_timeout_ms: 5_000
+  ]
+
+  @cross_app_continuation_ceilings %{
+    max_items: 256,
+    max_data_bytes: 1_311_744,
+    claim_ttl_ms: 3_600_000,
+    hydration_timeout_ms: 5_000
+  }
+
+  @cross_app_continuation_keys [
+    :backend,
+    :store_name,
+    :backend_opts,
+    :start_store,
+    :store_child_opts,
+    :max_items,
+    :max_data_bytes,
+    :claim_ttl_ms,
+    :hydration_timeout_ms
+  ]
+
+  @doc """
+  Validated CrossApp continuation durability config.
+
+  Raises `ArgumentError` on invalid configuration. Prefer
+  `fetch_cross_app_continuation/0` when you need a tagged error.
+  """
+  @spec cross_app_continuation() :: keyword()
+  def cross_app_continuation do
+    case fetch_cross_app_continuation() do
+      {:ok, opts} ->
+        opts
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "invalid :arbor_orchestrator :cross_app_continuation config: #{inspect(reason)}"
+    end
+  end
+
+  @doc "Tagged form of `cross_app_continuation/0`."
+  @spec fetch_cross_app_continuation() :: {:ok, keyword()} | {:error, term()}
+  def fetch_cross_app_continuation do
+    raw = Application.get_env(@app, :cross_app_continuation, [])
+    normalize_cross_app_continuation(raw)
+  end
+
+  @doc false
+  @spec tighten_cross_app_continuation(keyword(), keyword()) ::
+          {:ok, keyword()} | {:error, term()}
+  def tighten_cross_app_continuation(configured, runtime)
+      when is_list(configured) and is_list(runtime) do
+    Enum.reduce_while(@cross_app_continuation_ceilings, {:ok, configured}, fn {key, ceiling},
+                                                                              {:ok, acc} ->
+      configured_value = Keyword.get(configured, key)
+
+      case Keyword.fetch(runtime, key) do
+        :error ->
+          {:cont, {:ok, acc}}
+
+        {:ok, value}
+        when is_integer(value) and value > 0 and value <= configured_value and
+               value <= ceiling ->
+          {:cont, {:ok, Keyword.put(acc, key, value)}}
+
+        {:ok, value} when is_integer(value) and value > 0 ->
+          {:halt, {:error, {:widening_override, key}}}
+
+        {:ok, _invalid} ->
+          {:halt, {:error, {:invalid_override, key}}}
+      end
+    end)
+  end
+
+  def tighten_cross_app_continuation(_configured, _runtime),
+    do: {:error, :invalid_runtime_overrides}
+
+  defp normalize_cross_app_continuation(raw) do
+    cond do
+      is_nil(raw) ->
+        {:ok, @default_cross_app_continuation}
+
+      not is_list(raw) or not Keyword.keyword?(raw) ->
+        {:error, :not_keyword}
+
+      true ->
+        merged = Keyword.merge(@default_cross_app_continuation, raw)
+        validate_cross_app_continuation(merged)
+    end
+  end
+
+  defp validate_cross_app_continuation(opts) when is_list(opts) do
+    backend = Keyword.get(opts, :backend)
+    store_name = Keyword.get(opts, :store_name)
+    backend_opts = Keyword.get(opts, :backend_opts)
+    start_store = Keyword.get(opts, :start_store)
+    store_child_opts = Keyword.get(opts, :store_child_opts)
+
+    unknown =
+      opts
+      |> Keyword.keys()
+      |> Enum.reject(&(&1 in @cross_app_continuation_keys))
+
+    cond do
+      unknown != [] ->
+        {:error, {:unknown_keys, unknown}}
+
+      not (is_atom(backend) or is_nil(backend)) or backend in [true, false] ->
+        {:error, :backend_not_atom_or_nil}
+
+      not is_atom(store_name) or store_name in [nil, true, false] ->
+        {:error, :store_name_not_atom}
+
+      not is_list(backend_opts) or not Keyword.keyword?(backend_opts) ->
+        {:error, :backend_opts_not_keyword}
+
+      not is_boolean(start_store) ->
+        {:error, :start_store_not_boolean}
+
+      not is_list(store_child_opts) or not Keyword.keyword?(store_child_opts) ->
+        {:error, :store_child_opts_not_keyword}
+
+      true ->
+        with {:ok, opts} <- tighten_continuation_ceilings(opts),
+             :ok <- store_child_name_ok?(store_name, store_child_opts) do
+          {:ok,
+           Keyword.put(opts, :store_child_opts, Keyword.put(store_child_opts, :name, store_name))}
+        end
+    end
+  end
+
+  defp tighten_continuation_ceilings(opts) do
+    Enum.reduce_while(@cross_app_continuation_ceilings, {:ok, opts}, fn {key, ceiling},
+                                                                        {:ok, acc} ->
+      case Keyword.get(acc, key) do
+        value when is_integer(value) and value > 0 and value <= ceiling ->
+          {:cont, {:ok, acc}}
+
+        _invalid ->
+          {:halt, {:error, {:invalid_ceiling, key}}}
+      end
+    end)
+  end
 end

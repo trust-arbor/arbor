@@ -569,6 +569,225 @@ defmodule Arbor.Orchestrator do
   @spec coding_pipeline_logs_root() :: String.t()
   def coding_pipeline_logs_root, do: Config.coding_pipeline_logs_root()
 
+  @doc "Open a durable CrossApp continuation lineage."
+  @spec coding_cross_app_continuation_open(
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_open(input, caller_id, authority, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.open(
+      input,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
+  @doc "Load a durable continuation. Public snapshots redact claim fence_token."
+  @spec coding_cross_app_continuation_get(
+          String.t(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_get(continuation_id, caller_id, authority, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.get(
+      continuation_id,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
+  @doc "Claim a durable continuation. Journal injects trusted time and fence token."
+  @spec coding_cross_app_continuation_claim(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_claim(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation("claim", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "Accept the next passed batch receipt under the issued fence."
+  @spec coding_cross_app_continuation_accept_passed_receipt(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_accept_passed_receipt(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation(
+      "accept_passed_receipt",
+      continuation_id,
+      input,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
+  @doc "Admit a capacity handoff and retain the derived successor descriptor."
+  @spec coding_cross_app_continuation_accept_capacity_handoff(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_accept_capacity_handoff(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation(
+      "accept_capacity_handoff",
+      continuation_id,
+      input,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
+  @doc "Terminal-fail a claimed continuation."
+  @spec coding_cross_app_continuation_fail(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_fail(continuation_id, input, caller_id, authority, opts \\ []) do
+    continuation_mutation("fail", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "Terminal-cancel a claimed continuation."
+  @spec coding_cross_app_continuation_cancel(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_cancel(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation("cancel", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "Expire a claimed continuation window after its injected expiry."
+  @spec coding_cross_app_continuation_expire_claim(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_expire_claim(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation("expire_claim", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "Revoke the active continuation claim."
+  @spec coding_cross_app_continuation_revoke_claim(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_revoke_claim(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation("revoke_claim", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "Complete a continuation after a full passed receipt prefix."
+  @spec coding_cross_app_continuation_complete(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_complete(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    continuation_mutation("complete", continuation_id, input, caller_id, authority, opts)
+  end
+
+  @doc "JSON-clean CrossApp continuation durability status."
+  @spec coding_cross_app_continuation_durability_status(
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: map() | {:error, term()}
+  def coding_cross_app_continuation_durability_status(caller_id, authority, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.durability_status(
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
+  @doc "Refresh continuation inventory from durable authority."
+  @spec coding_cross_app_continuation_refresh(
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def coding_cross_app_continuation_refresh(caller_id, authority, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.refresh(caller_id, authority, opts)
+  end
+
+  defp continuation_mutation(operation, continuation_id, input, caller_id, authority, opts) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.mutate(
+      operation,
+      continuation_id,
+      input,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
   @doc """
   Run typed validation passes on a compiled Graph.
 
