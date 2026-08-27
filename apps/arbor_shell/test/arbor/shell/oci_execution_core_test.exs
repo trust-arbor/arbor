@@ -100,6 +100,103 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
       assert spec.plan.command_args == args
     end
 
+    test "dependency-bootstrapped warning-strict compile is a reviewed mix shape" do
+      args = [
+        "do",
+        "deps.compile",
+        "--skip-umbrella-children",
+        "+",
+        "compile",
+        "--no-deps-check",
+        "--warnings-as-errors"
+      ]
+
+      assert {:ok, spec} = Core.new(valid_request(%{args: args}))
+      assert spec.plan.command_args == args
+    end
+
+    @tag :security_regression
+    test "dependency bootstrap remains an exact reviewed compile form" do
+      suffix = ["+", "compile", "--no-deps-check", "--warnings-as-errors"]
+
+      near_misses = [
+        ["do", "deps.compile", "--force", "--skip-umbrella-children" | suffix],
+        ["do", "deps.compile", "--skip-umbrella-children", "boundary" | suffix],
+        ["do", "deps.get", "--skip-umbrella-children" | suffix],
+        ["do", "deps.compile", "--skip-umbrella-children", "+", "compile"]
+      ]
+
+      for args <- near_misses do
+        assert {:error, :unsupported_mix_command} = Core.new(valid_request(%{args: args}))
+      end
+    end
+
+    test "xref graph and exact tests may skip dependency lock checks" do
+      xref = ["xref", "graph", "--no-deps-check"]
+      test = ["test", "--no-deps-check", "--", "apps/arbor_kernel/test/example_test.exs"]
+
+      assert {:ok, xref_spec} = Core.new(valid_request(%{args: xref}))
+      assert xref_spec.plan.command_args == xref
+      assert {:ok, test_spec} = Core.new(valid_request(%{args: test}))
+      assert test_spec.plan.command_args == test
+
+      assert {:error, :reordered_test_flags} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "test",
+                     "--seed",
+                     "0",
+                     "--no-deps-check",
+                     "--",
+                     "apps/arbor_kernel/test/example_test.exs"
+                   ]
+                 })
+               )
+    end
+
+    @tag :security_regression
+    test "ContractChange cold-build commands remain exact reviewed OCI shapes" do
+      preflight = [
+        "do",
+        "deps.compile",
+        "--skip-umbrella-children",
+        "+",
+        "compile",
+        "--no-deps-check",
+        "--warnings-as-errors",
+        "+",
+        "xref",
+        "graph",
+        "--no-deps-check",
+        "+",
+        "arbor.contracts.census",
+        "--fail-on-violation"
+      ]
+
+      test = [
+        "test",
+        "--no-deps-check",
+        "--warnings-as-errors",
+        "--",
+        "apps/arbor_kernel/test/example_test.exs"
+      ]
+
+      assert {:ok, preflight_spec} = Core.new(valid_request(%{args: preflight}))
+      assert preflight_spec.plan.command_args == preflight
+      assert {:ok, test_spec} = Core.new(valid_request(%{args: test}))
+      assert test_spec.plan.command_args == test
+
+      for args <- [
+            List.insert_at(preflight, 3, "boundary"),
+            List.replace_at(preflight, 1, "deps.get"),
+            List.delete(preflight, "--no-deps-check"),
+            ["test", "--warnings-as-errors", "--", "apps/arbor_kernel/test/example_test.exs"]
+          ] do
+        assert {:error, :unsupported_mix_command} = Core.new(valid_request(%{args: args}))
+      end
+    end
+
     test "compile plans digest-only create argv without vminit or kernel" do
       assert {:ok, spec} = Core.new(valid_request())
       assert spec.plan.command_args == ["compile"]

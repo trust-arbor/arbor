@@ -732,6 +732,36 @@ The `cross_app` validation profile compiles three distinct budgets into
   aggregate test-stage ceiling, and further bounded by
   `budgets.wall_clock_ms`
 
+Each compile stage remains one contained child, but a fresh validation resource
+has an empty private `MIX_BUILD_PATH`. Its exact warning-strict command therefore
+bootstraps every available dependency from the attested baseline before compiling
+the project in the same Mix VM:
+
+```text
+mix do deps.compile --skip-umbrella-children + compile --no-deps-check --warnings-as-errors
+```
+
+The same command runs once in the dev environment and once under `MIX_ENV=test`.
+Keeping both tasks in one Mix process makes dependency-provided compilers such as
+`compile.boundary` available without asking Mix to inspect SCM lock state. The
+subsequent children use `mix xref graph --no-deps-check` and
+`mix test --no-deps-check -- <exact paths...>` against that private build. Shell
+admits these as closed argv shapes: named dependencies, `--force`, `deps.get`,
+reordered test flags, and missing `--no-deps-check` in the composite compile are
+rejected. Do not replace the composite command with a bare cold
+`mix compile --no-deps-check`; that suppresses the lock check but leaves dependency
+compiler tasks unloaded.
+
+The `contract_change` profile follows the same cold-build rule. Its first contained
+child uses fixed `+` separators to run dependency bootstrap, warning-strict compile,
+xref with `--no-deps-check`, and `arbor.contracts.census` in one Mix VM. Its second
+child runs the exact contract tests with both `--no-deps-check` and
+`--warnings-as-errors`. The default `mix_compile` profile likewise uses the
+dependency-bootstrapped compile argv. The fixed portion remains one child for the
+default profile, two children for ContractChange, and three pre-test children plus
+the unchanged exact test batches for CrossApp; the reviewed stage ceilings do not
+expand.
+
 Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
 files). Paths are partitioned into sequential batches of at most 5 exact files
 per child under the existing argv-count and argv-byte ceilings; tags are never

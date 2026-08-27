@@ -5,7 +5,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   alias Arbor.Actions.Coding.CrossApp.Shell
   alias Arbor.Actions.Mix, as: MixAction
 
-  @compile_argv ["compile", "--no-deps-check", "--warnings-as-errors"]
+  @compile_argv MixAction.compile_argv(%{warnings_as_errors: true})
+  @xref_argv MixAction.xref_graph_argv()
   @moduletag :fast
 
   setup do
@@ -73,15 +74,15 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     # App test root boundary forces separate per-app batches.
     assert_receive {:mix_invocation, ^worktree, alpha_batch, opts_a}
-    assert alpha_batch == ["test", "--", "apps/alpha/test/alpha_test.exs"]
+    assert alpha_batch == ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]
     assert Keyword.get(opts_a, :timeout) == launchable_op_ms()
 
     assert_receive {:mix_invocation, ^worktree, beta_batch, opts_b}
-    assert beta_batch == ["test", "--", "apps/beta/test/beta_test.exs"]
+    assert beta_batch == ["test", "--no-deps-check", "--", "apps/beta/test/beta_test.exs"]
     assert Keyword.get(opts_b, :timeout) == launchable_op_ms()
 
     # Never a raw directory; only exact admitted file paths.
-    refute_received {:mix_invocation, _, ["test", "--", "apps/alpha/test"], _}
+    refute_received {:mix_invocation, _, ["test", "--no-deps-check", "--", "apps/alpha/test"], _}
     refute_received {:mix_invocation, _, _}
   end
 
@@ -99,16 +100,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == original.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == original.paths ->
           {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
 
-        ["test", "--" | batch_paths] when batch_paths == left_paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == left_paths ->
           {:ok, %{exit_code: 0, stdout: "left pass", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == right_paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == right_paths ->
           {:ok, %{exit_code: 0, stdout: "right pass", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == suffix.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == suffix.paths ->
           {:ok, %{exit_code: 0, stdout: "suffix pass", stderr: "", timed_out: false}}
 
         other ->
@@ -130,11 +131,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute String.contains?(check["stdout_excerpt"], hd(paths))
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--" | root_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | root_paths], _opts}
     assert root_paths == original.paths
-    assert_receive {:mix_invocation, ["test", "--" | ^left_paths], _opts}
-    assert_receive {:mix_invocation, ["test", "--" | ^right_paths], _opts}
-    assert_receive {:mix_invocation, ["test", "--" | suffix_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^left_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^right_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | suffix_paths], _opts}
     assert suffix_paths == suffix.paths
     refute_received {:mix_invocation, _, _}
   end
@@ -151,10 +152,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == original.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == original.paths ->
           {:ok, %{exit_code: nil, stdout: "root timeout", stderr: "", timed_out: true}}
 
-        ["test", "--" | batch_paths] when batch_paths == left_paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == left_paths ->
           {:ok, %{exit_code: 1, stdout: "child failed", stderr: "", timed_out: false}}
 
         other ->
@@ -172,9 +173,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute check["passed"]
     assert check["reason"] == "tests_failed"
-    assert_receive {:mix_invocation, ["test", "--" | root_paths]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | root_paths]}
     assert root_paths == original.paths
-    assert_receive {:mix_invocation, ["test", "--" | ^left_paths]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^left_paths]}
     refute_received {:mix_invocation, _}
   end
 
@@ -217,7 +218,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Enum.map(handoff["unstarted_batches"], & &1["label"]) == [suffix.label]
     refute handoff["interrupted_batch"]["label"] =~ "refine-"
     refute Jason.encode!(handoff) =~ "\"paths\""
-    assert_receive {:mix_invocation, ["test", "--" | root_paths]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | root_paths]}
     assert root_paths == original.paths
     refute_received {:mix_invocation, _}
   end
@@ -236,10 +237,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
           {:ok, %{exit_code: 1, stdout: "batch2 fail", stderr: "", timed_out: false}}
 
         other ->
@@ -264,9 +265,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.contains?(check["stdout_excerpt"], "batch2 fail")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--" | received1]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received1]}
     assert received1 == batch1.paths
-    assert_receive {:mix_invocation, ["test", "--" | received2]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received2]}
     assert received2 == batch2.paths
     refute_received {:mix_invocation, _}
   end
@@ -294,9 +295,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       )
 
     assert check["passed"] == true
-    assert_receive {:mix_invocation, ["test", "--" | _paths], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | _paths], opts}
     assert Keyword.get(opts, :timeout) == op
-    assert_receive {:mix_invocation, ["test", "--" | _], _}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | _], _}
   end
 
   test "exhausted residual before first child hands off structurally without launch", %{
@@ -392,7 +393,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == launchable_op_ms()
     refute_received {:mix_invocation, _, _}
@@ -419,12 +420,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           # Small advance; remaining budget stays positive.
           Agent.update(clock_agent, fn t -> t + 1_000 end)
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
           # Final batch returns success and consumes the shared deadline.
           Agent.update(clock_agent, fn _ -> launchable_stage_ms() end)
           {:ok, %{exit_code: 0, stdout: "batch2 ok", stderr: "", timed_out: false}}
@@ -451,10 +452,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.contains?(check["stdout_excerpt"], "[#{batch2.label}]")
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--" | r1], opts1}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | r1], opts1}
     assert r1 == batch1.paths
     assert Keyword.get(opts1, :timeout) == launchable_op_ms()
-    assert_receive {:mix_invocation, ["test", "--" | r2], opts2}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | r2], opts2}
     assert r2 == batch2.paths
     assert Keyword.get(opts2, :timeout) == launchable_op_ms()
     refute_received {:mix_invocation, _, _}
@@ -508,7 +509,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
            ]
 
     refute Map.has_key?(handoff["interrupted_batch"], "paths")
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == stage
     refute_received {:mix_invocation, _, _}
@@ -538,11 +539,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           Agent.update(clock_agent, fn _ -> 1_000 end)
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
           Agent.update(clock_agent, fn _ -> stage end)
           {:ok, %{exit_code: nil, stdout: "", stderr: "", timed_out: true}}
 
@@ -564,11 +565,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert handoff["unstarted_batches"] == []
     refute Map.has_key?(handoff["interrupted_batch"], "paths")
 
-    assert_receive {:mix_invocation, ["test", "--" | received1], opts1}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received1], opts1}
     assert received1 == batch1.paths
     assert Keyword.get(opts1, :timeout) == stage
 
-    assert_receive {:mix_invocation, ["test", "--" | received2], opts2}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received2], opts2}
     assert received2 == batch2.paths
     assert Keyword.get(opts2, :timeout) == stage - 1_000
     refute_received {:mix_invocation, _, _}
@@ -593,7 +594,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
     refute Map.has_key?(check, "capacity_handoff")
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == op
   end
@@ -642,7 +643,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
     refute Jason.encode!(handoff) =~ "\"paths\""
 
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == stage
     refute_received {:mix_invocation, _, _}
@@ -686,7 +687,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert handoff["interrupted_batch"] == nil
     assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
 
-    assert_receive {:mix_invocation, ["test", "--" | received], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], _opts}
     assert received == batch1.paths
     refute_received {:mix_invocation, _, _}
   end
@@ -788,7 +789,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              compact_capacity_batch(batch2)
            ]
 
-    assert_receive {:mix_invocation, ["test", "--" | received], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], _opts}
     assert received == batch1.paths
     refute_received {:mix_invocation, _, _}
   end
@@ -813,7 +814,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           Agent.update(clock_agent, fn _ -> mix_reserve_ms() + 5_000 end)
           # Live Mix.invoke_spawn_capable/4 inspects spawn-capable errors.
           {:error, ":probe_timeout"}
@@ -849,7 +850,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute Map.has_key?(hd(handoff["unstarted_batches"]), "paths")
 
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == stage
     refute_received {:mix_invocation, _, _}
@@ -877,7 +878,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           {:error, :probe_timeout}
 
         other ->
@@ -892,7 +893,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage))
 
     assert label == batch1.label
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == op
     refute_received {:mix_invocation, _, _}
@@ -918,11 +919,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           Agent.update(clock_agent, fn t -> t + 1_000 end)
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
           Agent.update(clock_agent, fn _ -> mix_reserve_ms() + 5_000 end)
           {:error, :probe_timeout}
 
@@ -945,10 +946,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
     refute Map.has_key?(hd(handoff["unstarted_batches"]), "paths")
 
-    assert_receive {:mix_invocation, ["test", "--" | received1], opts1}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received1], opts1}
     assert received1 == batch1.paths
     assert Keyword.get(opts1, :timeout) == stage
-    assert_receive {:mix_invocation, ["test", "--" | received2], opts2}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received2], opts2}
     assert received2 == batch2.paths
     assert Keyword.get(opts2, :timeout) == stage - 1_000
     refute_received {:mix_invocation, _, _}
@@ -981,7 +982,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         send(parent, {:mix_invocation, args, opts, injected_reason})
 
         case args do
-          ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+          ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
             Agent.update(clock_agent, fn _ -> stage end)
             {:error, injected_reason}
 
@@ -994,7 +995,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
                catch_throw(Shell.run_app_tests(worktree, ["apps/alpha/test"], op, stage))
 
       assert label == batch1.label
-      assert_receive {:mix_invocation, ["test", "--" | received], opts, ^injected_reason}
+
+      assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts,
+                      ^injected_reason}
+
       assert received == batch1.paths
       assert Keyword.get(opts, :timeout) == stage
     end)
@@ -1023,7 +1027,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           Agent.update(clock_agent, fn _ -> launchable_op_ms() end)
           {:error, :probe_timeout}
 
@@ -1048,7 +1052,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              compact_capacity_batch(batch2)
            ]
 
-    assert_receive {:mix_invocation, ["test", "--" | received], opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
     assert received == batch1.paths
     assert Keyword.get(opts, :timeout) == op
     refute_received {:mix_invocation, _, _}
@@ -1069,7 +1073,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["test", "--" | paths] when paths == batch.paths ->
+        ["test", "--no-deps-check", "--" | paths] when paths == batch.paths ->
           {:ok,
            %{
              exit_code: 1,
@@ -1094,7 +1098,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert text_fail["reason"] == "tests_failed"
     refute text_fail["reason"] == "tests_timed_out"
     assert String.contains?(text_fail["stdout_excerpt"], "timeout waiting")
-    assert_receive {:mix_invocation, ["test", "--" | received]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received]}
     assert received == batch.paths
     refute_received {:mix_invocation, _}
 
@@ -1119,7 +1123,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     refute exact["passed"]
     assert exact["reason"] == "tests_timed_out"
-    assert_receive {:mix_invocation, {:exact, ["test", "--" | exact_paths]}}
+    assert_receive {:mix_invocation, {:exact, ["test", "--no-deps-check", "--" | exact_paths]}}
     assert exact_paths == batch.paths
     refute_received {:mix_invocation, _}
   end
@@ -1173,7 +1177,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     feedback = Core.feedback_from_result(%{exit_code: 1, stdout: raw, stderr: stderr_raw})
     assert feedback["stdout_sha256"] == raw_hash
     assert feedback["stderr_sha256"] == stderr_hash
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]}
   end
 
   test "multibyte excerpt bounds never split UTF-8 codepoints", %{worktree: worktree} do
@@ -1200,7 +1206,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.valid?(check["stdout_excerpt"])
     assert String.contains?(check["stdout_excerpt"], "...[omitted]...")
     assert {:ok, _} = Jason.encode(check)
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]}
   end
 
   test "no launch after deadline is already exhausted", %{worktree: worktree} do
@@ -1338,7 +1346,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["exit_code"] == 137
     assert String.contains?(check["stdout_excerpt"], "[#{batch1.label}]")
 
-    assert_receive {:mix_invocation, ["test", "--" | received]}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received]}
     assert received == batch1.paths
     refute_received {:mix_invocation, _}
   end
@@ -1381,7 +1389,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(dev_opts, :resource_profile) == :intensive
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
-    assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
+    assert_receive {:mix_invocation, ^worktree, @xref_argv, xref_opts}
     assert Keyword.get(xref_opts, :validation_resource) == resource
     assert Keyword.get(xref_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(xref_opts, :resource_profile) == :intensive
@@ -1392,7 +1400,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(test_opts, :resource_profile) == :intensive
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
+    assert_receive {:mix_invocation, ^worktree,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"],
                     test_run_opts}
 
     assert Keyword.get(test_run_opts, :validation_resource) == resource
@@ -1427,9 +1436,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert {:ok, checks_3} = Shell.run_validation_checks(worktree, ["apps/alpha/test"], op)
     assert checks_3.test["passed"]
     assert_receive {:validation_invocation, @compile_argv}
-    assert_receive {:validation_invocation, ["xref", "graph"]}
+    assert_receive {:validation_invocation, @xref_argv}
     assert_receive {:validation_invocation, @compile_argv}
-    assert_receive {:validation_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
+
+    assert_receive {:validation_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]}
 
     # 4-arity with resource map (legacy selection seam)
     assert {:ok, checks_4_resource} =
@@ -1498,7 +1509,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           Agent.update(clock_agent, &(&1 + 1_000))
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 1, stdout: "xref failed", stderr: "", timed_out: false}}
 
         other ->
@@ -1522,7 +1533,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, @compile_argv, compile_opts, 0}
     assert Keyword.get(compile_opts, :timeout) == 5_000
 
-    assert_receive {:mix_invocation, ["xref", "graph"], xref_opts, 1_000}
+    assert_receive {:mix_invocation, @xref_argv, xref_opts, 1_000}
     assert Keyword.get(xref_opts, :timeout) == 4_000
     refute_received {:mix_invocation, _, _, _}
   end
@@ -1553,13 +1564,23 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         args == @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        args == ["xref", "graph"] ->
+        args == @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        args == ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] ->
+        args == [
+          "test",
+          "--no-deps-check",
+          "--",
+          "apps/arbor_security/test/arbor_security_test.exs"
+        ] ->
           {:ok, %{exit_code: 0, stdout: "security ok", stderr: "", timed_out: false}}
 
-        args == ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"] ->
+        args == [
+          "test",
+          "--no-deps-check",
+          "--",
+          "apps/arbor_actions/test/arbor_actions_test.exs"
+        ] ->
           {:ok, %{exit_code: 0, stdout: "actions ok", stderr: "", timed_out: false}}
 
         true ->
@@ -1585,20 +1606,29 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute checks.test["reason"] == "no_existing_test_files"
 
     assert_receive {:mix_invocation, @compile_argv, _dev_opts}
-    assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts}
+    assert_receive {:mix_invocation, @xref_argv, _xref_opts}
     assert_receive {:mix_invocation, @compile_argv, _test_compile_opts}
 
     assert_receive {:mix_invocation,
-                    ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] =
+                    [
+                      "test",
+                      "--no-deps-check",
+                      "--",
+                      "apps/arbor_security/test/arbor_security_test.exs"
+                    ] =
                       security_args, security_run_opts}
 
     assert_receive {:mix_invocation,
-                    ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"],
-                    _actions_test}
+                    [
+                      "test",
+                      "--no-deps-check",
+                      "--",
+                      "apps/arbor_actions/test/arbor_actions_test.exs"
+                    ], _actions_test}
 
     assert Enum.drop(security_args, 2) != []
     assert Keyword.get(security_run_opts, :timeout) == op
-    refute_received {:mix_invocation, ["test", "--", _], _}
+    refute_received {:mix_invocation, ["test", "--no-deps-check", "--", _], _}
   end
 
   test "malformed or incomplete app selection fails before any Mix invocation", %{
@@ -1701,14 +1731,24 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         args == @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        args == ["xref", "graph"] ->
+        args == @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        args == ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] ->
+        args == [
+          "test",
+          "--no-deps-check",
+          "--",
+          "apps/arbor_security/test/arbor_security_test.exs"
+        ] ->
           Agent.update(clock_agent, fn _ -> launchable_stage_ms() end)
           {:ok, %{exit_code: 0, stdout: "security ok", stderr: "", timed_out: false}}
 
-        args == ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"] ->
+        args == [
+          "test",
+          "--no-deps-check",
+          "--",
+          "apps/arbor_actions/test/arbor_actions_test.exs"
+        ] ->
           flunk("downstream batch must not launch after runtime cap")
 
         true ->
@@ -1754,14 +1794,24 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
            ]
 
     assert_receive {:mix_invocation, @compile_argv, _}
-    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, @xref_argv, _}
     assert_receive {:mix_invocation, @compile_argv, _}
 
     assert_receive {:mix_invocation,
-                    ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"], _}
+                    [
+                      "test",
+                      "--no-deps-check",
+                      "--",
+                      "apps/arbor_security/test/arbor_security_test.exs"
+                    ], _}
 
     refute_received {:mix_invocation,
-                     ["test", "--", "apps/arbor_actions/test/arbor_actions_test.exs"], _}
+                     [
+                       "test",
+                       "--no-deps-check",
+                       "--",
+                       "apps/arbor_actions/test/arbor_actions_test.exs"
+                     ], _}
   end
 
   test "whole-validation deadline rejects an overrun immediately after a child", %{
@@ -1822,10 +1872,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
+        ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"] ->
           Agent.update(clock_agent, fn _ -> launchable_op_ms() end)
           {:ok, %{exit_code: 0, stdout: "late test success", stderr: "", timed_out: false}}
 
@@ -1847,7 +1897,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.test["passed"]
     assert checks.test["reason"] == nil
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts}
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"],
+                    test_opts}
+
     assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end
 
@@ -1898,7 +1951,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(dev_opts, :timeout) == operation_timeout
     assert Keyword.get(dev_opts, :resource_profile) == :intensive
 
-    assert_receive {:mix_invocation, ^worktree, ["xref", "graph"], xref_opts}
+    assert_receive {:mix_invocation, ^worktree, @xref_argv, xref_opts}
     assert Keyword.get(xref_opts, :timeout) == operation_timeout
     assert Keyword.get(xref_opts, :resource_profile) == :intensive
 
@@ -1907,7 +1960,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(test_opts, :resource_profile) == :intensive
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
 
-    assert_receive {:mix_invocation, ^worktree, ["test", "--", "apps/alpha/test/alpha_test.exs"],
+    assert_receive {:mix_invocation, ^worktree,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"],
                     test_run_opts}
 
     assert Keyword.get(test_run_opts, :timeout) == operation_timeout
@@ -1942,11 +1996,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           Agent.update(clock_agent, fn t -> t + 20_000 end)
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           Agent.update(clock_agent, fn t -> t + 20_000 end)
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
+        ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok, %{exit_code: 0, stdout: "test ok", stderr: "", timed_out: false}}
 
         other ->
@@ -1973,14 +2027,15 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert_receive {:mix_invocation, @compile_argv, dev_opts, 0}
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
-    assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts, 20_000}
+    assert_receive {:mix_invocation, @xref_argv, _xref_opts, 20_000}
 
     assert_receive {:mix_invocation, @compile_argv, test_compile_opts, 40_000}
 
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
-                    60_000}
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"],
+                    test_opts, 60_000}
 
     assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end
@@ -2026,7 +2081,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
             {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
           end
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 1, stdout: "xref fail", stderr: "", timed_out: false}}
 
         other ->
@@ -2043,7 +2098,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert xref_fail.test["status"] == "skipped"
     assert xref_fail.test_compile["reason"] == "xref_failed"
     assert_receive {:mix_invocation, @compile_argv, _}
-    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, @xref_argv, _}
     refute_received {:mix_invocation, _, _}
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
@@ -2057,7 +2112,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
             {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
           end
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
         ["test" | _] ->
@@ -2080,7 +2135,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, @compile_argv, dev_opts}
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
-    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, @xref_argv, _}
     assert_receive {:mix_invocation, @compile_argv, test_opts}
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
     refute_received {:mix_invocation, _, _}
@@ -2116,13 +2171,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch1.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch1.paths ->
           {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
 
-        ["test", "--" | batch_paths] when batch_paths == batch2.paths ->
+        ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == batch2.paths ->
           {:error, :operation_deadline_exceeded}
 
         other ->
@@ -2144,12 +2199,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert String.starts_with?(label, "batch-")
 
     assert_receive {:mix_invocation, @compile_argv, _}
-    assert_receive {:mix_invocation, ["xref", "graph"], _}
+    assert_receive {:mix_invocation, @xref_argv, _}
     assert_receive {:mix_invocation, @compile_argv, test_compile_opts}
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
-    assert_receive {:mix_invocation, ["test", "--" | r1], _}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | r1], _}
     assert r1 == batch1.paths
-    assert_receive {:mix_invocation, ["test", "--" | r2], _}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | r2], _}
     assert r2 == batch2.paths
     refute_received {:mix_invocation, _, _}
   end
@@ -2186,6 +2241,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     expected_batch = [
       "test",
+      "--no-deps-check",
       "--",
       "apps/alpha/test/a_test.exs",
       "apps/alpha/test/nested/m_test.exs",
@@ -2194,7 +2250,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ^expected_batch, opts1}
     assert Keyword.get(opts1, :timeout) == launchable_op_ms()
-    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/helper.exs"], _}
+
+    refute_received {:mix_invocation,
+                     ["test", "--no-deps-check", "--", "apps/alpha/test/helper.exs"], _}
+
     refute_received {:mix_invocation, _, _}
   end
 
@@ -2216,7 +2275,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
 
     assert Core.max_test_batch_argv_files() ==
-             Arbor.Shell.spawn_capable_max_command_args() - 2
+             Arbor.Shell.spawn_capable_max_command_args() - 3
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
@@ -2227,13 +2286,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["passed"]
 
     for batch <- batches do
-      assert_receive {:mix_invocation, ["test", "--" | received], opts}
+      assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], opts}
       assert received == batch.paths
       assert length(received) == batch.count
       assert length(received) <= Core.max_test_batch_files()
       assert length(received) <= Core.max_test_batch_runtime_files()
       # Full argv remains inside Shell's closed admission ceiling.
-      assert length(["test", "--" | received]) <=
+      assert length(["test", "--no-deps-check", "--" | received]) <=
                Arbor.Shell.spawn_capable_max_command_args()
 
       arg_bytes = Enum.reduce(received, 0, fn p, acc -> acc + byte_size(p) + 1 end)
@@ -2267,11 +2326,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     # App root boundary forces separate per-app batches.
     assert_receive {:mix_invocation, alpha_args, opts_a}
-    assert alpha_args == ["test", "--", "apps/alpha/test/alpha_test.exs"]
+    assert alpha_args == ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]
     assert Keyword.get(opts_a, :timeout) == launchable_op_ms()
 
     assert_receive {:mix_invocation, beta_args, opts_b}
-    assert beta_args == ["test", "--", "apps/beta/test/beta_test.exs"]
+    assert beta_args == ["test", "--no-deps-check", "--", "apps/beta/test/beta_test.exs"]
     assert Keyword.get(opts_b, :timeout) == launchable_op_ms()
 
     refute_received {:mix_invocation, _, _}
@@ -2300,8 +2359,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert check["passed"]
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
-    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/_generated_test.exs"], _}
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/kept_test.exs"], _}
+
+    refute_received {:mix_invocation,
+                     ["test", "--no-deps-check", "--", "apps/alpha/test/_generated_test.exs"], _}
+
     refute_received {:mix_invocation, _, _}
   end
 
@@ -2333,8 +2396,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert check["passed"]
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/kept_test.exs"], _}
-    refute_received {:mix_invocation, ["test", "--", "apps/alpha/test/deleted_test.exs"], _}
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/kept_test.exs"], _}
+
+    refute_received {:mix_invocation,
+                     ["test", "--no-deps-check", "--", "apps/alpha/test/deleted_test.exs"], _}
+
     refute_received {:mix_invocation, _, _}
   end
 
@@ -2366,7 +2433,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         other ->
@@ -2394,7 +2461,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
         @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         other ->
@@ -2433,11 +2500,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
           Agent.update(clock_agent, fn t -> t + 50_000 end)
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
-        ["xref", "graph"] ->
+        @xref_argv ->
           Agent.update(clock_agent, fn t -> t + 50_000 end)
           {:ok, %{exit_code: 0, stdout: "xref ok", stderr: "", timed_out: false}}
 
-        ["test", "--", "apps/alpha/test/alpha_test.exs"] ->
+        ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"] ->
           {:ok, %{exit_code: 0, stdout: "test ok", stderr: "", timed_out: false}}
 
         other ->
@@ -2458,8 +2525,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert checks.test["passed"]
 
-    assert_receive {:mix_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"], test_opts,
-                    _}
+    assert_receive {:mix_invocation,
+                    ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"],
+                    test_opts, _}
 
     assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
   end

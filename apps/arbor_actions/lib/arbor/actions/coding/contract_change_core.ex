@@ -35,13 +35,20 @@ defmodule Arbor.Actions.Coding.ContractChange.Core do
   @sha256_re ~r/\A[0-9a-f]{64}\z/
   @excerpt_omission_marker "\n...[omitted]...\n"
   @utf8_replacement <<0xEF, 0xBF, 0xBD>>
-  @test_argv_prefix ["test", "--warnings-as-errors", "--"]
+  @test_argv_prefix ["test", "--no-deps-check", "--warnings-as-errors", "--"]
   @preflight_argv [
     "do",
+    "deps.compile",
+    "--skip-umbrella-children",
+    "+",
     "compile",
-    "--warnings-as-errors,",
+    "--no-deps-check",
+    "--warnings-as-errors",
+    "+",
     "xref",
-    "graph,",
+    "graph",
+    "--no-deps-check",
+    "+",
     "arbor.contracts.census",
     "--fail-on-violation"
   ]

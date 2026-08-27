@@ -972,13 +972,15 @@ and verified 2026-08-27 with 1,634 Security tests passing).
 
 <!-- applied-learning: digest-pinned-validation-compiles-must-skip-mix-lock-git-checks -->
 <a id="applied-learning-digest-pinned-validation-compiles-must-skip-mix-lock-git-checks"></a>
-**Digest-pinned validation compiles must skip Mix lock git checks.** The
-validation image has no `git`, and baseline `deps/<git-dep>` trees have no
-`.git`, so `mix compile` shells out to `Mix.SCM.Git.get_rev_info/0` and dies
-`:enoent`. Deps are already digest-pinned; emit `--no-deps-check` from
-`Arbor.Actions.Mix.compile_argv/1` and admit that exact argv in the reviewed
-Mix shapes. Installing git in the image is belt-and-braces, not the fix (found
-2026-08-27, V7-15, Linux factory run 11n).
+**Cold digest-pinned validation builds must bootstrap dependencies without SCM
+lock checks.** A bare `mix compile --no-deps-check` avoids Git lock inspection,
+but it does not populate an empty private `MIX_BUILD_PATH`; project compilers such
+as `compile.boundary` are then unavailable. In one exact `mix do` child, run
+`deps.compile --skip-umbrella-children` followed by
+`compile --no-deps-check`, then retain `--no-deps-check` on xref and test children
+that reuse the build. Pin these argv shapes in containment and prove with a cold
+fixture that a dependency-provided compiler loads while a fake `git` is never
+invoked (found 2026-08-27 during P1B-2A Linux factory replay).
 
 <!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
 <a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>

@@ -1,7 +1,7 @@
 defmodule Arbor.Actions.MixCompileArgvTest do
   @moduledoc """
-  Pins the reviewed Mix compile argv and proves `--no-deps-check` lets a
-  git-dep lock compile when `git` is absent from PATH.
+  Pins the reviewed cold-build Mix compile argv and proves it loads a
+  dependency-provided compiler without consulting Git lock state.
   """
 
   use ExUnit.Case, async: false
@@ -11,18 +11,20 @@ defmodule Arbor.Actions.MixCompileArgvTest do
   @moduletag :fast
   @moduletag timeout: 30_000
 
-  test "compile argv always includes --no-deps-check" do
-    assert MixAction.compile_argv() == ["compile", "--no-deps-check"]
-    assert MixAction.compile_argv(%{}) == ["compile", "--no-deps-check"]
+  test "compile argv bootstraps attested dependencies before no-deps-check compile" do
+    prefix = ["do", "deps.compile", "--skip-umbrella-children", "+"]
+
+    assert MixAction.compile_argv() == prefix ++ ["compile", "--no-deps-check"]
+    assert MixAction.compile_argv(%{}) == prefix ++ ["compile", "--no-deps-check"]
 
     assert MixAction.compile_argv(%{warnings_as_errors: false}) ==
-             ["compile", "--no-deps-check"]
+             prefix ++ ["compile", "--no-deps-check"]
 
     assert MixAction.compile_argv(%{warnings_as_errors: true}) ==
-             ["compile", "--no-deps-check", "--warnings-as-errors"]
+             prefix ++ ["compile", "--no-deps-check", "--warnings-as-errors"]
   end
 
-  test "a mix.lock git dep compiles without git when --no-deps-check is set" do
+  test "cold compile loads a dependency compiler without invoking git" do
     {elixir_root, 0} = System.cmd("mise", ["where", "elixir"], stderr_to_stdout: true)
     {erlang_root, 0} = System.cmd("mise", ["where", "erlang"], stderr_to_stdout: true)
     elixir_root = String.trim(elixir_root)
@@ -43,6 +45,7 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     stub_bin = Path.join(root, "bin")
     File.mkdir_p!(Path.join(project, "lib"))
     File.mkdir_p!(Path.join(project, "deps/jido_sandbox"))
+    File.mkdir_p!(Path.join(project, "deps/boundary/lib/mix/tasks/compile"))
     File.mkdir_p!(stub_bin)
 
     File.write!(Path.join(project, "mix.exs"), """
@@ -50,11 +53,20 @@ defmodule Arbor.Actions.MixCompileArgvTest do
       use Mix.Project
 
       def project do
-        [app: :git_dep_fixture, version: "0.0.1", elixir: "~> 1.14", deps: deps()]
+        [
+          app: :git_dep_fixture,
+          version: "0.0.1",
+          elixir: "~> 1.14",
+          compilers: [:fixture_boundary] ++ Mix.compilers(),
+          deps: deps()
+        ]
       end
 
       defp deps do
-        [{:jido_sandbox, git: "https://example.invalid/jido_sandbox.git"}]
+        [
+          {:boundary, path: "deps/boundary", runtime: false},
+          {:jido_sandbox, git: "https://example.invalid/jido_sandbox.git"}
+        ]
       end
     end
     """)
@@ -80,6 +92,28 @@ defmodule Arbor.Actions.MixCompileArgvTest do
       end
     end
     """)
+
+    File.write!(Path.join(project, "deps/boundary/mix.exs"), """
+    defmodule BoundaryFixture.MixProject do
+      use Mix.Project
+
+      def project do
+        [app: :boundary, version: "0.0.1"]
+      end
+    end
+    """)
+
+    File.write!(
+      Path.join(project, "deps/boundary/lib/mix/tasks/compile/fixture_boundary.ex"),
+      """
+      defmodule Mix.Tasks.Compile.FixtureBoundary do
+        use Mix.Task.Compiler
+
+        @impl true
+        def run(_args), do: {:ok, []}
+      end
+      """
+    )
 
     git_stub = Path.join(stub_bin, "git")
     git_marker = Path.join(root, "git-invoked")

@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Mix do
 
   | Action | Description |
   |--------|-------------|
-  | `Compile` | Run `mix compile --no-deps-check` (optionally with warnings-as-errors) |
+  | `Compile` | Compile attested dependencies, then run `mix compile --no-deps-check` |
   | `Test` | Run `mix test` (optionally with paths/args) |
   | `Quality` | Run `mix quality` (format-check + credo) |
   | `Format` | Run `mix format` (write or check-only) |
@@ -137,14 +137,30 @@ defmodule Arbor.Actions.Mix do
   @doc false
   @spec compile_argv(map()) :: [String.t()]
   def compile_argv(params \\ %{}) when is_map(params) do
-    args = ["compile", "--no-deps-check"]
+    compile_args = ["compile", "--no-deps-check"]
 
-    if params[:warnings_as_errors] do
-      args ++ ["--warnings-as-errors"]
-    else
-      args
-    end
+    compile_args =
+      if params[:warnings_as_errors] do
+        compile_args ++ ["--warnings-as-errors"]
+      else
+        compile_args
+      end
+
+    # A validation resource starts with an empty MIX_BUILD_PATH. Compile every
+    # available attested dependency without running SCM lock-status checks, then
+    # compile the project in the same Mix VM so dependency-provided compiler
+    # tasks (for example compile.boundary) are already loaded.
+    ["do", "deps.compile", "--skip-umbrella-children", "+" | compile_args]
   end
+
+  @doc false
+  @spec xref_graph_argv() :: [String.t()]
+  def xref_graph_argv, do: ["xref", "graph", "--no-deps-check"]
+
+  @doc false
+  @spec test_argv([String.t()]) :: [String.t()]
+  def test_argv(paths) when is_list(paths),
+    do: ["test", "--no-deps-check", "--" | paths]
 
   @doc false
   def module_owned_env_keys, do: @module_owned_env_keys
@@ -3562,13 +3578,14 @@ defmodule Arbor.Actions.Mix do
     |------|------|----------|-------------|
     | `path` | string | yes | Project root |
     | `workspace_id` | string | yes | Opaque workspace lease for owner-scoped validation resources |
-    | `warnings_as_errors` | boolean | no | Pass `--warnings-as-errors` after `--no-deps-check` |
+    | `warnings_as_errors` | boolean | no | Pass `--warnings-as-errors` to the project compile |
     | `timeout` | integer | no | Command timeout in ms (default 5 min) |
     """
 
     use Jido.Action,
       name: "mix_compile",
-      description: "Run `mix compile --no-deps-check` in a project directory",
+      description:
+        "Compile attested dependencies, then run `mix compile --no-deps-check` in a project directory",
       category: "mix",
       tags: ["mix", "compile", "elixir"],
       schema: [

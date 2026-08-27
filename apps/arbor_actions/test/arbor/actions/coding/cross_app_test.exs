@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   alias Arbor.Actions.Coding.CrossApp.Validate
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Actions.TestLinuxBaselineMaterializer
 
   @moduletag :slow
@@ -294,7 +295,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
     # Mutation during the aggregate validation window fails closed.
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, _opts ->
-      if args == ["compile", "--no-deps-check", "--warnings-as-errors"] do
+      if args == MixAction.compile_argv(%{warnings_as_errors: true}) do
         File.write!(Path.join(path, "validation_mutated.txt"), "mutated during validation\n")
       end
 

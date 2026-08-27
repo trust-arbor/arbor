@@ -21,9 +21,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   focused downstream closure when topology is unchanged). Then runs (fail-closed,
   later stages skipped on earlier failure):
 
-  1. umbrella compile with `--no-deps-check --warnings-as-errors` (dev environment)
-  2. xref graph evidence (does not claim zero cycles)
-  3. explicit `MIX_ENV=test` compile with `--no-deps-check --warnings-as-errors`
+  1. compile attested dependencies, then umbrella compile with
+     `--no-deps-check --warnings-as-errors` (dev environment)
+  2. xref graph evidence with `--no-deps-check` (does not claim zero cycles)
+  3. repeat the dependency bootstrap and warning-strict compile under
+     explicit `MIX_ENV=test`
   4. focused per-file tests under an aggregate monotonic budget that starts
      only after the test-environment compile succeeds. Batches run
      sequentially under one shared absolute deadline. Each Mix child is
@@ -42,7 +44,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   use Jido.Action,
     name: "coding_cross_app_validate",
     description:
-      "Validate compile, xref, MIX_ENV=test compile, and downstream tests for the changed cross-app surface",
+      "Validate dependency-bootstrapped compile, xref, MIX_ENV=test compile, and downstream tests for the changed cross-app surface",
     category: "coding",
     tags: ["coding", "cross_app", "compile", "xref", "test", "umbrella"],
     schema: [

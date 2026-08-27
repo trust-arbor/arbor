@@ -16,9 +16,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   later worktree read (ABA / changed-path skew defense). The same tree OID is
   the validation before-binding and evidence `validated_tree_oid`.
 
-  The test-environment compile is an explicit
-  `mix compile --no-deps-check --warnings-as-errors` under owner-controlled
-  `MIX_ENV=test`. The aggregate app-test monotonic deadline
+  Each compile is one exact `mix do` invocation: first
+  `deps.compile --skip-umbrella-children`, then
+  `compile --no-deps-check --warnings-as-errors`. This initializes the fresh
+  private build path without asking Mix to inspect SCM locks. The
+  test-environment invocation runs under owner-controlled `MIX_ENV=test`.
+  Xref and test children also pass `--no-deps-check`. The aggregate app-test monotonic deadline
   starts only after that stage succeeds, so cold test-env compilation cannot
   consume the full test-stage budget.
 
@@ -28,10 +31,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   selected root, every listed file, and intermediate path components are
   lstat'd without following symlinks. Verified paths are then partitioned into
   pure Core batches (at most 5 exact test files per child, Shell argv ceiling
-  minus two fixed args, and <=64 KiB of path+separator argument bytes) so the
+  minus three fixed args, and <=64 KiB of path+separator argument bytes) so the
   complete inventory is preserved across sequential children without excluding
   slow or integration-tagged files. Each batch runs as one argv-safe
-  `mix test -- <exact paths...>` under
+  `mix test --no-deps-check -- <exact paths...>` under
   `min(per-operation intensive ceiling, remaining aggregate stage budget)`.
   Never passes raw directories or shell-joined globs.
   """
@@ -705,7 +708,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     # compile-connected cycles. Zero-cycle validation is not claimed.
     case run_bounded_mix(
            path,
-           ["xref", "graph"],
+           MixAction.xref_graph_argv(),
            [validation_resource: resource],
            timeout,
            validation_deadline,
@@ -899,7 +902,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           end)
 
         # Exact multi-file batch argv — never shell-joined strings or directories.
-        case run_mix(worktree_path, ["test", "--" | attempt.paths], mix_opts) do
+        case run_mix(worktree_path, MixAction.test_argv(attempt.paths), mix_opts) do
           {:ok, result} ->
             # Re-check shared deadline immediately after every child, including the final one.
             remaining_after = deadline - monotonic_ms()

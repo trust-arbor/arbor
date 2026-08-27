@@ -13,10 +13,17 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
   @worktree "/private/tmp/arbor-val/worktree"
   @contract_change_preflight_argv [
     "do",
+    "deps.compile",
+    "--skip-umbrella-children",
+    "+",
     "compile",
-    "--warnings-as-errors,",
+    "--no-deps-check",
+    "--warnings-as-errors",
+    "+",
     "xref",
-    "graph,",
+    "graph",
+    "--no-deps-check",
+    "+",
     "arbor.contracts.census",
     "--fail-on-violation"
   ]
@@ -42,6 +49,7 @@ defmodule Arbor.Actions.Coding.ContractChangeContainmentIntegrationTest do
 
     assert argv == [
              "test",
+             "--no-deps-check",
              "--warnings-as-errors",
              "--",
              "apps/arbor_kernel/test/arbor/contracts/admission_test.exs",

@@ -143,13 +143,36 @@ defmodule Arbor.Shell.OciExecutionCore do
   @name_re ~r/\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/
   @xref_formats MapSet.new(["stats", "cycles", "linked"])
 
-  # Exact ContractChange preflight only. Mix `do` commas stay inside tokens.
+  # Exact cold-build compile forms. `deps.compile` intentionally has no
+  # dependency names: Mix compiles every available attested dependency while
+  # skipping umbrella children, without invoking SCM lock-status checks. The
+  # second task stays `--no-deps-check` so the Git executable is unnecessary.
+  @dependency_bootstrapped_compile_argv [
+    "do",
+    "deps.compile",
+    "--skip-umbrella-children",
+    "+",
+    "compile",
+    "--no-deps-check"
+  ]
+  @dependency_bootstrapped_strict_compile_argv @dependency_bootstrapped_compile_argv ++
+                                                 ["--warnings-as-errors"]
+
+  # Exact ContractChange cold-build preflight only. `+` separators keep every
+  # task in one Mix VM without the deprecated comma syntax.
   @contract_change_preflight_argv [
     "do",
+    "deps.compile",
+    "--skip-umbrella-children",
+    "+",
     "compile",
-    "--warnings-as-errors,",
+    "--no-deps-check",
+    "--warnings-as-errors",
+    "+",
     "xref",
-    "graph,",
+    "graph",
+    "--no-deps-check",
+    "+",
     "arbor.contracts.census",
     "--fail-on-violation"
   ]
@@ -1029,9 +1052,17 @@ defmodule Arbor.Shell.OciExecutionCore do
   defp match_reviewed_mix_shape(["compile", "--no-deps-check", "--warnings-as-errors"]),
     do: {:ok, ["compile", "--no-deps-check", "--warnings-as-errors"]}
 
+  defp match_reviewed_mix_shape(args)
+       when args == @dependency_bootstrapped_compile_argv or
+              args == @dependency_bootstrapped_strict_compile_argv,
+       do: {:ok, args}
+
   defp match_reviewed_mix_shape(["quality"]), do: {:ok, ["quality"]}
 
   defp match_reviewed_mix_shape(["xref", "graph"]), do: {:ok, ["xref", "graph"]}
+
+  defp match_reviewed_mix_shape(["xref", "graph", "--no-deps-check"]),
+    do: {:ok, ["xref", "graph", "--no-deps-check"]}
 
   defp match_reviewed_mix_shape(["xref", "graph", "--format", format])
        when is_binary(format) do
@@ -1056,11 +1087,13 @@ defmodule Arbor.Shell.OciExecutionCore do
 
   defp match_reviewed_mix_shape(["run" | _rest]), do: {:error, :unsupported_mix_command}
 
-  # Exact ContractChange test child only. Ordered prefix is
-  # test, --warnings-as-errors, -- plus one or more relative paths.
+  # Exact ContractChange test child only. Ordered prefix is test,
+  # --no-deps-check, --warnings-as-errors, -- plus relative paths.
   # Reuse validate_test_paths/1. Do not teach parse_test_args this flag.
   # Must precede the generic test parser. Preserve caller argv bytes.
-  defp match_reviewed_mix_shape(["test", "--warnings-as-errors", "--" | paths] = args) do
+  defp match_reviewed_mix_shape(
+         ["test", "--no-deps-check", "--warnings-as-errors", "--" | paths] = args
+       ) do
     with {:ok, _validated_paths} <- validate_test_paths(paths) do
       {:ok, args}
     end
@@ -1074,11 +1107,12 @@ defmodule Arbor.Shell.OciExecutionCore do
     parse_format_args(rest, [])
   end
 
-  # Exact ContractChange preflight only. Mix `do` commas stay inside tokens.
+  # Exact ContractChange preflight only. Mix `do` separators are fixed tokens.
   # Do not parse generic `mix do`. Whole-list == is structural/value equality:
   # runtime-built binaries with these exact bytes remain admitted.
   defp match_reviewed_mix_shape(args)
-       when is_list(args) and length(args) == 7 and args == @contract_change_preflight_argv do
+       when is_list(args) and length(args) == length(@contract_change_preflight_argv) and
+              args == @contract_change_preflight_argv do
     {:ok, @contract_change_preflight_argv}
   end
 
@@ -1109,6 +1143,12 @@ defmodule Arbor.Shell.OciExecutionCore do
     case rest do
       [] ->
         {:ok, ["test" | Enum.reverse(acc)]}
+
+      ["--no-deps-check" | more] when acc == [] ->
+        parse_test_args(more, ["--no-deps-check"])
+
+      ["--no-deps-check" | _more] ->
+        {:error, :reordered_test_flags}
 
       ["--only", tag | more] ->
         if "--only" in acc or has_flag?(acc, "--only") do

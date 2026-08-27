@@ -8597,14 +8597,14 @@
       "source_ordinal": 697,
       "source_kind": "post-migration",
       "slug": "digest-pinned-validation-compiles-must-skip-mix-lock-git-checks",
-      "title": "Digest-pinned validation compiles must skip Mix lock git checks.",
+      "title": "Cold digest-pinned validation builds must bootstrap dependencies without SCM lock checks.",
       "topic": "testing-live-runtime",
       "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
       "anchor": "applied-learning-digest-pinned-validation-compiles-must-skip-mix-lock-git-checks",
       "source_date": "2026-08-27",
-      "source_incident": "found 2026-08-27, V7-15, Linux factory run 11n",
+      "source_incident": "found 2026-08-27 during P1B-2A Linux factory replay",
       "always_loaded": false,
-      "content_sha256": "c41bd8bcb88b19fb73f8ef5fbf209ca296a46364a0e52060b0ac308051670b0a"
+      "content_sha256": "16880b4f60ab726766d05247865912df2e80dd5e3adc09587d7c04a791c968a4"
     },
     {
       "source_ordinal": 698,

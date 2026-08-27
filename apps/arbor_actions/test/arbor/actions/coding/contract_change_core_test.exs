@@ -293,18 +293,26 @@ defmodule Arbor.Actions.Coding.ContractChange.CoreTest do
   end
 
   describe "preflight argv" do
-    test "is owner-owned Mix.do compile/xref/census" do
+    test "is owner-owned cold-build Mix.do compile/xref/census" do
       assert Core.preflight_argv() == [
                "do",
+               "deps.compile",
+               "--skip-umbrella-children",
+               "+",
                "compile",
-               "--warnings-as-errors,",
+               "--no-deps-check",
+               "--warnings-as-errors",
+               "+",
                "xref",
-               "graph,",
+               "graph",
+               "--no-deps-check",
+               "+",
                "arbor.contracts.census",
                "--fail-on-violation"
              ]
 
-      assert Core.test_argv_prefix() == ["test", "--warnings-as-errors", "--"]
+      assert Core.test_argv_prefix() ==
+               ["test", "--no-deps-check", "--warnings-as-errors", "--"]
 
       assert {:ok, args} = Core.test_argv(@kernel_suite)
       assert args == Core.test_argv_prefix() ++ Enum.sort(@kernel_suite)

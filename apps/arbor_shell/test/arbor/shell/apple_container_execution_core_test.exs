@@ -186,6 +186,37 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == args
     end
 
+    test "dependency-bootstrapped warning-strict compile" do
+      args = [
+        "do",
+        "deps.compile",
+        "--skip-umbrella-children",
+        "+",
+        "compile",
+        "--no-deps-check",
+        "--warnings-as-errors"
+      ]
+
+      assert {:ok, spec} = Core.new(valid_request(%{args: args}))
+      assert spec.plan.command_args == args
+    end
+
+    @tag :security_regression
+    test "dependency bootstrap remains an exact reviewed compile form" do
+      suffix = ["+", "compile", "--no-deps-check", "--warnings-as-errors"]
+
+      near_misses = [
+        ["do", "deps.compile", "--force", "--skip-umbrella-children" | suffix],
+        ["do", "deps.compile", "--skip-umbrella-children", "boundary" | suffix],
+        ["do", "deps.get", "--skip-umbrella-children" | suffix],
+        ["do", "deps.compile", "--skip-umbrella-children", "+", "compile"]
+      ]
+
+      for args <- near_misses do
+        assert {:error, :unsupported_mix_command} = Core.new(valid_request(%{args: args}))
+      end
+    end
+
     test "quality" do
       assert {:ok, spec} = Core.new(valid_request(%{args: ["quality"]}))
       assert spec.plan.command_args == ["quality"]
@@ -194,6 +225,30 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     test "xref graph" do
       assert {:ok, spec} = Core.new(valid_request(%{args: ["xref", "graph"]}))
       assert spec.plan.command_args == ["xref", "graph"]
+    end
+
+    test "xref graph and exact tests may skip dependency lock checks" do
+      xref = ["xref", "graph", "--no-deps-check"]
+      test = ["test", "--no-deps-check", "--", "apps/arbor_kernel/test/example_test.exs"]
+
+      assert {:ok, xref_spec} = Core.new(valid_request(%{args: xref}))
+      assert xref_spec.plan.command_args == xref
+      assert {:ok, test_spec} = Core.new(valid_request(%{args: test}))
+      assert test_spec.plan.command_args == test
+
+      assert {:error, :reordered_test_flags} =
+               Core.new(
+                 valid_request(%{
+                   args: [
+                     "test",
+                     "--seed",
+                     "0",
+                     "--no-deps-check",
+                     "--",
+                     "apps/arbor_kernel/test/example_test.exs"
+                   ]
+                 })
+               )
     end
 
     test "xref graph --format stats|cycles|linked" do
@@ -1185,10 +1240,17 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
   describe "public spawn facade: ContractChange preflight containment" do
     @contract_change_preflight_argv [
       "do",
+      "deps.compile",
+      "--skip-umbrella-children",
+      "+",
       "compile",
-      "--warnings-as-errors,",
+      "--no-deps-check",
+      "--warnings-as-errors",
+      "+",
       "xref",
-      "graph,",
+      "graph",
+      "--no-deps-check",
+      "+",
       "arbor.contracts.census",
       "--fail-on-violation"
     ]
@@ -1207,36 +1269,13 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     test "security regression: ContractChange mix do near-misses stay unsupported_mix_command" do
       near_misses = [
         {:deletion, Enum.drop(@contract_change_preflight_argv, -1)},
-        {:substitution,
-         [
-           "do",
-           "test",
-           "--warnings-as-errors,",
-           "xref",
-           "graph,",
-           "arbor.contracts.census",
-           "--fail-on-violation"
-         ]},
-        {:comma_encoding,
-         [
-           "do",
-           "compile",
-           "--warnings-as-errors",
-           "xref",
-           "graph",
-           "arbor.contracts.census",
-           "--fail-on-violation"
-         ]},
-        {:reordering,
-         [
-           "do",
-           "xref",
-           "graph,",
-           "compile",
-           "--warnings-as-errors,",
-           "arbor.contracts.census",
-           "--fail-on-violation"
-         ]},
+        {:substitution, List.replace_at(@contract_change_preflight_argv, 1, "deps.get")},
+        {:separator_encoding, List.replace_at(@contract_change_preflight_argv, 3, ",")},
+        {:named_dependency, List.insert_at(@contract_change_preflight_argv, 3, "boundary")},
+        {:forced_dependency_compile,
+         List.insert_at(@contract_change_preflight_argv, 3, "--force")},
+        {:missing_compile_no_deps_check,
+         List.delete(@contract_change_preflight_argv, "--no-deps-check")},
         {:extension, @contract_change_preflight_argv ++ ["test"]},
         {:forbidden_generalization, ["do", "compile"]}
       ]
@@ -1253,12 +1292,14 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
     @contract_change_test_path "apps/arbor_kernel/test/arbor/contracts/admission_test.exs"
     @contract_change_test_argv [
       "test",
+      "--no-deps-check",
       "--warnings-as-errors",
       "--",
       @contract_change_test_path
     ]
     @contract_change_test_argv_two_paths [
       "test",
+      "--no-deps-check",
       "--warnings-as-errors",
       "--",
       @contract_change_test_path,
@@ -1296,16 +1337,30 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       path = @contract_change_test_path
 
       near_misses = [
-        {:deletion, ["test", "--warnings-as-errors", path], :unsupported_mix_command},
-        {:reordering, ["test", "--", path, "--warnings-as-errors"], :option_shaped_test_path},
-        {:duplicate, ["test", "--warnings-as-errors", "--warnings-as-errors", "--", path],
+        {:deletion, ["test", "--no-deps-check", "--warnings-as-errors", path],
          :unsupported_mix_command},
-        {:option_shaped, ["test", "--warnings-as-errors", "--", "--trace"],
+        {:missing_no_deps_check, ["test", "--warnings-as-errors", "--", path],
+         :unsupported_mix_command},
+        {:reordering, ["test", "--warnings-as-errors", "--no-deps-check", "--", path],
+         :unsupported_mix_command},
+        {:duplicate,
+         [
+           "test",
+           "--no-deps-check",
+           "--warnings-as-errors",
+           "--warnings-as-errors",
+           "--",
+           path
+         ], :unsupported_mix_command},
+        {:option_shaped, ["test", "--no-deps-check", "--warnings-as-errors", "--", "--trace"],
          :option_shaped_test_path},
-        {:empty_path, ["test", "--warnings-as-errors", "--"], :empty_test_paths},
-        {:flag_extension, ["test", "--warnings-as-errors", "--trace", "--", path],
+        {:empty_path, ["test", "--no-deps-check", "--warnings-as-errors", "--"],
+         :empty_test_paths},
+        {:flag_extension,
+         ["test", "--no-deps-check", "--warnings-as-errors", "--trace", "--", path],
          :unsupported_mix_command},
-        {:comma_encoding, ["test", "--warnings-as-errors,", "--", path], :unsupported_mix_command}
+        {:comma_encoding, ["test", "--no-deps-check", "--warnings-as-errors,", "--", path],
+         :unsupported_mix_command}
       ]
 
       for {kind, args, reason} <- near_misses do

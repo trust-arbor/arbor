@@ -1223,7 +1223,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Core.max_test_batch_runtime_files() == 5
 
     assert Core.max_test_batch_argv_files() ==
-             Arbor.Shell.spawn_capable_max_command_args() - 2
+             Arbor.Shell.spawn_capable_max_command_args() - 3
 
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
@@ -1392,7 +1392,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
         arg_bytes = Enum.reduce(b.paths, 0, fn p, acc -> acc + byte_size(p) + 1 end)
         assert length(b.paths) <= Core.max_test_batch_files()
         assert length(b.paths) <= Core.max_test_batch_runtime_files()
-        assert length(["test", "--" | b.paths]) <= Arbor.Shell.spawn_capable_max_command_args()
+
+        assert length(["test", "--no-deps-check", "--" | b.paths]) <=
+                 Arbor.Shell.spawn_capable_max_command_args()
+
         assert arg_bytes <= Core.max_test_batch_arg_bytes()
         assert b.total == expected_batches
         assert b.label == "batch-#{b.index}-of-#{b.total}-n#{b.count}-#{b.inventory_sha256}"

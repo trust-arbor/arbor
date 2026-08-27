@@ -66,7 +66,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # filtering / dedup / lstat (ignored/generated paths still consume this bound).
   @max_git_inventory_entries 8_000
   # Closed Mix argv batch limits after exact-file normalization/lstat. Each
-  # invocation prepends `["test", "--"]`. Path slots are the minimum of:
+  # invocation prepends `["test", "--no-deps-check", "--"]`. Path slots are
+  # the minimum of:
   #   * Shell's public non-bypassable argv ceiling minus fixed args
   #   * a reviewed runtime batch cap (at most 5 exact test files per child)
   # so multi-file suites amortize container startup without exhausting the
@@ -78,7 +79,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # admitted inventory. The sum of each path's UTF-8 bytes plus one separator
   # byte must also stay under the byte ceiling. A single normalized path (max
   # 1024 bytes) always fits both bounds.
-  @test_batch_fixed_args 2
+  @test_batch_fixed_args 3
   @max_test_batch_runtime_files 5
   @max_test_batch_argv_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
   @max_test_batch_files min(@max_test_batch_runtime_files, @max_test_batch_argv_files)
