@@ -8563,9 +8563,9 @@
       "destination": ".claude/skills/applied-learning-acp-mcp.md",
       "anchor": "applied-learning-host-generated-grok-sandbox-profiles-in-runtime-grok-home",
       "source_date": "2026-08-26",
-      "source_incident": "found 2026-08-26, V7-13, task_13b256be6e742fb6bfe25c1d42c4ccd5",
+      "source_incident": "found 2026-08-26, V7-13, task_13b256be6e742fb6bfe25c1d42c4ccd5; inspect gate R7 2026-08-27",
       "always_loaded": false,
-      "content_sha256": "78c0354689a0467dcd46e2fbb26b89b4cbe3f9f66291aa4059776efa9d9a7934"
+      "content_sha256": "882fd5f680db0ecd99bcf1ddef85e0dd7587b334b8831b0ef202743dce6d4c0e"
     },
     {
       "source_ordinal": 695,

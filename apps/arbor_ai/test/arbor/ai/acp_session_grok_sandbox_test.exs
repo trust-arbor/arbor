@@ -72,14 +72,6 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
           send_signal(test_signal_pid(opts), {:grok_client_started, opts, self()})
           Process.sleep(:infinity)
 
-        :sandbox_unapplied ->
-          write_unapplied_sandbox_log(opts)
-
-          with {:ok, pid} <- Agent.start_link(fn -> %{opts: opts} end) do
-            send_signal(test_pid(pid), {:grok_client_started, opts, pid})
-            {:ok, pid}
-          end
-
         _ ->
           with {:ok, pid} <- Agent.start_link(fn -> %{opts: opts} end) do
             send_signal(test_pid(pid), {:grok_client_started, opts, pid})
@@ -163,21 +155,6 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       do: send(pid, message)
 
     defp send_signal(_pid, _message), do: :ok
-
-    defp write_unapplied_sandbox_log(opts) when is_list(opts) do
-      grok_home =
-        opts
-        |> Keyword.get(:env, [])
-        |> Map.new()
-        |> Map.get("GROK_HOME")
-
-      if is_binary(grok_home) and grok_home != "" do
-        File.write!(
-          Path.join(grok_home, "grok.log"),
-          "warning: sandbox could not be applied: Custom sandbox profile 'arbor-grok-strict-deadbeef' not found\n"
-        )
-      end
-    end
   end
 
   defp fixture_suffix do
@@ -340,6 +317,35 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         Application.delete_env(:arbor_ai, :acp_client_module)
       end
     end)
+  end
+
+  defp install_inspect_runner(fun) when is_function(fun, 1) do
+    previous = Application.get_env(:arbor_ai, :grok_sandbox_inspect)
+    Application.put_env(:arbor_ai, :grok_sandbox_inspect, fun)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:arbor_ai, :grok_sandbox_inspect, previous)
+      else
+        Application.delete_env(:arbor_ai, :grok_sandbox_inspect)
+      end
+    end)
+  end
+
+  defp unapplied_inspect_output(profile_name) when is_binary(profile_name) do
+    """
+    warning: sandbox could not be applied: Custom sandbox profile '#{profile_name}' not found. Define it in ~/.grok/sandbox.toml or .grok/sandbox.toml:
+
+    [profiles.#{profile_name}]
+    extends = "workspace"
+    read_only = ["/data"]
+
+    error: could not apply the '#{profile_name}' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.
+
+      Config Sources
+      └ User: (none)
+      └ Project: (none)
+    """
   end
 
   defp probe_client_opts(overrides) do
@@ -978,7 +984,44 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       refute File.dir?(Path.dirname(project_profile_path(worktree_root)))
     end
 
-    test "security regression: grok.log sandbox-not-applied fails closed even if the callback succeeds" do
+    test "security regression: inspect output with sandbox-not-applied fails closed before the callback" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      opts = grok_client_opts()
+      grok_home = grok_home_from_opts(opts)
+      expected_profile = expected_profile_name(canonical_repo_common_dir(repository_root))
+      test_pid = self()
+
+      File.write!(
+        Path.join(grok_home, "grok.log"),
+        "INFO sandbox_profile=Some(\"#{expected_profile}\")\n"
+      )
+
+      install_inspect_runner(fn request ->
+        send(test_pid, {:sandbox_inspect, request})
+        {unapplied_inspect_output(expected_profile), 0}
+      end)
+
+      assert {:ok, {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 opts,
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> flunk("callback must not run when inspect reports sandbox unapplied") end
+               )
+
+      assert_received {:sandbox_inspect, request}
+      assert request.command == "grok"
+      assert request.args == ["--sandbox", expected_profile, "inspect"]
+      assert request.cd == worktree_root
+      assert {"GROK_HOME", grok_home} in request.env
+      assert tail =~ "sandbox could not be applied"
+      refute File.exists?(project_profile_path(worktree_root))
+    end
+
+    test "security regression: grok.log sandbox-not-applied alone does not fail the launch" do
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
       opts = grok_client_opts()
@@ -989,18 +1032,36 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
         "warning: sandbox could not be applied: Custom sandbox profile 'arbor-grok-strict-deadbeef' not found\n"
       )
 
-      assert {:ok, {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}} =
+      assert {:ok, :callback_seen} =
                GrokSandbox.with_launch(
                  :grok,
                  opts,
                  worktree_root,
                  authority,
                  self(),
-                 fn _ -> :would_have_continued_unsandboxed end
+                 fn _ -> :callback_seen end
+               )
+    end
+
+    test "security regression: inspect without Config Sources fails closed" do
+      {repository_root, worktree_root} = create_linked_fixture!()
+      assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+
+      install_inspect_runner(fn _request ->
+        {"Environment\n  └ CWD: #{worktree_root}\n", 0}
+      end)
+
+      assert {:ok, {:error, {:grok_sandbox_inspect_incomplete, %{output_tail: tail}}}} =
+               GrokSandbox.with_launch(
+                 :grok,
+                 grok_client_opts(),
+                 worktree_root,
+                 authority,
+                 self(),
+                 fn _ -> flunk("callback must not run on incomplete inspect") end
                )
 
-      assert tail =~ "sandbox could not be applied"
-      refute File.exists?(project_profile_path(worktree_root))
+      refute tail =~ "Config Sources"
     end
 
     test "security regression: grok spawn errors keep a bounded grok.log tail" do
@@ -1147,17 +1208,24 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert :ok = AcpSession.close(session)
     end
 
-    test "security regression: a Linux launch whose grok.log says sandbox could not be applied fails the session" do
+    test "security regression: a Linux launch whose inspect output says sandbox could not be applied fails the session" do
       Process.flag(:trap_exit, true)
       install_client_module(ProbeAcpClient)
       {repository_root, worktree_root} = create_linked_fixture!()
       assert {:ok, authority} = GrokSandbox.bind(repository_root, worktree_root)
+      expected_profile = expected_profile_name(authority.common_dir)
+      test_pid = self()
+
+      install_inspect_runner(fn request ->
+        send(test_pid, {:sandbox_inspect, request})
+        {unapplied_inspect_output(expected_profile), 0}
+      end)
 
       assert {:ok, session} =
                AcpSession.start_link(
                  provider: :grok,
                  workspace: {:directory, worktree_root},
-                 client_opts: probe_client_opts(test_pid: self(), start_mode: :sandbox_unapplied),
+                 client_opts: probe_client_opts(test_pid: self()),
                  grok_sandbox_authority: authority,
                  timeout: 2_000
                )
@@ -1165,7 +1233,18 @@ defmodule Arbor.AI.AcpSession.GrokSandboxTest do
       assert {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}} =
                AcpSession.await_ready(session, timeout: 2_000)
 
+      assert_receive {:sandbox_inspect, request}, 1_000
+      assert request.command == "grok"
+      assert request.args == ["--sandbox", expected_profile, "inspect"]
+      assert request.cd == Path.expand(worktree_root)
+
+      assert Enum.any?(request.env, fn {key, value} ->
+               key == "GROK_HOME" and is_binary(value) and value != ""
+             end)
+
+      assert is_binary(tail)
       assert tail =~ "sandbox could not be applied"
+      refute_receive {:grok_client_started, _, _}
       refute File.exists?(project_profile_path(worktree_root))
       assert :ok = AcpSession.close(session)
     end

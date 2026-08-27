@@ -70,9 +70,15 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @max_metadata_bytes 4_096
   @max_profile_bytes 65_536
   @max_log_tail_bytes 2_048
+  @max_inspect_bytes 65_536
+  # Stay inside Arbor.LLM.ExternalTerm's 256-byte binary bound so session
+  # startup_error keeps a plain string instead of {:truncated_binary, ...}.
+  @max_reason_tail_bytes 256
+  @inspect_timeout_ms 10_000
   @sandbox_unapplied_marker "sandbox could not be applied"
   @custom_profile_marker "custom sandbox profile"
   @profile_not_found_marker "not found"
+  @config_sources_marker "config sources"
   @ambient_mcp_relative_paths [
     [".grok", "config.toml"],
     [".mcp.json"],
@@ -196,8 +202,11 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @doc false
   @spec verify_launch_enforcement(atom(), keyword()) :: :ok | {:error, term()}
   def verify_launch_enforcement(:grok, client_opts) when is_list(client_opts) do
-    with {:ok, grok_home} <- effective_grok_home(client_opts) do
-      reject_unapplied_sandbox(grok_home)
+    # Fail-closed sandbox enforcement is the pre-launch `grok --sandbox inspect`
+    # in `with_launch/7`. grok writes "sandbox could not be applied" to stderr
+    # only; grok.log never carries that marker.
+    with {:ok, _grok_home} <- effective_grok_home(client_opts) do
+      :ok
     end
   end
 
@@ -206,18 +215,12 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   @doc false
   @spec wrap_launch_error(atom(), keyword(), term()) :: term()
   def wrap_launch_error(:grok, client_opts, reason) when is_list(client_opts) do
-    case verify_launch_enforcement(:grok, client_opts) do
-      {:error, sandbox_reason} ->
-        sandbox_reason
+    case effective_grok_home(client_opts) do
+      {:ok, grok_home} ->
+        attach_log_tail(reason, read_grok_log_tail(grok_home))
 
-      :ok ->
-        case effective_grok_home(client_opts) do
-          {:ok, grok_home} ->
-            attach_log_tail(reason, read_grok_log_tail(grok_home))
-
-          _other ->
-            reason
-        end
+      _other ->
+        reason
     end
   end
 
@@ -244,6 +247,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
           lease,
           fn -> :ok end,
           mcp_servers,
+          worktree_root,
           fun
         )
       end
@@ -284,6 +288,7 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
         lease,
         fn -> verify_authority(authority, authority.owner, authority.worktree_root) end,
         mcp_servers,
+        authority.worktree_root,
         fun
       )
     end
@@ -296,18 +301,19 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
          lease,
          verify,
          mcp_servers,
+         cwd,
          fun
        ) do
     result =
       with :ok <- validate_client_opts(client_opts, mcp_servers),
-           :ok <- verify.() do
-        prepared_opts =
-          Keyword.put(
-            client_opts,
-            :command,
-            profiled_command(profile_name, mcp_servers, client_opts)
-          )
-
+           :ok <- verify.(),
+           prepared_opts =
+             Keyword.put(
+               client_opts,
+               :command,
+               profiled_command(profile_name, mcp_servers, client_opts)
+             ),
+           :ok <- verify_sandbox_applied(profile_name, grok_home, cwd, prepared_opts) do
         fun.(prepared_opts)
       end
 
@@ -706,30 +712,175 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
   defp overlay_launch_diagnostics(grok_home, result) do
     tail = read_grok_log_tail(grok_home)
 
-    cond do
-      sandbox_unapplied?(tail) ->
-        {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}
+    case result do
+      {:error, reason} ->
+        {:error, attach_log_tail(reason, tail)}
 
-      match?({:error, _reason}, result) ->
-        {:error, attach_log_tail(elem(result, 1), tail)}
-
-      true ->
+      _other ->
         result
     end
   end
 
-  defp reject_unapplied_sandbox(grok_home) do
-    tail = read_grok_log_tail(grok_home)
+  defp verify_sandbox_applied(profile_name, grok_home, cwd, client_opts)
+       when is_binary(profile_name) and is_binary(grok_home) and is_binary(cwd) do
+    with {:ok, env} <- inspect_env(client_opts),
+         {:ok, command} <- inspect_executable(client_opts),
+         {:ok, output, status} <-
+           run_sandbox_inspect(%{
+             command: command,
+             args: ["--sandbox", profile_name, "inspect"],
+             env: env,
+             cd: cwd
+           }) do
+      admit_inspect_output(output, status)
+    end
+  end
 
-    if sandbox_unapplied?(tail),
-      do: {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}},
-      else: :ok
+  defp verify_sandbox_applied(_profile_name, _grok_home, _cwd, _client_opts),
+    do: {:error, :invalid_grok_launch}
+
+  defp inspect_env(client_opts) do
+    case normalize_env(Keyword.get(client_opts, :env)) do
+      {:ok, env} -> {:ok, env}
+      :error -> {:error, :invalid_grok_home}
+    end
+  end
+
+  defp inspect_executable(client_opts) do
+    case Keyword.get(client_opts, :command) do
+      ["grok" | _rest] ->
+        {:ok, "grok"}
+
+      _other ->
+        {:error, :grok_sandbox_command_mismatch}
+    end
+  end
+
+  defp run_sandbox_inspect(request) when is_map(request) do
+    case inspect_runner().(request) do
+      {output, status} when is_binary(output) and is_integer(status) and status >= 0 ->
+        {:ok, bound_inspect_output(output), status}
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, {:grok_sandbox_inspect_failed, %{reason: :invalid_inspect_result}}}
+    end
+  rescue
+    _exception ->
+      {:error, {:grok_sandbox_inspect_failed, %{reason: :inspect_exception}}}
+  catch
+    _kind, _reason ->
+      {:error, {:grok_sandbox_inspect_failed, %{reason: :inspect_exception}}}
+  end
+
+  defp inspect_runner do
+    case Application.get_env(:arbor_ai, :grok_sandbox_inspect) do
+      fun when is_function(fun, 1) ->
+        fun
+
+      nil ->
+        &default_sandbox_inspect/1
+
+      _other ->
+        fn _request ->
+          {:error, {:grok_sandbox_inspect_failed, %{reason: :invalid_inspect_runner}}}
+        end
+    end
+  end
+
+  defp default_sandbox_inspect(%{
+         command: "grok",
+         args: args,
+         env: env,
+         cd: cd
+       })
+       when is_list(args) and is_list(env) and is_binary(cd) do
+    task =
+      Task.async(fn ->
+        System.cmd("grok", args, env: env, cd: cd, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, @inspect_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, status}} when is_binary(output) and is_integer(status) ->
+        {output, status}
+
+      nil ->
+        {:error, :grok_sandbox_inspect_timeout}
+
+      {:ok, _other} ->
+        {:error, {:grok_sandbox_inspect_failed, %{reason: :invalid_inspect_result}}}
+
+      {:exit, _reason} ->
+        {:error, {:grok_sandbox_inspect_failed, %{reason: :inspect_exit}}}
+    end
+  end
+
+  defp default_sandbox_inspect(_request),
+    do: {:error, {:grok_sandbox_inspect_failed, %{reason: :invalid_inspect_request}}}
+
+  defp admit_inspect_output(output, status) when is_binary(output) and is_integer(status) do
+    tail = inspect_output_tail(output)
+
+    cond do
+      sandbox_unapplied?(output) ->
+        {:error, {:grok_sandbox_not_applied, %{output_tail: tail}}}
+
+      status != 0 ->
+        {:error, {:grok_sandbox_inspect_failed, %{status: status, output_tail: tail}}}
+
+      not inspect_reports_config_sources?(output) ->
+        {:error, {:grok_sandbox_inspect_incomplete, %{output_tail: tail}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp inspect_reports_config_sources?(output) when is_binary(output) do
+    output
+    |> String.downcase()
+    |> String.contains?(@config_sources_marker)
+  end
+
+  defp bound_inspect_output(output) when is_binary(output) do
+    size = byte_size(output)
+
+    if size <= @max_inspect_bytes do
+      utf8_head(output)
+    else
+      utf8_head(binary_part(output, 0, @max_inspect_bytes))
+    end
+  end
+
+  defp inspect_output_tail(output) when is_binary(output) do
+    size = byte_size(output)
+
+    if size <= @max_reason_tail_bytes do
+      output
+    else
+      lowered = String.downcase(output)
+
+      {start, length} =
+        case :binary.match(lowered, @sandbox_unapplied_marker) do
+          {index, _len} ->
+            start = max(index - 32, 0)
+            {start, min(@max_reason_tail_bytes, size - start)}
+
+          :nomatch ->
+            {0, @max_reason_tail_bytes}
+        end
+
+      utf8_tail(binary_part(output, start, length))
+    end
   end
 
   defp attach_log_tail(reason, ""), do: reason
 
-  defp attach_log_tail({:grok_sandbox_not_applied, %{output_tail: _}} = reason, _tail),
-    do: reason
+  defp attach_log_tail({reason, %{output_tail: existing} = detail}, _tail)
+       when is_atom(reason) and is_map(detail) and is_binary(existing) and existing != "",
+       do: {reason, detail}
 
   defp attach_log_tail({reason, %{output_tail: _tail} = detail}, tail)
        when is_atom(reason) and is_map(detail),
@@ -794,6 +945,19 @@ defmodule Arbor.AI.AcpSession.GrokSandbox do
 
       Enum.find_value(0..min(3, max(size - 1, 0)), fn n ->
         candidate = binary_part(data, n, size - n)
+        if String.valid?(candidate), do: candidate
+      end) || <<>>
+    end
+  end
+
+  defp utf8_head(data) when is_binary(data) do
+    if String.valid?(data) do
+      data
+    else
+      size = byte_size(data)
+
+      Enum.find_value(0..min(3, max(size - 1, 0)), fn n ->
+        candidate = binary_part(data, 0, size - n)
         if String.valid?(candidate), do: candidate
       end) || <<>>
     end

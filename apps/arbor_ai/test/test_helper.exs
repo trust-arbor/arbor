@@ -97,6 +97,46 @@ end
 
 Arbor.AI.TestSupport.ProviderRouteEvidence.reset!()
 
+defmodule Arbor.AI.TestSupport.GrokSandboxInspect do
+  @moduledoc false
+
+  def succeed(request) when is_map(request) do
+    grok_home = env_value(Map.get(request, :env), "GROK_HOME")
+
+    user_source =
+      if is_binary(grok_home) and grok_home != "",
+        do: Path.join(grok_home, "config.toml"),
+        else: "(none)"
+
+    output = """
+
+      Environment
+      └ CWD: #{Map.get(request, :cd)}
+
+      Config Sources
+      └ User: #{user_source}
+      └ Project: (none)
+    """
+
+    {output, 0}
+  end
+
+  defp env_value(env, key) when is_list(env) do
+    case List.keyfind(env, key, 0) do
+      {^key, value} -> value
+      _other -> nil
+    end
+  end
+
+  defp env_value(_env, _key), do: nil
+end
+
+Application.put_env(
+  :arbor_ai,
+  :grok_sandbox_inspect,
+  &Arbor.AI.TestSupport.GrokSandboxInspect.succeed/1
+)
+
 defmodule Arbor.AI.TestSupport.AutoTrustPolicy do
   @moduledoc false
 
