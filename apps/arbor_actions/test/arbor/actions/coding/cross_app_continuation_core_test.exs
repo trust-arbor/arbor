@@ -465,6 +465,60 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert {:error, :malformed_state} = Core.show([])
   end
 
+  test "lineage_key/1 is stable under shuffled identity keys and changes with identity" do
+    {:ok, state} = Core.new(fresh_attrs())
+    {:ok, key} = Core.lineage_key(state)
+    assert key =~ ~r/\Axappc_[0-9a-f]{64}\z/
+
+    shuffled =
+      state["identities"]
+      |> Enum.shuffle()
+      |> Map.new()
+
+    {:ok, shuffled_key} = Core.lineage_key(Map.put(state, "identities", shuffled))
+    assert shuffled_key == key
+
+    drifted = put_in(state, ["identities", "task_id"], "task_other_lineage")
+    {:ok, other} = Core.lineage_key(drifted)
+    assert other != key
+    assert {:error, :malformed_state} = Core.lineage_key(nil)
+  end
+
+  test "retained_effects/1 match persist-only, mint_successor, and terminal Core outputs" do
+    {:ok, open} = Core.new(fresh_attrs())
+    {:ok, claimed, persist_effects} = Core.claim(open, claim_attrs())
+    {:ok, claimed_retained} = Core.retained_effects(claimed)
+    assert persist_effects == [claimed_retained["persist"]]
+    assert claimed_retained["successor"] == nil
+    assert claimed_retained["terminal"] == nil
+    assert claimed_retained["snapshot"] == claimed
+
+    plan = plan()
+    structural = v3_handoff(plan, [], nil, plan, "structural")
+
+    {:ok, handed, mint_effects} =
+      Core.accept_capacity_handoff(claimed, fence(claimed, @mid, %{"handoff" => structural}))
+
+    {:ok, handed_retained} = Core.retained_effects(handed)
+    assert [%{"op" => "persist"}, mint] = mint_effects
+    assert handed_retained["persist"]["snapshot"] == handed
+    assert handed_retained["successor"] == mint
+    assert handed_retained["terminal"] == nil
+
+    {:ok, failed, fail_effects} = Core.fail(claimed_state(), fence(claimed_state(), @mid))
+    {:ok, failed_retained} = Core.retained_effects(failed)
+    assert [%{"op" => "persist"}, terminal] = fail_effects
+    assert failed_retained["terminal"] == terminal
+    assert failed_retained["successor"] == nil
+
+    {:ok, cancelled, cancel_effects} =
+      Core.cancel(claimed_state(), fence(claimed_state(), @mid))
+
+    {:ok, cancelled_retained} = Core.retained_effects(cancelled)
+    assert [%{"op" => "persist"}, cancel_terminal] = cancel_effects
+    assert cancelled_retained["terminal"] == cancel_terminal
+  end
+
   test "candidate_head must equal base_commit; candidate_tree_oid may differ" do
     plan = plan()
     drifted_head = Map.put(identities(plan), "candidate_head", String.duplicate("7", 40))

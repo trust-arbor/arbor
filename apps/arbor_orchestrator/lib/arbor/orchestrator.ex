@@ -569,6 +569,95 @@ defmodule Arbor.Orchestrator do
   @spec coding_pipeline_logs_root() :: String.t()
   def coding_pipeline_logs_root, do: Config.coding_pipeline_logs_root()
 
+  @doc "Open a durable CrossApp continuation lineage."
+  @spec coding_cross_app_continuation_open(map(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_open(input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.open(input, opts)
+  end
+
+  @doc "Load a durable continuation. Public snapshots redact claim fence_token."
+  @spec coding_cross_app_continuation_get(String.t(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_get(continuation_id, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.get(continuation_id, opts)
+  end
+
+  @doc "Claim a durable continuation. Journal injects trusted time and fence token."
+  @spec coding_cross_app_continuation_claim(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_claim(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.claim(continuation_id, input, opts)
+  end
+
+  @doc "Accept the next passed batch receipt under the issued fence."
+  @spec coding_cross_app_continuation_accept_passed_receipt(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_accept_passed_receipt(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.accept_passed_receipt(
+      continuation_id,
+      input,
+      opts
+    )
+  end
+
+  @doc "Admit a capacity handoff and retain the derived successor descriptor."
+  @spec coding_cross_app_continuation_accept_capacity_handoff(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_accept_capacity_handoff(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.accept_capacity_handoff(
+      continuation_id,
+      input,
+      opts
+    )
+  end
+
+  @doc "Terminal-fail a claimed continuation."
+  @spec coding_cross_app_continuation_fail(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_fail(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.fail(continuation_id, input, opts)
+  end
+
+  @doc "Terminal-cancel a claimed continuation."
+  @spec coding_cross_app_continuation_cancel(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_cancel(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.cancel(continuation_id, input, opts)
+  end
+
+  @doc "Expire a claimed continuation window after its injected expiry."
+  @spec coding_cross_app_continuation_expire_claim(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_expire_claim(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.expire_claim(continuation_id, input, opts)
+  end
+
+  @doc "Revoke the active continuation claim."
+  @spec coding_cross_app_continuation_revoke_claim(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_revoke_claim(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.revoke_claim(continuation_id, input, opts)
+  end
+
+  @doc "Complete a continuation after a full passed receipt prefix."
+  @spec coding_cross_app_continuation_complete(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_complete(continuation_id, input, opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.complete(continuation_id, input, opts)
+  end
+
+  @doc "JSON-clean CrossApp continuation durability status."
+  @spec coding_cross_app_continuation_durability_status(keyword()) :: map() | {:error, atom()}
+  def coding_cross_app_continuation_durability_status(opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.durability_status(opts)
+  end
+
+  @doc "Refresh continuation inventory from durable authority."
+  @spec coding_cross_app_continuation_refresh(keyword()) :: :ok | {:error, atom()}
+  def coding_cross_app_continuation_refresh(opts \\ []) do
+    Arbor.Orchestrator.CrossAppContinuation.Journal.refresh(opts)
+  end
+
   @doc """
   Run typed validation passes on a compiled Graph.
 

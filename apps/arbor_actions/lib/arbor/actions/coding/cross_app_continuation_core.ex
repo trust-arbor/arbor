@@ -16,7 +16,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   Public transitions: new/1, show/1, claim/2, accept_passed_receipt/2,
   accept_capacity_handoff/2, fail/2, cancel/2, expire_claim/2, revoke_claim/2,
-  complete/2. Mutating transitions rehydrate the state argument as untrusted
+  complete/2. Derivation seams: lineage_key/1, retained_effects/1, digest/1.
+  Mutating transitions rehydrate the state argument as untrusted
   persisted JSON before effects. Claimed live mutations require matching
   fence_generation+token and now < expires_at. expire_claim matches the fence
   then requires now >= expires_at. revoke_claim matches the fence and ignores
@@ -168,6 +169,62 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
       "persist_envelope_bytes" => @persist_envelope_bytes,
       "max_fence_generation" => @max_fence_generation
     }
+  end
+
+  @doc """
+  Deterministic store key for an admitted continuation.
+
+  `xappc_` plus lowercase hex SHA-256 of canonical JSON over the closed
+  identities map. Canonical JSON recursively sorts string keys.
+  """
+  @spec lineage_key(term()) :: {:ok, String.t()} | {:error, error()}
+  def lineage_key(input) do
+    with {:ok, state} <- new(input) do
+      {:ok, "xappc_" <> sha256_hex(canonical_json(state["identities"]))}
+    end
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
+  @doc """
+  Derive persist, successor, and terminal from a fully rehydrated snapshot.
+
+  Successor is the exact mint_successor map only when status is open and a
+  capacity handoff is stored. Terminal is the exact terminal map only for
+  failed, cancelled, or completed snapshots. Otherwise those fields are null.
+  """
+  @spec retained_effects(term()) ::
+          {:ok, %{required(String.t()) => term()}} | {:error, error()}
+  def retained_effects(input) do
+    with {:ok, state} <- new(input),
+         {:ok, successor} <- derived_successor(state),
+         {:ok, terminal} <- derived_terminal(state) do
+      {:ok,
+       %{
+         "snapshot" => state,
+         "persist" => persist_effect(state),
+         "successor" => successor,
+         "terminal" => terminal
+       }}
+    end
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
+  @doc "Lowercase hex SHA-256 of canonical JSON for a JSON-clean value."
+  @spec digest(term()) :: {:ok, String.t()} | {:error, error()}
+  def digest(value) do
+    with :ok <- require_json_clean_value(value) do
+      {:ok, sha256_hex(canonical_json(value))}
+    end
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
   end
 
   @doc "Construct a fresh continuation or rehydrate a show/1 snapshot."
@@ -792,6 +849,41 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
     }
   end
 
+  defp derived_successor(%{"status" => "open", "capacity_handoff" => handoff} = state)
+       when is_map(handoff) do
+    remaining = remaining_batches(handoff["interrupted_batch"], handoff["unstarted_batches"])
+
+    if remaining == :invalid do
+      {:error, :malformed_state}
+    else
+      {:ok,
+       %{
+         "op" => "mint_successor",
+         "schema_version" => @schema_version,
+         "identities" => state["identities"],
+         "static_stage_receipt_digest" => state["static_stage_receipt_digest"],
+         "fence_generation" => state["fence_generation"],
+         "remaining_batches" => remaining,
+         "handoff" => handoff
+       }}
+    end
+  end
+
+  defp derived_successor(_state), do: {:ok, nil}
+
+  defp derived_terminal(%{"status" => status, "terminal_reason" => reason})
+       when status in @terminal_statuses do
+    {:ok,
+     %{
+       "op" => "terminal",
+       "schema_version" => @schema_version,
+       "status" => status,
+       "reason" => reason
+     }}
+  end
+
+  defp derived_terminal(_state), do: {:ok, nil}
+
   defp ok_effects(state, effects) do
     state_bytes = json_size(state)
 
@@ -1231,4 +1323,33 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
     |> String.to_charlist()
     |> Enum.all?(&(&1 >= 0x20 and &1 != 0x7F))
   end
+
+  defp require_json_clean_value(value) do
+    if json_clean?(value), do: :ok, else: {:error, :malformed_state}
+  end
+
+  defp sha256_hex(bytes) when is_binary(bytes) do
+    :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+  end
+
+  defp canonical_json(value) when is_map(value) and not is_struct(value) do
+    entries =
+      value
+      |> Enum.sort_by(fn {key, _} -> key end)
+      |> Enum.map(fn {key, item} ->
+        [Jason.encode!(key), ":", canonical_json(item)]
+      end)
+
+    IO.iodata_to_binary(["{", Enum.intersperse(entries, ","), "}"])
+  end
+
+  defp canonical_json(value) when is_list(value) do
+    IO.iodata_to_binary([
+      "[",
+      Enum.intersperse(Enum.map(value, &canonical_json/1), ","),
+      "]"
+    ])
+  end
+
+  defp canonical_json(value), do: Jason.encode!(value)
 end
