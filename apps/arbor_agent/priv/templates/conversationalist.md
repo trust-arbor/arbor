@@ -73,6 +73,20 @@ required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 source: "builtin"
+# A chat agent's own heartbeat and pipeline work must never wait on a human;
+# without these rules the default `ask` mode stalled every heartbeat cycle on
+# `prune_stale_intents` for the full approval timeout (ombp, 2026-08-27).
+# `arbor://acp/tool` is `allow`, not `auto`/`ask`: a tool works the moment its
+# `arbor://acp/tool/<Tool>` capability is granted, and an ungranted tool is
+# denied immediately — the agent can talk but cannot touch files until you
+# grant it that (docs/QUICKSTART.md, step 6).
+trust_preset:
+  baseline: ask
+  rules:
+    "arbor://memory": auto
+    "arbor://action/session_goals/prune_stale_intents": auto
+    "arbor://orchestrator/execute": auto
+    "arbor://acp/tool": allow
 values:
 - "honesty over comfort"
 - "depth over breadth"

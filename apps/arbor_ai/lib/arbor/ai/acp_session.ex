@@ -945,10 +945,16 @@ defmodule Arbor.AI.AcpSession do
       |> Keyword.put(:provider, Keyword.fetch!(opts, :provider))
       |> Keyword.put(:cwd, cwd)
 
+    # Launch-time tool profile derived from the agent's own capabilities and
+    # trust policy (ToolProfileCore). Adapters that understand the options
+    # restrict the CLI up front; the per-call handler stays as defense in depth.
+    tool_profile_opts = Arbor.AI.AcpSession.ToolProfile.opts(tool_profile_for(opts))
+
     client_opts
     |> Keyword.put(:event_listener, session_pid)
     |> Keyword.put_new(:handler, Arbor.AI.AcpSession.Handler)
-    |> Keyword.put(:handler_opts, handler_opts)
+    |> Keyword.put(:handler_opts, Keyword.merge(handler_opts, tool_profile_opts))
+    |> merge_adapter_opts(tool_profile_opts)
     |> Keyword.put_new(:pending_request_timeout, @default_pending_request_timeout_ms)
     |> Keyword.put_new(:handler_request_timeout, @default_handler_request_timeout_ms)
     |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
@@ -960,6 +966,30 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp normalize_handler_opts(_opts), do: []
+
+  # Resolve the launch-time tool profile for the session's agent. Explicit
+  # `:tool_profile` in opts wins (tests, evals); otherwise derive from the
+  # agent's capabilities. `nil` means "no launch-time restriction".
+  defp tool_profile_for(opts) do
+    case Keyword.get(opts, :tool_profile) do
+      %{} = profile -> profile
+      _ -> Arbor.AI.AcpSession.ToolProfile.resolve(Keyword.get(opts, :agent_id))
+    end
+  end
+
+  defp merge_adapter_opts(client_opts, []), do: client_opts
+
+  defp merge_adapter_opts(client_opts, tool_profile_opts) do
+    existing =
+      case Keyword.get(client_opts, :adapter_opts) do
+        ao when is_list(ao) -> ao
+        _ -> []
+      end
+
+    # Explicit adapter options (e.g. a pipeline's own allowed_tools) win over
+    # the derived profile.
+    Keyword.put(client_opts, :adapter_opts, Keyword.merge(tool_profile_opts, existing))
+  end
 
   defp unwrap_grok_launch({:ok, result}), do: result
 

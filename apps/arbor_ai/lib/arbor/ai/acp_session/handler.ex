@@ -353,7 +353,18 @@ defmodule Arbor.AI.AcpSession.Handler do
             :authorized
 
           :gated ->
-            escalate_for_trust_approval(agent_id, resource_uri, state)
+            # Escalate to a human only when the agent actually holds a
+            # capability for this tool. An agent with no `arbor://acp/tool/*`
+            # grant (the quickstart `conversationalist`) used to sit here for
+            # the full `permission_timeout_ms` on every tool the CLI tried —
+            # 3 × 60 s inside one chat turn on 2026-08-27 — waiting for an
+            # operator who was never shown the request. "Not granted" is a
+            # deny, not a question.
+            if holds_capability?(agent_id, resource_uri) do
+              escalate_for_trust_approval(agent_id, resource_uri, state)
+            else
+              {:denied, "tool not granted to this agent"}
+            end
 
           :deny ->
             {:denied, "denied by trust policy"}
@@ -507,6 +518,35 @@ defmodule Arbor.AI.AcpSession.Handler do
   # Security and trust modules are code-owned injection seams. They are never
   # selected from handler opts or caller-controlled ACP request data.
   defp security_module, do: Application.get_env(:arbor_ai, :security_module, Arbor.Security)
+
+  # Side-effect-free "does this agent hold a capability that could authorize
+  # `resource_uri`?" — no usage counters, no signals. Used to decide whether a
+  # trust-gated tool is worth asking a human about at all. A security module
+  # that cannot enumerate capabilities (test doubles, minimal deployments)
+  # keeps the historical behaviour of escalating.
+  @doc false
+  def holds_capability?(agent_id, resource_uri) when is_binary(agent_id) do
+    module = security_module()
+
+    if function_exported?(module, :list_capabilities, 2) and
+         function_exported?(module, :capability_authorizes?, 3) do
+      case module.list_capabilities(agent_id, []) do
+        {:ok, capabilities} when is_list(capabilities) ->
+          Enum.any?(capabilities, &module.capability_authorizes?(&1, resource_uri, []))
+
+        _other ->
+          false
+      end
+    else
+      true
+    end
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  def holds_capability?(_agent_id, _resource_uri), do: false
 
   defp file_guard_module,
     do: Application.get_env(:arbor_ai, :file_guard_module, Arbor.Security.FileGuard)
