@@ -106,25 +106,7 @@ defmodule Arbor.Actions.TestMixShell do
                cancelled: false
              }}
           else
-            case System.cmd(wrapper, args,
-                   cd: cwd,
-                   env: env,
-                   stderr_to_stdout: true
-                 ) do
-              {output, exit_code} ->
-                {:ok,
-                 %{
-                   exit_code: exit_code,
-                   stdout: output,
-                   stderr: "",
-                   duration_ms: System.monotonic_time(:millisecond) - started_at,
-                   timed_out: false,
-                   killed: false,
-                   output_truncated: false,
-                   output_limit_exceeded: false,
-                   cancelled: false
-                 }}
-            end
+            run_real_mix(wrapper, args, cwd, env, Keyword.get(opts, :timeout), started_at)
           end
       end
     end
@@ -209,6 +191,81 @@ defmodule Arbor.Actions.TestMixShell do
     |> Map.put_new(:output_truncated, false)
     |> Map.put_new(:output_limit_exceeded, false)
     |> Map.put_new(:cancelled, false)
+  end
+
+  defp run_real_mix(wrapper, args, cwd, env, timeout, started_at) do
+    port =
+      Port.open(
+        {:spawn_executable, String.to_charlist(wrapper)},
+        [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          args: Enum.map(args, &String.to_charlist/1),
+          cd: String.to_charlist(cwd),
+          env: port_env(env)
+        ]
+      )
+
+    deadline =
+      if is_integer(timeout) and timeout >= 0 do
+        started_at + timeout
+      else
+        :infinity
+      end
+
+    collect_real_mix(port, deadline, started_at, [])
+  end
+
+  defp collect_real_mix(port, deadline, started_at, output) do
+    receive do
+      {^port, {:data, data}} ->
+        collect_real_mix(port, deadline, started_at, [data | output])
+
+      {^port, {:exit_status, exit_code}} ->
+        {:ok, real_mix_result(exit_code, output, started_at, false)}
+    after
+      remaining_timeout(deadline) ->
+        close_port(port)
+        {:ok, real_mix_result(137, output, started_at, true)}
+    end
+  end
+
+  defp real_mix_result(exit_code, output, started_at, timed_out) do
+    %{
+      exit_code: exit_code,
+      stdout: output |> Enum.reverse() |> IO.iodata_to_binary(),
+      stderr: "",
+      duration_ms: System.monotonic_time(:millisecond) - started_at,
+      timed_out: timed_out,
+      killed: timed_out,
+      output_truncated: false,
+      output_limit_exceeded: false,
+      cancelled: false
+    }
+  end
+
+  defp remaining_timeout(:infinity), do: :infinity
+
+  defp remaining_timeout(deadline) do
+    max(deadline - System.monotonic_time(:millisecond), 0)
+  end
+
+  defp close_port(port) do
+    if Port.info(port) do
+      Port.close(port)
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp port_env(env) do
+    Enum.map(env, fn
+      {key, nil} -> {String.to_charlist(key), false}
+      {key, value} -> {String.to_charlist(key), String.to_charlist(value)}
+    end)
   end
 
   defp maybe_mutate_worktree(cwd) when is_binary(cwd) do

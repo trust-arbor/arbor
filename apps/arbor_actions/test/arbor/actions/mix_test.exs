@@ -406,23 +406,63 @@ defmodule Arbor.Actions.MixTest do
       project_path: project_path,
       fixture: fixture
     } do
-      add_mix_env_assertion(project_path, "dev")
-      commit_worktree!(fixture)
+      Arbor.Actions.TestMixShell.clear_last_invocation()
+      Arbor.Actions.TestMixShell.clear_canned_spawn_result()
 
-      MixAction.with_validation_resource(
-        fixture.lease.workspace_id,
-        fixture.context,
-        fn resource ->
-          assert {:ok, result} =
-                   MixAction.run_mix(project_path, ["test"],
-                     validation_resource: resource,
-                     env: %{"MIX_ENV" => "dev"}
-                   )
+      Arbor.Actions.TestMixShell.set_canned_spawn_result(%{
+        exit_code: 0,
+        stdout: "canned MIX_ENV projection\n"
+      })
 
-          assert result.exit_code == 0
-          {:ok, :ok}
-        end
-      )
+      try do
+        MixAction.with_validation_resource(
+          fixture.lease.workspace_id,
+          fixture.context,
+          fn resource ->
+            assert {:ok, result} =
+                     MixAction.run_mix(project_path, ["test"],
+                       validation_resource: resource,
+                       env: %{"MIX_ENV" => "dev"}
+                     )
+
+            assert result.exit_code == 0
+            assert result.stdout == "canned MIX_ENV projection\n"
+
+            invocation = Arbor.Actions.TestMixShell.last_invocation()
+            assert Map.fetch!(Map.new(invocation.env), "MIX_ENV") == "dev"
+            {:ok, :ok}
+          end
+        )
+      after
+        Arbor.Actions.TestMixShell.clear_canned_spawn_result()
+        Arbor.Actions.TestMixShell.clear_last_invocation()
+      end
+    end
+
+    test "TestMixShell real execution returns canonical flags at its finite timeout", %{
+      project_path: project_path
+    } do
+      assert {:ok, wrapper} = Arbor.Actions.TestMixShell.resolve_mix_wrapper()
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:ok, result} =
+               Arbor.Actions.TestMixShell.execute_spawn_capable(
+                 wrapper,
+                 ["run", "--no-halt"],
+                 cwd: project_path,
+                 env: %{},
+                 timeout: 250
+               )
+
+      elapsed = System.monotonic_time(:millisecond) - started_at
+
+      assert result.exit_code == 137
+      assert result.timed_out == true
+      assert result.killed == true
+      assert result.cancelled == false
+      assert result.output_truncated == false
+      assert result.output_limit_exceeded == false
+      assert elapsed < 5_000
     end
 
     test "security regression: closed wrapper identity and caller path env scrubbing", %{
