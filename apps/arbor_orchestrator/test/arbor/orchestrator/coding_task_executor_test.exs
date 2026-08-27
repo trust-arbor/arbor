@@ -4844,6 +4844,102 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert byte_size(encoded) <= 65_536
     end
 
+    test "security regression: prior validation redacts secret forms from stdout and stderr" do
+      bearer_token = "bearer-token-abcdefghijklmnopqrstuvwxyz123456"
+      database_password = "database-password-canary"
+      assignment_secret = "assignment-secret-canary"
+      reason_secret = "reason-secret-canary"
+
+      secret_forms = [
+        {"bearer token", "Authorization: Bearer " <> bearer_token, bearer_token},
+        {"credential URL", "postgres://runner:#{database_password}@db.internal/arbor",
+         database_password},
+        {"secret assignment", ~s(api_key="#{assignment_secret}"), assignment_secret}
+      ]
+
+      for source_field <- ~w(stdout_excerpt stderr_excerpt),
+          {form, secret_form, raw_secret} <- secret_forms do
+        stage_source = "diagnostic before #{secret_form}\ndiagnostic after"
+
+        assert {:error, {:pipeline_error, detail}} =
+                 run_with_engine_result(%{
+                   "status" => "pipeline_error",
+                   "error" => "worker_turn_no_progress",
+                   "rework_kind" => "validation",
+                   "validation_candidate_tree_oid" => @verification_tree_oid,
+                   "validation.reason" => ~s(tests_failed password="#{reason_secret}" continue),
+                   "validation.test" => %{
+                     "passed" => false,
+                     source_field => stage_source,
+                     "stdout" => "complete output repeats #{raw_secret}",
+                     "unrelated" => "unrelated secret #{raw_secret}"
+                   },
+                   "release.status" => "retained",
+                   "release.expires_at" => "2026-08-28T12:00:00Z",
+                   "unrelated_context" => "ambient secret #{raw_secret}"
+                 })
+
+        prior = detail["prior_validation"]
+        assert detail["status"] == "pipeline_error"
+        assert detail["error"] == "worker_turn_no_progress"
+        assert detail["outcome"]["code"] == "worker_turn_no_progress"
+        assert detail["outcome"]["retry"] == "same_session"
+        assert detail["workspace_release_status"] == "retained"
+        assert prior["candidate_tree_oid"] == @verification_tree_oid
+        assert prior["failed_stage"] == "test"
+        assert prior["reason"] =~ "tests_failed"
+        assert prior["reason"] =~ "continue"
+        assert prior["reason"] =~ "[REDACTED]"
+        assert prior["stage_excerpt"] =~ "diagnostic before"
+        assert prior["stage_excerpt"] =~ "diagnostic after"
+        assert prior["stage_excerpt"] =~ "[REDACTED]"
+        assert byte_size(prior["reason"]) <= 512
+        assert byte_size(prior["stage_excerpt"]) <= 512
+
+        assert Map.keys(prior) |> Enum.sort() ==
+                 ~w(candidate_tree_oid failed_stage reason stage_excerpt)
+
+        refute inspect(detail) =~ raw_secret,
+               "#{form} leaked from #{source_field}"
+
+        refute inspect(detail) =~ reason_secret
+        refute inspect(detail) =~ "ambient secret"
+        refute inspect(detail) =~ "unrelated secret"
+        refute Map.has_key?(detail, "validation")
+        assert {:ok, _encoded} = Jason.encode(detail)
+      end
+    end
+
+    test "security regression: prior validation redacts before the final 512-byte bound" do
+      database_password = "boundary-crossing-password-canary"
+      prefix = String.duplicate("x", 480)
+
+      stage_source =
+        prefix <>
+          " postgres://runner:#{database_password}@db.internal/arbor actionable failure"
+
+      assert byte_size(stage_source) in 513..16_384
+
+      assert {:error, {:pipeline_error, detail}} =
+               run_with_engine_result(%{
+                 "status" => "pipeline_error",
+                 "error" => "worker_turn_no_progress",
+                 "rework_kind" => "validation",
+                 "validation_candidate_tree_oid" => @verification_tree_oid,
+                 "validation.reason" => "tests_failed",
+                 "validation.test" => %{
+                   "passed" => false,
+                   "stdout_excerpt" => stage_source
+                 }
+               })
+
+      excerpt = detail["prior_validation"]["stage_excerpt"]
+      assert byte_size(excerpt) <= 512
+      assert excerpt =~ "[REDACTED]"
+      refute excerpt =~ database_password
+      assert detail["prior_validation"]["candidate_tree_oid"] == @verification_tree_oid
+    end
+
     test "non-validation no-progress terminals do not expose stale validation context" do
       for rework_kind <- ["review", "operator_approval", "design_checkpoint", nil] do
         assert {:error, {:pipeline_error, detail}} =

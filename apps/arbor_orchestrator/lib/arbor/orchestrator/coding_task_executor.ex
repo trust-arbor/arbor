@@ -60,7 +60,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   @behaviour Arbor.Contracts.Agent.TaskExecutor
 
-  alias Arbor.Common.SafePath
+  alias Arbor.Common.{SafePath, SensitiveData}
 
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
@@ -3652,10 +3652,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          reason when is_binary(reason) <- prior_validation_field(context, "reason"),
          true <- valid_prior_validation_text?(reason),
          bounded_reason when is_binary(bounded_reason) and bounded_reason != "" <-
-           RunLifecycleAdapter.bound_failure_reason(reason),
+           redact_and_bound_prior_validation_text(reason),
          {stage, excerpt} <- prior_validation_failed_stage(context),
          bounded_excerpt when is_binary(bounded_excerpt) and bounded_excerpt != "" <-
-           RunLifecycleAdapter.bound_failure_reason(excerpt) do
+           redact_and_bound_prior_validation_text(excerpt) do
       Map.put(detail, "prior_validation", %{
         "candidate_tree_oid" => candidate_tree_oid,
         "reason" => bounded_reason,
@@ -3712,6 +3712,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp valid_prior_validation_stage_source?(_value), do: false
+
+  defp redact_and_bound_prior_validation_text(value) when is_binary(value) do
+    value
+    |> SensitiveData.redact_secrets()
+    |> RunLifecycleAdapter.bound_failure_reason()
+    |> case do
+      bounded when is_binary(bounded) and bounded != "" -> bounded
+      _other -> nil
+    end
+  end
 
   defp valid_git_oid?(oid) when byte_size(oid) in [40, 64],
     do: String.match?(oid, ~r/\A[0-9a-f]+\z/)
