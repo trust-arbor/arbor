@@ -1976,16 +1976,85 @@ defmodule Arbor.Actions.Coding.Workspace do
              |> Map.put(:committable_tree_oid, oid)
              |> Map.put(:committable_tree_observed_at, observed_at)}
           else
-            {:error, :committable_tree_binding_failed}
+            {:error, committable_tree_failure(:invalid_tree_oid)}
           end
 
+        {:error, reason} ->
+          {:error, committable_tree_failure(reason)}
+
         _other ->
-          {:error, :committable_tree_binding_failed}
+          {:error, committable_tree_failure(:invalid_binding_result)}
       end
     end
 
     defp maybe_include_committable_tree(_view, true),
-      do: {:error, :committable_tree_binding_failed}
+      do: {:error, committable_tree_failure(:invalid_worktree)}
+
+    defp committable_tree_failure(reason) do
+      {:committable_tree_binding_failed,
+       %{failure_category: committable_tree_failure_category(reason)}}
+    end
+
+    defp committable_tree_failure_category(reason)
+         when reason in [:worktree_file_changed, :worktree_symlink_changed],
+         do: "worktree_mutated"
+
+    defp committable_tree_failure_category(:operation_deadline_exceeded),
+      do: "deadline_exceeded"
+
+    defp committable_tree_failure_category({:git_timeout, _operation}),
+      do: "deadline_exceeded"
+
+    defp committable_tree_failure_category(:tree_binding_bounds_exceeded),
+      do: "bounds_exceeded"
+
+    defp committable_tree_failure_category(reason)
+         when reason in [:invalid_worktree, :invalid_worktree_path],
+         do: "path_invalid"
+
+    defp committable_tree_failure_category({:unsafe_index_path, _path}),
+      do: "path_invalid"
+
+    defp committable_tree_failure_category({:worktree_lstat_failed, _reason}),
+      do: "path_invalid"
+
+    defp committable_tree_failure_category({:tree_binding_cleanup_failed, _detail}),
+      do: "cleanup_failed"
+
+    defp committable_tree_failure_category({:tree_binding_cleanup_raised, _detail}),
+      do: "cleanup_failed"
+
+    defp committable_tree_failure_category({:git_failed, _operation, _detail}),
+      do: "git_failed"
+
+    defp committable_tree_failure_category({:git_output_limit, _operation}),
+      do: "git_failed"
+
+    defp committable_tree_failure_category({:git_cancelled, _operation}),
+      do: "git_failed"
+
+    defp committable_tree_failure_category({:git_containment_failed, _operation}),
+      do: "git_failed"
+
+    defp committable_tree_failure_category({:git_killed, _operation}),
+      do: "git_failed"
+
+    defp committable_tree_failure_category(reason)
+         when reason in [
+                :invalid_tree_oid,
+                :invalid_binding_result,
+                :tree_binding_root_exists,
+                :tree_binding_root_identity_changed
+              ],
+         do: "integrity_failed"
+
+    defp committable_tree_failure_category({:tree_binding_root_identity_unproven, _detail}),
+      do: "integrity_failed"
+
+    defp committable_tree_failure_category({:tree_binding_tmp_unproven, _detail}),
+      do: "integrity_failed"
+
+    defp committable_tree_failure_category(_reason), do: "binding_failed"
 
     defp map_value(map, key) when is_map(map) and is_atom(key) do
       cond do

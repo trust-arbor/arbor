@@ -2146,6 +2146,83 @@ defmodule Arbor.Actions.MixSpawnContainmentSlice1Test do
     assert {:ok, _bytes} = Arbor.Contracts.Coding.SourceInventory.encode(admitted)
   end
 
+  test "transient committable-tree capture retries once under the original absolute deadline",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_fixture(tmp_dir)
+    wt = fixture.lease.worktree_path
+    deadline_ms = System.monotonic_time(:millisecond) + 30_000
+    test_pid = self()
+
+    MixAction.__test_set_committable_tree_capture_hook__(fn attempt, observed_deadline ->
+      send(test_pid, {:capture_attempt, attempt, observed_deadline})
+      if attempt == 1, do: {:error, :worktree_file_changed}, else: :continue
+    end)
+
+    try do
+      assert {:ok, binding} =
+               MixAction.committable_tree_binding(wt, deadline_ms: deadline_ms)
+
+      assert is_binary(binding.tree_oid)
+      assert_receive {:capture_attempt, 1, ^deadline_ms}
+      assert_receive {:capture_attempt, 2, ^deadline_ms}
+      refute_receive {:capture_attempt, _, _}
+    after
+      MixAction.__test_set_committable_tree_capture_hook__(nil)
+    end
+  end
+
+  test "persistent committable-tree mutation fails after exactly two attempts", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    deadline_ms = System.monotonic_time(:millisecond) + 30_000
+    test_pid = self()
+
+    MixAction.__test_set_committable_tree_capture_hook__(fn attempt, observed_deadline ->
+      send(test_pid, {:capture_attempt, attempt, observed_deadline})
+      {:error, :worktree_symlink_changed}
+    end)
+
+    try do
+      assert {:error, :worktree_symlink_changed} =
+               MixAction.committable_tree_binding(fixture.lease.worktree_path,
+                 deadline_ms: deadline_ms
+               )
+
+      assert_receive {:capture_attempt, 1, ^deadline_ms}
+      assert_receive {:capture_attempt, 2, ^deadline_ms}
+      refute_receive {:capture_attempt, _, _}
+    after
+      MixAction.__test_set_committable_tree_capture_hook__(nil)
+    end
+  end
+
+  test "hard committable-tree capture errors fail immediately without retry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_fixture(tmp_dir)
+    deadline_ms = System.monotonic_time(:millisecond) + 30_000
+    test_pid = self()
+    hard_error = {:unsafe_index_path, "/private/retained-p1b/escape"}
+
+    MixAction.__test_set_committable_tree_capture_hook__(fn attempt, observed_deadline ->
+      send(test_pid, {:capture_attempt, attempt, observed_deadline})
+      {:error, hard_error}
+    end)
+
+    try do
+      assert {:error, ^hard_error} =
+               MixAction.committable_tree_binding(fixture.lease.worktree_path,
+                 deadline_ms: deadline_ms
+               )
+
+      assert_receive {:capture_attempt, 1, ^deadline_ms}
+      refute_receive {:capture_attempt, _, _}
+    after
+      MixAction.__test_set_committable_tree_capture_hook__(nil)
+    end
+  end
+
   test "security regression: symlink swap during capture fails closed deterministically", %{
     tmp_dir: tmp_dir
   } do

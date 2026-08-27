@@ -1385,7 +1385,15 @@ defmodule Arbor.Actions.Mix do
   @spec committable_tree_binding(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def committable_tree_binding(worktree_path, opts)
       when is_binary(worktree_path) and is_list(opts) do
-    case do_committable_tree_capture(worktree_path, Keyword.put(opts, :include_paths, false)) do
+    timeout = Keyword.get(opts, :timeout, mix_timeout())
+    deadline_ms = Keyword.get(opts, :deadline_ms) || absolute_deadline(timeout)
+
+    capture_opts =
+      opts
+      |> Keyword.put(:include_paths, false)
+      |> Keyword.put(:deadline_ms, deadline_ms)
+
+    case committable_tree_binding_attempt(worktree_path, capture_opts, 1) do
       {:ok, %{head: head, tree_oid: tree_oid}} ->
         {:ok, %{head: head, tree_oid: tree_oid}}
 
@@ -1395,6 +1403,29 @@ defmodule Arbor.Actions.Mix do
   end
 
   def committable_tree_binding(_, _), do: {:error, :invalid_worktree}
+
+  defp committable_tree_binding_attempt(worktree_path, opts, attempt) do
+    result =
+      case Process.get({__MODULE__, :committable_tree_capture_hook}) do
+        fun when is_function(fun, 2) ->
+          case fun.(attempt, Keyword.fetch!(opts, :deadline_ms)) do
+            :continue -> do_committable_tree_capture(worktree_path, opts)
+            result -> result
+          end
+
+        _ ->
+          do_committable_tree_capture(worktree_path, opts)
+      end
+
+    case result do
+      {:error, reason}
+      when attempt == 1 and reason in [:worktree_file_changed, :worktree_symlink_changed] ->
+        committable_tree_binding_attempt(worktree_path, opts, 2)
+
+      result ->
+        result
+    end
+  end
 
   @doc false
   @spec committable_source_inventory(String.t()) :: {:ok, map()} | {:error, term()}
@@ -2509,6 +2540,17 @@ defmodule Arbor.Actions.Mix do
 
   def __test_set_symlink_capture_hook__(nil) do
     Process.delete({__MODULE__, :tree_binding_symlink_capture_hook})
+    :ok
+  end
+
+  @doc false
+  def __test_set_committable_tree_capture_hook__(fun) when is_function(fun, 2) do
+    Process.put({__MODULE__, :committable_tree_capture_hook}, fun)
+    :ok
+  end
+
+  def __test_set_committable_tree_capture_hook__(nil) do
+    Process.delete({__MODULE__, :committable_tree_capture_hook})
     :ok
   end
 

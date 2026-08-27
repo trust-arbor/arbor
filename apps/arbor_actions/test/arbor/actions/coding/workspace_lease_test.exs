@@ -6,6 +6,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
   alias Arbor.Actions.Coding.Workspace.DeltaRanges
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
+  alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Contracts.Security.AuthContext
 
   @moduletag :fast
@@ -345,11 +346,63 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       refute Map.has_key?(direct_string_input, :committable_tree_oid)
       refute Map.has_key?(direct_string_input, :committable_tree_observed_at)
 
-      assert {:error, :committable_tree_binding_failed} =
+      assert {:error, {:committable_tree_binding_failed, %{failure_category: "path_invalid"}}} =
                Workspace.Inspect.run(
                  %{workspace_id: lease.workspace_id, include_committable_tree: true},
                  %{}
                )
+    end
+
+    test "committable-tree inspection exposes only bounded path-free failure categories", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/workspace-binding-diagnostic",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      sensitive_path = "/private/retained-p1b/candidate/secret.txt"
+      hostile_text = String.duplicate("hostile-exception-text-", 10_000)
+
+      MixAction.__test_set_committable_tree_capture_hook__(fn _attempt, _deadline ->
+        {:error, {:committable_tree_binding_raised, sensitive_path <> hostile_text}}
+      end)
+
+      try do
+        assert {:error, failure} =
+                 Workspace.Inspect.run(
+                   %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                   %{}
+                 )
+
+        assert failure ==
+                 {:committable_tree_binding_failed, %{failure_category: "binding_failed"}}
+
+        evidence = inspect(failure)
+        assert byte_size(evidence) <= 128
+        refute String.contains?(evidence, sensitive_path)
+        refute String.contains?(evidence, "hostile-exception-text")
+
+        MixAction.__test_set_committable_tree_capture_hook__(fn _attempt, _deadline ->
+          {:error, :worktree_file_changed}
+        end)
+
+        assert {:error,
+                {:committable_tree_binding_failed, %{failure_category: "worktree_mutated"}}} =
+                 Workspace.Inspect.run(
+                   %{workspace_id: lease.workspace_id, include_committable_tree: true},
+                   %{}
+                 )
+      after
+        MixAction.__test_set_committable_tree_capture_hook__(nil)
+      end
     end
 
     test "security regression: detached cleanup is idempotent after path and registration absence",
