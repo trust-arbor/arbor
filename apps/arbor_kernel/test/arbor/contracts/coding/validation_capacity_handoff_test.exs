@@ -5,10 +5,10 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
 
   @moduletag :fast
 
-  test "live schema is v3 and maximum compact batch cardinality remains bounded" do
+  test "live schema accepts the current 20-file producer maximum" do
     assert ValidationCapacityHandoff.schema_version() == 3
-    batches = max_batches()
-    assert length(batches) == 604
+    batches = current_max_batches()
+    assert length(batches) == 343
 
     assert {:ok, ordered_plan_sha256} =
              ValidationCapacityHandoff.ordered_plan_digest(batches)
@@ -23,6 +23,27 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     refute Map.has_key?(ValidationCapacityHandoff.to_map(descriptor), "required_budget_ms")
     assert descriptor.available_budget_ms == 0
     assert descriptor.interrupted_batch == nil
+  end
+
+  test "historical schema-v3 five-file evidence remains valid through 604 descriptors" do
+    batches = historical_five_file_max_batches()
+    assert length(batches) == 604
+    assert Enum.sum(Enum.map(batches, & &1["count"])) == 2_000
+    {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
+    attrs = valid_v3_structural_attrs(batches, ordered_plan_sha256)
+
+    assert {:ok, descriptor} = ValidationCapacityHandoff.new(attrs)
+    assert descriptor.total_batch_count == 604
+    assert {:ok, normalized} = ValidationCapacityHandoff.normalize(attrs)
+    assert normalized["total_batch_count"] == 604
+    assert ValidationCapacityHandoff.valid?(attrs)
+
+    oversized =
+      batches ++
+        [batch(605, 605, 1, String.duplicate("f", 64))]
+
+    assert {:error, {:invalid_capacity_handoff, :too_many_batches}} =
+             ValidationCapacityHandoff.ordered_plan_digest(oversized)
   end
 
   test "valid interrupted-middle and interrupted-final v3 shapes" do
@@ -77,7 +98,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   end
 
   test "tampered, unknown, and inconsistent v3 descriptors fail closed" do
-    batches = max_batches()
+    batches = current_max_batches()
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
     attrs = valid_v3_structural_attrs(batches, ordered_plan_sha256)
     [b1, b2 | _] = three_batches()
@@ -135,7 +156,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   end
 
   test "live normalize rejects well-formed historical schema-v1 and schema-v2 evidence" do
-    batches = max_batches()
+    batches = current_max_batches()
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
     v1 = valid_v1_attrs(batches, ordered_plan_sha256)
     v2 = valid_v2_attrs(batches, ordered_plan_sha256)
@@ -148,8 +169,9 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     refute ValidationCapacityHandoff.valid?(v2)
   end
 
-  test "archive-only APIs accept valid historical schema-v1 and schema-v2 and reject tamper" do
-    batches = max_batches()
+  test "archive-only APIs accept 604-descriptor schema-v1 and schema-v2 evidence" do
+    batches = historical_five_file_max_batches()
+    assert length(batches) == 604
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
     v1 = valid_v1_attrs(batches, ordered_plan_sha256)
     v2 = valid_v2_attrs(batches, ordered_plan_sha256)
@@ -157,10 +179,12 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     assert {:ok, normalized_v1} = ValidationCapacityHandoff.normalize_archived_v1(v1)
     assert normalized_v1["schema_version"] == 1
     assert normalized_v1["required_budget_ms"] == 604 * 1_200_000
+    assert normalized_v1["total_batch_count"] == 604
     assert ValidationCapacityHandoff.valid_archived_v1?(v1)
 
     assert {:ok, normalized_v2} = ValidationCapacityHandoff.normalize_archived_v2(v2)
     assert normalized_v2["schema_version"] == 2
+    assert normalized_v2["total_batch_count"] == 604
     refute Map.has_key?(normalized_v2, "interrupted_batch")
     assert ValidationCapacityHandoff.valid_archived_v2?(v2)
 
@@ -176,8 +200,8 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     refute ValidationCapacityHandoff.valid_archived_v2?(Map.put(v2, "available_budget_ms", 1))
   end
 
-  test "archive-only APIs retain the exact historical 343-batch plan" do
-    batches = historical_max_batches()
+  test "archive-only APIs retain the exact current 343-batch plan shape" do
+    batches = current_max_batches()
     assert length(batches) == 343
     assert Enum.sum(Enum.map(batches, & &1["count"])) == 2_000
     {:ok, ordered_plan_sha256} = ValidationCapacityHandoff.ordered_plan_digest(batches)
@@ -209,6 +233,9 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   end
 
   defp valid_v3_structural_attrs(batches, ordered_plan_sha256) do
+    batch_count = length(batches)
+    file_count = Enum.sum(Enum.map(batches, & &1["count"]))
+
     %{
       "schema_version" => 3,
       "phase" => "structural",
@@ -216,10 +243,10 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
       "per_batch_budget_ms" => 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 604,
-      "unstarted_file_count" => 2_000,
-      "total_batch_count" => 604,
-      "total_file_count" => 2_000,
+      "unstarted_batch_count" => batch_count,
+      "unstarted_file_count" => file_count,
+      "total_batch_count" => batch_count,
+      "total_file_count" => file_count,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "interrupted_batch" => nil,
       "unstarted_batches" => batches
@@ -227,6 +254,9 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
   end
 
   defp valid_v2_attrs(batches, ordered_plan_sha256) do
+    batch_count = length(batches)
+    file_count = Enum.sum(Enum.map(batches, & &1["count"]))
+
     %{
       "schema_version" => 2,
       "phase" => "structural",
@@ -234,28 +264,31 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
       "per_batch_budget_ms" => 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 604,
-      "unstarted_file_count" => 2_000,
-      "total_batch_count" => 604,
-      "total_file_count" => 2_000,
+      "unstarted_batch_count" => batch_count,
+      "unstarted_file_count" => file_count,
+      "total_batch_count" => batch_count,
+      "total_file_count" => file_count,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "unstarted_batches" => batches
     }
   end
 
   defp valid_v1_attrs(batches, ordered_plan_sha256) do
+    batch_count = length(batches)
+    file_count = Enum.sum(Enum.map(batches, & &1["count"]))
+
     %{
       "schema_version" => 1,
       "phase" => "structural",
       "available_budget_ms" => 1_000,
       "per_batch_budget_ms" => 1_200_000,
-      "required_budget_ms" => 604 * 1_200_000,
+      "required_budget_ms" => batch_count * 1_200_000,
       "completed_batch_count" => 0,
       "completed_file_count" => 0,
-      "unstarted_batch_count" => 604,
-      "unstarted_file_count" => 2_000,
-      "total_batch_count" => 604,
-      "total_file_count" => 2_000,
+      "unstarted_batch_count" => batch_count,
+      "unstarted_file_count" => file_count,
+      "total_batch_count" => batch_count,
+      "total_file_count" => file_count,
       "ordered_plan_sha256" => ordered_plan_sha256,
       "unstarted_batches" => batches
     }
@@ -279,19 +312,7 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
     }
   end
 
-  defp max_batches do
-    Enum.map(1..604, fn index ->
-      count = if index <= 255, do: 1, else: 5
-
-      inventory_sha256 =
-        :crypto.hash(:sha256, "inventory-#{index}")
-        |> Base.encode16(case: :lower)
-
-      batch(index, 604, count, inventory_sha256)
-    end)
-  end
-
-  defp historical_max_batches do
+  defp current_max_batches do
     Enum.map(1..343, fn index ->
       count =
         cond do
@@ -301,10 +322,22 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoffTest do
         end
 
       inventory_sha256 =
-        :crypto.hash(:sha256, "historical-inventory-#{index}")
+        :crypto.hash(:sha256, "inventory-#{index}")
         |> Base.encode16(case: :lower)
 
       batch(index, 343, count, inventory_sha256)
+    end)
+  end
+
+  defp historical_five_file_max_batches do
+    Enum.map(1..604, fn index ->
+      count = if index <= 255, do: 1, else: 5
+
+      inventory_sha256 =
+        :crypto.hash(:sha256, "historical-inventory-#{index}")
+        |> Base.encode16(case: :lower)
+
+      batch(index, 604, count, inventory_sha256)
     end)
   end
 end

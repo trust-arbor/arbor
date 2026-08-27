@@ -510,13 +510,15 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_step(-3, [first, second], 10_000)
   end
 
-  test "timeout refinement is deterministic, ordered, and completes each original once" do
+  test "timed-out 20-file root refines deterministically before its untouched suffix" do
     paths =
-      for i <- 1..6 do
-        "apps/alpha/test/f#{i}_test.exs"
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
       end
 
     assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
+    assert original.count == 20
+    assert suffix.count == 1
     assert {:ok, execution} = Core.new_test_execution(batches, 10_000)
     assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
     assert root.paths == original.paths
@@ -532,8 +534,9 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              )
 
     assert {:run, left, 10_000} = Core.next_test_execution_step(refined, 10_000)
-    assert left.paths == Enum.take(original.paths, 3)
-    assert left.count == 3
+    split_at = div(original.count + 1, 2)
+    assert left.paths == Enum.take(original.paths, split_at)
+    assert left.count == 10
 
     assert {:continue, after_left} =
              Core.record_test_execution_attempt(
@@ -546,8 +549,8 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              )
 
     assert {:run, right, 9_000} = Core.next_test_execution_step(after_left, 9_000)
-    assert right.paths == Enum.drop(original.paths, 3)
-    assert right.count == 2
+    assert right.paths == Enum.drop(original.paths, split_at)
+    assert right.count == 10
 
     assert {:continue, next_original} =
              Core.record_test_execution_attempt(
@@ -613,7 +616,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert String.contains?(check["stdout_excerpt"], "cross_app_refinement")
     assert String.contains?(check["stdout_excerpt"], "attempted_outputs_sha256=")
     assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
-    refute String.contains?(check["stdout_excerpt"], "apps/alpha/test/f1_test.exs")
+    refute String.contains?(check["stdout_excerpt"], hd(paths))
 
     expected_attempt_digest =
       [
@@ -657,6 +660,76 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert String.contains?(check["stdout_excerpt"], expected_attempt_digest)
     assert {:ok, _} = Jason.encode(check)
+  end
+
+  test "public API recursively times out a 20-file left branch through rootLLLLL" do
+    paths =
+      for i <- 1..20 do
+        "apps/alpha/test/deep_#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    [first_path | _] = paths
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert original.count == 20
+    operation_timeout = 10_000
+    assert {:ok, execution} = Core.new_test_execution([original], operation_timeout)
+
+    expected_timed_out_ancestors = [
+      {"root", 20},
+      {"rootL", 10},
+      {"rootLL", 5},
+      {"rootLLL", 3},
+      {"rootLLLL", 2}
+    ]
+
+    {singleton_state, remaining} =
+      Enum.reduce(
+        expected_timed_out_ancestors,
+        {execution, 20_000},
+        fn {position, count}, {state, residual} ->
+          assert {:run, attempt, ^operation_timeout} =
+                   Core.next_test_execution_step(state, residual)
+
+          assert attempt.position == position
+          assert attempt.count == count
+
+          next_residual = residual - 1_000
+
+          assert {:continue, next_state} =
+                   Core.record_test_execution_attempt(
+                     state,
+                     attempt,
+                     test_feedback(nil, "#{position} timeout"),
+                     true,
+                     operation_timeout,
+                     next_residual
+                   )
+
+          {next_state, next_residual}
+        end
+      )
+
+    assert remaining == 15_000
+
+    assert {:run, singleton, ^operation_timeout} =
+             Core.next_test_execution_step(singleton_state, remaining)
+
+    assert singleton.position == "rootLLLLL"
+    assert singleton.count == 1
+    assert singleton.paths == [first_path]
+
+    assert {:terminal, timed_out} =
+             Core.record_test_execution_attempt(
+               singleton_state,
+               singleton,
+               test_feedback(nil, "rootLLLLL timeout"),
+               true,
+               operation_timeout,
+               remaining - 1_000
+             )
+
+    assert timed_out["reason"] == "tests_timed_out"
+    refute Map.has_key?(timed_out, "capacity_handoff")
   end
 
   test "refined failure is fail-fast and only singleton ordinary timeout is terminal timeout" do
@@ -717,8 +790,8 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
   test "capacity during refinement uses only immutable original descriptors" do
     paths =
-      for i <- 1..6 do
-        "apps/alpha/test/f#{i}_test.exs"
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
       end
 
     assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
@@ -848,8 +921,8 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
   test "aggregate expiry at each refined-child boundary preserves original plan" do
     paths =
-      for i <- 1..6 do
-        "apps/alpha/test/f#{i}_test.exs"
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
       end
 
     assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
@@ -914,7 +987,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.next_test_execution_step(resolved_original, 0)
   end
 
-  test "maximum five-file per app-root plan is representable by the handoff contract" do
+  test "maximum current per-app-root plan is representable by the handoff contract" do
     singleton_paths =
       for i <- 1..255 do
         app = "app#{String.pad_leading(Integer.to_string(i), 3, "0")}"
@@ -928,16 +1001,22 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     inventory = singleton_paths ++ final_paths
     assert length(inventory) == Core.max_expanded_test_files()
-    assert Core.max_test_batch_files() == 5
+    assert Core.max_test_batch_files() == 20
     assert {:ok, batches} = Core.partition_test_batches(inventory)
-    assert length(batches) == 604
+
+    expected_batch_count =
+      length(singleton_paths) +
+        div(length(final_paths) + Core.max_test_batch_files() - 1, Core.max_test_batch_files())
+
+    assert expected_batch_count == 343
+    assert length(batches) == expected_batch_count
     assert Enum.flat_map(batches, & &1.paths) == inventory
-    assert Enum.all?(batches, &(&1.count <= 5))
+    assert Enum.all?(batches, &(&1.count <= Core.max_test_batch_files()))
 
     assert {:ok, check} =
              Core.capacity_handoff(:structural, 0, Core.maximum_timeout(), [], nil, batches)
 
-    assert check["capacity_handoff"]["total_batch_count"] == 604
+    assert check["capacity_handoff"]["total_batch_count"] == expected_batch_count
     assert check["capacity_handoff"]["total_file_count"] == 2_000
   end
 
@@ -1220,7 +1299,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches is deterministic, exact-once, ordered, and bound-respecting" do
-    assert Core.max_test_batch_runtime_files() == 5
+    assert Core.max_test_batch_runtime_files() == 20
 
     assert Core.max_test_batch_argv_files() ==
              Arbor.Shell.spawn_capable_max_command_args() - 3
@@ -1228,7 +1307,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())
 
-    assert Core.max_test_batch_files() == 5
+    assert Core.max_test_batch_files() == 20
     assert Core.max_test_batch_arg_bytes() == 65_536
 
     # Two files pack into one multi-file child while preserving inventory order.
@@ -1357,10 +1436,13 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   end
 
   test "partition_test_batches representative inventories are exact-once and deterministic" do
-    assert Core.max_test_batch_runtime_files() == 5
-    assert Core.max_test_batch_files() == 5
+    assert Core.max_test_batch_runtime_files() == 20
+    assert Core.max_test_batch_files() == 20
 
-    for {size, expected_batches} <- [{40, 8}, {511, 103}, {707, 142}] do
+    for size <- [40, 511, 707] do
+      expected_batches =
+        div(size + Core.max_test_batch_files() - 1, Core.max_test_batch_files())
+
       inventory =
         for i <- 1..size do
           "apps/alpha/test/r#{String.pad_leading(Integer.to_string(i), 5, "0")}_test.exs"
@@ -1412,17 +1494,25 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     end
   end
 
-  test "validation timeout regression: twenty exact files split into four resumable children" do
+  test "initial batch regression: twenty exact files remain one argv-safe child" do
     files =
       for i <- 1..20 do
         "apps/alpha/test/slow_#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
       end
 
-    assert {:ok, batches} = Core.partition_test_batches(files)
-    assert Enum.map(batches, & &1.count) == [5, 5, 5, 5]
+    assert {:ok, [batch] = batches} = Core.partition_test_batches(files)
+    assert batch.count == 20
+    assert batch.paths == files
+    assert batch.index == 1
+    assert batch.total == 1
+    assert batch.label == "batch-1-of-1-n20-#{batch.inventory_sha256}"
     assert Enum.flat_map(batches, & &1.paths) == files
-    assert Enum.map(batches, & &1.index) == [1, 2, 3, 4]
-    assert Enum.all?(batches, &(&1.total == 4))
+
+    assert length(["test", "--no-deps-check", "--" | batch.paths]) <=
+             Arbor.Shell.spawn_capable_max_command_args()
+
+    arg_bytes = Enum.reduce(batch.paths, 0, fn path, acc -> acc + byte_size(path) + 1 end)
+    assert arg_bytes <= Core.max_test_batch_arg_bytes()
   end
 
   test "partition_test_batches fails closed on malformed or non-normalized input" do
@@ -2359,14 +2449,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     refute Core.residual_allows_mix_launch?(op, 5_000, reserve)
     refute Core.residual_allows_mix_launch?(op, reserve, reserve)
 
-    files = [
-      "apps/alpha/test/a1_test.exs",
-      "apps/alpha/test/a2_test.exs",
-      "apps/alpha/test/a3_test.exs",
-      "apps/alpha/test/a4_test.exs",
-      "apps/alpha/test/a5_test.exs",
-      "apps/alpha/test/a6_test.exs"
-    ]
+    files =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/a#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
 
     assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(files)
     op = reserve * 2

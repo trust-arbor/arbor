@@ -71,22 +71,21 @@ defmodule Arbor.Contracts.Coding.ValidationCapacityHandoff do
   ]
   @batch_fields [:index, :total, :count, :label, :inventory_sha256]
   # These bounds mirror CrossApp's closed maxima without introducing a
-  # contracts -> actions dependency. With 2,000 files, 256 app test roots, and
-  # at most 5 files per current CrossApp batch, the worst distribution is 255
-  # singleton roots plus 1,745 files in one root:
-  # 255 + ceil(1,745 / 5) = 604 batches.
-  #
-  # Descriptor count remains at the historical 20-file ceiling so archived
-  # v1/v2 evidence and other existing contract consumers remain readable.
+  # contracts -> actions dependency. The current 20-file producer can emit at
+  # most 255 singleton roots plus ceil(1,745 / 20) = 88 batches in the final
+  # root, for 343 descriptors. The contract retains the five-file-era schema-v3
+  # cardinality bound of 255 + ceil(1,745 / 5) = 604 descriptors so historical
+  # live-schema evidence remains readable. Archive-only v1/v2 evidence shares
+  # that compatibility bound.
   @max_file_count 2_000
   @max_test_roots 256
-  @cross_app_max_batch_files 5
   @max_descriptor_batch_files 20
+  @historical_cross_app_batch_files 5
   @singleton_roots @max_test_roots - 1
   @files_in_last_root @max_file_count - @singleton_roots
   @last_root_batch_count div(
-                           @files_in_last_root + @cross_app_max_batch_files - 1,
-                           @cross_app_max_batch_files
+                           @files_in_last_root + @historical_cross_app_batch_files - 1,
+                           @historical_cross_app_batch_files
                          )
   @max_batch_count @singleton_roots + @last_root_batch_count
   @max_operation_timeout_ms 1_200_000

@@ -86,18 +86,32 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _}
   end
 
-  test "timed-out multi-file batch refines in order before untouched suffix", %{
+  test "timed-out 20-file root refines under one deadline before untouched suffix", %{
     worktree: worktree
   } do
     parent = self()
-    paths = write_numbered_tests!(worktree, "alpha", 6)
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
-    [left_paths, right_paths] = [Enum.take(original.paths, 3), Enum.drop(original.paths, 3)]
+    assert original.count == 20
+    assert suffix.count == 1
+    split_at = div(original.count + 1, 2)
 
-    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
+    [left_paths, right_paths] =
+      [Enum.take(original.paths, split_at), Enum.drop(original.paths, split_at)]
+
+    {:ok, clock} = Agent.start(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock), do: Agent.stop(clock)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock, & &1)
+    end)
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
+      Agent.update(clock, &(&1 + 1_000))
 
       case args do
         ["test", "--no-deps-check", "--" | batch_paths] when batch_paths == original.paths ->
@@ -117,13 +131,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       end
     end)
 
-    check =
-      Shell.run_app_tests(
-        worktree,
-        ["apps/alpha/test"],
-        launchable_op_ms(),
-        launchable_stage_ms()
-      )
+    stage = launchable_stage_ms()
+    operation = stage
+    check = Shell.run_app_tests(worktree, ["apps/alpha/test"], operation, stage)
 
     assert check["passed"]
     assert String.contains?(check["stdout_excerpt"], "cross_app_refinement")
@@ -131,12 +141,21 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute String.contains?(check["stdout_excerpt"], hd(paths))
     assert {:ok, _} = Jason.encode(check)
 
-    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | root_paths], _opts}
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | root_paths], root_opts}
     assert root_paths == original.paths
-    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^left_paths], _opts}
-    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^right_paths], _opts}
-    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | suffix_paths], _opts}
+    assert Keyword.get(root_opts, :timeout) == min(operation, stage)
+
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^left_paths], left_opts}
+    assert Keyword.get(left_opts, :timeout) == min(operation, stage - 1_000)
+
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | ^right_paths], right_opts}
+    assert Keyword.get(right_opts, :timeout) == min(operation, stage - 2_000)
+
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | suffix_paths],
+                    suffix_opts}
+
     assert suffix_paths == suffix.paths
+    assert Keyword.get(suffix_opts, :timeout) == min(operation, stage - 3_000)
     refute_received {:mix_invocation, _, _}
   end
 
@@ -183,7 +202,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     worktree: worktree
   } do
     parent = self()
-    paths = write_numbered_tests!(worktree, "alpha", 6)
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
     assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
     {:ok, clock} = Agent.start(fn -> [0, 0, 1, launchable_stage_ms()] end)
 
@@ -2235,9 +2254,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert check["passed"]
 
-    # Runtime batch cap admits up to 5 exact files; three-file inventory is one child.
-    assert Core.max_test_batch_files() == 5
-    assert Core.max_test_batch_runtime_files() == 5
+    # Runtime batch cap admits up to 20 exact files; three-file inventory is one child.
+    assert Core.max_test_batch_files() == 20
+    assert Core.max_test_batch_runtime_files() == 20
 
     expected_batch = [
       "test",
@@ -2269,7 +2288,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Enum.at(batches, 1).count == 5
     assert Enum.flat_map(batches, & &1.paths) == paths
 
-    assert Core.max_test_batch_runtime_files() == 5
+    assert Core.max_test_batch_runtime_files() == 20
 
     assert Core.max_test_batch_files() ==
              min(Core.max_test_batch_runtime_files(), Core.max_test_batch_argv_files())

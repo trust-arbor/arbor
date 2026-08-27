@@ -766,9 +766,13 @@ pre-test children plus the unchanged exact test batches for CrossApp; the
 reviewed stage ceilings do not expand.
 
 Exact `*_test.exs` inventory is preserved (including slow and integration-tagged
-files). Paths are partitioned into sequential batches of at most 5 exact files
-per child under the existing argv-count and argv-byte ceilings; tags are never
-excluded to fit a budget.
+files). Paths are partitioned into sequential app-root-local initial batches of
+at most 20 exact files per child under the existing argv-count and argv-byte
+ceilings; tags are never excluded to fit a budget. A process timeout on a
+multi-file batch refines that batch deterministically with
+`ordered_binary_split_v1`; non-timeout failures remain fail-fast and singleton
+timeouts remain terminal. Refined children run sequentially under the original
+absolute aggregate deadline and never reset or extend either validation ceiling.
 
 The optional top-level MCP dispatch `timeout` is an outer cancellation ceiling.
 The executor uses the smaller of that value and `budgets.wall_clock_ms`, so a
@@ -1017,19 +1021,22 @@ A capacity handoff is emitted only when residual budget is exhausted
 
 - **structural** — residual is already 0 before the first child launches
 - **runtime** — the shared deadline expires after a completed prefix, leaving
-  an exact unstarted suffix
+  an exact unstarted suffix, or interrupts one immutable original batch during
+  timeout refinement
 
 The workflow bypasses validation and total rework counters, closes the worker,
 and retains the workspace. Live `validation[0].test.capacity_handoff` is schema
-**v2**: a closed, bounded descriptor whose ordered batch labels, counts, and
-SHA-256 digests bind the exact unstarted inventory without copying raw paths
-into the terminal artifact and without encoding ceiling products as required
-duration. An authorized operator or CI job can reconstruct paths from the
-retained workspace and verify the digest chain. Callers that already read
-historical schema-v1 handoffs (which recorded a product-bearing
-`required_budget_ms`) can validate them with the explicit archive-only
-verifier. Arbor does not currently expose an integrated terminal archive reader
-for that helper; live normalize/finalize/write paths accept v2 only.
+**v3**: a closed, bounded descriptor whose optional interrupted batch and
+ordered unstarted batch labels, counts, and SHA-256 digests bind the immutable
+original plan without copying raw paths into the terminal artifact or replacing
+it with runtime-only refined children. The current 20-file producer emits at
+most 343 descriptors for the bounded 2,000-file, 256-root inventory. The
+contract retains the five-file-era schema-v3 compatibility bound of 604
+descriptors so historical evidence remains readable; that archive bound is not
+the current producer cap. An authorized operator or CI job can reconstruct
+paths from the retained workspace and verify the digest chain. Historical
+schema-v1 and schema-v2 handoffs remain available only through their explicit
+archive-only verifiers; live normalize/finalize/write paths accept v3 only.
 
 ## Post-integration settlement
 
