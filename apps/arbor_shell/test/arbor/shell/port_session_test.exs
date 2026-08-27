@@ -1,9 +1,25 @@
 defmodule Arbor.Shell.PortSessionTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbor.Shell.PortSession
 
   describe "basic execution" do
+    test "complete logs the producing handler" do
+      log =
+        capture_log(fn ->
+          {:ok, pid} =
+            PortSession.start_link("sleep 60", stream_to: self(), timeout: 1_000)
+
+          id = PortSession.get_id(pid)
+          assert_receive {:port_exit, ^id, 137, _output}, 5_000
+        end)
+
+      assert log =~ "shell port session complete handler=:process_group_terminal"
+      assert log =~ "reason=:timeout"
+    end
+
     test "runs a command and returns output with exit code 0" do
       {:ok, pid} = PortSession.start_link("echo hello", stream_to: self())
       id = PortSession.get_id(pid)

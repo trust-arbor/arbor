@@ -1,6 +1,8 @@
 defmodule Arbor.Shell.OciUnitRuntime do
   @moduledoc false
 
+  require Logger
+
   # Production OCI/Podman unit adapter. Uses the reviewed oci-unit launcher
   # mode (clone/fork permitted for pinned /usr/bin/podman argv) instead of
   # generic no-fork PortSession. Teardown kills the process group and also
@@ -31,6 +33,8 @@ defmodule Arbor.Shell.OciUnitRuntime do
     with :ok <- require_runtime_executable(executable),
          :ok <- OciUnitArgv.review(args),
          :ok <- reject_launcher_opts(opts) do
+      Logger.warning("shell oci unit start_command owner=#{inspect(self())}")
+
       PortSession.start_supervised_direct_for_oci_unit(
         executable,
         args,

@@ -9,6 +9,8 @@ defmodule Arbor.Shell.PortSession do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Identifiers
 
   alias Arbor.Shell.{
@@ -474,6 +476,10 @@ defmodule Arbor.Shell.PortSession do
   @impl true
   def handle_info({:cancel_shell_execution, id}, state) do
     if id in [nil, state.id] do
+      Logger.warning(
+        "shell port session complete handler=cancel_request status=#{state.status} id=#{state.id}"
+      )
+
       cancelled = cancel_running(state)
 
       if cancelled.status == :cleanup_pending,
@@ -495,7 +501,13 @@ defmodule Arbor.Shell.PortSession do
       else: {:stop, :normal, cleaned}
   end
 
-  def handle_info({:DOWN, ref, :process, pid, _reason}, %{owner_ref: ref, owner_pid: pid} = state) do
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{owner_ref: ref, owner_pid: pid} = state) do
+    if state.status in [:starting, :running] do
+      Logger.warning(
+        "shell port session complete handler=owner_down reason=#{inspect(reason)} pid=#{inspect(pid)} status=#{state.status} id=#{state.id}"
+      )
+    end
+
     cancelled = cancel_running(state)
 
     if cancelled.status == :cleanup_pending,
@@ -512,6 +524,10 @@ defmodule Arbor.Shell.PortSession do
 
         if state.had_subscribers and MapSet.size(subscribers) == 0 and
              state.status in [:starting, :running] do
+          Logger.warning(
+            "shell port session complete handler=last_subscriber_down pid=#{inspect(pid)} status=#{state.status} id=#{state.id}"
+          )
+
           cancelled = cancel_running(updated)
 
           if cancelled.status == :cleanup_pending,
@@ -539,7 +555,7 @@ defmodule Arbor.Shell.PortSession do
          }}
 
       {:terminal, reason, exit_code} ->
-        completed = complete(state, reason, exit_code)
+        completed = complete(state, reason, exit_code, :process_group_terminal)
         Process.send_after(self(), :self_terminate, @retention_ms)
         {:noreply, completed}
 
@@ -706,7 +722,13 @@ defmodule Arbor.Shell.PortSession do
     end
   end
 
-  defp complete(state, reason, exit_code) do
+  defp complete(state, reason, exit_code, handler) do
+    if reason != :normal or handler != :process_group_terminal do
+      Logger.warning(
+        "shell port session complete handler=#{inspect(handler)} reason=#{inspect(reason)} exit=#{inspect(exit_code)} owner=#{inspect(state.owner_pid)} status=#{state.status} id=#{state.id}"
+      )
+    end
+
     status =
       case reason do
         :normal -> :completed
@@ -771,7 +793,14 @@ defmodule Arbor.Shell.PortSession do
   # interactive delivery running under backpressure.
   defp framing_input_cleanup(state, :timeout), do: cleanup_or_defer(state, :timeout, nil)
   defp framing_input_cleanup(state, :cancelled), do: cleanup_or_defer(state, :cancelled, nil)
-  defp framing_input_cleanup(state, :caller_dead), do: cleanup_or_defer(state, :cancelled, nil)
+
+  defp framing_input_cleanup(state, :caller_dead) do
+    Logger.warning(
+      "shell port session complete handler=caller_dead owner=#{inspect(state.owner_pid)} status=#{state.status} id=#{state.id}"
+    )
+
+    cleanup_or_defer(state, :cancelled, nil)
+  end
 
   defp framing_input_cleanup(state, _port_command_error),
     do: cleanup_or_defer(state, :cancelled, nil)
@@ -780,7 +809,7 @@ defmodule Arbor.Shell.PortSession do
     case ProcessGroup.terminate(handle, requested_reason) do
       {:ok, terminal_reason} ->
         if is_nil(failure) do
-          complete(state, terminal_reason, 137)
+          complete(state, terminal_reason, 137, {:cleanup, requested_reason})
         else
           fail_after_cleanup(state, failure)
         end

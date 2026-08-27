@@ -43,16 +43,27 @@ defmodule Arbor.Commands.Baseline.ActivateCore do
 
   @spec require_oci_document(term()) :: :ok | {:error, atom()}
   def require_oci_document(%{"runtime" => "oci"} = document) when is_map(document) do
-    if Map.has_key?(document, "apple_container") or
-         get_in(document, ["image_policy", "vminit_image"]) != nil or
-         get_in(document, ["image_policy", "vminit_manifest_digest"]) != nil do
-      {:error, :apple_only_policy_key}
-    else
-      :ok
+    cond do
+      Map.has_key?(document, "apple_container") or
+        get_in(document, ["image_policy", "vminit_image"]) != nil or
+          get_in(document, ["image_policy", "vminit_manifest_digest"]) != nil ->
+        {:error, :apple_only_policy_key}
+
+      not valid_image_id?(get_in(document, ["image_policy", "image_id"])) ->
+        {:error, :missing_image_id}
+
+      true ->
+        :ok
     end
   end
 
   def require_oci_document(_document), do: {:error, :invalid_baseline_document}
+
+  defp valid_image_id?("sha256:" <> hex) when byte_size(hex) == 64 do
+    Regex.match?(@hex64_re, hex)
+  end
+
+  defp valid_image_id?(_other), do: false
 
   defp require_absolute(path) when is_binary(path) do
     cond do

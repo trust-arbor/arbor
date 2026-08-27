@@ -36,12 +36,22 @@ defmodule Arbor.Commands.BaselineCoreTest do
 
     assert override == "/tmp/validation-runtime.json"
 
-    assert :ok = ActivateCore.require_oci_document(%{"runtime" => "oci"})
+    image_id = "sha256:" <> String.duplicate("12", 32)
+
+    assert :ok =
+             ActivateCore.require_oci_document(%{
+               "runtime" => "oci",
+               "image_policy" => %{"image_id" => image_id}
+             })
+
+    assert {:error, :missing_image_id} =
+             ActivateCore.require_oci_document(%{"runtime" => "oci"})
 
     assert {:error, :apple_only_policy_key} =
              ActivateCore.require_oci_document(%{
                "runtime" => "oci",
-               "apple_container" => %{}
+               "apple_container" => %{},
+               "image_policy" => %{"image_id" => image_id}
              })
   end
 

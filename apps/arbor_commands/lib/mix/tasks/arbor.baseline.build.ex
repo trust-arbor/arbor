@@ -71,6 +71,7 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
       platform=#{report["platform"]}
       tree_digest=#{report["tree_digest"]}
       mix_lock_digest=#{report["mix_lock_digest"]}
+      image_id=#{report["image_id"]}
       baseline_root=#{report["baseline_root"]}
     Activate with mix arbor.baseline.activate #{report["tree_digest"]}
     """

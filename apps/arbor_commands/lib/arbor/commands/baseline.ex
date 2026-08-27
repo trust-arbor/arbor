@@ -25,6 +25,7 @@ defmodule Arbor.Commands.Baseline do
           | {:config_path, String.t()}
           | {:image_build, (map() -> {:ok, map()} | {:error, term()})}
           | {:deps_fetch, (map() -> :ok | {:error, term()})}
+          | {:deps_compile, (map() -> :ok | {:error, term()})}
           | {:smoke_test, (String.t(), String.t() -> :ok | {:error, term()})}
           | {:network, (term() -> term())}
           | {:shell, module()}
@@ -38,6 +39,7 @@ defmodule Arbor.Commands.Baseline do
          :ok <- BuildCore.require_platform(platform),
          {:ok, mix_lock_digest} <- hash_mix_lock(ctx.repo_root),
          :ok <- fetch_deps(ctx),
+         :ok <- compile_deps(ctx),
          :ok <- smoke_test_copy(ctx, platform),
          {:ok, tree_digest} <-
            ctx.shell.linux_dependency_baseline_tree_digest(ctx.deps_path, platform),
@@ -76,7 +78,8 @@ defmodule Arbor.Commands.Baseline do
          "mix_lock_digest" => mix_lock_digest,
          "platform" => platform,
          "baseline_root" => layout.baseline_root,
-         "active_config_path" => ctx.active_config_path
+         "active_config_path" => ctx.active_config_path,
+         "image_id" => Map.get(image, :image_id)
        }}
     end
   end
@@ -196,6 +199,7 @@ defmodule Arbor.Commands.Baseline do
                Path.join(home, "validation-runtime.json"),
            image_build: Keyword.get(opts, :image_build),
            deps_fetch: Keyword.get(opts, :deps_fetch),
+           deps_compile: Keyword.get(opts, :deps_compile),
            smoke_test: Keyword.get(opts, :smoke_test),
            shell: Keyword.get(opts, :shell, Shell)
          }}
@@ -294,6 +298,24 @@ defmodule Arbor.Commands.Baseline do
          ) do
       {_output, 0} -> :ok
       {_output, _status} -> {:error, :deps_fetch_failed}
+    end
+  end
+
+  defp compile_deps(%{deps_compile: fun} = ctx) when is_function(fun, 1), do: fun.(ctx)
+
+  defp compile_deps(%{deps_path: deps_path, repo_root: repo_root}) do
+    # Compile-time fetches (sqlite_vec loadables) write into the dep checkout.
+    # Take the tree digest after this so the unit can compile with --network none.
+    build_path = deps_path <> "-build"
+    File.mkdir_p!(build_path)
+
+    case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.compile"],
+           cd: repo_root,
+           env: [{"MIX_DEPS_PATH", deps_path}, {"MIX_BUILD_PATH", build_path}],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> :ok
+      {_output, _status} -> {:error, :deps_compile_failed}
     end
   end
 
@@ -494,16 +516,73 @@ defmodule Arbor.Commands.Baseline do
     # the operator-owned pin walks; created by `mkdir_p` under a 002 umask it
     # came out 775 and every pin failed with :untrusted_path even though the
     # digest dir and tree were 0700/0400 (V7-4, 2026-08-26). Own it too.
-    with :ok <- mkdir_owner_only(Path.dirname(layout.baseline_root)),
-         :ok <- mkdir_owner_only(layout.baseline_root),
-         :ok <- copy_tree(source_tree, layout.tree_dir),
-         :ok <- write_mode_0400(layout.manifest_path, Jason.encode!(document)),
+    #
+    # Write into a fresh sibling and rename into place. A second build with
+    # the same tree digest used to File.copy onto 0400/0500 files and fail
+    # :tree_copy_failed while baseline.json kept the previous image_id (V7-19).
+    collection = Path.dirname(layout.baseline_root)
+
+    staging =
+      Path.join(
+        collection,
+        ".staging-" <> Integer.to_string(System.unique_integer([:positive]))
+      )
+
+    with :ok <- mkdir_owner_only(collection),
+         :ok <- mkdir_owner_only(staging),
+         :ok <- copy_tree(source_tree, Path.join(staging, "tree")),
+         :ok <- write_mode_0400(Path.join(staging, "manifest.json"), Jason.encode!(document)),
          :ok <-
            write_mode_0400(
-             layout.baseline_json_path,
+             Path.join(staging, "baseline.json"),
              Jason.encode!(BuildCore.activation_document(layout, image_policy))
-           ) do
-      chmod_tree(layout.baseline_root)
+           ),
+         :ok <- chmod_tree(staging),
+         :ok <- install_baseline_root(layout.baseline_root, staging) do
+      :ok
+    else
+      error ->
+        _ = File.rm_rf(staging)
+        error
+    end
+  end
+
+  defp install_baseline_root(dest, staging) do
+    backup =
+      dest <> ".old-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    with :ok <- maybe_rename_existing(dest, backup),
+         :ok <- rename_or_error(staging, dest) do
+      _ = File.rm_rf(backup)
+      :ok
+    else
+      error ->
+        _ = File.rm_rf(dest)
+        _ = restore_backup(backup, dest)
+        error
+    end
+  end
+
+  defp maybe_rename_existing(dest, backup) do
+    if File.exists?(dest) do
+      rename_or_error(dest, backup)
+    else
+      :ok
+    end
+  end
+
+  defp restore_backup(backup, dest) do
+    if File.exists?(backup) do
+      File.rename(backup, dest)
+    else
+      :ok
+    end
+  end
+
+  defp rename_or_error(from, to) do
+    case File.rename(from, to) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :baseline_write_failed}
     end
   end
 

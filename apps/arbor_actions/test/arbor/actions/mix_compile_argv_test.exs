@@ -195,4 +195,114 @@ defmodule Arbor.Actions.MixCompileArgvTest do
     git_invocations = File.read!(git_log)
     assert git_invocations =~ "rev-parse"
   end
+
+  test "cold compile uses a pre-fetched dep artifact and does not download" do
+    {elixir_root, 0} = System.cmd("mise", ["where", "elixir"], stderr_to_stdout: true)
+    {erlang_root, 0} = System.cmd("mise", ["where", "erlang"], stderr_to_stdout: true)
+    elixir_root = String.trim(elixir_root)
+    erlang_root = String.trim(erlang_root)
+    mix = Path.join(elixir_root, "bin/mix")
+    assert File.regular?(mix)
+
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "mix-prefetch-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    project = Path.join(root, "project")
+    File.mkdir_p!(Path.join(project, "lib"))
+    File.mkdir_p!(Path.join(project, "deps/payload/lib/mix/tasks/compile"))
+    File.mkdir_p!(Path.join(project, "deps/payload/priv/0.1.5"))
+
+    File.write!(Path.join(project, "mix.exs"), """
+    defmodule PrefetchFixture.MixProject do
+      use Mix.Project
+
+      def project do
+        [
+          app: :prefetch_fixture,
+          version: "0.0.1",
+          elixir: "~> 1.14",
+          compilers: [:download_payload] ++ Mix.compilers(),
+          deps: [{:payload, path: "deps/payload", runtime: false}]
+        ]
+      end
+    end
+    """)
+
+    File.write!(Path.join(project, "lib/prefetch_fixture.ex"), """
+    defmodule PrefetchFixture do
+      def ok, do: :ok
+    end
+    """)
+
+    File.write!(Path.join(project, "deps/payload/mix.exs"), """
+    defmodule Payload.MixProject do
+      use Mix.Project
+
+      def project do
+        [app: :payload, version: "0.0.1"]
+      end
+    end
+    """)
+
+    File.write!(
+      Path.join(project, "deps/payload/lib/mix/tasks/compile/download_payload.ex"),
+      """
+      defmodule Mix.Tasks.Compile.DownloadPayload do
+        use Mix.Task.Compiler
+
+        @impl true
+        def run(_args) do
+          artifact = Path.join([File.cwd!(), "deps/payload/priv/0.1.5/vec0.so"])
+
+          if File.exists?(artifact) do
+            File.write!("download_payload_ran", "skip")
+            {:ok, []}
+          else
+            Mix.raise("would download under network none")
+          end
+        end
+      end
+      """
+    )
+
+    File.write!(Path.join(project, "deps/payload/priv/0.1.5/vec0.so"), "native\n")
+
+    path =
+      Enum.join(
+        [
+          Path.join(erlang_root, "bin"),
+          Path.join(elixir_root, "bin"),
+          System.get_env("PATH", "/usr/bin:/bin")
+        ],
+        ":"
+      )
+
+    env =
+      System.get_env()
+      |> Map.put("PATH", path)
+      |> Map.put("MIX_ENV", "dev")
+      |> Map.put("MIX_BUILD_PATH", Path.join(root, "build"))
+      |> Map.put("MIX_DEPS_PATH", nil)
+      |> Map.put("MIX_EXS", nil)
+
+    task =
+      Task.async(fn ->
+        System.cmd(mix, MixAction.compile_argv(),
+          cd: project,
+          env: env,
+          stderr_to_stdout: true
+        )
+      end)
+
+    assert {:ok, {output, status}} = Task.yield(task, 50_000) || Task.shutdown(task, :brutal_kill)
+    assert status == 0, output
+    refute output =~ "would download"
+    assert File.read!(Path.join(project, "download_payload_ran")) == "skip"
+  end
 end

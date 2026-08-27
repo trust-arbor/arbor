@@ -147,6 +147,7 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                active_config_path: active,
                image_build: image_build,
                deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
                smoke_test: fn copy, _platform ->
                  refute copy == deps
                  :ok
@@ -168,6 +169,77 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
 
     assert baseline_json["image_policy"]["image_id"] == image_id
     assert baseline_json["image_policy"]["manifest_digest"] == @manifest
+    assert report["image_id"] == image_id
+  end
+
+  test "second build with an unchanged digest replaces 0400 tree and records the new image id",
+       %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    artifact = Path.join(deps, "sqlite_vec/priv/0.1.5/vec0.so")
+
+    first_id = "sha256:" <> String.duplicate("1", 64)
+    second_id = "sha256:" <> String.duplicate("2", 64)
+    {:ok, agent} = Agent.start_link(fn -> first_id end)
+
+    image_build = fn _request ->
+      id = Agent.get(agent, & &1)
+
+      {:ok,
+       %{
+         index_digest: @index,
+         manifest_digest: @manifest,
+         image: "docker.io/arbor/validation@" <> @index,
+         image_id: id
+       }}
+    end
+
+    opts = [
+      arbor_home: root,
+      repo_root: repo,
+      deps_path: deps,
+      platform: "linux/amd64",
+      active_config_path: Path.join(root, "validation-runtime.json"),
+      image_build: image_build,
+      deps_fetch: fn _ctx -> :ok end,
+      deps_compile: fn ctx ->
+        send(self(), {:deps_compile, ctx.deps_path})
+        dest = Path.join(ctx.deps_path, "sqlite_vec/priv/0.1.5")
+        File.mkdir_p!(dest)
+        path = Path.join(dest, "vec0.so")
+        unless File.exists?(path), do: File.write!(path, "native\n")
+        :ok
+      end,
+      smoke_test: fn _copy, _platform -> :ok end,
+      shell: FakeShell
+    ]
+
+    assert {:ok, first} = Build.execute([], opts)
+    tree_file = Path.join(first["baseline_root"], "tree/sqlite_vec/priv/0.1.5/vec0.so")
+    assert File.read!(tree_file) == "native\n"
+    assert {:ok, %File.Stat{type: :regular} = stat} = File.lstat(tree_file)
+    assert (stat.mode &&& 0o777) == 0o400
+    assert_received {:deps_compile, ^deps}
+
+    Agent.update(agent, fn _ -> second_id end)
+    File.write!(artifact, "native-rebuild\n")
+
+    assert {:ok, second} = Build.execute([], opts)
+    assert_received {:deps_compile, ^deps}
+    assert second["baseline_root"] == first["baseline_root"]
+    assert second["image_id"] == second_id
+
+    assert File.read!(Path.join(second["baseline_root"], "tree/sqlite_vec/priv/0.1.5/vec0.so")) ==
+             "native-rebuild\n"
+
+    baseline_json =
+      second["baseline_root"]
+      |> Path.join("baseline.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert baseline_json["image_policy"]["image_id"] == second_id
+    assert {:ok, %File.Stat{type: :regular} = rebuilt} = File.lstat(tree_file)
+    assert (rebuilt.mode &&& 0o777) == 0o400
   end
 
   test "status uses the Shell facade and never names Authority modules" do
@@ -211,6 +283,7 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
       },
       "image_policy" => %{
         "image" => "docker.io/arbor/validation@" <> @index,
+        "image_id" => "sha256:" <> String.duplicate("1", 64),
         "manifest_digest" => @manifest,
         "env" => ["MIX_HOME=/usr/local/.mix"],
         "labels" => %{"org.arbor.validation.schema" => "1"},
