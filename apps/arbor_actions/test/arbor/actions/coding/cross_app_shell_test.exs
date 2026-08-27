@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   alias Arbor.Actions.Coding.CrossApp.Shell
   alias Arbor.Actions.Mix, as: MixAction
 
+  @compile_argv ["compile", "--no-deps-check", "--warnings-as-errors"]
   @moduletag :fast
 
   setup do
@@ -1374,7 +1375,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.test_compile["passed"]
     assert checks.test["passed"]
 
-    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
+    assert_receive {:mix_invocation, ^worktree, @compile_argv, dev_opts}
     assert Keyword.get(dev_opts, :validation_resource) == resource
     assert Keyword.get(dev_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(dev_opts, :resource_profile) == :intensive
@@ -1385,7 +1386,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(xref_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(xref_opts, :resource_profile) == :intensive
 
-    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
+    assert_receive {:mix_invocation, ^worktree, @compile_argv, test_opts}
     assert Keyword.get(test_opts, :validation_resource) == resource
     assert Keyword.get(test_opts, :timeout) == launchable_op_ms()
     assert Keyword.get(test_opts, :resource_profile) == :intensive
@@ -1425,9 +1426,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert {:ok, checks_3} = Shell.run_validation_checks(worktree, ["apps/alpha/test"], op)
     assert checks_3.test["passed"]
-    assert_receive {:validation_invocation, ["compile", "--warnings-as-errors"]}
+    assert_receive {:validation_invocation, @compile_argv}
     assert_receive {:validation_invocation, ["xref", "graph"]}
-    assert_receive {:validation_invocation, ["compile", "--warnings-as-errors"]}
+    assert_receive {:validation_invocation, @compile_argv}
     assert_receive {:validation_invocation, ["test", "--", "apps/alpha/test/alpha_test.exs"]}
 
     # 4-arity with resource map (legacy selection seam)
@@ -1493,7 +1494,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts, now})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           Agent.update(clock_agent, &(&1 + 1_000))
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
@@ -1518,7 +1519,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.compile["passed"]
     refute checks.xref["passed"]
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], compile_opts, 0}
+    assert_receive {:mix_invocation, @compile_argv, compile_opts, 0}
     assert Keyword.get(compile_opts, :timeout) == 5_000
 
     assert_receive {:mix_invocation, ["xref", "graph"], xref_opts, 1_000}
@@ -1545,11 +1546,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       cond do
-        args == ["compile", "--warnings-as-errors"] and
+        args == @compile_argv and
             Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
-        args == ["compile", "--warnings-as-errors"] ->
+        args == @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         args == ["xref", "graph"] ->
@@ -1583,9 +1584,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert checks.test["reason"] == nil
     refute checks.test["reason"] == "no_existing_test_files"
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _dev_opts}
+    assert_receive {:mix_invocation, @compile_argv, _dev_opts}
     assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts}
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _test_compile_opts}
+    assert_receive {:mix_invocation, @compile_argv, _test_compile_opts}
 
     assert_receive {:mix_invocation,
                     ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"] =
@@ -1697,7 +1698,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       cond do
-        args == ["compile", "--warnings-as-errors"] ->
+        args == @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         args == ["xref", "graph"] ->
@@ -1752,9 +1753,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
              }
            ]
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, @compile_argv, _}
     assert_receive {:mix_invocation, ["xref", "graph"], _}
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, @compile_argv, _}
 
     assert_receive {:mix_invocation,
                     ["test", "--", "apps/arbor_security/test/arbor_security_test.exs"], _}
@@ -1794,7 +1795,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
                %{id: "res"}
              )
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], opts}
+    assert_receive {:mix_invocation, @compile_argv, opts}
     assert Keyword.get(opts, :timeout) == 5_000
     refute_received {:mix_invocation, _, _}
   end
@@ -1818,7 +1819,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 
         ["xref", "graph"] ->
@@ -1893,7 +1894,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     # Last-mile: every contained Mix stage carries the above-standard timeout
     # and the system-owned intensive resource profile (not caller-selectable).
-    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], dev_opts}
+    assert_receive {:mix_invocation, ^worktree, @compile_argv, dev_opts}
     assert Keyword.get(dev_opts, :timeout) == operation_timeout
     assert Keyword.get(dev_opts, :resource_profile) == :intensive
 
@@ -1901,7 +1902,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert Keyword.get(xref_opts, :timeout) == operation_timeout
     assert Keyword.get(xref_opts, :resource_profile) == :intensive
 
-    assert_receive {:mix_invocation, ^worktree, ["compile", "--warnings-as-errors"], test_opts}
+    assert_receive {:mix_invocation, ^worktree, @compile_argv, test_opts}
     assert Keyword.get(test_opts, :timeout) == operation_timeout
     assert Keyword.get(test_opts, :resource_profile) == :intensive
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
@@ -1935,7 +1936,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts, Agent.get(clock_agent, & &1)})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           # Consume wall time during pre-test stages; must not start the shared
           # app-test deadline until after MIX_ENV=test compile succeeds.
           Agent.update(clock_agent, fn t -> t + 20_000 end)
@@ -1969,13 +1970,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     # Two compile invocations (dev + test env) and xref consume 60_000ms of wall
     # clock before tests; the test stage still receives the full per-op budget.
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], dev_opts, 0}
+    assert_receive {:mix_invocation, @compile_argv, dev_opts, 0}
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
 
     assert_receive {:mix_invocation, ["xref", "graph"], _xref_opts, 20_000}
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_compile_opts,
-                    40_000}
+    assert_receive {:mix_invocation, @compile_argv, test_compile_opts, 40_000}
 
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
 
@@ -1995,7 +1995,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           {:ok, %{exit_code: 1, stdout: "compile fail", stderr: "", timed_out: false}}
 
         other ->
@@ -2012,14 +2012,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert compile_fail.test["status"] == "skipped"
     assert compile_fail.xref["reason"] == "compile_failed"
     assert compile_fail.test_compile["reason"] == "compile_failed"
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"]}
+    assert_receive {:mix_invocation, @compile_argv}
     refute_received {:mix_invocation, _}
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           if Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} do
             flunk("must not run test compile after xref failure")
           else
@@ -2042,7 +2042,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert xref_fail.test_compile["status"] == "skipped"
     assert xref_fail.test["status"] == "skipped"
     assert xref_fail.test_compile["reason"] == "xref_failed"
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, @compile_argv, _}
     assert_receive {:mix_invocation, ["xref", "graph"], _}
     refute_received {:mix_invocation, _, _}
 
@@ -2050,7 +2050,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           if Keyword.get(opts, :env) == %{"MIX_ENV" => "test"} do
             {:ok, %{exit_code: 1, stdout: "test compile fail", stderr: "", timed_out: false}}
           else
@@ -2078,10 +2078,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert test_compile_fail.test["status"] == "skipped"
     assert test_compile_fail.test["reason"] == "test_compile_failed"
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], dev_opts}
+    assert_receive {:mix_invocation, @compile_argv, dev_opts}
     refute match?(%{"MIX_ENV" => "test"}, Keyword.get(dev_opts, :env))
     assert_receive {:mix_invocation, ["xref", "graph"], _}
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_opts}
+    assert_receive {:mix_invocation, @compile_argv, test_opts}
     assert Keyword.get(test_opts, :env) == %{"MIX_ENV" => "test"}
     refute_received {:mix_invocation, _, _}
 
@@ -2113,7 +2113,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         ["xref", "graph"] ->
@@ -2143,9 +2143,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute String.contains?(label, "apps/alpha/test/f")
     assert String.starts_with?(label, "batch-")
 
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], _}
+    assert_receive {:mix_invocation, @compile_argv, _}
     assert_receive {:mix_invocation, ["xref", "graph"], _}
-    assert_receive {:mix_invocation, ["compile", "--warnings-as-errors"], test_compile_opts}
+    assert_receive {:mix_invocation, @compile_argv, test_compile_opts}
     assert Keyword.get(test_compile_opts, :env) == %{"MIX_ENV" => "test"}
     assert_receive {:mix_invocation, ["test", "--" | r1], _}
     assert r1 == batch1.paths
@@ -2363,7 +2363,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     # Public validation checks surface converts the throw into {:error, reason}.
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         ["xref", "graph"] ->
@@ -2391,7 +2391,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
 
         ["xref", "graph"] ->
@@ -2429,7 +2429,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       send(parent, {:mix_invocation, args, opts, Agent.get(clock_agent, & &1)})
 
       case args do
-        ["compile", "--warnings-as-errors"] ->
+        @compile_argv ->
           Agent.update(clock_agent, fn t -> t + 50_000 end)
           {:ok, %{exit_code: 0, stdout: "compile ok", stderr: "", timed_out: false}}
 

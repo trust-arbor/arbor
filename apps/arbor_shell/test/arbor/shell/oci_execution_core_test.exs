@@ -87,6 +87,19 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
   end
 
   describe "mix wrapper contract" do
+    test "compile --no-deps-check is a reviewed mix shape" do
+      assert {:ok, spec} =
+               Core.new(valid_request(%{args: ["compile", "--no-deps-check"]}))
+
+      assert spec.plan.command_args == ["compile", "--no-deps-check"]
+    end
+
+    test "compile --no-deps-check --warnings-as-errors is a reviewed mix shape" do
+      args = ["compile", "--no-deps-check", "--warnings-as-errors"]
+      assert {:ok, spec} = Core.new(valid_request(%{args: args}))
+      assert spec.plan.command_args == args
+    end
+
     test "compile plans digest-only create argv without vminit or kernel" do
       assert {:ok, spec} = Core.new(valid_request())
       assert spec.plan.command_args == ["compile"]

@@ -194,7 +194,7 @@ defmodule Arbor.Actions.Code do
 
       case MixAction.run_with_required_workspace(
              worktree,
-             ["compile", "--warnings-as-errors"],
+             MixAction.compile_argv(%{warnings_as_errors: true}),
              mix_params,
              context || %{},
              opts

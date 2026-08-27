@@ -86,6 +86,7 @@ defmodule Arbor.Actions.MixTest do
 
       invocation = Arbor.Actions.TestMixShell.last_invocation()
       assert Keyword.fetch!(invocation.opts, :resource_profile) == :intensive
+      assert invocation.args == MixAction.compile_argv(%{warnings_as_errors: true})
     end
 
     test "all public Mix actions preserve typed validation infrastructure errors", %{

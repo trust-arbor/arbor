@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 695,
+  "entry_count": 697,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8579,8 +8579,34 @@
       "source_incident": "found 2026-08-26 in P1B-2A CrossApp batch 17 and verified 2026-08-27",
       "always_loaded": false,
       "content_sha256": "07e6a9ca30b04dd647b67f6830d09a0d2cc9a9bfd01ce1622d580cb95d79a3f1"
+    },
+    {
+      "source_ordinal": 696,
+      "source_kind": "post-migration",
+      "slug": "grok-written-files-inside-a-verified-private-home-must-not-require-umask-022",
+      "title": "Grok-written files inside a verified-private `GROK_HOME` must not require umask 022.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-grok-written-files-inside-a-verified-private-home-must-not-require-umask-022",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-27, V7-14, Linux factory run 11l/11m",
+      "always_loaded": false,
+      "content_sha256": "b53fec69d8edd295b190fa9eb4d464fb717151b537fc6d6984c4820561e17142"
+    },
+    {
+      "source_ordinal": 697,
+      "source_kind": "post-migration",
+      "slug": "digest-pinned-validation-compiles-must-skip-mix-lock-git-checks",
+      "title": "Digest-pinned validation compiles must skip Mix lock git checks.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-digest-pinned-validation-compiles-must-skip-mix-lock-git-checks",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-27, V7-15, Linux factory run 11n",
+      "always_loaded": false,
+      "content_sha256": "c41bd8bcb88b19fb73f8ef5fbf209ca296a46364a0e52060b0ac308051670b0a"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 234
+  "post_migration_entry_count": 236
 }

@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Mix do
 
   | Action | Description |
   |--------|-------------|
-  | `Compile` | Run `mix compile` (optionally with warnings-as-errors) |
+  | `Compile` | Run `mix compile --no-deps-check` (optionally with warnings-as-errors) |
   | `Test` | Run `mix test` (optionally with paths/args) |
   | `Quality` | Run `mix quality` (format-check + credo) |
   | `Format` | Run `mix format` (write or check-only) |
@@ -133,6 +133,18 @@ defmodule Arbor.Actions.Mix do
 
   @doc false
   def compile_feedback_text_limit, do: @compile_feedback_text_limit
+
+  @doc false
+  @spec compile_argv(map()) :: [String.t()]
+  def compile_argv(params \\ %{}) when is_map(params) do
+    args = ["compile", "--no-deps-check"]
+
+    if params[:warnings_as_errors] do
+      args ++ ["--warnings-as-errors"]
+    else
+      args
+    end
+  end
 
   @doc false
   def module_owned_env_keys, do: @module_owned_env_keys
@@ -3550,13 +3562,13 @@ defmodule Arbor.Actions.Mix do
     |------|------|----------|-------------|
     | `path` | string | yes | Project root |
     | `workspace_id` | string | yes | Opaque workspace lease for owner-scoped validation resources |
-    | `warnings_as_errors` | boolean | no | Pass `--warnings-as-errors` |
+    | `warnings_as_errors` | boolean | no | Pass `--warnings-as-errors` after `--no-deps-check` |
     | `timeout` | integer | no | Command timeout in ms (default 5 min) |
     """
 
     use Jido.Action,
       name: "mix_compile",
-      description: "Run `mix compile` in a project directory",
+      description: "Run `mix compile --no-deps-check` in a project directory",
       category: "mix",
       tags: ["mix", "compile", "elixir"],
       schema: [
@@ -3633,15 +3645,7 @@ defmodule Arbor.Actions.Mix do
       end
     end
 
-    defp build_args(params) do
-      args = ["compile"]
-
-      if params[:warnings_as_errors] do
-        args ++ ["--warnings-as-errors"]
-      else
-        args
-      end
-    end
+    defp build_args(params), do: MixAction.compile_argv(params)
   end
 
   defmodule Test do

@@ -1023,6 +1023,12 @@ defmodule Arbor.Shell.OciExecutionCore do
   defp match_reviewed_mix_shape(["compile", "--warnings-as-errors"]),
     do: {:ok, ["compile", "--warnings-as-errors"]}
 
+  defp match_reviewed_mix_shape(["compile", "--no-deps-check"]),
+    do: {:ok, ["compile", "--no-deps-check"]}
+
+  defp match_reviewed_mix_shape(["compile", "--no-deps-check", "--warnings-as-errors"]),
+    do: {:ok, ["compile", "--no-deps-check", "--warnings-as-errors"]}
+
   defp match_reviewed_mix_shape(["quality"]), do: {:ok, ["quality"]}
 
   defp match_reviewed_mix_shape(["xref", "graph"]), do: {:ok, ["xref", "graph"]}

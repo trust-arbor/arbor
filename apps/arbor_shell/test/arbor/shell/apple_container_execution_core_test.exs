@@ -173,6 +173,19 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       assert spec.plan.command_args == ["compile", "--warnings-as-errors"]
     end
 
+    test "compile --no-deps-check" do
+      assert {:ok, spec} =
+               Core.new(valid_request(%{args: ["compile", "--no-deps-check"]}))
+
+      assert spec.plan.command_args == ["compile", "--no-deps-check"]
+    end
+
+    test "compile --no-deps-check --warnings-as-errors" do
+      args = ["compile", "--no-deps-check", "--warnings-as-errors"]
+      assert {:ok, spec} = Core.new(valid_request(%{args: args}))
+      assert spec.plan.command_args == args
+    end
+
     test "quality" do
       assert {:ok, spec} = Core.new(valid_request(%{args: ["quality"]}))
       assert spec.plan.command_args == ["quality"]

@@ -16,8 +16,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   later worktree read (ABA / changed-path skew defense). The same tree OID is
   the validation before-binding and evidence `validated_tree_oid`.
 
-  The test-environment compile is an explicit `mix compile --warnings-as-errors`
-  under owner-controlled `MIX_ENV=test`. The aggregate app-test monotonic deadline
+  The test-environment compile is an explicit
+  `mix compile --no-deps-check --warnings-as-errors` under owner-controlled
+  `MIX_ENV=test`. The aggregate app-test monotonic deadline
   starts only after that stage succeeds, so cold test-env compilation cannot
   consume the full test-stage budget.
 
@@ -685,7 +686,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_compile(path, timeout, validation_deadline, resource) do
     case run_bounded_mix(
            path,
-           ["compile", "--warnings-as-errors"],
+           MixAction.compile_argv(%{warnings_as_errors: true}),
            [validation_resource: resource],
            timeout,
            validation_deadline,
@@ -727,7 +728,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     # Owner-controlled safe env only; same per-operation timeout as other stages.
     case run_bounded_mix(
            path,
-           ["compile", "--warnings-as-errors"],
+           MixAction.compile_argv(%{warnings_as_errors: true}),
            [validation_resource: resource, env: %{"MIX_ENV" => "test"}],
            timeout,
            validation_deadline,

@@ -68,8 +68,11 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   """
   @max_grok_auth_payload_bytes 65_600
   @max_grok_access_token_bytes 65_536
+  @max_grok_auth_lock_bytes 1_024
   @max_grok_auth_ttl_seconds 300
-  @grok_external_auth_scrub_timeout_ms 100
+  # Quiet-loop budget. Linux umask-002 lock settlement can exceed 100 ms on a
+  # cold VM; the loop still exits early once cache files stay absent.
+  @grok_external_auth_scrub_timeout_ms 500
   @grok_external_auth_scrub_quiet_ms 20
   @grok_external_auth_scrub_retry_ms 5
   @grok_external_auth_scope_prefix "https://auth.x.ai::"
@@ -258,7 +261,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     do: {:error, :grok_external_auth_unavailable}
 
   @doc false
-  @spec refresh_grok_external_auth(map()) :: :ok | {:error, atom()}
+  @spec refresh_grok_external_auth(map()) :: :ok | {:error, term()}
   def refresh_grok_external_auth(%{path: runtime_home} = cleanup_identity)
       when is_binary(runtime_home) and runtime_home != "" do
     with :ok <- scrub_grok_external_auth_cache(cleanup_identity) do
@@ -270,7 +273,7 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     do: {:error, :grok_external_auth_unavailable}
 
   @doc false
-  @spec scrub_grok_external_auth_cache(map()) :: :ok | {:error, atom()}
+  @spec scrub_grok_external_auth_cache(map()) :: :ok | {:error, term()}
   def scrub_grok_external_auth_cache(%{path: runtime_home})
       when is_binary(runtime_home) and runtime_home != "" do
     # ACP authentication may return before the provider creates or settles its cache files.
@@ -343,13 +346,21 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     lock_path = Path.join(grok_home, @grok_auth_lock_filename)
 
     with :ok <- verify_private_directory(grok_home),
+         {:ok, owner_uid} <- grok_home_owner_uid(grok_home),
          {:ok, %{"access_token" => access_token}} <-
            read_verified_grok_auth_payload(payload_path, grok_home),
-         :ok <- verify_and_remove_grok_external_auth_cache(auth_path, grok_home, access_token),
-         :ok <- verify_and_remove_grok_external_auth_lock(lock_path, grok_home),
+         :ok <-
+           verify_and_remove_grok_external_auth_cache(
+             auth_path,
+             grok_home,
+             access_token,
+             owner_uid
+           ),
+         :ok <- verify_and_remove_grok_external_auth_lock(lock_path, grok_home, owner_uid),
          :ok <- refuse_legacy_grok_auth(grok_home) do
       :ok
     else
+      {:error, _reason} = error -> error
       _other -> {:error, :grok_external_auth_unavailable}
     end
   rescue
@@ -1076,43 +1087,46 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
     end
   end
 
-  defp verify_and_remove_grok_external_auth_cache(auth_path, grok_home, access_token) do
+  defp verify_and_remove_grok_external_auth_cache(auth_path, grok_home, access_token, owner_uid) do
     case File.lstat(auth_path) do
       {:error, :enoent} ->
         :ok
 
-      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size} = before}
-      when (mode &&& 0o7777) == 0o600 and size > 0 and
-             size <= @max_grok_auth_payload_bytes ->
-        with {:ok, ^auth_path} <-
-               contained_grok_file_path(auth_path, grok_home, @grok_auth_filename),
-             {:ok, payload} <-
-               Arbor.LLM.read_bounded_regular_file(
-                 auth_path,
-                 @max_grok_auth_payload_bytes
-               ),
-             true <- byte_size(payload) == size,
-             {:ok, decoded} <-
-               Arbor.LLM.decode_bounded_json(payload,
-                 max_bytes: @max_grok_auth_payload_bytes,
-                 max_nodes: 32,
-                 max_depth: 3,
-                 max_map_keys: 16,
-                 max_list_items: 1
-               ),
-             :ok <- validate_grok_external_auth_cache(decoded, access_token),
-             {:ok, %File.Stat{type: :regular, links: 1} = after_stat} <-
-               File.lstat(auth_path),
-             true <- grok_file_identity(before) == grok_file_identity(after_stat),
-             :ok <- File.rm(auth_path),
-             {:error, :enoent} <- File.lstat(auth_path) do
-          :ok
+      {:ok, %File.Stat{} = before} ->
+        if grok_written_regular_file?(before, @max_grok_auth_payload_bytes, owner_uid) and
+             before.size > 0 do
+          with {:ok, ^auth_path} <-
+                 contained_grok_file_path(auth_path, grok_home, @grok_auth_filename),
+               {:ok, payload} <-
+                 Arbor.LLM.read_bounded_regular_file(
+                   auth_path,
+                   @max_grok_auth_payload_bytes
+                 ),
+               true <- byte_size(payload) == before.size,
+               {:ok, decoded} <-
+                 Arbor.LLM.decode_bounded_json(payload,
+                   max_bytes: @max_grok_auth_payload_bytes,
+                   max_nodes: 32,
+                   max_depth: 3,
+                   max_map_keys: 16,
+                   max_list_items: 1
+                 ),
+               :ok <- validate_grok_external_auth_cache(decoded, access_token),
+               {:ok, %File.Stat{type: :regular, links: 1} = after_stat} <-
+                 File.lstat(auth_path),
+               true <- grok_file_identity(before) == grok_file_identity(after_stat),
+               :ok <- File.rm(auth_path),
+               {:error, :enoent} <- File.lstat(auth_path) do
+            :ok
+          else
+            _other -> grok_external_auth_cache_invalid(@grok_auth_filename, before)
+          end
         else
-          _other -> {:error, :grok_external_auth_cache_invalid}
+          grok_external_auth_cache_invalid(@grok_auth_filename, before)
         end
 
-      _other ->
-        {:error, :grok_external_auth_cache_invalid}
+      other ->
+        grok_external_auth_cache_invalid(@grok_auth_filename, other)
     end
   end
 
@@ -1139,25 +1153,63 @@ defmodule Arbor.AI.AcpSession.RuntimeHome do
   defp grok_external_auth_scalar?(value),
     do: is_binary(value) or is_integer(value) or is_boolean(value) or is_nil(value)
 
-  defp verify_and_remove_grok_external_auth_lock(lock_path, grok_home) do
+  defp verify_and_remove_grok_external_auth_lock(lock_path, grok_home, owner_uid) do
     case File.lstat(lock_path) do
       {:error, :enoent} ->
         :ok
 
-      {:ok, %File.Stat{type: :regular, links: 1, mode: mode, size: size}}
-      when (mode &&& 0o022) == 0 and size <= 1_024 ->
-        with {:ok, ^lock_path} <-
-               contained_grok_file_path(lock_path, grok_home, @grok_auth_lock_filename),
-             :ok <- File.rm(lock_path),
-             {:error, :enoent} <- File.lstat(lock_path) do
-          :ok
+      {:ok, %File.Stat{} = before} ->
+        if grok_written_regular_file?(before, @max_grok_auth_lock_bytes, owner_uid) do
+          with {:ok, ^lock_path} <-
+                 contained_grok_file_path(lock_path, grok_home, @grok_auth_lock_filename),
+               :ok <- File.rm(lock_path),
+               {:error, :enoent} <- File.lstat(lock_path) do
+            :ok
+          else
+            _other -> grok_external_auth_cache_invalid(@grok_auth_lock_filename, before)
+          end
         else
-          _other -> {:error, :grok_external_auth_cache_invalid}
+          grok_external_auth_cache_invalid(@grok_auth_lock_filename, before)
         end
 
-      _other ->
-        {:error, :grok_external_auth_cache_invalid}
+      other ->
+        grok_external_auth_cache_invalid(@grok_auth_lock_filename, other)
     end
+  end
+
+  # Grok-written files live under a directory already pinned euid-owned 0700.
+  # Inner group/world bits therefore grant nothing; requiring `(mode &&& 0o022) == 0`
+  # is a umask policy (macOS 022 → 644 vs Linux user-private-group 002 → 664).
+  # OTP has no :os.geteuid/0; ownership is the verified grok_home uid.
+  defp grok_written_regular_file?(%File.Stat{} = stat, max_size, owner_uid)
+       when is_integer(max_size) and max_size >= 0 and is_integer(owner_uid) do
+    stat.type == :regular and stat.links == 1 and is_integer(stat.size) and stat.size >= 0 and
+      stat.size <= max_size and stat.uid == owner_uid
+  end
+
+  defp grok_written_regular_file?(_stat, _max_size, _owner_uid), do: false
+
+  defp grok_home_owner_uid(grok_home) when is_binary(grok_home) do
+    case File.lstat(grok_home) do
+      {:ok, %File.Stat{type: :directory, uid: uid}} when is_integer(uid) ->
+        {:ok, uid}
+
+      _other ->
+        {:error, :grok_runtime_home_unavailable}
+    end
+  end
+
+  defp grok_external_auth_cache_invalid(filename, stat) when is_binary(filename) do
+    {:error, {:grok_external_auth_cache_invalid, grok_external_auth_cache_detail(filename, stat)}}
+  end
+
+  defp grok_external_auth_cache_detail(filename, %File.Stat{mode: mode})
+       when is_binary(filename) do
+    %{file: filename, mode: mode &&& 0o7777}
+  end
+
+  defp grok_external_auth_cache_detail(filename, _stat) when is_binary(filename) do
+    %{file: filename, mode: nil}
   end
 
   defp validate_grok_auth_payload(

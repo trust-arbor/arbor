@@ -355,10 +355,66 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     {cleanup, opts, _payload} = staged_opts!()
     write_grok_auth_cache!(opts, "wrong-cache-token")
 
-    assert {:error, :grok_external_auth_unavailable} =
+    assert {:error, {:grok_external_auth_cache_invalid, detail}} =
              RuntimeHome.scrub_grok_external_auth_cache(cleanup)
 
+    assert detail.file == "auth.json"
+    assert detail.mode == 0o600
     assert File.regular?(Path.join(grok_home(opts), "auth.json"))
+    assert :ok = RuntimeHome.cleanup(cleanup)
+  end
+
+  test "security regression: grok-written 0664 lock inside 0700 grok_home is scrubbed",
+       _context do
+    access = jwt(System.system_time(:second) + 7_200, "umask-lock-access")
+    publish_xai!(access, "umask-lock-refresh")
+
+    {cleanup, opts, _payload} = staged_opts!()
+    home = grok_home(opts)
+    lock_path = Path.join(home, "auth.json.lock")
+    File.write!(lock_path, "grok-lock-state\n")
+    File.chmod!(lock_path, 0o664)
+    assert {:ok, %File.Stat{mode: mode}} = File.lstat(home)
+    assert Bitwise.band(mode, 0o7777) == 0o700
+
+    assert :ok = RuntimeHome.scrub_grok_external_auth_cache(cleanup)
+    assert {:error, :enoent} = File.lstat(lock_path)
+    assert :ok = RuntimeHome.cleanup(cleanup)
+  end
+
+  test "security regression: grok-written 0664 cache inside 0700 grok_home is scrubbed",
+       _context do
+    access = jwt(System.system_time(:second) + 7_200, "umask-cache-access")
+    publish_xai!(access, "umask-cache-refresh")
+
+    {cleanup, opts, _payload} = staged_opts!()
+    write_grok_auth_cache!(opts, access)
+    home = grok_home(opts)
+    File.chmod!(Path.join(home, "auth.json"), 0o664)
+    File.chmod!(Path.join(home, "auth.json.lock"), 0o664)
+
+    assert :ok = RuntimeHome.scrub_grok_external_auth_cache(cleanup)
+    refute_grok_auth_cache(opts)
+    assert :ok = RuntimeHome.cleanup(cleanup)
+  end
+
+  test "security regression: grok-written lock in a group-writable grok_home is refused",
+       _context do
+    access = jwt(System.system_time(:second) + 7_200, "group-writable-home-access")
+    publish_xai!(access, "group-writable-home-refresh")
+
+    {cleanup, opts, _payload} = staged_opts!()
+    home = grok_home(opts)
+    lock_path = Path.join(home, "auth.json.lock")
+    File.write!(lock_path, "grok-lock-state\n")
+    File.chmod!(lock_path, 0o664)
+    File.chmod!(home, 0o770)
+
+    assert {:error, :grok_runtime_home_unavailable} =
+             RuntimeHome.scrub_grok_external_auth_cache(cleanup)
+
+    assert File.regular?(lock_path)
+    File.chmod!(home, 0o700)
     assert :ok = RuntimeHome.cleanup(cleanup)
   end
 
@@ -407,7 +463,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
 
     File.rm!(payload_path)
 
-    assert {:error, :grok_external_auth_unavailable} =
+    assert {:error, :grok_auth_payload_invalid} =
              AcpSession.send_message(session, "must-not-run", timeout: 2_000)
 
     refute File.exists?(payload_path)
@@ -459,7 +515,7 @@ defmodule Arbor.AI.AcpSessionGrokOAuthSecurityRegressionTest do
     assert_receive {:grok_probe_started, cache_client, cache_opts, _payload}, 2_000
     assert_grok_authenticated(cache_client)
 
-    assert {:error, :grok_external_auth_unavailable} =
+    assert {:error, {:grok_external_auth_cache_invalid, %{file: "auth.json", mode: 0o600}}} =
              AcpSession.await_ready(mismatched_cache_session, timeout: 2_000)
 
     refute inspect(AcpSession.status(mismatched_cache_session)) =~ cache_sentinel

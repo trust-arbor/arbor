@@ -294,7 +294,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
     # Mutation during the aggregate validation window fails closed.
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, _opts ->
-      if args == ["compile", "--warnings-as-errors"] do
+      if args == ["compile", "--no-deps-check", "--warnings-as-errors"] do
         File.write!(Path.join(path, "validation_mutated.txt"), "mutated during validation\n")
       end
 
