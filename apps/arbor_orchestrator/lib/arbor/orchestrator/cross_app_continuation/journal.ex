@@ -49,7 +49,12 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
   def open(input, opts \\ []), do: call(opts, {:open, input})
   def get(continuation_id, opts \\ []), do: call(opts, {:get, continuation_id})
-  def subject(continuation_id, opts \\ []), do: call(opts, {:subject, continuation_id})
+
+  def get_for_principal(continuation_id, principal_id, opts \\ []),
+    do: call(opts, {:get_for_principal, continuation_id, principal_id})
+
+  def mutate_for_principal(transition, continuation_id, input, principal_id, opts \\ []),
+    do: call(opts, {:mutate_for_principal, transition, continuation_id, input, principal_id})
 
   def claim(continuation_id, input, opts \\ []),
     do: call(opts, {:mutate, "claim", continuation_id, input})
@@ -175,13 +180,24 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
     {:reply, reply, state}
   end
 
-  def handle_call({:subject, continuation_id}, _from, state) do
-    {reply, state} = do_subject(continuation_id, state)
+  def handle_call({:get_for_principal, continuation_id, principal_id}, _from, state) do
+    {reply, state} = do_get_for_principal(continuation_id, principal_id, state)
     {:reply, reply, state}
   end
 
   def handle_call({:mutate, transition, continuation_id, input}, _from, state) do
     {reply, state} = do_mutate(transition, continuation_id, input, state)
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:mutate_for_principal, transition, continuation_id, input, principal_id},
+        _from,
+        state
+      ) do
+    {reply, state} =
+      do_mutate_for_principal(transition, continuation_id, input, principal_id, state)
+
     {:reply, reply, state}
   end
 
@@ -341,21 +357,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
   defp do_get(continuation_id, state, token_mode) do
     with {:ok, continuation_id} <- Envelope.continuation_id(continuation_id),
          {:ok, record, data} <- load_admitted(continuation_id, state) do
-      snapshot =
-        if token_mode == :redact,
-          do: Envelope.redact_snapshot(data["snapshot"]),
-          else: data["snapshot"]
-
-      {{:ok,
-        Envelope.public_envelope(
-          continuation_id,
-          data["commit"]["operation_id"],
-          snapshot,
-          data["successor"],
-          data["terminal"],
-          record,
-          state.durability_class
-        )}, state}
+      {get_public(record, data, token_mode, state), state}
     else
       {:error, :not_found} ->
         {{:error, :not_found}, state}
@@ -365,62 +367,66 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
     end
   end
 
-  defp do_subject(continuation_id, state) do
+  defp do_get_for_principal(continuation_id, principal_id, state) do
     with {:ok, continuation_id} <- Envelope.continuation_id(continuation_id),
-         {:ok, _record, data} <- load_admitted(continuation_id, state),
-         %{"principal_id" => principal_id, "task_id" => task_id} <-
-           data["snapshot"]["identities"] do
-      {{:ok,
-        %{
-          "continuation_id" => continuation_id,
-          "principal_id" => principal_id,
-          "task_id" => task_id
-        }}, state}
+         {:ok, record, data} <- load_admitted(continuation_id, state),
+         :ok <- bind_principal(data, principal_id) do
+      {get_public(record, data, :redact, state), state}
     else
       {:error, :not_found} -> {{:error, :not_found}, state}
       {:error, reason} -> {{:error, reason}, maybe_poison(state, reason)}
-      _other -> {{:error, :malformed_record}, maybe_poison(state, :malformed_record)}
     end
   end
 
+  defp get_public(record, data, token_mode, state) do
+    snapshot =
+      if token_mode == :redact,
+        do: Envelope.redact_snapshot(data["snapshot"]),
+        else: data["snapshot"]
+
+    {:ok,
+     Envelope.public_envelope(
+       data["continuation_id"],
+       data["commit"]["operation_id"],
+       snapshot,
+       data["successor"],
+       data["terminal"],
+       record,
+       state.durability_class
+     )}
+  end
+
   defp do_mutate(transition, continuation_id, input, state) do
+    do_mutate(transition, continuation_id, input, nil, state)
+  end
+
+  defp do_mutate_for_principal(transition, continuation_id, input, principal_id, state) do
+    do_mutate(transition, continuation_id, input, principal_id, state)
+  end
+
+  defp do_mutate(transition, continuation_id, input, principal_id, state) do
     with {:ok, continuation_id} <- Envelope.continuation_id(continuation_id),
+         :ok <- require_transition(transition),
          :ok <- require_json_object(input),
          {:ok, operation_id} <- Envelope.operation_id(input["operation_id"]),
          :ok <- reject_injected(input, transition) do
       case load_admitted(continuation_id, state) do
         {:ok, record, data} ->
-          snapshot = data["snapshot"]
-          payload = caller_payload(input)
-          fence = fence_fields(transition, input)
-
-          cond do
-            transition == "claim" and
-                claim_binding_match?(data, continuation_id, operation_id, payload) ->
-              {ok_public(record, operation_id, data, :keep_token, state), state}
-
-            replay_match?(
-              data["commit"],
-              continuation_id,
-              transition,
-              operation_id,
-              snapshot,
-              payload
-            ) ->
-              {ok_public(record, operation_id, data, :redact, state), state}
-
-            true ->
-              apply_transition(
+          case bind_optional_principal(data, principal_id) do
+            :ok ->
+              mutate_admitted(
                 transition,
                 continuation_id,
                 operation_id,
                 input,
-                payload,
-                fence,
                 record,
                 data,
+                principal_id,
                 state
               )
+
+            {:error, reason} ->
+              {{:error, reason}, state}
           end
 
         {:error, reason} ->
@@ -431,6 +437,63 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
     end
   end
 
+  defp mutate_admitted(
+         transition,
+         continuation_id,
+         operation_id,
+         input,
+         record,
+         data,
+         principal_id,
+         state
+       ) do
+    snapshot = data["snapshot"]
+    payload = caller_payload(input)
+    fence = fence_fields(transition, input)
+
+    cond do
+      transition == "claim" and
+          claim_binding_match?(data, continuation_id, operation_id, payload) ->
+        {ok_public(record, operation_id, data, :keep_token, state), state}
+
+      replay_match?(
+        data["commit"],
+        continuation_id,
+        transition,
+        operation_id,
+        snapshot,
+        payload
+      ) ->
+        {ok_public(record, operation_id, data, :redact, state), state}
+
+      true ->
+        apply_transition(
+          transition,
+          continuation_id,
+          operation_id,
+          input,
+          payload,
+          fence,
+          record,
+          data,
+          principal_id,
+          state
+        )
+    end
+  end
+
+  defp bind_optional_principal(_data, nil), do: :ok
+  defp bind_optional_principal(data, principal_id), do: bind_principal(data, principal_id)
+
+  defp bind_principal(
+         %{"snapshot" => %{"identities" => %{"principal_id" => principal_id}}},
+         principal_id
+       )
+       when is_binary(principal_id) and principal_id != "",
+       do: :ok
+
+  defp bind_principal(_data, _principal_id), do: {:error, :subject_principal_mismatch}
+
   defp apply_transition(
          transition,
          continuation_id,
@@ -440,6 +503,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
          fence,
          record,
          data,
+         principal_id,
          state
        ) do
     snapshot = data["snapshot"]
@@ -457,6 +521,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
             data,
             next_snapshot,
             effects,
+            principal_id,
             state
           )
 
@@ -484,6 +549,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
          previous,
          next_snapshot,
          effects,
+         principal_id,
          state
        ) do
     with :ok <- require_persist_first(effects, next_snapshot),
@@ -527,7 +593,14 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
           publish_stored(stored, operation_id, token_mode, state)
 
         {:error, :conflict} ->
-          replay_or_conflict(continuation_id, transition, operation_id, payload, state)
+          replay_or_conflict(
+            continuation_id,
+            transition,
+            operation_id,
+            payload,
+            state,
+            principal_id
+          )
 
         {:error, reason} ->
           {{:error, reason}, maybe_poison(state, reason)}
@@ -537,28 +610,41 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
     end
   end
 
-  defp replay_or_conflict(continuation_id, transition, operation_id, payload, state) do
+  defp replay_or_conflict(
+         continuation_id,
+         transition,
+         operation_id,
+         payload,
+         state,
+         principal_id \\ nil
+       ) do
     case load_admitted(continuation_id, state) do
       {:ok, record, data} ->
-        state = remember(state, record)
+        case bind_optional_principal(data, principal_id) do
+          :ok ->
+            state = remember(state, record)
 
-        cond do
-          transition == "claim" and
-              claim_binding_match?(data, continuation_id, operation_id, payload) ->
-            {ok_public(record, operation_id, data, :keep_token, state), state}
+            cond do
+              transition == "claim" and
+                  claim_binding_match?(data, continuation_id, operation_id, payload) ->
+                {ok_public(record, operation_id, data, :keep_token, state), state}
 
-          replay_match?(
-            data["commit"],
-            continuation_id,
-            transition,
-            operation_id,
-            data["snapshot"],
-            payload
-          ) ->
-            {ok_public(record, operation_id, data, :redact, state), state}
+              replay_match?(
+                data["commit"],
+                continuation_id,
+                transition,
+                operation_id,
+                data["snapshot"],
+                payload
+              ) ->
+                {ok_public(record, operation_id, data, :redact, state), state}
 
-          true ->
-            {{:error, :conflict}, state}
+              true ->
+                {{:error, :conflict}, state}
+            end
+
+          {:error, reason} ->
+            {{:error, reason}, state}
         end
 
       {:error, reason} ->
@@ -1014,6 +1100,10 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
   defp require_generation(value) when is_integer(value) and value >= 1, do: {:ok, value}
   defp require_generation(_value), do: {:error, :malformed_state}
+
+  defp require_transition("claim"), do: :ok
+  defp require_transition(transition) when transition in @fenced_transitions, do: :ok
+  defp require_transition(_transition), do: {:error, :invalid_operation}
 
   defp terminal_status("fail"), do: "failed"
   defp terminal_status("cancel"), do: "cancelled"

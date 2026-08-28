@@ -38,6 +38,140 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
     end
   end
 
+  test "security regression: every public operation authorizes before Journal access" do
+    {journal, store} = start_journal()
+    legitimate = identity_and_authority("continuation-operation-table")
+    input = open_input(legitimate.identity.agent_id, "open-table")
+    {:ok, open_resource} = Authorization.open_resource(input)
+
+    get_count = FakeStore.get_call_count(store)
+    list_count = FakeStore.list_call_count(store)
+
+    assert {:error, _reason} =
+             Orchestrator.coding_cross_app_continuation_open(
+               input,
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+
+    assert FakeStore.record_count(store) == 0
+    assert FakeStore.get_call_count(store) == get_count
+    assert FakeStore.list_call_count(store) == list_count
+
+    grant!(legitimate.identity.agent_id, open_resource)
+
+    assert {:ok, opened} =
+             Orchestrator.coding_cross_app_continuation_open(
+               input,
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+
+    continuation_id = opened["continuation_id"]
+    durable_before = FakeStore.peek(store, continuation_id)
+    get_count = FakeStore.get_call_count(store)
+    list_count = FakeStore.list_call_count(store)
+
+    operation_rows =
+      [
+        {"get", nil,
+         fn ->
+           Orchestrator.coding_cross_app_continuation_get(
+             continuation_id,
+             legitimate.identity.agent_id,
+             legitimate.authority,
+             server: journal
+           )
+         end}
+      ] ++
+        Enum.map(mutation_inputs(), fn {operation, mutation_input} ->
+          {operation, mutation_input["operation_id"],
+           fn ->
+             invoke_public_mutation(
+               operation,
+               continuation_id,
+               mutation_input,
+               legitimate,
+               journal
+             )
+           end}
+        end) ++
+        [
+          {"durability_status", nil,
+           fn ->
+             Orchestrator.coding_cross_app_continuation_durability_status(
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+           end},
+          {"refresh", nil,
+           fn ->
+             Orchestrator.coding_cross_app_continuation_refresh(
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+           end}
+        ]
+
+    for {operation, _operation_id, invoke} <- operation_rows do
+      assert {:error, _reason} = invoke.(), "#{operation} must fail without its capability"
+      assert FakeStore.peek(store, continuation_id) == durable_before
+      assert FakeStore.get_call_count(store) == get_count
+      assert FakeStore.list_call_count(store) == list_count
+    end
+  end
+
+  test "security regression: every record-bound operation rejects a capable wrong subject" do
+    {journal, store} = start_journal()
+    legitimate = identity_and_authority("continuation-table-owner")
+    attacker = identity_and_authority("continuation-table-attacker")
+    input = open_input(legitimate.identity.agent_id, "open-wrong-subject-table")
+    {:ok, open_resource} = Authorization.open_resource(input)
+    grant!(legitimate.identity.agent_id, open_resource)
+
+    assert {:ok, opened} =
+             Orchestrator.coding_cross_app_continuation_open(
+               input,
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+
+    continuation_id = opened["continuation_id"]
+
+    rows =
+      [
+        {"get", nil,
+         fn ->
+           Orchestrator.coding_cross_app_continuation_get(
+             continuation_id,
+             attacker.identity.agent_id,
+             attacker.authority,
+             server: journal
+           )
+         end}
+      ] ++
+        Enum.map(mutation_inputs(), fn {operation, mutation_input} ->
+          {operation, mutation_input["operation_id"],
+           fn ->
+             invoke_public_mutation(operation, continuation_id, mutation_input, attacker, journal)
+           end}
+        end)
+
+    for {operation, operation_id, invoke} <- rows do
+      {:ok, resource} = Authorization.resource(continuation_id, operation, operation_id)
+      grant!(attacker.identity.agent_id, resource)
+      durable_before = FakeStore.peek(store, continuation_id)
+
+      assert {:error, :subject_principal_mismatch} = invoke.()
+      assert FakeStore.peek(store, continuation_id) == durable_before
+    end
+  end
+
   test "security regression: malformed authority and wrong subject cannot access durable state" do
     {journal, store} = start_journal()
     legitimate = identity_and_authority("continuation-legitimate")
@@ -114,6 +248,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
 
     grant!(legitimate.identity.agent_id, get_resource)
     grant!(legitimate.identity.agent_id, claim_resource)
+    get_count = FakeStore.get_call_count(store)
 
     assert {:ok, legitimate_read} =
              Orchestrator.coding_cross_app_continuation_get(
@@ -124,6 +259,8 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
              )
 
     assert legitimate_read["snapshot"]["status"] == "open"
+    assert FakeStore.get_call_count(store) == get_count + 1
+    get_count = FakeStore.get_call_count(store)
 
     assert {:ok, claimed} =
              Orchestrator.coding_cross_app_continuation_claim(
@@ -134,6 +271,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
                server: journal
              )
 
+    assert FakeStore.get_call_count(store) == get_count + 1
     token = claimed["snapshot"]["claim"]["fence_token"]
     assert is_binary(token)
 
@@ -384,6 +522,59 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
       "per_batch_budget_ms" => 1_000,
       "static_stage_receipt_digest" => String.duplicate("d", 64)
     }
+  end
+
+  defp mutation_inputs do
+    fence = %{"fence_token" => "token", "fence_generation" => 1}
+
+    [
+      {"claim", %{"operation_id" => "table-claim"}},
+      {"accept_passed_receipt",
+       Map.merge(fence, %{"operation_id" => "table-receipt", "receipt" => %{}})},
+      {"accept_capacity_handoff",
+       Map.merge(fence, %{"operation_id" => "table-handoff", "handoff" => %{}})},
+      {"fail", Map.merge(fence, %{"operation_id" => "table-fail"})},
+      {"cancel", Map.merge(fence, %{"operation_id" => "table-cancel"})},
+      {"expire_claim", Map.merge(fence, %{"operation_id" => "table-expire"})},
+      {"revoke_claim", Map.merge(fence, %{"operation_id" => "table-revoke"})},
+      {"complete", Map.merge(fence, %{"operation_id" => "table-complete"})}
+    ]
+  end
+
+  defp invoke_public_mutation(operation, continuation_id, input, principal, journal) do
+    args = [
+      continuation_id,
+      input,
+      principal.identity.agent_id,
+      principal.authority,
+      [server: journal]
+    ]
+
+    case operation do
+      "claim" ->
+        apply(Orchestrator, :coding_cross_app_continuation_claim, args)
+
+      "accept_passed_receipt" ->
+        apply(Orchestrator, :coding_cross_app_continuation_accept_passed_receipt, args)
+
+      "accept_capacity_handoff" ->
+        apply(Orchestrator, :coding_cross_app_continuation_accept_capacity_handoff, args)
+
+      "fail" ->
+        apply(Orchestrator, :coding_cross_app_continuation_fail, args)
+
+      "cancel" ->
+        apply(Orchestrator, :coding_cross_app_continuation_cancel, args)
+
+      "expire_claim" ->
+        apply(Orchestrator, :coding_cross_app_continuation_expire_claim, args)
+
+      "revoke_claim" ->
+        apply(Orchestrator, :coding_cross_app_continuation_revoke_claim, args)
+
+      "complete" ->
+        apply(Orchestrator, :coding_cross_app_continuation_complete, args)
+    end
   end
 
   defp await_ready(opts, attempts \\ 100)

@@ -39,9 +39,8 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Authorization do
   def get(continuation_id, caller_id, authority, opts) do
     with {:ok, journal_opts} <- admit_opts(opts),
          {:ok, resource} <- resource(continuation_id, "get"),
-         :ok <- authorize(caller_id, authority, resource),
-         :ok <- bind_durable_subject(continuation_id, caller_id, journal_opts) do
-      Journal.get(continuation_id, journal_opts)
+         :ok <- authorize(caller_id, authority, resource) do
+      Journal.get_for_principal(continuation_id, caller_id, journal_opts)
     end
   end
 
@@ -49,12 +48,17 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Authorization do
           {:ok, map()} | {:error, term()}
   def mutate(operation, continuation_id, input, caller_id, authority, opts) do
     with {:ok, journal_opts} <- admit_opts(opts),
-         {:ok, journal_fun} <- mutation_fun(operation),
+         {:ok, _journal_fun} <- mutation_fun(operation),
          {:ok, operation_id} <- input_operation_id(input),
          {:ok, resource} <- resource(continuation_id, operation, operation_id),
-         :ok <- authorize(caller_id, authority, resource),
-         :ok <- bind_durable_subject(continuation_id, caller_id, journal_opts) do
-      apply(Journal, journal_fun, [continuation_id, input, journal_opts])
+         :ok <- authorize(caller_id, authority, resource) do
+      Journal.mutate_for_principal(
+        operation,
+        continuation_id,
+        input,
+        caller_id,
+        journal_opts
+      )
     end
   end
 
@@ -123,25 +127,6 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Authorization do
     do: :ok
 
   defp bind_principal(_snapshot, _caller_id), do: {:error, :subject_principal_mismatch}
-
-  defp bind_durable_subject(continuation_id, caller_id, journal_opts) do
-    case Journal.subject(continuation_id, journal_opts) do
-      {:ok,
-       %{
-         "continuation_id" => ^continuation_id,
-         "principal_id" => ^caller_id,
-         "task_id" => task_id
-       }}
-      when is_binary(task_id) and task_id != "" ->
-        :ok
-
-      {:ok, _subject} ->
-        {:error, :subject_principal_mismatch}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
 
   defp authorize(caller_id, authority, resource) do
     with {:ok, canonical} <- SigningAuthority.canonicalize(authority),

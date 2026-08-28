@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.FakeStore do
           mismatch_next: %{},
           list_delay_ms: 0,
           list_call_count: 0,
+          get_call_count: 0,
           durability_class: :node_restart
         }
       end,
@@ -54,6 +55,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.FakeStore do
 
   def record_count(name), do: Agent.get(name, &map_size(&1.records))
   def list_call_count(name), do: Agent.get(name, & &1.list_call_count)
+  def get_call_count(name), do: Agent.get(name, & &1.get_call_count)
 
   def set_list_delay(name, ms) when is_integer(ms) and ms >= 0 do
     Agent.update(name, fn state -> %{state | list_delay_ms: ms} end)
@@ -81,6 +83,8 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.FakeStore do
     name = Keyword.fetch!(opts, :name)
 
     Agent.get_and_update(name, fn state ->
+      state = %{state | get_call_count: state.get_call_count + 1}
+
       case pop_fail(state, :get) do
         {nil, state} ->
           {mismatch_result(state, :get, lookup(state, key)), clear_mismatch(state, :get)}

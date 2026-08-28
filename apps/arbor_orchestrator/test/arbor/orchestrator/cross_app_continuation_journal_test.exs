@@ -115,6 +115,107 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.JournalTest do
     refute Map.has_key?(fenced["snapshot"]["claim"], "fence_token")
   end
 
+  test "principal-bound get and mutation admit and bind the same backend record", %{
+    store: store,
+    opts: opts
+  } do
+    {:ok, opened} = Journal.open(open_input("op-principal-open"), opts)
+    id = opened["continuation_id"]
+    principal_id = opened["snapshot"]["identities"]["principal_id"]
+    durable_open = FakeStore.peek(store, id)
+
+    get_count = FakeStore.get_call_count(store)
+    assert {:ok, got} = Journal.get_for_principal(id, principal_id, opts)
+    assert FakeStore.get_call_count(store) == get_count + 1
+    assert got["snapshot"]["status"] == "open"
+
+    get_count = FakeStore.get_call_count(store)
+
+    assert {:error, :subject_principal_mismatch} =
+             Journal.get_for_principal(id, "agent_attacker", opts)
+
+    assert FakeStore.get_call_count(store) == get_count + 1
+    assert FakeStore.peek(store, id) == durable_open
+
+    get_count = FakeStore.get_call_count(store)
+
+    assert {:ok, claimed} =
+             Journal.mutate_for_principal(
+               "claim",
+               id,
+               %{"operation_id" => "op-principal-claim"},
+               principal_id,
+               opts
+             )
+
+    assert FakeStore.get_call_count(store) == get_count + 1
+    token = claimed["snapshot"]["claim"]["fence_token"]
+    generation = claimed["snapshot"]["claim"]["fence_generation"]
+    assert is_binary(token)
+    durable_claimed = FakeStore.peek(store, id)
+
+    assert {:error, :subject_principal_mismatch} =
+             Journal.mutate_for_principal(
+               "claim",
+               id,
+               %{"operation_id" => "op-principal-claim"},
+               "agent_attacker",
+               opts
+             )
+
+    assert FakeStore.peek(store, id) == durable_claimed
+
+    assert {:error, :subject_principal_mismatch} =
+             Journal.mutate_for_principal(
+               "claim",
+               id,
+               %{"operation_id" => "op-attacker-claim"},
+               "agent_attacker",
+               opts
+             )
+
+    assert FakeStore.peek(store, id) == durable_claimed
+
+    assert {:ok, receipt} =
+             Journal.mutate_for_principal(
+               "accept_passed_receipt",
+               id,
+               %{
+                 "operation_id" => "op-principal-receipt",
+                 "fence_token" => token,
+                 "fence_generation" => generation,
+                 "receipt" => passed(hd(plan()))
+               },
+               principal_id,
+               opts
+             )
+
+    refute Map.has_key?(receipt["snapshot"]["claim"], "fence_token")
+  end
+
+  test "principal-bound access fully admits malformed persisted data before comparison", %{
+    store: store,
+    journal: journal,
+    opts: opts
+  } do
+    {:ok, opened} = Journal.open(open_input("op-principal-malformed"), opts)
+    id = opened["continuation_id"]
+    current = FakeStore.peek(store, id)
+    malformed = Record.update(current, Map.put(current.data, "unexpected", true))
+
+    FakeStore.put_record(store, %{
+      malformed
+      | generation: current.generation,
+        revision: current.revision
+    })
+
+    assert {:error, :malformed_record} =
+             Journal.get_for_principal(id, "agent_attacker", opts)
+
+    assert %{"ready" => false, "reason" => "poisoned"} =
+             Journal.durability_status(server: journal)
+  end
+
   test "claim then receipt then restart recovers token only for exact claim replay", %{
     store: store,
     opts: opts,
