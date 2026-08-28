@@ -407,6 +407,47 @@ Do these once per machine / identity.
 
 ## First run
 
+**`mix arbor.coding.run` is the way to run a packet.** It stamps the
+digest, validates the plan, closes the grant loop, checks executor
+readiness, dispatches, follows status, and answers approvals until a
+terminal outcome. The manual digest / readiness / dispatch / approve
+steps below stay as reference when you need to inspect a single stage.
+
+```bash
+./bin/mix arbor.coding.run /tmp/factory-first-run.json \
+  --agent-id agent_<coordinator>
+./bin/mix arbor.coding.run /tmp/factory-first-run.json \
+  --agent-id agent_<coordinator> \
+  --key-file ~/.arbor/identity.key \
+  --approve-as-dispatcher \
+  --allow-paths '^docs/arbor/SOFTWARE_FACTORY\.md$' \
+  --poll-ms 10000 \
+  --max-wait-ms 5400000
+```
+
+`--max-wait-ms` bounds the **whole** command (grant, readiness, dispatch,
+polling, and every RPC). Remaining budget is clamped into each sleep and
+RPC timeout; the command exits 1 when none remains. Following is
+unconditional. Exit `0` for `change_committed` / `pr_created` /
+`no_changes`, `2` for `human_review_required`, and `1` otherwise.
+
+### Running it on another host
+
+The command talks to the Arbor node on the machine where you invoke Mix
+(same discovery as `mix arbor.baseline.status`). From a laptop, SSH to
+the host that is running `./bin/mix arbor.start` and run the command
+there:
+
+```bash
+ssh user@factory-host 'cd /absolute/path/to/arbor && \
+  ./bin/mix arbor.coding.run /tmp/factory-first-run.json \
+    --agent-id agent_<coordinator> \
+    --key-file ~/.arbor/identity.key'
+```
+
+Do not add a second transport. Signed MCP and this Mix command are the
+two supported operator paths.
+
 Use a tiny, reversible packet. The point is to prove admission, worker
 launch, validation, and review — not to land a feature.
 

@@ -51,6 +51,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
           | {:server_running?, (-> boolean())}
           | {:target_node, (-> node())}
           | {:caller_resolver, (map() -> {:ok, String.t()} | {:error, term()})}
+          | {:plan, map()}
 
   @doc false
   @spec run([String.t()]) :: :ok | no_return()
@@ -80,7 +81,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
 
   def execute(args, runtime_opts) when is_list(args) and is_list(runtime_opts) do
     with {:ok, cli} <- parse_args(args),
-         {:ok, plan} <- read_plan(cli.plan),
+         {:ok, plan} <- resolve_plan(cli, runtime_opts),
          {:ok, caller_id} <- resolve_caller(cli, runtime_opts),
          {:ok, target} <- discover_target(runtime_opts),
          {:ok, state} <-
@@ -167,6 +168,14 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
   defp has_control_byte?(<<>>), do: false
   defp has_control_byte?(<<byte, _rest::binary>>) when byte <= 0x1F or byte == 0x7F, do: true
   defp has_control_byte?(<<_byte, rest::binary>>), do: has_control_byte?(rest)
+
+  defp resolve_plan(cli, runtime_opts) do
+    case Keyword.fetch(runtime_opts, :plan) do
+      {:ok, plan} when is_map(plan) and not is_struct(plan) -> {:ok, plan}
+      {:ok, _other} -> {:error, halt_error(:invalid_options)}
+      :error -> read_plan(cli.plan)
+    end
+  end
 
   defp read_plan(path) when is_binary(path) do
     invalid_path? =
