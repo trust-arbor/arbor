@@ -1832,16 +1832,24 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   test "selected symlink sources and empty selections fail before candidate execution", %{
     tmp_dir: tmp_dir
   } do
-    fixture = leased_project(tmp_dir, valid_module())
+    fixture =
+      leased_project(tmp_dir, valid_module(),
+        setup_repo: fn repo ->
+          File.write!(
+            Path.join(repo, "test/real_source.exs"),
+            "defmodule Tiny.RealSource do\nend\n"
+          )
 
-    File.write!(
-      Path.join(fixture.lease.worktree_path, "test/real_source.exs"),
-      "defmodule Tiny.RealSource do\nend\n"
+          File.ln_s!("real_source.exs", Path.join(repo, "test/symlink_test.exs"))
+          git!(repo, ["add", "test/real_source.exs", "test/symlink_test.exs"])
+          git!(repo, ["commit", "-m", "symlink source"])
+        end
+      )
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n"
     )
-
-    File.ln_s!("real_source.exs", Path.join(fixture.lease.worktree_path, "test/symlink_test.exs"))
-    git!(fixture.lease.worktree_path, ["add", "test/real_source.exs", "test/symlink_test.exs"])
-    git!(fixture.lease.worktree_path, ["commit", "-m", "symlink source"])
 
     assert {:error, :test_path_symlink} =
              Validate.run(attested_params(fixture, ["test/symlink_test.exs"]), fixture.context)
@@ -3855,6 +3863,11 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         base_module,
         opts
       )
+
+    case Keyword.get(opts, :setup_repo) do
+      nil -> :ok
+      setup when is_function(setup, 1) -> setup.(repo)
+    end
 
     task_id = "task_security_regression_#{System.unique_integer([:positive])}"
     principal_id = "agent_security_regression_#{System.unique_integer([:positive])}"
