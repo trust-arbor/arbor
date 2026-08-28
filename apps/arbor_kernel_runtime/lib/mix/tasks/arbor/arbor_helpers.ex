@@ -788,10 +788,20 @@ defmodule Mix.Tasks.Arbor.Helpers do
   """
   @spec stop_os_mon() :: :ok
   def stop_os_mon do
-    case Application.stop(:os_mon) do
-      :ok -> :ok
-      {:error, {:not_started, :os_mon}} -> :ok
-      {:error, _reason} -> :ok
+    # Stopping os_mon logs `[notice]` alarm-clear and application-exit lines,
+    # which is the noise this hook exists to remove; silence the logger for
+    # the stop only. The Mix VM is exiting, so the level is not restored.
+    previous_level = Logger.level()
+    Logger.configure(level: :error)
+
+    try do
+      case Application.stop(:os_mon) do
+        :ok -> :ok
+        {:error, {:not_started, :os_mon}} -> :ok
+        {:error, _reason} -> :ok
+      end
+    after
+      Logger.configure(level: previous_level)
     end
   end
 end
