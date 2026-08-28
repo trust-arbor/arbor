@@ -35,7 +35,6 @@ defmodule Arbor.Commands.Baseline.ReportSourceCoreTest do
       %{reachability: :reachable, local: local_obs(), node: node_obs()}
       |> ReportSourceCore.new()
       |> ReportSourceCore.decide()
-      |> ReportSourceCore.show()
 
     assert decision.source == "node"
     assert decision.input.runtime["state"] == "pinned"
@@ -86,6 +85,57 @@ defmodule Arbor.Commands.Baseline.ReportSourceCoreTest do
     assert decision.input == local_obs()
   end
 
+  test "empty node map is not labeled source=node" do
+    decision =
+      ReportSourceCore.decide(%{
+        reachability: :reachable,
+        local: local_obs(),
+        node: %{}
+      })
+
+    assert decision.source == "local (invalid_node_observations)"
+    assert decision.input == local_obs()
+  end
+
+  test "partial node maps fall back to a fully local report for each required key" do
+    for key <- [:runtime, :baseline, :mix_lock_digest, :probe] do
+      node = Map.delete(node_obs(), key)
+
+      decision =
+        ReportSourceCore.decide(%{
+          reachability: :reachable,
+          local: local_obs(),
+          node: node
+        })
+
+      assert decision.source == "local (invalid_node_observations)",
+             "missing #{key} must not be labeled node"
+
+      assert decision.input == local_obs()
+    end
+  end
+
+  test "string-keyed complete node observations are accepted" do
+    node = %{
+      "runtime" => %{"state" => "pinned", "driver" => "podman", "reason" => nil},
+      "baseline" => %{"state" => "pinned", "reason" => nil},
+      "mix_lock_digest" => {:ok, @digest},
+      "probe" => {:ok, %{"state" => "available"}}
+    }
+
+    assert ReportSourceCore.complete_node_observations?(node)
+
+    decision =
+      ReportSourceCore.decide(%{
+        reachability: :reachable,
+        local: local_obs(),
+        node: node
+      })
+
+    assert decision.source == "node"
+    assert decision.input.runtime["driver"] == "podman"
+  end
+
   test "node overlay does not replace local head digest or platforms" do
     node = Map.put(node_obs(), :head_mix_lock_digest, @other)
 
@@ -96,6 +146,7 @@ defmodule Arbor.Commands.Baseline.ReportSourceCoreTest do
         node: node
       })
 
+    assert decision.source == "node"
     assert decision.input.head_mix_lock_digest == @digest
     assert decision.input.guest_platform == "linux/amd64"
   end

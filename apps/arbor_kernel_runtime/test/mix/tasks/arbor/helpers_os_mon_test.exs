@@ -40,4 +40,20 @@ defmodule Mix.Tasks.Arbor.HelpersOsMonTest do
     assert source =~ "System.at_exit"
     assert source =~ "stop_os_mon()"
   end
+
+  test "rpc_result/5 is a bounded result-preserving Mix RPC facade" do
+    assert function_exported?(Helpers, :rpc_result, 4)
+    assert function_exported?(Helpers, :rpc_result, 5)
+
+    source =
+      File.read!(
+        Path.expand(
+          "../../../../lib/mix/tasks/arbor/arbor_helpers.ex",
+          Path.dirname(__ENV__.file)
+        )
+      )
+
+    assert source =~ "def rpc_result(node, mod, fun, args, timeout)"
+    assert source =~ ":rpc.call(node, @remote_call, :apply_quiet, [mod, fun, args], timeout)"
+  end
 end

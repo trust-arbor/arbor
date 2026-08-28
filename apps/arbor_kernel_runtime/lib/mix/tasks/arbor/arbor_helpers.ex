@@ -505,10 +505,11 @@ defmodule Mix.Tasks.Arbor.Helpers do
     end
   end
 
-  # Both RPC entry points go through `Arbor.KernelRuntime.RemoteCall.apply_quiet/3`
+  # Mix RPC entry points go through `Arbor.KernelRuntime.RemoteCall.apply_quiet/3`
   # on the server so the server's Logger output stays in the server log instead
   # of being echoed onto the operator's terminal (see that module's docs).
   @remote_call Arbor.KernelRuntime.RemoteCall
+  @default_rpc_timeout_ms 15_000
 
   @doc "Makes an RPC call, returning nil on badrpc."
   def rpc(node, mod, fun, args) do
@@ -516,6 +517,25 @@ defmodule Mix.Tasks.Arbor.Helpers do
       {:badrpc, _reason} -> nil
       result -> result
     end
+  end
+
+  @doc """
+  Makes an RPC call and preserves the full result, including `{:badrpc, reason}`.
+
+  Unlike `rpc/4`, this does not collapse a failed call to `nil`. The
+  timeout is bounded (`:rpc.call/5`); default is 15 seconds. Callers
+  that need a longer budget (for example a validation-runtime probe)
+  pass an explicit timeout.
+  """
+  @spec rpc_result(node(), module(), atom(), [term()]) :: term()
+  def rpc_result(node, mod, fun, args) do
+    rpc_result(node, mod, fun, args, @default_rpc_timeout_ms)
+  end
+
+  @spec rpc_result(node(), module(), atom(), [term()], pos_integer()) :: term()
+  def rpc_result(node, mod, fun, args, timeout)
+      when is_integer(timeout) and timeout > 0 do
+    :rpc.call(node, @remote_call, :apply_quiet, [mod, fun, args], timeout)
   end
 
   @doc """

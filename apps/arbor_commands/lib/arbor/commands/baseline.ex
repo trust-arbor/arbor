@@ -118,14 +118,18 @@ defmodule Arbor.Commands.Baseline do
   def status(opts \\ [])
 
   def status(opts) when is_list(opts) do
-    local = observations(opts)
+    reachability = Keyword.get(opts, :reachability, :unreachable)
+    node = Keyword.get(opts, :node_observations)
+
+    local =
+      if reachability == :reachable and ReportSourceCore.complete_node_observations?(node) do
+        local_anchors(opts)
+      else
+        observations(opts)
+      end
 
     decision =
-      %{
-        reachability: Keyword.get(opts, :reachability, :unreachable),
-        local: local,
-        node: Keyword.get(opts, :node_observations)
-      }
+      %{reachability: reachability, local: local, node: node}
       |> ReportSourceCore.new()
       |> ReportSourceCore.decide()
 
@@ -135,25 +139,41 @@ defmodule Arbor.Commands.Baseline do
   def status(_opts), do: {:error, :invalid_options}
 
   @doc """
+  Local StatusCore input that does not call the Shell facade.
+
+  HEAD mix.lock digest and host/guest platforms come from this Mix VM.
+  Used on the reachable-node path so a discarded cold-VM probe is never run.
+  """
+  @spec local_anchors(keyword()) :: map()
+  def local_anchors(opts) when is_list(opts) do
+    architecture = Keyword.get(opts, :architecture, architecture())
+
+    %{
+      head_mix_lock_digest: head_mix_lock_digest(opts),
+      host_platform: architecture,
+      guest_platform: guest_platform(opts, architecture)
+    }
+  end
+
+  def local_anchors(_opts), do: %{}
+
+  @doc """
   Local StatusCore input gathered through the `Arbor.Shell` facade.
 
-  Used by `status/1` and by Mix tasks that overlay a reachable node's
-  observations via `ReportSourceCore`.
+  Used when no complete node observations are available.
   """
   @spec observations(keyword()) :: map()
   def observations(opts) when is_list(opts) do
     shell = Keyword.get(opts, :shell, Shell)
-    architecture = Keyword.get(opts, :architecture, architecture())
 
-    %{
+    opts
+    |> local_anchors()
+    |> Map.merge(%{
       runtime: shell.validation_runtime_status(),
       baseline: shell.linux_dependency_baseline_status(),
       mix_lock_digest: shell.linux_dependency_baseline_mix_lock_digest(),
-      head_mix_lock_digest: head_mix_lock_digest(opts),
-      probe: maybe_probe(shell, opts),
-      host_platform: architecture,
-      guest_platform: guest_platform(opts, architecture)
-    }
+      probe: maybe_probe(shell, opts)
+    })
   end
 
   def observations(_opts), do: %{}
@@ -200,15 +220,15 @@ defmodule Arbor.Commands.Baseline do
         digest
 
       _other ->
-        case Keyword.get(opts, :repo_root) do
-          root when is_binary(root) ->
-            case hash_mix_lock(root) do
-              {:ok, digest} -> digest
-              _error -> nil
-            end
+        root =
+          case Keyword.get(opts, :repo_root) do
+            value when is_binary(value) -> value
+            _missing -> File.cwd!()
+          end
 
-          _missing ->
-            nil
+        case hash_mix_lock(root) do
+          {:ok, digest} -> digest
+          _error -> nil
         end
     end
   end

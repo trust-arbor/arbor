@@ -7,9 +7,16 @@ defmodule Mix.Tasks.Arbor.Baseline.Status do
   digest.
 
   When a local Arbor node is reachable (the same detection `mix arbor.rpc`
-  uses), observations come from that node's `Arbor.Shell` / `Arbor.Commands.Baseline`
-  facades. Otherwise the report is computed in this Mix VM and labeled
-  `source=local (node not running)`.
+  uses), observations come from that node's `Arbor.Shell` /
+  `Arbor.Commands.Baseline` facades and the report is labeled `source=node`.
+
+  When no node is running, the report is computed in this Mix VM and
+  labeled `source=local (node not running)`.
+
+  If distribution or RPC fails after a ping, the label includes the
+  reason (for example `source=local (nodedown)` or `source=local (timeout)`).
+  Incomplete node observations fall back to
+  `source=local (invalid_node_observations)`.
 
       mix arbor.baseline.status
       mix arbor.baseline.status --json
@@ -18,8 +25,10 @@ defmodule Mix.Tasks.Arbor.Baseline.Status do
   use Mix.Task
 
   @requirements ["compile"]
+  @rpc_timeout_ms 30_000
 
   alias Arbor.Commands.Baseline
+  alias Arbor.Commands.Baseline.ReportSourceCore
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
 
   @impl Mix.Task
@@ -46,9 +55,20 @@ defmodule Mix.Tasks.Arbor.Baseline.Status do
     if Keyword.keyword?(runtime_opts) do
       case OptionParser.parse(args, strict: [json: :boolean]) do
         {opts, [], []} ->
-          maybe_start_shell(runtime_opts)
+          {reachability, node_observations} = resolve_node_source(runtime_opts)
 
-          case Baseline.status(with_node_source(runtime_opts)) do
+          status_opts =
+            runtime_opts
+            |> Keyword.put_new(:repo_root, File.cwd!())
+            |> Keyword.put(:reachability, reachability)
+            |> Keyword.put(:node_observations, node_observations)
+
+          unless reachability == :reachable and
+                   ReportSourceCore.complete_node_observations?(node_observations) do
+            maybe_start_shell(status_opts)
+          end
+
+          case Baseline.status(status_opts) do
             {:ok, report} -> {:ok, report, opts[:json] == true}
             {:error, reason} -> {:error, reason}
           end
@@ -63,33 +83,12 @@ defmodule Mix.Tasks.Arbor.Baseline.Status do
 
   def execute(_args, _runtime_opts), do: {:error, :invalid_arguments}
 
-  defp with_node_source(runtime_opts) do
-    {reachability, node_observations} = resolve_node_source(runtime_opts)
-
-    runtime_opts
-    |> Keyword.put(:reachability, reachability)
-    |> Keyword.put(:node_observations, node_observations)
-  end
-
   defp resolve_node_source(runtime_opts) do
-    cond do
-      Keyword.has_key?(runtime_opts, :reachability) ->
-        {Keyword.get(runtime_opts, :reachability), Keyword.get(runtime_opts, :node_observations)}
-
-      skip_live_node?(runtime_opts) ->
-        {:unreachable, nil}
-
-      true ->
-        probe_live_node(runtime_opts)
+    if Keyword.has_key?(runtime_opts, :reachability) do
+      {Keyword.get(runtime_opts, :reachability), Keyword.get(runtime_opts, :node_observations)}
+    else
+      probe_live_node(runtime_opts)
     end
-  end
-
-  # Injected `:shell` without node callbacks is a local unit-test fixture.
-  # Production `run/1` does not pass `:shell`, so it always probes the node.
-  defp skip_live_node?(opts) do
-    Keyword.has_key?(opts, :shell) and
-      not Keyword.has_key?(opts, :server_running?) and
-      not Keyword.has_key?(opts, :rpc)
   end
 
   defp probe_live_node(opts) do
@@ -125,7 +124,7 @@ defmodule Mix.Tasks.Arbor.Baseline.Status do
   end
 
   defp default_rpc(node, mod, fun, args) do
-    :rpc.call(node, Arbor.KernelRuntime.RemoteCall, :apply_quiet, [mod, fun, args])
+    ArborConfig.rpc_result(node, mod, fun, args, @rpc_timeout_ms)
   end
 
   defp safe_call(fun) when is_function(fun, 0) do

@@ -52,6 +52,15 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     defp test_pid, do: :persistent_term.get({__MODULE__, :test_pid})
   end
 
+  defmodule ProbeFlunkShell do
+    @moduledoc false
+
+    def linux_dependency_baseline_status, do: flunk("must not collect local Shell status")
+    def linux_dependency_baseline_mix_lock_digest, do: flunk("must not collect local mix.lock")
+    def validation_runtime_status, do: flunk("must not collect local runtime status")
+    def validation_runtime_probe, do: flunk("must not probe locally when node is reachable")
+  end
+
   setup do
     :persistent_term.put({FakeShell, :test_pid}, self())
 
@@ -506,6 +515,9 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     refute task_source =~ "ValidationRuntime.Authority"
     refute task_source =~ "OciProbeRuntime"
     assert task_source =~ "install_mix_shutdown_hooks"
+    assert task_source =~ "rpc_result"
+    refute task_source =~ "Arbor.KernelRuntime.RemoteCall"
+    refute task_source =~ ":rpc.call"
     assert commands_source =~ "shell.validation_runtime_status"
     assert commands_source =~ "shell.linux_dependency_baseline_status"
     assert commands_source =~ "shell.validation_runtime_probe"
@@ -516,7 +528,8 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                architecture: "x86_64-pc-linux-gnu",
                platform: "linux/amd64",
                head_mix_lock_digest: String.duplicate("e", 64),
-               probe: true
+               probe: true,
+               reachability: :unreachable
              )
 
     assert report["source"] == "local (node not running)"
@@ -591,6 +604,77 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     assert report["source"] == "local (nodedown)"
     assert report["driver"] == "podman"
     assert report["image_reachable"] == true
+  end
+
+  test "status falls back to local when node RPC times out" do
+    assert {:ok, report, false} =
+             Status.execute([],
+               shell: FakeShell,
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               head_mix_lock_digest: String.duplicate("e", 64),
+               ensure_distribution: fn -> :ok end,
+               server_running?: fn -> true end,
+               target_node: fn -> :"arbor_dev_test@127.0.0.1" end,
+               rpc: fn _node, _mod, _fun, _args -> {:badrpc, :timeout} end
+             )
+
+    assert report["source"] == "local (timeout)"
+    assert report["driver"] == "podman"
+  end
+
+  test "status hashes repo mix.lock for HEAD when digest is not injected", %{root: root} do
+    repo = Path.join(root, "head-lock")
+    File.mkdir_p!(repo)
+    File.write!(Path.join(repo, "mix.lock"), "%{lock: :fixture}\n")
+    digest = mix_lock_sha256(repo)
+
+    node_obs = %{
+      runtime: %{"state" => "pinned", "driver" => "podman", "reason" => nil},
+      baseline: %{"state" => "pinned", "reason" => nil},
+      mix_lock_digest: {:ok, digest},
+      probe: {:ok, %{"state" => "available", "driver" => "podman"}}
+    }
+
+    assert {:ok, report, false} =
+             Status.execute([],
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               repo_root: repo,
+               reachability: :reachable,
+               node_observations: node_obs
+             )
+
+    assert report["source"] == "node"
+    assert report["mix_lock_digest"] == digest
+    assert report["mix_lock_matches_head"] == true
+  end
+
+  test "reachable node path does not run the local Shell probe" do
+    node_obs = %{
+      runtime: %{"state" => "pinned", "driver" => "podman", "reason" => nil},
+      baseline: %{"state" => "pinned", "reason" => nil},
+      mix_lock_digest: {:ok, String.duplicate("e", 64)},
+      probe: {:ok, %{"state" => "available", "driver" => "podman"}}
+    }
+
+    assert {:ok, report, false} =
+             Status.execute([],
+               shell: ProbeFlunkShell,
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               head_mix_lock_digest: String.duplicate("e", 64),
+               reachability: :reachable,
+               node_observations: node_obs
+             )
+
+    assert report["source"] == "node"
+    assert report["image_reachable"] == true
+  end
+
+  defp mix_lock_sha256(repo_root) do
+    bytes = File.read!(Path.join(repo_root, "mix.lock"))
+    Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
   end
 
   defp valid_oci_document(root, baseline_dir) do
