@@ -132,6 +132,33 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     File.chmod!(root, 0o700)
   end
 
+  test "build without an image_build override rejects an unadmitted backend by name (B2a)",
+       %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    previous = Application.get_env(:arbor_commands, :baseline_image_executables)
+    Application.put_env(:arbor_commands, :baseline_image_executables, %{"podman" => "podman"})
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:arbor_commands, :baseline_image_executables),
+        else: Application.put_env(:arbor_commands, :baseline_image_executables, previous)
+    end)
+
+    # FakeShell reports driver "podman"; the relative executable is refused
+    # before anything is spawned — no /usr/bin/podman literal remains.
+    assert {:error, :image_executable_invalid} =
+             Arbor.Commands.Baseline.build(
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+  end
+
   test "build does not overwrite active validation-runtime.json", %{root: root} do
     {repo, deps} = fixture_repo!(root)
     active = Path.join(root, "validation-runtime.json")

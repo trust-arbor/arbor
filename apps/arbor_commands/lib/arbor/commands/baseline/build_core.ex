@@ -229,4 +229,127 @@ defmodule Arbor.Commands.Baseline.BuildCore do
   end
 
   defp require_absolute(_path), do: {:error, :invalid_arbor_home}
+
+  # ── Image backend selection ───────────────────────────────────────────────
+  #
+  # The image step used to hardcode `/usr/bin/podman`; on a macOS host the
+  # validation runtime is Apple Container, so the build finished the attested
+  # tree and then died at `podman: not found` (B2a, reproduced 2026-08 and by
+  # Codex on 2026-08-27 at tree 81704a6b…). Select the backend the runtime
+  # admission already reports instead of assuming one.
+
+  @image_backends ["podman", "apple_container"]
+  @default_image_executables %{
+    "podman" => "/usr/bin/podman",
+    "apple_container" => "/usr/local/bin/container"
+  }
+
+  @doc """
+  Pick the image backend from the validation runtime status (preferred) or
+  the runtime probe. Returns `{:ok, driver}` for an admitted backend or
+  `{:error, {:image_backend_unsupported, driver}}` naming what was seen.
+  """
+  @spec image_backend(term(), term()) ::
+          {:ok, String.t()} | {:error, {:image_backend_unsupported, term()}}
+  def image_backend(runtime_status, probe) do
+    driver = driver_of(runtime_status) || driver_of(probe)
+
+    if driver in @image_backends,
+      do: {:ok, driver},
+      else: {:error, {:image_backend_unsupported, driver}}
+  end
+
+  defp driver_of({:ok, map}), do: driver_of(map)
+  defp driver_of(%{"driver" => driver}) when is_binary(driver) and driver != "", do: driver
+  defp driver_of(%{driver: driver}) when is_binary(driver) and driver != "", do: driver
+  defp driver_of(_other), do: nil
+
+  @doc """
+  Executable for a backend: reviewed host config
+  (`config :arbor_commands, :baseline_image_executables`) over the defaults.
+  Only absolute paths are accepted.
+  """
+  @spec image_executable(String.t(), term()) :: {:ok, String.t()} | {:error, atom()}
+  def image_executable(driver, configured) when is_binary(driver) do
+    configured = if is_map(configured), do: configured, else: %{}
+
+    case Map.get(configured, driver) || Map.get(@default_image_executables, driver) do
+      "/" <> _ = path -> {:ok, path}
+      _other -> {:error, :image_executable_invalid}
+    end
+  end
+
+  @doc "Build tag and local workload alias for an Apple Container baseline image."
+  @spec apple_container_tags(String.t()) ::
+          {:ok, %{build: String.t(), alias: String.t()}} | {:error, atom()}
+  def apple_container_tags(tree_digest) when is_binary(tree_digest) do
+    case tree_digest do
+      <<short::binary-size(8), _rest::binary>> when byte_size(tree_digest) == 64 ->
+        if Regex.match?(~r/^[0-9a-f]{64}$/, tree_digest) do
+          {:ok,
+           %{
+             build: "arbor/validation:baseline-" <> short,
+             alias: "127.0.0.1:0/arbor/workload:baseline-" <> short
+           }}
+        else
+          {:error, :invalid_tree_digest}
+        end
+
+      _other ->
+        {:error, :invalid_tree_digest}
+    end
+  end
+
+  def apple_container_tags(_tree_digest), do: {:error, :invalid_tree_digest}
+
+  @doc """
+  Derive the baseline image identity from Apple Container's
+  `container image inspect` JSON plus the OCI manifest blob of the platform
+  variant. `inspect` gives the index digest (`configuration.descriptor.digest`)
+  and the per-platform manifest digest (`variants[].digest`); the image id is
+  the manifest's `config.digest` (the same value Podman reports as `.Id`), which
+  inspect does not expose, hence `manifest_json`.
+  """
+  @spec apple_container_image(term(), term(), String.t()) :: {:ok, map()} | {:error, atom()}
+  def apple_container_image(inspect_json, manifest_json, platform)
+      when is_binary(inspect_json) and is_binary(manifest_json) and is_binary(platform) do
+    with {:ok, [resource | _]} when is_map(resource) <- Jason.decode(inspect_json),
+         "sha256:" <> ihex = index when byte_size(ihex) == 64 <-
+           get_in(resource, ["configuration", "descriptor", "digest"]),
+         {:ok, "sha256:" <> mhex = manifest} when byte_size(mhex) == 64 <-
+           variant_digest(Map.get(resource, "variants"), platform),
+         {:ok, %{"config" => %{"digest" => "sha256:" <> chex = image_id}}}
+         when byte_size(chex) == 64 <-
+           Jason.decode(manifest_json) do
+      {:ok, %{index_digest: index, manifest_digest: manifest, image_id: image_id}}
+    else
+      _other -> {:error, :image_inspect_failed}
+    end
+  end
+
+  def apple_container_image(_inspect, _manifest, _platform), do: {:error, :image_inspect_failed}
+
+  @doc false
+  @spec apple_container_variant_digest(term(), String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def apple_container_variant_digest(variants, platform), do: variant_digest(variants, platform)
+
+  defp variant_digest([%{"digest" => digest}], _platform) when is_binary(digest),
+    do: {:ok, digest}
+
+  defp variant_digest(variants, platform) when is_list(variants) do
+    arch =
+      case String.split(platform, "/") do
+        [_os, arch | _] -> arch
+        _ -> nil
+      end
+
+    variants
+    |> Enum.find(fn v -> get_in(v, ["platform", "architecture"]) == arch end)
+    |> case do
+      %{"digest" => digest} when is_binary(digest) -> {:ok, digest}
+      _ -> {:error, :variant_not_found}
+    end
+  end
+
+  defp variant_digest(_variants, _platform), do: {:error, :variant_not_found}
 end

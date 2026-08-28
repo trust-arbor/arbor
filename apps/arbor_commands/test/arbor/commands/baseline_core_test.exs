@@ -100,4 +100,101 @@ defmodule Arbor.Commands.BaselineCoreTest do
     assert report["image_reachable"] == false
     assert report["guest_platform"] == "linux/amd64"
   end
+
+  # ── B2a: image backend selection + Apple Container identity ─────────────
+
+  @index "sha256:" <> String.duplicate("f0", 32)
+  @manifest_arm "sha256:" <> String.duplicate("1d", 32)
+  @manifest_amd "sha256:" <> String.duplicate("2e", 32)
+  @config "sha256:" <> String.duplicate("ca", 32)
+
+  defp apple_inspect(variants) do
+    Jason.encode!([
+      %{
+        "id" => String.duplicate("f0", 32),
+        "configuration" => %{"descriptor" => %{"digest" => @index}},
+        "variants" => variants
+      }
+    ])
+  end
+
+  test "image_backend follows the runtime status driver, then the probe, and names unknowns" do
+    assert {:ok, "podman"} = BuildCore.image_backend(%{"driver" => "podman"}, nil)
+
+    assert {:ok, "apple_container"} =
+             BuildCore.image_backend(
+               %{"state" => "unpinned"},
+               {:ok, %{"driver" => "apple_container"}}
+             )
+
+    assert {:error, {:image_backend_unsupported, "docker"}} =
+             BuildCore.image_backend(%{"driver" => "docker"}, nil)
+
+    assert {:error, {:image_backend_unsupported, nil}} =
+             BuildCore.image_backend(%{}, {:error, :probe_skipped})
+  end
+
+  test "image_executable prefers reviewed host config and requires absolute paths" do
+    assert {:ok, "/usr/bin/podman"} = BuildCore.image_executable("podman", %{})
+    assert {:ok, "/usr/local/bin/container"} = BuildCore.image_executable("apple_container", nil)
+
+    assert {:ok, "/opt/podman/bin/podman"} =
+             BuildCore.image_executable("podman", %{"podman" => "/opt/podman/bin/podman"})
+
+    assert {:error, :image_executable_invalid} =
+             BuildCore.image_executable("podman", %{"podman" => "podman"})
+
+    assert {:error, :image_executable_invalid} = BuildCore.image_executable("docker", %{})
+  end
+
+  test "apple_container_tags derive the build tag and the admitted local workload alias" do
+    tree = "81704a6b" <> String.duplicate("0", 56)
+
+    assert {:ok,
+            %{
+              build: "arbor/validation:baseline-81704a6b",
+              alias: "127.0.0.1:0/arbor/workload:baseline-81704a6b"
+            }} =
+             BuildCore.apple_container_tags(tree)
+
+    assert {:error, :invalid_tree_digest} = BuildCore.apple_container_tags("81704a6b")
+
+    assert {:error, :invalid_tree_digest} =
+             BuildCore.apple_container_tags(String.duplicate("G", 64))
+  end
+
+  test "apple_container_image reads index from inspect, manifest by platform, image id from the manifest config" do
+    inspect_json =
+      apple_inspect([
+        %{"digest" => @manifest_amd, "platform" => %{"architecture" => "amd64", "os" => "linux"}},
+        %{"digest" => @manifest_arm, "platform" => %{"architecture" => "arm64", "os" => "linux"}}
+      ])
+
+    manifest_json = Jason.encode!(%{"config" => %{"digest" => @config, "size" => 1}})
+
+    assert {:ok, %{index_digest: @index, manifest_digest: @manifest_arm, image_id: @config}} =
+             BuildCore.apple_container_image(inspect_json, manifest_json, "linux/arm64")
+
+    assert {:ok, %{manifest_digest: @manifest_amd}} =
+             BuildCore.apple_container_image(inspect_json, manifest_json, "linux/amd64")
+
+    # A single variant needs no platform match (what `container build` produces).
+    single = apple_inspect([%{"digest" => @manifest_arm}])
+
+    assert {:ok, %{manifest_digest: @manifest_arm}} =
+             BuildCore.apple_container_image(single, manifest_json, "linux/arm64")
+
+    assert {:error, :image_inspect_failed} =
+             BuildCore.apple_container_image(inspect_json, manifest_json, "linux/riscv64")
+
+    assert {:error, :image_inspect_failed} =
+             BuildCore.apple_container_image(
+               inspect_json,
+               Jason.encode!(%{"config" => %{}}),
+               "linux/arm64"
+             )
+
+    assert {:error, :image_inspect_failed} =
+             BuildCore.apple_container_image("not json", manifest_json, "linux/arm64")
+  end
 end

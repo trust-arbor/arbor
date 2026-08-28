@@ -570,6 +570,14 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 # provider per node). When this host cannot call the preferred provider, the
 # LLM handler takes the first available candidate below and the verdict names
 # it. Order matters; add your own providers/models here.
+# Baseline image step backends (B2a). Selected from the validation runtime's
+# reported driver; paths are reviewed host config, not literals in code.
+config :arbor_commands,
+  baseline_image_executables: %{
+    "podman" => "/usr/bin/podman",
+    "apple_container" => "/usr/local/bin/container"
+  }
+
 config :arbor_orchestrator,
   llm_fallback_providers: [
     {"openai_oauth", "gpt-5.6-sol"},

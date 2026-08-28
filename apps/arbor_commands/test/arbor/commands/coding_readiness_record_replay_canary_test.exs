@@ -55,6 +55,7 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
   @readiness_gate_ids ~w(
     plan_schema trusted_roots compiler provenance security_authority
     dependency_baseline acp_health toolchain_identity validation_capacity
+    review_panel
   )
 
   defmodule FakeReqLLMTransport do
@@ -107,6 +108,20 @@ defmodule Arbor.Commands.CodingReadinessRecordReplayCanaryTest do
     def signing_key_status(_agent_id), do: {:ok, :available}
     def coding_toolchain_identity, do: {:ok, toolchain_identity()}
     def validation_capacity_observer, do: :available
+
+    # Readiness-green canary: every council seat runs on its preferred provider.
+    def review_panel(_plan),
+      do:
+        {:ok,
+         %{
+           status: :passed,
+           total: 10,
+           preferred: 10,
+           fallback: 0,
+           unresolved: 0,
+           distinct_providers: 3,
+           seats: []
+         }}
 
     def coding_validation_runtime_admission do
       {:ok,

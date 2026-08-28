@@ -10,9 +10,14 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
 
       mix arbor.baseline.build
 
-  Image production uses `/usr/bin/podman build --pull=never`. Pull the
-  reviewed Debian base once first (`podman pull debian:bookworm-slim@sha256:…`
-  — digest in `images/validation-runtime/Containerfile`);
+  Image production uses the backend the validation runtime reports:
+  `podman build --pull=never` on Linux (rootless Podman) or
+  `container build` + `container image tag` on macOS (Apple Container, which
+  publishes the `127.0.0.1:0/arbor/workload:baseline-<8hex>` alias the launcher
+  admits). Executables come from `config :arbor_commands,
+  :baseline_image_executables`. Pull the reviewed Debian base once first
+  (`podman pull` / `container image pull debian:bookworm-slim@sha256:…` —
+  digest in `images/validation-runtime/Containerfile`);
   see `images/validation-runtime/README.md`.
   """
 

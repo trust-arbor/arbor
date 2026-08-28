@@ -405,10 +405,27 @@ defmodule Arbor.Commands.Baseline do
     result =
       case ctx.image_build do
         fun when is_function(fun, 1) -> fun.(request)
-        _missing -> podman_build(request)
+        _missing -> backend_build(ctx, request)
       end
 
     normalize_image_result(result)
+  end
+
+  # Select the backend the runtime admission reports (B2a). Unadmitted
+  # backends fail here naming the driver, not at `podman: not found`.
+  defp backend_build(ctx, request) do
+    executables = Application.get_env(:arbor_commands, :baseline_image_executables, %{})
+
+    runtime = safe_shell_call(ctx.shell, :validation_runtime_status)
+    probe = safe_shell_call(ctx.shell, :validation_runtime_probe)
+
+    with {:ok, driver} <- BuildCore.image_backend(runtime, probe),
+         {:ok, executable} <- BuildCore.image_executable(driver, executables) do
+      case driver do
+        "podman" -> podman_build(request, executable)
+        "apple_container" -> apple_container_build(request, executable)
+      end
+    end
   end
 
   defp normalize_image_result({:ok, image}) when is_map(image) do
@@ -443,7 +460,7 @@ defmodule Arbor.Commands.Baseline do
   defp normalize_image_result({:error, reason}), do: {:error, reason}
   defp normalize_image_result(_other), do: {:error, :invalid_image_inspect}
 
-  defp podman_build(request) do
+  defp podman_build(request, executable) do
     # `podman image inspect --latest` does not exist (the flag belongs to
     # `podman inspect` for containers); it failed every build with
     # `image_inspect_failed` on the first V7 run (2026-08-26). Capture the
@@ -477,9 +494,9 @@ defmodule Arbor.Commands.Baseline do
     ]
 
     try do
-      case System.cmd("/usr/bin/podman", args, stderr_to_stdout: true) do
+      case System.cmd(executable, args, stderr_to_stdout: true) do
         {_output, 0} ->
-          inspect_built_image(iidfile)
+          inspect_built_image(iidfile, executable)
 
         {_output, _status} ->
           {:error, :image_build_failed}
@@ -509,11 +526,88 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
-  defp inspect_built_image(iidfile) do
+  defp safe_shell_call(shell, fun) do
+    if function_exported?(shell, fun, 0) or Code.ensure_loaded?(shell),
+      do: apply(shell, fun, []),
+      else: nil
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # Apple Container has no `--iidfile`; build under a deterministic tag,
+  # publish the non-routable local workload alias the launcher admits
+  # (`127.0.0.1:0/arbor/workload:baseline-<8hex>`), then inspect the tag. The
+  # image id is the manifest's config digest, read from the content store.
+  defp apple_container_build(request, executable) do
+    with {:ok, tags} <- BuildCore.apple_container_tags(request.tree_digest) do
+      args =
+        [
+          "build",
+          "--no-cache",
+          "--platform",
+          request.platform,
+          "--build-arg",
+          "ERLANG_VERSION=" <> request.erlang,
+          "--build-arg",
+          "ELIXIR_VERSION=" <> request.elixir,
+          "--build-arg",
+          "ARBOR_VALIDATION_PLATFORM=" <> request.platform,
+          "--build-arg",
+          "MIX_LOCK_SHA256=" <> request.mix_lock_digest,
+          "--build-arg",
+          "DEPS_TREE_SHA256=" <> request.tree_digest,
+          "-t",
+          tags.build,
+          "-f",
+          request.containerfile,
+          request.context
+        ]
+
+      with {_out, 0} <- System.cmd(executable, args, stderr_to_stdout: true),
+           {_out, 0} <-
+             System.cmd(executable, ["image", "tag", tags.build, tags.alias],
+               stderr_to_stdout: true
+             ),
+           {json, 0} <-
+             System.cmd(executable, ["image", "inspect", tags.build], stderr_to_stdout: true),
+           {:ok, manifest_json} <- apple_container_manifest(json, request.platform),
+           {:ok, image} <- BuildCore.apple_container_image(json, manifest_json, request.platform) do
+        {:ok, Map.put(image, :image, @provisioning_image_prefix <> image.index_digest)}
+      else
+        {:error, reason} -> {:error, reason}
+        {_output, _status} -> {:error, :image_build_failed}
+      end
+    end
+  end
+
+  # The manifest blob lives in Apple Container's content store; the path is
+  # host config so a relocated store does not silently break attestation.
+  defp apple_container_manifest(inspect_json, platform) do
+    store =
+      Application.get_env(
+        :arbor_commands,
+        :apple_container_content_store,
+        Path.expand("~/Library/Application Support/com.apple.container/content/blobs/sha256")
+      )
+
+    with {:ok, [resource | _]} <- Jason.decode(inspect_json),
+         {:ok, "sha256:" <> hex} when byte_size(hex) == 64 <-
+           BuildCore.apple_container_variant_digest(Map.get(resource, "variants"), platform),
+         true <- Regex.match?(~r/^[0-9a-f]{64}$/, hex),
+         {:ok, manifest_json} <- File.read(Path.join(store, hex)) do
+      {:ok, manifest_json}
+    else
+      _other -> {:error, :image_inspect_failed}
+    end
+  end
+
+  defp inspect_built_image(iidfile, executable) do
     with {:ok, contents} <- File.read(iidfile),
          "sha256:" <> hex = image_id when byte_size(hex) == 64 <- String.trim(contents),
          {json, 0} <-
-           System.cmd("/usr/bin/podman", ["image", "inspect", image_id], stderr_to_stdout: true) do
+           System.cmd(executable, ["image", "inspect", image_id], stderr_to_stdout: true) do
       parse_inspect(json, image_id)
     else
       _other -> {:error, :image_inspect_failed}
