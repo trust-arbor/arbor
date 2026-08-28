@@ -272,10 +272,10 @@ defmodule Arbor.Actions.Config do
              {:invalid_validation_runtime_module,
               {:callback_not_exported, module, :validation_runtime_status, 0}}}
 
-          not function_exported?(module, :validation_runtime_probe, 0) ->
+          not function_exported?(module, :validation_runtime_readiness_probe, 0) ->
             {:error,
              {:invalid_validation_runtime_module,
-              {:callback_not_exported, module, :validation_runtime_probe, 0}}}
+              {:callback_not_exported, module, :validation_runtime_readiness_probe, 0}}}
 
           true ->
             {:ok, module}

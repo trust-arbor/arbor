@@ -33,6 +33,27 @@ defmodule Arbor.Shell.ValidationRuntime.AppleContainerTest do
              AppleContainer.probe_for_test(fn _deadline -> {:ok, admission} end, fn -> status end)
   end
 
+  test "readiness can impose a deadline below the execution probe ceiling" do
+    test_pid = self()
+    deadline_ms = Arbor.Shell.validation_runtime_readiness_probe_timeout_ms()
+    status = %{"state" => "pinned", "driver" => "apple_container"}
+
+    assert deadline_ms == 30_000
+    assert deadline_ms < SpawnCapableTimeout.max_probe_deadline_ms()
+
+    assert {:ok, ^status} =
+             AppleContainer.probe_for_test(
+               deadline_ms,
+               fn observed_deadline ->
+                 send(test_pid, {:readiness_deadline, observed_deadline})
+                 {:ok, %{}}
+               end,
+               fn -> status end
+             )
+
+    assert_receive {:readiness_deadline, ^deadline_ms}
+  end
+
   test "malformed probe and status results fail closed" do
     assert {:error, :apple_container_unavailable} =
              AppleContainer.probe_for_test(fn _deadline -> :ok end, fn -> %{} end)

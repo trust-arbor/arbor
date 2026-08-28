@@ -15,7 +15,13 @@ defmodule Arbor.Shell.ValidationRuntime.AppleContainer do
   @impl true
   @spec probe() :: {:ok, map()} | {:error, term()}
   def probe do
-    probe_with(&AppleContainerProber.probe/1, &public_status/0)
+    probe(SpawnCapableTimeout.max_probe_deadline_ms())
+  end
+
+  @impl true
+  @spec probe(term()) :: {:ok, map()} | {:error, term()}
+  def probe(deadline_ms) do
+    probe_with(deadline_ms, &AppleContainerProber.probe/1, &public_status/0)
   end
 
   @doc false
@@ -23,11 +29,19 @@ defmodule Arbor.Shell.ValidationRuntime.AppleContainer do
           {:ok, map()} | {:error, term()}
   def probe_for_test(prober, status_provider)
       when is_function(prober, 1) and is_function(status_provider, 0) do
-    probe_with(prober, status_provider)
+    probe_for_test(SpawnCapableTimeout.max_probe_deadline_ms(), prober, status_provider)
   end
 
-  defp probe_with(prober, status_provider) do
-    case prober.(SpawnCapableTimeout.max_probe_deadline_ms()) do
+  @doc false
+  @spec probe_for_test(term(), (term() -> term()), (-> term())) ::
+          {:ok, map()} | {:error, term()}
+  def probe_for_test(deadline_ms, prober, status_provider)
+      when is_function(prober, 1) and is_function(status_provider, 0) do
+    probe_with(deadline_ms, prober, status_provider)
+  end
+
+  defp probe_with(deadline_ms, prober, status_provider) do
+    case prober.(deadline_ms) do
       {:ok, _admission} ->
         case status_provider.() do
           %{"state" => "pinned"} = status -> {:ok, status}

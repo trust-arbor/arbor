@@ -10,6 +10,7 @@ defmodule Arbor.Shell.ValidationRuntime.OciTest do
     Code.ensure_loaded!(Oci)
     assert function_exported?(Oci, :execute, 3)
     assert function_exported?(Oci, :probe, 0)
+    assert function_exported?(Oci, :probe, 1)
     assert function_exported?(Oci, :public_status, 0)
 
     status = Oci.public_status()

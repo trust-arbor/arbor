@@ -12,6 +12,7 @@ defmodule Arbor.Shell.ValidationRuntime do
   alias Arbor.Shell.ValidationRuntime.Authority
 
   @callback probe() :: {:ok, map()} | {:error, term()}
+  @callback probe(pos_integer()) :: {:ok, map()} | {:error, term()}
   @callback execute(String.t(), [String.t()], keyword()) :: {:ok, map()} | {:error, term()}
   @callback public_status() :: map()
 
@@ -29,6 +30,15 @@ defmodule Arbor.Shell.ValidationRuntime do
   def probe do
     case Authority.checkout_implementation() do
       {:ok, mod} -> mod.probe()
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec probe(term()) :: {:ok, map()} | {:error, term()}
+  def probe(deadline_ms) do
+    case Authority.checkout_implementation() do
+      {:ok, mod} -> mod.probe(deadline_ms)
       {:error, reason} -> {:error, reason}
     end
   end

@@ -14,7 +14,13 @@ defmodule Arbor.Shell.ValidationRuntime.Oci do
   @impl true
   @spec probe() :: {:ok, map()} | {:error, term()}
   def probe do
-    case OciProber.probe(SpawnCapableTimeout.max_probe_deadline_ms()) do
+    probe(SpawnCapableTimeout.max_probe_deadline_ms())
+  end
+
+  @impl true
+  @spec probe(term()) :: {:ok, map()} | {:error, term()}
+  def probe(deadline_ms) do
+    case OciProber.probe(deadline_ms) do
       {:ok, _admission} -> {:ok, public_status()}
       {:error, reason} -> {:error, reason}
     end

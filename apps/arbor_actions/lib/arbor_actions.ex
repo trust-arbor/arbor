@@ -790,9 +790,10 @@ defmodule Arbor.Actions do
   Point-in-time validation-runtime admission for live coding readiness.
 
   Calls the public `Arbor.Shell` facade (`validation_runtime_status/0` and,
-  when pinned, `validation_runtime_probe/0`) and returns a JSON-clean
-  envelope. Mix.lock comparison remains `coding_dependency_baseline_admission/2`.
-  Never includes image digests or host paths.
+  when pinned, `validation_runtime_readiness_probe/0`) and returns a
+  JSON-clean envelope. Mix.lock comparison remains
+  `coding_dependency_baseline_admission/2`. Never includes image digests or
+  host paths.
   """
   @spec coding_validation_runtime_admission() ::
           {:ok, %{required(String.t()) => String.t()}} | {:error, :malformed}
@@ -848,7 +849,7 @@ defmodule Arbor.Actions do
 
   defp maybe_validation_runtime_probe(module, %{"state" => state})
        when state in ["pinned", "available"] do
-    module.validation_runtime_probe()
+    module.validation_runtime_readiness_probe()
   end
 
   defp maybe_validation_runtime_probe(_module, _status), do: :skipped

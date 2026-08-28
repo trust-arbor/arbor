@@ -18,11 +18,20 @@ defmodule Arbor.Shell.ValidationRuntime.AuthorityTest do
     end
 
     def probe, do: {:ok, %{"state" => "injected"}}
+    def probe(_deadline_ms), do: probe()
     def public_status, do: %{"state" => "injected", "driver" => "fake"}
 
     defp test_pid do
       :persistent_term.get({__MODULE__, :test_pid})
     end
+  end
+
+  defmodule LegacyProbeOnlyRuntime do
+    @moduledoc false
+
+    def execute(_tool, _args, _opts), do: {:ok, %{}}
+    def probe, do: {:ok, %{}}
+    def public_status, do: %{"state" => "injected", "driver" => "legacy"}
   end
 
   setup do
@@ -142,6 +151,18 @@ defmodule Arbor.Shell.ValidationRuntime.AuthorityTest do
 
       assert Authority.public_status(pid)["state"] == "unavailable"
       assert Authority.public_status(pid)["reason"] == "invalid_validation_runtime_implementation"
+    end
+
+    test "bounded-probe regression: probe/0-only implementation fails admission" do
+      name = unique_name()
+
+      {:ok, pid} = start_authority(name: name, implementation: LegacyProbeOnlyRuntime)
+
+      assert {:error, :validation_runtime_unavailable} =
+               Authority.checkout_implementation(pid)
+
+      assert Authority.public_status(pid)["reason"] ==
+               "invalid_validation_runtime_implementation"
     end
 
     test "unknown start option starts unavailable" do

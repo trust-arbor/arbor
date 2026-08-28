@@ -17,13 +17,14 @@ defmodule Arbor.Gateway.Router do
   alias Arbor.Gateway.Auth
   alias Arbor.Gateway.JwtAuth
 
-  # Readiness owns a 10-second callback budget. Keep the outer MCP transport
-  # strictly larger so it can return the owned timeout result instead of
-  # terminating a legitimate probe at the same deadline.
+  # Coding readiness owns a 35-second callback budget around a 30-second
+  # validation admission probe. Keep the outer MCP transport strictly larger
+  # so it can return the owned timeout result instead of terminating a
+  # legitimate probe at the same deadline.
   @mcp_http_init_opts [
     handler: Arbor.Gateway.MCP.Handler,
     handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
-    handler_call_timeout: 30_000,
+    handler_call_timeout: 45_000,
     server_info: %{name: "arbor", version: "0.1.0"},
     protocol_mode: :legacy_only,
     sse_enabled: true,

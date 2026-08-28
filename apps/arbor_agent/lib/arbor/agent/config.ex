@@ -14,7 +14,7 @@ defmodule Arbor.Agent.Config do
       config :arbor_agent,
         default_task_executor: Arbor.Agent.Orchestration.TaskRunner,
         executor_callback_timeout_ms: 250,
-        executor_readiness_timeout_ms: 20_000,
+        executor_readiness_timeout_ms: 35_000,
         executor_finalization_timeout_ms: 2_000,
         task_executors: %{
           "coding_change" => MyApp.CodingPipelineExecutor
@@ -42,11 +42,10 @@ defmodule Arbor.Agent.Config do
   # Best-effort bound for optional task_status/2 and cancel_task/2 callbacks.
   # Short on purpose: hung executors must not freeze status or cancellation.
   @default_executor_callback_timeout_ms 250
-  # Pre-dispatch readiness projection may run multi-step coding probes (live
-  # production originally measured ~1667 ms; large reviewed coding plans now
-  # take about 11 seconds. Keep this below the 30-second MCP transport ceiling
-  # while leaving enough headroom for the complete read-only projection.
-  @default_executor_readiness_timeout_ms 20_000
+  # Pre-dispatch readiness projection may run multi-step coding probes. Full
+  # Apple Container admission can consume its 30-second sub-deadline, so keep
+  # explicit headroom below the 45-second MCP transport ceiling.
+  @default_executor_readiness_timeout_ms 35_000
   # Terminal artifact publication may write a bounded file and is mandatory for
   # executors that opt in, so it gets a larger but still finite deadline.
   @default_executor_finalization_timeout_ms 2_000

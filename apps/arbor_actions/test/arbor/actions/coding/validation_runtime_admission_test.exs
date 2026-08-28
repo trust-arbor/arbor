@@ -16,7 +16,7 @@ defmodule Arbor.Actions.Coding.ValidationRuntimeAdmissionTest do
       })
     end
 
-    def validation_runtime_probe do
+    def validation_runtime_readiness_probe do
       send(Process.get(:validation_runtime_test_pid, self()), :probed)
 
       Process.get(

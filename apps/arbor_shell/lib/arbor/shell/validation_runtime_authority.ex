@@ -350,6 +350,7 @@ defmodule Arbor.Shell.ValidationRuntime.Authority do
     case Code.ensure_loaded(mod) do
       {:module, ^mod} ->
         function_exported?(mod, :execute, 3) and function_exported?(mod, :probe, 0) and
+          function_exported?(mod, :probe, 1) and
           function_exported?(mod, :public_status, 0)
 
       _other ->

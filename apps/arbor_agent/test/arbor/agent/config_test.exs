@@ -75,25 +75,28 @@ defmodule Arbor.Agent.ConfigTest do
 
   test "executor_readiness_timeout_ms/0 has a dedicated default and does not fall back to callback budget" do
     Application.delete_env(:arbor_agent, :executor_readiness_timeout_ms)
-    assert Config.executor_readiness_timeout_ms() == 20_000
+    assert Config.executor_readiness_timeout_ms() == 35_000
+
+    assert Config.executor_readiness_timeout_ms() >
+             Arbor.Shell.validation_runtime_readiness_probe_timeout_ms()
 
     # Generic callback budget stays short; readiness budget is independent.
     Application.put_env(:arbor_agent, :executor_callback_timeout_ms, 250)
     assert Config.executor_callback_timeout_ms() == 250
-    assert Config.executor_readiness_timeout_ms() == 20_000
+    assert Config.executor_readiness_timeout_ms() == 35_000
 
     Application.put_env(:arbor_agent, :executor_readiness_timeout_ms, 7_500)
     assert Config.executor_readiness_timeout_ms() == 7_500
 
     # Invalid dedicated values fall back to the dedicated default only.
     Application.put_env(:arbor_agent, :executor_readiness_timeout_ms, 0)
-    assert Config.executor_readiness_timeout_ms() == 20_000
+    assert Config.executor_readiness_timeout_ms() == 35_000
 
     Application.put_env(:arbor_agent, :executor_readiness_timeout_ms, "nope")
-    assert Config.executor_readiness_timeout_ms() == 20_000
+    assert Config.executor_readiness_timeout_ms() == 35_000
 
     Application.put_env(:arbor_agent, :executor_readiness_timeout_ms, -1)
-    assert Config.executor_readiness_timeout_ms() == 20_000
+    assert Config.executor_readiness_timeout_ms() == 35_000
   end
 
   test "validated_default_task_executor/0 accepts a valid configured module" do

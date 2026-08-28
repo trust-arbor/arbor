@@ -1064,6 +1064,25 @@ defmodule Arbor.Shell do
     ValidationRuntime.probe()
   end
 
+  @validation_runtime_readiness_probe_timeout_ms 30_000
+
+  @doc """
+  Probe the boot-pinned validation runtime within the readiness-owned deadline.
+
+  This is the full admission probe used by coding dispatch readiness. Its
+  deadline stays below the executor-readiness callback and MCP transport
+  deadlines so timeout ownership remains deterministic.
+  """
+  @spec validation_runtime_readiness_probe() :: {:ok, map()} | {:error, term()}
+  def validation_runtime_readiness_probe do
+    ValidationRuntime.probe(@validation_runtime_readiness_probe_timeout_ms)
+  end
+
+  @doc false
+  @spec validation_runtime_readiness_probe_timeout_ms() :: pos_integer()
+  def validation_runtime_readiness_probe_timeout_ms,
+    do: @validation_runtime_readiness_probe_timeout_ms
+
   @doc """
   Re-pin an operator-owned validation-runtime document through TrustedPath.
 
