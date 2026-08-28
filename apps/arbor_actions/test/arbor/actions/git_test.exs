@@ -32,6 +32,44 @@ defmodule Arbor.Actions.GitTest do
     Arbor.Actions.GitPrincipalHelpers.run(module, params, context)
   end
 
+  describe "deterministic commit identity (F4, ombp 2026-08-27)" do
+    test "the hermetic env pins the factory as committer and default author" do
+      env = Git.hermetic_git_env()
+      assert env["GIT_COMMITTER_NAME"] == "Arbor Software Factory"
+      assert env["GIT_COMMITTER_EMAIL"] == "factory@arbor.invalid"
+      assert env["GIT_AUTHOR_NAME"] == "Arbor Software Factory"
+      assert env["GIT_AUTHOR_EMAIL"] == "factory@arbor.invalid"
+    end
+
+    test "security regression: commits without any git identity on the host, naming the principal as author",
+         %{repo_path: repo_path} do
+      # No repo-local identity; the hermetic env already hides global/system
+      # config. Before the fix this died with "Author identity unknown" on
+      # hosts without a FQDN.
+      {_, 0} = System.cmd("git", ["config", "--unset", "user.email"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["config", "--unset", "user.name"], cd: repo_path)
+      File.write!(Path.join(repo_path, "note.txt"), "f4\n")
+      {_, 0} = System.cmd("git", ["add", "note.txt"], cd: repo_path)
+
+      assert {:ok, _} = run_git(Git.Commit, %{path: repo_path, message: "f4 identity"})
+
+      {out, 0} = System.cmd("git", ["log", "-1", "--format=%an <%ae>|%cn <%ce>"], cd: repo_path)
+      [author, committer] = out |> String.trim() |> String.split("|")
+      assert author =~ ~r/\AArbor coding agent <agent_[A-Za-z0-9_.-]+@arbor\.invalid>\z/
+      assert committer == "Arbor Software Factory <factory@arbor.invalid>"
+    end
+
+    test "author_args refuses a malformed principal" do
+      assert Git.Commit.author_args("bad principal <x>") == []
+      assert Git.Commit.author_args(nil) == []
+
+      assert Git.Commit.author_args("agent_ok") == [
+               "--author",
+               "Arbor coding agent <agent_ok@arbor.invalid>"
+             ]
+    end
+  end
+
   describe "hermetic no-fork git config" do
     test "pins the reviewed single-threaded GIT_CONFIG_COUNT shape" do
       env = Git.hermetic_git_env()

@@ -294,7 +294,7 @@ defmodule Arbor.Commands.Baseline do
     # 2026-08-26). Same absolute-wrapper contract as `Arbor.Actions.Mix`.
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.get"],
            cd: repo_root,
-           env: [{"MIX_DEPS_PATH", deps_path}],
+           env: staging_mix_env(deps_path),
            stderr_to_stdout: true
          ) do
       {_output, 0} -> :ok
@@ -302,21 +302,38 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
+  @doc """
+  Environment for every Mix invocation the baseline build runs in `repo_root`.
+
+  Both the fetch and the compile step must redirect `MIX_BUILD_PATH` as well as
+  `MIX_DEPS_PATH`: Mix's post-fetch cleanup removes the compiled build of each
+  (re)fetched dependency from the *project's* build path, so a `deps.get` with
+  only `MIX_DEPS_PATH` redirected wiped the operator's `_build/dev` and the next
+  `./bin/mix` task recompiled 125 dependencies (ombp, 2026-08-27, F1).
+  """
+  @spec staging_mix_env(String.t()) :: [{String.t(), String.t()}]
+  def staging_mix_env(deps_path) when is_binary(deps_path) do
+    [
+      {"MIX_DEPS_PATH", deps_path},
+      {"MIX_BUILD_PATH", staging_build_path(deps_path)},
+      {"MIX_ENV", "test"}
+    ]
+  end
+
+  @doc false
+  @spec staging_build_path(String.t()) :: String.t()
+  def staging_build_path(deps_path) when is_binary(deps_path), do: deps_path <> "-build"
+
   defp compile_deps(%{deps_compile: fun} = ctx) when is_function(fun, 1), do: fun.(ctx)
 
   defp compile_deps(%{deps_path: deps_path, repo_root: repo_root}) do
     # Compile-time fetches (sqlite_vec loadables) write into the dep checkout.
     # Take the tree digest after this so the unit can compile with --network none.
-    build_path = deps_path <> "-build"
-    File.mkdir_p!(build_path)
+    File.mkdir_p!(staging_build_path(deps_path))
 
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.compile"],
            cd: repo_root,
-           env: [
-             {"MIX_DEPS_PATH", deps_path},
-             {"MIX_BUILD_PATH", build_path},
-             {"MIX_ENV", "test"}
-           ],
+           env: staging_mix_env(deps_path),
            stderr_to_stdout: true
          ) do
       {_output, 0} -> :ok

@@ -64,6 +64,20 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     {:ok, root: root}
   end
 
+  test "fetch and compile share one staging Mix env that redirects the build path" do
+    # Regression (ombp, 2026-08-27, F1): `deps.get` ran with only MIX_DEPS_PATH
+    # redirected, so Mix's post-fetch cleanup deleted every fetched dep's
+    # compiled build from the checkout's own _build/dev.
+    env = Arbor.Commands.Baseline.staging_mix_env("/tmp/x/baseline-staging")
+
+    assert {"MIX_DEPS_PATH", "/tmp/x/baseline-staging"} in env
+    assert {"MIX_BUILD_PATH", "/tmp/x/baseline-staging-build"} in env
+    assert {"MIX_ENV", "test"} in env
+
+    assert Arbor.Commands.Baseline.staging_build_path("/tmp/x/baseline-staging") ==
+             "/tmp/x/baseline-staging-build"
+  end
+
   test "activate writes mode 0400 and does not fetch", %{root: root} do
     digest = @hex64
     baseline_dir = Path.join([root, "baseline", digest])

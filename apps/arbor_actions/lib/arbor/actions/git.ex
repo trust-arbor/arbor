@@ -172,7 +172,18 @@ defmodule Arbor.Actions.Git do
                "GIT_EDITOR" => "false",
                "GIT_SEQUENCE_EDITOR" => "false",
                "GIT_TERMINAL_PROMPT" => "0",
-               "GIT_WORK_TREE" => false
+               "GIT_WORK_TREE" => false,
+               # Deterministic identity. The hermetic env hides the operator's
+               # global config (GIT_CONFIG_GLOBAL=/dev/null), and git's
+               # auto-detected identity needs a FQDN — on a host called
+               # `ombp` the reviewed commit died with "Author identity
+               # unknown" (ombp, 2026-08-27, F4). The reviewed commit is
+               # Arbor's act: the factory is the committer; the coordinating
+               # agent is named as author by `Commit` (`--author`).
+               "GIT_AUTHOR_NAME" => "Arbor Software Factory",
+               "GIT_AUTHOR_EMAIL" => "factory@arbor.invalid",
+               "GIT_COMMITTER_NAME" => "Arbor Software Factory",
+               "GIT_COMMITTER_EMAIL" => "factory@arbor.invalid"
              },
              fn {{key, value}, index}, acc ->
                acc
@@ -3402,8 +3413,8 @@ defmodule Arbor.Actions.Git do
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, message: message} = params, context) do
       case Actions.authorized_principal(context, __MODULE__) do
-        {:ok, _principal_id} ->
-          commit_authorized(path, message, params)
+        {:ok, principal_id} ->
+          commit_authorized(path, message, Map.put(params, :__author_principal__, principal_id))
 
         {:error, reason} ->
           {:error, Actions.unauthorized_message(reason)}
@@ -3569,9 +3580,21 @@ defmodule Arbor.Actions.Git do
     defp create_commit(path, message, params) do
       args = ["commit", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim"]
       args = if enabled?(params[:allow_empty]), do: args ++ ["--allow-empty"], else: args
+      args = args ++ author_args(params[:__author_principal__])
       args = args ++ ["-m", message, "--"]
       git_command(path, args)
     end
+
+    # The authorized principal (the coordinating agent) is the author; the
+    # committer is the factory identity pinned in the hermetic env.
+    @doc false
+    def author_args(principal_id) when is_binary(principal_id) and principal_id != "" do
+      if Regex.match?(~r/\A[A-Za-z0-9_.-]{1,128}\z/, principal_id),
+        do: ["--author", "Arbor coding agent <#{principal_id}@arbor.invalid>"],
+        else: []
+    end
+
+    def author_args(_), do: []
 
     defp enabled?(value), do: value in [true, "true", "1", 1]
 
