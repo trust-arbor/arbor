@@ -682,6 +682,36 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
       }
     end
 
+    test "carries consolidated_findings next to the ledger on the task payload" do
+      raw =
+        review_raw(%{
+          "aaa" => %{
+            "id" => "aaa",
+            "state" => "open",
+            "blocks_merge" => true,
+            "severity" => "blocking",
+            "owner" => "security"
+          }
+        })
+        |> put_in(["review", "consolidated_findings"], [
+          %{
+            "issue_key" => "issue-1",
+            "owners" => ["security", "correctness"],
+            "severity" => "blocking",
+            "blocks_merge" => true,
+            "title" => "Max rounds off-by-one",
+            "required_actions" => [String.duplicate("a", 1_500), String.duplicate("a", 1_500)],
+            "anchor" => %{"path" => "lib/rounds.ex", "line" => 42}
+          }
+        ])
+
+      assert [finding] = get_in(TaskArtifacts.normalize(raw), [:payload, :consolidated_findings])
+      assert finding.issue_key == "issue-1"
+      assert finding.owners == ["correctness", "security"]
+      assert finding.required_actions == [String.duplicate("a", 1_000)]
+      assert finding.title == "Max rounds off-by-one"
+    end
+
     test "surfaces blocking findings from the result, not just their hashed ids" do
       # Regression: the actionable output of a rejected review used to be
       # reachable only by reading the temp evidence JSON off disk and matching

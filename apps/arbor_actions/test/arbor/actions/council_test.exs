@@ -1,10 +1,11 @@
 defmodule Arbor.Actions.CouncilTest do
   use Arbor.Actions.ActionCase, async: false
 
-  alias Arbor.Actions.Council
+  alias Arbor.Actions.Coding.ReviewLedgerCore
   alias Arbor.Actions.Coding.ReviewTree
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Council
 
   @moduletag :fast
 
@@ -291,6 +292,133 @@ defmodule Arbor.Actions.CouncilTest do
       assert persisted_review["review_disposition"] == "rework"
       assert persisted_review["blocking_ids"] == ["finding-1", "finding-2"]
       assert persisted_review["reviewer_outcomes"] == result.reviewer_outcomes
+    end
+
+    test "projects bounded JSON-clean consolidated_findings onto result, verdict meta, and rework feedback" do
+      long_action = String.duplicate("a", 1_500)
+
+      injected =
+        Enum.map(1..70, fn number ->
+          %{
+            "issue_key" => "issue-#{String.pad_leading(Integer.to_string(number), 2, "0")}",
+            "owners" => ["security", "correctness"],
+            "severity" => "blocking",
+            "blocks_merge" => true,
+            "title" => "Max rounds off-by-one #{number}",
+            "anchor" => %{"path" => "lib/rounds.ex", "side" => "new", "line" => number},
+            "required_actions" => [long_action, long_action]
+          }
+        end)
+
+      decision = %{
+        "decision" => "deadlock",
+        "approve_count" => 0,
+        "reject_count" => 2,
+        "abstain_count" => 0,
+        "quorum_met" => false,
+        "review_cycle" => 1,
+        "finding_ledger" => review_ledger(),
+        "consolidated_findings" => injected,
+        "review_disposition" => "rework",
+        "blocking_ids" => ["finding-1"],
+        "blocking_reasons" => [%{"id" => "finding-1", "reason" => "active_blocking"}],
+        "human_required" => false
+      }
+
+      parent = self()
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: fn _request, _params, _context -> {:ok, decision} end,
+                 persist_verdict: fn verdict, _request, _decision ->
+                   send(parent, {:review_meta, verdict.meta.review})
+                   :ok
+                 end
+               })
+
+      assert length(result.consolidated_findings) == 64
+
+      assert Enum.all?(result.consolidated_findings, fn finding ->
+               finding["owners"] == ["correctness", "security"] and
+                 Enum.all?(finding["required_actions"], &(byte_size(&1) == 1_000)) and
+                 finding["required_actions"] == [String.duplicate("a", 1_000)]
+             end)
+
+      assert {:ok, encoded} = Jason.encode(result.consolidated_findings)
+      assert Jason.decode!(encoded) == result.consolidated_findings
+
+      assert result.verdict.meta["review"]["consolidated_findings"] ==
+               result.consolidated_findings
+
+      assert is_list(result.feedback["review"]["consolidated_findings"])
+      assert result.feedback["review"]["consolidated_findings"] != []
+
+      assert Enum.all?(result.feedback["review"]["consolidated_findings"], fn finding ->
+               Enum.all?(finding["required_actions"], &(byte_size(&1) <= 1_000))
+             end)
+
+      assert_receive {:review_meta, persisted_review}
+      assert persisted_review["consolidated_findings"] == result.consolidated_findings
+      refute Map.has_key?(persisted_review, "finding_ledger")
+    end
+
+    test "consolidates a real multi-owner ledger so the worker sees one issue" do
+      {:ok, empty} =
+        ReviewLedgerCore.new(%{
+          "perspectives" => ["correctness", "security", "maintainability"]
+        })
+
+      shared = %{
+        "title" => "Max rounds off-by-one",
+        "required_action" => "Clamp the last included round",
+        "severity" => "blocking",
+        "anchor" => %{"path" => "lib/rounds.ex", "side" => "new", "line" => 42}
+      }
+
+      {:ok, ledger} =
+        ReviewLedgerCore.apply_cycle(empty, 1, %{
+          "correctness" => %{
+            "vote" => "reject",
+            "finding_updates" => [],
+            "new_findings" => [shared]
+          },
+          "security" => %{
+            "vote" => "reject",
+            "finding_updates" => [],
+            "new_findings" => [shared]
+          }
+        })
+
+      decision = %{
+        "decision" => "deadlock",
+        "approve_count" => 0,
+        "reject_count" => 2,
+        "abstain_count" => 1,
+        "quorum_met" => false,
+        "review_cycle" => 1,
+        "finding_ledger" => ledger,
+        "review_disposition" => "rework",
+        "blocking_ids" => Enum.sort(Map.keys(ledger["findings"])),
+        "blocking_reasons" =>
+          Enum.map(Map.keys(ledger["findings"]), &%{"id" => &1, "reason" => "active_blocking"}),
+        "human_required" => false
+      }
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: fn _request, _params, _context -> {:ok, decision} end,
+                 persist_verdict: false
+               })
+
+      assert map_size(result.finding_ledger["findings"]) == 2
+      assert [finding] = result.consolidated_findings
+      assert finding["owners"] == ["correctness", "security"]
+      assert finding["severity"] == "blocking"
+      assert finding["blocks_merge"] == true
+      assert finding["title"] == "Max rounds off-by-one"
+      assert finding["required_actions"] == ["Clamp the last included round"]
+      assert result.feedback["review"]["consolidated_findings"] == [finding]
+      assert result.verdict.meta["review"]["consolidated_findings"] == [finding]
     end
 
     test "architectural ledger handoff routes rejected decisions to human review without security veto" do

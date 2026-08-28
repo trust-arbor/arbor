@@ -45,6 +45,7 @@ defmodule Arbor.Actions.Council do
   - ConsultOne: `arbor://ai/generate`
   """
 
+  alias Arbor.Actions.Coding.ReviewLedgerCore
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Council.BlastRadius
@@ -58,6 +59,8 @@ defmodule Arbor.Actions.Council do
   @feedback_list_limit 20
   @feedback_json_bytes_limit 32_768
   @result_files_limit 100
+  @max_consolidated_findings 64
+  @max_required_action_bytes 1_000
   @active_finding_states ~w(open new_regression architectural_blocker)
 
   # Perspectives available in AdvisoryLLM
@@ -936,6 +939,7 @@ defmodule Arbor.Actions.Council do
         %{
           "review_cycle" => completed_review_cycle(decision, request),
           "finding_ledger" => completed_finding_ledger(decision),
+          "consolidated_findings" => completed_consolidated_findings(decision),
           "review_disposition" => review_disposition(decision),
           "blocking_ids" => review_blocking_ids(decision),
           "blocking_reasons" => review_blocking_reasons(decision),
@@ -1034,6 +1038,7 @@ defmodule Arbor.Actions.Council do
       |> Map.put(:review_cycle, review["review_cycle"])
       |> Map.put(:prior_candidate_commit, review["prior_candidate_commit"])
       |> Map.put(:finding_ledger, review["finding_ledger"])
+      |> Map.put(:consolidated_findings, review["consolidated_findings"])
       |> Map.put(:review_disposition, review["review_disposition"])
       |> Map.put(:blocking_ids, review["blocking_ids"])
       |> Map.put(:blocking_reasons, review["blocking_reasons"])
@@ -1927,6 +1932,7 @@ defmodule Arbor.Actions.Council do
         "review_cycle" => completed_review_cycle(decision, request),
         "prior_candidate_commit" => bounded_text(request.prior_candidate_commit),
         "finding_ledger" => completed_finding_ledger(decision),
+        "consolidated_findings" => completed_consolidated_findings(decision),
         "review_disposition" => review_disposition(decision),
         "blocking_ids" => review_blocking_ids(decision),
         "blocking_reasons" => review_blocking_reasons(decision),
@@ -1950,7 +1956,8 @@ defmodule Arbor.Actions.Council do
           "review_cycle",
           "review_disposition",
           "blocking_ids",
-          "reviewer_outcomes"
+          "reviewer_outcomes",
+          "consolidated_findings"
         ])
     end
   end
@@ -1966,6 +1973,73 @@ defmodule Arbor.Actions.Council do
     case value(decision, "finding_ledger") do
       ledger when is_map(ledger) -> ledger
       _ -> %{}
+    end
+  end
+
+  defp completed_consolidated_findings(decision) do
+    case value(decision, "consolidated_findings") do
+      findings when is_list(findings) ->
+        bound_consolidated_findings(findings)
+
+      _ ->
+        case ReviewLedgerCore.consolidated_findings(completed_finding_ledger(decision)) do
+          {:ok, findings} -> bound_consolidated_findings(findings)
+          {:error, _reason} -> []
+        end
+    end
+  end
+
+  defp bound_consolidated_findings(findings) when is_list(findings) do
+    findings
+    |> Enum.filter(&is_map/1)
+    |> Enum.take(@max_consolidated_findings)
+    |> Enum.map(&bound_consolidated_finding/1)
+  end
+
+  defp bound_consolidated_finding(finding) do
+    %{
+      "issue_key" => bounded_text(value(finding, "issue_key")),
+      "owners" => bound_consolidated_owners(value(finding, "owners")),
+      "severity" => bounded_text(value(finding, "severity")),
+      "blocks_merge" => boolean_value(finding, "blocks_merge"),
+      "title" => bounded_text(value(finding, "title")),
+      "required_actions" => bound_required_actions(value(finding, "required_actions"))
+    }
+    |> maybe_put("anchor", active_finding_anchor(value(finding, "anchor")))
+  end
+
+  defp bound_consolidated_owners(owners) do
+    owners
+    |> List.wrap()
+    |> Enum.map(&bounded_text/1)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp bound_required_actions(actions) do
+    actions
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&clip_required_action/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp clip_required_action(action) when byte_size(action) <= @max_required_action_bytes,
+    do: action
+
+  defp clip_required_action(action) do
+    action
+    |> binary_part(0, @max_required_action_bytes)
+    |> trim_incomplete_utf8()
+  end
+
+  defp trim_incomplete_utf8(prefix) do
+    if String.valid?(prefix) do
+      prefix
+    else
+      trim_incomplete_utf8(binary_part(prefix, 0, byte_size(prefix) - 1))
     end
   end
 
@@ -2019,7 +2093,8 @@ defmodule Arbor.Actions.Council do
       "blocking_ids" => review["blocking_ids"],
       "blocking_reasons" => review["blocking_reasons"],
       "human_required" => review["human_required"],
-      "active_findings" => active_findings(review["finding_ledger"])
+      "active_findings" => active_findings(review["finding_ledger"]),
+      "consolidated_findings" => review["consolidated_findings"] || []
     }
     |> maybe_put("reviewer_outcomes", review["reviewer_outcomes"])
   end
@@ -2072,8 +2147,38 @@ defmodule Arbor.Actions.Council do
       |> Enum.take(6)
       |> Enum.map(&compact_active_finding/1)
     end)
+    |> Map.update("consolidated_findings", [], fn findings ->
+      findings
+      |> List.wrap()
+      |> Enum.take(6)
+      |> Enum.map(&compact_consolidated_finding/1)
+    end)
     |> Map.update("reviewer_outcomes", %{}, &compact_reviewer_outcomes/1)
   end
+
+  defp compact_consolidated_finding(finding) when is_map(finding) do
+    %{
+      "issue_key" => compact_text(value(finding, "issue_key")),
+      "owners" =>
+        finding
+        |> value("owners")
+        |> List.wrap()
+        |> Enum.take(8)
+        |> Enum.map(&compact_text/1),
+      "severity" => compact_text(value(finding, "severity")),
+      "blocks_merge" => boolean_value(finding, "blocks_merge"),
+      "title" => compact_text(value(finding, "title")),
+      "required_actions" =>
+        finding
+        |> value("required_actions")
+        |> List.wrap()
+        |> Enum.take(8)
+        |> Enum.map(&compact_text/1)
+    }
+    |> maybe_put("anchor", compact_feedback_value("anchor", value(finding, "anchor")))
+  end
+
+  defp compact_consolidated_finding(_finding), do: %{}
 
   defp compact_reviewer_outcomes(outcomes) when is_map(outcomes) do
     Map.new(outcomes, fn {perspective, outcome} ->

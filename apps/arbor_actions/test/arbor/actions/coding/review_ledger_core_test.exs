@@ -667,6 +667,87 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
            }
   end
 
+  describe "consolidated_findings/1" do
+    test "groups two owners on one issue_key and keeps distinct keys separate" do
+      shared = %{
+        "title" => "Max rounds off-by-one",
+        "severity" => "major",
+        "anchor" => %{"path" => "lib/rounds.ex", "side" => "new", "line" => 42}
+      }
+
+      {:ok, ledger} =
+        apply_cycle(new_ledger(), 1, %{
+          "correctness" =>
+            report("reject",
+              new_findings: [
+                Map.put(shared, "required_action", "Clamp the last included round"),
+                Map.merge(finding("unrelated contract break", "minor", 8), %{
+                  "required_action" => "Restore the public arity"
+                })
+              ]
+            ),
+          "security" =>
+            report("reject",
+              new_findings: [
+                shared
+                |> Map.put("required_action", "Clamp the last included round")
+                |> Map.put("severity", "blocking")
+              ]
+            ),
+          "maintainability" =>
+            report(
+              new_findings: [Map.put(shared, "required_action", "Document the inclusive bound")]
+            )
+        })
+
+      assert map_size(ledger["findings"]) == 4
+
+      assert {:ok, consolidated} = ReviewLedgerCore.consolidated_findings(ledger)
+      assert length(consolidated) == 2
+
+      shared_entry =
+        Enum.find(consolidated, &(&1["title"] == "Max rounds off-by-one"))
+
+      other_entry =
+        Enum.find(consolidated, &(&1["title"] == "unrelated contract break"))
+
+      assert shared_entry["owners"] == ["correctness", "maintainability", "security"]
+      assert shared_entry["severity"] == "blocking"
+      assert shared_entry["blocks_merge"] == true
+
+      assert shared_entry["required_actions"] == [
+               "Clamp the last included round",
+               "Document the inclusive bound"
+             ]
+
+      assert shared_entry["anchor"] == shared["anchor"]
+      assert other_entry["owners"] == ["correctness"]
+      assert other_entry["severity"] == "minor"
+      refute other_entry["blocks_merge"]
+
+      ranks = %{"blocking" => 0, "major" => 1, "minor" => 2, "nit" => 3}
+
+      assert Enum.map(consolidated, & &1["issue_key"]) ==
+               consolidated
+               |> Enum.sort_by(&{Map.fetch!(ranks, &1["severity"]), &1["issue_key"]})
+               |> Enum.map(& &1["issue_key"])
+
+      assert {:ok, encoded} = Jason.encode(consolidated)
+      assert Jason.decode!(encoded) == consolidated
+    end
+
+    test "returns an empty list for an empty ledger and a closed error when malformed" do
+      {:ok, empty} = ReviewLedgerCore.new(%{"perspectives" => @perspectives})
+      assert ReviewLedgerCore.consolidated_findings(empty) == {:ok, []}
+      assert ReviewLedgerCore.consolidated_findings(%{}) == {:ok, []}
+
+      assert ReviewLedgerCore.consolidated_findings(%{"version" => "forged"}) ==
+               {:error, :invalid_ledger}
+
+      assert ReviewLedgerCore.consolidated_findings(:not_a_ledger) == {:error, :invalid_ledger}
+    end
+  end
+
   test "rejects non-JSON reports and bounded finding data" do
     {:ok, ledger} = ReviewLedgerCore.new(%{"perspectives" => @perspectives})
 

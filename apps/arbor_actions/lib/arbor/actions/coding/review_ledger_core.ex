@@ -33,6 +33,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
   @votes ["approve", "reject", "abstain"]
   @severities ["blocking", "major", "minor", "nit"]
+  @severity_rank %{"blocking" => 0, "major" => 1, "minor" => 2, "nit" => 3}
   @active_states ["open", "new_regression", "architectural_blocker"]
   @update_states ["fixed", "open", "architectural_blocker"]
 
@@ -116,6 +117,24 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
 
   def decision(_ledger), do: fail_closed_decision()
 
+  @doc """
+  Project one finding per `issue_key` for worker-facing review feedback.
+
+  Per-owner ledger entries stay as the source of truth. This view groups them
+  by `issue_key` with sorted `owners`, the highest severity, the OR of
+  `blocks_merge`, the first-cycle anchor/title, and `required_actions`
+  de-duplicated by exact text. Sorted by severity rank, then `issue_key`.
+  """
+  @spec consolidated_findings(map()) :: {:ok, [map()]} | {:error, term()}
+  def consolidated_findings(ledger) when is_map(ledger) do
+    case normalize_ledger(ledger) do
+      {:ok, normalized} -> {:ok, build_consolidated_findings(normalized)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def consolidated_findings(_ledger), do: {:error, :invalid_ledger}
+
   @doc "Convert a ledger and its current decision into JSON-clean context values."
   @spec to_context(map()) :: map()
   def to_context(ledger) when is_map(ledger) do
@@ -123,24 +142,29 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
       {:ok, normalized} ->
         findings = normalized["findings"] |> map_values_sorted()
         decision = build_decision(normalized)
+        consolidated = build_consolidated_findings(normalized)
 
         %{
           "review.finding_ledger" => normalized,
           "review.findings" => findings,
+          "review.consolidated_findings" => consolidated,
           "review.out_of_scope" => normalized["out_of_scope"],
           "review.decision" => decision,
           "review.perspective_votes" => effective_perspective_votes(normalized),
-          "finding_ledger" => normalized
+          "finding_ledger" => normalized,
+          "consolidated_findings" => consolidated
         }
 
       {:error, _reason} ->
         %{
           "review.finding_ledger" => %{},
           "review.findings" => [],
+          "review.consolidated_findings" => [],
           "review.out_of_scope" => [],
           "review.decision" => fail_closed_decision(),
           "review.perspective_votes" => %{},
-          "finding_ledger" => %{}
+          "finding_ledger" => %{},
+          "consolidated_findings" => []
         }
     end
   end
@@ -1224,4 +1248,34 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     |> Enum.sort_by(fn {id, _finding} -> id end)
     |> Enum.map(fn {_id, finding} -> finding end)
   end
+
+  defp build_consolidated_findings(ledger) do
+    ledger["findings"]
+    |> Map.values()
+    |> Enum.group_by(& &1["issue_key"])
+    |> Enum.map(fn {issue_key, findings} ->
+      ordered = Enum.sort_by(findings, &{&1["origin_cycle"], &1["owner"], &1["id"]})
+      first = hd(ordered)
+
+      %{
+        "issue_key" => issue_key,
+        "owners" => findings |> Enum.map(& &1["owner"]) |> Enum.uniq() |> Enum.sort(),
+        "severity" => highest_severity(Enum.map(findings, & &1["severity"])),
+        "blocks_merge" => Enum.any?(findings, &(&1["blocks_merge"] == true)),
+        "title" => first["title"],
+        "anchor" => first["anchor"],
+        "required_actions" =>
+          ordered
+          |> Enum.map(& &1["required_action"])
+          |> Enum.uniq()
+      }
+    end)
+    |> Enum.sort_by(&{severity_rank(&1["severity"]), &1["issue_key"]})
+  end
+
+  defp highest_severity(severities) do
+    Enum.min_by(severities, &severity_rank/1)
+  end
+
+  defp severity_rank(severity), do: Map.get(@severity_rank, severity, 99)
 end

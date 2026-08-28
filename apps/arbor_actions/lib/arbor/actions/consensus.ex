@@ -983,6 +983,7 @@ defmodule Arbor.Actions.Consensus do
         "status" => "decided",
         "review_cycle" => ledger["review_cycle"],
         "finding_ledger" => ledger,
+        "consolidated_findings" => context["consolidated_findings"],
         "findings" => context["review.findings"],
         "out_of_scope" => context["review.out_of_scope"],
         "review_disposition" => disposition,

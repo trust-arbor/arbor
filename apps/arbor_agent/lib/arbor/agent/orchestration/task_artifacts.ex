@@ -38,6 +38,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @max_outcome_depth 6
   @max_provider_session_id_length 200
   @max_blocking_findings 16
+  @max_consolidated_findings 64
+  @max_required_action_bytes 1_000
   @max_finding_text_bytes 2_048
   # Copied from ReviewLedgerCore's active set; do not import that module here.
   @active_finding_states MapSet.new(~w(open new_regression architectural_blocker))
@@ -111,6 +113,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
               report: report(raw, artifacts, metrics, outcome),
               verdict: verdict(raw),
               blocking_findings: blocking_findings(raw),
+              consolidated_findings: consolidated_findings(raw),
               artifacts: artifacts,
               metrics: metrics,
               repo_path: value(raw, :repo_path),
@@ -377,6 +380,75 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp bounded_provider_session_id(_), do: nil
+
+  # Carry the worker-facing consolidation next to the per-owner ledger. The
+  # ledger stays the source of truth; this list is one issue_key with N owners.
+  defp consolidated_findings(raw) do
+    review = value(raw, :review)
+
+    findings =
+      value(raw, :consolidated_findings) || value(review, :consolidated_findings)
+
+    case findings do
+      list when is_list(list) and list != [] ->
+        list
+        |> Enum.filter(&is_map/1)
+        |> Enum.take(@max_consolidated_findings)
+        |> Enum.map(&compact_consolidated_finding/1)
+
+      _other ->
+        nil
+    end
+  end
+
+  defp compact_consolidated_finding(finding) do
+    %{
+      issue_key: finding_text(value(finding, :issue_key)),
+      owners: consolidated_owners(value(finding, :owners)),
+      severity: finding_text(value(finding, :severity)),
+      blocks_merge: value(finding, :blocks_merge) == true,
+      title: finding_text(value(finding, :title)),
+      required_actions: consolidated_required_actions(value(finding, :required_actions)),
+      anchor: finding_anchor(value(finding, :anchor))
+    }
+    |> reject_nil_values()
+  end
+
+  defp consolidated_owners(owners) do
+    owners
+    |> List.wrap()
+    |> Enum.map(&finding_text/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> case do
+      [] -> nil
+      list -> list
+    end
+  end
+
+  defp consolidated_required_actions(actions) do
+    actions
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&clip_required_action/1)
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+    |> case do
+      [] -> nil
+      list -> list
+    end
+  end
+
+  defp clip_required_action(action) when byte_size(action) <= @max_required_action_bytes,
+    do: action
+
+  defp clip_required_action(action) do
+    case ApprovalAnswer.bound_utf8_prefix(action, @max_required_action_bytes) do
+      "" -> nil
+      text -> text
+    end
+  end
 
   # The blocking findings ARE the actionable output of a rejected review, but
   # they used to be reachable only by reading the temp evidence JSON off disk
