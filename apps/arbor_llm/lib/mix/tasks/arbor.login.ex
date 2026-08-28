@@ -48,10 +48,18 @@ defmodule Mix.Tasks.Arbor.Login do
 
   require Logger
 
-  @requirements ["app.start"]
+  alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
+
+  # Short calls (start, complete, health) and the two blocking waits (the
+  # loopback await and the xAI device poll, both bounded by the OAuth handle
+  # TTL). RPC timeouts, not HTTP ones.
+  @rpc_timeout_ms 30_000
+  @rpc_wait_timeout_ms 900_000
 
   @impl true
   def run(args) do
+    ArborConfig.install_mix_shutdown_hooks()
+
     case execute(args, []) do
       :ok -> :ok
       {:error, _reason} -> exit({:shutdown, 1})
@@ -203,22 +211,94 @@ defmodule Mix.Tasks.Arbor.Login do
     end
   end
 
+  # The OAuth store, pending handles, and the loopback listener live in the
+  # running Arbor node. When one is reachable every facade call is an RPC to
+  # it; otherwise the Mix VM starts the app itself (no node, so no port clash
+  # with the dashboard). Tests inject the facade functions directly.
   defp deps(opts) do
+    facade = facade(opts)
+
     %{
       emit: Keyword.get(opts, :output, &default_emit/1),
       log: Keyword.get(opts, :log, &default_log/1),
       opener: Keyword.get(opts, :opener, &default_opener/1),
       prompt: Keyword.get(opts, :prompt, &default_prompt/1),
       start_openai_loopback:
-        Keyword.get(opts, :start_openai_loopback, &LLM.start_openai_loopback_login/1),
+        Keyword.get(opts, :start_openai_loopback, facade.(:start_openai_loopback_login, 1)),
       await_openai_loopback:
-        Keyword.get(opts, :await_openai_loopback, &LLM.await_openai_loopback_login/2),
-      start_openai: Keyword.get(opts, :start_openai, &LLM.start_openai_login/1),
-      complete_openai: Keyword.get(opts, :complete_openai, &LLM.complete_openai_login/3),
-      start_xai: Keyword.get(opts, :start_xai, &LLM.start_xai_device_login/0),
-      complete_xai: Keyword.get(opts, :complete_xai, &LLM.complete_xai_device_login/1),
-      oauth_health: Keyword.get(opts, :oauth_health, &LLM.oauth_health/1)
+        Keyword.get(opts, :await_openai_loopback, facade.(:await_openai_loopback_login, 2)),
+      start_openai: Keyword.get(opts, :start_openai, facade.(:start_openai_login, 1)),
+      complete_openai: Keyword.get(opts, :complete_openai, facade.(:complete_openai_login, 3)),
+      start_xai: Keyword.get(opts, :start_xai, facade.(:start_xai_device_login, 0)),
+      complete_xai: Keyword.get(opts, :complete_xai, facade.(:complete_xai_device_login, 1)),
+      oauth_health: Keyword.get(opts, :oauth_health, facade.(:oauth_health, 1))
     }
+  end
+
+  @facade_keys [
+    :start_openai_loopback,
+    :await_openai_loopback,
+    :start_openai,
+    :complete_openai,
+    :start_xai,
+    :complete_xai,
+    :oauth_health
+  ]
+
+  defp facade(opts) do
+    cond do
+      Enum.all?(@facade_keys, &Keyword.has_key?(opts, &1)) ->
+        fn fun, arity -> local_facade(fun, arity) end
+
+      (node = reachable_node(opts)) != nil ->
+        Logger.debug("[arbor.login] calling the running node #{node}")
+        fn fun, arity -> node_facade(node, fun, arity) end
+
+      true ->
+        Mix.Task.run("app.start")
+        fn fun, arity -> local_facade(fun, arity) end
+    end
+  end
+
+  defp reachable_node(opts) do
+    ensure = Keyword.get(opts, :ensure_distribution, &ArborConfig.ensure_distribution/0)
+    running? = Keyword.get(opts, :server_running?, &ArborConfig.server_running?/0)
+    target = Keyword.get(opts, :target_node, &ArborConfig.full_node_name/0)
+
+    with :ok <- ensure.(),
+         true <- running?.(),
+         node when is_atom(node) and not is_nil(node) <- target.() do
+      node
+    else
+      _other -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp local_facade(fun, arity), do: Function.capture(LLM, fun, arity)
+
+  defp node_facade(node, fun, arity) do
+    timeout =
+      if fun in [:await_openai_loopback_login, :complete_xai_device_login],
+        do: @rpc_wait_timeout_ms,
+        else: @rpc_timeout_ms
+
+    call = fn args ->
+      case ArborConfig.rpc_result(node, LLM, fun, args, timeout) do
+        {:badrpc, reason} -> {:error, {:node_rpc, closed(reason)}}
+        other -> other
+      end
+    end
+
+    case arity do
+      0 -> fn -> call.([]) end
+      1 -> fn a -> call.([a]) end
+      2 -> fn a, b -> call.([a, b]) end
+      3 -> fn a, b, c -> call.([a, b, c]) end
+    end
   end
 
   defp default_emit(message), do: Mix.shell().info(message)

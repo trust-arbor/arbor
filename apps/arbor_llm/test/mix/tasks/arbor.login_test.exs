@@ -33,8 +33,10 @@ defmodule Mix.Tasks.Arbor.LoginTest do
     refute src =~ "Arbor.LLM.OAuth.Login.start"
     refute src =~ "Arbor.LLM.OAuth.Login.complete"
     refute src =~ "Arbor.LLM.OAuth.Login.await"
-    assert src =~ "LLM.start_openai_loopback_login"
-    assert src =~ "LLM.await_openai_loopback_login"
+    # Facade functions are captured by name (locally or as RPCs to the node).
+    assert src =~ ":start_openai_loopback_login"
+    assert src =~ ":await_openai_loopback_login"
+    assert src =~ "Function.capture(LLM"
     assert Code.ensure_loaded?(Mix.Tasks.Arbor.Oauth.Login)
     assert function_exported?(Mix.Tasks.Arbor.Oauth.Login, :run, 1)
   end
