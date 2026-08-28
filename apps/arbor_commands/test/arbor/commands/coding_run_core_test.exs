@@ -156,7 +156,7 @@ defmodule Arbor.Commands.CodingRunCoreTest do
 
     {state, effect} = Core.step(state, {:approvals, {:ok, [approval]}})
     {state, effect} = flush_emits(state, effect)
-    assert {:git_status_porcelain, "/tmp/ws"} = effect
+    assert {:git_status_porcelain, "/tmp/ws", 10_000} = effect
 
     porcelain = " M apps/arbor_commands/lib/foo.ex\0"
     {state, effect} = Core.step(state, {:git_status, {:ok, porcelain}})
@@ -164,11 +164,42 @@ defmodule Arbor.Commands.CodingRunCoreTest do
     assert {:rpc, Arbor.Agent.Orchestration, :answer_approval, ["irq_commit" | _], _} = effect
   end
 
+  test "commit-gate git inspection is clamped to the remaining whole-command budget" do
+    state =
+      waiting_state(
+        approve_as_dispatcher: true,
+        allow_paths: "^apps/",
+        max_wait_ms: 2_000,
+        now_ms: 0
+      )
+
+    approval = approval_view("irq_commit", "coding_reviewed_commit", "/tmp/ws")
+    {state, effect} = Core.step(state, {:approvals, {:ok, [approval]}})
+    {_state, effect} = flush_emits(state, effect)
+    assert {:git_status_porcelain, "/tmp/ws", 2_000} = effect
+  end
+
+  test "commit gate never starts git inspection once the budget is spent" do
+    state =
+      waiting_state(
+        approve_as_dispatcher: true,
+        allow_paths: "^apps/",
+        max_wait_ms: 1_000,
+        now_ms: 0
+      )
+
+    approval = approval_view("irq_commit", "coding_reviewed_commit", "/tmp/ws")
+    {state, effect} = Core.step(%{state | now_ms: 1_000}, {:approvals, {:ok, [approval]}})
+    {_state, effect} = flush_emits(state, effect)
+    assert {:halt, 1, result} = effect
+    assert result.reason == :deadline_exceeded
+  end
+
   test "commit gate refuses with UNEXPECTED FILES when a path is outside --allow-paths" do
     state = waiting_state(approve_as_dispatcher: true, allow_paths: "^apps/arbor_commands/")
     approval = approval_view("irq_commit", "coding_reviewed_commit", "/tmp/ws")
     {state, effect} = Core.step(state, {:approvals, {:ok, [approval]}})
-    {state, {:git_status_porcelain, _}} = flush_emits(state, effect)
+    {state, {:git_status_porcelain, _, _}} = flush_emits(state, effect)
 
     porcelain = " M apps/arbor_security/lib/secret.ex\0"
     {state, effect} = Core.step(state, {:git_status, {:ok, porcelain}})
@@ -269,7 +300,7 @@ defmodule Arbor.Commands.CodingRunCoreTest do
               effect
 
             {:git_status, result} ->
-              assert {:git_status_porcelain, _} = effect
+              assert {:git_status_porcelain, _, _} = effect
               {state, next} = Core.step(state, {:git_status, result})
               elem(flush_emits(state, next), 1)
           end

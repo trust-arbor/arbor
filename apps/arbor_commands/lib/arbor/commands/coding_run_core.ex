@@ -11,6 +11,10 @@ defmodule Arbor.Commands.CodingRunCore do
   `--max-wait-ms` budget can clamp `{:sleep, ms}` and `{:rpc, …, timeout}`.
   """
 
+  # Upper bound for one commit-gate git inspection; clamped further by the
+  # remaining --max-wait-ms budget.
+  @git_timeout_ms 10_000
+
   alias Arbor.Commands.CodingRun.GitStatus
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
 
@@ -50,6 +54,7 @@ defmodule Arbor.Commands.CodingRunCore do
           | :handling_approval
           | :awaiting_git
           | :awaiting_prompt
+          | :following
           | :awaiting_answer
           | :awaiting_result
           | :halted
@@ -59,7 +64,7 @@ defmodule Arbor.Commands.CodingRunCore do
           | {:emit, String.t()}
           | {:prompt, String.t()}
           | {:sleep, non_neg_integer()}
-          | {:git_status_porcelain, String.t()}
+          | {:git_status_porcelain, String.t(), pos_integer()}
           | {:halt, non_neg_integer(), result()}
 
   @type result :: %{
@@ -566,8 +571,16 @@ defmodule Arbor.Commands.CodingRunCore do
     worktree = approval["worktree"]
 
     if is_binary(worktree) and worktree != "" do
-      effect = {:git_status_porcelain, worktree}
-      emit_then(%{state | phase: :awaiting_git}, listing, effect)
+      # The git inspection is bounded by the smaller of its own 10 s cap and
+      # whatever remains of --max-wait-ms; with nothing left it never starts.
+      case clamp_timeout(state, @git_timeout_ms) do
+        0 ->
+          halt(state, 1, :deadline_exceeded, "deadline exceeded before commit-gate inspection")
+
+        timeout_ms ->
+          effect = {:git_status_porcelain, worktree, timeout_ms}
+          emit_then(%{state | phase: :awaiting_git}, listing, effect)
+      end
     else
       halt(state, 1, :missing_worktree, "commit gate missing worktree; not answering")
     end

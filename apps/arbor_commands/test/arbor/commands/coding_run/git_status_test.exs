@@ -146,4 +146,11 @@ defmodule Arbor.Commands.CodingRun.GitStatusTest do
       _other -> false
     end
   end
+
+  @tag :security_regression
+  test "security regression: an unterminated porcelain record is malformed, never a path" do
+    assert {:error, :malformed_output} = GitStatus.decode(" M allowed/path.ex")
+    assert {:ok, ["allowed/path.ex"]} = GitStatus.decode(" M allowed/path.ex\0")
+    assert {:ok, []} = GitStatus.decode("")
+  end
 end

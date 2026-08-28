@@ -45,8 +45,16 @@ defmodule Arbor.Commands.CodingRun.GitStatus do
   @doc "Decode a successful porcelain=v1 -z payload into repository-relative paths."
   @spec decode(binary()) ::
           {:ok, [String.t()]} | {:error, :malformed_output | :path_count_exceeded}
+  def decode(<<>>), do: {:ok, []}
+
+  # `--porcelain=v1 -z` terminates every record with NUL. A payload without a
+  # trailing NUL is truncated or not porcelain at all; it never yields paths
+  # (a plausible-looking unterminated record could otherwise authorize the
+  # commit gate — council finding, 2026-08-28).
   def decode(binary) when is_binary(binary) do
-    walk_records(split_records(binary), [], 0)
+    if :binary.last(binary) == 0,
+      do: walk_records(split_records(binary), [], 0),
+      else: {:error, :malformed_output}
   end
 
   def decode(_binary), do: {:error, :malformed_output}

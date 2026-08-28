@@ -354,9 +354,9 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
     interpret(state, effect, ctx)
   end
 
-  defp interpret(state, {:git_status_porcelain, worktree}, ctx) do
-    runner = Keyword.get(ctx.runtime_opts, :git_status, &GitStatus.run/1)
-    result = safe_git(runner, worktree)
+  defp interpret(state, {:git_status_porcelain, worktree, timeout_ms}, ctx) do
+    runner = Keyword.get(ctx.runtime_opts, :git_status, &GitStatus.run/2)
+    result = safe_git(runner, worktree, timeout_ms)
     {state, effect} = CodingRunCore.step(touch(state, ctx), {:git_status, result})
     interpret(state, effect, ctx)
   end
@@ -377,8 +377,10 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
   defp rpc_event(:awaiting_result, _mod, _fun, result), do: {:result, result}
   defp rpc_event(_phase, _mod, _fun, result), do: {:rpc_result, result}
 
+  # Bound before projecting: a large response must not cost more than the
+  # 64 approvals the core will look at.
   defp project_approvals({:ok, list}) when is_list(list) do
-    {:ok, Enum.map(list, &project_approval/1)}
+    {:ok, list |> Enum.take(64) |> Enum.map(&project_approval/1)}
   end
 
   defp project_approvals(other), do: other
@@ -507,8 +509,16 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
     end
   end
 
-  defp safe_git(fun, worktree) do
-    case safe_callback(fun, [worktree]) do
+  # Test seams may inject an arity-1 runner; production uses GitStatus.run/2
+  # with the deadline the core clamped to the remaining command budget.
+  defp safe_git(fun, worktree, timeout_ms) do
+    args =
+      case Function.info(fun, :arity) do
+        {:arity, 1} -> [worktree]
+        _ -> [worktree, [timeout_ms: timeout_ms]]
+      end
+
+    case safe_callback(fun, args) do
       {:ok, binary} when is_binary(binary) -> {:ok, binary}
       {:error, reason} -> {:error, reason}
       _other -> {:error, :port_failed}
