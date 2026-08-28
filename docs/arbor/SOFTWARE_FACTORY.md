@@ -276,11 +276,34 @@ task = Jason.decode!(File.read!("/tmp/factory-first-run.json"))
 {:ok, report} = Arbor.Agent.coding_dispatch_readiness(caller, target, task)
 horizon = report["planes"]["executor"]["details"]["projection"]["authority_horizon"]
 
-for finding <- horizon["findings"],
-    finding["principal_role"] == "authenticated_caller",
-    finding["classification"] == "missing",
-    uri <- finding["resource_uris"] do
-  {:ok, _} = Arbor.Security.grant(principal: caller, resource: uri)
+# Fail closed exactly like the Mix task: every URI must parse as a capability
+# URI and must not be a wildcard/root or contain a ".." segment. One bad entry
+# means the report is malformed — grant nothing from it.
+alias Arbor.Contracts.Security.CapabilityUri
+
+uris =
+  for finding <- horizon["findings"],
+      finding["principal_role"] == "authenticated_caller",
+      finding["classification"] == "missing",
+      uri <- List.wrap(finding["resource_uris"]),
+      do: uri
+
+admitted =
+  Enum.map(uris, fn uri ->
+    case is_binary(uri) and CapabilityUri.parse(uri) do
+      {:ok, %{segments: segments}} ->
+        if Enum.any?(segments, &(&1 in ["*", "**", ".."])) or uri =~ ~r/[*]/,
+          do: {:error, {:unsafe_uri, uri}},
+          else: {:ok, uri}
+
+      _ ->
+        {:error, {:malformed_uri, uri}}
+    end
+  end)
+
+case Enum.find(admitted, &match?({:error, _}, &1)) do
+  nil -> for {:ok, uri} <- admitted, do: {:ok, _} = Arbor.Security.grant(principal: caller, resource: uri)
+  {:error, reason} -> raise "malformed readiness report, granting nothing: #{inspect(reason)}"
 end
 ```
 
