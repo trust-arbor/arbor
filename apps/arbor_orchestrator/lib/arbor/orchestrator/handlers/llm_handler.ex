@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   require Logger
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
+  alias Arbor.Orchestrator.LlmRouting.ProviderFallbackCore
   alias Arbor.Signals.Taint, as: SignalTaint
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
@@ -1057,7 +1058,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       {:error, _} = error ->
         error
 
-      {routed_provider, routed_model} ->
+      {sensitivity_provider, sensitivity_model} ->
+        # Availability routing: a reviewed graph pins a *preferred* provider per
+        # node (council seats); if this host cannot call it, take the first
+        # available candidate from the host's fallback table instead of failing
+        # the call with `unknown_provider` (2026-08-27: six council seats
+        # abstained on a host without Ollama). Recorded in the node's context
+        # updates so the verdict names the provider that actually voted.
+        {routed_provider, routed_model} =
+          maybe_route_by_availability(sensitivity_provider, sensitivity_model, node)
+
         {:ok,
          %Request{
            provider: routed_provider,
@@ -2222,12 +2232,76 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   # Merge routing decision from process dict into context_updates.
-  # Set by maybe_route_by_sensitivity when a reroute occurs.
+  # Set by maybe_route_by_sensitivity / maybe_route_by_availability when a
+  # reroute occurs. A provider fallback also rewrites `llm.provider` /
+  # `llm.model` so downstream projections (reviewer outcomes) see the route
+  # that was really used.
   defp maybe_put_routing_decision(updates) do
     case Process.delete(:__routing_decision__) do
-      nil -> updates
-      decision -> Map.put(updates, "__routing_decision__", decision)
+      nil ->
+        updates
+
+      %{action: :provider_fallback, alternative: {p, m}} = decision ->
+        updates
+        |> Map.put("__routing_decision__", decision)
+        |> Map.put("llm.provider", p)
+        |> Map.put("llm.model", m)
+        |> Map.put("llm.preferred_provider", elem(decision.original, 0))
+
+      decision ->
+        Map.put(updates, "__routing_decision__", decision)
     end
+  end
+
+  # Host-configured provider fallback (see ProviderFallbackCore). Opt out per
+  # node with `llm_fallback="false"`. Availability is `Arbor.LLM.provider_available?/1`
+  # unless overridden via `:llm_provider_availability` (tests).
+  defp maybe_route_by_availability(provider, model, node) do
+    # Only a provider the graph itself pins (`llm_provider` attr) is eligible:
+    # a session's configured default provider is the user's explicit choice and
+    # must fail loudly, not be silently swapped.
+    pinned? = is_binary(Map.get(node.attrs, "llm_provider"))
+
+    if not pinned? or Map.get(node.attrs, "llm_fallback") in ["false", false] or
+         not is_binary(provider) do
+      {provider, model}
+    else
+      {specific, generic} =
+        ProviderFallbackCore.normalize_config(
+          Application.get_env(:arbor_orchestrator, :llm_provider_fallbacks, %{}),
+          Application.get_env(:arbor_orchestrator, :llm_fallback_providers, [])
+        )
+
+      # Unknown routes (caller-registered adapters) count as available: only a
+      # route the catalog knows and reports down is rerouted.
+      available? =
+        Application.get_env(:arbor_orchestrator, :llm_provider_availability) ||
+          fn p -> Arbor.LLM.provider_route(p) != :unavailable end
+
+      case ProviderFallbackCore.resolve(provider, model, available?, specific, generic) do
+        {:ok, {p, m}, :preferred} ->
+          {p, m}
+
+        {:ok, {p, m}, {:fallback, from}} ->
+          Process.put(:__routing_decision__, %{
+            action: :provider_fallback,
+            original: {from, model},
+            alternative: {p, m},
+            reason: "provider #{from} unavailable on this host"
+          })
+
+          {p, m}
+
+        {:error, :no_available_provider, _tried} ->
+          # Leave the preferred route in place: the call fails with the
+          # provider's own error and the seat abstains with that reason.
+          {provider, model}
+      end
+    end
+  rescue
+    _ -> {provider, model}
+  catch
+    _, _ -> {provider, model}
   end
 
   # Propagate discovered tool names from find_tools calls into context

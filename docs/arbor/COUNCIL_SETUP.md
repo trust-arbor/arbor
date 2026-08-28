@@ -128,11 +128,35 @@ llama.cpp or LM Studio on `:1234` is `lm_studio`, not `ollama`. Pointing
 failed seats, which the reducer records as abstentions.
 
 If `ollama` is not a configured provider on the node at all, those six
-seats abstain with `{:unknown_provider, "ollama"}`. Live coding readiness
-still reports READY — there is no panel-provider gate today. Observed
-2026-08-27 on 10.42.42.42 run 11w: 8 of 10 reviewers abstained; quorum
-still met on the remaining `openai_oauth` and `xai_oauth` seats. Tracked
-in `.arbor/roadmap/0-inbox/binding-council-provider-availability.md`.
+seats no longer abstain outright: since 2026-08-27 the LLM handler resolves
+each seat's provider at call time and reroutes a *known-but-unavailable*
+provider to the first available entry of the host fallback table (below).
+The verdict's `reviewer_outcomes` record the provider and model that
+actually voted. Before that change (10.42.42.42 run 11w, 2026-08-27) 8 of
+10 reviewers abstained with `{:unknown_provider, "ollama"}` while readiness
+still said READY.
+
+### Host fallback table
+
+```elixir
+# config/config.exs (stock)
+config :arbor_orchestrator,
+  # tried in order when a seat's provider is unavailable on this host
+  llm_fallback_providers: [{"openai_oauth", "gpt-5.6-sol"}, {"xai_oauth", "grok-4.6"}],
+  # optional per-provider chains, tried before the generic list
+  llm_provider_fallbacks: %{"ollama" => [{"openrouter", "z-ai/glm-5.2"}]}
+```
+
+Rules: the preferred provider is never its own fallback; a provider the
+catalog has never heard of (a caller-registered adapter) is left alone; a
+node can opt out with `llm_fallback="false"`; if nothing in the chain is
+available the seat keeps its preferred route and abstains with that
+provider's own error. Live coding readiness (`mix arbor.coding.check
+--live`, `arbor_coding_dispatch_readiness`) has a `review_panel` plane:
+`passed` when every seat runs on its preferred provider, `degraded` (never
+blocked) when any seat falls back or would abstain, with the seat ids and
+the number of distinct providers that will vote. Fallback keeps the vote
+alive; it does not restore model diversity — remap seats for that.
 
 ### Capabilities
 

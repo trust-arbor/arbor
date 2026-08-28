@@ -35,6 +35,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     def coding_validation_runtime_admission,
       do: invoke(:coding_validation_runtime_admission, [])
 
+    def review_panel(plan), do: invoke(:review_panel, [plan])
+
     defp invoke(key, args) do
       case Process.get({:readiness_observer, key}) do
         function when is_function(function, length(args)) -> apply(function, args)
@@ -118,6 +120,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert "acp_health_unavailable" in codes
     assert "toolchain_identity_unavailable" in codes
     assert "validation_capacity_unavailable" in codes
+    assert "review_panel_unavailable" in codes
 
     assert Enum.map(report["diagnostics"], & &1["gate_id"]) == [
              "plan_schema",
@@ -128,7 +131,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
              "dependency_baseline",
              "acp_health",
              "toolchain_identity",
-             "validation_capacity"
+             "validation_capacity",
+             "review_panel"
            ]
 
     assert diagnostic(report, "dependency_baseline")["decision"] == "unavailable"
@@ -149,9 +153,49 @@ defmodule Arbor.Orchestrator.CodingPlan.ReadinessTest do
     assert diagnostic(report, "acp_health")["decision"] == "degraded"
     assert diagnostic(report, "acp_health")["code"] == "acp_health_degraded"
     assert diagnostic(report, "validation_capacity")["decision"] == "unavailable"
+    # No review_panel observer stubbed: the plane degrades as unobserved rather
+    # than blocking or vanishing.
+    assert diagnostic(report, "review_panel")["decision"] == "degraded"
+    assert diagnostic(report, "review_panel")["code"] == "review_panel_unobserved"
     assert Enum.all?(report["diagnostics"], &json_clean?/1)
     refute inspect(report) =~ "mix_wrapper_path"
     assert File.ls!(ctx.repo) == before
+  end
+
+  test "live review panel reports available, degraded-with-remedy, and never blocks", ctx do
+    passed = %{
+      status: :passed,
+      total: 10,
+      preferred: 10,
+      fallback: 0,
+      unresolved: 0,
+      distinct_providers: 3,
+      seats: []
+    }
+
+    Process.put({:readiness_observer, :review_panel}, fn _plan -> {:ok, passed} end)
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), live_opts(ctx))
+    assert diagnostic(report, "review_panel")["decision"] == "passed"
+    assert diagnostic(report, "review_panel")["code"] == "review_panel_available"
+    assert diagnostic(report, "review_panel")["message"] =~ "All 10 review seats"
+
+    degraded = %{
+      passed
+      | status: :degraded,
+        preferred: 2,
+        fallback: 0,
+        unresolved: 8,
+        distinct_providers: 2,
+        seats: [%{id: "seat_a", preferred: {"ollama", "m"}, resolved: nil, outcome: :unresolved}]
+    }
+
+    Process.put({:readiness_observer, :review_panel}, fn _plan -> {:ok, degraded} end)
+    assert {:ok, report} = Readiness.check(plan(ctx.repo), live_opts(ctx))
+    assert diagnostic(report, "review_panel")["decision"] == "degraded"
+    assert diagnostic(report, "review_panel")["code"] == "review_panel_degraded"
+    assert diagnostic(report, "review_panel")["message"] =~ "8 will abstain"
+    assert diagnostic(report, "review_panel")["remediation"] =~ "llm_fallback_providers"
+    assert Enum.count(report["diagnostics"], &(&1["decision"] == "blocked")) == 0
   end
 
   test "live security failure is primary and short-circuits ACP, toolchain, and capacity", ctx do

@@ -51,7 +51,7 @@ defmodule Arbor.MixProject do
       # changes — the path has no source on the CI runner). rc.8 defaults to :prefer_modern
       # (MCP 2026-07-28); Arbor pins protocol_mode: :legacy_only so existing MCP/ACP
       # integrations keep the pre-2026-07-28 initialize handshake.
-      {:ex_mcp, "1.1.0", override: true},
+      {:ex_mcp, "1.1.1", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

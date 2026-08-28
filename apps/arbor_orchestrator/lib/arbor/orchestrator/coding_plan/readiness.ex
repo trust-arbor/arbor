@@ -2,6 +2,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
   @moduledoc false
 
   alias Arbor.Contracts.Coding.{Diagnostic, Plan}
+  alias Arbor.Orchestrator.CodingPlan.ReviewPanelCore
 
   alias Arbor.Orchestrator.CodingPlan.{
     Compilation,
@@ -282,14 +283,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
          {:ok, acp_diagnostic, provider_expiry, acp_observed_through} <-
            observe_acp(plan, opts, observed_at, observed_datetime),
          {:ok, toolchain_diagnostic} <- observe_toolchain(opts, observed_at),
-         {:ok, capacity_diagnostic} <- observe_capacity(opts, observed_at) do
+         {:ok, capacity_diagnostic} <- observe_capacity(opts, observed_at),
+         {:ok, review_panel_diagnostic} <- observe_review_panel(plan, observed_at) do
       {:ok,
        [
          security_diagnostic,
          baseline_diagnostic,
          acp_diagnostic,
          toolchain_diagnostic,
-         capacity_diagnostic
+         capacity_diagnostic,
+         review_panel_diagnostic
        ], provider_expiry, acp_observed_through}
     else
       {:blocked, diagnostic, latest_observed_at} ->
@@ -385,6 +388,70 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
 
   defp retimestamp_diagnostics(diagnostics, observed_at) do
     Enum.map(diagnostics, &%{&1 | observed_at: observed_at})
+  end
+
+  # Review panel: can the council seats in the reviewed graph be called from
+  # this host, directly or via the configured provider fallback? Never blocks
+  # (a single available seat still votes); degraded when any seat falls back or
+  # is unresolvable, so the operator learns before dispatch that the "council"
+  # is smaller than the graph says (2026-08-27: 8 of 10 seats abstained on a
+  # host without Ollama while readiness said READY).
+  defp observe_review_panel(plan, observed_at) do
+    result =
+      safe_observer(:review_panel, [plan], fn plan_value ->
+        Arbor.Orchestrator.CodingPlan.ReviewPanel.observe(plan_value)
+      end)
+
+    # safe_observer wraps the observer's own `{:ok, panel}` once more.
+    panel_result =
+      case result do
+        {:ok, {:ok, %{status: _} = panel}} -> {:ok, panel}
+        {:ok, %{status: _} = panel} -> {:ok, panel}
+        other -> other
+      end
+
+    diagnostic =
+      case panel_result do
+        {:ok, %{status: :passed} = panel} ->
+          passed_with_evidence(
+            "review_panel",
+            "review_panel_available",
+            observed_at,
+            clip_text(ReviewPanelCore.message(panel)),
+            "council"
+          )
+
+        {:ok, %{status: :degraded} = panel} ->
+          ReadinessCore.diagnostic(
+            "review_panel",
+            "preflight",
+            "degraded",
+            "review_panel_degraded",
+            observed_at,
+            clip_text(ReviewPanelCore.message(panel)),
+            clip_text(ReviewPanelCore.remedy(panel)),
+            "council"
+          )
+
+        _other ->
+          degraded_with_evidence(
+            "review_panel",
+            "review_panel_unobserved",
+            observed_at,
+            "The review panel could not be observed on this host. Confirm the reviewed council graph and the provider catalog are available.",
+            "council"
+          )
+      end
+
+    {:ok, diagnostic}
+  end
+
+  # Diagnostic text fields are capped at 256 bytes by the contract.
+  @max_diagnostic_text 256
+  defp clip_text(text) when is_binary(text) and byte_size(text) <= @max_diagnostic_text, do: text
+
+  defp clip_text(text) when is_binary(text) do
+    String.slice(text, 0, @max_diagnostic_text - 1) |> String.trim_trailing() |> Kernel.<>("…")
   end
 
   defp observe_security(opts, observed_at) do
@@ -1217,6 +1284,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Readiness do
         observed_at,
         "Validation capacity was not observed in static mode.",
         "Run live capacity verification before dispatch."
+      ),
+      unavailable(
+        "review_panel",
+        "review_panel_unavailable",
+        observed_at,
+        "Review panel provider availability was not observed in static mode.",
+        "Run the live readiness check before dispatch."
       )
     ]
   end

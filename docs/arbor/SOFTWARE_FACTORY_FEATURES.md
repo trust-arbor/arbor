@@ -312,7 +312,7 @@ runs ten seats in parallel (`docs/arbor/COUNCIL_SETUP.md` for remapping):
 | It ran a command you did not expect in your checkout | The worker has no shell; Arbor runs compile/tests in a container it controls | The agent cannot poke at your environment or install tools to fix it |
 | "Tests pass" — they did not | Arbor runs the validation and projects the real exit code and output | ≈3 min per validation with a seeded baseline (8–16 cold); a ≈13 min baseline build per `mix.lock` change |
 | The fix merged with no failing test | Security-regression profile requires the test to fail on the base commit | Some fixes need a test that can be overlaid on the base |
-| One model reviewed its own work | Ten seats, structured votes, security veto, forced human review on core modules | Reviewer calls across providers; seats whose provider you lack abstain |
+| One model reviewed its own work | Ten seats, structured votes, security veto, forced human review on core modules | Reviewer calls across providers; seats whose provider you lack fall back to your configured providers (readiness says `degraded`) |
 | It pushed to `main` | Branch + verdict + evidence; you merge, Arbor settles | One more manual step |
 | It half-worked and nobody noticed | Fail closed with a named reason at every gate | A missing grant or drifted digest stops the run instead of warning |
 
@@ -333,11 +333,15 @@ want an agent to interactively debug your local environment.
 
 ## Known gaps (as of 2026-08-27)
 
-- **The council does not adapt to your providers.** Six stock seats point at
-  Ollama Cloud models; on a host without Ollama they abstain and the vote is
-  carried by the remaining seats while readiness still reports READY. Until
-  the panel derives its seats from the providers actually configured, remap
-  seats per `COUNCIL_SETUP.md`.
+- **The council adapts to your providers by fallback, not by design.** Six
+  stock seats point at Ollama Cloud models. Since 2026-08-27 a seat whose
+  provider this host cannot call is rerouted at call time to the first
+  available entry in `config :arbor_orchestrator, :llm_fallback_providers`
+  (stock: `openai_oauth`, then `xai_oauth`), the verdict names the provider
+  that actually voted, and live readiness carries a `review_panel` plane that
+  reports `degraded` with the seat list when any seat falls back or would
+  abstain. What you lose is model diversity: two providers may cast ten
+  votes. Remap seats per `COUNCIL_SETUP.md` to get real diversity back.
 - **Most knobs are constants.** Rework/retry caps, the budget split, approval
   wait timeouts, unit CPU/memory/pids, output bounds and the Mix timeout live
   in code today. Making them plan- and config-level settings is the next

@@ -102,6 +102,91 @@ defmodule Arbor.LLM do
   def oauth_health(provider), do: Arbor.LLM.OAuth.health(provider)
 
   @doc """
+  Whether a provider route can be called from this host right now.
+
+  Two kinds of route exist: catalog providers (`"openai"`, `"xai"`, `"ollama"`,
+  `"openrouter"`, `"acp"`, …) are available when `Arbor.LLM.ProviderCatalog`
+  reports them so (key present / local server reachable / ACP agent installed),
+  and the subscription OAuth routes (`"openai_oauth"`, `"xai_oauth"`) are
+  available when `oauth_health/1` reports `status: "ready"`. Unknown names are
+  unavailable. Never raises; a failing check is `false`.
+  """
+  @spec provider_available?(String.t() | atom()) :: boolean()
+  def provider_available?(provider) when is_atom(provider) and not is_nil(provider),
+    do: provider_available?(Atom.to_string(provider))
+
+  def provider_available?(provider) when provider in ["openai_oauth", "xai_oauth"] do
+    case oauth_health(provider) do
+      {:ok, %{status: "ready"}} -> true
+      _other -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  def provider_available?(provider) when is_binary(provider) do
+    Enum.any?(Arbor.LLM.ProviderCatalog.available(), fn {name, _caps} -> name == provider end)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  def provider_available?(_provider), do: false
+
+  @doc """
+  Route status for call-time fallback decisions: `:available`, `:unavailable`
+  (a route this host knows about but cannot call right now), or `:unknown`
+  (not a catalog or OAuth route at all — e.g. a caller-registered adapter).
+  Fallback logic must leave `:unknown` routes alone: the catalog cannot vouch
+  for them either way, and rerouting them breaks custom adapters.
+  """
+  @spec provider_route(String.t() | atom()) :: :available | :unavailable | :unknown
+  def provider_route(provider) when is_atom(provider) and not is_nil(provider),
+    do: provider_route(Atom.to_string(provider))
+
+  def provider_route(provider) when is_binary(provider) do
+    cond do
+      provider_available?(provider) -> :available
+      provider in ["openai_oauth", "xai_oauth"] -> :unavailable
+      known_catalog_provider?(provider) -> :unavailable
+      true -> :unknown
+    end
+  end
+
+  def provider_route(_provider), do: :unknown
+
+  defp known_catalog_provider?(provider) do
+    Enum.any?(Arbor.LLM.ProviderCatalog.all(), fn
+      %{provider: name} -> name == provider
+      {name, _caps} -> name == provider
+      _ -> false
+    end)
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  @doc "Names of every provider route `provider_available?/1` would accept right now."
+  @spec available_providers() :: [String.t()]
+  def available_providers do
+    catalog =
+      try do
+        Enum.map(Arbor.LLM.ProviderCatalog.available(), fn {name, _caps} -> name end)
+      rescue
+        _ -> []
+      catch
+        _, _ -> []
+      end
+
+    oauth = Enum.filter(["openai_oauth", "xai_oauth"], &provider_available?/1)
+    Enum.sort(Enum.uniq(catalog ++ oauth))
+  end
+
+  @doc """
   Return the bounded access-token-only payload consumed by Grok's external auth provider.
 
   Only the exact atom route `:xai_oauth` is accepted. The returned JSON contains exactly

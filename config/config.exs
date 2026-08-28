@@ -566,4 +566,15 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
 #   # config :arbor_security, gate_on_premises_egress: true
 
 # Import environment-specific config
+# LLM provider fallback for reviewed graphs (council seats pin a preferred
+# provider per node). When this host cannot call the preferred provider, the
+# LLM handler takes the first available candidate below and the verdict names
+# it. Order matters; add your own providers/models here.
+config :arbor_orchestrator,
+  llm_fallback_providers: [
+    {"openai_oauth", "gpt-5.6-sol"},
+    {"xai_oauth", "grok-4.6"}
+  ],
+  llm_provider_fallbacks: %{}
+
 import_config "#{config_env()}.exs"
