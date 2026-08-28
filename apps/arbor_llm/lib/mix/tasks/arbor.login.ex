@@ -70,10 +70,7 @@ defmodule Mix.Tasks.Arbor.Login do
   end
 
   defp dispatch(%{action: :status} = _command, deps) do
-    lines =
-      LoginCliCore.oauth_routes()
-      |> Enum.map(&status_line(&1, deps))
-      |> Enum.join("\n")
+    lines = Enum.map_join(LoginCliCore.oauth_routes(), "\n", &status_line(&1, deps))
 
     deps.emit.(lines)
     :ok
@@ -179,17 +176,15 @@ defmodule Mix.Tasks.Arbor.Login do
   defp maybe_open(_url, false, _deps), do: :ok
 
   defp maybe_open(url, true, deps) do
-    try do
-      open_browser(deps.opener, url, deps)
-    rescue
-      exception ->
-        deps.log.("Browser opener failed; continue waiting. #{Exception.message(exception)}")
-        :ok
-    catch
-      kind, reason ->
-        deps.log.("Browser opener failed; continue waiting. #{kind}: #{inspect_closed(reason)}")
-        :ok
-    end
+    open_browser(deps.opener, url, deps)
+  rescue
+    exception ->
+      deps.log.("Browser opener failed; continue waiting. #{Exception.message(exception)}")
+      :ok
+  catch
+    kind, reason ->
+      deps.log.("Browser opener failed; continue waiting. #{kind}: #{inspect_closed(reason)}")
+      :ok
   end
 
   defp open_browser(opener, url, deps) do

@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   test "task source calls only the public Arbor.LLM facade" do
     src =
-      File.read!(Path.expand("../../../../lib/mix/tasks/arbor.login.ex", __DIR__))
+      File.read!(Path.expand("../../../lib/mix/tasks/arbor.login.ex", __DIR__))
 
     refute src =~ "LoopbackOwner"
     refute src =~ "PendingStore"
@@ -35,11 +35,13 @@ defmodule Mix.Tasks.Arbor.LoginTest do
     refute src =~ "Arbor.LLM.OAuth.Login.await"
     assert src =~ "LLM.start_openai_loopback_login"
     assert src =~ "LLM.await_openai_loopback_login"
+    assert Code.ensure_loaded?(Mix.Tasks.Arbor.Oauth.Login)
     assert function_exported?(Mix.Tasks.Arbor.Oauth.Login, :run, 1)
   end
 
   test "openai emits the authorize URL before the blocking await" do
     events = start_events()
+    parent = self()
 
     task =
       Task.async(fn ->
@@ -51,11 +53,11 @@ defmodule Mix.Tasks.Arbor.LoginTest do
             record_event(events, :start)
             {:ok, loopback_prompt()}
           end,
-          await_openai_loopback: held_await(events)
+          await_openai_loopback: held_await(events, parent)
         )
       end)
 
-    assert_receive {:held, pid}
+    assert_receive {:held, pid}, 5_000
 
     assert event_list(events) == [
              :start,
@@ -71,6 +73,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   test "openai --no-browser emits the authorize URL before await and does not open" do
     events = start_events()
+    parent = self()
 
     task =
       Task.async(fn ->
@@ -82,11 +85,11 @@ defmodule Mix.Tasks.Arbor.LoginTest do
             record_event(events, :start)
             {:ok, loopback_prompt()}
           end,
-          await_openai_loopback: held_await(events)
+          await_openai_loopback: held_await(events, parent)
         )
       end)
 
-    assert_receive {:held, pid}
+    assert_receive {:held, pid}, 5_000
     assert event_list(events) == [:start, {:out, openai_instructions()}, :await]
     send(pid, :release)
     assert {:ok, {:error, :timeout}} = Task.yield(task, 1_000)
@@ -94,6 +97,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   test "openai --manual emits the authorize URL before the callback prompt" do
     events = start_events()
+    parent = self()
 
     result =
       Login.execute(
@@ -132,6 +136,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   test "xai emits the device URL and code before the blocking complete" do
     events = start_events()
+    parent = self()
 
     task =
       Task.async(fn ->
@@ -142,12 +147,12 @@ defmodule Mix.Tasks.Arbor.LoginTest do
             record_event(events, :start)
             {:ok, device_prompt()}
           end,
-          complete_xai: held_complete(events),
+          complete_xai: held_complete(events, parent),
           oauth_health: fn :xai_oauth -> {:ok, health_fixture("xai_oauth")} end
         )
       end)
 
-    assert_receive {:held, pid}
+    assert_receive {:held, pid}, 5_000
 
     assert event_list(events) == [
              :start,
@@ -166,6 +171,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
           fn _url -> {:error, :opener_missing} end
         ] do
       events = start_events()
+      parent = self()
       logs = start_events()
 
       task =
@@ -176,11 +182,11 @@ defmodule Mix.Tasks.Arbor.LoginTest do
             log: record(logs, :log),
             opener: opener,
             start_openai_loopback: fn _opts -> {:ok, loopback_prompt()} end,
-            await_openai_loopback: held_await(events)
+            await_openai_loopback: held_await(events, parent)
           )
         end)
 
-      assert_receive {:held, pid}
+      assert_receive {:held, pid}, 5_000
       assert {:out, instructions} = Enum.at(event_list(events), 0)
       assert instructions =~ @authorize_url
       assert :await in event_list(events)
@@ -192,6 +198,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   test "status emits every route's oauth_health" do
     events = start_events()
+    parent = self()
 
     assert :ok =
              Login.execute(
@@ -221,9 +228,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
 
   defp event_list(agent), do: Agent.get(agent, & &1)
 
-  defp held_await(events) do
-    parent = self()
-
+  defp held_await(events, parent) do
     fn _prompt, _opts ->
       record_event(events, :await)
       send(parent, {:held, self()})
@@ -236,9 +241,7 @@ defmodule Mix.Tasks.Arbor.LoginTest do
     end
   end
 
-  defp held_complete(events) do
-    parent = self()
-
+  defp held_complete(events, parent) do
     fn _handle ->
       record_event(events, :complete)
       send(parent, {:held, self()})

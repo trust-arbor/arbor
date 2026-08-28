@@ -37,12 +37,23 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
   @doc false
   @spec active_flow() :: {:ok, LoopbackFlow.t()} | :error
   def active_flow do
-    case Registry.select(@registry, [{{:"$1", :_, :_}, [], [:"$1"]}]) do
-      [flow_id | _] -> {:ok, LoopbackFlow.new(flow_id)}
-      [] -> :error
+    # Terminal owners linger for @terminal_cleanup_ms; only a flow that is
+    # still waiting or active holds the listener, so name that one.
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.find(fn {_flow_id, pid} -> holds_listener?(pid) end)
+    |> case do
+      {flow_id, _pid} -> {:ok, LoopbackFlow.new(flow_id)}
+      nil -> :error
     end
   catch
     :exit, _reason -> :error
+  end
+
+  defp holds_listener?(pid) do
+    GenServer.call(pid, :holds_listener?, 1_000)
+  catch
+    :exit, _reason -> false
   end
 
   @doc false
@@ -118,6 +129,9 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackOwner do
 
   def handle_call(:take_authorize_url, _from, state),
     do: {:reply, {:error, :oauth_loopback_unavailable}, state}
+
+  def handle_call(:holds_listener?, _from, state),
+    do: {:reply, state.phase in [:waiting_activation, :active], state}
 
   def handle_call({:await, timeout_ms}, from, state) do
     cond do

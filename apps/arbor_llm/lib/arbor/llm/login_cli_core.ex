@@ -123,9 +123,7 @@ defmodule Arbor.LLM.LoginCliCore do
   @doc "Format every route's health or closed error."
   @spec format_status([{String.t(), {:ok, term()} | {:error, term()}}]) :: String.t()
   def format_status(results) when is_list(results) do
-    results
-    |> Enum.map(&format_status_line/1)
-    |> Enum.join("\n")
+    Enum.map_join(results, "\n", &format_status_line/1)
   end
 
   @doc "Closed, secret-free error line for Mix output and non-zero exit."

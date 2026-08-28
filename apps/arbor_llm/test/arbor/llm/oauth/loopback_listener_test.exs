@@ -77,7 +77,7 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     assert {:ok, %LoopbackPrompt{} = prompt} =
              Arbor.LLM.start_openai_loopback_login(redirect_uri: :port_1457)
 
-    assert Map.keys(Map.from_struct(prompt)) == [:authorize_url, :flow]
+    assert Enum.sort(Map.keys(Map.from_struct(prompt))) == [:authorize_url, :flow]
     refute Map.has_key?(Map.from_struct(prompt), :handle)
     assert inspect(prompt) == "#Arbor.LLM.OAuth.Login.LoopbackPrompt<redacted>"
 
