@@ -244,7 +244,8 @@ dispatch.
 Close the authority-horizon loop with the Mix task. It runs coding dispatch
 readiness for the plan against the coordinator, grants the capability URIs
 readiness names as missing for the key-file caller through
-`Arbor.Security.grant/1`, and repeats until readiness names nothing.
+`Arbor.Security.grant/1`, and repeats until readiness names nothing or the
+configured maximum number of readiness rounds is reached.
 
 ```bash
 ./bin/mix arbor.coding.grant --plan /tmp/factory-first-run.json \
@@ -261,26 +262,26 @@ converged only when a report names nothing; otherwise it ends unconverged at
 max-rounds.
 
 Do not copy a URI count from an old session — profile and graph changes
-alter the set. The hand-run list below stays as the reference for what the
-task is automating (dispatch first, then the horizon readiness names):
+alter the set. The Mix task is the grant loop. If you must do it by hand,
+start with dispatch, then grant each exact authenticated-caller missing URI
+readiness names (never a wildcard):
 
 ```elixir
 caller = "agent_<caller_from_key_file>"
 target = "agent_<coordinator>"
+task = Jason.decode!(File.read!("/tmp/factory-first-run.json"))
 
 {:ok, _} = Arbor.Security.grant(principal: caller, resource: "arbor://agent/dispatch")
 
-# After you have a plan JSON on disk (see First run):
-plan_path = "/tmp/factory-first-run.json"
-task = Jason.decode!(File.read!(plan_path))
-{:ok, graph} =
-  Arbor.Orchestrator.parse(
-    File.read!("apps/arbor_orchestrator/priv/pipelines/coding-change-v1.dot")
-  )
+{:ok, report} = Arbor.Agent.coding_dispatch_readiness(caller, target, task)
+horizon = report["planes"]["executor"]["details"]["projection"]["authority_horizon"]
 
-# Prefer deriving from a compiled plan + execution_manifest when you have one.
-# First-run shortcut: grant the coding_agent template URIs to *both* caller
-# and coordinator, then let readiness name anything still missing.
+for finding <- horizon["findings"],
+    finding["principal_role"] == "authenticated_caller",
+    finding["classification"] == "missing",
+    uri <- finding["resource_uris"] do
+  {:ok, _} = Arbor.Security.grant(principal: caller, resource: uri)
+end
 ```
 
 The coordinator also needs the template capabilities; `mix arbor.agent start

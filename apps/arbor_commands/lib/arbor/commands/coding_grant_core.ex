@@ -32,6 +32,17 @@ defmodule Arbor.Commands.CodingGrantCore do
           remaining: [String.t()]
         }
 
+  @type state :: %{
+          max_rounds: pos_integer(),
+          dry_run: boolean(),
+          rounds: non_neg_integer(),
+          granted: [String.t()],
+          failed: [{String.t(), term()}],
+          remaining: [String.t()],
+          queue: [String.t()],
+          phase: atom()
+        }
+
   @doc """
   Construct grant-loop state.
 
@@ -39,7 +50,7 @@ defmodule Arbor.Commands.CodingGrantCore do
   default false). Invalid `:max_rounds` is `{:error, :invalid_max_rounds}`;
   any other bad option is `{:error, :invalid_options}`.
   """
-  @spec new(keyword() | map()) :: {:ok, map()} | {:error, atom()}
+  @spec new(keyword() | map()) :: {:ok, state()} | {:error, atom()}
   def new(opts) when is_list(opts) do
     cond do
       not Keyword.keyword?(opts) ->
@@ -71,9 +82,17 @@ defmodule Arbor.Commands.CodingGrantCore do
   @doc """
   Advance the machine. `max_rounds` is re-checked on every call, including
   preconstructed state.
+
+  After an `{:emit, text}` effect, the shell must call `step/2` with any
+  `{:grant_result, _, _}` to acknowledge the listing. Phases `:after_emit` and
+  `:after_emit_halt` are listing-ack phases, not grant phases — the URI and
+  result are ignored.
   """
-  @spec step(map(), {:readiness, term()} | {:grant_result, term(), :ok | {:error, term()}}) ::
-          {map(), effect()}
+  @spec step(
+          state() | map(),
+          {:readiness, term()} | {:grant_result, term(), :ok | {:error, term()}}
+        ) ::
+          {state(), effect()}
   def step(state, input) when is_map(state) do
     case normalize_max_rounds(Map.get(state, :max_rounds)) do
       {:ok, max_rounds} ->
@@ -168,13 +187,11 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp on_readiness(state, report) do
     next_rounds = state.rounds + 1
 
-    cond do
-      next_rounds > state.max_rounds ->
-        halt(state, :unconverged, remaining: state.remaining)
-
-      true ->
-        state = %{state | rounds: next_rounds, queue: [], remaining: []}
-        admit_readiness(state, report)
+    if next_rounds > state.max_rounds do
+      halt(state, :unconverged, remaining: state.remaining)
+    else
+      state = %{state | rounds: next_rounds, queue: [], remaining: []}
+      admit_readiness(state, report)
     end
   end
 
@@ -188,9 +205,6 @@ defmodule Arbor.Commands.CodingGrantCore do
 
       {:error, status} when status in [:malformed_report, :report_truncated] ->
         halt(state, status)
-
-      {:error, :invalid_options} ->
-        halt(state, :invalid_options)
     end
   end
 
@@ -216,6 +230,7 @@ defmodule Arbor.Commands.CodingGrantCore do
     {state, {:emit, format_uris(uris)}}
   end
 
+  # Listing ack after {:emit, text}. Not a grant: URI and result are ignored.
   defp on_grant_result(%{phase: :after_emit} = state, _uri, _result) do
     {%{state | phase: :awaiting_readiness, remaining: []}, :readiness}
   end
@@ -225,16 +240,23 @@ defmodule Arbor.Commands.CodingGrantCore do
   end
 
   defp on_grant_result(%{phase: :granting, queue: [uri | rest]} = state, uri, :ok) do
-    state = %{state | granted: state.granted ++ [uri], queue: rest, remaining: rest}
+    state = %{state | granted: [uri | state.granted], queue: rest, remaining: rest}
     next_after_grant(state)
   end
 
   defp on_grant_result(%{phase: :granting, queue: [uri | rest]} = state, uri, {:error, reason}) do
-    halt(state, :grant_failed, failed: state.failed ++ [{uri, reason}], remaining: rest)
+    state = %{
+      state
+      | failed: [{uri, reason} | state.failed],
+        remaining: [uri | rest]
+    }
+
+    halt(state, :grant_failed)
   end
 
   defp on_grant_result(state, uri, {:error, reason}) do
-    halt(state, :grant_failed, failed: state.failed ++ [{to_string_uri(uri), reason}])
+    state = %{state | failed: [{to_string_uri(uri), reason} | state.failed]}
+    halt(state, :grant_failed)
   end
 
   defp on_grant_result(state, _uri, _result) do
@@ -256,9 +278,7 @@ defmodule Arbor.Commands.CodingGrantCore do
   end
 
   defp extract_caller_missing_uris(report) do
-    horizon = horizon_projection(report)
-
-    case horizon do
+    case fetch_map_path(report, @horizon_path) do
       %{"findings" => findings, "required_resources" => required} when is_list(findings) ->
         with :ok <- validate_required_resources(required) do
           reduce_findings(findings)
@@ -269,11 +289,18 @@ defmodule Arbor.Commands.CodingGrantCore do
     end
   end
 
-  defp horizon_projection(report) when is_map(report) do
-    get_in(report, @horizon_path)
+  defp fetch_map_path(value, []) do
+    value
   end
 
-  defp horizon_projection(_report), do: nil
+  defp fetch_map_path(value, [key | rest]) when is_map(value) and not is_struct(value) do
+    case Map.fetch(value, key) do
+      {:ok, next} -> fetch_map_path(next, rest)
+      :error -> nil
+    end
+  end
+
+  defp fetch_map_path(_value, _path), do: nil
 
   defp validate_required_resources(required) when is_list(required), do: :ok
 
@@ -341,7 +368,7 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp consume_uri_budget(uri, {:ok, uris, uri_count}) do
     case admit_uri(uri) do
       {:ok, admitted} ->
-        {:cont, {:ok, uris ++ [admitted], uri_count + 1}}
+        {:cont, {:ok, [admitted | uris], uri_count + 1}}
 
       {:error, :malformed_report} = error ->
         {:halt, error}
@@ -351,7 +378,7 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp admit_uri(uri) when is_binary(uri) do
     case CapabilityUri.parse(uri) do
       {:ok, parsed} ->
-        if wildcard_or_root?(parsed) do
+        if unsafe_capability_uri?(parsed) do
           {:error, :malformed_report}
         else
           {:ok, uri}
@@ -364,19 +391,19 @@ defmodule Arbor.Commands.CodingGrantCore do
 
   defp admit_uri(_uri), do: {:error, :malformed_report}
 
-  defp wildcard_or_root?(parsed) do
-    parsed.wildcard != :none or parsed.segments == ["**"]
+  defp unsafe_capability_uri?(parsed) do
+    parsed.wildcard != :none or parsed.segments == ["**"] or ".." in parsed.segments
   end
 
-  defp unwrap_extraction({:ok, uris, _finding_count, _uri_count}), do: {:ok, uris}
+  defp unwrap_extraction({:ok, uris, _finding_count, _uri_count}), do: {:ok, Enum.reverse(uris)}
   defp unwrap_extraction({:error, _reason} = error), do: error
 
   defp halt(state, status, overrides \\ []) do
     result = %{
       status: status,
       rounds: reported_rounds(state),
-      granted: Keyword.get(overrides, :granted, state.granted),
-      failed: Keyword.get(overrides, :failed, state.failed),
+      granted: Enum.reverse(Keyword.get(overrides, :granted, state.granted)),
+      failed: Enum.reverse(Keyword.get(overrides, :failed, state.failed)),
       remaining: Keyword.get(overrides, :remaining, state.remaining)
     }
 

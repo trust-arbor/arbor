@@ -21,6 +21,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   test "mix help arbor.coding.grant states dry-run semantics exactly" do
     doc = Mix.Task.moduledoc(Mix.Tasks.Arbor.Coding.Grant)
 
+    assert doc =~ "until readiness names nothing"
+    assert doc =~ "maximum number of readiness rounds"
     assert doc =~ "every round invokes readiness"
     assert doc =~ "emits the full list of"
     assert doc =~ "caller URIs named that round (no dedupe)"
@@ -205,6 +207,84 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
               [@caller, @agent_id, %{"kind" => "coding_change", "task" => "grant-loop"}, []],
               60_000}
            ] = rpcs
+  end
+
+  test "later readiness RPC failure preserves granted progress" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    readiness_n = :atomics.new(1, [])
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case function do
+          :coding_dispatch_readiness ->
+            n = :atomics.add_get(readiness_n, 1, 1)
+
+            if n == 1 do
+              {:ok, missing_report([@uri_a])}
+            else
+              {:badrpc, :timeout}
+            end
+
+          :grant ->
+            {:ok, %{id: "cap_granted"}}
+        end
+      end)
+
+    assert {:error, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
+    assert result.status == :malformed_report
+    assert result.granted == [@uri_a]
+    assert result.rounds == 2
+    assert result.failed == []
+
+    rpcs = collect_rpcs([])
+    grants = Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :grant end)
+    assert length(grants) == 1
+  end
+
+  @tag :security_regression
+  test "security regression: valid then malformed sibling produces no grant RPC" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    report =
+      %{
+        "planes" => %{
+          "executor" => %{
+            "details" => %{
+              "projection" => %{
+                "authority_horizon" => %{
+                  "findings" => [
+                    %{
+                      "principal_role" => "authenticated_caller",
+                      "classification" => "missing",
+                      "resource_uris" => [@uri_a]
+                    },
+                    "not-a-map"
+                  ],
+                  "required_resources" => []
+                }
+              }
+            }
+          }
+        }
+      }
+
+    opts =
+      runtime_opts(fn _node, _mod, function, _args, _timeout ->
+        case function do
+          :coding_dispatch_readiness -> {:ok, report}
+          :grant -> flunk("malformed sibling must not produce a grant RPC")
+        end
+      end)
+
+    assert {:error, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
+    assert result.status == :malformed_report
+    assert result.granted == []
   end
 
   test "run exits non-zero on unconverged halt" do

@@ -115,7 +115,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     assert result.status == :grant_failed
     assert result.granted == [@uri_a]
     assert result.failed == [{@uri_b, :denied}]
-    assert result.remaining == [@uri_c]
+    assert result.remaining == [@uri_b, @uri_c]
     assert result.rounds == 1
   end
 
@@ -145,7 +145,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     {:ok, state} = Core.new(dry_run: true, max_rounds: 4)
 
     {state, {:emit, _text}} = Core.step(state, {:readiness, missing_report([@uri_a])})
-    {state, :readiness} = Core.step(state, {:grant_result, "listed", :ok})
+    {state, :readiness} = Core.step(state, {:grant_result, :emit_ack, :ok})
     {_state, {:halt, result}} = Core.step(state, {:readiness, missing_report([])})
 
     assert result.status == :converged
@@ -172,6 +172,25 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
       finding = caller_missing_finding([@uri_b, bad])
       assert_malformed_no_grant(poisoned_findings([finding]))
     end)
+  end
+
+  @tag :security_regression
+  test "security regression: traversal URI in a caller/missing finding fails closed with no sibling grants" do
+    finding = caller_missing_finding([@uri_a, "arbor://fs/read/../secret"])
+    assert_malformed_no_grant(readiness_report([finding]))
+
+    assert_malformed_no_grant(
+      readiness_report([
+        caller_missing_finding(["arbor://fs/read/../secret"]),
+        caller_missing_finding([@uri_a])
+      ])
+    )
+  end
+
+  @tag :security_regression
+  test "security regression: valid caller finding then malformed sibling fails closed with no grants" do
+    report = readiness_report([caller_missing_finding([@uri_a]), "not-a-map"])
+    assert_malformed_no_grant(report)
   end
 
   @tag :security_regression
@@ -203,6 +222,52 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     assert {:halt, result} = effect
     assert result.status == :converged
     refute match?({:grant, _}, effect)
+  end
+
+  test "exactly 64 findings and exactly 1024 caller URIs are admitted" do
+    findings =
+      Enum.map(1..63, fn n ->
+        %{
+          "principal_role" => "execution_principal",
+          "classification" => "missing",
+          "resource_uris" => ["arbor://fs/read/noise-#{n}"]
+        }
+      end) ++ [caller_missing_finding([@uri_a])]
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, readiness_report(findings)})
+    assert {:grant, @uri_a} = effect
+
+    uris = Enum.map(1..1024, fn n -> "arbor://fs/read/item-#{n}" end)
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, missing_report(uris)})
+    assert {:grant, "arbor://fs/read/item-1"} = effect
+  end
+
+  test "scalar or list at each intermediate horizon path is malformed" do
+    {:ok, state} = Core.new([])
+    good = readiness_report([])
+
+    Enum.each(["planes", "executor", "details", "projection"], fn key ->
+      Enum.each([1, ["not-a-map"]], fn bad ->
+        {_, effect} = Core.step(state, {:readiness, replace_path_component(good, key, bad)})
+        assert {:halt, result} = effect
+        assert result.status == :malformed_report, "expected malformed for #{key}=#{inspect(bad)}"
+        refute match?({:grant, _}, effect)
+      end)
+    end)
+  end
+
+  test "later malformed readiness preserves granted progress" do
+    {:ok, state} = Core.new([])
+    {state, {:grant, @uri_a}} = Core.step(state, {:readiness, missing_report([@uri_a])})
+    {state, :readiness} = Core.step(state, {:grant_result, @uri_a, :ok})
+    {_state, {:halt, result}} = Core.step(state, {:readiness, :unavailable})
+
+    assert result.status == :malformed_report
+    assert result.granted == [@uri_a]
+    assert result.failed == []
+    assert result.rounds == 2
   end
 
   test "wide reports are truncated and never converge" do
@@ -300,7 +365,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
   end
 
   defp drive(state, {:emit, text}, readiness_fun, effects) do
-    {state, effect} = Core.step(state, {:grant_result, "listed", :ok})
+    {state, effect} = Core.step(state, {:grant_result, :emit_ack, :ok})
     drive(state, effect, readiness_fun, [{:emit, text} | effects])
   end
 
@@ -343,6 +408,11 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
         }
       }
     }
+  end
+
+  defp replace_path_component(report, key, value) do
+    parent = Enum.take_while(["planes", "executor", "details", "projection"], &(&1 != key))
+    put_in(report, parent ++ [key], value)
   end
 
   defp core_source do

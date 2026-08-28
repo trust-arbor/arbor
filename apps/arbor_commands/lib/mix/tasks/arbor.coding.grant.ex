@@ -5,7 +5,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
 
   Runs coding dispatch readiness for the plan against the coordinator, grants
   the capability URIs readiness names as missing for the key-file caller
-  through `Arbor.Security.grant/1`, and repeats until readiness names nothing.
+  through `Arbor.Security.grant/1`, and repeats until readiness names nothing
+  or the configured maximum number of readiness rounds is reached.
 
       mix arbor.coding.grant --plan path/to/plan.json --agent-id agent_<coordinator>
       mix arbor.coding.grant --plan path/to/plan.json --agent-id agent_<coordinator> \
@@ -228,14 +229,14 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
   end
 
   defp interpret(state, :readiness, ctx) do
-    case invoke_readiness(ctx) do
-      {:ok, report} ->
-        {state, effect} = CodingGrantCore.step(state, {:readiness, report})
-        interpret(state, effect, ctx)
+    report =
+      case invoke_readiness(ctx) do
+        {:ok, report} -> report
+        :error -> :unavailable
+      end
 
-      {:error, result} ->
-        {:error, result}
-    end
+    {state, effect} = CodingGrantCore.step(state, {:readiness, report})
+    interpret(state, effect, ctx)
   end
 
   defp interpret(state, {:grant, uri}, ctx) do
@@ -246,7 +247,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
 
   defp interpret(state, {:emit, text}, ctx) do
     Mix.shell().info(text)
-    {state, effect} = CodingGrantCore.step(state, {:grant_result, "listed", :ok})
+    # Listing ack, not a grant. :after_emit / :after_emit_halt ignore URI and result.
+    {state, effect} = CodingGrantCore.step(state, {:grant_result, :emit_ack, :ok})
     interpret(state, effect, ctx)
   end
 
@@ -267,8 +269,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
            @rpc_timeout_ms
          ) do
       {:ok, report} when is_map(report) -> {:ok, report}
-      {:error, _reason} -> {:error, halt_error(:malformed_report)}
-      _other -> {:error, halt_error(:malformed_report)}
+      _other -> :error
     end
   end
 
