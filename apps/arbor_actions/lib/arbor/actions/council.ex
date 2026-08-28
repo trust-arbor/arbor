@@ -1976,16 +1976,13 @@ defmodule Arbor.Actions.Council do
     end
   end
 
+  # Always derived from the validated per-owner ledger — never taken from a
+  # "consolidated_findings" value in the decision, which nothing verifies
+  # (council finding, 2026-08-28).
   defp completed_consolidated_findings(decision) do
-    case value(decision, "consolidated_findings") do
-      findings when is_list(findings) ->
-        bound_consolidated_findings(findings)
-
-      _ ->
-        case ReviewLedgerCore.consolidated_findings(completed_finding_ledger(decision)) do
-          {:ok, findings} -> bound_consolidated_findings(findings)
-          {:error, _reason} -> []
-        end
+    case ReviewLedgerCore.consolidated_findings(completed_finding_ledger(decision)) do
+      {:ok, findings} -> bound_consolidated_findings(findings)
+      {:error, _reason} -> []
     end
   end
 
@@ -2093,10 +2090,19 @@ defmodule Arbor.Actions.Council do
       "blocking_ids" => review["blocking_ids"],
       "blocking_reasons" => review["blocking_reasons"],
       "human_required" => review["human_required"],
-      "active_findings" => active_findings(review["finding_ledger"]),
-      "consolidated_findings" => review["consolidated_findings"] || []
+      "findings" => worker_facing_findings(review),
+      "per_owner_active_finding_count" => length(active_findings(review["finding_ledger"]))
     }
     |> maybe_put("reviewer_outcomes", review["reviewer_outcomes"])
+  end
+
+  # The worker sees one issue with N owners; the per-owner ledger stays the
+  # source of truth for states, cycles, and the veto (only its count is shown).
+  defp worker_facing_findings(review) do
+    case review["consolidated_findings"] do
+      [_ | _] = consolidated -> consolidated
+      _ -> active_findings(review["finding_ledger"])
+    end
   end
 
   defp bounded_feedback_json(feedback) do
@@ -2141,20 +2147,24 @@ defmodule Arbor.Actions.Council do
         }
       end)
     end)
-    |> Map.update("active_findings", [], fn findings ->
+    |> Map.update("findings", [], fn findings ->
       findings
       |> List.wrap()
       |> Enum.take(6)
-      |> Enum.map(&compact_active_finding/1)
-    end)
-    |> Map.update("consolidated_findings", [], fn findings ->
-      findings
-      |> List.wrap()
-      |> Enum.take(6)
-      |> Enum.map(&compact_consolidated_finding/1)
+      |> Enum.map(&compact_worker_finding/1)
     end)
     |> Map.update("reviewer_outcomes", %{}, &compact_reviewer_outcomes/1)
   end
+
+  # Worker-facing findings are consolidated (issue_key + owners) when the
+  # ledger produced any, otherwise per-owner active findings.
+  defp compact_worker_finding(finding) when is_map(finding) do
+    if Map.has_key?(finding, "owners") or Map.has_key?(finding, :owners),
+      do: compact_consolidated_finding(finding),
+      else: compact_active_finding(finding)
+  end
+
+  defp compact_worker_finding(other), do: other
 
   defp compact_consolidated_finding(finding) when is_map(finding) do
     %{

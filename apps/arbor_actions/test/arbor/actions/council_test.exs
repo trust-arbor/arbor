@@ -279,7 +279,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.feedback["review"]["blocking_ids"] == ["finding-1", "finding-2"]
       assert result.feedback["review"]["reviewer_outcomes"] == result.reviewer_outcomes
 
-      assert [first | _] = result.feedback["review"]["active_findings"]
+      assert [first | _] = result.feedback["review"]["findings"]
       assert first["id"] == "finding-1"
       assert first["owner"] == "correctness"
       assert first["required_action"] == "Repair the contract boundary"
@@ -294,7 +294,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert persisted_review["reviewer_outcomes"] == result.reviewer_outcomes
     end
 
-    test "projects bounded JSON-clean consolidated_findings onto result, verdict meta, and rework feedback" do
+    test "derives bounded JSON-clean consolidated_findings from the ledger and ignores an injected list" do
       long_action = String.duplicate("a", 1_500)
 
       injected =
@@ -310,6 +310,26 @@ defmodule Arbor.Actions.CouncilTest do
           }
         end)
 
+      {:ok, empty} =
+        ReviewLedgerCore.new(%{"perspectives" => ["correctness", "security", "maintainability"]})
+
+      shared = %{
+        "title" => "Max rounds off-by-one",
+        "required_action" => "Clamp the last included round",
+        "severity" => "blocking",
+        "anchor" => %{"path" => "lib/rounds.ex", "side" => "new", "line" => 42}
+      }
+
+      {:ok, real_ledger} =
+        ReviewLedgerCore.apply_cycle(empty, 1, %{
+          "correctness" => %{
+            "vote" => "reject",
+            "finding_updates" => [],
+            "new_findings" => [shared]
+          },
+          "security" => %{"vote" => "reject", "finding_updates" => [], "new_findings" => [shared]}
+        })
+
       decision = %{
         "decision" => "deadlock",
         "approve_count" => 0,
@@ -317,7 +337,7 @@ defmodule Arbor.Actions.CouncilTest do
         "abstain_count" => 0,
         "quorum_met" => false,
         "review_cycle" => 1,
-        "finding_ledger" => review_ledger(),
+        "finding_ledger" => real_ledger,
         "consolidated_findings" => injected,
         "review_disposition" => "rework",
         "blocking_ids" => ["finding-1"],
@@ -336,12 +356,19 @@ defmodule Arbor.Actions.CouncilTest do
                  end
                })
 
-      assert length(result.consolidated_findings) == 64
+      # Security: an injected "consolidated_findings" list is never trusted —
+      # the projection is always derived from the validated ledger.
+      assert result.consolidated_findings != []
+      assert length(result.consolidated_findings) <= 64
+
+      refute Enum.any?(
+               result.consolidated_findings,
+               &String.starts_with?(&1["issue_key"], "issue-")
+             )
 
       assert Enum.all?(result.consolidated_findings, fn finding ->
-               finding["owners"] == ["correctness", "security"] and
-                 Enum.all?(finding["required_actions"], &(byte_size(&1) == 1_000)) and
-                 finding["required_actions"] == [String.duplicate("a", 1_000)]
+               is_list(finding["owners"]) and
+                 Enum.all?(finding["required_actions"], &(byte_size(&1) <= 1_000))
              end)
 
       assert {:ok, encoded} = Jason.encode(result.consolidated_findings)
@@ -350,10 +377,10 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.verdict.meta["review"]["consolidated_findings"] ==
                result.consolidated_findings
 
-      assert is_list(result.feedback["review"]["consolidated_findings"])
-      assert result.feedback["review"]["consolidated_findings"] != []
+      assert is_list(result.feedback["review"]["findings"])
+      assert result.feedback["review"]["findings"] != []
 
-      assert Enum.all?(result.feedback["review"]["consolidated_findings"], fn finding ->
+      assert Enum.all?(result.feedback["review"]["findings"], fn finding ->
                Enum.all?(finding["required_actions"], &(byte_size(&1) <= 1_000))
              end)
 
@@ -417,7 +444,7 @@ defmodule Arbor.Actions.CouncilTest do
       assert finding["blocks_merge"] == true
       assert finding["title"] == "Max rounds off-by-one"
       assert finding["required_actions"] == ["Clamp the last included round"]
-      assert result.feedback["review"]["consolidated_findings"] == [finding]
+      assert result.feedback["review"]["findings"] == [finding]
       assert result.verdict.meta["review"]["consolidated_findings"] == [finding]
     end
 
@@ -2027,7 +2054,7 @@ defmodule Arbor.Actions.CouncilTest do
 
       assert {:ok, feedback} = Jason.decode(result.feedback_json)
       assert feedback == result.feedback
-      assert length(feedback["review"]["active_findings"]) <= 20
+      assert length(feedback["review"]["findings"]) <= 20
       assert length(feedback["review"]["blocking_ids"]) <= 20
       assert map_size(feedback["review"]["reviewer_outcomes"]) == 10
       assert byte_size(result.feedback_json) <= 32_768
@@ -2038,7 +2065,7 @@ defmodule Arbor.Actions.CouncilTest do
                  (is_nil(outcome["reason"]) or String.length(outcome["reason"]) <= 256)
              end)
 
-      assert Enum.all?(feedback["review"]["active_findings"], fn finding ->
+      assert Enum.all?(feedback["review"]["findings"], fn finding ->
                String.length(finding["title"]) <= 1_000 and
                  String.length(finding["required_action"]) <= 1_000 and
                  String.length(finding["evidence"]) <= 1_000
