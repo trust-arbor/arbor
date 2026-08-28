@@ -301,6 +301,31 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     assert cancelled["status"] == "cancelled"
   end
 
+  test "terminal effect ceiling preserves a maximally escaped 256-byte failure reason" do
+    claimed = claimed_state()
+    reason = String.duplicate("\"\\", 128)
+
+    assert byte_size(reason) == 256
+
+    assert {:ok, failed, [%{"op" => "persist"}, terminal]} =
+             Core.fail(claimed, fence(claimed, @mid, %{"reason" => reason}))
+
+    assert failed["terminal_reason"] == reason
+    assert terminal["reason"] == reason
+    assert byte_size(Jason.encode!(terminal)) <= Core.limits()["max_terminal_effect_bytes"]
+
+    terminal_without_reason =
+      terminal
+      |> Map.put("status", "cancelled")
+      |> Map.put("reason", "")
+
+    expected_ceiling =
+      byte_size(Jason.encode!(terminal_without_reason)) - byte_size(Jason.encode!("")) +
+        (2 + 6 * 256)
+
+    assert Core.limits()["max_terminal_effect_bytes"] == expected_ceiling
+  end
+
   test "complete requires a live matching claim after every planned batch has one receipt" do
     claimed = claimed_state()
     [first, second] = plan()
@@ -482,6 +507,25 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCoreTest do
     {:ok, other} = Core.lineage_key(drifted)
     assert other != key
     assert {:error, :malformed_state} = Core.lineage_key(nil)
+  end
+
+  test "admit_identities/1 and lineage_key_for_identities/1 share lineage_key/1 derivation" do
+    {:ok, state} = Core.new(fresh_attrs())
+    {:ok, admitted} = Core.admit_identities(state["identities"])
+    assert admitted == state["identities"]
+
+    shuffled = state["identities"] |> Enum.shuffle() |> Map.new()
+    {:ok, shuffled_admitted} = Core.admit_identities(shuffled)
+    assert shuffled_admitted == admitted
+
+    {:ok, from_identities} = Core.lineage_key_for_identities(shuffled)
+    {:ok, from_state} = Core.lineage_key(state)
+    assert from_identities == from_state
+    assert from_identities =~ ~r/\Axappc_[0-9a-f]{64}\z/
+
+    assert {:error, :malformed_state} = Core.admit_identities(nil)
+    assert {:error, :malformed_state} = Core.lineage_key_for_identities(%{"task_id" => "only"})
+    assert {:error, :malformed_state} = Core.admit_identities(%{task_id: "atom"})
   end
 
   test "retained_effects/1 match persist-only, mint_successor, and terminal Core outputs" do

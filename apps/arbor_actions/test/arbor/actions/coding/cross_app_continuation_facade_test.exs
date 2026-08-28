@@ -113,6 +113,85 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationFacadeTest do
     assert digest =~ ~r/\A[0-9a-f]{64}\z/
   end
 
+  test "execution facade delegates match ContinuationExecutionCore and stay JSON-clean" do
+    alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore, as: Exec
+
+    assert Actions.coding_cross_app_continuation_execution_schema_version() ==
+             Exec.schema_version()
+
+    assert Actions.coding_cross_app_continuation_execution_limits() == Exec.limits()
+
+    checks = successful_checks()
+
+    {:ok, receipt, digest} =
+      Actions.coding_cross_app_continuation_static_receipt_new(identities(plan()), checks)
+
+    assert {:ok, ^receipt, ^digest} =
+             Exec.new_static_stage_receipt(identities(plan()), checks)
+
+    assert {:ok, ^receipt} = Actions.coding_cross_app_continuation_static_receipt_admit(receipt)
+    assert {:ok, ^digest} = Actions.coding_cross_app_continuation_static_receipt_digest(receipt)
+    {:ok, core_digest} = Exec.static_receipt_digest(receipt)
+    assert digest == core_digest
+    assert {:ok, _} = Jason.encode(receipt)
+
+    {:ok, open} =
+      Actions.coding_cross_app_continuation_new(
+        Map.put(fresh_attrs(), "static_stage_receipt_digest", digest)
+      )
+
+    {:ok, claimed, _} = Actions.coding_cross_app_continuation_claim(open, claim_attrs())
+
+    {:ok, window} =
+      Actions.coding_cross_app_continuation_execution_window_prepare(claimed, receipt)
+
+    assert {:ok, ^window} = Exec.prepare_execution_window(claimed, receipt)
+
+    assert {:ok, ^window} =
+             Actions.coding_cross_app_continuation_execution_window_admit(window, receipt)
+
+    refute Map.has_key?(window, "fence_token")
+    encoded_window = Jason.encode!(window)
+    refute encoded_window =~ "fence_token"
+    refute encoded_window =~ "authority"
+
+    [first, second] = plan()
+
+    observation = %{
+      "new_receipts" => [passed(first), passed(second)],
+      "disposition" => %{"type" => "completed"}
+    }
+
+    {:ok, progress} =
+      Actions.coding_cross_app_continuation_progress_new(window, receipt, observation)
+
+    assert {:ok, ^progress} = Exec.new_progress(window, receipt, observation)
+
+    assert {:ok, ^progress} =
+             Actions.coding_cross_app_continuation_progress_admit(window, receipt, progress)
+
+    encoded_progress = Jason.encode!(progress)
+    refute encoded_progress =~ "fence_token"
+    refute encoded_progress =~ "authority"
+  end
+
+  defp successful_checks do
+    check = %{
+      "status" => "completed",
+      "passed" => true,
+      "exit_code" => 0,
+      "reason" => nil,
+      "stdout_excerpt" => "",
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => String.duplicate("a", 64),
+      "stderr_sha256" => String.duplicate("b", 64)
+    }
+
+    %{"compile" => check, "xref" => check, "test_compile" => check}
+  end
+
   defp plan do
     [batch(1, 2, 1, @inv1), batch(2, 2, 1, @inv2)]
   end

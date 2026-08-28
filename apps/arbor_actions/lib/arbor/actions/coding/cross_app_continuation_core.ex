@@ -16,7 +16,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
 
   Public transitions: new/1, show/1, claim/2, accept_passed_receipt/2,
   accept_capacity_handoff/2, fail/2, cancel/2, expire_claim/2, revoke_claim/2,
-  complete/2. Derivation seams: lineage_key/1, retained_effects/1, digest/1.
+  complete/2. Derivation seams: admit_identities/1, lineage_key_for_identities/1,
+  lineage_key/1, retained_effects/1, digest/1.
   Mutating transitions rehydrate the state argument as untrusted
   persisted JSON before effects. Claimed live mutations require matching
   fence_generation+token and now < expires_at. expire_claim matches the fence
@@ -58,11 +59,20 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   @max_state_json_bytes 778_240
   @max_persist_effect_bytes 778_368
   @max_mint_effect_bytes 516_352
-  @max_terminal_effect_bytes 512
   @max_effects_json_bytes 1_294_848
   @persist_envelope_bytes 128
   @max_id_bytes 256
   @max_reason_bytes 256
+  @max_reason_json_bytes 2 + 6 * @max_reason_bytes
+  @terminal_effect_without_reason_bytes byte_size(
+                                          Jason.encode!(%{
+                                            "op" => "terminal",
+                                            "schema_version" => @schema_version,
+                                            "status" => "cancelled",
+                                            "reason" => ""
+                                          })
+                                        ) - byte_size(Jason.encode!(""))
+  @max_terminal_effect_bytes @terminal_effect_without_reason_bytes + @max_reason_json_bytes
   @max_fence_generation 1_000_000
   @digest_regex ~r/\A[0-9a-f]{64}\z/
   @work_packet_digest_regex ~r/\Asha256:[0-9a-f]{64}\z/
@@ -172,15 +182,46 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationCore do
   end
 
   @doc """
-  Deterministic store key for an admitted continuation.
+  Admit a closed identities map without constructing a full continuation.
+
+  Execution envelopes derive `continuation_id` from identities alone so a
+  static receipt cannot circularly include its own digest.
+  """
+  @spec admit_identities(term()) :: {:ok, map()} | {:error, error()}
+  def admit_identities(identities) do
+    parse_identities(identities)
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
+  @doc """
+  Deterministic store key from an admitted identities map.
 
   `xappc_` plus lowercase hex SHA-256 of canonical JSON over the closed
   identities map. Canonical JSON recursively sorts string keys.
   """
+  @spec lineage_key_for_identities(term()) :: {:ok, String.t()} | {:error, error()}
+  def lineage_key_for_identities(identities) do
+    with {:ok, admitted} <- admit_identities(identities) do
+      {:ok, "xappc_" <> sha256_hex(canonical_json(admitted))}
+    end
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
+  @doc """
+  Deterministic store key for an admitted continuation.
+
+  Shares derivation with `lineage_key_for_identities/1` after full `new/1`.
+  """
   @spec lineage_key(term()) :: {:ok, String.t()} | {:error, error()}
   def lineage_key(input) do
     with {:ok, state} <- new(input) do
-      {:ok, "xappc_" <> sha256_hex(canonical_json(state["identities"]))}
+      lineage_key_for_identities(state["identities"])
     end
   rescue
     _ -> {:error, :malformed_state}

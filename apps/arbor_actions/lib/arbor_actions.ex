@@ -1162,6 +1162,104 @@ defmodule Arbor.Actions do
     end)
   end
 
+  @doc "Execution-envelope schema version owned by ContinuationExecutionCore."
+  @spec coding_cross_app_continuation_execution_schema_version() :: 1
+  def coding_cross_app_continuation_execution_schema_version do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.schema_version()
+    end)
+  end
+
+  @doc "Encoded JSON ceilings for CrossApp continuation execution envelopes."
+  @spec coding_cross_app_continuation_execution_limits() :: %{
+          required(String.t()) => pos_integer()
+        }
+  def coding_cross_app_continuation_execution_limits do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.limits()
+    end)
+  end
+
+  @doc "Construct a closed static pretest receipt from identities and successful checks."
+  @spec coding_cross_app_continuation_static_receipt_new(term(), term()) ::
+          {:ok, map(), String.t()} | {:error, atom()}
+  def coding_cross_app_continuation_static_receipt_new(identities, checks) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.new_static_stage_receipt(
+        identities,
+        checks
+      )
+    end)
+  end
+
+  @doc "Admit an arbitrary closed static pretest receipt."
+  @spec coding_cross_app_continuation_static_receipt_admit(term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_static_receipt_admit(receipt) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_static_stage_receipt(receipt)
+    end)
+  end
+
+  @doc "Canonical SHA-256 digest of an admitted static pretest receipt."
+  @spec coding_cross_app_continuation_static_receipt_digest(term()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_continuation_static_receipt_digest(receipt) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.static_receipt_digest(receipt)
+    end)
+  end
+
+  @doc "Project a token-free claimed execution window from state and static receipt."
+  @spec coding_cross_app_continuation_execution_window_prepare(term(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_execution_window_prepare(state, receipt) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.prepare_execution_window(
+        state,
+        receipt
+      )
+    end)
+  end
+
+  @doc "Admit a token-free claimed execution window with its static receipt."
+  @spec coding_cross_app_continuation_execution_window_admit(term(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_execution_window_admit(window, receipt) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_execution_window(
+        window,
+        receipt
+      )
+    end)
+  end
+
+  @doc "Construct progress from a trusted observation bound to an admitted window."
+  @spec coding_cross_app_continuation_progress_new(term(), term(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_progress_new(window, receipt, observation) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.new_progress(
+        window,
+        receipt,
+        observation
+      )
+    end)
+  end
+
+  @doc "Admit arbitrary progress against an admitted window and static receipt."
+  @spec coding_cross_app_continuation_progress_admit(term(), term(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_continuation_progress_admit(window, receipt, progress) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_progress(
+        window,
+        receipt,
+        progress
+      )
+    end)
+  end
+
   defp wrap_cross_app_continuation(fun) when is_function(fun, 0) do
     fun.()
   rescue
