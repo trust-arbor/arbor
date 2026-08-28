@@ -746,4 +746,32 @@ defmodule Mix.Tasks.Arbor.Helpers do
   end
 
   defp format_ipv4({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
+
+  @doc """
+  Stop OTP `os_mon` before this Mix VM exits.
+
+  Mix tasks that start applications can pull in `memsup` / `cpu_sup`.
+  A hard VM halt then prints `[os_mon] ... Erlang has closed` on stderr.
+  Stopping `os_mon` here is Mix-VM-only and does not touch a running
+  Arbor node.
+  """
+  @spec install_mix_shutdown_hooks() :: :ok
+  def install_mix_shutdown_hooks do
+    System.at_exit(fn _status -> stop_os_mon() end)
+    :ok
+  end
+
+  @doc """
+  Gracefully stop `os_mon` if this Mix VM started it.
+
+  Idempotent. Never contacts a remote node.
+  """
+  @spec stop_os_mon() :: :ok
+  def stop_os_mon do
+    case Application.stop(:os_mon) do
+      :ok -> :ok
+      {:error, {:not_started, :os_mon}} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
 end

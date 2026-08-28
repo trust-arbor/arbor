@@ -76,6 +76,8 @@ defmodule Mix.Tasks.Arbor.Doctor do
   """
   use Mix.Task
 
+  alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
+
   # Provider priority order for --configure: free / local / ACP before paid APIs.
   # Catalog key = ProviderCatalog string, config atom = what goes in .env/config,
   # LLMDB atom = what LLMDB uses for model lookup.
@@ -121,6 +123,8 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   @impl Mix.Task
   def run(args) do
+    ArborConfig.install_mix_shutdown_hooks()
+
     # `strict:`, not `switches:`. With `switches:`, OptionParser DISCARDS an
     # unrecognized flag entirely — `parse(["--bogus"], switches: [...])` returns
     # `{[], [], []}`, so it appears in neither opts, argv, nor invalid. A

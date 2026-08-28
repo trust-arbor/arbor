@@ -130,6 +130,16 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       end
     end
 
+    test "--validation reruns arbor.baseline.status (same node-aware path)" do
+      source =
+        File.read!(
+          Path.expand("../../../../lib/mix/tasks/arbor/doctor.ex", Path.dirname(__ENV__.file))
+        )
+
+      assert source =~ ~s[Mix.Task.rerun("arbor.baseline.status",]
+      assert source =~ "install_mix_shutdown_hooks"
+    end
+
     test "unknown flags still raise" do
       assert_raise Mix.Error, ~r/Unknown option/, fn ->
         Doctor.run(["--not-a-doctor-flag"])

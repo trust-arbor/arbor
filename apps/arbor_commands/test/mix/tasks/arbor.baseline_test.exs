@@ -505,6 +505,7 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     refute task_source =~ "LinuxDependencyBaselineAuthority"
     refute task_source =~ "ValidationRuntime.Authority"
     refute task_source =~ "OciProbeRuntime"
+    assert task_source =~ "install_mix_shutdown_hooks"
     assert commands_source =~ "shell.validation_runtime_status"
     assert commands_source =~ "shell.linux_dependency_baseline_status"
     assert commands_source =~ "shell.validation_runtime_probe"
@@ -518,10 +519,78 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                probe: true
              )
 
+    assert report["source"] == "local (node not running)"
     assert report["driver"] == "podman"
     assert report["image_reachable"] == true
     assert report["mix_lock_matches_head"] == true
     assert report["guest_platform"] == "linux/amd64"
+  end
+
+  test "status uses node observations when the local node is reachable" do
+    node_obs = %{
+      runtime: %{"state" => "pinned", "driver" => "apple_container", "reason" => nil},
+      baseline: %{"state" => "pinned", "reason" => nil},
+      mix_lock_digest: {:ok, String.duplicate("e", 64)},
+      probe: {:ok, %{"state" => "available", "driver" => "apple_container"}}
+    }
+
+    assert {:ok, report, false} =
+             Status.execute([],
+               shell: FakeShell,
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               head_mix_lock_digest: String.duplicate("e", 64),
+               ensure_distribution: fn -> :ok end,
+               server_running?: fn -> true end,
+               target_node: fn -> :"arbor_dev_test@127.0.0.1" end,
+               rpc: fn _node, Arbor.Commands.Baseline, :node_observations, [[]] ->
+                 node_obs
+               end
+             )
+
+    assert report["source"] == "node"
+    assert report["driver"] == "apple_container"
+    assert report["image_reachable"] == true
+    assert report["mix_lock_matches_head"] == true
+  end
+
+  test "status stays local when the node is not running" do
+    refute_rpc = fn _node, _mod, _fun, _args ->
+      flunk("must not RPC when the node is unreachable")
+    end
+
+    assert {:ok, report, false} =
+             Status.execute([],
+               shell: FakeShell,
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               head_mix_lock_digest: String.duplicate("e", 64),
+               ensure_distribution: fn -> :ok end,
+               server_running?: fn -> false end,
+               rpc: refute_rpc
+             )
+
+    assert report["source"] == "local (node not running)"
+    assert report["driver"] == "podman"
+    assert report["image_reachable"] == true
+  end
+
+  test "status falls back to local when node RPC fails" do
+    assert {:ok, report, false} =
+             Status.execute([],
+               shell: FakeShell,
+               architecture: "x86_64-pc-linux-gnu",
+               platform: "linux/amd64",
+               head_mix_lock_digest: String.duplicate("e", 64),
+               ensure_distribution: fn -> :ok end,
+               server_running?: fn -> true end,
+               target_node: fn -> :"arbor_dev_test@127.0.0.1" end,
+               rpc: fn _node, _mod, _fun, _args -> {:badrpc, :nodedown} end
+             )
+
+    assert report["source"] == "local (nodedown)"
+    assert report["driver"] == "podman"
+    assert report["image_reachable"] == true
   end
 
   defp valid_oci_document(root, baseline_dir) do
