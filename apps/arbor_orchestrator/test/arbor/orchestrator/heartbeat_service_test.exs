@@ -214,6 +214,17 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       assert values["session.system_prompt"] == "find the glob wildcard bug"
       assert values["session.llm_provider"] == "opencode_zen"
 
+      # Idle detection inputs: the beat ordinal and the percepts newer than the
+      # last completed beat (not the last-five-ever list).
+      assert values["session.beat_count"] == 1
+      assert is_list(values["session.new_percepts"])
+
+      # The next beat carries the next ordinal (heartbeat.dot's idle_every keys off it).
+      wait_until(fn -> :sys.get_state(pid).heartbeat_in_flight == false end)
+      send(pid, :heartbeat)
+      assert_receive {:hb_values, values2}, 2_000
+      assert values2["session.beat_count"] == 2
+
       GenServer.stop(pid)
     end
 
@@ -544,6 +555,20 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
       # ~30s interval later — autonomous activity should begin from first boot.
       assert Enum.max(delays) < 30_000,
              "first-beat delay must be far below the default heartbeat interval (30s)"
+    end
+  end
+
+  defp wait_until(fun, attempts \\ 100) do
+    cond do
+      fun.() ->
+        :ok
+
+      attempts == 0 ->
+        flunk("condition not met in time")
+
+      true ->
+        Process.sleep(20)
+        wait_until(fun, attempts - 1)
     end
   end
 end

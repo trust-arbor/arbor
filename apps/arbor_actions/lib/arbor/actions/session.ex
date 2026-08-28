@@ -75,10 +75,25 @@ defmodule Arbor.Actions.Session do
     | `active_intents` | list | no | Active intents |
     | `turn_count` | integer | no | Current turn number |
     | `user_waiting` | boolean | no | Whether a user is waiting for response |
+    | `new_percepts` | list | no | Percepts since the last cycle (idle detection) |
+    | `pending_proposals` | list | no | Proposals awaiting a decision (idle detection) |
+    | `beat_count` | integer | no | Heartbeat ordinal (idle detection) |
+    | `idle_every` | integer | no | Reflect only every N idle beats; nil disables idle |
 
     ## Returns
 
-    `%{cognitive_mode: "conversation" | "consolidation" | "plan_execution" | "goal_pursuit" | "reflection"}`
+    `%{cognitive_mode: "conversation" | "consolidation" | "plan_execution" | "goal_pursuit" | "reflection" | "idle"}`
+
+    ## Idle
+
+    A heartbeat with nothing to act on — no goals, no intents, no new percepts,
+    no pending proposals — used to run a full reflection LLM call every beat
+    (prompt grew 8.2k → 10.3k tokens per cycle on an idle conversationalist,
+    2026-08-27). When `idle_every` is set, such beats return `"idle"` and the
+    graph skips the LLM; every `idle_every`-th beat still reflects so the
+    agent keeps its inner life. Graphs opt in by passing `param.idle_every`
+    and routing `idle` past the LLM nodes; graphs that do not set it are
+    unchanged.
     """
     use Jido.Action,
       name: "session_mode_select",
@@ -88,7 +103,15 @@ defmodule Arbor.Actions.Session do
         goals: [type: {:list, :map}, required: false, doc: "Active goals"],
         active_intents: [type: {:list, :map}, required: false, doc: "Active intents"],
         turn_count: [type: :integer, required: false, doc: "Current turn number"],
-        user_waiting: [type: :boolean, required: false, doc: "User waiting for response"]
+        user_waiting: [type: :boolean, required: false, doc: "User waiting for response"],
+        new_percepts: [type: {:list, :any}, required: false, doc: "Percepts since last cycle"],
+        pending_proposals: [
+          type: {:list, :any},
+          required: false,
+          doc: "Proposals awaiting decision"
+        ],
+        beat_count: [type: :integer, required: false, doc: "Heartbeat ordinal"],
+        idle_every: [type: :integer, required: false, doc: "Reflect every N idle beats"]
       ]
 
     require Logger
@@ -99,6 +122,16 @@ defmodule Arbor.Actions.Session do
       intents = List.wrap(get_param(params, :active_intents, []))
       turn = parse_int(get_param(params, :turn_count, 0), 0)
       user_waiting = to_bool(get_param(params, :user_waiting, false))
+      percepts = List.wrap(get_param(params, :new_percepts, []))
+      proposals = List.wrap(get_param(params, :pending_proposals, []))
+      beat = parse_int(get_param(params, :beat_count, 0), 0)
+      idle_every = parse_int(get_param(params, :idle_every, nil), nil)
+
+      nothing_to_do? = goals == [] and intents == [] and percepts == [] and proposals == []
+
+      idle? =
+        is_integer(idle_every) and idle_every > 0 and nothing_to_do? and
+          rem(beat, idle_every) != 0
 
       mode =
         cond do
@@ -106,11 +139,14 @@ defmodule Arbor.Actions.Session do
           rem(turn, 5) == 0 and turn > 0 -> "consolidation"
           goals != [] and intents == [] -> "plan_execution"
           goals != [] -> "goal_pursuit"
+          idle? -> "idle"
           true -> "reflection"
         end
 
       Logger.info(
-        "[Session.ModeSelect] goals=#{length(goals)}, intents=#{length(intents)}, turn=#{turn} → #{mode}"
+        "[Session.ModeSelect] goals=#{length(goals)}, intents=#{length(intents)}, " <>
+          "percepts=#{length(percepts)}, proposals=#{length(proposals)}, turn=#{turn}, " <>
+          "beat=#{beat}, idle_every=#{inspect(idle_every)} → #{mode}"
       )
 
       {:ok, %{cognitive_mode: mode}}

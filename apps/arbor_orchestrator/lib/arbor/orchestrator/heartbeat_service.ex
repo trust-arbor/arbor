@@ -138,6 +138,9 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_task_ref: nil,
       heartbeat_failures: 0,
       heartbeat_no_identity_beats: 0,
+      # Ordinal of the beat being started; feeds `session.beat_count` so the
+      # graph's mode selection can rate-limit idle reflection.
+      heartbeat_beat_count: 0,
       heartbeat_disabled: false,
       heartbeat_disabled_reason: nil,
       heartbeat_last_error: nil,
@@ -224,7 +227,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     state = %{state | heartbeat_ref: nil}
 
     if state.identity_checker.(state.agent_id) do
-      state = start_heartbeat_task(state)
+      state =
+        state
+        |> Map.update(:heartbeat_beat_count, 1, &(&1 + 1))
+        |> start_heartbeat_task()
 
       # A beat that actually started schedules its successor when it finishes
       # (success or failure), so the interval is a gap between beats, never an
@@ -617,6 +623,8 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       goals: [],
       cognitive_mode: :reflection,
       phase: :idle,
+      heartbeat_beat_count: Map.get(state, :heartbeat_beat_count, 0),
+      heartbeat_last_completed_at: Map.get(state, :heartbeat_last_completed_at),
       messages: [],
       compactor: nil,
       discovered_tools: MapSet.new()

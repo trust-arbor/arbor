@@ -405,6 +405,45 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     :exit, _ -> []
   end
 
+  @doc """
+  Percepts created after `since` (a `DateTime` or nil = all), in the same
+  shape as `load_recent_percepts/1`. Used by the heartbeat graph's idle
+  detection: only percepts newer than the last completed beat count as
+  "something happened".
+  """
+  def load_new_percepts(agent_id, since) do
+    case Arbor.Memory.recent_percepts(agent_id, limit: 5) do
+      percepts when is_list(percepts) ->
+        percepts
+        |> Enum.filter(&percept_after?(&1, since))
+        |> Enum.map(fn p ->
+          %{
+            "action_type" => get_percept_action_type(p),
+            "outcome" => to_string(Map.get(p, :outcome, "")),
+            "data" => Map.get(p, :data, %{})
+          }
+        end)
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp percept_after?(_percept, nil), do: true
+
+  defp percept_after?(percept, %DateTime{} = since) do
+    case Map.get(percept, :created_at) do
+      %DateTime{} = at -> DateTime.compare(at, since) == :gt
+      _ -> true
+    end
+  end
+
+  defp percept_after?(_percept, _since), do: true
+
   def get_percept_action_type(p) do
     data = Map.get(p, :data, %{})
 

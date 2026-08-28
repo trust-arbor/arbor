@@ -74,8 +74,11 @@ digraph Heartbeat {
                  context_keys="session.agent_id", output_prefix="session"]
 
   // ── Cognitive mode selection ──────────────────────────────
+  // idle_every: reflect on every Nth beat that has nothing to act on (no goals,
+  // intents, percepts, or proposals); the other idle beats skip the LLM entirely.
   select_mode [type="exec", target="action", action="session.mode_select",
-               context_keys="session.goals,session.working_memory,session.turn_count",
+               context_keys="session.goals,session.working_memory,session.turn_count,session.active_intents,session.new_percepts,session.pending_proposals,session.beat_count",
+               param.idle_every="10",
                output_prefix="session"]
 
   // ── Mode routing (conditional fan-out) ────────────────────
@@ -174,6 +177,7 @@ digraph Heartbeat {
   mode_router -> build_prompt [condition="context.session.cognitive_mode=reflection"]
   mode_router -> build_prompt [condition="context.session.cognitive_mode=plan_execution"]
   mode_router -> consolidate [condition="context.session.cognitive_mode=consolidation"]
+  mode_router -> prune_intents [condition="context.session.cognitive_mode=idle"]
 
   // LLM path: build prompt -> call LLM -> process results
   build_prompt -> llm_call -> process

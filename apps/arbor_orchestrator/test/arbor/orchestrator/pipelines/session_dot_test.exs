@@ -139,9 +139,9 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
       end
     end
 
-    test "mode_router has 4-way conditional routing", %{graph: graph} do
+    test "mode_router has 5-way conditional routing (4 cognitive modes + idle)", %{graph: graph} do
       edges = edges_from(graph, "mode_router")
-      assert length(edges) == 4
+      assert length(edges) == 5
 
       conditions = Enum.map(edges, &edge_condition/1)
 
@@ -149,6 +149,21 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
       assert "context.session.cognitive_mode=reflection" in conditions
       assert "context.session.cognitive_mode=plan_execution" in conditions
       assert "context.session.cognitive_mode=consolidation" in conditions
+      assert "context.session.cognitive_mode=idle" in conditions
+    end
+
+    test "idle routes past the LLM straight to prune_intents", %{graph: graph} do
+      idle_edge =
+        graph
+        |> edges_from("mode_router")
+        |> Enum.find(&(edge_condition(&1) == "context.session.cognitive_mode=idle"))
+
+      assert idle_edge.to == "prune_intents"
+
+      select_mode = Map.fetch!(graph.nodes, "select_mode")
+      assert select_mode.attrs["param.idle_every"] == "10"
+      assert select_mode.attrs["context_keys"] =~ "session.new_percepts"
+      assert select_mode.attrs["context_keys"] =~ "session.beat_count"
     end
 
     test "3 LLM modes route to build_prompt, consolidation routes separately", %{graph: graph} do

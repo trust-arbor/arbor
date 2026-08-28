@@ -85,6 +85,32 @@ defmodule Arbor.Actions.SessionTest do
                Session.ModeSelect.run(%{}, %{})
     end
 
+    test "idle: nothing to do and idle_every set → idle except every Nth beat" do
+      idle = %{idle_every: 10, beat_count: 3}
+      assert {:ok, %{cognitive_mode: "idle"}} = Session.ModeSelect.run(idle, %{})
+
+      # The Nth beat still reflects so the agent keeps an inner life.
+      assert {:ok, %{cognitive_mode: "reflection"}} =
+               Session.ModeSelect.run(%{idle_every: 10, beat_count: 10}, %{})
+
+      # Any signal breaks idleness.
+      assert {:ok, %{cognitive_mode: "reflection"}} =
+               Session.ModeSelect.run(Map.put(idle, :new_percepts, [%{"kind" => "x"}]), %{})
+
+      assert {:ok, %{cognitive_mode: "reflection"}} =
+               Session.ModeSelect.run(Map.put(idle, :pending_proposals, [%{"id" => "p"}]), %{})
+
+      assert {:ok, %{cognitive_mode: "plan_execution"}} =
+               Session.ModeSelect.run(Map.put(idle, :goals, [%{id: "g"}]), %{})
+
+      # String params from DOT attrs work; without idle_every nothing changes.
+      assert {:ok, %{cognitive_mode: "idle"}} =
+               Session.ModeSelect.run(%{idle_every: "10", beat_count: "3"}, %{})
+
+      assert {:ok, %{cognitive_mode: "reflection"}} =
+               Session.ModeSelect.run(%{beat_count: 3}, %{})
+    end
+
     test "accepts string turn_count" do
       assert {:ok, %{cognitive_mode: "consolidation"}} =
                Session.ModeSelect.run(%{turn_count: "10"}, %{})

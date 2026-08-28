@@ -96,6 +96,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
     |> Map.put("session.recent_thinking", recent_thoughts)
     |> Map.put("session.recent_percepts", recent_percepts)
     |> Map.put("session.self_knowledge", self_knowledge)
+    |> Map.put("session.beat_count", Map.get(state, :heartbeat_beat_count, 0))
+    |> Map.put(
+      "session.new_percepts",
+      ContextBuilder.load_new_percepts(agent_id, Map.get(state, :heartbeat_last_completed_at))
+    )
   end
 
   @doc false
