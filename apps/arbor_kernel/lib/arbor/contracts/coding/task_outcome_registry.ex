@@ -16,6 +16,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     pr_created
     pr_failed
     review_failed
+    review_unavailable
     review_rejected
     review_requires_rework
     rework_exhausted
@@ -36,6 +37,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     pr_created
     pr_failed
     review_failed
+    review_unavailable
     review_rejected
     review_requires_rework
     rework_exhausted
@@ -120,6 +122,12 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       phase: "review",
       origin: "reviewer",
       retry: "after_external_change"
+    },
+    "review_unavailable" => %{
+      disposition: "failed",
+      phase: "review",
+      origin: "runtime",
+      retry: "new_session"
     },
     "review_rejected" => %{
       disposition: "rejected",

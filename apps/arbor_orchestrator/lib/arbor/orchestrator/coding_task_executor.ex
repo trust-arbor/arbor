@@ -79,6 +79,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Config
 
+  require Logger
+
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
     ArtifactStore,
@@ -95,6 +97,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     ReadinessCore,
     SemanticPreflight,
     TaskTerminalArchiveCore,
+    TerminalReclassifyCore,
     ValidationCapacityTerminal,
     ValidationProgram
   }
@@ -3003,8 +3006,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp adapt_context(context, engine_result, worker_provider, requested_model)
        when is_map(context) do
     clean = json_clean_map(context)
-    status = context_get(clean, "status")
     legacy = context_get(clean, "legacy_status")
+
+    # An environmental review failure (budget already spent, host suspended)
+    # is not a council verdict; say so in the public terminal.
+    {status, reclassified} =
+      TerminalReclassifyCore.reclassify(
+        context_get(clean, "status"),
+        engine_result_field(engine_result, :node_failure_reasons, "node_failure_reasons")
+      )
+
+    clean = maybe_put_reclassified(clean, reclassified)
 
     cond do
       status in [nil, ""] ->
@@ -3039,6 +3051,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
           {:error, outcome} -> {:error, {:invalid_terminal_evidence, outcome}}
         end
     end
+  end
+
+  defp maybe_put_reclassified(clean, nil), do: clean
+
+  defp maybe_put_reclassified(clean, %{from: from, to: to, reason: reason}) do
+    Logger.warning(
+      "[CodingTaskExecutor] terminal #{from} reclassified as #{to}: " <>
+        inspect(reason, printable_limit: 300)
+    )
+
+    clean
+    |> Map.put("status", to)
+    |> Map.put("status_reclassified_from", from)
+    |> Map.put("error", RunLifecycleAdapter.bound_failure_reason(reason) || reason)
   end
 
   defp adapt_terminal_verification(raw_context, clean_context, status, legacy_status) do

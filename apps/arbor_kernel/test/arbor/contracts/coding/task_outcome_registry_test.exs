@@ -15,6 +15,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              pr_created
              pr_failed
              review_failed
+             review_unavailable
              review_rejected
              review_requires_rework
              rework_exhausted
@@ -64,6 +65,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              pr_created
              pr_failed
              review_failed
+             review_unavailable
              review_rejected
              review_requires_rework
              rework_exhausted
