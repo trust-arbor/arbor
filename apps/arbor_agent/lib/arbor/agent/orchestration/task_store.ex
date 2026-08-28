@@ -59,6 +59,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   use GenServer
 
+  require Logger
+
   @default_name __MODULE__
   @default_task_supervisor Arbor.Agent.Orchestration.TaskSupervisor
   @default_runner Arbor.Agent.Orchestration.TaskRunner
@@ -11927,8 +11929,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        ),
        do: approval_owner_terminated_envelope(record, approval_id)
 
-  defp terminal_envelope(record, {:runner_result, {:error, _raw_error}}),
-    do: lifecycle_envelope!("task_runner_failed", record, %{"kind" => "task_runner_failed"})
+  defp terminal_envelope(record, {:runner_result, {:error, raw_error}}) do
+    # The public terminal is deliberately evidence-free; the node log is the
+    # only place an operator can learn why the runner failed (2026-08-28: two
+    # dispatches died at "control" with nothing logged anywhere).
+    Logger.warning(
+      "[TaskStore] task #{record.task_id} runner failed (task_runner_failed): " <>
+        inspect(raw_error, limit: 50, printable_limit: 1_000)
+    )
+
+    lifecycle_envelope!("task_runner_failed", record, %{"kind" => "task_runner_failed"})
+  end
 
   defp terminal_envelope(record, {:runner_result, _malformed}),
     do: invalid_terminal_envelope(record, nil)
