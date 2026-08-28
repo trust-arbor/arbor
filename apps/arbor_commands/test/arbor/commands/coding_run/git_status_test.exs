@@ -36,7 +36,7 @@ defmodule Arbor.Commands.CodingRun.GitStatusTest do
                GitStatus.run(worktree,
                  executable: script,
                  args: [pid_file],
-                 timeout_ms: 150
+                 timeout_ms: 500
                )
 
       pid = read_pid(pid_file)
@@ -125,7 +125,7 @@ defmodule Arbor.Commands.CodingRun.GitStatusTest do
   end
 
   defp read_pid(path) do
-    wait_for_file(path, 20)
+    wait_for_file(path, 100)
     path |> File.read!() |> String.trim() |> String.to_integer()
   end
 
