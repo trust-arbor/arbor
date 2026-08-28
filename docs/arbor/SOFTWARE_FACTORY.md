@@ -276,7 +276,25 @@ The reviewed coding worker is **Grok 4.6** (`worker.provider: "grok"`,
 
 Arbor never copies the operator's interactive Grok login. Immediately
 before launch it projects an Arbor-owned, mode-`0600`, access-token-only
-xAI OAuth file. Log in on the live node:
+xAI OAuth file. As of 2026-08-27, log in on the live node with:
+
+```bash
+./bin/mix arbor.login xai
+./bin/mix arbor.login status
+```
+
+The Mix task prints the device URL and user code immediately, then waits for
+completion. For OpenAI loopback from another machine, forward the pinned
+callback port first:
+
+```bash
+ssh -L 1455:localhost:1455 host
+./bin/mix arbor.login openai
+```
+
+The rpc/manual flow remains the documented fallback. Complete the device
+flow in a browser **first** — the verification URL is one line in the rpc
+output, so copy it out deliberately. Then:
 
 ```elixir
 {:ok, prompt} = Arbor.LLM.start_xai_device_login()
@@ -286,12 +304,7 @@ Arbor.LLM.OAuth.Login.DevicePrompt.verification_uri_complete(prompt) ||
 
 Arbor.LLM.OAuth.Login.DevicePrompt.user_code(prompt)
 # inspect(prompt) is intentionally redacted — keep prompt.handle yourself.
-```
 
-Complete the device flow in a browser **first** — the verification URL is one
-line in the rpc output, so copy it out deliberately. Then:
-
-```elixir
 Arbor.LLM.complete_xai_device_login(prompt.handle)
 ```
 
@@ -343,7 +356,7 @@ Do these once per machine / identity.
 4. Start a `coding_agent` coordinator and record its `agent_id`.
 5. Grant `arbor://agent/dispatch` to the caller. Grant any readiness-named
    horizon URIs the same way.
-6. Complete Arbor-owned xAI device login on the live node.
+6. Complete Arbor-owned xAI device login on the live node (`./bin/mix arbor.login xai`).
 7. Point the MCP host at `./bin/mix arbor.signer` with absolute paths.
 8. `arbor_status` with `component: "agents"` — you should see the
    coordinator.

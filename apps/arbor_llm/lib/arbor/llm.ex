@@ -251,6 +251,23 @@ defmodule Arbor.LLM do
   def start_openai_loopback_login(opts \\ []), do: Login.start_openai_loopback_login(opts)
 
   @doc """
+  Block until one OpenAI loopback flow reaches its own terminal result.
+
+  Accepts the `LoopbackPrompt` from `start_openai_loopback_login/1` or that
+  prompt's opaque `flow` handle. `:timeout_ms` bounds the wait; the default
+  matches the OpenAI handle TTL. Success returns that flow's
+  `oauth_health/1` snapshot. Denial, callback failure, and timeout are this
+  flow's outcomes — not inferred from an unrelated route becoming ready.
+  """
+  @spec await_openai_loopback_login(
+          Arbor.LLM.OAuth.Login.LoopbackPrompt.t()
+          | Arbor.LLM.OAuth.Login.LoopbackFlow.t(),
+          keyword()
+        ) :: {:ok, Arbor.Contracts.LLM.OAuthHealth.t()} | {:error, term()}
+  def await_openai_loopback_login(prompt_or_flow, opts \\ []),
+    do: Login.await_openai_loopback_login(prompt_or_flow, opts)
+
+  @doc """
   Start provider-specific xAI OAuth device login.
 
   Returns a `DevicePrompt` containing user-facing device fields and an opaque

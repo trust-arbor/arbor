@@ -77,8 +77,13 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
     assert {:ok, %LoopbackPrompt{} = prompt} =
              Arbor.LLM.start_openai_loopback_login(redirect_uri: :port_1457)
 
-    assert Map.keys(Map.from_struct(prompt)) == [:authorize_url]
+    assert Map.keys(Map.from_struct(prompt)) == [:authorize_url, :flow]
+    refute Map.has_key?(Map.from_struct(prompt), :handle)
     assert inspect(prompt) == "#Arbor.LLM.OAuth.Login.LoopbackPrompt<redacted>"
+
+    assert inspect(LoopbackPrompt.flow(prompt)) ==
+             "#Arbor.LLM.OAuth.Login.LoopbackFlow<redacted>"
+
     url = LoopbackPrompt.authorize_url(prompt)
     state = query_value(url, "state")
 
@@ -311,9 +316,11 @@ defmodule Arbor.LLM.OAuth.Login.LoopbackListenerTest do
 
   test "same-port flow fails closed before issuing and listener child failure cleans pending state" do
     before_count = pending_count()
-    assert {:ok, _prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
+    assert {:ok, prompt} = Loopback.start_resolved(:port_1457, [@ipv4])
     assert pending_count() == before_count + 1
-    assert {:error, :oauth_loopback_unavailable} = Loopback.start_resolved(:port_1457, [@ipv4])
+
+    assert {:error, {:loopback_busy, flow}} = Loopback.start_resolved(:port_1457, [@ipv4])
+    assert flow == LoopbackPrompt.flow(prompt)
     assert pending_count() == before_count + 1
 
     [{_, flow_pid, _, _}] =

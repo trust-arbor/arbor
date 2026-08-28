@@ -103,12 +103,15 @@ running `--configure`:
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, …;
   `.env.example` lists them all) so it shows up as ready.
 - **Running Ollama or LM Studio?** Start it first; `--configure` detects it.
-- **Subscribe to a coding agent?** Log the CLI in first — for Claude Code run
-  `claude`, type `/login` inside it, exit, and check `claude -p "say ready"`
-  prints `ready` — then run `--configure`; it will recommend `acp / <agent>`.
-  Detection only checks the binary is on `PATH`, not that it is logged in, so
-  do the check. Your agent then talks through that subscription: no API key,
-  no free-tier data disclosure.
+- **Subscribe to a coding agent?** For Arbor-owned OpenAI or xAI OAuth, run
+  `./bin/mix arbor.login openai` or `./bin/mix arbor.login xai` (then
+  `./bin/mix arbor.login status`). The rpc/manual complete flow remains the
+  fallback — see [arbor/SOFTWARE_FACTORY.md](arbor/SOFTWARE_FACTORY.md). For
+  Claude Code run `claude`, type `/login` inside it, exit, and check
+  `claude -p "say ready"` prints `ready` — then run `--configure`; it will
+  recommend `acp / <agent>`. Detection only checks the binary is on `PATH`,
+  not that it is logged in, so do the check. Your agent then talks through
+  that subscription: no API key, no free-tier data disclosure.
 - **None of the above?** A new install can run **without an API key and
   without a subscription** on the OpenCode Zen free tier. Before the first
   request Arbor shows this disclosure, which you must acknowledge once (the

@@ -25,8 +25,8 @@ defmodule Arbor.LLM.OAuth.Login do
 
   Public entry points are exposed through `Arbor.LLM` as
   `start_openai_login/1`, `complete_openai_login/3`,
-  `start_openai_loopback_login/1`, `start_xai_device_login/0`, and
-  `complete_xai_device_login/1`.
+  `start_openai_loopback_login/1`, `await_openai_loopback_login/2`,
+  `start_xai_device_login/0`, and `complete_xai_device_login/1`.
 
   The optional OpenAI loopback flow owns a short-lived supervised listener;
   this module still does not launch a browser or add dashboard/CLI behavior.
@@ -43,6 +43,9 @@ defmodule Arbor.LLM.OAuth.Login do
   alias Arbor.LLM.OAuth.Login.AuthorizationPrompt
   alias Arbor.LLM.OAuth.Login.DevicePrompt
   alias Arbor.LLM.OAuth.Login.Loopback
+  alias Arbor.LLM.OAuth.Login.LoopbackFlow
+  alias Arbor.LLM.OAuth.Login.LoopbackOwner
+  alias Arbor.LLM.OAuth.Login.LoopbackPrompt
   alias Arbor.LLM.OAuth.Login.PendingStore
   alias Arbor.LLM.OAuth.ProviderPolicy
 
@@ -60,6 +63,8 @@ defmodule Arbor.LLM.OAuth.Login do
   @xai_max_poll_window_ms 1_000_000
 
   @start_openai_option_keys MapSet.new([:redirect_uri])
+  @await_openai_option_keys MapSet.new([:timeout_ms])
+  @default_await_timeout_ms 600_000
   @default_redirect_uri_selector :port_1455
   @xai_refresh_token_min_bytes 1
   @xai_refresh_token_max_bytes 65_536
@@ -115,6 +120,25 @@ defmodule Arbor.LLM.OAuth.Login do
   @spec start_openai_loopback_login(keyword()) ::
           {:ok, Arbor.LLM.OAuth.Login.LoopbackPrompt.t()} | {:error, term()}
   def start_openai_loopback_login(opts \\ []), do: Loopback.start(opts)
+
+  @doc """
+  Await the terminal result of one OpenAI loopback flow.
+
+  Accepts the `LoopbackPrompt` returned by `start_openai_loopback_login/1` or
+  its opaque `flow` handle. Success is this flow's own completion — never
+  inferred from global `oauth_health/1` while the flow is still pending.
+  """
+  @spec await_openai_loopback_login(LoopbackPrompt.t() | LoopbackFlow.t(), keyword()) ::
+          {:ok, Arbor.Contracts.LLM.OAuthHealth.t()} | {:error, term()}
+  def await_openai_loopback_login(prompt_or_flow, opts \\ []) do
+    with {:ok, flow_id} <- extract_flow_id(prompt_or_flow),
+         {:ok, timeout_ms} <- validate_await_options(opts) do
+      case LoopbackOwner.await(flow_id, timeout_ms) do
+        :success -> OAuth.health(:openai_oauth)
+        {:error, _reason} = error -> error
+      end
+    end
+  end
 
   @doc false
   @spec openai_redirect_selector(keyword()) :: {:ok, atom()} | {:error, term()}
@@ -362,4 +386,39 @@ defmodule Arbor.LLM.OAuth.Login do
   end
 
   defp validate_openai_start_option_pairs(_bad, _acc), do: {:error, :improper_openai_options}
+
+  defp extract_flow_id(%LoopbackPrompt{flow: flow}), do: extract_flow_id(flow)
+  defp extract_flow_id(%LoopbackFlow{id: id}) when is_reference(id), do: {:ok, id}
+  defp extract_flow_id(_prompt_or_flow), do: {:error, :invalid_loopback_flow}
+
+  defp validate_await_options(opts) when is_list(opts) do
+    with {:ok, normalized} <- validate_await_option_pairs(opts, %{}) do
+      timeout_ms = Map.get(normalized, :timeout_ms, @default_await_timeout_ms)
+
+      if is_integer(timeout_ms) and timeout_ms > 0 do
+        {:ok, timeout_ms}
+      else
+        {:error, :invalid_timeout}
+      end
+    end
+  end
+
+  defp validate_await_options(_opts), do: {:error, :keyword_options_required}
+
+  defp validate_await_option_pairs([], acc), do: {:ok, acc}
+
+  defp validate_await_option_pairs([{key, value} | rest], acc) when is_atom(key) do
+    cond do
+      not MapSet.member?(@await_openai_option_keys, key) ->
+        {:error, :unknown_login_option}
+
+      Map.has_key?(acc, key) ->
+        {:error, :duplicate_login_option}
+
+      true ->
+        validate_await_option_pairs(rest, Map.put(acc, key, value))
+    end
+  end
+
+  defp validate_await_option_pairs(_bad, _acc), do: {:error, :improper_openai_options}
 end

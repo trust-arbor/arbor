@@ -2,6 +2,7 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
   @moduledoc false
 
   alias Arbor.LLM.OAuth.Login
+  alias Arbor.LLM.OAuth.Login.LoopbackFlow
   alias Arbor.LLM.OAuth.Login.LoopbackFlowSupervisor
   alias Arbor.LLM.OAuth.Login.LoopbackOwner
   alias Arbor.LLM.OAuth.Login.LoopbackPrompt
@@ -34,7 +35,7 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
           take_authorize_url(flow_pid, flow_id)
 
         {:error, _reason} ->
-          {:error, :oauth_loopback_unavailable}
+          busy_or_unavailable()
       end
     else
       :error -> {:error, :invalid_redirect_uri_selector}
@@ -45,7 +46,7 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
   defp take_authorize_url(flow_pid, flow_id) do
     case LoopbackOwner.take_authorize_url(flow_id) do
       {:ok, authorize_url} ->
-        {:ok, %LoopbackPrompt{authorize_url: authorize_url}}
+        {:ok, %LoopbackPrompt{authorize_url: authorize_url, flow: LoopbackFlow.new(flow_id)}}
 
       {:error, _reason} ->
         terminate_flow(flow_pid)
@@ -55,6 +56,13 @@ defmodule Arbor.LLM.OAuth.Login.Loopback do
     :exit, _reason ->
       terminate_flow(flow_pid)
       {:error, :oauth_loopback_unavailable}
+  end
+
+  defp busy_or_unavailable do
+    case LoopbackOwner.active_flow() do
+      {:ok, flow} -> {:error, {:loopback_busy, flow}}
+      :error -> {:error, :oauth_loopback_unavailable}
+    end
   end
 
   defp terminate_flow(flow_pid) do
