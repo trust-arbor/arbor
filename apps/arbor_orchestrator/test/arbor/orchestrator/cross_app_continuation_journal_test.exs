@@ -960,6 +960,27 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.JournalTest do
     assert Process.alive?(pid3)
   end
 
+  test "stale hydration timeout after success does not crash journal", %{clock: clock} do
+    store = unique(:store)
+    {:ok, _} = FakeStore.start_link(name: store)
+    journal = unique(:journal)
+
+    {:ok, pid} =
+      Journal.start_link(
+        name: journal,
+        backend: FakeStore,
+        store_name: store,
+        backend_opts: [],
+        hydration_timeout_ms: 20,
+        clock: fn -> Agent.get(clock, & &1) end
+      )
+
+    assert %{"ready" => true} = await_ready(server: journal)
+    Process.sleep(40)
+    assert %{"ready" => true} = Journal.durability_status(server: journal)
+    assert Process.alive?(pid)
+  end
+
   test "orchestrator lib does not import ContinuationCore" do
     root = Path.expand("../../../lib", __DIR__)
 

@@ -212,7 +212,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
   end
 
   def handle_info({:hydration_timeout, epoch, monitor_ref}, state) do
-    if (state.worker && state.worker.epoch == epoch) and state.worker.monitor_ref == monitor_ref do
+    if state.worker && state.worker.epoch == epoch && state.worker.monitor_ref == monitor_ref do
       Process.demonitor(monitor_ref, [:flush])
       Process.exit(state.worker.pid, :kill)
       {:noreply, poison(state, "hydration_timeout")}
