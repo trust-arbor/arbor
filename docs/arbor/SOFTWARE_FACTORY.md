@@ -241,8 +241,28 @@ dispatch.
 
 ### Caller grants
 
-Grant at least dispatch, then derive and grant the horizon. Do not copy a
-URI count from an old session — profile and graph changes alter the set.
+Close the authority-horizon loop with the Mix task. It runs coding dispatch
+readiness for the plan against the coordinator, grants the capability URIs
+readiness names as missing for the key-file caller through
+`Arbor.Security.grant/1`, and repeats until readiness names nothing.
+
+```bash
+./bin/mix arbor.coding.grant --plan /tmp/factory-first-run.json \
+  --agent-id agent_<coordinator>
+./bin/mix arbor.coding.grant --plan /tmp/factory-first-run.json \
+  --agent-id agent_<coordinator> --key-file ~/.arbor/identity.key --max-rounds 5
+./bin/mix arbor.coding.grant --plan /tmp/factory-first-run.json \
+  --agent-id agent_<coordinator> --dry-run
+```
+
+`--dry-run`: every round invokes readiness and emits the full list of caller
+URIs named that round (no dedupe). Dry-run never emits a grant. It halts
+converged only when a report names nothing; otherwise it ends unconverged at
+max-rounds.
+
+Do not copy a URI count from an old session — profile and graph changes
+alter the set. The hand-run list below stays as the reference for what the
+task is automating (dispatch first, then the horizon readiness names):
 
 ```elixir
 caller = "agent_<caller_from_key_file>"
@@ -267,7 +287,7 @@ The coordinator also needs the template capabilities; `mix arbor.agent start
 coding_agent` requests them at creation. If readiness later reports
 `authority_horizon_missing`, grant the named URI to the **caller** (horizon
 is a caller check) and confirm the coordinator still holds the matching
-execution grant.
+execution grant. The Mix task is that caller-grant loop.
 
 ### Grok worker OAuth
 
