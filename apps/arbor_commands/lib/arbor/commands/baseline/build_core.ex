@@ -245,24 +245,39 @@ defmodule Arbor.Commands.Baseline.BuildCore do
   }
 
   @doc """
-  Pick the image backend from the validation runtime status (preferred) or
-  the runtime probe. Returns `{:ok, driver}` for an admitted backend or
-  `{:error, {:image_backend_unsupported, driver}}` naming what was seen.
+  Pick the image backend: the validation runtime status driver, else the
+  probe driver, else the host OS (the first build on a fresh host has no
+  activated runtime yet, and both report `"unavailable"`). macOS hosts run
+  Apple Container; Linux hosts run rootless Podman. Returns `{:ok, driver}`
+  for an admitted backend or `{:error, {:image_backend_unsupported, seen}}`
+  naming what was reported.
   """
-  @spec image_backend(term(), term()) ::
+  @spec image_backend(term(), term(), term()) ::
           {:ok, String.t()} | {:error, {:image_backend_unsupported, term()}}
-  def image_backend(runtime_status, probe) do
-    driver = driver_of(runtime_status) || driver_of(probe)
+  def image_backend(runtime_status, probe, host_os \\ nil) do
+    reported = driver_of(runtime_status) || driver_of(probe)
+    driver = reported || host_default(host_os)
 
     if driver in @image_backends,
       do: {:ok, driver},
-      else: {:error, {:image_backend_unsupported, driver}}
+      else: {:error, {:image_backend_unsupported, reported || driver}}
   end
 
+  @absent_drivers ["", "unavailable", "unpinned", "none", "unknown"]
+
   defp driver_of({:ok, map}), do: driver_of(map)
-  defp driver_of(%{"driver" => driver}) when is_binary(driver) and driver != "", do: driver
-  defp driver_of(%{driver: driver}) when is_binary(driver) and driver != "", do: driver
+
+  defp driver_of(%{"driver" => driver}) when is_binary(driver) and driver not in @absent_drivers,
+    do: driver
+
+  defp driver_of(%{driver: driver}) when is_binary(driver) and driver not in @absent_drivers,
+    do: driver
+
   defp driver_of(_other), do: nil
+
+  defp host_default({:unix, :darwin}), do: "apple_container"
+  defp host_default({:unix, :linux}), do: "podman"
+  defp host_default(_other), do: nil
 
   @doc """
   Executable for a backend: reviewed host config

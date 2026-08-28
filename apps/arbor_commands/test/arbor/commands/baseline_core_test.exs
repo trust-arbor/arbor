@@ -130,8 +130,24 @@ defmodule Arbor.Commands.BaselineCoreTest do
     assert {:error, {:image_backend_unsupported, "docker"}} =
              BuildCore.image_backend(%{"driver" => "docker"}, nil)
 
+    # Fresh host: nothing activated yet, status and probe say "unavailable" —
+    # the host OS decides (first macOS build failed here before this clause).
+    assert {:ok, "apple_container"} =
+             BuildCore.image_backend(
+               %{"driver" => "unavailable"},
+               {:error, :validation_runtime_unavailable},
+               {:unix, :darwin}
+             )
+
+    assert {:ok, "podman"} =
+             BuildCore.image_backend(%{"driver" => "unavailable"}, nil, {:unix, :linux})
+
     assert {:error, {:image_backend_unsupported, nil}} =
-             BuildCore.image_backend(%{}, {:error, :probe_skipped})
+             BuildCore.image_backend(%{}, {:error, :probe_skipped}, {:win32, :nt})
+
+    # A pinned driver always wins over the host default.
+    assert {:ok, "podman"} =
+             BuildCore.image_backend(%{"driver" => "podman"}, nil, {:unix, :darwin})
   end
 
   test "image_executable prefers reviewed host config and requires absolute paths" do

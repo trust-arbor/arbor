@@ -419,7 +419,7 @@ defmodule Arbor.Commands.Baseline do
     runtime = safe_shell_call(ctx.shell, :validation_runtime_status)
     probe = safe_shell_call(ctx.shell, :validation_runtime_probe)
 
-    with {:ok, driver} <- BuildCore.image_backend(runtime, probe),
+    with {:ok, driver} <- BuildCore.image_backend(runtime, probe, :os.type()),
          {:ok, executable} <- BuildCore.image_executable(driver, executables) do
       case driver do
         "podman" -> podman_build(request, executable)
