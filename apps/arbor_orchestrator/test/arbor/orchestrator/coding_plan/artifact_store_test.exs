@@ -2211,6 +2211,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     second = static_receipt_bundle(excerpt: "second-writer")
     path = static_receipt_path(base, first.task_id)
 
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               first.task_id,
+               first.continuation_id,
+               first.digest
+             )
+
     tasks =
       Enum.map([first, second], fn bundle ->
         Task.async(fn ->
@@ -2871,6 +2879,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     checks = static_receipt_checks(excerpt)
     {:ok, receipt, digest} =
       Actions.coding_cross_app_continuation_static_receipt_new(identities, checks)
+
     {:ok, admitted} = Actions.coding_cross_app_continuation_static_receipt_admit(receipt)
     {:ok, ^digest} = Actions.coding_cross_app_continuation_static_receipt_digest(admitted)
 
