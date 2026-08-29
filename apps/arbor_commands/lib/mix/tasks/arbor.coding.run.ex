@@ -421,8 +421,11 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
     %{"id" => "", "action" => "", "task_id" => nil, "worktree" => nil}
   end
 
+  # The same documented field arrives atom-keyed from the node's RPC struct
+  # and string-keyed from the MCP JSON projection; both encodings of exactly
+  # these fields are accepted, nothing else.
   defp documented_meta(map, key) when is_map(map) and is_binary(key) do
-    case Map.fetch(map, key) do
+    case documented_fetch(map, key) do
       {:ok, value} when is_binary(value) -> value
       _other -> nil
     end
@@ -431,13 +434,27 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
   defp documented_meta(_map, _key), do: nil
 
   defp documented_map(map, key) when is_map(map) do
-    case Map.fetch(map, key) do
+    case documented_fetch(map, key) do
       {:ok, value} when is_map(value) -> value
       _other -> %{}
     end
   end
 
   defp documented_map(_map, _key), do: %{}
+
+  @documented_keys %{
+    "approval_context" => :approval_context,
+    "provenance" => :provenance,
+    "task_id" => :task_id,
+    "path" => :path
+  }
+
+  defp documented_fetch(map, key) do
+    case Map.fetch(map, key) do
+      {:ok, _} = hit -> hit
+      :error -> Map.fetch(map, Map.fetch!(@documented_keys, key))
+    end
+  end
 
   defp action_name(action) when is_atom(action), do: Atom.to_string(action)
   defp action_name(action) when is_binary(action), do: action
