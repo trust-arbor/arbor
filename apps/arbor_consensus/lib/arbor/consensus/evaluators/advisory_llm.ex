@@ -71,6 +71,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   require Logger
 
+  alias Arbor.Common.ProviderFallbackCore
+
   @perspectives [
     :brainstorming,
     :user_experience,
@@ -103,22 +105,38 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   #   })
   @gemini_model "openrouter:google/gemini-3.7-flash"
   @deepseek_model "openrouter:deepseek/deepseek-v4-pro-0813"
+  @openai_model "openai_oauth:gpt-5.6-sol"
+  @grok_model "xai_oauth:grok-4.6"
+  @kimi_model "ollama:kimi-k2.7-code:cloud"
+
+  # Preferred seats span the routes operators actually have (subscription
+  # OAuth, local Ollama, OpenRouter); each is resolved against what THIS host
+  # can call at consult time (see resolve_provider_model/2), falling back
+  # through @default_fallback_providers, so an OpenRouter-only install still
+  # gets every seat and a two-provider host still gets two voices.
+  @default_fallback_providers [
+    {"openai_oauth", "gpt-5.6-sol"},
+    {"xai_oauth", "grok-4.6"},
+    {"openrouter", "google/gemini-3.7-flash"},
+    {"ollama", "kimi-k2.7-code:cloud"}
+  ]
+
   @default_perspective_models %{
     # Override per-perspective at runtime via configure_perspective/2 or
     # Application config :arbor_consensus, :perspective_models.
-    brainstorming: @gemini_model,
+    brainstorming: @grok_model,
     user_experience: @gemini_model,
-    security: @deepseek_model,
+    security: @openai_model,
     privacy: @gemini_model,
     stability: @deepseek_model,
     capability: @gemini_model,
-    emergence: @gemini_model,
+    emergence: @grok_model,
     vision: @gemini_model,
-    performance: @deepseek_model,
+    performance: @kimi_model,
     generalization: @deepseek_model,
-    resource_usage: @gemini_model,
+    resource_usage: @kimi_model,
     consistency: @deepseek_model,
-    adversarial: @deepseek_model
+    adversarial: @openai_model
   }
 
   # ============================================================================
@@ -558,7 +576,67 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
       Keyword.get(opts, :provider_model) ||
         Map.get(provider_map(), perspective, "anthropic:claude-sonnet-4-5-20250929")
 
-    parse_provider_model(provider_model)
+    {provider, model} = parse_provider_model(provider_model)
+    resolve_against_host(perspective, provider, model, opts)
+  end
+
+  # Same rules as the binding council's seats: a preferred route this host
+  # knows but cannot call is rerouted to the first available fallback; an
+  # unknown route or an explicit per-call override is left alone; when
+  # nothing is available the preferred route stays and the seat abstains
+  # with that provider's own error. Availability comes through the
+  # `:provider_route_mfa` seam (set to `{Arbor.LLM, :provider_route}` by the
+  # umbrella config) because this library must not depend on arbor_llm.
+  defp resolve_against_host(perspective, provider, model, opts) do
+    if Keyword.has_key?(opts, :provider_model) or is_nil(provider_route_mfa()) do
+      {provider, model}
+    else
+      {specific, generic} =
+        ProviderFallbackCore.normalize_config(
+          Application.get_env(:arbor_consensus, :advisory_provider_fallbacks, %{}),
+          Application.get_env(
+            :arbor_consensus,
+            :advisory_fallback_providers,
+            @default_fallback_providers
+          )
+        )
+
+      case ProviderFallbackCore.resolve(
+             provider,
+             model,
+             &host_available?/1,
+             specific,
+             generic
+           ) do
+        {:ok, {p, m}, {:fallback, from}} ->
+          Logger.info(
+            "[AdvisoryLLM] #{perspective}: #{from} unavailable on this host, using #{p}:#{m}"
+          )
+
+          {p, m}
+
+        _other ->
+          {provider, model}
+      end
+    end
+  end
+
+  defp provider_route_mfa do
+    case Application.get_env(:arbor_consensus, :provider_route_mfa) do
+      {mod, fun} when is_atom(mod) and is_atom(fun) -> {mod, fun}
+      _ -> nil
+    end
+  end
+
+  defp host_available?(provider) do
+    case provider_route_mfa() do
+      {mod, fun} -> apply(mod, fun, [provider]) != :unavailable
+      nil -> true
+    end
+  rescue
+    _ -> true
+  catch
+    _, _ -> true
   end
 
   defp parse_provider_model(provider_model) when is_binary(provider_model) do

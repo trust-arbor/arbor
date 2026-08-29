@@ -578,6 +578,12 @@ config :arbor_commands,
     "apple_container" => "/usr/local/bin/container"
   }
 
+# Advisory council: resolve each seat's preferred route against this host
+# (same rule as the binding council) through the arbor_llm route probe.
+config :arbor_consensus,
+  provider_route_mfa: {Arbor.LLM, :provider_route},
+  advisory_provider_fallbacks: %{}
+
 config :arbor_orchestrator,
   llm_fallback_providers: [
     {"openai_oauth", "gpt-5.6-sol"},

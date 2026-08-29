@@ -24,19 +24,19 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
   ]
 
   @portable_models %{
-    brainstorming: "openrouter:google/gemini-3.7-flash",
+    brainstorming: "xai_oauth:grok-4.6",
     user_experience: "openrouter:google/gemini-3.7-flash",
-    security: "openrouter:deepseek/deepseek-v4-pro-0813",
+    security: "openai_oauth:gpt-5.6-sol",
     privacy: "openrouter:google/gemini-3.7-flash",
     stability: "openrouter:deepseek/deepseek-v4-pro-0813",
     capability: "openrouter:google/gemini-3.7-flash",
-    emergence: "openrouter:google/gemini-3.7-flash",
+    emergence: "xai_oauth:grok-4.6",
     vision: "openrouter:google/gemini-3.7-flash",
-    performance: "openrouter:deepseek/deepseek-v4-pro-0813",
+    performance: "ollama:kimi-k2.7-code:cloud",
     generalization: "openrouter:deepseek/deepseek-v4-pro-0813",
-    resource_usage: "openrouter:google/gemini-3.7-flash",
+    resource_usage: "ollama:kimi-k2.7-code:cloud",
     consistency: "openrouter:deepseek/deepseek-v4-pro-0813",
-    adversarial: "openrouter:deepseek/deepseek-v4-pro-0813"
+    adversarial: "openai_oauth:gpt-5.6-sol"
   }
 
   @model_config_keys [:council_model, :perspective_models_json, :perspective_models]
@@ -306,8 +306,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       unique_models = map |> Map.values() |> Enum.uniq()
 
-      assert length(unique_models) == 2,
-             "expected 2 portable model families, got: #{inspect(unique_models)}"
+      # Seats span subscription OAuth, local Ollama, and OpenRouter; each is
+      # resolved against the host at consult time (see the host-fallback test).
+      assert length(unique_models) >= 3,
+             "expected mixed model families, got: #{inspect(unique_models)}"
     end
 
     test "each perspective has a default provider:model assignment" do
@@ -399,8 +401,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
   describe "resolve_provider_model/2" do
     test "returns default provider and model for perspective" do
-      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
-               AdvisoryLLM.resolve_provider_model(:security)
+      assert {"openai_oauth", "gpt-5.6-sol"} = AdvisoryLLM.resolve_provider_model(:security)
 
       assert {"openrouter", "google/gemini-3.7-flash"} =
                AdvisoryLLM.resolve_provider_model(:privacy)
@@ -436,13 +437,11 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     test "adversarial perspective has a default" do
       AdvisoryLLM.reset_perspective_models()
 
-      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
-               AdvisoryLLM.resolve_provider_model(:adversarial)
+      assert {"openai_oauth", "gpt-5.6-sol"} = AdvisoryLLM.resolve_provider_model(:adversarial)
     end
 
     test "OpenRouter model defaults resolve correctly" do
-      assert {"openrouter", "google/gemini-3.7-flash"} =
-               AdvisoryLLM.resolve_provider_model(:brainstorming)
+      assert {"xai_oauth", "grok-4.6"} = AdvisoryLLM.resolve_provider_model(:brainstorming)
 
       assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
                AdvisoryLLM.resolve_provider_model(:generalization)
@@ -554,8 +553,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       AdvisoryLLM.reset_perspective_models()
 
-      assert {"openrouter", "deepseek/deepseek-v4-pro-0813"} =
-               AdvisoryLLM.resolve_provider_model(:security)
+      assert {"openai_oauth", "gpt-5.6-sol"} = AdvisoryLLM.resolve_provider_model(:security)
     end
 
     test "provider_map/0 reflects runtime configuration" do
@@ -563,7 +561,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       map = AdvisoryLLM.provider_map()
       assert map[:adversarial] == "lm_studio:qwen3-coder"
       # Defaults still present for unconfigured perspectives
-      assert map[:security] == "openrouter:deepseek/deepseek-v4-pro-0813"
+      assert map[:security] == "openai_oauth:gpt-5.6-sol"
     end
 
     test "per-call provider_model opt still takes precedence over config" do

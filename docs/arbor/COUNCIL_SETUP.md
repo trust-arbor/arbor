@@ -307,11 +307,24 @@ Thirteen perspectives: `brainstorming`, `user_experience`, `security`,
 `performance`, `generalization`, `resource_usage`, `consistency`,
 `adversarial`.
 
-Portable defaults are OpenRouter-only so a fresh install needs one key:
+Compiled defaults (2026-08-29) span the routes operators actually have and
+are resolved against **this host** at consult time, with the same rule as the
+binding council: a seat pinned to a route the host knows but cannot call
+falls back through `config :arbor_consensus, :advisory_fallback_providers`
+(stock: `openai_oauth`, `xai_oauth`, `openrouter` Gemini Flash, `ollama`
+Kimi), an unknown route or a per-call override is left alone, and a seat
+with nothing available keeps its route and abstains with that provider's
+error. So an OpenRouter-only install still gets every seat, and a host with
+OpenAI + xAI logins gets two real voices.
 
-- Gemini Flash — most seats
-- DeepSeek — security, stability, performance, generalization,
-  consistency, adversarial
+- `openai_oauth` / `gpt-5.6-sol` — security, adversarial
+- `xai_oauth` / `grok-4.6` — brainstorming, emergence
+- `ollama` / `kimi-k2.7-code:cloud` — performance, resource_usage
+- OpenRouter DeepSeek — stability, generalization, consistency
+- OpenRouter Gemini Flash — user_experience, privacy, capability, vision
+
+The availability probe is `config :arbor_consensus, :provider_route_mfa`
+(`{Arbor.LLM, :provider_route}` in the umbrella config; unset = no fallback).
 
 Resolution, lowest to highest:
 
