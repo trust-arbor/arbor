@@ -305,7 +305,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "action" => "coding_cross_app_validate",
                "authority_parameter" => "workspace_id",
                "authority_source" => "workspace_id",
-               "context_keys" => ["workspace_id"],
+               "context_keys" => [
+                 "workspace_id",
+                 "cross_app_progress",
+                 "cross_app_progress_binding",
+                 "coding_plan_work_packet_digest"
+               ],
                "result_adapter" => "cross_app_v1",
                "static_parameters" => %{},
                "timeout_budget_param" => "stage_timeout",

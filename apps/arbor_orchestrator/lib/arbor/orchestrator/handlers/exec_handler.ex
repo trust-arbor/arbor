@@ -249,6 +249,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_execution_id(opts)
             |> maybe_put_transcript_sink(opts)
             |> maybe_put_design_artifact_boundary(opts)
+            |> maybe_put_cross_app_static_receipt_boundary(opts)
 
           try do
             case invoke_action_executor(
@@ -664,6 +665,33 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
           executor_opts,
           :design_artifact_boundary_error,
           :invalid_trusted_design_artifact_boundary
+        )
+    end
+  end
+
+  defp maybe_put_cross_app_static_receipt_boundary(executor_opts, engine_opts) do
+    executor_opts
+    |> put_cross_app_static_receipt_mfa(engine_opts, :cross_app_static_receipt_sink)
+    |> put_cross_app_static_receipt_mfa(engine_opts, :cross_app_static_receipt_source)
+  end
+
+  defp put_cross_app_static_receipt_mfa(executor_opts, engine_opts, key) do
+    case Keyword.fetch(engine_opts, key) do
+      :error ->
+        executor_opts
+
+      {:ok, nil} ->
+        executor_opts
+
+      {:ok, {module, function, fixed_args} = mfa}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+        Keyword.put(executor_opts, key, mfa)
+
+      {:ok, _malformed} ->
+        Keyword.put(
+          executor_opts,
+          :cross_app_static_receipt_boundary_error,
+          :invalid_trusted_cross_app_static_receipt_boundary
         )
     end
   end

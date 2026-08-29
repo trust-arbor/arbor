@@ -59,6 +59,125 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            )
   end
 
+  test "cross_app loop pins fail closed on caller progress params and rewired edges", ctx do
+    plan = plan!(%{"validation_profile" => "cross_app"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    assert :ok = preflight(graph, profile["semantic_policy"], review_profile: "binding")
+
+    caller_progress =
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "param.cross_app_progress", "{\"status\":\"completed\"}")
+      )
+
+    assert {:error, {:semantic_preflight_failed, caller_errors}} =
+             preflight(caller_progress, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(caller_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    missing_keys =
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "context_keys", "workspace_id")
+      )
+
+    assert {:error, {:semantic_preflight_failed, key_errors}} =
+             preflight(missing_keys, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(key_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    rewired =
+      %{
+        graph
+        | edges:
+            Enum.map(graph.edges, fn edge ->
+              if edge.from == "route_cross_app_window" and edge.to == "hoist_cross_app_progress" do
+                %{edge | to: "close_worker"}
+              else
+                edge
+              end
+            end),
+          adjacency: %{},
+          reverse_adjacency: %{}
+      }
+
+    assert {:error, {:semantic_preflight_failed, loop_errors}} =
+             preflight(rewired, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(loop_errors, &(&1["code"] == "cross_app_topology_mismatch"))
+
+    default_plan = plan!()
+    assert {:ok, default_compilation} = compile(default_plan, ctx)
+    default_graph = compiled_graph!(default_compilation.dot_source)
+    refute Map.has_key?(default_graph.nodes, "route_cross_app_window")
+    refute Map.has_key?(default_graph.nodes, "hoist_cross_app_progress")
+  end
+
+  test "cross_app loop pins fail closed on tampered functional attributes", ctx do
+    plan = plan!(%{"validation_profile" => "cross_app"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    assert :ok = preflight(graph, profile["semantic_policy"], review_profile: "binding")
+
+    mutations = [
+      {"hoist_cross_app_progress", "source_key", "forged.progress"},
+      {"hoist_cross_app_progress", "output_key", "forged_progress"},
+      {"hoist_cross_app_progress_binding", "source_key", "forged.progress_binding"},
+      {"hoist_cross_app_progress_binding", "output_key", "forged_progress_binding"},
+      {"clear_cross_app_progress", "expression", "keep"},
+      {"clear_cross_app_progress", "output_key", "forged_progress"},
+      {"clear_cross_app_progress_binding", "expression", "keep"},
+      {"clear_cross_app_progress_binding", "output_key", "forged_progress_binding"},
+      {"route_cross_app_window", "type", "gate"},
+      {"route_cross_app_window", "shape", "box"},
+      {"route_cross_app_window", "fan_out", "true"},
+      {"error_cross_app_window_invalid", "expression", "forged_error"},
+      {"error_cross_app_window_invalid", "output_key", "forged_error"}
+    ]
+
+    for {node_id, attribute, value} <- mutations do
+      mutated =
+        update_in(graph.nodes[node_id].attrs, &Map.put(&1, attribute, value))
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "cross_app_binding_mismatch" and err["node_id"] == node_id and
+                 err["detail"]["attribute"] == attribute
+             end),
+             "expected cross_app_binding_mismatch for #{node_id}.#{attribute}"
+    end
+  end
+
+  test "cross_app loop rejects noncompiler writers of continuation state", ctx do
+    plan = plan!(%{"validation_profile" => "cross_app"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    for context_key <- ~w(cross_app_progress cross_app_progress_binding) do
+      forged_writer =
+        update_in(
+          graph.nodes["route_cross_app_window"].attrs,
+          &Map.put(&1, "output_key", context_key)
+        )
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(forged_writer, profile["semantic_policy"], review_profile: "binding")
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "review_convergence_writer_violation" and
+                 error["detail"]["context_key"] == context_key
+             end)
+    end
+  end
+
   test "contract_change binding and human_required graphs pass semantic preflight", ctx do
     assert {:ok, profile} = Profiles.fetch_executable("contract_change")
 

@@ -49,6 +49,22 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     refute encoded =~ "authority"
   end
 
+  test "whole-stage timeout is terminal infrastructure failure, not source rework" do
+    assert {:error, :validation_stage_timeout} =
+             ProgressCore.project_failure("validation_stage_timeout")
+
+    assert {:error, :validation_infrastructure_failed} =
+             ProgressCore.project_failure("validation_infrastructure_failed")
+
+    assert {:error, :validation_tree_mutated} =
+             ProgressCore.project_failure("validation_tree_mutated")
+
+    assert {:ok, domain_failure} = ProgressCore.project_failure("tests_failed")
+    assert domain_failure["disposition_type"] == "failed"
+    assert domain_failure["passed"] == false
+    assert domain_failure["reason"] == "tests_failed"
+  end
+
   test "admit/2 rehydrates a show/1 snapshot against freshly injected bindings" do
     {:ok, state} = ProgressCore.new(fresh_bindings())
     snapshot = ProgressCore.show(state)

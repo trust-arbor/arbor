@@ -64,6 +64,21 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
         type: :non_neg_integer,
         doc:
           "ExecHandler-clamped nested validator stage_timeout binding (cross_app/security profiles)"
+      ],
+      cross_app_progress: [
+        type: {:or, [:map, :string]},
+        required: false,
+        doc: "Compiler-owned CrossApp continuation progress or the empty seed sentinel"
+      ],
+      cross_app_progress_binding: [
+        type: {:or, [:map, :string]},
+        required: false,
+        doc: "Compiler-owned CrossApp continuation identity binding or the empty seed sentinel"
+      ],
+      coding_plan_work_packet_digest: [
+        type: :string,
+        required: false,
+        doc: "Compiler-owned digest binding CrossApp evidence to the frozen work packet"
       ]
     ]
 
@@ -102,7 +117,10 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       workspace_id: :control,
       review_attestation_id: :control,
       timeout: :control,
-      stage_timeout: :control
+      stage_timeout: :control,
+      cross_app_progress: :control,
+      cross_app_progress_binding: :control,
+      coding_plan_work_packet_digest: :control
     }
   end
 
@@ -148,6 +166,7 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
     # against an open-ended action name supplied by the graph author.
     result =
       with {:ok, pin} <- resolve_pin(params),
+           {:ok, context} <- put_cross_app_window_context(pin, params, context),
            {:ok, module} <- resolve_pinned_module(pin),
            {:ok, nested_params} <- build_nested_params(pin, params),
            resource = Actions.canonical_uri_for(module, nested_params),
@@ -200,6 +219,56 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
   end
 
   def run(_params, _context), do: {:error, "invalid_reviewed_validation_params"}
+
+  @cross_app_window_keys [
+    {"cross_app_progress", :cross_app_progress},
+    {"cross_app_progress_binding", :cross_app_progress_binding},
+    {"coding_plan_work_packet_digest", :coding_plan_work_packet_digest}
+  ]
+
+  defp put_cross_app_window_context(%{profile_id: "cross_app"}, params, context)
+       when is_map(params) and is_map(context) do
+    Enum.reduce_while(@cross_app_window_keys, {:ok, context}, fn {string_key, atom_key},
+                                                                 {:ok, acc} ->
+      case exclusive_param(params, string_key, atom_key) do
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+
+        {:ok, nil} ->
+          {:cont, {:ok, acc}}
+
+        {:ok, ""} ->
+          {:cont, {:ok, Map.put(acc, string_key, "")}}
+
+        {:ok, value} ->
+          {:cont, {:ok, Map.put(acc, string_key, value)}}
+      end
+    end)
+  end
+
+  defp put_cross_app_window_context(_pin, params, context)
+       when is_map(params) and is_map(context) do
+    Enum.reduce_while(@cross_app_window_keys, {:ok, context}, fn {string_key, atom_key},
+                                                                 {:ok, acc} ->
+      case exclusive_param(params, string_key, atom_key) do
+        {:ok, nil} -> {:cont, {:ok, acc}}
+        {:ok, ""} -> {:cont, {:ok, acc}}
+        _other -> {:halt, {:error, :invalid_cross_app_window_context}}
+      end
+    end)
+  end
+
+  defp exclusive_param(params, string_key, atom_key) do
+    has_string = Map.has_key?(params, string_key)
+    has_atom = Map.has_key?(params, atom_key)
+
+    cond do
+      has_string and has_atom -> {:error, :invalid_cross_app_window_context}
+      has_string -> {:ok, Map.get(params, string_key)}
+      has_atom -> {:ok, Map.get(params, atom_key)}
+      true -> {:ok, nil}
+    end
+  end
 
   # -- pin resolution --------------------------------------------------------
 

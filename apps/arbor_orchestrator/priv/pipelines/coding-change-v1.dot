@@ -1027,6 +1027,48 @@ digraph CodingChangeV1 {
     fan_out="false"
   ]
 
+  // CrossApp capacity loop. Dormant unless compiler activates the profile.
+  route_cross_app_window [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_cross_app_progress [
+    type="transform",
+    transform="identity",
+    source_key="validation.progress",
+    output_key="cross_app_progress"
+  ]
+
+  hoist_cross_app_progress_binding [
+    type="transform",
+    transform="identity",
+    source_key="validation.progress_binding",
+    output_key="cross_app_progress_binding"
+  ]
+
+  clear_cross_app_progress [
+    type="transform",
+    transform="constant",
+    expression="",
+    output_key="cross_app_progress"
+  ]
+
+  clear_cross_app_progress_binding [
+    type="transform",
+    transform="constant",
+    expression="",
+    output_key="cross_app_progress_binding"
+  ]
+
+  error_cross_app_window_invalid [
+    type="transform",
+    transform="constant",
+    expression="cross_app_window_invalid",
+    output_key="error"
+  ]
+
   hoist_validation_approval_request_id [
     type="transform",
     transform="identity",
@@ -2230,6 +2272,12 @@ digraph CodingChangeV1 {
   start -> route_security_attested_human [condition="0=1"]
   start -> route_security_attested_auto [condition="0=1"]
   start -> snapshot_validation_prior_commit [condition="0=1"]
+  start -> route_cross_app_window [condition="0=1"]
+  start -> hoist_cross_app_progress [condition="0=1"]
+  start -> hoist_cross_app_progress_binding [condition="0=1"]
+  start -> clear_cross_app_progress [condition="0=1"]
+  start -> clear_cross_app_progress_binding [condition="0=1"]
+  start -> error_cross_app_window_invalid [condition="0=1"]
 
   // Dormant security-regression edges retain default behavior until the
   // compiler connects the reviewed profile-specific entry points.
@@ -2307,6 +2355,11 @@ digraph CodingChangeV1 {
   hoist_validation_approval_request_id_denied -> hoist_validation_approval_note_denied
   hoist_validation_approval_note_denied -> status_validation_failed
   error_validation_interaction_invalid -> status_pipeline_error_then_close
+  error_cross_app_window_invalid -> status_pipeline_error_then_close
+  route_cross_app_window -> hoist_cross_app_progress
+  hoist_cross_app_progress -> hoist_cross_app_progress_binding
+  hoist_cross_app_progress_binding -> validate
+  clear_cross_app_progress -> clear_cross_app_progress_binding
 
   // Validation soft-fail: initiate at most one validation repair and never a
   // third total repair attempt.

@@ -66,6 +66,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @compilation_publication_barrier_key {__MODULE__, :compilation_publication_barrier}
   @static_receipt_filename "coding-cross-app-continuation-static-receipt.json"
   @static_receipt_publication_barrier_key {__MODULE__, :static_receipt_publication_barrier}
+  @engine_static_receipt_directory "coding-cross-app-static-receipts"
+  @engine_static_receipt_generation_limit 8
+  @digest_filename_regex ~r/\A[0-9a-f]{64}\.json\z/
 
   @terminal_result_keys MapSet.new(~w(
     status
@@ -634,6 +637,88 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         _expected_digest
       ),
       do: {:error, :invalid_static_receipt_input}
+
+  @doc """
+  Archive one Engine-native CrossApp static-stage receipt generation.
+
+  Filename is the exact receipt digest under a store-owned directory in the
+  hashed task root. Callers never select the path. Distinct digests coexist
+  up to #{@engine_static_receipt_generation_limit} generations. Same-digest
+  retry is idempotent; a different body for an existing digest conflicts.
+  """
+  @spec archive_cross_app_static_receipt(String.t(), String.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def archive_cross_app_static_receipt(base_root, task_id, expected_digest, receipt)
+      when is_binary(base_root) and is_binary(task_id) and is_binary(expected_digest) and
+             is_map(receipt) and not is_struct(receipt) do
+    with :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_sha256(expected_digest, :receipt_sha256),
+         {:ok, admitted} <-
+           Actions.coding_cross_app_continuation_static_receipt_admit(receipt),
+         {:ok, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+         :ok <- match_static_receipt_task_id(admitted, task_id),
+         :ok <- match_static_receipt_digest(digest, expected_digest),
+         {:ok, encoded} <- encode_compact_canonical_json(admitted, :static_receipt),
+         {:ok, max_bytes} <- static_receipt_max_json_bytes(),
+         :ok <- validate_static_receipt_size(encoded, max_bytes),
+         {:ok, task_root} <- ensure_static_receipt_task_root(base_root, task_id),
+         {:ok, generation_root} <- ensure_engine_static_receipt_generation_root(task_root),
+         path = engine_static_receipt_path(generation_root, digest),
+         :ok <- validate_engine_static_receipt_path(generation_root, path, digest),
+         :ok <-
+           enforce_engine_static_receipt_generation_limit(generation_root, path),
+         :ok <- write_engine_static_receipt_once(path, encoded, generation_root),
+         {:ok, descriptor} <-
+           verify_published_engine_static_receipt(base_root, task_id, expected_digest) do
+      {:ok, descriptor}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :static_receipt_archive_error}
+    end
+  rescue
+    _ -> {:error, :static_receipt_archive_error}
+  catch
+    _, _ -> {:error, :static_receipt_archive_error}
+  end
+
+  def archive_cross_app_static_receipt(_base_root, _task_id, _expected_digest, _receipt),
+    do: {:error, :invalid_static_receipt_input}
+
+  @doc """
+  Read and re-verify one Engine-native CrossApp static-stage receipt generation.
+
+  Resolves only the store-owned digest filename under the hashed task root.
+  """
+  @spec read_cross_app_static_receipt(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def read_cross_app_static_receipt(base_root, task_id, expected_digest)
+      when is_binary(base_root) and is_binary(task_id) and is_binary(expected_digest) do
+    with :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_sha256(expected_digest, :receipt_sha256),
+         {:ok, encoded, admitted, digest} <-
+           load_and_admit_engine_static_receipt(base_root, task_id, expected_digest),
+         :ok <- match_static_receipt_task_id(admitted, task_id),
+         :ok <- match_static_receipt_digest(digest, expected_digest) do
+      {:ok,
+       %{
+         "receipt" => admitted,
+         "descriptor" => engine_static_receipt_descriptor(task_id, digest, encoded)
+       }}
+    else
+      {:error, :static_receipt_task_identity_mismatch} = error -> error
+      {:error, :static_receipt_digest_mismatch} = error -> error
+      {:error, :static_receipt_generation_limit} = error -> error
+      _ -> {:error, :cross_app_static_receipt_unavailable}
+    end
+  rescue
+    _ -> {:error, :cross_app_static_receipt_unavailable}
+  catch
+    _, _ -> {:error, :cross_app_static_receipt_unavailable}
+  end
+
+  def read_cross_app_static_receipt(_base_root, _task_id, _expected_digest),
+    do: {:error, :invalid_static_receipt_input}
 
   defp normalize_reconciliation_envelope(envelope)
        when is_map(envelope) and not is_struct(envelope) do
@@ -2376,6 +2461,192 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       "receipt_sha256" => digest,
       "byte_size" => byte_size(encoded)
     }
+  end
+
+  defp engine_static_receipt_descriptor(task_id, digest, encoded) do
+    %{
+      "schema_version" => 1,
+      "task_id" => task_id,
+      "digest" => digest,
+      "byte_size" => byte_size(encoded)
+    }
+  end
+
+  defp engine_static_receipt_path(generation_root, digest),
+    do: Path.join(generation_root, digest <> ".json")
+
+  defp ensure_engine_static_receipt_generation_root(task_root) do
+    with {:ok, generation_root} <-
+           SafePath.safe_join(task_root, @engine_static_receipt_directory),
+         :ok <- create_root(generation_root),
+         {:ok, canonical} <- SafePath.resolve_real(generation_root),
+         true <- canonical == generation_root and SafePath.within?(canonical, task_root),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(canonical) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :static_receipt_path_escape}
+    end
+  rescue
+    _ -> {:error, :static_receipt_path_escape}
+  end
+
+  defp validate_engine_static_receipt_path(generation_root, path, digest) do
+    with true <- Path.basename(path) == digest <> ".json",
+         true <- Path.dirname(path) == generation_root,
+         {:ok, ^path} <- SafePath.resolve_within(path, generation_root),
+         {:ok, ^generation_root} <- SafePath.resolve_real(Path.dirname(path)),
+         true <- SafePath.within?(path, generation_root) do
+      :ok
+    else
+      _ -> {:error, :static_receipt_path_escape}
+    end
+  rescue
+    _ -> {:error, :static_receipt_path_escape}
+  end
+
+  defp enforce_engine_static_receipt_generation_limit(generation_root, path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        :ok
+
+      {:error, :enoent} ->
+        case count_engine_static_receipt_generations(generation_root) do
+          count when is_integer(count) and count < @engine_static_receipt_generation_limit ->
+            :ok
+
+          count when is_integer(count) ->
+            {:error, :static_receipt_generation_limit}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:ok, _} ->
+        {:error, :invalid_static_receipt_file}
+
+      {:error, _reason} ->
+        {:error, :write_static_receipt_failed}
+    end
+  end
+
+  defp count_engine_static_receipt_generations(generation_root) do
+    case File.ls(generation_root) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&Regex.match?(@digest_filename_regex, &1))
+        |> Enum.count(fn name ->
+          path = Path.join(generation_root, name)
+
+          case File.lstat(path) do
+            {:ok, %File.Stat{type: :regular}} -> true
+            _ -> false
+          end
+        end)
+
+      {:error, _reason} ->
+        {:error, :write_static_receipt_failed}
+    end
+  end
+
+  defp write_engine_static_receipt_once(path, content, generation_root) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        write_engine_static_receipt_new(path, content, generation_root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode, links: links}} ->
+        cond do
+          Bitwise.band(mode, 0o777) != 0o600 ->
+            {:error, :insecure_static_receipt_mode}
+
+          links != 1 ->
+            {:error, :static_receipt_hard_link}
+
+          true ->
+            case File.read(path) do
+              {:ok, ^content} -> :ok
+              {:ok, _other} -> {:error, :static_receipt_conflict}
+              {:error, _reason} -> {:error, :write_static_receipt_failed}
+            end
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :static_receipt_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_static_receipt_file}
+
+      {:error, _reason} ->
+        {:error, :write_static_receipt_failed}
+    end
+  end
+
+  defp write_engine_static_receipt_new(path, content, generation_root) do
+    temporary_path = temporary_path(path)
+
+    publication =
+      try do
+        digest = Path.basename(path, ".json")
+
+        with :ok <- validate_engine_static_receipt_path(generation_root, path, digest),
+             {:ok, %File.Stat{type: :directory}} <- File.lstat(generation_root),
+             :ok <- write_secure_temp(temporary_path, content),
+             :ok <- maybe_wait_for_static_receipt_publication(:before_static_receipt_link),
+             :ok <- File.ln(temporary_path, path) do
+          :published
+        else
+          {:error, :eexist} -> :existing
+          {:error, _reason} -> {:error, :write_static_receipt_failed}
+          _other -> {:error, :write_static_receipt_failed}
+        end
+      after
+        File.rm(temporary_path)
+      end
+
+    case publication do
+      :published -> :ok
+      :existing -> write_engine_static_receipt_once(path, content, generation_root)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp verify_published_engine_static_receipt(base_root, task_id, expected_digest) do
+    case read_cross_app_static_receipt(base_root, task_id, expected_digest) do
+      {:ok, %{"descriptor" => descriptor}} ->
+        {:ok, descriptor}
+
+      {:error, :cross_app_static_receipt_unavailable} ->
+        {:error, :static_receipt_verification_failed}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp load_and_admit_engine_static_receipt(base_root, task_id, expected_digest) do
+    with {:ok, base_root} <- normalize_compilation_base(base_root),
+         {:ok, task_root} <- compilation_task_root(base_root, task_id),
+         {:ok, generation_root} <-
+           SafePath.safe_join(task_root, @engine_static_receipt_directory),
+         {:ok, canonical_root} <- SafePath.resolve_real(generation_root),
+         true <-
+           canonical_root == generation_root and SafePath.within?(canonical_root, task_root),
+         path = engine_static_receipt_path(generation_root, expected_digest),
+         :ok <- validate_engine_static_receipt_path(generation_root, path, expected_digest),
+         {:ok, max_bytes} <- static_receipt_max_json_bytes(),
+         {:ok, encoded} <- read_static_receipt_file(path, generation_root, max_bytes),
+         {:ok, decoded} <- Jason.decode(encoded),
+         {:ok, admitted} <-
+           Actions.coding_cross_app_continuation_static_receipt_admit(decoded),
+         {:ok, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+         {:ok, canonical} <- encode_compact_canonical_json(admitted, :static_receipt),
+         true <- canonical === encoded do
+      {:ok, encoded, admitted, digest}
+    else
+      false -> {:error, :cross_app_static_receipt_unavailable}
+      {:error, _reason} = error -> error
+      _other -> {:error, :cross_app_static_receipt_unavailable}
+    end
   end
 
   defp atomic_write(path, content) do

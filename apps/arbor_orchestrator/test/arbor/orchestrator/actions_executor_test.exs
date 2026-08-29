@@ -329,6 +329,153 @@ defmodule Arbor.Orchestrator.ActionsExecutorTest do
       refute Map.has_key?(file_context, :design_artifact_sink)
       refute Map.has_key?(file_context, :design_artifact_source)
     end
+
+    test "missing CrossApp static-receipt MFA becomes a process-local boundary error" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      tracer = self()
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_cross_app_validate",
+          %{"workspace_id" => "ws_test"},
+          "."
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Coding.CrossApp.Validate,
+                         params,
+                         context
+                       ]}}
+
+      assert context.cross_app_static_receipt_boundary_error ==
+               :invalid_trusted_cross_app_static_receipt_boundary
+
+      refute Map.has_key?(context, :cross_app_static_receipt_sink)
+      refute Map.has_key?(context, :cross_app_static_receipt_source)
+      refute Map.has_key?(params, :cross_app_static_receipt_sink)
+      refute Map.has_key?(params, "cross_app_static_receipt_sink")
+      refute Map.has_key?(params, :cross_app_static_receipt_source)
+      refute Map.has_key?(params, "cross_app_static_receipt_source")
+      refute Map.has_key?(params, :cross_app_static_receipt_boundary_error)
+      refute Map.has_key?(params, "cross_app_static_receipt_boundary_error")
+    end
+
+    test "malformed CrossApp static-receipt MFA becomes a process-local boundary error" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      tracer = self()
+      malformed = %{callback: fn -> :unsafe end}
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_cross_app_validate",
+          %{"workspace_id" => "ws_test"},
+          ".",
+          cross_app_static_receipt_sink: malformed,
+          cross_app_static_receipt_source: malformed
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Coding.CrossApp.Validate,
+                         params,
+                         context
+                       ]}}
+
+      assert context.cross_app_static_receipt_boundary_error ==
+               :invalid_trusted_cross_app_static_receipt_boundary
+
+      refute Map.has_key?(context, :cross_app_static_receipt_sink)
+      refute Map.has_key?(context, :cross_app_static_receipt_source)
+      refute Map.has_key?(params, :cross_app_static_receipt_sink)
+      refute Map.has_key?(params, "cross_app_static_receipt_sink")
+      refute inspect(params) =~ "callback"
+    end
+
+    test "valid CrossApp static-receipt MFA stays process-local and off params" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      tracer = self()
+      sink = {__MODULE__, :archive_receipt, ["/tmp", "task-test"]}
+      source = {__MODULE__, :read_receipt, ["/tmp", "task-test"]}
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "coding_cross_app_validate",
+          %{"workspace_id" => "ws_test"},
+          ".",
+          cross_app_static_receipt_sink: sink,
+          cross_app_static_receipt_source: source
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [
+                         _agent_id,
+                         Arbor.Actions.Coding.CrossApp.Validate,
+                         params,
+                         context
+                       ]}}
+
+      assert context.cross_app_static_receipt_sink == sink
+      assert context.cross_app_static_receipt_source == source
+      refute Map.has_key?(context, :cross_app_static_receipt_boundary_error)
+      refute Map.has_key?(params, :cross_app_static_receipt_sink)
+      refute Map.has_key?(params, "cross_app_static_receipt_sink")
+      refute Map.has_key?(params, :cross_app_static_receipt_source)
+      refute Map.has_key?(params, "cross_app_static_receipt_source")
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "file.read",
+          %{"path" => "mix.exs"},
+          ".",
+          cross_app_static_receipt_sink: sink,
+          cross_app_static_receipt_source: source
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, file_context]}}
+
+      refute Map.has_key?(file_context, :cross_app_static_receipt_sink)
+      refute Map.has_key?(file_context, :cross_app_static_receipt_source)
+      refute Map.has_key?(file_context, :cross_app_static_receipt_boundary_error)
+    end
   end
 
   describe "normalize_name/1" do

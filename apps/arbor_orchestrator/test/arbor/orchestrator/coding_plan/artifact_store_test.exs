@@ -2486,6 +2486,103 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert envelope["descriptor"] == descriptor
   end
 
+  test "engine-native static receipts are digest-keyed generations under a store-owned directory",
+       %{base: base} do
+    File.mkdir_p!(base)
+    first = static_receipt_bundle(excerpt: "")
+    second = static_receipt_bundle(excerpt: "gen-two")
+    assert first.task_id == second.task_id
+    refute first.digest == second.digest
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_cross_app_static_receipt(
+               base,
+               first.task_id,
+               first.digest,
+               first.receipt
+             )
+
+    assert descriptor["task_id"] == first.task_id
+    assert descriptor["digest"] == first.digest
+    refute Map.has_key?(descriptor, "path")
+    refute Map.has_key?(descriptor, "continuation_id")
+
+    generation_root =
+      Path.join(compilation_task_root(base, first.task_id), "coding-cross-app-static-receipts")
+
+    path = Path.join(generation_root, first.digest <> ".json")
+    assert Path.basename(path) == first.digest <> ".json"
+    assert {:ok, %File.Stat{type: :regular, mode: mode, links: 1}} = File.lstat(path)
+    assert (mode &&& 0o777) == 0o600
+
+    assert {:ok, ^descriptor} =
+             ArtifactStore.archive_cross_app_static_receipt(
+               base,
+               first.task_id,
+               first.digest,
+               first.receipt
+             )
+
+    assert {:ok, second_descriptor} =
+             ArtifactStore.archive_cross_app_static_receipt(
+               base,
+               second.task_id,
+               second.digest,
+               second.receipt
+             )
+
+    assert second_descriptor["digest"] == second.digest
+    assert File.exists?(Path.join(generation_root, first.digest <> ".json"))
+    assert File.exists?(Path.join(generation_root, second.digest <> ".json"))
+
+    assert {:ok, envelope} =
+             ArtifactStore.read_cross_app_static_receipt(base, first.task_id, first.digest)
+
+    assert envelope["receipt"] == first.receipt
+    assert envelope["descriptor"]["digest"] == first.digest
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_static_receipt(
+               base,
+               first.task_id,
+               String.duplicate("e", 64)
+             )
+  end
+
+  test "engine-native static receipt generation cap fails closed without clobbering", %{
+    base: base
+  } do
+    File.mkdir_p!(base)
+    task_id = "task_static_receipt_cap"
+
+    for n <- 1..8 do
+      bundle = static_receipt_bundle(task_id: task_id, excerpt: "gen-#{n}")
+
+      assert {:ok, _descriptor} =
+               ArtifactStore.archive_cross_app_static_receipt(
+                 base,
+                 task_id,
+                 bundle.digest,
+                 bundle.receipt
+               )
+    end
+
+    extra = static_receipt_bundle(task_id: task_id, excerpt: "gen-overflow")
+
+    assert {:error, :static_receipt_generation_limit} =
+             ArtifactStore.archive_cross_app_static_receipt(
+               base,
+               task_id,
+               extra.digest,
+               extra.receipt
+             )
+
+    generation_root =
+      Path.join(compilation_task_root(base, task_id), "coding-cross-app-static-receipts")
+
+    assert length(File.ls!(generation_root)) == 8
+  end
+
   defp plan_fixture do
     %{
       "version" => 1,

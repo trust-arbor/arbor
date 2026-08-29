@@ -208,6 +208,77 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerExecutionIdTest do
     assert {:ok, _json} = Jason.encode(outcome.context_updates)
   end
 
+  test "forwards trusted CrossApp static-receipt boundaries only as process-local executor opts" do
+    sink =
+      {Arbor.Orchestrator.CodingPlan.ArtifactStore, :archive_cross_app_static_receipt,
+       ["/tmp", "t"]}
+
+    source =
+      {Arbor.Orchestrator.CodingPlan.ArtifactStore, :read_cross_app_static_receipt, ["/tmp", "t"]}
+
+    node =
+      action_node(%{
+        "action" => "coding_cross_app_validate",
+        "arg.workspace_id" => "ws_test"
+      })
+
+    outcome =
+      ExecHandler.execute(
+        node,
+        Context.new(),
+        graph(),
+        base_opts(cross_app_static_receipt_sink: sink, cross_app_static_receipt_source: source)
+      )
+
+    assert outcome.status == :success
+
+    assert_received {:stub_execute, "coding_cross_app_validate", args, _workdir, executor_opts}
+
+    assert Keyword.fetch!(executor_opts, :cross_app_static_receipt_sink) == sink
+    assert Keyword.fetch!(executor_opts, :cross_app_static_receipt_source) == source
+    refute Map.has_key?(args, "cross_app_static_receipt_sink")
+    refute Map.has_key?(args, "cross_app_static_receipt_source")
+    refute Map.has_key?(args, "cross_app_static_receipt_boundary_error")
+    refute Map.has_key?(outcome.context_updates, "cross_app_static_receipt_sink")
+    refute Map.has_key?(outcome.context_updates, "cross_app_static_receipt_source")
+    refute Map.has_key?(outcome.context_updates, "cross_app_static_receipt_boundary_error")
+    assert {:ok, _json} = Jason.encode(outcome.context_updates)
+  end
+
+  test "malformed CrossApp static-receipt boundary becomes a bounded process-local sentinel" do
+    node =
+      action_node(%{
+        "action" => "coding_cross_app_validate",
+        "arg.workspace_id" => "ws_test"
+      })
+
+    outcome =
+      ExecHandler.execute(
+        node,
+        Context.new(),
+        graph(),
+        base_opts(
+          cross_app_static_receipt_sink: %{callback: fn -> :unsafe end},
+          cross_app_static_receipt_source: %{callback: fn -> :unsafe end}
+        )
+      )
+
+    assert outcome.status == :success
+
+    assert_received {:stub_execute, "coding_cross_app_validate", args, _workdir, executor_opts}
+
+    assert Keyword.fetch!(executor_opts, :cross_app_static_receipt_boundary_error) ==
+             :invalid_trusted_cross_app_static_receipt_boundary
+
+    refute Keyword.has_key?(executor_opts, :cross_app_static_receipt_sink)
+    refute Keyword.has_key?(executor_opts, :cross_app_static_receipt_source)
+    refute Map.has_key?(args, "cross_app_static_receipt_sink")
+    refute Map.has_key?(args, "cross_app_static_receipt_source")
+    refute Map.has_key?(args, "cross_app_static_receipt_boundary_error")
+    refute inspect(outcome.context_updates) =~ "callback"
+    assert {:ok, _json} = Jason.encode(outcome.context_updates)
+  end
+
   test "security regression: malformed sink fails through ExecHandler and ActionsExecutor" do
     for module <- [
           Arbor.Security.Identity.Registry,

@@ -10,6 +10,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Shell
+  alias Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary
   alias Arbor.Actions.Coding.CrossApp.Validate
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
@@ -935,6 +936,118 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute Jason.encode!(progress) =~ "apps/"
   end
 
+  test "seed window with trusted MFA runs static stages then first original batches", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    context = seed_context(fixture.context, bundle)
+    assert StaticReceiptBoundary.state(context) == :ready
+
+    assert {:ok, observation} = Validate.run(bundle.params, context)
+    assert observation["disposition_type"] in ["capacity_handoff", "completed"]
+    assert is_map(observation["progress"])
+    assert is_map(observation["progress_binding"])
+
+    digest = observation["progress_binding"]["static_stage_receipt_digest"]
+    assert is_binary(digest) and byte_size(digest) == 64
+
+    assert_receive {:mix, compile_args}
+    assert hd(compile_args) == "compile"
+  end
+
+  test "ordinary absence with no static-receipt boundary signal still runs Mix", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    assert StaticReceiptBoundary.state(fixture.context) == :absent
+    assert StaticReceiptBoundary.state(%{}) == :absent
+    assert StaticReceiptBoundary.state(nil) == :absent
+
+    assert {:ok, ordinary} =
+             Validate.run(%{workspace_id: fixture.lease.workspace_id}, fixture.context)
+
+    assert ordinary.passed
+    assert_receive {:mix, ["compile", "--warnings-as-errors"]}
+    assert_receive {:mix, ["xref", "graph", "--no-deps-check"]}
+    assert_receive {:mix, ["compile", "--warnings-as-errors"]}
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "invalid initial static-receipt boundary fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    invalid_contexts = [
+      Map.put(
+        fixture.context,
+        :cross_app_static_receipt_boundary_error,
+        :invalid_trusted_cross_app_static_receipt_boundary
+      ),
+      Map.put(
+        fixture.context,
+        "cross_app_static_receipt_boundary_error",
+        :invalid_trusted_cross_app_static_receipt_boundary
+      ),
+      Map.put(
+        fixture.context,
+        :cross_app_static_receipt_sink,
+        {__MODULE__.FakeReceiptStore, :archive, []}
+      ),
+      Map.put(
+        fixture.context,
+        :cross_app_static_receipt_source,
+        {__MODULE__.FakeReceiptStore, :read, []}
+      ),
+      Map.put(fixture.context, :cross_app_static_receipt_sink, {:not_a_module, "archive", []}),
+      Map.put(fixture.context, :cross_app_static_receipt_sink, nil),
+      Map.put(fixture.context, "cross_app_static_receipt_source", nil),
+      fixture.context
+      |> Map.put(:cross_app_static_receipt_sink, {__MODULE__.FakeReceiptStore, :archive, []})
+      |> Map.put(:cross_app_static_receipt_source, {__MODULE__.FakeReceiptStore, :read, []})
+      |> Map.put(
+        :cross_app_static_receipt_boundary_error,
+        :invalid_trusted_cross_app_static_receipt_boundary
+      ),
+      fixture.context
+      |> Map.put("cross_app_progress", "")
+      |> Map.put("cross_app_progress_binding", "")
+      |> Map.put(
+        :cross_app_static_receipt_boundary_error,
+        :invalid_trusted_cross_app_static_receipt_boundary
+      )
+    ]
+
+    Enum.each(invalid_contexts, fn context ->
+      assert StaticReceiptBoundary.state(context) == :invalid
+
+      assert {:error, :invalid_trusted_cross_app_static_receipt_boundary} =
+               Validate.run(bundle.params, context)
+    end)
+
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
   test "progress window starts at first missing original batch and returns a token-free observation",
        %{tmp_dir: tmp_dir} do
     fixture = continuation_fixture(tmp_dir)
@@ -946,14 +1059,13 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       successful_mix()
     end)
 
-    context =
-      fixture.context
-      |> Map.put("cross_app_progress", bundle.progress)
-      |> Map.put("cross_app_progress_binding", bundle.binding)
+    context = window_context(fixture.context, bundle)
 
     assert {:ok, observation} = Validate.run(bundle.params, context)
     assert observation["schema_version"] == 1
-    assert observation["disposition"] == %{"type" => "completed"}
+    assert observation["disposition_type"] == "completed"
+    assert observation["progress_status"] == "completed"
+    assert observation["passed"] == true
     refute Map.has_key?(observation, "new_receipts")
     assert observation["progress"]["status"] == "completed"
     assert observation["progress"]["next_batch_index"] == 3
@@ -969,7 +1081,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute encoded =~ "capability"
     refute encoded =~ "credential"
     refute Map.has_key?(observation, "continuation_id")
-    refute Map.has_key?(observation, "passed")
+    refute encoded =~ "fence_token"
   end
 
   test "returned capacity progress is admitted by the next window at the next original batch",
@@ -991,16 +1103,13 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       successful_mix()
     end)
 
-    context =
-      fixture.context
-      |> Map.put("cross_app_progress", bundle.progress)
-      |> Map.put("cross_app_progress_binding", bundle.binding)
+    context = window_context(fixture.context, bundle)
 
     assert {:ok, first} = Validate.run(bundle.params, context)
-    assert first["disposition"] == %{"type" => "capacity_handoff"}
+    assert first["disposition_type"] == "capacity_handoff"
+    assert first["progress_status"] == "in_progress"
+    refute Map.has_key?(first, "passed")
     refute Map.has_key?(first, "new_receipts")
-    refute Map.has_key?(first["disposition"], "capacity")
-    refute Map.has_key?(first["disposition"], "capacity_handoff")
     assert first["progress"]["status"] == "in_progress"
     assert first["progress"]["next_batch_index"] == 2
     assert first["progress"]["completed_batch_count"] == 1
@@ -1014,7 +1123,8 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
     next_context = Map.put(context, "cross_app_progress", first["progress"])
     assert {:ok, second} = Validate.run(bundle.params, next_context)
-    assert second["disposition"] == %{"type" => "completed"}
+    assert second["disposition_type"] == "completed"
+    assert second["passed"] == true
     assert second["progress"]["status"] == "completed"
     assert second["progress"]["next_batch_index"] == 3
     refute Map.has_key?(second, "new_receipts")
@@ -1036,9 +1146,121 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       successful_mix()
     end)
 
-    context = Map.put(fixture.context, "cross_app_progress", bundle.progress)
+    context =
+      fixture.context
+      |> Map.put("cross_app_progress", bundle.progress)
+      |> Map.put(:cross_app_static_receipt_sink, {__MODULE__.FakeReceiptStore, :archive, []})
+      |> Map.put(:cross_app_static_receipt_source, {__MODULE__.FakeReceiptStore, :read, []})
 
     assert {:error, :missing_progress_binding} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "progress without trusted receipt MFA fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context =
+      fixture.context
+      |> Map.put("cross_app_progress", bundle.progress)
+      |> Map.put("cross_app_progress_binding", bundle.binding)
+
+    assert {:error, :invalid_trusted_cross_app_static_receipt_boundary} =
+             Validate.run(bundle.params, context)
+
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "malformed static receipt source payload fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context = window_context(fixture.context, bundle)
+
+    __MODULE__.FakeReceiptStore.put_read(bundle.binding["static_stage_receipt_digest"], %{
+      "schema_version" => 1,
+      "digest" => bundle.binding["static_stage_receipt_digest"]
+    })
+
+    assert {:error, :malformed_envelope} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "wrong static receipt digest fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    other_identities =
+      Map.put(bundle.identities, "toolchain_digest", String.duplicate("e", 64))
+
+    {:ok, other_receipt, other_digest} =
+      ContinuationExecutionCore.new_static_stage_receipt(
+        other_identities,
+        successful_static_checks()
+      )
+
+    refute other_digest == bundle.binding["static_stage_receipt_digest"]
+
+    context = window_context(fixture.context, bundle)
+
+    __MODULE__.FakeReceiptStore.put_read(
+      bundle.binding["static_stage_receipt_digest"],
+      other_receipt
+    )
+
+    assert {:error, :static_receipt_drift} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "old candidate identity static receipt fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    stale_tree = String.duplicate("e", byte_size(bundle.identities["candidate_tree_oid"]))
+    refute stale_tree == bundle.identities["candidate_tree_oid"]
+
+    stale_identities = Map.put(bundle.identities, "candidate_tree_oid", stale_tree)
+
+    {:ok, stale_receipt, stale_digest} =
+      ContinuationExecutionCore.new_static_stage_receipt(
+        stale_identities,
+        successful_static_checks()
+      )
+
+    stale_bundle =
+      bundle
+      |> Map.put(:receipt, stale_receipt)
+      |> Map.put(:identities, stale_identities)
+      |> Map.update!(:binding, &Map.put(&1, "static_stage_receipt_digest", stale_digest))
+      |> Map.update!(:progress, &Map.put(&1, "static_stage_receipt_digest", stale_digest))
+
+    context = window_context(fixture.context, stale_bundle)
+
+    assert {:error, :identity_drift} = Validate.run(bundle.params, context)
     refute_receive {:unexpected_mix, _}, 25
   end
 
@@ -1053,6 +1275,24 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     end)
 
     context = Map.put(fixture.context, "cross_app_progress_binding", bundle.binding)
+
+    assert {:error, :missing_progress} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "stale compiler binding without progress fails closed before seed Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context =
+      seed_context(fixture.context, bundle)
+      |> Map.put("cross_app_progress_binding", bundle.binding)
 
     assert {:error, :missing_progress} = Validate.run(bundle.params, context)
     refute_receive {:unexpected_mix, _}, 25
@@ -1710,7 +1950,19 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   defp progress_window_bundle(fixture, opts) do
     base = continuation_bundle(fixture, opts)
     accepted_count = Keyword.get(opts, :accepted_count, 0)
-    static_digest = String.duplicate("d", 64)
+
+    identities =
+      base.identities
+      |> Map.put("work_packet_digest", "sha256:" <> String.duplicate("1", 64))
+      |> Map.put("toolchain_digest", String.duplicate("2", 64))
+      |> Map.put("dependency_baseline_digest", String.duplicate("3", 64))
+      |> Map.put("wrapper_digest", String.duplicate("4", 64))
+
+    {:ok, receipt, static_digest} =
+      ContinuationExecutionCore.new_static_stage_receipt(
+        identities,
+        successful_static_checks()
+      )
 
     binding = %{
       "work_packet_digest" => "sha256:" <> String.duplicate("1", 64),
@@ -1719,13 +1971,6 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       "wrapper_digest" => String.duplicate("4", 64),
       "static_stage_receipt_digest" => static_digest
     }
-
-    identities =
-      base.identities
-      |> Map.put("work_packet_digest", "sha256:" <> String.duplicate("1", 64))
-      |> Map.put("toolchain_digest", String.duplicate("2", 64))
-      |> Map.put("dependency_baseline_digest", String.duplicate("3", 64))
-      |> Map.put("wrapper_digest", String.duplicate("4", 64))
 
     bindings = %{
       "identities" => identities,
@@ -1778,8 +2023,104 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     Map.merge(base, %{
       progress: progress,
       binding: binding,
-      identities: identities
+      identities: identities,
+      receipt: receipt
     })
+  end
+
+  defp seed_context(context, bundle) do
+    trusted_seed_context(context, bundle)
+  end
+
+  defp window_context(context, bundle) do
+    context
+    |> trusted_seed_context(bundle)
+    |> Map.put("cross_app_progress", bundle.progress)
+    |> Map.put("cross_app_progress_binding", bundle.binding)
+  end
+
+  defp trusted_seed_context(context, bundle) do
+    frozen = Map.take(bundle.binding, ~w(
+      work_packet_digest
+      toolchain_digest
+      wrapper_digest
+      dependency_baseline_digest
+    ))
+
+    Application.put_env(:arbor_actions, :cross_app_frozen_binding_observer, fn _ctx ->
+      {:ok, frozen}
+    end)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_actions, :cross_app_frozen_binding_observer)
+    end)
+
+    if receipt = Map.get(bundle, :receipt) do
+      __MODULE__.FakeReceiptStore.put(bundle.binding["static_stage_receipt_digest"], receipt)
+    end
+
+    context
+    |> Map.put("coding_plan_work_packet_digest", bundle.binding["work_packet_digest"])
+    |> Map.put(:cross_app_static_receipt_sink, {__MODULE__.FakeReceiptStore, :archive, []})
+    |> Map.put(:cross_app_static_receipt_source, {__MODULE__.FakeReceiptStore, :read, []})
+  end
+
+  defmodule FakeReceiptStore do
+    @moduledoc false
+
+    @store_key {__MODULE__, :store}
+    @read_override_key {__MODULE__, :read_overrides}
+
+    def archive(digest, receipt) when is_binary(digest) and is_map(receipt) do
+      put(digest, receipt)
+
+      {:ok,
+       %{
+         "schema_version" => 1,
+         "task_id" => "task_progress_g1",
+         "digest" => digest,
+         "byte_size" => 1
+       }}
+    end
+
+    def read(digest) when is_binary(digest) do
+      case override(digest) do
+        {:ok, payload} ->
+          {:ok, payload}
+
+        :error ->
+          case store_get(digest) do
+            {:ok, receipt} -> {:ok, %{"receipt" => receipt}}
+            :error -> {:error, :cross_app_static_receipt_unavailable}
+          end
+      end
+    end
+
+    def put(digest, receipt) when is_binary(digest) and is_map(receipt) do
+      store = Process.get(@store_key, %{})
+      Process.put(@store_key, Map.put(store, digest, receipt))
+      :ok
+    end
+
+    def put_read(digest, payload) when is_binary(digest) do
+      overrides = Process.get(@read_override_key, %{})
+      Process.put(@read_override_key, Map.put(overrides, digest, payload))
+      :ok
+    end
+
+    defp override(digest) do
+      case Process.get(@read_override_key, %{}) do
+        %{^digest => payload} -> {:ok, payload}
+        _other -> :error
+      end
+    end
+
+    defp store_get(digest) do
+      case Process.get(@store_key, %{}) do
+        %{^digest => receipt} -> {:ok, receipt}
+        _other -> :error
+      end
+    end
   end
 
   defp progress_v3_handoff(planned, completed, interrupted, unstarted, phase, per_batch) do

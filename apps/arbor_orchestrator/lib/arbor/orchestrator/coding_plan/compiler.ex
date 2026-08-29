@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
+  alias Arbor.Orchestrator.Graph.Edge
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.IR.HandlerSchema
@@ -63,6 +64,19 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     snapshot_validation_prior_commit
   ]
   @security_dormant_seed_condition "0=1"
+  @cross_app_dormant_nodes ~w[
+    clear_cross_app_progress
+    clear_cross_app_progress_binding
+    error_cross_app_window_invalid
+    hoist_cross_app_progress
+    hoist_cross_app_progress_binding
+    route_cross_app_window
+  ]
+  @cross_app_dormant_roots @cross_app_dormant_nodes
+  @cross_app_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+  @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
+  @cross_app_legacy_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff"
+  @cross_app_domain_failure_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
   @design_checkpoint_seed_condition "context.coding_plan_version=2&&context.coding_plan_checkpoint_policy=design_required"
   @allowed_options [:template_path, :template_source, :action_catalog]
   @static_schema_types ~w(string boolean integer number array object)
@@ -582,15 +596,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp rewrite_profile_flow(graph, %Plan{validation_profile: "default"}) do
-    drop_security_dormant_nodes(graph)
+    with {:ok, graph} <- drop_security_dormant_nodes(graph) do
+      drop_cross_app_dormant_nodes(graph)
+    end
   end
 
   defp rewrite_profile_flow(graph, %Plan{validation_profile: "cross_app"}) do
-    drop_security_dormant_nodes(graph)
+    with {:ok, graph} <- drop_security_dormant_nodes(graph) do
+      activate_cross_app_window_loop(graph)
+    end
   end
 
   defp rewrite_profile_flow(graph, %Plan{validation_profile: "contract_change"}) do
-    drop_security_dormant_nodes(graph)
+    with {:ok, graph} <- drop_security_dormant_nodes(graph) do
+      drop_cross_app_dormant_nodes(graph)
+    end
   end
 
   defp rewrite_profile_flow(
@@ -689,11 +709,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            end) do
       # adopt_head_commit was removed: clean self-commit adoption is performed
       # inside coding_reviewed_commit so rework cannot bypass a fresh gate.
-      remove_replaced_status_node(
-        graph,
-        "prep_validation_path",
-        "capture_validation_workspace"
-      )
+      with {:ok, graph} <-
+             remove_replaced_status_node(
+               graph,
+               "prep_validation_path",
+               "capture_validation_workspace"
+             ) do
+        drop_cross_app_dormant_nodes(graph)
+      end
     end
   end
 
@@ -1337,6 +1360,142 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         "route_security_attested_auto",
         "context.review.tier_decision=auto_proceed"
       )
+    end
+  end
+
+  defp activate_cross_app_window_loop(%Graph{} = graph) do
+    with {:ok, graph} <- remove_cross_app_dormant_seed_edges(graph),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_validation_interaction",
+             "status_validation_capacity_exceeded",
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded",
+             "status_validation_capacity_exceeded",
+             @cross_app_legacy_capacity_condition
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_validation_interaction",
+             "check_validation_passed",
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded",
+             "check_validation_passed",
+             @cross_app_completed_condition
+           ),
+         {:ok, graph} <-
+           add_conditional_edge(
+             graph,
+             "route_validation_interaction",
+             "route_cross_app_window",
+             @cross_app_capacity_condition
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_cross_app_window",
+             "hoist_cross_app_progress",
+             nil,
+             "hoist_cross_app_progress",
+             @cross_app_capacity_condition
+           ),
+         {:ok, graph} <-
+           add_unconditional_edge(
+             graph,
+             "route_cross_app_window",
+             "error_cross_app_window_invalid"
+           ),
+         {:ok, graph} <-
+           add_conditional_edge(
+             graph,
+             "route_validation_interaction",
+             "check_validation_passed",
+             @cross_app_domain_failure_condition
+           ),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "build_validation_rework_prompt",
+             "capture_pre_turn_workspace",
+             "clear_cross_app_progress"
+           ),
+         {:ok, graph} <-
+           add_unconditional_edge(
+             graph,
+             "clear_cross_app_progress_binding",
+             "capture_pre_turn_workspace"
+           ) do
+      {:ok, graph}
+    end
+  end
+
+  defp drop_cross_app_dormant_nodes(%Graph{} = graph) do
+    missing = Enum.reject(@cross_app_dormant_nodes, &Map.has_key?(graph.nodes, &1))
+
+    if missing == [] do
+      drop_ids = MapSet.new(@cross_app_dormant_nodes)
+
+      nodes = Map.drop(graph.nodes, @cross_app_dormant_nodes)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          MapSet.member?(drop_ids, edge.from) or MapSet.member?(drop_ids, edge.to)
+        end)
+
+      {:ok, %{graph | nodes: nodes, edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:missing_template_nodes, Enum.sort(missing)}}
+    end
+  end
+
+  defp remove_cross_app_dormant_seed_edges(%Graph{} = graph) do
+    counts =
+      Map.new(@cross_app_dormant_roots, fn root ->
+        count =
+          Enum.count(graph.edges, fn edge ->
+            edge.from == "start" and edge.to == root and
+              Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+          end)
+
+        {root, count}
+      end)
+
+    unexpected = Enum.reject(counts, fn {_root, count} -> count == 1 end)
+
+    if unexpected == [] do
+      roots = MapSet.new(@cross_app_dormant_roots)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          edge.from == "start" and MapSet.member?(roots, edge.to) and
+            Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:unexpected_cross_app_dormant_seed_edges, Enum.sort(unexpected)}}
+    end
+  end
+
+  defp add_conditional_edge(%Graph{} = graph, from, to, condition) do
+    add_graph_edge(graph, from, to, %{"condition" => condition})
+  end
+
+  defp add_unconditional_edge(%Graph{} = graph, from, to) do
+    add_graph_edge(graph, from, to, %{})
+  end
+
+  defp add_graph_edge(%Graph{} = graph, from, to, attrs) do
+    cond do
+      not Map.has_key?(graph.nodes, from) ->
+        {:error, {:missing_template_node, from}}
+
+      not Map.has_key?(graph.nodes, to) ->
+        {:error, {:missing_template_node, to}}
+
+      true ->
+        edge = Edge.from_attrs(from, to, attrs)
+        {:ok, %{Graph.add_edge(graph, edge) | adjacency: %{}, reverse_adjacency: %{}}}
     end
   end
 

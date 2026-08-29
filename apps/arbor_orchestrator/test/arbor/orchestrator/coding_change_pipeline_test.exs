@@ -963,7 +963,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :malformed_design_then_valid_repair,
                :oversized_design_then_bounded_repair,
                :protocol_repair_then_design_rework,
-               :design_streamed_duplicate_envelope
+               :design_streamed_duplicate_envelope,
+               :cross_app_capacity_then_complete,
+               :cross_app_capacity_then_domain_rework,
+               :cross_app_legacy_capacity_exceeded
              ] ->
           if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
 
@@ -1008,8 +1011,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
-    defp reviewed_validation_response(scenario, counters, state, _args) do
+    defp reviewed_validation_response(scenario, counters, state, args) do
       cond do
+        scenario in [:cross_app_capacity_then_complete, :cross_app_capacity_then_domain_rework] ->
+          n = Map.get(counters, :validate, 0)
+
+          Agent.update(state, fn s ->
+            %{s | counters: Map.put(s.counters, :validate, n + 1)}
+          end)
+
+          cross_app_window_response(scenario, n, args)
+
         scenario == :validation_approval_rework and Map.get(counters, :validate, 0) == 0 ->
           Agent.update(state, fn s ->
             %{s | counters: Map.put(s.counters, :validate, Map.get(s.counters, :validate, 0) + 1)}
@@ -1114,6 +1126,128 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       }
     end
 
+    @cross_app_generation_a String.duplicate("a", 64)
+    @cross_app_generation_b String.duplicate("b", 64)
+
+    defp cross_app_window_response(:cross_app_capacity_then_complete, 0, args) do
+      if seed_args?(args) do
+        {:ok, cross_app_capacity_envelope(2, @cross_app_generation_a)}
+      else
+        {:error, "first window was not a seed"}
+      end
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_complete, _n, args) do
+      if incoming_digest(args) == @cross_app_generation_a do
+        {:ok, cross_app_completed_envelope(@cross_app_generation_a)}
+      else
+        {:error, "capacity window reused a different static receipt generation"}
+      end
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_domain_rework, 0, args) do
+      if seed_args?(args) do
+        {:ok, cross_app_capacity_envelope(2, @cross_app_generation_a)}
+      else
+        {:error, "first window was not a seed"}
+      end
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_domain_rework, 1, args) do
+      if incoming_digest(args) == @cross_app_generation_a do
+        {:ok,
+         %{
+           interaction_outcome: "",
+           disposition_type: "failed",
+           passed: false,
+           reason: "tests_failed",
+           request_id: "",
+           note: ""
+         }}
+      else
+        {:error, "in-candidate window drifted from the seeded static receipt digest"}
+      end
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_domain_rework, _n, args) do
+      if seed_args?(args) do
+        {:ok, cross_app_completed_envelope(@cross_app_generation_b)}
+      else
+        {:error, "stale progress or binding reused after rework"}
+      end
+    end
+
+    defp seed_args?(args) do
+      present_window_arg(args, "cross_app_progress", :cross_app_progress) in [nil, ""] and
+        present_window_arg(args, "cross_app_progress_binding", :cross_app_progress_binding) in [
+          nil,
+          ""
+        ]
+    end
+
+    defp incoming_digest(args) do
+      binding =
+        present_window_arg(args, "cross_app_progress_binding", :cross_app_progress_binding)
+
+      cond do
+        is_map(binding) ->
+          binding["static_stage_receipt_digest"] || binding[:static_stage_receipt_digest]
+
+        true ->
+          nil
+      end
+    end
+
+    defp present_window_arg(args, string_key, atom_key) do
+      Map.get(args, string_key) || Map.get(args, atom_key)
+    end
+
+    defp cross_app_capacity_envelope(next_batch_index, digest) do
+      %{
+        interaction_outcome: "",
+        request_id: "",
+        note: "",
+        disposition_type: "capacity_handoff",
+        progress_status: "in_progress",
+        progress: %{
+          "schema_version" => 1,
+          "status" => "in_progress",
+          "next_batch_index" => next_batch_index,
+          "completed_batch_count" => next_batch_index - 1
+        },
+        progress_binding: cross_app_progress_binding(digest)
+      }
+    end
+
+    defp cross_app_completed_envelope(digest) do
+      %{
+        interaction_outcome: "",
+        request_id: "",
+        note: "",
+        disposition_type: "completed",
+        progress_status: "completed",
+        passed: true,
+        validated_tree_oid: String.duplicate("a", 40),
+        progress: %{
+          "schema_version" => 1,
+          "status" => "completed",
+          "next_batch_index" => 3,
+          "completed_batch_count" => 2
+        },
+        progress_binding: cross_app_progress_binding(digest)
+      }
+    end
+
+    defp cross_app_progress_binding(digest) do
+      %{
+        "work_packet_digest" => "sha256:" <> String.duplicate("c", 64),
+        "toolchain_digest" => String.duplicate("2", 64),
+        "wrapper_digest" => String.duplicate("4", 64),
+        "dependency_baseline_digest" => String.duplicate("3", 64),
+        "static_stage_receipt_digest" => digest
+      }
+    end
+
     defp validate_response(scenario, counters, state) do
       n = Map.get(counters, :validate, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :validate, n + 1)} end)
@@ -1122,7 +1256,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         :validation_hard_fail ->
           {:error, "mix compile crashed"}
 
-        :validation_capacity_exceeded ->
+        scenario
+        when scenario in [:validation_capacity_exceeded, :cross_app_legacy_capacity_exceeded] ->
           feedback = %{
             "exit_code" => 137,
             "passed" => false,
@@ -1713,6 +1848,42 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         right_value
       end
     end)
+  end
+
+  defp seed_window_args?(args) when is_map(args) do
+    progress = args["cross_app_progress"] || args[:cross_app_progress]
+    binding = args["cross_app_progress_binding"] || args[:cross_app_progress_binding]
+    progress in [nil, ""] and binding in [nil, ""]
+  end
+
+  defp assert_cross_app_progress_budget(context) when is_map(context) do
+    checkpoint_values =
+      [
+        "cross_app_progress",
+        "validation.progress",
+        "cross_app_progress_binding",
+        "validation.progress_binding"
+      ]
+      |> Enum.map(&Map.get(context, &1))
+      |> Enum.filter(&is_map/1)
+
+    encoded_snapshots =
+      Enum.map(checkpoint_values, fn snapshot ->
+        encoded = Jason.encode!(snapshot)
+        assert byte_size(encoded) <= 163_840
+        encoded
+      end)
+
+    combined = byte_size(Jason.encode!(encoded_snapshots))
+    assert combined <= 327_680
+
+    forbidden = ~w(authority authorization capability credential fence_token secret token)
+
+    refute Enum.any?(checkpoint_values, fn value ->
+             Enum.any?(Map.keys(value), fn key ->
+               Enum.any?(forbidden, &String.contains?(to_string(key), &1))
+             end)
+           end)
   end
 
   defp assert_json_clean_context(context) when is_map(context) do
@@ -2715,6 +2886,98 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert "close_worker" in result.completed_nodes
       assert_release_mode(calls, "retain")
       assert_closed_and_released(calls)
+    end
+
+    test "cross_app capacity loops to the next original batch without rework or close_worker" do
+      {{:ok, result}, calls, _plan, _compilation} =
+        run_compiled_v2_fixture(:cross_app_capacity_then_complete, "design_required", %{
+          "validation_profile" => "cross_app"
+        })
+
+      assert result.final_outcome.status in [:success, "success"] or
+               result.context["status"] == "change_committed"
+
+      validate_calls = action_calls(calls, "coding_reviewed_validation")
+      assert length(validate_calls) >= 2
+      first_args = Enum.at(validate_calls, 0)
+      second_args = Enum.at(validate_calls, 1)
+      assert seed_window_args?(first_args)
+      progress = second_args["cross_app_progress"] || second_args[:cross_app_progress]
+
+      binding =
+        second_args["cross_app_progress_binding"] || second_args[:cross_app_progress_binding]
+
+      assert is_map(progress)
+      assert is_map(binding)
+      assert progress["next_batch_index"] == 2
+      assert binding["static_stage_receipt_digest"] == String.duplicate("a", 64)
+
+      assert result.context["validation.progress_binding"]["static_stage_receipt_digest"] ==
+               binding["static_stage_receipt_digest"]
+
+      refute "inc_validation_rework_count" in result.completed_nodes
+      refute "inc_validation_total_rework_count" in result.completed_nodes
+      refute "build_validation_rework_prompt" in result.completed_nodes
+      assert_single_worker_session(calls, 2)
+      assert result.context["validation_rework_count"] in [nil, "0", 0]
+      assert result.context["total_rework_count"] in [nil, "0", 0]
+      assert called?(calls, "coding_reviewed_commit")
+      assert_cross_app_progress_budget(result.context)
+    end
+
+    test "cross_app legacy capacity envelope cannot enter continuation or domain rework" do
+      {{:ok, result}, calls, _plan, _compilation} =
+        run_compiled_v2_fixture(:cross_app_legacy_capacity_exceeded, "design_required", %{
+          "validation_profile" => "cross_app"
+        })
+
+      assert result.context["status"] == "validation_capacity_exceeded"
+      assert "status_validation_capacity_exceeded" in result.completed_nodes
+      refute "route_cross_app_window" in result.completed_nodes
+      refute "inc_validation_rework_count" in result.completed_nodes
+      refute "inc_validation_total_rework_count" in result.completed_nodes
+      refute "build_validation_rework_prompt" in result.completed_nodes
+      assert length(action_calls(calls, "coding_reviewed_validation")) == 1
+      refute called?(calls, "coding_reviewed_commit")
+      assert_release_mode(calls, "retain")
+      assert_closed_and_released(calls)
+    end
+
+    test "cross_app domain rework clears progress and reseeds instead of reusing the old receipt" do
+      {{:ok, result}, calls, _plan, _compilation} =
+        run_compiled_v2_fixture(
+          :cross_app_capacity_then_domain_rework,
+          "design_required",
+          %{
+            "validation_profile" => "cross_app"
+          }
+        )
+
+      validate_calls = action_calls(calls, "coding_reviewed_validation")
+      assert length(validate_calls) >= 3
+      first_args = Enum.at(validate_calls, 0)
+      second_args = Enum.at(validate_calls, 1)
+      third_args = Enum.at(validate_calls, 2)
+      assert seed_window_args?(first_args)
+
+      second_binding =
+        second_args["cross_app_progress_binding"] || second_args[:cross_app_progress_binding]
+
+      assert is_map(second_binding)
+      assert second_binding["static_stage_receipt_digest"] == String.duplicate("a", 64)
+      assert seed_window_args?(third_args)
+      assert "clear_cross_app_progress" in result.completed_nodes
+      assert "clear_cross_app_progress_binding" in result.completed_nodes
+      assert "build_validation_rework_prompt" in result.completed_nodes
+
+      assert result.context["validation.progress_binding"]["static_stage_receipt_digest"] ==
+               String.duplicate("b", 64)
+
+      refute result.context["validation.progress_binding"]["static_stage_receipt_digest"] ==
+               second_binding["static_stage_receipt_digest"]
+
+      assert_single_worker_session(calls, 3)
+      assert_cross_app_progress_budget(result.context)
     end
 
     test "repeated council rework exhausts only the review retry" do

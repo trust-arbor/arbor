@@ -855,6 +855,55 @@ defmodule Arbor.Actions do
     end
   end
 
+  @doc "SHA-256 digest of the reviewed Mix wrapper bytes. Never returns a path."
+  @spec coding_mix_wrapper_digest() ::
+          {:ok, String.t()} | {:error, :mix_wrapper_unavailable | :invalid_toolchain_identity}
+  def coding_mix_wrapper_digest do
+    with {:ok, wrapper_path} <- observe_mix_wrapper(),
+         {:ok, digest} <- hash_mix_wrapper(wrapper_path) do
+      {:ok, digest}
+    else
+      {:error, :mix_wrapper_unavailable} = error -> error
+      _ -> {:error, :invalid_toolchain_identity}
+    end
+  end
+
+  @doc "Pinned Linux mix.lock digest from the public Shell facade."
+  @spec coding_dependency_baseline_digest() ::
+          {:ok, String.t()} | {:error, :baseline_unavailable}
+  def coding_dependency_baseline_digest do
+    case Arbor.Shell.linux_dependency_baseline_mix_lock_digest() do
+      {:ok, digest} when is_binary(digest) ->
+        if Regex.match?(~r/\A[0-9a-f]{64}\z/, digest),
+          do: {:ok, digest},
+          else: {:error, :baseline_unavailable}
+
+      _other ->
+        {:error, :baseline_unavailable}
+    end
+  rescue
+    _ -> {:error, :baseline_unavailable}
+  catch
+    _, _ -> {:error, :baseline_unavailable}
+  end
+
+  defp hash_mix_wrapper(path) when is_binary(path) do
+    max_bytes = 1_048_576
+
+    with {:ok, %File.Stat{type: :regular, size: size}} <- File.lstat(path),
+         true <- is_integer(size) and size > 0 and size <= max_bytes,
+         {:ok, content} <- File.read(path),
+         true <- byte_size(content) == size do
+      {:ok, :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)}
+    else
+      _ -> {:error, :mix_wrapper_unavailable}
+    end
+  rescue
+    _ -> {:error, :mix_wrapper_unavailable}
+  catch
+    _, _ -> {:error, :mix_wrapper_unavailable}
+  end
+
   defp maybe_validation_runtime_probe(module, %{"state" => state})
        when state in ["pinned", "available"] do
     module.validation_runtime_readiness_probe()

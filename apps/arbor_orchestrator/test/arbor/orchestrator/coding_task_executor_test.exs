@@ -2554,6 +2554,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {ArtifactStore, :read_design_artifact, [^design_root, "task_abc"]} =
                opts[:design_artifact_source]
 
+      assert {ArtifactStore, :archive_cross_app_static_receipt, [^design_root, "task_abc"]} =
+               opts[:cross_app_static_receipt_sink]
+
+      assert {ArtifactStore, :read_cross_app_static_receipt, [^design_root, "task_abc"]} =
+               opts[:cross_app_static_receipt_source]
+
       assert design_root == opts[:logs_root]
       assert opts[:timeout] == 900_000
       # Compiled coding DOT runs pass the owner interaction wait as Engine

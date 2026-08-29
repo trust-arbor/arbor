@@ -327,11 +327,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 89_209
-    assert map_size(graph.nodes) == 253
-    assert length(graph.edges) == 367
+    assert byte_size(ctx.template_source) == 90_794
+    assert map_size(graph.nodes) == 259
+    assert length(graph.edges) == 378
     assert byte_size(ctx.template_source) <= 262_144
-    assert map_size(graph.nodes) <= 256
+    # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
+    # retain reviewed growth headroom while exact inventory remains pinned above.
+    assert map_size(graph.nodes) <= 320
     assert length(graph.edges) <= 512
   end
 
@@ -1281,6 +1283,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compilation.action_catalog_digest
 
     assert "coding_reviewed_validation" in compilation.manifest["action_names"]
+    refute Map.has_key?(graph.nodes, "route_cross_app_window")
+    refute Map.has_key?(graph.nodes, "hoist_cross_app_progress")
+    refute Map.has_key?(graph.nodes, "clear_cross_app_progress")
     # Nested validator is pin-transitive via execution_dependencies, not a graph node.
     refute "mix_compile" in compilation.manifest["action_names"]
     assert "council_review_change" in compilation.manifest["action_names"]
@@ -1641,7 +1646,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["action"] == "coding_reviewed_validation"
     assert validate["param.pinned_action"] == "coding_cross_app_validate"
     assert validate["param.pinned_profile_id"] == "cross_app"
-    assert validate["context_keys"] == "workspace_id"
+
+    assert validate["context_keys"] ==
+             "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest"
+
     refute Map.has_key?(validate, "param.warnings_as_errors")
     assert {:ok, pinned} = Jason.decode(validate["param.pinned_params_json"])
     # Intensive per-op max 1_200_000 and aggregate stage max 4_200_000, both min
@@ -1653,12 +1661,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["timeout_budget.param"] == "stage_timeout"
     refute Map.has_key?(validate, "param.timeout")
     refute Map.has_key?(validate, "param.test_stage_timeout")
+    refute Map.has_key?(validate, "param.cross_app_progress")
+    refute Map.has_key?(validate, "param.cross_app_progress_binding")
     refute validate["context_keys"] =~ "path"
     refute validate["context_keys"] =~ "test_paths"
     assert_validation_capture_topology(graph, "prep_validation_path")
 
     assert Map.has_key?(graph.nodes, "status_validation_capacity_exceeded")
     assert Map.has_key?(graph.nodes, "route_validation_interaction")
+    assert Map.has_key?(graph.nodes, "route_cross_app_window")
+    assert Map.has_key?(graph.nodes, "hoist_cross_app_progress")
+    assert Map.has_key?(graph.nodes, "clear_cross_app_progress")
 
     assert edge_condition(graph, "validate", "route_validation_interaction") == "outcome=success"
 
@@ -1667,10 +1680,54 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "route_validation_interaction",
              "status_validation_capacity_exceeded"
            ) ==
-             "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff"
 
-    assert edge_condition(graph, "route_validation_interaction", "check_validation_passed") ==
-             "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"
+    assert edge_target(
+             graph,
+             "route_validation_interaction",
+             "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+           ) == "route_cross_app_window"
+
+    assert edge_target(
+             graph,
+             "route_validation_interaction",
+             "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
+           ) == "check_validation_passed"
+
+    assert edge_target(
+             graph,
+             "route_validation_interaction",
+             "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
+           ) == "check_validation_passed"
+
+    assert edge_condition(graph, "route_cross_app_window", "hoist_cross_app_progress") ==
+             "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+
+    assert edge_target(graph, "route_cross_app_window", nil) ==
+             "error_cross_app_window_invalid"
+
+    assert edge_condition(graph, "hoist_cross_app_progress", "hoist_cross_app_progress_binding") ==
+             nil
+
+    assert edge_condition(graph, "hoist_cross_app_progress_binding", "validate") == nil
+
+    assert edge_condition(graph, "build_validation_rework_prompt", "clear_cross_app_progress") ==
+             nil
+
+    assert edge_condition(
+             graph,
+             "clear_cross_app_progress_binding",
+             "capture_pre_turn_workspace"
+           ) == nil
+
+    refute Enum.any?(graph.edges, fn edge ->
+             edge.from == "route_cross_app_window" and
+               edge.to in [
+                 "close_worker",
+                 "inc_validation_rework_count",
+                 "check_validation_category_budget"
+               ]
+           end)
 
     assert Enum.any?(graph.edges, fn edge ->
              edge.from == "status_validation_capacity_exceeded" and

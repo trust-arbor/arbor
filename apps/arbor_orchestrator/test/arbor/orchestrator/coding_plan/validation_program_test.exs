@@ -29,7 +29,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
            "profile_id" => "cross_app",
            "action" => "coding_cross_app_validate",
            "result_adapter" => "cross_app_v1",
-           "context_keys" => ["workspace_id"],
+           "context_keys" => [
+             "workspace_id",
+             "cross_app_progress",
+             "cross_app_progress_binding",
+             "coding_plan_work_packet_digest"
+           ],
            "static_parameters" => %{
              "stage_timeout" => 900_000,
              "test_stage_timeout" => 900_000,
@@ -274,7 +279,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         },
         "cross_app" => %{
           "action" => "coding_reviewed_validation",
-          "context_keys" => "workspace_id",
+          "context_keys" =>
+            "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest",
           "output_prefix" => "validation",
           "param.pinned_action" => "coding_cross_app_validate",
           "param.pinned_profile_id" => "cross_app"

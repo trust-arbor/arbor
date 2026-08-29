@@ -296,6 +296,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @default_required_actions @common_required_actions
   @security_required_actions @common_required_actions
   @cross_app_required_actions @common_required_actions
+  @cross_app_required_nodes Enum.sort(
+                              @default_required_nodes ++
+                                ~w[
+                                  clear_cross_app_progress
+                                  clear_cross_app_progress_binding
+                                  error_cross_app_window_invalid
+                                  hoist_cross_app_progress
+                                  hoist_cross_app_progress_binding
+                                  route_cross_app_window
+                                ]
+                            )
 
   # Closed, sorted action-placement contracts. Node identity pins exact
   # multiplicity; required_dominators / review_required_dominators /
@@ -1709,6 +1720,41 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "edges" => @review_convergence_edges
   }
 
+  @cross_app_review_convergence_policy @review_convergence_policy
+                                       |> update_in(
+                                         ["protected_writers"],
+                                         &Map.merge(&1, %{
+                                           "cross_app_progress" => [
+                                             "clear_cross_app_progress",
+                                             "hoist_cross_app_progress"
+                                           ],
+                                           "cross_app_progress_binding" => [
+                                             "clear_cross_app_progress_binding",
+                                             "hoist_cross_app_progress_binding"
+                                           ]
+                                         })
+                                       )
+                                       |> Map.put(
+                                         "edges",
+                                         @review_convergence_edges
+                                         |> Enum.reject(
+                                           &(&1 ==
+                                               [
+                                                 "build_validation_rework_prompt",
+                                                 "capture_pre_turn_workspace",
+                                                 nil
+                                               ])
+                                         )
+                                         |> Kernel.++([
+                                           [
+                                             "build_validation_rework_prompt",
+                                             "clear_cross_app_progress",
+                                             nil
+                                           ]
+                                         ])
+                                         |> Enum.sort()
+                                       )
+
   @security_review_convergence_policy %{
     "node_attrs" =>
       @review_convergence_node_attrs
@@ -2121,13 +2167,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "id" => "cross_app",
                 "executable" => true,
                 "template_version" => @template_version,
-                "required_nodes" => @default_required_nodes,
+                "required_nodes" => @cross_app_required_nodes,
                 "required_actions" => @cross_app_required_actions,
                 "validation_strategy" => %{
                   "action" => "coding_cross_app_validate",
                   "authority_parameter" => "workspace_id",
                   "authority_source" => "workspace_id",
-                  "context_keys" => ["workspace_id"],
+                  "context_keys" => [
+                    "workspace_id",
+                    "cross_app_progress",
+                    "cross_app_progress_binding",
+                    "coding_plan_work_packet_digest"
+                  ],
                   "result_adapter" => "cross_app_v1",
                   "static_parameters" => %{},
                   "timeout_budget_param" => "stage_timeout",
@@ -2148,6 +2199,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
                   @semantic_policy_base
+                  |> Map.put("review_convergence", @cross_app_review_convergence_policy)
                   |> Map.put("validation_profile", "cross_app")
                   |> Map.put("action_placements", @cross_app_action_placements)
                   |> Map.put(

@@ -72,6 +72,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   alias Arbor.Actions
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.Shell
+  alias Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary
 
   def taint_roles do
     %{
@@ -119,32 +120,54 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
            fetch_alias(context, "cross_app_progress", :cross_app_progress),
          {:ok, context_binding} <-
            fetch_alias(context, "cross_app_progress_binding", :cross_app_progress_binding) do
-      resolve_window(params, param_progress, param_binding, context_progress, context_binding)
+      resolve_window(
+        params,
+        context,
+        param_progress,
+        param_binding,
+        context_progress,
+        context_binding
+      )
     end
   end
 
-  defp resolve_window(params, param_progress, param_binding, context_progress, context_binding) do
-    progress =
-      cond do
-        not is_nil(context_progress) -> context_progress
-        not is_nil(param_progress) -> param_progress
-        true -> nil
-      end
+  defp resolve_window(
+         params,
+         context,
+         param_progress,
+         param_binding,
+         context_progress,
+         context_binding
+       ) do
+    progress = present_value(context_progress) || present_value(param_progress)
+    context_binding = present_value(context_binding)
+    param_binding = present_value(param_binding)
+    boundary = StaticReceiptBoundary.state(context)
 
     cond do
-      is_nil(progress) and is_nil(context_binding) and is_nil(param_binding) ->
+      conflict?(param_progress, context_progress) ->
+        {:error, :invalid_cross_app_input}
+
+      conflict?(param_binding, context_binding) ->
+        {:error, :invalid_cross_app_input}
+
+      is_nil(progress) and is_nil(context_binding) and is_nil(param_binding) and
+          boundary == :absent ->
         {:ok, params, :ordinary}
 
-      not is_nil(param_progress) and not is_nil(context_progress) and
-          param_progress !== context_progress ->
-        {:error, :invalid_cross_app_input}
+      is_nil(progress) and is_nil(context_binding) and is_nil(param_binding) and
+          boundary == :invalid ->
+        {:error, :invalid_trusted_cross_app_static_receipt_boundary}
 
-      not is_nil(param_binding) and not is_nil(context_binding) and
-          param_binding !== context_binding ->
-        {:error, :invalid_cross_app_input}
+      is_nil(progress) and is_nil(context_binding) and is_nil(param_binding) and
+          boundary == :ready ->
+        {:ok, params, :seed}
 
       is_nil(progress) ->
         {:error, :missing_progress}
+
+      boundary != :ready ->
+        {:error, :invalid_trusted_cross_app_static_receipt_boundary}
 
       is_nil(context_binding) ->
         {:error, :missing_progress_binding}
@@ -153,6 +176,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
         {:ok, params, {:window, progress, context_binding}}
     end
   end
+
+  defp conflict?(left, right) do
+    not is_nil(present_value(left)) and not is_nil(present_value(right)) and
+      present_value(left) !== present_value(right)
+  end
+
+  defp present_value(""), do: nil
+  defp present_value(nil), do: nil
+  defp present_value(value), do: value
 
   defp pop_alias(map, string_key, atom_key) do
     has_string = Map.has_key?(map, string_key)
@@ -186,14 +218,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   end
 
   defp result_passed(result) when is_map(result) do
-    case Map.get(result, :passed) do
-      value when is_boolean(value) -> value
-      _ -> get_in(result, ["disposition", "type"]) == "completed"
+    case Map.get(result, :passed, Map.get(result, "passed")) do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        Map.get(result, "disposition_type") == "completed" or
+          get_in(result, ["disposition", "type"]) == "completed"
     end
   end
 
   defp result_reason(result) when is_map(result) do
-    Map.get(result, :reason) || get_in(result, ["disposition", "reason"])
+    Map.get(result, :reason) || Map.get(result, "reason") ||
+      get_in(result, ["disposition", "reason"])
   end
 
   defp param(params, key) do

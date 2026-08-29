@@ -88,6 +88,26 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     }
   end
 
+  @doc "Project a stable validation failure into a domain result or terminal infrastructure error."
+  @spec project_failure(term()) :: {:ok, map()} | {:error, atom()}
+  def project_failure("validation_infrastructure_failed"),
+    do: {:error, :validation_infrastructure_failed}
+
+  def project_failure("validation_tree_mutated"), do: {:error, :validation_tree_mutated}
+  def project_failure("validation_stage_timeout"), do: {:error, :validation_stage_timeout}
+
+  def project_failure(reason) when is_binary(reason) do
+    {:ok,
+     %{
+       "schema_version" => 1,
+       "disposition_type" => "failed",
+       "passed" => false,
+       "reason" => reason
+     }}
+  end
+
+  def project_failure(_reason), do: {:error, :validation_infrastructure_failed}
+
   @doc "Construct fresh in_progress compact progress from injected bindings."
   @spec new(term()) :: {:ok, state()} | {:error, error()}
   def new(bindings) do

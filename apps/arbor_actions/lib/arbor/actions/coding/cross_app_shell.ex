@@ -40,10 +40,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   """
 
   alias Arbor.Actions.Coding.BlobManifest
+  alias Arbor.Actions
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Parser
+  alias Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Mix, as: MixAction
@@ -70,7 +72,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   def run(_input, _context), do: {:error, :invalid_cross_app_input}
 
   @doc false
-  @spec run(Core.input(), map(), :ordinary | {:window, term(), term()}) ::
+  @spec run(Core.input(), map(), :ordinary | :seed | {:window, term(), term()}) ::
           {:ok, map()} | {:error, term()}
   def run(input, context, window) when is_map(input) and is_map(context) do
     try do
@@ -347,6 +349,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       {{:ok, _live_grant}, _legacy, {:window, _progress, _binding}} ->
         {:error, :invalid_cross_app_input}
 
+      {{:ok, _live_grant}, _legacy, :seed} ->
+        {:error, :invalid_cross_app_input}
+
       {{:ok, live_grant}, _legacy, :ordinary} ->
         if continuation_grant_matches?(live_grant, input) do
           do_run_bound(input, live_grant, validation_deadline)
@@ -356,6 +361,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
       {:none, nil, :ordinary} ->
         do_run_unbound(input, context, validation_deadline)
+
+      {:none, nil, :seed} ->
+        do_run_seed_window(input, context, validation_deadline)
 
       {:none, nil, {:window, progress, binding}} ->
         do_run_progress_window(input, context, progress, binding, validation_deadline)
@@ -419,8 +427,189 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
+  defp do_run_seed_window(input, context, validation_deadline) do
+    with :ok <- require_static_receipt_boundary(context),
+         {:ok, lease} <- resolve_lease(input.workspace_id, context),
+         {:ok, worktree_path, base_commit} <- lease_paths(lease),
+         {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
+         {:ok, resolved} <- resolve_selection(worktree_path, base_commit) do
+      before_binding = %{
+        head: resolved.candidate_head,
+        tree_oid: resolved.candidate_tree_oid,
+        blob_manifest: resolved.candidate_blob_manifest
+      }
+
+      MixAction.with_validation_resource(
+        input.workspace_id,
+        context,
+        fn resource ->
+          snapshot_path =
+            Map.get(resource, :candidate_path) || Map.get(resource, "candidate_path")
+
+          cond do
+            not is_binary(snapshot_path) or snapshot_path == "" ->
+              {:error, :validation_infrastructure_failed}
+
+            snapshot_path == worktree_path ->
+              {:error, :validation_infrastructure_failed}
+
+            true ->
+              seed_on_snapshot(
+                input,
+                context,
+                resource,
+                snapshot_path,
+                resolved,
+                base_commit,
+                base_tree_oid,
+                before_binding,
+                validation_deadline
+              )
+          end
+        end,
+        validation_resource_opts(input.timeout, validation_deadline) ++
+          [
+            committable_snapshot: true,
+            expected_tree_oid: before_binding.tree_oid,
+            expected_head: before_binding.head,
+            blob_manifest: Map.get(before_binding, :blob_manifest)
+          ]
+      )
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :invalid_cross_app_input}
+  catch
+    {:execution_error, reason} -> {:error, reason}
+    _, _ -> {:error, :invalid_cross_app_input}
+  end
+
+  defp seed_on_snapshot(
+         input,
+         context,
+         resource,
+         snapshot_path,
+         resolved,
+         base_commit,
+         base_tree_oid,
+         before_binding,
+         validation_deadline
+       ) do
+    with :ok <- invoke_after_committable_snapshot_hook(snapshot_path),
+         {:ok, prepared} <-
+           prepare_continuation_batches(resolved.selection, resolved.candidate_blob_manifest),
+         {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
+         {:ok, static_checks} <-
+           run_static_stage_checks(
+             snapshot_path,
+             input.timeout,
+             validation_deadline,
+             resource
+           ) do
+      if static_stages_passed?(static_checks) do
+        finish_seed_after_static(
+          input,
+          context,
+          resource,
+          snapshot_path,
+          resolved,
+          base_commit,
+          base_tree_oid,
+          before_binding,
+          prepared.batches,
+          compact_plan,
+          static_checks,
+          validation_deadline
+        )
+      else
+        ordinary_failed_static_result(resolved.selection, static_checks, base_commit)
+      end
+    end
+  end
+
+  defp finish_seed_after_static(
+         input,
+         context,
+         resource,
+         snapshot_path,
+         resolved,
+         base_commit,
+         base_tree_oid,
+         before_binding,
+         batches,
+         compact_plan,
+         static_checks,
+         validation_deadline
+       ) do
+    with {:ok, configuration_digest} <- Core.configuration_digest(input_params(input)),
+         {:ok, validation_plan_digest} <-
+           ValidationCapacityHandoff.ordered_plan_digest(compact_plan),
+         {:ok, frozen} <- observe_frozen_binding_digests(context),
+         {:ok, identities} <-
+           assemble_live_identities(
+             context,
+             frozen,
+             configuration_digest,
+             validation_plan_digest,
+             base_commit,
+             base_tree_oid,
+             resolved
+           ),
+         {:ok, receipt, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_new(
+             identities,
+             static_checks
+           ),
+         {:ok, _descriptor} <- StaticReceiptBoundary.archive(context, digest, receipt),
+         {:ok, _published} <- consume_static_receipt(context, digest, identities),
+         binding <- frozen_binding(frozen, digest),
+         bindings <-
+           %{
+             "identities" => identities,
+             "planned_batches" => compact_plan,
+             "static_stage_receipt_digest" => digest,
+             "per_batch_budget_ms" => input.timeout
+           },
+         {:ok, progress} <- ProgressCore.new(bindings) do
+      run_progress_suffix(
+        input,
+        progress,
+        bindings,
+        snapshot_path,
+        batches,
+        before_binding,
+        validation_deadline,
+        resource,
+        binding
+      )
+    end
+  end
+
+  defp ordinary_failed_static_result(selection, checks, base_commit) do
+    evidence =
+      Core.show(%{
+        selection: selection,
+        checks: %{
+          compile: checks["compile"],
+          xref: checks["xref"],
+          test_compile: checks["test_compile"],
+          test: Core.skipped_check(static_failure_reason(checks))
+        },
+        base_commit: base_commit
+      })
+
+    feedback_json = Jason.encode!(evidence)
+    {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+  end
+
+  defp static_failure_reason(%{"compile" => %{"passed" => false}}), do: "compile_failed"
+  defp static_failure_reason(%{"xref" => %{"passed" => false}}), do: "xref_failed"
+  defp static_failure_reason(_checks), do: "test_compile_failed"
+
   defp do_run_progress_window(input, context, progress, binding, validation_deadline) do
-    with {:ok, binding} <- admit_progress_binding(binding),
+    with :ok <- require_static_receipt_boundary(context),
+         {:ok, binding} <- admit_progress_binding(binding),
          {:ok, lease} <- resolve_lease(input.workspace_id, context),
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
          {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
@@ -431,15 +620,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, configuration_digest} <- Core.configuration_digest(input_params(input)),
          {:ok, validation_plan_digest} <-
            ValidationCapacityHandoff.ordered_plan_digest(compact_plan),
+         {:ok, frozen} <- observe_frozen_binding_digests(context),
+         :ok <- match_frozen_binding(binding, frozen),
          {:ok, identities} <-
-           assemble_progress_identities(
+           assemble_live_identities(
              context,
-             binding,
+             frozen,
              configuration_digest,
              validation_plan_digest,
              base_commit,
              base_tree_oid,
              resolved
+           ),
+         {:ok, _receipt} <-
+           consume_static_receipt(
+             context,
+             binding["static_stage_receipt_digest"],
+             identities
            ),
          bindings <-
            %{
@@ -462,7 +659,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         worktree_path,
         prepared.batches,
         before_binding,
-        validation_deadline
+        validation_deadline,
+        nil,
+        binding
       )
     else
       {:error, :missing_progress_binding} = error -> error
@@ -486,9 +685,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp assemble_progress_identities(
+  defp assemble_live_identities(
          context,
-         binding,
+         frozen,
          configuration_digest,
          validation_plan_digest,
          base_commit,
@@ -498,23 +697,158 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     task_id = Workspace.context_task_id(context)
     principal_id = Workspace.context_principal_id(context)
 
-    {:ok,
-     %{
-       "task_id" => task_id,
-       "work_packet_digest" => binding["work_packet_digest"],
-       "base_commit" => base_commit,
-       "base_tree_oid" => base_tree_oid,
-       "candidate_head" => resolved.candidate_head,
-       "candidate_tree_oid" => resolved.candidate_tree_oid,
-       "validation_plan_digest" => validation_plan_digest,
-       "toolchain_digest" => binding["toolchain_digest"],
-       "dependency_baseline_digest" => binding["dependency_baseline_digest"],
-       "wrapper_digest" => binding["wrapper_digest"],
-       "validator_id" => "coding_cross_app_validate",
-       "principal_id" => principal_id,
-       "configuration_digest" => configuration_digest
-     }}
+    cond do
+      not is_binary(task_id) or task_id == "" ->
+        {:error, :invalid_cross_app_input}
+
+      not is_binary(principal_id) or principal_id == "" ->
+        {:error, :invalid_cross_app_input}
+
+      true ->
+        {:ok,
+         %{
+           "task_id" => task_id,
+           "work_packet_digest" => frozen["work_packet_digest"],
+           "base_commit" => base_commit,
+           "base_tree_oid" => base_tree_oid,
+           "candidate_head" => resolved.candidate_head,
+           "candidate_tree_oid" => resolved.candidate_tree_oid,
+           "validation_plan_digest" => validation_plan_digest,
+           "toolchain_digest" => frozen["toolchain_digest"],
+           "dependency_baseline_digest" => frozen["dependency_baseline_digest"],
+           "wrapper_digest" => frozen["wrapper_digest"],
+           "validator_id" => "coding_cross_app_validate",
+           "principal_id" => principal_id,
+           "configuration_digest" => configuration_digest
+         }}
+    end
   end
+
+  defp require_static_receipt_boundary(context) do
+    if StaticReceiptBoundary.present?(context),
+      do: :ok,
+      else: {:error, :invalid_trusted_cross_app_static_receipt_boundary}
+  end
+
+  defp consume_static_receipt(context, digest, identities) do
+    with {:ok, receipt} <- StaticReceiptBoundary.read(context, digest),
+         :ok <- bind_static_receipt_identities(receipt, identities) do
+      {:ok, receipt}
+    end
+  end
+
+  defp bind_static_receipt_identities(%{"identities" => receipt_identities}, identities)
+       when is_map(receipt_identities) and is_map(identities) do
+    if receipt_identities === identities,
+      do: :ok,
+      else: {:error, :identity_drift}
+  end
+
+  defp bind_static_receipt_identities(_receipt, _identities), do: {:error, :identity_drift}
+
+  defp observe_frozen_binding_digests(context) do
+    case Application.get_env(:arbor_actions, :cross_app_frozen_binding_observer) do
+      fun when is_function(fun, 1) ->
+        fun.(context)
+
+      nil ->
+        observe_live_frozen_binding_digests(context)
+
+      _other ->
+        {:error, :validation_infrastructure_failed}
+    end
+  end
+
+  defp observe_live_frozen_binding_digests(context) do
+    with {:ok, work_packet_digest} <- fetch_work_packet_digest(context),
+         {:ok, toolchain} <- Actions.coding_toolchain_identity(),
+         {:ok, wrapper_digest} <- Actions.coding_mix_wrapper_digest(),
+         {:ok, baseline_digest} <- Actions.coding_dependency_baseline_digest() do
+      {:ok,
+       %{
+         "work_packet_digest" => work_packet_digest,
+         "toolchain_digest" => toolchain["identity_digest"],
+         "wrapper_digest" => wrapper_digest,
+         "dependency_baseline_digest" => baseline_digest
+       }}
+    else
+      {:error, :mix_wrapper_unavailable} -> {:error, :validation_infrastructure_failed}
+      {:error, :invalid_toolchain_identity} -> {:error, :validation_infrastructure_failed}
+      {:error, :baseline_unavailable} -> {:error, :validation_infrastructure_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_work_packet_digest(context) when is_map(context) do
+    value =
+      Map.get(context, "coding_plan_work_packet_digest") ||
+        Map.get(context, :coding_plan_work_packet_digest)
+
+    if is_binary(value) and value != "",
+      do: {:ok, value},
+      else: {:error, :missing_progress_binding}
+  end
+
+  defp match_frozen_binding(binding, frozen) do
+    keys = ~w(work_packet_digest toolchain_digest wrapper_digest dependency_baseline_digest)
+
+    if Enum.all?(keys, &(binding[&1] === frozen[&1])),
+      do: :ok,
+      else: {:error, :identity_drift}
+  end
+
+  defp frozen_binding(frozen, digest) do
+    %{
+      "work_packet_digest" => frozen["work_packet_digest"],
+      "toolchain_digest" => frozen["toolchain_digest"],
+      "wrapper_digest" => frozen["wrapper_digest"],
+      "dependency_baseline_digest" => frozen["dependency_baseline_digest"],
+      "static_stage_receipt_digest" => digest
+    }
+  end
+
+  defp run_static_stage_checks(worktree_path, timeout, validation_deadline, resource) do
+    compile = run_compile(worktree_path, timeout, validation_deadline, resource)
+
+    if compile["passed"] do
+      xref = run_xref(worktree_path, timeout, validation_deadline, resource)
+
+      if xref["passed"] do
+        test_compile = run_test_compile(worktree_path, timeout, validation_deadline, resource)
+
+        {:ok,
+         %{
+           "compile" => compile,
+           "xref" => xref,
+           "test_compile" => test_compile
+         }}
+      else
+        {:ok,
+         %{
+           "compile" => compile,
+           "xref" => xref,
+           "test_compile" => Core.skipped_check("xref_failed")
+         }}
+      end
+    else
+      {:ok,
+       %{
+         "compile" => compile,
+         "xref" => Core.skipped_check("compile_failed"),
+         "test_compile" => Core.skipped_check("compile_failed")
+       }}
+    end
+  end
+
+  defp static_stages_passed?(%{
+         "compile" => compile,
+         "xref" => xref,
+         "test_compile" => test_compile
+       }) do
+    compile["passed"] == true and xref["passed"] == true and test_compile["passed"] == true
+  end
+
+  defp static_stages_passed?(_checks), do: false
 
   defp input_params(input) do
     %{
@@ -532,7 +866,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          worktree_path,
          full_batches,
          before_binding,
-         validation_deadline
+         validation_deadline,
+         resource,
+         binding
+       )
+
+  defp run_progress_suffix(
+         input,
+         progress,
+         bindings,
+         worktree_path,
+         full_batches,
+         before_binding,
+         validation_deadline,
+         nil,
+         binding
        ) do
     accepted_count = progress["completed_batch_count"]
     suffix = Enum.drop(full_batches, accepted_count)
@@ -574,7 +922,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                   bindings,
                   snapshot_path,
                   before_binding,
-                  resource
+                  resource,
+                  binding
                 )
               else
                 {:error, reason} ->
@@ -593,6 +942,46 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
     case result do
       {:ok, observation} -> {:ok, observation}
+      {:error, reason} -> progress_failed_observation([], failure_reason(reason))
+    end
+  end
+
+  defp run_progress_suffix(
+         input,
+         progress,
+         bindings,
+         snapshot_path,
+         full_batches,
+         before_binding,
+         validation_deadline,
+         resource,
+         binding
+       )
+       when is_map(resource) do
+    accepted_count = progress["completed_batch_count"]
+    suffix = Enum.drop(full_batches, accepted_count)
+
+    with {:ok, observation} <-
+           execute_progress_tests(
+             input.test_stage_timeout,
+             input.timeout,
+             snapshot_path,
+             full_batches,
+             suffix,
+             accepted_count,
+             validation_deadline,
+             resource
+           ) do
+      finalize_progress_observation(
+        observation,
+        progress,
+        bindings,
+        snapshot_path,
+        before_binding,
+        resource,
+        binding
+      )
+    else
       {:error, reason} -> progress_failed_observation([], failure_reason(reason))
     end
   end
@@ -878,7 +1267,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          bindings,
          worktree_path,
          before_binding,
-         resource
+         resource,
+         binding
        ) do
     observation =
       case verify_progress_tree(worktree_path, before_binding, resource) do
@@ -903,7 +1293,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           }
       end
 
-    project_progress_observation(progress, bindings, observation)
+    project_progress_observation(progress, bindings, observation, binding)
   end
 
   defp verify_progress_tree(_worktree_path, _before_binding, resource) when is_map(resource) do
@@ -913,13 +1303,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp verify_progress_tree(_worktree_path, _before_binding, _resource),
     do: {:error, :validation_resource_required}
 
-  defp project_progress_observation(progress, bindings, observation) do
+  defp project_progress_observation(progress, bindings, observation, binding) do
     new_receipts = observation.new_receipts
     disposition = observation.disposition
 
     cond do
       disposition["type"] == "failed" ->
-        progress_failed_observation(disposition["reason"] || "validation_infrastructure_failed")
+        domain_or_infra_failure(disposition["reason"] || "validation_infrastructure_failed")
 
       disposition["type"] == "completed" ->
         case ProgressCore.advance(progress, bindings, %{
@@ -928,10 +1318,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                "disposition" => %{"type" => "completed"}
              }) do
           {:ok, advanced} ->
-            emit_progress_envelope(advanced, "completed")
+            emit_progress_envelope(advanced, "completed", binding)
 
           {:error, _reason} ->
-            progress_failed_observation("validation_infrastructure_failed")
+            {:error, :validation_infrastructure_failed}
         end
 
       disposition["type"] == "capacity_handoff" ->
@@ -944,45 +1334,59 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                }
              }) do
           {:ok, advanced} ->
-            emit_progress_envelope(advanced, "capacity_handoff")
+            emit_progress_envelope(advanced, "capacity_handoff", binding)
 
           {:error, _reason} ->
-            progress_failed_observation("validation_infrastructure_failed")
+            {:error, :validation_infrastructure_failed}
         end
 
       true ->
-        progress_failed_observation("validation_infrastructure_failed")
+        {:error, :validation_infrastructure_failed}
     end
   end
 
-  defp emit_progress_envelope(advanced, type) do
+  defp emit_progress_envelope(advanced, type, binding) do
     case ProgressCore.show(advanced) do
       snapshot when is_map(snapshot) ->
-        envelope = %{
-          "schema_version" => 1,
-          "disposition" => %{"type" => type},
-          "progress" => snapshot
-        }
+        envelope = window_envelope(type, snapshot, binding)
 
         with :ok <- reject_progress_forbidden(envelope),
              :ok <- bound_progress_envelope(envelope) do
           {:ok, envelope}
         else
-          _ -> progress_failed_observation("validation_infrastructure_failed")
+          _ -> {:error, :validation_infrastructure_failed}
         end
 
       _other ->
-        progress_failed_observation("validation_infrastructure_failed")
+        {:error, :validation_infrastructure_failed}
     end
   end
 
-  defp progress_failed_observation(reason) when is_binary(reason) do
-    envelope = %{
+  defp window_envelope("completed", snapshot, binding) do
+    %{
       "schema_version" => 1,
-      "disposition" => %{"type" => "failed", "reason" => reason}
+      "disposition_type" => "completed",
+      "progress_status" => snapshot["status"],
+      "progress" => snapshot,
+      "progress_binding" => binding,
+      "passed" => snapshot["status"] == "completed"
     }
+  end
 
-    {:ok, envelope}
+  defp window_envelope("capacity_handoff", snapshot, binding) do
+    %{
+      "schema_version" => 1,
+      "disposition_type" => "capacity_handoff",
+      "progress_status" => snapshot["status"],
+      "progress" => snapshot,
+      "progress_binding" => binding
+    }
+  end
+
+  defp domain_or_infra_failure(reason), do: ProgressCore.project_failure(reason)
+
+  defp progress_failed_observation(reason) when is_binary(reason) do
+    domain_or_infra_failure(reason)
   end
 
   defp progress_failed_observation(_receipts, reason) when is_binary(reason) do

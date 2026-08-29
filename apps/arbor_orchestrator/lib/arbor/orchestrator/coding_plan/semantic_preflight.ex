@@ -74,6 +74,62 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   @attestation_present ~s(context.review.review_attestation_id!="")
   @attestation_absent ~s(context.review.review_attestation_id="")
+  @cross_app_loop_nodes ~w[
+    clear_cross_app_progress
+    clear_cross_app_progress_binding
+    error_cross_app_window_invalid
+    hoist_cross_app_progress
+    hoist_cross_app_progress_binding
+    route_cross_app_window
+  ]
+  @cross_app_validate_context_keys "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest"
+  @cross_app_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+  @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
+  @cross_app_domain_failure_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
+  @cross_app_legacy_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff"
+  @forbidden_cross_app_param_prefixes [
+    "param.cross_app_progress",
+    "param.cross_app_progress_binding",
+    "param.cross_app_static_receipt"
+  ]
+  @cross_app_loop_node_attrs [
+    {"clear_cross_app_progress",
+     %{
+       "type" => "transform",
+       "transform" => "constant",
+       "expression" => "",
+       "output_key" => "cross_app_progress"
+     }},
+    {"clear_cross_app_progress_binding",
+     %{
+       "type" => "transform",
+       "transform" => "constant",
+       "expression" => "",
+       "output_key" => "cross_app_progress_binding"
+     }},
+    {"error_cross_app_window_invalid",
+     %{
+       "type" => "transform",
+       "transform" => "constant",
+       "expression" => "cross_app_window_invalid",
+       "output_key" => "error"
+     }},
+    {"hoist_cross_app_progress",
+     %{
+       "type" => "transform",
+       "transform" => "identity",
+       "source_key" => "validation.progress",
+       "output_key" => "cross_app_progress"
+     }},
+    {"hoist_cross_app_progress_binding",
+     %{
+       "type" => "transform",
+       "transform" => "identity",
+       "source_key" => "validation.progress_binding",
+       "output_key" => "cross_app_progress_binding"
+     }},
+    {"route_cross_app_window", %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}}
+  ]
 
   @forbidden_attr_keys MapSet.new(~w(
     agent_id
@@ -3895,8 +3951,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _validation_test_stage_timeout_ms,
          _validation_stage_timeout_ms
        ) do
-    check_validation_parameters(
-      errors,
+    errors
+    |> check_validation_parameters(
       graph,
       %{
         "param.pinned_action" => "mix_compile",
@@ -3909,6 +3965,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       },
       "validation_parameter_violation"
     )
+    |> reject_cross_app_loop_nodes(graph)
+    |> reject_caller_cross_app_params(graph)
   end
 
   defp check_profile_bindings(
@@ -3923,8 +3981,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        when is_integer(validation_test_stage_timeout_ms) and
               validation_test_stage_timeout_ms > 0 and
               is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
-    check_validation_parameters(
-      errors,
+    errors
+    |> check_validation_parameters(
       graph,
       %{
         "param.pinned_action" => "coding_cross_app_validate",
@@ -3938,6 +3996,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       },
       "validation_parameter_violation"
     )
+    |> check_cross_app_validate_context_keys(graph)
+    |> check_cross_app_topology(graph)
+    |> check_cross_app_loop_node_attrs(graph)
+    |> reject_caller_cross_app_params(graph)
   end
 
   defp check_profile_bindings(
@@ -3983,6 +4045,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     )
     |> check_security_protected_writers(graph)
     |> check_security_topology(graph, review_profile)
+    |> reject_cross_app_loop_nodes(graph)
+    |> reject_caller_cross_app_params(graph)
   end
 
   defp check_profile_bindings(
@@ -4014,8 +4078,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          validation_stage_timeout_ms
        )
        when is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
-    check_validation_parameters(
-      errors,
+    errors
+    |> check_validation_parameters(
       graph,
       %{
         "param.pinned_action" => "coding_contract_change_validate",
@@ -4028,6 +4092,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       },
       "validation_parameter_violation"
     )
+    |> reject_cross_app_loop_nodes(graph)
+    |> reject_caller_cross_app_params(graph)
   end
 
   defp check_profile_bindings(
@@ -4261,6 +4327,155 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       },
       "security_validator_parameter_violation"
     )
+  end
+
+  defp check_cross_app_validate_context_keys(errors, graph) do
+    case Map.fetch(graph.nodes, "validate") do
+      :error ->
+        errors
+
+      {:ok, node} ->
+        actual = Map.get(node.attrs, "context_keys")
+
+        if actual == @cross_app_validate_context_keys do
+          errors
+        else
+          [
+            error("validation_parameter_violation", "validate", %{
+              "expected_context_keys" => @cross_app_validate_context_keys,
+              "actual_context_keys" => actual
+            })
+            | errors
+          ]
+        end
+    end
+  end
+
+  defp check_cross_app_topology(errors, graph) do
+    expected = [
+      {"route_validation_interaction",
+       [
+         {"status_validation_capacity_exceeded", @cross_app_legacy_capacity_condition},
+         {"check_validation_passed", @cross_app_completed_condition},
+         {"route_cross_app_window", @cross_app_capacity_condition},
+         {"check_validation_passed", @cross_app_domain_failure_condition},
+         {"hoist_validation_approval_request_id",
+          "context.validation.interaction_outcome=rework"},
+         {"hoist_validation_approval_request_id_denied",
+          "context.validation.interaction_outcome=denied"},
+         {"error_validation_interaction_invalid", nil}
+       ]},
+      {"route_cross_app_window",
+       [
+         {"hoist_cross_app_progress", @cross_app_capacity_condition},
+         {"error_cross_app_window_invalid", nil}
+       ]},
+      {"hoist_cross_app_progress", [{"hoist_cross_app_progress_binding", nil}]},
+      {"hoist_cross_app_progress_binding", [{"validate", nil}]},
+      {"clear_cross_app_progress", [{"clear_cross_app_progress_binding", nil}]},
+      {"clear_cross_app_progress_binding", [{"capture_pre_turn_workspace", nil}]},
+      {"error_cross_app_window_invalid", [{"status_pipeline_error_then_close", nil}]},
+      {"build_validation_rework_prompt", [{"clear_cross_app_progress", nil}]}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_cross_app_outgoing(acc, graph, node_id, outgoing)
+    end)
+  end
+
+  defp check_cross_app_loop_node_attrs(errors, graph) do
+    Enum.reduce(@cross_app_loop_node_attrs, errors, fn {node_id, attrs}, acc ->
+      require_cross_app_node_attrs(acc, graph, node_id, attrs)
+    end)
+  end
+
+  defp require_cross_app_node_attrs(errors, graph, node_id, expected) do
+    case Map.fetch(graph.nodes, node_id) do
+      :error ->
+        [error("cross_app_binding_missing_node", node_id, %{}) | errors]
+
+      {:ok, node} ->
+        Enum.reduce(expected, errors, fn {attribute, expected_value}, acc ->
+          actual = Map.get(node.attrs, attribute)
+
+          if actual === expected_value do
+            acc
+          else
+            [
+              error("cross_app_binding_mismatch", node_id, %{
+                "attribute" => attribute,
+                "expected" => expected_value,
+                "actual" => actual
+              })
+              | acc
+            ]
+          end
+        end)
+    end
+  end
+
+  defp require_exact_cross_app_outgoing(errors, graph, node_id, expected) do
+    actual =
+      graph.edges
+      |> Enum.flat_map(fn edge ->
+        if edge.from == node_id do
+          [{edge.to, Map.get(edge.attrs, "condition")}]
+        else
+          []
+        end
+      end)
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("cross_app_topology_mismatch", node_id, %{
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp reject_cross_app_loop_nodes(errors, graph) do
+    Enum.reduce(@cross_app_loop_nodes, errors, fn node_id, acc ->
+      if Map.has_key?(graph.nodes, node_id) do
+        [
+          error("cross_app_loop_cross_profile", node_id, %{
+            "detail" => "cross_app loop node is not allowed on this profile"
+          })
+          | acc
+        ]
+      else
+        acc
+      end
+    end)
+  end
+
+  defp reject_caller_cross_app_params(errors, graph) do
+    graph.nodes
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce(errors, fn {node_id, node}, acc ->
+      hits =
+        node.attrs
+        |> Map.keys()
+        |> Enum.filter(fn key ->
+          is_binary(key) and
+            Enum.any?(@forbidden_cross_app_param_prefixes, &String.starts_with?(key, &1))
+        end)
+        |> Enum.sort()
+
+      Enum.reduce(hits, acc, fn key, inner ->
+        [
+          error("validation_parameter_violation", node_id, %{"forbidden_attribute" => key})
+          | inner
+        ]
+      end)
+    end)
   end
 
   defp check_validation_parameters(errors, graph, expected, error_code) do

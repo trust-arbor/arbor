@@ -2708,6 +2708,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
             :read_design_artifact,
             [logs_root, task_id]
           },
+          cross_app_static_receipt_sink: {
+            ArtifactStore,
+            :archive_cross_app_static_receipt,
+            [logs_root, task_id]
+          },
+          cross_app_static_receipt_source: {
+            ArtifactStore,
+            :read_cross_app_static_receipt,
+            [logs_root, task_id]
+          },
           graph_hash: compilation.graph_hash,
           execution_manifest: compilation.execution_manifest,
           execution_manifest_digest: compilation.execution_manifest_digest,

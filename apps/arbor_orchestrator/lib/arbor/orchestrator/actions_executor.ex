@@ -365,6 +365,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 |> maybe_put_context(:execution_id, Keyword.get(opts, :execution_id))
                 |> maybe_put_acp_transcript_capture(action_module, opts)
                 |> maybe_put_design_artifact_boundary(action_module, opts)
+                |> maybe_put_cross_app_static_receipt_boundary(action_module, opts)
                 # Engine-pinned graph execution may resolve pipeline_internal actions.
                 |> Map.put(:allow_pipeline_internal, true)
                 |> maybe_put_file_workspace(action_module, workdir)
@@ -1386,6 +1387,60 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp maybe_put_design_artifact_boundary(context, _action_module, _opts), do: context
+
+  defp maybe_put_cross_app_static_receipt_boundary(
+         context,
+         Arbor.Actions.Coding.ReviewedValidation,
+         opts
+       ) do
+    put_cross_app_static_receipt_boundary(context, opts)
+  end
+
+  defp maybe_put_cross_app_static_receipt_boundary(
+         context,
+         Arbor.Actions.Coding.CrossApp.Validate,
+         opts
+       ) do
+    put_cross_app_static_receipt_boundary(context, opts)
+  end
+
+  defp maybe_put_cross_app_static_receipt_boundary(context, _action_module, _opts), do: context
+
+  defp put_cross_app_static_receipt_boundary(context, opts) do
+    context
+    |> put_cross_app_static_receipt_boundary_error(opts)
+    |> put_cross_app_static_receipt_mfa(opts, :cross_app_static_receipt_sink)
+    |> put_cross_app_static_receipt_mfa(opts, :cross_app_static_receipt_source)
+  end
+
+  defp put_cross_app_static_receipt_boundary_error(context, opts) do
+    case Keyword.get(opts, :cross_app_static_receipt_boundary_error) do
+      nil -> context
+      error -> Map.put(context, :cross_app_static_receipt_boundary_error, error)
+    end
+  end
+
+  defp put_cross_app_static_receipt_mfa(context, opts, key) do
+    case Keyword.get(opts, key) do
+      {module, function, fixed_args}
+      when is_atom(module) and is_atom(function) and is_list(fixed_args) ->
+        Map.put(context, key, {module, function, fixed_args})
+
+      nil ->
+        Map.put(
+          context,
+          :cross_app_static_receipt_boundary_error,
+          :invalid_trusted_cross_app_static_receipt_boundary
+        )
+
+      _ ->
+        Map.put(
+          context,
+          :cross_app_static_receipt_boundary_error,
+          :invalid_trusted_cross_app_static_receipt_boundary
+        )
+    end
+  end
 
   defp put_design_artifact_boundary_error(context, opts) do
     case Keyword.get(opts, :design_artifact_boundary_error) do
