@@ -40,7 +40,7 @@ defmodule Arbor.Actions.EvalPipeline do
       name: "eval_pipeline_load_dataset",
       description: "Load a JSONL dataset file for evaluation",
       category: "eval",
-      tags: ["eval", "dataset", "load", "pipeline"],
+      tags: ["eval", "dataset", "load", "pipeline", "pipeline_internal"],
       schema: [
         path: [type: :string, required: true, doc: "Path to JSONL dataset file"],
         shuffle: [type: :boolean, default: false, doc: "Randomize sample order"],
@@ -117,7 +117,7 @@ defmodule Arbor.Actions.EvalPipeline do
       name: "eval_pipeline_run_eval",
       description: "Run evaluation graders on dataset samples",
       category: "eval",
-      tags: ["eval", "run", "graders", "pipeline"],
+      tags: ["eval", "run", "graders", "pipeline", "pipeline_internal"],
       schema: [
         dataset: [type: {:list, :map}, required: true, doc: "List of sample maps"],
         graders: [type: :string, required: true, doc: "Comma-separated grader names"],
@@ -243,7 +243,7 @@ defmodule Arbor.Actions.EvalPipeline do
       name: "eval_pipeline_aggregate",
       description: "Compute metrics over evaluation results",
       category: "eval",
-      tags: ["eval", "aggregate", "metrics", "pipeline"],
+      tags: ["eval", "aggregate", "metrics", "pipeline", "pipeline_internal"],
       schema: [
         results: [type: {:list, :map}, required: true, doc: "Eval results from RunEval"],
         metrics: [type: :string, default: "accuracy,mean_score", doc: "Comma-separated metrics"],
@@ -308,7 +308,7 @@ defmodule Arbor.Actions.EvalPipeline do
       name: "eval_pipeline_persist",
       description: "Persist eval run results to the database",
       category: "eval",
-      tags: ["eval", "persist", "database", "pipeline"],
+      tags: ["eval", "persist", "database", "pipeline", "pipeline_internal"],
       schema: [
         results: [type: {:list, :map}, required: true, doc: "Eval results to persist"],
         metrics: [type: :map, default: %{}, doc: "Computed metrics"],
@@ -494,7 +494,7 @@ defmodule Arbor.Actions.EvalPipeline do
       name: "eval_pipeline_report",
       description: "Generate a formatted evaluation report",
       category: "eval",
-      tags: ["eval", "report", "format", "pipeline"],
+      tags: ["eval", "report", "format", "pipeline", "pipeline_internal"],
       schema: [
         results: [type: {:list, :map}, required: true, doc: "Eval results"],
         metrics: [type: :map, default: %{}, doc: "Computed metrics"],

@@ -43,7 +43,7 @@ defmodule Arbor.Actions.TDD do
       name: "tdd_build_impl_prompt",
       description: "Build the LLM prompt for the TDD implementation-generation stage",
       category: "tdd",
-      tags: ["tdd", "prompt"],
+      tags: ["tdd", "prompt", "pipeline_internal"],
       schema: [
         module_name: [type: :string, required: true, doc: "Target module name"],
         signature: [type: :string, required: true, doc: "Function signature spec"],
@@ -155,7 +155,7 @@ defmodule Arbor.Actions.TDD do
       name: "tdd_record_attempt",
       description: "Record the failed attempt + bump iteration counter",
       category: "tdd",
-      tags: ["tdd", "loop"],
+      tags: ["tdd", "loop", "pipeline_internal"],
       schema: [
         iteration: [type: :non_neg_integer, required: true, doc: "Current iteration"],
         max_iterations: [type: :pos_integer, required: true, doc: "Hard cap"],

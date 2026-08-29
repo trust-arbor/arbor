@@ -410,7 +410,7 @@ defmodule Arbor.Actions.Council do
       name: "council_review_change",
       description: "Run the binding code-review council over a branch diff",
       category: "council",
-      tags: ["council", "code_review", "verdict", "llm"],
+      tags: ["council", "code_review", "verdict", "llm", "pipeline_internal"],
       schema: [
         request: [
           type: :map,

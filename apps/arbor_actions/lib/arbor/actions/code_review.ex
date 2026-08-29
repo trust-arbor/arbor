@@ -40,7 +40,7 @@ defmodule Arbor.Actions.CodeReview do
       name: "apply_changes",
       description: "Apply a batch of LLM-drafted file changes within a workdir",
       category: "code_review",
-      tags: ["code_review", "filesystem"],
+      tags: ["code_review", "filesystem", "pipeline_internal"],
       schema: [
         changes_json: [
           type: :string,

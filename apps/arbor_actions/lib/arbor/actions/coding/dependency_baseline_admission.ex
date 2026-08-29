@@ -21,7 +21,7 @@ defmodule Arbor.Actions.Coding.DependencyBaselineAdmission do
     name: "coding_dependency_baseline_check",
     description: "Verify the acquired base commit's mix.lock matches the pinned Linux baseline",
     category: "coding",
-    tags: ["coding", "workspace", "dependency-baseline"],
+    tags: ["coding", "workspace", "dependency-baseline", "pipeline_internal"],
     schema: [
       repo_path: [
         type: :string,

@@ -40,7 +40,7 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
     description:
       "Synthesize a candidate S1 AST detector from a confirmed finding and G1-self-validate it",
     category: "security",
-    tags: ["security", "sentinel", "synthesis", "e1"],
+    tags: ["security", "sentinel", "synthesis", "e1", "pipeline_internal"],
     schema: [
       finding: [
         type: {:or, [:map, :struct]},

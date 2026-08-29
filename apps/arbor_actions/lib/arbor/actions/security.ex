@@ -22,7 +22,7 @@ defmodule Arbor.Actions.Security.RunStaticDetectors do
     name: "security_run_static_detectors",
     description: "Run static security detectors over a path and record findings",
     category: "security",
-    tags: ["security", "static-analysis", "sentinel"],
+    tags: ["security", "static-analysis", "sentinel", "pipeline_internal"],
     schema: [
       path: [
         type: {:or, [:string, {:list, :string}]},
@@ -80,7 +80,7 @@ defmodule Arbor.Actions.Security.RunDependencyScan do
     name: "security_run_dependency_scan",
     description: "Scan dependencies for supply-chain risk (mutable git deps, retired packages)",
     category: "security",
-    tags: ["security", "supply-chain", "sentinel", "dependencies"],
+    tags: ["security", "supply-chain", "sentinel", "dependencies", "pipeline_internal"],
     schema: [
       audit: [type: :boolean, default: true, doc: "Run mix hex.audit for retired packages"],
       output_dir: [type: :string, default: ".arbor/security/findings", doc: "Findings dir"],
@@ -126,7 +126,7 @@ defmodule Arbor.Actions.Security.LoadFinding do
     name: "security_load_finding",
     description: "Load a finding's markdown content by id",
     category: "security",
-    tags: ["security", "sentinel", "verify"],
+    tags: ["security", "sentinel", "verify", "pipeline_internal"],
     schema: [
       finding_id: [type: :string, required: true],
       output_dir: [type: :string, default: ".arbor/security/findings"]
@@ -162,7 +162,7 @@ defmodule Arbor.Actions.Security.SelectFindingsToVerify do
     name: "security_select_findings_to_verify",
     description: "Select recorded findings that need adversarial verification",
     category: "security",
-    tags: ["security", "sentinel", "verify"],
+    tags: ["security", "sentinel", "verify", "pipeline_internal"],
     schema: [
       output_dir: [type: :string, default: ".arbor/security/findings"],
       max: [type: :integer, default: 25, doc: "cap on findings verified per run"]
@@ -212,7 +212,7 @@ defmodule Arbor.Actions.Security.RecordDiffFindings do
     name: "security_record_diff_findings",
     description: "Parse an L1 diff-review LLM output into findings and record them",
     category: "security",
-    tags: ["security", "sentinel", "l1", "diff-review"],
+    tags: ["security", "sentinel", "l1", "diff-review", "pipeline_internal"],
     schema: [
       review: [type: :string, default: "", doc: "The LLM diff-review output (JSON array)"],
       output_dir: [type: :string, default: ".arbor/security/findings", doc: "Findings dir"],
@@ -259,7 +259,7 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
     name: "security_aggregate_verdict",
     description: "Aggregate adversarial verify-finding skeptic outputs into a verdict",
     category: "security",
-    tags: ["security", "sentinel", "verify"],
+    tags: ["security", "sentinel", "verify", "pipeline_internal"],
     schema: [
       skeptic_1: [type: :string, default: ""],
       skeptic_2: [type: :string, default: ""],

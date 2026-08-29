@@ -21,6 +21,7 @@ defmodule Arbor.Actions.Review do
     use Jido.Action,
       name: "review_synthesize",
       description: "Merge and classify multi-model review findings by verification status",
+      tags: ["pipeline_internal"],
       schema: [
         results: [type: {:list, :map}, required: false, doc: "Parallel reviewer branch results"]
       ]

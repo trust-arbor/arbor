@@ -1773,7 +1773,7 @@ defmodule Arbor.Actions.Coding.Workspace do
       name: "coding_workspace_acquire",
       description: "Acquire a monitored coding git worktree lease",
       category: "coding",
-      tags: ["coding", "workspace", "worktree", "git", "lease"],
+      tags: ["coding", "workspace", "worktree", "git", "lease", "pipeline_internal"],
       schema: [
         repo_path: [
           type: :string,
@@ -1895,7 +1895,7 @@ defmodule Arbor.Actions.Coding.Workspace do
       name: "coding_workspace_inspect",
       description: "Inspect a coding workspace lease owned by this process or task",
       category: "coding",
-      tags: ["coding", "workspace", "worktree", "lease"],
+      tags: ["coding", "workspace", "worktree", "lease", "pipeline_internal"],
       schema: [
         workspace_id: [
           type: :string,
@@ -2153,7 +2153,7 @@ defmodule Arbor.Actions.Coding.Workspace do
       name: "coding_workspace_release",
       description: "Release or publish a coding workspace lease",
       category: "coding",
-      tags: ["coding", "workspace", "worktree", "lease"],
+      tags: ["coding", "workspace", "worktree", "lease", "pipeline_internal"],
       schema: [
         workspace_id: [
           type: :string,
@@ -2297,7 +2297,15 @@ defmodule Arbor.Actions.Coding.Workspace do
       description:
         "Read cumulative committed diff and changed files for a coding workspace lease",
       category: "coding",
-      tags: ["coding", "workspace", "worktree", "git", "diff", "lease"],
+      tags: [
+        "coding",
+        "workspace",
+        "worktree",
+        "git",
+        "diff",
+        "lease",
+        "pipeline_internal"
+      ],
       schema: [
         workspace_id: [
           type: :string,

@@ -57,7 +57,7 @@ defmodule Arbor.Actions.Security.SweepCandidate do
     name: "security_sweep_candidate",
     description: "Sweep a synthesized candidate detector over the umbrella and collect siblings",
     category: "security",
-    tags: ["security", "sentinel", "synthesis", "sweep", "e1"],
+    tags: ["security", "sentinel", "synthesis", "sweep", "e1", "pipeline_internal"],
     schema: [
       candidate: [
         type: {:or, [:map, :struct]},

@@ -3,8 +3,10 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
   Standing guard: every registered action used as a DOT graph syscall is
   either tagged `pipeline_internal` or explicitly allowlisted as dual-use.
 
-  DOT targets are derived from tracked pipeline files (`apps/*/priv/**/*.dot`
-  and `apps/*/specs/**/*.dot`), not a hand-copied target list.
+  DOT targets are derived from Git-tracked pipeline files
+  (`apps/*/priv/**/*.dot` and `apps/*/specs/**/*.dot`). Inventory fails
+  closed when Git (or the contained source-inventory manifest) cannot be
+  established, and unresolved `action=` targets fail the suite.
   """
   use ExUnit.Case, async: false
 
@@ -14,10 +16,11 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
   alias Arbor.Actions.SessionExecution
   alias Arbor.Actions.SessionGoals
   alias Arbor.Actions.SessionLlm
-  alias Arbor.Actions.SessionMemory
   alias Arbor.Common.CapabilityIndex
+  alias Arbor.Contracts.Coding.SourceInventory
 
   @action_attr ~r/(?<![A-Za-z0-9_.])action\s*=\s*["']([^"']+)["']/
+  @repo_root Path.expand("../../../../..", __DIR__)
 
   @session_graph_syscalls [
     SessionGoals.UpdateGoals,
@@ -28,15 +31,43 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
     SessionExecution.RouteActions,
     SessionExecution.ExecuteActions,
     SessionLlm.BuildPrompt,
-    SessionMemory.Recall,
-    SessionMemory.Update,
-    SessionMemory.Checkpoint,
-    SessionMemory.Consolidate,
-    SessionMemory.UpdateWorkingMemory,
-    SessionMemory.BackgroundChecks,
+    Actions.SessionMemory.Recall,
+    Actions.SessionMemory.Update,
+    Actions.SessionMemory.Checkpoint,
+    Actions.SessionMemory.Consolidate,
+    Actions.SessionMemory.UpdateWorkingMemory,
+    Actions.SessionMemory.BackgroundChecks,
     Actions.Session.Classify,
     Actions.Session.ModeSelect,
     Actions.Session.ProcessResults
+  ]
+
+  # Test-owned dual-use allowlist. Direct agent use is justified by tool
+  # schema plus non-graph call sites (APIAgent/MCP/Agent.Capabilities).
+  # Graph-only syscalls must carry `pipeline_internal` instead of appearing here.
+  @dual_use_graph_actions [
+    # File I/O — Agent.Capabilities fs.read/write and MCP tool exposure;
+    # also example and scheduler pipeline nodes.
+    Arbor.Actions.File.Read,
+    Arbor.Actions.File.Write,
+    # Mix test runner — conversational mix_test tool and TDD/code-review nodes.
+    Arbor.Actions.Mix.Test,
+    # Git/GitHub — agent VCS catalog (Git.Commit in Agent.Capabilities;
+    # branch/PR in git/github tools) and code-review/coding pipeline nodes.
+    Arbor.Actions.Git.Branch,
+    Arbor.Actions.Git.Commit,
+    Arbor.Actions.Git.PR,
+    Arbor.Actions.Github.PR,
+    # Web search — Agent.Capabilities web.search plus scheduler trend pipelines.
+    Arbor.Actions.Web.Search,
+    Arbor.Actions.Web.ExaSearch,
+    Arbor.Actions.Web.TinyfishSearch,
+    # ACP sessions — Agent.Capabilities physical acp.* tools and coding-change
+    # pipeline worker sessions.
+    Arbor.Actions.Acp.StartSession,
+    Arbor.Actions.Acp.SendMessage,
+    Arbor.Actions.Acp.SessionStatus,
+    Arbor.Actions.Acp.CloseSession
   ]
 
   defmodule StaleSessionGraphSyscallProvider do
@@ -74,17 +105,18 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
 
     test "non-allowlisted graph syscalls are tagged pipeline_internal" do
       {_targets, resolved} = inventory_dot_action_targets()
+      allowlisted = MapSet.new(@dual_use_graph_actions)
 
       untagged =
         resolved
         |> Enum.map(fn {_target, module} -> module end)
         |> Enum.uniq()
         |> Enum.reject(&Actions.pipeline_internal_action?/1)
-        |> Enum.reject(&Actions.dual_use_graph_action?/1)
+        |> Enum.reject(&MapSet.member?(allowlisted, &1))
         |> Enum.sort()
 
       assert untagged == [],
-             "DOT graph syscalls missing pipeline_internal (add the tag, or review into dual_use_graph_actions/0): " <>
+             "DOT graph syscalls missing pipeline_internal (add the tag, or review into the test-owned dual-use allowlist): " <>
                inspect(untagged)
     end
 
@@ -98,14 +130,17 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
                inspect(unresolved)
     end
 
-    test "dual-use allowlist modules are registered and disjoint from pipeline_internal" do
-      allowlisted = Actions.dual_use_graph_actions()
-      assert allowlisted != []
+    test "dual-use allowlist modules are registered, inventoried, and disjoint from pipeline_internal" do
+      {_targets, resolved} = inventory_dot_action_targets()
+      inventoried = MapSet.new(resolved, fn {_target, module} -> module end)
       registered = MapSet.new(Actions.all_actions())
 
-      for module <- allowlisted do
+      for module <- @dual_use_graph_actions do
         assert module in registered,
                "#{inspect(module)} is allowlisted as dual-use but is not in all_actions/0"
+
+        assert MapSet.member?(inventoried, module),
+               "#{inspect(module)} is allowlisted as dual-use but is not a tracked DOT action= target"
 
         refute Actions.pipeline_internal_action?(module),
                "#{inspect(module)} cannot be both pipeline_internal and dual-use"
@@ -130,7 +165,7 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
         refute name in exposed_names
       end
 
-      for module <- Actions.dual_use_graph_actions() do
+      for module <- @dual_use_graph_actions do
         name = to_string(module.name())
         schema = schema_name(module.to_tool())
 
@@ -143,7 +178,6 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
     end
 
     test "DOT-session catalog primitive never lists session_goals/exec/llm syscalls" do
-      # ToolDisclosure.profile_tools/1 enumerates Arbor.Actions.exposed_actions/0.
       names =
         Actions.exposed_actions()
         |> Enum.map(&to_string(&1.name()))
@@ -184,7 +218,7 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
 
   defp inventory_dot_action_targets do
     targets =
-      repo_root()
+      @repo_root
       |> pipeline_dot_files()
       |> Enum.flat_map(&dot_action_targets/1)
       |> Enum.uniq()
@@ -193,8 +227,17 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
     resolved =
       Enum.flat_map(targets, fn target ->
         case Actions.name_to_module(target) do
-          {:ok, module} -> [{target, module}]
-          {:error, :unknown_action} -> []
+          {:ok, module} when is_atom(module) ->
+            [{target, module}]
+
+          {:error, :unknown_action} ->
+            []
+
+          other ->
+            flunk(
+              "Arbor.Actions.name_to_module/1 returned unexpected result for #{inspect(target)}: " <>
+                inspect(other)
+            )
         end
       end)
 
@@ -202,28 +245,148 @@ defmodule Arbor.Actions.PipelineInternalGraphSyscallGuardTest do
   end
 
   defp pipeline_dot_files(repo_root) do
-    ["apps/*/priv/**/*.dot", "apps/*/specs/**/*.dot"]
-    |> Enum.flat_map(&Path.wildcard(Path.join(repo_root, &1)))
-    |> Enum.filter(&File.regular?/1)
-    |> Enum.uniq()
+    case tracked_pipeline_dot_relpaths(repo_root, inventory_env_from_system()) do
+      {:ok, relpaths} ->
+        abs_paths = Enum.map(relpaths, &Path.join(repo_root, &1))
+        missing = Enum.reject(abs_paths, &File.regular?/1)
+
+        if missing == [] do
+          Enum.sort(abs_paths)
+        else
+          flunk(
+            "Git-tracked pipeline files are missing or not regular files: " <> inspect(missing)
+          )
+        end
+
+      {:error, reason} ->
+        flunk("failed to establish Git-tracked pipeline inventory: #{inspect(reason)}")
+    end
   end
+
+  defp tracked_pipeline_dot_relpaths(root, env) when is_binary(root) and is_map(env) do
+    case Map.get(env, "ARBOR_MIX_CONTAINED") do
+      "1" -> contained_tracked_pipeline_dot_relpaths(env)
+      _ -> git_tracked_pipeline_dot_relpaths(root)
+    end
+  end
+
+  defp git_tracked_pipeline_dot_relpaths(root) when is_binary(root) do
+    try do
+      case System.cmd("git", ["ls-files", "-z", "--", "apps"],
+             cd: root,
+             stderr_to_stdout: true
+           ) do
+        {output, 0} when is_binary(output) ->
+          relpaths =
+            output
+            |> String.split(<<0>>, trim: true)
+            |> Enum.filter(&tracked_pipeline_dot_path?/1)
+            |> Enum.sort()
+
+          {:ok, relpaths}
+
+        {output, code} ->
+          {:error, {:git_ls_files_failed, code, output}}
+      end
+    rescue
+      error -> {:error, {:git_ls_files_failed, error}}
+    catch
+      kind, reason -> {:error, {:git_ls_files_failed, {kind, reason}}}
+    end
+  end
+
+  defp contained_tracked_pipeline_dot_relpaths(env) when is_map(env) do
+    case resolve_source_inventory_path(env) do
+      {:error, reason} ->
+        {:error, {:contained_inventory, reason, :before_filesystem}}
+
+      {:ok, path} ->
+        max_bytes = SourceInventory.max_encoded_bytes()
+
+        with {:ok, %File.Stat{type: :regular, size: size}} <- File.lstat(path),
+             :ok <- admit_manifest_byte_size(size, max_bytes),
+             {:ok, bytes} <- File.read(path),
+             {:ok, decoded} <- Jason.decode(bytes),
+             {:ok, inventory} <- SourceInventory.new(decoded) do
+          relpaths =
+            inventory
+            |> SourceInventory.paths()
+            |> Enum.filter(&tracked_pipeline_dot_path?/1)
+            |> Enum.sort()
+
+          {:ok, relpaths}
+        else
+          {:error, :enoent} ->
+            {:error, {:contained_inventory, :enoent, path}}
+
+          {:error, :oversized_manifest} ->
+            {:error, {:contained_inventory, :oversized_manifest, path}}
+
+          {:error, reason} ->
+            {:error, {:contained_inventory, reason, path}}
+
+          other ->
+            {:error, {:contained_inventory, other, path}}
+        end
+    end
+  end
+
+  defp admit_manifest_byte_size(size, max_bytes)
+       when is_integer(size) and is_integer(max_bytes) and size >= 0 and max_bytes > 0 do
+    if size <= max_bytes, do: :ok, else: {:error, :oversized_manifest}
+  end
+
+  defp admit_manifest_byte_size(_size, _max_bytes), do: {:error, :oversized_manifest}
+
+  defp resolve_source_inventory_path(env) when is_map(env) do
+    case Map.fetch(env, "ARBOR_SOURCE_INVENTORY_PATH") do
+      {:ok, path} when is_binary(path) and path != "" -> {:ok, path}
+      {:ok, _value} -> {:error, :invalid_inventory_path}
+      :error -> {:error, :missing_inventory_path}
+    end
+  end
+
+  defp inventory_env_from_system do
+    %{}
+    |> put_env_if_present("ARBOR_MIX_CONTAINED")
+    |> put_env_if_present("ARBOR_SOURCE_INVENTORY_PATH")
+  end
+
+  defp put_env_if_present(env, key) do
+    case System.get_env(key) do
+      nil -> env
+      value -> Map.put(env, key, value)
+    end
+  end
+
+  defp tracked_pipeline_dot_path?(path) when is_binary(path) do
+    String.ends_with?(path, ".dot") and
+      case Path.split(path) do
+        ["apps", app, "priv" | rest] -> valid_app_name?(app) and rest != []
+        ["apps", app, "specs" | rest] -> valid_app_name?(app) and rest != []
+        _ -> false
+      end
+  end
+
+  defp tracked_pipeline_dot_path?(_path), do: false
+
+  defp valid_app_name?(app) when is_binary(app) do
+    app != "" and app != "." and app != ".." and not String.contains?(app, "/")
+  end
+
+  defp valid_app_name?(_app), do: false
 
   defp dot_action_targets(path) do
-    path
-    |> File.read!()
-    |> then(&Regex.scan(@action_attr, &1, capture: :all_but_first))
-    |> List.flatten()
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
+    case File.read(path) do
+      {:ok, contents} ->
+        contents
+        |> then(&Regex.scan(@action_attr, &1, capture: :all_but_first))
+        |> List.flatten()
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
 
-  defp repo_root do
-    case Mix.Project.project_file() do
-      path when is_binary(path) ->
-        Path.expand("../..", Path.dirname(path))
-
-      _ ->
-        Path.expand("../../../../..", __DIR__)
+      {:error, reason} ->
+        flunk("failed to read tracked pipeline file #{path}: #{inspect(reason)}")
     end
   end
 

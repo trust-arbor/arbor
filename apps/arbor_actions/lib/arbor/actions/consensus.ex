@@ -343,6 +343,7 @@ defmodule Arbor.Actions.Consensus do
     use Jido.Action,
       name: "consensus_decide",
       description: "Tally votes from parallel results into a council decision",
+      tags: ["pipeline_internal"],
       schema: [
         results: [type: {:list, :map}, required: false, doc: "Parallel branch results"],
         question: [type: :string, required: false, doc: "Question being decided"],
@@ -652,6 +653,7 @@ defmodule Arbor.Actions.Consensus do
     use Jido.Action,
       name: "consensus_decide_review",
       description: "Apply strict code-review reports to a frozen finding ledger",
+      tags: ["pipeline_internal"],
       schema:
         Zoi.object(%{
           results:

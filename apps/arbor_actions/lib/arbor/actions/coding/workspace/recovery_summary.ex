@@ -11,7 +11,15 @@ defmodule Arbor.Actions.Coding.Workspace.RecoverySummary do
     name: "coding_workspace_recovery_summary",
     description: "Build a bounded recovery prompt from an authorized coding workspace lease",
     category: "coding",
-    tags: ["coding", "workspace", "worktree", "git", "lease", "recovery"],
+    tags: [
+      "coding",
+      "workspace",
+      "worktree",
+      "git",
+      "lease",
+      "recovery",
+      "pipeline_internal"
+    ],
     schema: [
       workspace_id: [
         type: :string,
