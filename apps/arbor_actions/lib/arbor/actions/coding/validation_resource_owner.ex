@@ -3,7 +3,10 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
 
   use GenServer
 
+  require Logger
+
   alias Arbor.Actions.Coding.BlobManifest
+  alias Arbor.Actions.Coding.SnapshotDestVerify
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Mix, as: MixAction
 
@@ -14,6 +17,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   @max_cleanup_retry_limit 32
   @supervisor_cleanup_budget_ms 20_000
   @cleanup_attempted_key {__MODULE__, :bounded_cleanup_attempted}
+  @git_invocations_key {__MODULE__, :git_invocations}
 
   @doc false
   def supervisor_name, do: @supervisor
@@ -646,11 +650,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
          true <- is_binary(index) and index != "",
          true <- is_binary(dest) and dest != "",
          true <- is_binary(held) and held != "",
-         :ok <- match_expected_tree(held, expected_oid),
-         {:ok, held_entries} <- verify_destination_against_held(state, dest_budget(opts)),
-         :ok <- read_held_tree(objects, index, held),
-         :ok <- checkout_held_tree(objects, index, dest) do
-      {:ok, snapshot_binding(state, held_entries)}
+         :ok <- match_expected_tree(held, expected_oid) do
+      recapture_verified_tree(state, objects, index, dest, held, opts)
     else
       false -> {:error, :admitted_tree_mismatch}
       {:error, reason} -> {:error, reason}
@@ -658,11 +659,72 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
     end
   end
 
-  defp snapshot_binding(state, held_entries) when is_list(held_entries) do
+  # Dest verification hashes in-process and must not write dest bytes into the
+  # owner object store. Source staging keeps hash_source_blob/3 with hash-object -w.
+  defp recapture_verified_tree(state, objects, index, dest, held, opts) do
+    reset_git_invocations()
+    held_list_started = monotonic_ms()
+
+    with {:ok, listing} <-
+           git(["--git-dir", objects, "ls-tree", "-r", "-z", held], [], raw: true),
+         {:ok, held_entries} <- BlobManifest.parse_ls_tree_z(listing),
+         {:ok, format} <- infer_held_format(held, held_entries) do
+      held_list_ms = elapsed_ms(held_list_started)
+      Logger.info("dest_verify begin held_entries=#{length(held_entries)}")
+      walk_started = monotonic_ms()
+
+      case SnapshotDestVerify.verify(dest, held_entries, dest_budget(opts), format) do
+        {:ok, held_entries, walk_stats} ->
+          walk_ms = elapsed_ms(walk_started)
+          restore_started = monotonic_ms()
+
+          with :ok <- read_held_tree(objects, index, held),
+               :ok <- checkout_held_tree(objects, index, dest) do
+            restore_ms = elapsed_ms(restore_started)
+            git_invocations = git_invocation_count()
+
+            dest_verify = %{
+              held_entries: length(held_entries),
+              dest_files: walk_stats.dest_files,
+              dest_entries_visited: walk_stats.dest_entries_visited,
+              dest_bytes: walk_stats.dest_bytes,
+              held_list_ms: held_list_ms,
+              walk_ms: walk_ms,
+              restore_ms: restore_ms,
+              git_invocations: git_invocations
+            }
+
+            Logger.info(
+              "dest_verify done dest_files=#{dest_verify.dest_files} dest_bytes=#{dest_verify.dest_bytes} walk_ms=#{walk_ms} git_invocations=#{git_invocations}"
+            )
+
+            {:ok, snapshot_binding(state, held_entries, dest_verify)}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :admitted_tree_mismatch}
+    end
+  end
+
+  defp infer_held_format(tree_oid, entries) do
+    case BlobManifest.infer_object_format(tree_oid, entries) do
+      {:ok, format} -> {:ok, format}
+      {:error, :mixed_object_format} -> {:error, :committable_snapshot_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp snapshot_binding(state, held_entries, dest_verify)
+       when is_list(held_entries) and is_map(dest_verify) do
     %{
       head: Map.get(state, :snapshot_head),
       tree_oid: Map.get(state, :snapshot_tree_oid),
-      paths: held_entries |> Enum.map(& &1.path) |> Enum.sort()
+      paths: held_entries |> Enum.map(& &1.path) |> Enum.sort(),
+      dest_verify: dest_verify
     }
   end
 
@@ -794,292 +856,11 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
 
   defp clamp_bound(_value, ceiling) when is_integer(ceiling) and ceiling >= 0, do: ceiling
 
-  defp verify_destination_against_held(state, budget) when is_map(budget) do
-    objects = Map.get(state, :snapshot_objects)
-    dest = Map.get(state, :snapshot_dest) || state.candidate_path
-    held = Map.get(state, :snapshot_tree_oid)
-
-    with {:ok, listing} <-
-           git(["--git-dir", objects, "ls-tree", "-r", "-z", held], [], raw: true),
-         {:ok, held_entries} <- BlobManifest.parse_ls_tree_z(listing),
-         {:ok, dest_blobs, extra_dirs?} <-
-           walk_destination(dest, objects, budget, held_ancestor_dirs(held_entries)),
-         :ok <- compare_dest_to_held(dest_blobs, extra_dirs?, held_entries) do
-      {:ok, held_entries}
-    end
-  end
-
-  defp held_ancestor_dirs(entries) when is_list(entries) do
-    Enum.reduce(entries, MapSet.new(), fn %{path: path}, acc ->
-      MapSet.union(acc, MapSet.new(ancestor_dirs(path)))
-    end)
-  end
-
-  defp ancestor_dirs(path) when is_binary(path) do
-    parts = Path.split(path)
-
-    if length(parts) < 2 do
-      []
-    else
-      Enum.map(1..(length(parts) - 1), fn n ->
-        parts |> Enum.take(n) |> Enum.join("/")
-      end)
-    end
-  end
-
-  defp walk_destination(dest, objects, budget, ancestors)
-       when is_binary(dest) and dest != "" do
-    case File.lstat(dest, time: :posix) do
-      {:ok, %File.Stat{type: :directory}} ->
-        case walk_dest_dir(dest, dest, "", objects, budget, ancestors, %{}, false) do
-          {:ok, _budget, blobs, extra_dirs?} -> {:ok, blobs, extra_dirs?}
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:ok, %File.Stat{}} ->
-        {:error, :validation_tree_mutated}
-
-      {:error, _reason} ->
-        {:error, :validation_tree_mutated}
-    end
-  end
-
-  defp walk_destination(_dest, _objects, _budget, _ancestors),
-    do: {:error, :validation_tree_mutated}
-
-  defp walk_dest_dir(root, abs, rel, objects, budget, ancestors, blobs, extra_dirs?) do
-    case File.ls(abs) do
-      {:ok, names} ->
-        reduce_dest_entries(names, root, abs, rel, objects, budget, ancestors, blobs, extra_dirs?)
-
-      {:error, reason} ->
-        {:error, {:snapshot_dest_unreadable, reason}}
-    end
-  end
-
-  defp reduce_dest_entries(
-         [],
-         _root,
-         _abs,
-         _rel,
-         _objects,
-         budget,
-         _ancestors,
-         blobs,
-         extra_dirs?
-       ) do
-    {:ok, budget, blobs, extra_dirs?}
-  end
-
-  defp reduce_dest_entries(
-         [name | rest],
-         root,
-         abs,
-         rel,
-         objects,
-         budget,
-         ancestors,
-         blobs,
-         extra_dirs?
-       ) do
-    case visit_dest_entry(root, abs, rel, name, objects, budget, ancestors, blobs, extra_dirs?) do
-      {:ok, budget, blobs, extra_dirs?} ->
-        reduce_dest_entries(rest, root, abs, rel, objects, budget, ancestors, blobs, extra_dirs?)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp visit_dest_entry(root, abs, rel, name, objects, budget, ancestors, blobs, extra_dirs?) do
-    with true <- safe_dest_name?(name),
-         child_rel = join_rel(rel, name),
-         child_abs = abs <> "/" <> name,
-         true <- within_dest?(root, child_abs),
-         {:ok, %File.Stat{} = stat} <- File.lstat(child_abs, time: :posix),
-         {:ok, budget} <- account_dest_entry(budget, child_rel, stat) do
-      case stat.type do
-        :directory ->
-          extra_dirs? = extra_dirs? or not MapSet.member?(ancestors, child_rel)
-
-          walk_dest_dir(
-            root,
-            child_abs,
-            child_rel,
-            objects,
-            budget,
-            ancestors,
-            blobs,
-            extra_dirs?
-          )
-
-        :regular ->
-          hash_dest_regular(objects, child_abs, child_rel, budget, blobs, extra_dirs?, stat)
-
-        :symlink ->
-          hash_dest_symlink(objects, child_abs, child_rel, budget, blobs, extra_dirs?)
-
-        _other ->
-          {:error, :validation_tree_mutated}
-      end
-    else
-      false -> {:error, :validation_tree_mutated}
-      {:error, :enoent} -> {:error, :validation_tree_mutated}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp hash_dest_regular(objects, abs, rel, budget, blobs, extra_dirs?, stat) do
-    case hash_destination_blob(objects, abs, "100644") do
-      {:ok, oid} ->
-        mode = if executable_mode?(stat.mode), do: "100755", else: "100644"
-        {:ok, budget, Map.put(blobs, rel, {mode, oid}), extra_dirs?}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp hash_dest_symlink(objects, abs, rel, budget, blobs, extra_dirs?) do
-    case File.read_link(abs) do
-      {:ok, target} when is_binary(target) ->
-        next_bytes = budget.bytes + byte_size(target)
-
-        cond do
-          next_bytes > budget.max_bytes ->
-            {:error, :tree_binding_bounds_exceeded}
-
-          true ->
-            case hash_destination_blob(objects, abs, "120000") do
-              {:ok, oid} ->
-                {:ok, %{budget | bytes: next_bytes}, Map.put(blobs, rel, {"120000", oid}),
-                 extra_dirs?}
-
-              {:error, reason} ->
-                {:error, reason}
-            end
-        end
-
-      {:error, _reason} ->
-        {:error, :validation_tree_mutated}
-
-      _other ->
-        {:error, :validation_tree_mutated}
-    end
-  end
-
-  defp compare_dest_to_held(dest_blobs, extra_dirs?, held_entries)
-       when is_map(dest_blobs) and is_boolean(extra_dirs?) and is_list(held_entries) do
-    held_map = Map.new(held_entries, &{&1.path, {&1.mode, &1.oid}})
-    dest_paths = MapSet.new(Map.keys(dest_blobs))
-    held_paths = MapSet.new(Map.keys(held_map))
-
-    mismatched? =
-      extra_dirs? or dest_paths != held_paths or
-        Enum.any?(held_map, fn {path, held} -> Map.get(dest_blobs, path) != held end)
-
-    if mismatched?, do: {:error, :validation_tree_mutated}, else: :ok
-  end
-
-  defp compare_dest_to_held(_dest_blobs, _extra_dirs?, _held_entries),
-    do: {:error, :validation_tree_mutated}
-
-  defp account_dest_entry(budget, rel, %File.Stat{} = stat) do
-    next = budget.entries + 1
-    file_bytes = if stat.type == :regular, do: max(stat.size || 0, 0), else: 0
-    next_bytes = budget.bytes + file_bytes
-
-    cond do
-      next > budget.max_entries ->
-        {:error, :tree_binding_bounds_exceeded}
-
-      match?({:error, _}, check_path_depth(rel, budget.max_depth)) ->
-        {:error, :tree_binding_bounds_exceeded}
-
-      next_bytes > budget.max_bytes ->
-        {:error, :tree_binding_bounds_exceeded}
-
-      true ->
-        {:ok, %{budget | entries: next, bytes: next_bytes}}
-    end
-  end
-
-  defp check_path_depth(path, max_depth)
-       when is_binary(path) and is_integer(max_depth) and max_depth >= 0 do
-    depth =
-      path
-      |> :binary.split(<<"/">>, [:global])
-      |> Enum.reject(&(&1 == <<>>))
-      |> length()
-
-    if depth > max_depth,
-      do: {:error, :tree_binding_bounds_exceeded},
-      else: :ok
-  end
-
-  defp check_path_depth(_, _), do: {:error, :tree_binding_bounds_exceeded}
-
-  defp safe_dest_name?(name) when is_binary(name) do
-    name != "" and name != "." and name != ".." and not String.contains?(name, "/") and
-      not String.contains?(name, <<0>>)
-  end
-
-  defp safe_dest_name?(_), do: false
-
-  defp join_rel("", name), do: name
-  defp join_rel(rel, name) when is_binary(rel) and is_binary(name), do: rel <> "/" <> name
-
-  defp within_dest?(root, abs) when is_binary(root) and is_binary(abs) do
-    root_parts = Path.split(root)
-    abs_parts = Path.split(abs)
-    List.starts_with?(abs_parts, root_parts)
-  end
-
-  defp within_dest?(_, _), do: false
-
-  defp executable_mode?(mode) when is_integer(mode), do: Bitwise.band(mode, 0o111) != 0
-  defp executable_mode?(_), do: false
-
-  # Independent dest hashing must not write dest bytes into the owner object
-  # store. Source staging keeps hash_source_blob/3 with hash-object -w.
-  defp hash_destination_blob(objects, path, "120000") do
-    case File.read_link(path) do
-      {:ok, target} when is_binary(target) ->
-        case git(
-               ["--git-dir", objects, "hash-object", "--stdin", "--no-filters"],
-               [],
-               stdin: target
-             ) do
-          {:ok, oid} -> admit_oid(oid)
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, {:snapshot_symlink_unreadable, reason}}
-    end
-  end
-
-  defp hash_destination_blob(objects, path, _mode) do
-    case git(["--git-dir", objects, "hash-object", "--no-filters", "--", path]) do
-      {:ok, oid} -> admit_oid(oid)
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp admit_oid(oid) when is_binary(oid) do
-    oid = String.trim(oid)
-
-    if Regex.match?(~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/, oid),
-      do: {:ok, oid},
-      else: {:error, :committable_snapshot_failed}
-  end
-
-  defp admit_oid(_oid), do: {:error, :committable_snapshot_failed}
-
   defp git(args, env \\ [], opts \\ [])
 
   defp git(args, env, opts)
        when is_list(args) and is_list(env) and is_list(opts) do
+    bump_git_invocations()
     env_map = Map.new(env, fn {k, v} -> {to_string(k), to_string(v)} end)
 
     shell_opts =
@@ -1109,4 +890,16 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   end
 
   defp maybe_put_git_stdin(opts, _stdin), do: opts
+
+  defp reset_git_invocations, do: Process.put(@git_invocations_key, 0)
+
+  defp bump_git_invocations do
+    Process.put(@git_invocations_key, git_invocation_count() + 1)
+  end
+
+  defp git_invocation_count, do: Process.get(@git_invocations_key, 0)
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp elapsed_ms(started) when is_integer(started), do: max(monotonic_ms() - started, 0)
 end

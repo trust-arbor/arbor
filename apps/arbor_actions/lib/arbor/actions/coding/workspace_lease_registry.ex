@@ -1329,7 +1329,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                   %{
                     head: Map.get(resource, :expected_head) || Map.get(binding, :head),
                     tree_oid: expected,
-                    paths: Map.get(binding, :paths, [])
+                    paths: Map.get(binding, :paths, []),
+                    dest_verify: Map.get(binding, :dest_verify)
                   }}, state}
 
               {:error, reason} ->

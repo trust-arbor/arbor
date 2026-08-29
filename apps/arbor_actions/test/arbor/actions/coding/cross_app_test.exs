@@ -1741,6 +1741,72 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
                end,
                snapshot_opts
              )
+
+    assert :ok =
+             MixAction.with_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context,
+               fn resource ->
+                 dest = resource.candidate_path
+                 File.write!(Path.join(dest, "mix.lock"), "%{}")
+
+                 assert {:error, :validation_tree_mutated} =
+                          MixAction.recapture_committable_snapshot(resource)
+
+                 :ok
+               end,
+               snapshot_opts
+             )
+
+    assert :ok =
+             MixAction.with_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context,
+               fn resource ->
+                 dest = resource.candidate_path
+                 File.write!(Path.join(dest, "mix.lock"), "%{}\nx")
+
+                 assert {:error, :validation_tree_mutated} =
+                          MixAction.recapture_committable_snapshot(resource)
+
+                 :ok
+               end,
+               snapshot_opts
+             )
+
+    assert :ok =
+             MixAction.with_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context,
+               fn resource ->
+                 dest = resource.candidate_path
+                 lock = Path.join(dest, "mix.lock")
+                 File.rm!(lock)
+                 File.ln_s("mix.exs", lock)
+
+                 assert {:error, :validation_tree_mutated} =
+                          MixAction.recapture_committable_snapshot(resource)
+
+                 :ok
+               end,
+               snapshot_opts
+             )
+  end
+
+  test "owner dest verification git invocations do not scale with regular files", %{
+    tmp_dir: tmp_dir
+  } do
+    small = bind_tree_with_extra_files(tmp_dir, 4)
+    large = bind_tree_with_extra_files(tmp_dir, 24)
+
+    assert small.tree_oid == small.expected_tree_oid
+    assert large.tree_oid == large.expected_tree_oid
+    assert small.git_invocations == large.git_invocations
+    assert small.git_invocations <= 8
+    assert small.dest_files == small.held_count
+    assert large.dest_files == large.held_count
+    assert large.dest_files > small.dest_files
+    assert small.bind_git_invocations == small.git_invocations
   end
 
   test "default Mix runner binds the owner snapshot read-only and does not launch on dest drift",
@@ -2364,6 +2430,59 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       {output, 0} -> {:ok, String.trim(output)}
       {output, _} -> {:error, output}
     end
+  end
+
+  defp bind_tree_with_extra_files(tmp_dir, extra_count)
+       when is_integer(extra_count) and extra_count >= 0 do
+    fixture = leased_umbrella(tmp_dir)
+
+    for index <- 1..extra_count do
+      File.write!(
+        Path.join(fixture.lease.worktree_path, "extra_#{index}.txt"),
+        "extra #{index}\n"
+      )
+    end
+
+    {:ok, freeze} = MixAction.committable_app_mix_inventory(fixture.lease.worktree_path)
+    held_count = length(freeze.blob_manifest)
+
+    {:ok, result} =
+      MixAction.with_validation_resource(
+        fixture.lease.workspace_id,
+        fixture.context,
+        fn resource ->
+          assert {:ok, first} = MixAction.bind_committable_snapshot(resource)
+          assert {:ok, second} = MixAction.bind_committable_snapshot(resource)
+          assert first.tree_oid == freeze.tree_oid
+          assert second.tree_oid == freeze.tree_oid
+          assert first.dest_verify.git_invocations == second.dest_verify.git_invocations
+          {:ok, {first, second}}
+        end,
+        committable_snapshot: true,
+        expected_tree_oid: freeze.tree_oid,
+        expected_head: freeze.head,
+        blob_manifest: freeze.blob_manifest
+      )
+
+    {first, second} = result
+    dest_verify = first.dest_verify
+    assert is_map(dest_verify)
+    assert is_integer(dest_verify.git_invocations)
+    assert is_integer(dest_verify.dest_files)
+    assert is_integer(dest_verify.walk_ms)
+    assert is_integer(dest_verify.held_list_ms)
+    assert is_integer(dest_verify.restore_ms)
+    assert is_integer(dest_verify.dest_entries_visited)
+    assert is_integer(dest_verify.dest_bytes)
+
+    %{
+      tree_oid: first.tree_oid,
+      expected_tree_oid: freeze.tree_oid,
+      held_count: held_count,
+      dest_files: dest_verify.dest_files,
+      git_invocations: dest_verify.git_invocations,
+      bind_git_invocations: second.dest_verify.git_invocations
+    }
   end
 
   defp leased_umbrella(tmp_dir) do

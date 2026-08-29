@@ -129,6 +129,26 @@ defmodule Arbor.Actions.Coding.BlobManifest do
     end
   end
 
+  @doc false
+  @spec infer_object_format(term(), term()) ::
+          {:ok, :sha1 | :sha256} | {:error, :mixed_object_format}
+  def infer_object_format(tree_oid, entries)
+      when is_binary(tree_oid) and is_list(entries) do
+    case valid_oid_length(tree_oid) do
+      length when length in [40, 64] ->
+        if Enum.any?(entries, &(valid_entry_oid_length(&1) != length)) do
+          {:error, :mixed_object_format}
+        else
+          format_for_length(length)
+        end
+
+      _other ->
+        {:error, :mixed_object_format}
+    end
+  end
+
+  def infer_object_format(_tree_oid, _entries), do: {:error, :mixed_object_format}
+
   defp parse_ls_tree_entry(entry) when is_binary(entry) do
     case :binary.split(entry, "\t") do
       [meta, path] when path != "" ->
@@ -202,4 +222,17 @@ defmodule Arbor.Actions.Coding.BlobManifest do
   end
 
   defp valid_blob_segments?(_), do: false
+
+  defp format_for_length(40), do: {:ok, :sha1}
+  defp format_for_length(64), do: {:ok, :sha256}
+
+  defp valid_oid_length(oid) when is_binary(oid) do
+    if Regex.match?(@full_oid_re, oid), do: byte_size(oid), else: -1
+  end
+
+  defp valid_oid_length(_), do: -1
+
+  defp valid_entry_oid_length(%{oid: oid}), do: valid_oid_length(oid)
+  defp valid_entry_oid_length(%{"oid" => oid}), do: valid_oid_length(oid)
+  defp valid_entry_oid_length(_), do: -1
 end
