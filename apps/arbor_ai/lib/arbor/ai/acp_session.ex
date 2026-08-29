@@ -133,6 +133,10 @@ defmodule Arbor.AI.AcpSession do
     context_tokens: 0,
     reconnect_attempted: false,
     usage: %{input_tokens: 0, output_tokens: 0},
+    # Closed per-prompt usage accumulated from session/update notifications
+    # (cursor-agent and other native ACP servers). Cleared when a prompt
+    # completes so it cannot leak into the next prompt.
+    pending_usage: nil,
     task_controls: %{},
     task_control_sequence: [],
     task_control_history_order: [],
@@ -1478,6 +1482,21 @@ defmodule Arbor.AI.AcpSession do
     "text"
   ]
 
+  # ACP session/update shapes that may carry per-turn token usage instead of
+  # (or in addition to) the prompt result. Official Usage is camelCase;
+  # providers also emit snake_case. Context-window-only usage_update (used/size)
+  # is ignored because it has no input/output tokens.
+  @usage_update_types ["usage", "tokenUsage", "token_usage", "usage_update"]
+  @max_session_usage_map_keys 32
+  @session_usage_payload_keys [
+    "usage",
+    :usage,
+    "tokenUsage",
+    :tokenUsage,
+    "token_usage",
+    :token_usage
+  ]
+
   defp process_session_update(state, session_id, update, opts) do
     case reconcile_session_update_identity(state, session_id) do
       {:ok, state} -> process_bound_session_update(state, session_id, update, opts)
@@ -1493,11 +1512,13 @@ defmodule Arbor.AI.AcpSession do
       end
 
     # Accumulate streaming text chunks (Gemini/adapter sessions can deliver text
-    # via session/update instead of the prompt result) and a bounded stream tail
-    # for task transcript artifacts.
+    # via session/update instead of the prompt result), closed pending usage
+    # (cursor-agent reports tokens on session/update, not the prompt result),
+    # and a bounded stream tail for task transcript artifacts.
     state =
       state
       |> then(&accumulate_text(update, &1))
+      |> maybe_accumulate_pending_usage(update)
       |> accumulate_stream_tail(update)
       |> note_provider_session_identity(update)
 
@@ -1624,12 +1645,18 @@ defmodule Arbor.AI.AcpSession do
   defp accumulate_stream_tail(state, _update), do: state
 
   defp prepare_prompt_capture(state, nil),
-    do: %{state | accumulated_text: "", stream_tail: nil}
+    do: %{state | accumulated_text: "", stream_tail: nil, pending_usage: nil}
 
   defp prepare_prompt_capture(state, _capture),
-    do: %{state | accumulated_text: "", stream_tail: AcpTranscript.empty_stream_tail()}
+    do: %{
+      state
+      | accumulated_text: "",
+        stream_tail: AcpTranscript.empty_stream_tail(),
+        pending_usage: nil
+    }
 
-  defp clear_prompt_capture(state), do: %{state | accumulated_text: "", stream_tail: nil}
+  defp clear_prompt_capture(state),
+    do: %{state | accumulated_text: "", stream_tail: nil, pending_usage: nil}
 
   @doc false
   def merge_accumulated_text(result, "") when is_map(result), do: result
@@ -1738,6 +1765,114 @@ defmodule Arbor.AI.AcpSession do
 
   defp accumulate_usage(state, _), do: state
 
+  # Closed per-prompt usage from session/update. Only numbers; ignore anything
+  # else (strings, negatives, oversized maps) so a hostile update cannot crash
+  # the bound session or poison the next prompt.
+  defp maybe_accumulate_pending_usage(state, update) when is_map(update) do
+    case parse_session_usage_update(update) do
+      {:ok, usage} ->
+        Map.put(state, :pending_usage, merge_pending_usage(Map.get(state, :pending_usage), usage))
+
+      :ignore ->
+        state
+    end
+  end
+
+  defp maybe_accumulate_pending_usage(state, _update), do: state
+
+  defp parse_session_usage_update(update) when is_map(update) do
+    if map_size(update) > @max_session_usage_map_keys do
+      :ignore
+    else
+      case session_usage_payload(update) do
+        {:ok, usage} ->
+          parse_closed_session_usage(usage)
+
+        :invalid ->
+          :ignore
+
+        :missing ->
+          if usage_update_type?(update), do: parse_closed_session_usage(update), else: :ignore
+      end
+    end
+  end
+
+  defp parse_session_usage_update(_update), do: :ignore
+
+  defp usage_update_type?(update) do
+    case update_type(update) do
+      type when is_atom(type) -> Atom.to_string(type) in @usage_update_types
+      type when is_binary(type) -> type in @usage_update_types
+      _ -> false
+    end
+  end
+
+  defp session_usage_payload(update) when is_map(update) do
+    Enum.reduce_while(@session_usage_payload_keys, :missing, fn key, _acc ->
+      case Map.fetch(update, key) do
+        {:ok, value} when is_map(value) -> {:halt, {:ok, value}}
+        {:ok, _invalid} -> {:halt, :invalid}
+        :error -> {:cont, :missing}
+      end
+    end)
+  end
+
+  defp parse_closed_session_usage(usage) when is_map(usage) do
+    cond do
+      map_size(usage) == 0 ->
+        :ignore
+
+      map_size(usage) > @max_session_usage_map_keys ->
+        :ignore
+
+      true ->
+        with {:ok, input} <-
+               present_usage_token(usage, ["input_tokens", :input_tokens, "inputTokens"]),
+             {:ok, output} <-
+               present_usage_token(usage, ["output_tokens", :output_tokens, "outputTokens"]),
+             {:ok, total} <- optional_total_tokens(usage, input, output),
+             {:ok, cached} <- optional_cached_tokens(usage, input) do
+          {:ok,
+           %{
+             input_tokens: input,
+             output_tokens: output,
+             total_tokens: total,
+             cached_tokens: cached,
+             subscription_usage_units: nil
+           }}
+        else
+          _ -> :ignore
+        end
+    end
+  end
+
+  defp parse_closed_session_usage(_usage), do: :ignore
+
+  defp merge_pending_usage(nil, usage), do: usage
+
+  defp merge_pending_usage(existing, incoming)
+       when is_map(existing) and is_map(incoming) do
+    input = checked_add_tokens(existing.input_tokens, incoming.input_tokens)
+    output = checked_add_tokens(existing.output_tokens, incoming.output_tokens)
+    cached = checked_add_tokens(existing.cached_tokens, incoming.cached_tokens)
+    total = checked_add_tokens(existing.total_tokens, incoming.total_tokens)
+    cached = min(cached, input)
+    total = max(total, checked_add_tokens(input, output))
+
+    %{
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: total,
+      cached_tokens: cached,
+      subscription_usage_units: nil
+    }
+  end
+
+  defp merge_pending_usage(_existing, incoming), do: incoming
+
+  defp clear_pending_usage(state) when is_map(state), do: Map.put(state, :pending_usage, nil)
+  defp clear_pending_usage(state), do: state
+
   # Keep the last valid signed-64 cumulative count when addition would overflow.
   defp checked_add_tokens(current, delta)
        when is_integer(current) and is_integer(delta) do
@@ -1753,7 +1888,9 @@ defmodule Arbor.AI.AcpSession do
 
   # Strict ledger parse: require a present usage map and both token fields.
   # Missing or malformed usage emits no ledger fact (never invent zero-token events).
-  defp strict_prompt_usage(result) when is_map(result) do
+  # When the prompt result carries no usage map, fall back to session/update
+  # pending_usage accumulated for this prompt only.
+  defp strict_prompt_usage(result, pending_usage) when is_map(result) do
     case prompt_usage_map(result) do
       usage when is_map(usage) and map_size(usage) > 0 ->
         with {:ok, input} <-
@@ -1776,11 +1913,29 @@ defmodule Arbor.AI.AcpSession do
         end
 
       _ ->
-        :missing
+        strict_pending_usage(pending_usage)
     end
   end
 
-  defp strict_prompt_usage(_), do: :missing
+  defp strict_prompt_usage(_result, pending_usage), do: strict_pending_usage(pending_usage)
+
+  defp strict_pending_usage(
+         %{
+           input_tokens: input,
+           output_tokens: output,
+           total_tokens: total,
+           cached_tokens: cached
+         } = usage
+       )
+       when is_integer(input) and input >= 0 and input <= 1_000_000_000 and
+              is_integer(output) and output >= 0 and output <= 1_000_000_000 and
+              is_integer(total) and total >= 0 and total <= 1_000_000_000 and
+              is_integer(cached) and cached >= 0 and cached <= 1_000_000_000 and
+              total >= input + output and cached <= input do
+    {:ok, Map.put_new(usage, :subscription_usage_units, nil)}
+  end
+
+  defp strict_pending_usage(_pending), do: :missing
 
   defp present_usage_token(usage, keys) when is_map(usage) do
     case fetch_usage_token(usage, keys) do
@@ -1818,7 +1973,9 @@ defmodule Arbor.AI.AcpSession do
            :cached_tokens,
            "cache_read_tokens",
            :cache_read_tokens,
-           "cachedTokens"
+           "cachedTokens",
+           "cachedReadTokens",
+           "cached_read_tokens"
          ]) do
       {:ok, cached} when cached <= input -> {:ok, cached}
       :missing -> {:ok, 0}
@@ -1872,7 +2029,7 @@ defmodule Arbor.AI.AcpSession do
   # An unset or failing snapshotted ledger must not emit admission-failure
   # observations for prompts that never produced authoritative usage.
   defp maybe_record_provider_usage(prompt, result, state) do
-    with {:ok, usage} <- strict_prompt_usage(result),
+    with {:ok, usage} <- strict_prompt_usage(result, Map.get(state, :pending_usage)),
          {:ok, event} <- build_acp_provider_usage_event(prompt, usage, state) do
       # Only after a strict event exists do we consult immutable ledger state.
       case usage_ledger_opts(state) do
@@ -3308,7 +3465,7 @@ defmodule Arbor.AI.AcpSession do
 
         # Report only after transcript durability succeeds, before follow-up chain.
         maybe_record_provider_usage(prompt, result, new_state)
-        continue_after_durable_prompt(prompt, result, new_state)
+        continue_after_durable_prompt(prompt, result, clear_pending_usage(new_state))
 
       {:error, reason} ->
         transcript_durability_failed(prompt, state, reason)

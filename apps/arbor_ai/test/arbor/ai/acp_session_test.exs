@@ -1872,6 +1872,42 @@ defmodule Arbor.AI.AcpSessionTest do
       assert AcpSession.drain_pending_updates(state).accumulated_text == ""
     end
 
+    test "accumulates ACP schema usage_update tokens as pending_usage" do
+      # Constructed from the ACP Usage schema; no captured cursor-agent fixture
+      # exists in this repo.
+      state = %{
+        accumulated_text: "",
+        stream_callback: nil,
+        provider: :cursor,
+        session_id: "s1",
+        pending_usage: nil
+      }
+
+      send(
+        self(),
+        {:acp_session_update, "s1",
+         %{
+           "sessionUpdate" => "usage_update",
+           "usage" => %{
+             "inputTokens" => 35_000,
+             "outputTokens" => 12_000,
+             "totalTokens" => 53_000,
+             "cachedReadTokens" => 5_000
+           }
+         }}
+      )
+
+      drained = AcpSession.drain_pending_updates(state)
+
+      assert drained.pending_usage == %{
+               input_tokens: 35_000,
+               output_tokens: 12_000,
+               total_tokens: 53_000,
+               cached_tokens: 5_000,
+               subscription_usage_units: nil
+             }
+    end
+
     test "security regression: ignores updates for a different provider session" do
       state = %{
         accumulated_text: "",

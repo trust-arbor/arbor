@@ -13,6 +13,19 @@ defmodule Arbor.AI.AcpProviderUsageTest do
 
   @moduletag :fast
 
+  # Constructed from the ACP Usage schema (inputTokens / outputTokens /
+  # totalTokens / cachedReadTokens on sessionUpdate: "usage_update"). No
+  # captured cursor-agent session/update fixture exists in this repo.
+  @cursor_agent_usage_update %{
+    "sessionUpdate" => "usage_update",
+    "usage" => %{
+      "inputTokens" => 35_000,
+      "outputTokens" => 12_000,
+      "totalTokens" => 53_000,
+      "cachedReadTokens" => 5_000
+    }
+  }
+
   defmodule FakeClient do
     @moduledoc false
 
@@ -269,6 +282,225 @@ defmodule Arbor.AI.AcpProviderUsageTest do
              AcpSession.send_message(session, "hello", capture_opts(:fail, timeout: 2_000))
 
     assert stream_events(target) == []
+  end
+
+  test "session/update usage records one event when the prompt result has none", %{
+    target: target
+  } do
+    session =
+      start_session(:cursor,
+        gated?: true,
+        results: [],
+        provider_usage_ledger_target: target
+      )
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(
+          session,
+          "hello",
+          timeout: 5_000,
+          usage_context: %{task_id: "task_cursor_usage", principal_id: "agent_cursor"}
+        )
+      end)
+
+    assert_receive {:prompt_started, worker, "hello"}, 2_000
+    send(session, {:acp_session_update, "fake-session", @cursor_agent_usage_update})
+    send(worker, {:release, {:ok, %{"text" => "done"}}})
+
+    assert {:ok, result} = Task.await(caller, 5_000)
+    assert result["text"] == "done"
+
+    events = stream_events(target)
+    assert length(events) == 1
+    assert hd(events).data["provider"] == "cursor"
+    assert hd(events).data["input_tokens"] == 35_000
+    assert hd(events).data["output_tokens"] == 12_000
+    assert hd(events).data["total_tokens"] == 53_000
+    assert hd(events).data["cached_tokens"] == 5_000
+    assert hd(events).data["task_id"] == "task_cursor_usage"
+    assert hd(events).data["principal_id"] == "agent_cursor"
+    assert :sys.get_state(session).pending_usage == nil
+  end
+
+  test "prompt-result usage wins over session/update and clears the accumulator", %{
+    target: target
+  } do
+    session =
+      start_session(:claude,
+        gated?: true,
+        results: [],
+        provider_usage_ledger_target: target
+      )
+
+    first =
+      Task.async(fn ->
+        AcpSession.send_message(
+          session,
+          "first",
+          timeout: 5_000,
+          usage_context: %{task_id: "task_result_wins"}
+        )
+      end)
+
+    assert_receive {:prompt_started, first_worker, "first"}, 2_000
+
+    send(
+      session,
+      {:acp_session_update, "fake-session",
+       %{
+         "sessionUpdate" => "usage_update",
+         "usage" => %{"input_tokens" => 100, "output_tokens" => 20, "total_tokens" => 120}
+       }}
+    )
+
+    send(
+      first_worker,
+      {:release,
+       {:ok, %{"text" => "first", "usage" => %{"input_tokens" => 5, "output_tokens" => 2}}}}
+    )
+
+    assert {:ok, _} = Task.await(first, 5_000)
+    [first_event] = stream_events(target)
+    assert first_event.data["input_tokens"] == 5
+    assert first_event.data["output_tokens"] == 2
+    assert first_event.data["total_tokens"] == 7
+    assert first_event.data["task_id"] == "task_result_wins"
+    assert :sys.get_state(session).pending_usage == nil
+
+    second =
+      Task.async(fn ->
+        AcpSession.send_message(
+          session,
+          "second",
+          timeout: 5_000,
+          usage_context: %{task_id: "task_result_wins"}
+        )
+      end)
+
+    assert_receive {:prompt_started, second_worker, "second"}, 2_000
+
+    send(
+      session,
+      {:acp_session_update, "fake-session",
+       %{
+         "sessionUpdate" => "tokenUsage",
+         "tokenUsage" => %{"inputTokens" => 7, "outputTokens" => 3, "totalTokens" => 10}
+       }}
+    )
+
+    send(second_worker, {:release, {:ok, %{"text" => "second"}}})
+    assert {:ok, _} = Task.await(second, 5_000)
+
+    events = stream_events(target)
+    assert length(events) == 2
+    assert Enum.map(events, & &1.data["input_tokens"]) == [5, 7]
+    assert Enum.map(events, & &1.data["output_tokens"]) == [2, 3]
+    assert Enum.map(events, & &1.data["total_tokens"]) == [7, 10]
+    assert Enum.all?(events, &(&1.data["task_id"] == "task_result_wins"))
+    assert :sys.get_state(session).pending_usage == nil
+  end
+
+  test "malformed session/update usage strings are ignored without crashing", %{target: target} do
+    session =
+      start_session(:cursor,
+        gated?: true,
+        results: [],
+        provider_usage_ledger_target: target
+      )
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "hello", timeout: 5_000)
+      end)
+
+    assert_receive {:prompt_started, worker, "hello"}, 2_000
+
+    send(
+      session,
+      {:acp_session_update, "fake-session",
+       %{
+         "sessionUpdate" => "usage_update",
+         "usage" => %{"inputTokens" => "35000", "outputTokens" => "12000"}
+       }}
+    )
+
+    send(worker, {:release, {:ok, %{"text" => "done"}}})
+    assert {:ok, result} = Task.await(caller, 5_000)
+    assert result["text"] == "done"
+    assert stream_events(target) == []
+    assert Process.alive?(session)
+    assert :sys.get_state(session).pending_usage == nil
+  end
+
+  test "malformed session/update usage negatives are ignored without crashing", %{
+    target: target
+  } do
+    session =
+      start_session(:cursor,
+        gated?: true,
+        results: [],
+        provider_usage_ledger_target: target
+      )
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "hello", timeout: 5_000)
+      end)
+
+    assert_receive {:prompt_started, worker, "hello"}, 2_000
+
+    send(
+      session,
+      {:acp_session_update, "fake-session",
+       %{
+         "sessionUpdate" => "usage",
+         "usage" => %{"input_tokens" => -5, "output_tokens" => 3, "total_tokens" => 10}
+       }}
+    )
+
+    send(worker, {:release, {:ok, %{"text" => "done"}}})
+    assert {:ok, result} = Task.await(caller, 5_000)
+    assert result["text"] == "done"
+    assert stream_events(target) == []
+    assert Process.alive?(session)
+    assert :sys.get_state(session).pending_usage == nil
+  end
+
+  test "malformed session/update huge usage maps are ignored without crashing", %{
+    target: target
+  } do
+    huge_usage =
+      1..40
+      |> Map.new(fn i -> {"extra_#{i}", i} end)
+      |> Map.merge(%{"inputTokens" => 9, "outputTokens" => 3, "totalTokens" => 12})
+
+    session =
+      start_session(:cursor,
+        gated?: true,
+        results: [],
+        provider_usage_ledger_target: target
+      )
+
+    caller =
+      Task.async(fn ->
+        AcpSession.send_message(session, "hello", timeout: 5_000)
+      end)
+
+    assert_receive {:prompt_started, worker, "hello"}, 2_000
+
+    send(
+      session,
+      {:acp_session_update, "fake-session",
+       %{"sessionUpdate" => "usage_update", "usage" => huge_usage}}
+    )
+
+    send(worker, {:release, {:ok, %{"text" => "done"}}})
+    assert {:ok, result} = Task.await(caller, 5_000)
+    assert result["text"] == "done"
+    assert stream_events(target) == []
+    assert Process.alive?(session)
+    assert :sys.get_state(session).pending_usage == nil
   end
 
   test "missing and malformed ACP usage invent no ledger facts", %{target: target} do
