@@ -21,11 +21,20 @@ defmodule Arbor.Gateway.Router do
   # validation admission probe. Keep the outer MCP transport strictly larger
   # so it can return the owned timeout result instead of terminating a
   # legitimate probe at the same deadline.
+  @mcp_handler_call_timeout_ms Application.compile_env(
+                                 :arbor_gateway,
+                                 :mcp_handler_call_timeout_ms,
+                                 45_000
+                               )
+
+  @doc "The MCP handler call budget (ms); the HTTP idle timeout must exceed it."
+  @spec handler_call_timeout_ms() :: pos_integer()
+  def handler_call_timeout_ms, do: @mcp_handler_call_timeout_ms
+
   @mcp_http_init_opts [
     handler: Arbor.Gateway.MCP.Handler,
     handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
-    handler_call_timeout:
-      Application.compile_env(:arbor_gateway, :mcp_handler_call_timeout_ms, 45_000),
+    handler_call_timeout: @mcp_handler_call_timeout_ms,
     server_info: %{name: "arbor", version: "0.1.0"},
     protocol_mode: :legacy_only,
     sse_enabled: true,

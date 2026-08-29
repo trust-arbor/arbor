@@ -28,10 +28,15 @@ defmodule Arbor.Gateway.Application do
           bind_ip = Application.get_env(:arbor_gateway, :bind_ip, {127, 0, 0, 1})
           Logger.info("Starting Arbor Gateway HTTP server on #{:inet.ntoa(bind_ip)}:#{port}")
 
-          [
-            {Plug.Cowboy,
-             scheme: :http, plug: Arbor.Gateway.Router, options: [port: port, ip: bind_ip]}
-          ]
+          options =
+            Arbor.Gateway.HttpServerOptions.build(
+              port: port,
+              ip: bind_ip,
+              handler_call_timeout_ms: Arbor.Gateway.Router.handler_call_timeout_ms(),
+              http_idle_timeout_ms: Application.get_env(:arbor_gateway, :http_idle_timeout_ms)
+            )
+
+          [{Plug.Cowboy, scheme: :http, plug: Arbor.Gateway.Router, options: options}]
         else
           Logger.warning("Port #{port} already in use, starting Gateway without HTTP server")
           []
