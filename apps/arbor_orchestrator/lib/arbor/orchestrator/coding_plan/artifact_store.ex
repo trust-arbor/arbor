@@ -47,6 +47,30 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     branch_lifecycle
     verification_report
     candidate
+    metrics
+  ))
+  @max_archived_node_durations 256
+  @archived_metrics_keys MapSet.new(~w(
+    execution_path
+    wall_clock_ms
+    node_durations_ms
+    completed_nodes
+    completed_node_count
+    validation_attempts
+    review_attempts
+    protocol_retry_count
+    design_rework_count
+    validation_rework_count
+    review_rework_count
+    operator_rework_count
+    total_rework_count
+    completed_nodes_truncated
+    node_durations_truncated
+    usage
+    context_tokens
+    worker_close_status
+    workspace_release_status
+    workspace_expires_at
   ))
   @compiled_workflow_keys MapSet.new(~w(
     coding_plan_path
@@ -1270,7 +1294,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
              "branch_lifecycle",
              BranchLifecycleDescriptor
            ) do
-      :ok
+      validate_terminal_metrics(Map.get(result, "metrics"))
     end
   end
 
@@ -1522,7 +1546,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       )
       |> maybe_put_terminal_candidate(result, task_id)
 
-    {:ok, body}
+    case maybe_put_archived_metrics(body, result) do
+      {:ok, body} -> {:ok, body}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp maybe_put_terminal_candidate(body, result, task_id) do
@@ -1552,6 +1579,147 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         is_binary(value) and String.valid?(value) and String.trim(value) != ""
       end
     )
+  end
+
+  defp maybe_put_archived_metrics(body, result) do
+    case Map.fetch(result, "metrics") do
+      :error ->
+        {:ok, body}
+
+      {:ok, metrics} ->
+        case sanitize_archived_metrics(metrics) do
+          {:ok, sanitized} -> {:ok, Map.put(body, "metrics", sanitized)}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp validate_terminal_metrics(nil), do: :ok
+
+  defp validate_terminal_metrics(metrics) do
+    case sanitize_archived_metrics(metrics) do
+      {:ok, _sanitized} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp sanitize_archived_metrics(metrics) when is_map(metrics) and not is_struct(metrics) do
+    with :ok <- validate_json_object(metrics, :invalid_terminal_metrics),
+         :ok <- validate_terminal_keys(metrics, @archived_metrics_keys, :terminal_metrics) do
+      sanitize_metrics_fields(metrics)
+    end
+  end
+
+  defp sanitize_archived_metrics(_metrics),
+    do: {:error, {:invalid_terminal_metrics, :expected_map}}
+
+  defp sanitize_metrics_fields(metrics) do
+    Enum.reduce_while(metrics, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case sanitize_metric_field(key, value) do
+        {:ok, sanitized} -> {:cont, {:ok, Map.put(acc, key, sanitized)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp sanitize_metric_field("node_durations_ms", value)
+       when is_map(value) and not is_struct(value) do
+    with :ok <- validate_json_object(value, :invalid_terminal_metrics),
+         true <-
+           Enum.all?(value, fn {node_id, duration} ->
+             is_binary(node_id) and is_integer(duration) and duration >= 0
+           end) do
+      bounded =
+        value
+        |> Enum.sort_by(fn {node_id, duration} -> {node_id, duration} end)
+        |> Enum.take(@max_archived_node_durations)
+        |> Map.new()
+
+      {:ok, bounded}
+    else
+      false -> {:error, {:invalid_terminal_metrics, "node_durations_ms"}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp sanitize_metric_field("node_durations_ms", _value),
+    do: {:error, {:invalid_terminal_metrics, "node_durations_ms"}}
+
+  defp sanitize_metric_field("usage", value) when is_map(value) and not is_struct(value) do
+    with :ok <- validate_json_object(value, :invalid_terminal_metrics) do
+      numbers =
+        value
+        |> Enum.filter(fn {key, number} -> is_binary(key) and is_number(number) end)
+        |> Map.new()
+
+      {:ok, numbers}
+    end
+  end
+
+  defp sanitize_metric_field("usage", _value),
+    do: {:error, {:invalid_terminal_metrics, "usage"}}
+
+  defp sanitize_metric_field("completed_nodes", value) when is_list(value) do
+    if Enum.all?(value, &(is_binary(&1) and String.valid?(&1))),
+      do: {:ok, value},
+      else: {:error, {:invalid_terminal_metrics, "completed_nodes"}}
+  end
+
+  defp sanitize_metric_field("completed_nodes", _value),
+    do: {:error, {:invalid_terminal_metrics, "completed_nodes"}}
+
+  defp sanitize_metric_field(key, value)
+       when key in ~w(
+         wall_clock_ms
+         completed_node_count
+         validation_attempts
+         review_attempts
+         protocol_retry_count
+         design_rework_count
+         validation_rework_count
+         review_rework_count
+         operator_rework_count
+         total_rework_count
+         context_tokens
+       ) do
+    if is_integer(value) and value >= 0,
+      do: {:ok, value},
+      else: {:error, {:invalid_terminal_metrics, key}}
+  end
+
+  defp sanitize_metric_field(key, value)
+       when key in ~w(completed_nodes_truncated node_durations_truncated) do
+    if is_boolean(value),
+      do: {:ok, value},
+      else: {:error, {:invalid_terminal_metrics, key}}
+  end
+
+  defp sanitize_metric_field(key, value)
+       when key in ~w(
+         execution_path
+         worker_close_status
+         workspace_release_status
+         workspace_expires_at
+       ) do
+    if is_binary(value) and String.valid?(value) and String.trim(value) != "",
+      do: {:ok, value},
+      else: {:error, {:invalid_terminal_metrics, key}}
+  end
+
+  defp sanitize_metric_field(key, _value),
+    do: {:error, {:invalid_terminal_metrics, key}}
+
+  defp validate_archived_optional_metrics(body) do
+    case Map.fetch(body, "metrics") do
+      :error ->
+        :ok
+
+      {:ok, metrics} ->
+        case sanitize_archived_metrics(metrics) do
+          {:ok, _sanitized} -> :ok
+          {:error, _reason} -> {:error, :invalid_coding_terminal_evidence}
+        end
+    end
   end
 
   defp validate_archived_terminal_evidence(body, task_id)
@@ -1585,7 +1753,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
              BranchLifecycleDescriptor
            ),
          :ok <- validate_archived_optional_verification_report(body),
-         :ok <- validate_archived_optional_candidate(body, task_id) do
+         :ok <- validate_archived_optional_candidate(body, task_id),
+         :ok <- validate_archived_optional_metrics(body) do
       :ok
     else
       _ -> {:error, :invalid_coding_terminal_evidence}

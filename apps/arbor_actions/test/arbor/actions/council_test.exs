@@ -218,6 +218,79 @@ defmodule Arbor.Actions.CouncilTest do
       assert decision.decision == "approved"
     end
 
+    test "persists task_id from authorization context, never from worker text" do
+      parent = self()
+      trusted_task_id = "task_from_auth_#{System.unique_integer([:positive])}"
+      worker_task_id = "task_from_worker_text_#{System.unique_integer([:positive])}"
+
+      persist_verdict = fn _verdict, _request, _decision, _params, persist_opts ->
+        send(parent, {:persist_opts, persist_opts})
+        {:ok, "run_task_id"}
+      end
+
+      params =
+        Map.merge(@valid_review_params, %{
+          intent: "Implement #{worker_task_id} from the worker prompt",
+          diff: "diff --git a/lib/a.ex b/lib/a.ex\n+def ok, do: :ok\n+# task_id=#{worker_task_id}"
+        })
+
+      assert {:ok, _result} =
+               Council.ReviewChange.run(params, %{
+                 task_id: trusted_task_id,
+                 review_runner: fn _request, _params, _context ->
+                   {:ok,
+                    %{
+                      decision: "approved",
+                      approve_count: 7,
+                      reject_count: 2,
+                      abstain_count: 1,
+                      quorum_met: true
+                    }}
+                 end,
+                 persist_verdict: persist_verdict
+               })
+
+      assert_receive {:persist_opts, persist_opts}
+      assert persist_opts[:task_id] == trusted_task_id
+      refute persist_opts[:task_id] == worker_task_id
+      refute persist_opts[:task_id] =~ worker_task_id
+      assert is_integer(persist_opts[:duration_ms])
+      assert persist_opts[:duration_ms] >= 0
+      refute Keyword.has_key?(persist_opts, :cost)
+      refute Keyword.has_key?(persist_opts, :prompt_tokens)
+      refute Keyword.has_key?(persist_opts, :total_tokens)
+    end
+
+    test "persists summed round usage from context and leaves it nil when absent" do
+      parent = self()
+
+      persist_verdict = fn _verdict, _request, _decision, _params, persist_opts ->
+        send(parent, {:persist_opts, persist_opts})
+        {:ok, "run_usage"}
+      end
+
+      decision = %{
+        decision: "approved",
+        approve_count: 7,
+        reject_count: 2,
+        abstain_count: 1,
+        quorum_met: true
+      }
+
+      assert {:ok, _result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: fn _, _, _ -> {:ok, decision} end,
+                 persist_verdict: persist_verdict,
+                 usage: %{"cost" => 0.25, "prompt_tokens" => 10, "total_tokens" => 15},
+                 llm_usage: %{cost: 0.25, prompt_tokens: 5, total_tokens: 7}
+               })
+
+      assert_receive {:persist_opts, persist_opts}
+      assert persist_opts[:cost] == 0.5
+      assert persist_opts[:prompt_tokens] == 15
+      assert persist_opts[:total_tokens] == 22
+    end
+
     test "projects review ledger decisions into results, feedback, and persisted verdict metadata" do
       initial_ledger = %{"findings" => %{}}
       ledger = review_ledger()

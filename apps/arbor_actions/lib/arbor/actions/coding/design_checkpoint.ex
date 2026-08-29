@@ -51,6 +51,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     packet_digest
     design_artifact
     design_digest
+    design_council_run_id
   )
 
   @doc false
@@ -82,7 +83,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
             "worker_session_id" => common.worker_session_id,
             "provider_session_id" => common.provider_session_id,
             "design_attempt" => common.design_attempt,
-            "packet_digest" => common.packet_digest
+            "packet_digest" => common.packet_digest,
+            "design_council_run_id" => common.design_council_run_id
           },
           design_fields
         )
@@ -131,7 +133,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          {:ok, workspace_id} <- required_identifier(params, context, :workspace_id),
          {:ok, worker_session_id} <- required_worker_session(params, context),
          {:ok, provider_session_id} <- optional_identifier(params, context, :provider_session_id),
-         {:ok, design_attempt} <- required_attempt(params, context) do
+         {:ok, design_attempt} <- required_attempt(params, context),
+         {:ok, design_council_run_id} <- optional_design_council_run_id(params, context) do
       {:ok,
        %{
          packet: packet,
@@ -142,7 +145,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          workspace_id: workspace_id,
          worker_session_id: worker_session_id,
          provider_session_id: provider_session_id,
-         design_attempt: design_attempt
+         design_attempt: design_attempt,
+         design_council_run_id: design_council_run_id
        }}
     end
   end
@@ -436,6 +440,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   def canonical_evidence(_evidence), do: {:error, :design_checkpoint_evidence_not_map}
 
   defp encode_canonical_evidence(evidence, keys) do
+    evidence = default_optional_artifact_keys(evidence, keys)
+
     if Enum.all?(keys, &Map.has_key?(evidence, &1)) do
       ordered =
         keys
@@ -448,6 +454,14 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
       end
     else
       {:error, :design_checkpoint_evidence_incomplete}
+    end
+  end
+
+  defp default_optional_artifact_keys(evidence, keys) do
+    if "design_council_run_id" in keys do
+      Map.put_new(evidence, "design_council_run_id", nil)
+    else
+      evidence
     end
   end
 
@@ -733,6 +747,19 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
+  defp optional_design_council_run_id(params, context) do
+    case value(params, context, :design_council_run_id) do
+      nil ->
+        {:ok, nil}
+
+      value ->
+        case string_value(value) do
+          value when is_binary(value) -> validate_identifier(value, :design_council_run_id)
+          _ -> {:error, {:design_checkpoint_identifier_invalid, "design_council_run_id"}}
+        end
+    end
+  end
+
   defp validate_identifier(value, key) when is_binary(value) do
     if byte_size(value) > 0 and byte_size(value) <= @max_identifier_bytes and
          String.valid?(value) and value == String.trim(value) and
@@ -829,6 +856,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
          :ok <- optional_equal(metadata, :design_digest, evidence["design_digest"]),
          :ok <- optional_equal(metadata, :design, evidence["design"]),
          :ok <- optional_equal(metadata, :design_artifact, evidence["design_artifact"]),
+         :ok <-
+           optional_equal(metadata, :design_council_run_id, evidence["design_council_run_id"]),
          :ok <- optional_nested_evidence(metadata, request_id, evidence) do
       :ok
     end
@@ -1456,6 +1485,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
         type: :integer,
         required: true,
         doc: "Static design-checkpoint timeout in milliseconds"
+      ],
+      design_council_run_id: [
+        type: :string,
+        required: false,
+        doc: "Optional design-council run id; nil when the checkpoint did not consult a council"
       ]
     ]
 
@@ -1481,7 +1515,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
       design_digest: :control,
       agent_id: :control,
       run_deadline_unix_ms: :control,
-      timeout: :control
+      timeout: :control,
+      design_council_run_id: :control
     }
   end
 
@@ -1514,7 +1549,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Open do
          "request_id" => binding.request_id,
          "operation_id" => operation_id,
          "owner_deadline_unix_ms" => owner_deadline_unix_ms,
-         "evidence" => binding.evidence
+         "evidence" => binding.evidence,
+         "design_council_run_id" => Map.get(binding.evidence, "design_council_run_id")
        }}
     else
       {:error, reason} -> {:error, reason}
@@ -1662,6 +1698,11 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
         doc: "Persisted durable interaction deadline in Unix milliseconds"
       ],
       evidence: [type: :map, required: true, doc: "Exact Open evidence envelope"],
+      design_council_run_id: [
+        type: :string,
+        required: false,
+        doc: "Optional design-council run id; nil when the checkpoint did not consult a council"
+      ],
       run_deadline_unix_ms: [
         type: :integer,
         required: true,
@@ -1694,7 +1735,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       operation_id: :control,
       owner_deadline_unix_ms: :control,
       evidence: :control,
-      run_deadline_unix_ms: :control
+      run_deadline_unix_ms: :control,
+      design_council_run_id: :control
     }
   end
 
@@ -1847,7 +1889,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint.Await do
       "checkpoint_outcome" => outcome,
       "request_id" => binding.request_id,
       "note" => note,
-      "evidence" => binding.evidence
+      "evidence" => binding.evidence,
+      "design_council_run_id" => Map.get(binding.evidence, "design_council_run_id")
     }
   end
 end

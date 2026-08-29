@@ -923,6 +923,62 @@ defmodule Arbor.Actions.Coding.DesignCheckpointTest do
     refute Map.has_key?(binding.evidence, "design_artifact")
   end
 
+  test "design checkpoint evidence accepts design_council_run_id and it reaches accepted-design evidence",
+       ctx do
+    alias Arbor.Actions.Coding.DesignCheckpoint.{Capture, Open}
+    root = tmp_root()
+    task_id = ctx.params.task_id
+    design = ctx.params.design
+    design_digest = ctx.params.design_digest
+    council_run_id = "council_run_design_#{System.unique_integer([:positive])}"
+
+    context =
+      Map.merge(ctx.context, %{
+        design_artifact_sink: {__MODULE__.FakeArtifactStore, :archive, [root, task_id]},
+        design_artifact_source: {__MODULE__.FakeArtifactStore, :read, [root, task_id]}
+      })
+
+    assert {:ok, default_binding} = DesignCheckpoint.build_binding(ctx.params, ctx.context)
+    assert default_binding.evidence["design_council_run_id"] == nil
+
+    assert {:ok, captured} =
+             Capture.run(
+               %{
+                 design: design,
+                 design_digest: design_digest,
+                 task_id: task_id,
+                 design_attempt: 1
+               },
+               context
+             )
+
+    descriptor = captured["design_artifact"]
+
+    artifact_defaults =
+      ctx.params
+      |> Map.delete(:design)
+      |> Map.put(:design_artifact, descriptor)
+      |> Map.put(:design_digest, design_digest)
+
+    assert {:ok, default_artifact} = DesignCheckpoint.build_binding(artifact_defaults, context)
+    assert default_artifact.evidence["design_council_run_id"] == nil
+
+    artifact_params =
+      ctx.params
+      |> Map.delete(:design)
+      |> Map.put(:design_artifact, descriptor)
+      |> Map.put(:design_digest, design_digest)
+      |> Map.put(:design_council_run_id, council_run_id)
+
+    assert {:ok, binding} = DesignCheckpoint.build_binding(artifact_params, context)
+    assert binding.evidence["design_council_run_id"] == council_run_id
+
+    assert {:ok, opened} = Open.run(artifact_params, context)
+    accepted_design_evidence = opened["evidence"]
+    assert accepted_design_evidence["design_council_run_id"] == council_run_id
+    assert opened["design_council_run_id"] == council_run_id
+  end
+
   test "artifact path Open metadata has descriptor and digest but not design text", ctx do
     alias Arbor.Actions.Coding.DesignCheckpoint.{Capture, Load}
     root = tmp_root()

@@ -2586,6 +2586,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "source_key" => "design_checkpoint.request_id",
          "output_key" => "accepted_design_request_id"
        }},
+      {"hoist_accepted_design_council_run_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "design_checkpoint.design_council_run_id",
+         "output_key" => "accepted_design_council_run_id"
+       }},
       {"format_accepted_design_evidence",
        %{
          "type" => "transform",
@@ -2666,6 +2673,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "accepted_design_evidence" => ["hoist_accepted_design_evidence"],
       "accepted_design_evidence_json" => ["format_accepted_design_evidence"],
       "accepted_design_request_id" => ["hoist_accepted_design_request_id"],
+      "accepted_design_council_run_id" => ["hoist_accepted_design_council_run_id"],
       "coding_plan_work_packet_json" => ["freeze_coding_plan_work_packet_json"],
       "design" => ["extract_design"],
       "design_artifact" => ["hoist_design_artifact"],
@@ -2989,7 +2997,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_accepted_design_evidence", [{"hoist_accepted_design", nil}]},
       {"hoist_accepted_design", [{"hoist_accepted_design_digest", nil}]},
       {"hoist_accepted_design_digest", [{"hoist_accepted_design_request_id", nil}]},
-      {"hoist_accepted_design_request_id", [{"format_accepted_design_evidence", nil}]},
+      {"hoist_accepted_design_request_id", [{"hoist_accepted_design_council_run_id", nil}]},
+      {"hoist_accepted_design_council_run_id", [{"format_accepted_design_evidence", nil}]},
       {"format_accepted_design_evidence", [{"mark_implementation_phase", nil}]},
       {"mark_implementation_phase", [{"build_implement_prompt", nil}]},
       {"hoist_design_decision_request_id", [{"hoist_design_decision_note", nil}]},

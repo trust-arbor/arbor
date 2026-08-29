@@ -527,6 +527,13 @@ digraph CodingChangeV1 {
     output_key="accepted_design_request_id"
   ]
 
+  hoist_accepted_design_council_run_id [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.design_council_run_id",
+    output_key="accepted_design_council_run_id"
+  ]
+
   format_accepted_design_evidence [
     type="transform",
     transform="format",
@@ -2237,7 +2244,8 @@ digraph CodingChangeV1 {
   hoist_accepted_design_evidence -> hoist_accepted_design
   hoist_accepted_design -> hoist_accepted_design_digest
   hoist_accepted_design_digest -> hoist_accepted_design_request_id
-  hoist_accepted_design_request_id -> format_accepted_design_evidence
+  hoist_accepted_design_request_id -> hoist_accepted_design_council_run_id
+  hoist_accepted_design_council_run_id -> format_accepted_design_evidence
   format_accepted_design_evidence -> mark_implementation_phase
   mark_implementation_phase -> build_implement_prompt
 

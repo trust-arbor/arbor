@@ -519,6 +519,7 @@ defmodule Arbor.Actions.Council do
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
       Actions.emit_started(__MODULE__, loggable_params(params))
+      start_time = System.monotonic_time(:millisecond)
 
       bound? = Council.bound_review_context?(context)
 
@@ -529,9 +530,18 @@ defmodule Arbor.Actions.Council do
            :ok <- Council.validate_review_decision_cycle(decision, request),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
         routing = Council.review_routing(verdict, request, decision, context)
+        duration_ms = System.monotonic_time(:millisecond) - start_time
 
         persistence =
-          Council.persist_review_verdict(verdict, request, decision, params, context, routing)
+          Council.persist_review_verdict(
+            verdict,
+            request,
+            decision,
+            params,
+            context,
+            routing,
+            duration_ms
+          )
 
         result = Council.review_result(verdict, request, decision, persistence, routing)
 
@@ -866,13 +876,18 @@ defmodule Arbor.Actions.Council do
         decision,
         params,
         context,
-        routing
+        routing,
+        duration_ms \\ nil
       ) do
     persist_fun = Map.get(context, :persist_verdict)
+    persist_opts = review_verdict_persist_opts(request, decision, routing, context, duration_ms)
 
     cond do
       persist_fun == false ->
         :ok
+
+      is_function(persist_fun, 5) ->
+        persist_fun.(verdict, request, decision, params, persist_opts)
 
       is_function(persist_fun, 3) ->
         persist_fun.(verdict, request, decision)
@@ -881,18 +896,121 @@ defmodule Arbor.Actions.Council do
         persist_fun.(verdict, request, decision, params)
 
       true ->
-        VerdictLog.record(verdict,
-          domain: "code_review",
-          source: "code_review_council",
-          sample_id: request.branch,
-          input: request.diff,
-          dataset: "code_review",
-          graders: ["code_review_council"],
-          result_metadata: review_result_metadata(request, decision, routing)
-        )
+        VerdictLog.record(verdict, persist_opts)
     end
   rescue
     _ -> :ok
+  end
+
+  defp review_verdict_persist_opts(request, decision, routing, context, duration_ms) do
+    {cost, prompt_tokens, total_tokens} = review_round_usage(context)
+
+    [
+      domain: "code_review",
+      source: "code_review_council",
+      sample_id: request.branch,
+      input: request.diff,
+      dataset: "code_review",
+      graders: ["code_review_council"],
+      result_metadata: review_result_metadata(request, decision, routing)
+    ]
+    |> put_opt(:task_id, review_persist_task_id(context))
+    |> put_opt(:duration_ms, review_persist_duration_ms(duration_ms))
+    |> put_opt(:cost, cost)
+    |> put_opt(:prompt_tokens, prompt_tokens)
+    |> put_opt(:total_tokens, total_tokens)
+  end
+
+  # Task identity is taken from run authorization / lineage context only.
+  # Worker-supplied request text (diff, intent, files) is never a source.
+  defp review_persist_task_id(context) when is_map(context) do
+    case present_lineage_value(context, :task_id) do
+      {:ok, task_id} ->
+        task_id
+
+      :absent ->
+        run_authorization_task_id(context) || Workspace.context_task_id(context)
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  defp review_persist_task_id(_context), do: nil
+
+  defp run_authorization_task_id(context) do
+    case context_value(context, :run_authorization) do
+      %{task_id: task_id} when is_binary(task_id) and task_id != "" ->
+        task_id
+
+      %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
+        task_id
+
+      _other ->
+        nil
+    end
+  end
+
+  defp review_persist_duration_ms(duration_ms)
+       when is_integer(duration_ms) and duration_ms >= 0,
+       do: duration_ms
+
+  defp review_persist_duration_ms(_duration_ms), do: nil
+
+  defp review_round_usage(context) when is_map(context) do
+    usages =
+      [
+        context_value(context, :usage),
+        context_value(context, :llm_usage),
+        context_value(context, :review_usage)
+      ]
+      |> Enum.flat_map(&usage_maps/1)
+
+    {sum_usage_number(usages, [:cost, "cost"]),
+     sum_usage_integer(usages, [:prompt_tokens, "prompt_tokens", :input_tokens, "input_tokens"]),
+     sum_usage_integer(usages, [:total_tokens, "total_tokens"])}
+  end
+
+  defp review_round_usage(_context), do: {nil, nil, nil}
+
+  defp usage_maps(usage) when is_map(usage) and not is_struct(usage), do: [usage]
+
+  defp usage_maps(usages) when is_list(usages),
+    do: Enum.flat_map(usages, &usage_maps/1)
+
+  defp usage_maps(_other), do: []
+
+  defp sum_usage_number(usages, keys) do
+    values =
+      usages
+      |> Enum.map(&first_usage_value(&1, keys))
+      |> Enum.filter(&is_number/1)
+
+    case values do
+      [] -> nil
+      numbers -> Enum.sum(numbers)
+    end
+  end
+
+  defp sum_usage_integer(usages, keys) do
+    values =
+      usages
+      |> Enum.map(&first_usage_value(&1, keys))
+      |> Enum.filter(&(is_integer(&1) and &1 >= 0))
+
+    case values do
+      [] -> nil
+      numbers -> Enum.sum(numbers)
+    end
+  end
+
+  defp first_usage_value(usage, keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.fetch(usage, key) do
+        {:ok, value} -> value
+        :error -> nil
+      end
+    end)
   end
 
   @doc false

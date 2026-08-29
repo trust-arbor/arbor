@@ -88,6 +88,45 @@ defmodule Arbor.Persistence.VerdictLogTest do
     test "requires :domain" do
       assert_raise KeyError, fn -> VerdictLog.project(verdict(), []) end
     end
+
+    test "persists task_id on the eval run when supplied" do
+      {run, _result} =
+        VerdictLog.project(verdict(), domain: "code_review", task_id: "task_eval_123")
+
+      assert run.task_id == "task_eval_123"
+    end
+
+    test "persists duration_ms when a duration is supplied" do
+      {_run, result} = VerdictLog.project(verdict(), domain: "code_review", duration_ms: 1_500)
+
+      assert result.duration_ms == 1_500
+      assert result.duration_ms > 0
+    end
+
+    test "persists cost and tokens when supplied" do
+      {_run, result} =
+        VerdictLog.project(verdict(),
+          domain: "code_review",
+          cost: 0.042,
+          prompt_tokens: 120,
+          total_tokens: 180
+        )
+
+      assert result.cost == 0.042
+      assert result.prompt_tokens == 120
+      assert result.total_tokens == 180
+    end
+
+    test "leaves cost and tokens nil when omitted" do
+      {_run, result} = VerdictLog.project(verdict(), domain: "code_review")
+
+      refute Map.has_key?(result, :cost)
+      refute Map.has_key?(result, :prompt_tokens)
+      refute Map.has_key?(result, :total_tokens)
+      assert Map.get(result, :cost) == nil
+      assert Map.get(result, :prompt_tokens) == nil
+      assert Map.get(result, :total_tokens) == nil
+    end
   end
 
   describe "record/2 degradation" do

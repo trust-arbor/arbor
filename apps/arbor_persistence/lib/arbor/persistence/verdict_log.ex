@@ -29,6 +29,10 @@ defmodule Arbor.Persistence.VerdictLog do
   - `:sample_id`        — result sample id (default "verdict")
   - `:input`            — the subject text (truncated to 10KB)
   - `:duration_ms`      — result duration
+  - `:task_id`          — optional coding/eval task identity for the run
+  - `:cost`             — optional result cost; persist only when supplied
+  - `:prompt_tokens`    — optional prompt-token count; persist only when supplied
+  - `:total_tokens`     — optional total-token count; persist only when supplied
   - `:config`           — extra run config map (merged)
   - `:run_metadata`     — extra run metadata map (merged)
   - `:result_metadata`  — extra result metadata map (merged)
@@ -77,22 +81,24 @@ defmodule Arbor.Persistence.VerdictLog do
     domain = Keyword.fetch!(opts, :domain)
     run_id = generate_id()
 
-    run_attrs = %{
-      id: run_id,
-      domain: domain,
-      model: Keyword.get(opts, :model, "unknown"),
-      provider: Keyword.get(opts, :provider, "unknown"),
-      dataset: Keyword.get(opts, :dataset, domain),
-      sample_count: 1,
-      status: "completed",
-      graders: Keyword.get(opts, :graders, [domain]),
-      config: Keyword.get(opts, :config, %{}),
-      metadata:
-        Map.merge(
-          %{"source" => Keyword.get(opts, :source, domain), "mode" => to_string(verdict.mode)},
-          Keyword.get(opts, :run_metadata, %{})
-        )
-    }
+    run_attrs =
+      %{
+        id: run_id,
+        domain: domain,
+        model: Keyword.get(opts, :model, "unknown"),
+        provider: Keyword.get(opts, :provider, "unknown"),
+        dataset: Keyword.get(opts, :dataset, domain),
+        sample_count: 1,
+        status: "completed",
+        graders: Keyword.get(opts, :graders, [domain]),
+        config: Keyword.get(opts, :config, %{}),
+        metadata:
+          Map.merge(
+            %{"source" => Keyword.get(opts, :source, domain), "mode" => to_string(verdict.mode)},
+            Keyword.get(opts, :run_metadata, %{})
+          )
+      }
+      |> maybe_put_opt(:task_id, Keyword.get(opts, :task_id))
 
     {run_attrs, build_result(run_id, verdict, opts)}
   end
@@ -126,7 +132,13 @@ defmodule Arbor.Persistence.VerdictLog do
           Keyword.get(opts, :result_metadata, %{})
         )
     }
+    |> maybe_put_opt(:cost, Keyword.get(opts, :cost))
+    |> maybe_put_opt(:prompt_tokens, Keyword.get(opts, :prompt_tokens))
+    |> maybe_put_opt(:total_tokens, Keyword.get(opts, :total_tokens))
   end
+
+  defp maybe_put_opt(map, _key, nil), do: map
+  defp maybe_put_opt(map, key, value), do: Map.put(map, key, value)
 
   # Verdict → JSON-safe map. Includes meta so domain-specific detail (e.g.
   # security's decision/refuted/dissent, council's vote counts) is preserved.

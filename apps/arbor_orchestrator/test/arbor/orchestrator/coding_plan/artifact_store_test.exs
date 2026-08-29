@@ -1738,6 +1738,42 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              "security_veto" => false,
              "blast_radius" => "low"
            }
+
+    refute Map.has_key?(evidence, "metrics")
+  end
+
+  test "terminal evidence archives optional metrics and reads them back", %{root: root} do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    metrics = pipeline_metrics_fixture()
+    result = Map.put(terminal_result(root), "metrics", metrics)
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert evidence["metrics"]["wall_clock_ms"] == 12_345
+    assert evidence["metrics"]["review_attempts"] == 2
+    assert evidence["metrics"]["validation_attempts"] == 3
+    assert evidence["metrics"]["total_rework_count"] == 4
+    assert evidence["metrics"]["usage"] == %{"input_tokens" => 100, "output_tokens" => 25}
+
+    node_durations =
+      Map.new(1..300, fn index ->
+        {"node_#{index}", index}
+      end)
+
+    oversized =
+      result
+      |> put_in(["metrics", "node_durations_ms"], node_durations)
+      |> put_in(["metrics", "usage"], %{"input_tokens" => 9, "note" => "drop", "cost" => 0.5})
+
+    assert {:ok, bounded_descriptor} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", oversized, [])
+
+    bounded = bounded_descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert map_size(bounded["metrics"]["node_durations_ms"]) == 256
+    assert bounded["metrics"]["usage"] == %{"input_tokens" => 9, "cost" => 0.5}
   end
 
   test "terminal evidence binds the published candidate identity", %{root: root} do
@@ -2631,6 +2667,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     destination = Path.join(destination_root, Path.basename(source))
     File.cp!(source, destination)
     File.chmod!(destination, 0o600)
+  end
+
+  defp pipeline_metrics_fixture do
+    %{
+      "execution_path" => "pipeline",
+      "wall_clock_ms" => 12_345,
+      "validation_attempts" => 3,
+      "review_attempts" => 2,
+      "total_rework_count" => 4,
+      "usage" => %{"input_tokens" => 100, "output_tokens" => 25},
+      "node_durations_ms" => %{"validate" => 10, "review_change" => 20}
+    }
   end
 
   defp terminal_result(root) do

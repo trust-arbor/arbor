@@ -106,6 +106,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     hoist_accepted_design_digest
                     hoist_accepted_design_evidence
                     hoist_accepted_design_request_id
+                    hoist_accepted_design_council_run_id
                     hoist_design_artifact
                     hoist_design_checkpoint_request_id
                     hoist_design_decision_note
