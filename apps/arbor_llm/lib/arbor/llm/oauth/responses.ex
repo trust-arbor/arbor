@@ -12,6 +12,8 @@ defmodule Arbor.LLM.OAuth.Responses do
   `response.completed` event's `response.output`.
   """
 
+  require Logger
+
   alias Arbor.LLM.{Deadline, Endpoint, OAuth, Response, ResponseBudget}
   alias Arbor.LLM.OAuth.{CredentialReceipt, ResponsesFailure}
 
@@ -399,11 +401,23 @@ defmodule Arbor.LLM.OAuth.Responses do
         {:error, transport_failure(identity, :connection_failed)}
     end
   rescue
-    _exception ->
+    exception ->
+      log_invalid_stream(identity, {:exception, exception, __STACKTRACE__})
       {:error, protocol_failure(identity, :invalid_stream)}
   catch
-    _kind, _reason ->
+    kind, reason ->
+      log_invalid_stream(identity, {kind, reason})
       {:error, protocol_failure(identity, :invalid_stream)}
+  end
+
+  # The public failure stays the closed `:invalid_stream` code; the underlying
+  # reason is logged (bounded) so an operator can tell a parser fault from a
+  # transport drop. Without this, every unclassified stream failure was mute.
+  defp log_invalid_stream(identity, reason) do
+    Logger.warning(
+      "[OAuth.Responses] #{identity.backend}/#{inspect(identity.route)} stream classified " <>
+        ":invalid_stream: " <> inspect(reason, limit: 40, printable_limit: 600)
+    )
   end
 
   defp transport_failure(identity, code),
@@ -427,8 +441,10 @@ defmodule Arbor.LLM.OAuth.Responses do
   defp classify_stream_reason({:response_bytes_exceeded, _maximum}, identity),
     do: protocol_failure(identity, :response_bytes_exceeded)
 
-  defp classify_stream_reason(_reason, identity),
-    do: protocol_failure(identity, :invalid_stream)
+  defp classify_stream_reason(reason, identity) do
+    log_invalid_stream(identity, reason)
+    protocol_failure(identity, :invalid_stream)
+  end
 
   defp classify_status(status, raw, response, identity) do
     ResponsesFailure.from_status(identity.route, identity.backend, status,
@@ -542,6 +558,9 @@ defmodule Arbor.LLM.OAuth.Responses do
       decoded_bytes: 0,
       decoded_map_keys: 0,
       decoded_list_items: 0,
+      retained_nodes: 0,
+      retained_map_keys: 0,
+      retained_list_items: 0,
       text_chunks: [],
       text_bytes: 0,
       tool_calls: [],
@@ -658,7 +677,7 @@ defmodule Arbor.LLM.OAuth.Responses do
          state
        ) do
     with {:ok, tool_call, measurements} <- tool_call_from_item(item),
-         {:ok, state} <- charge_measurements(state, measurements) do
+         {:ok, state} <- charge_retained(state, measurements) do
       {:ok, %{state | tool_calls: [tool_call | state.tool_calls]}}
     end
   end
@@ -1010,6 +1029,17 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   defp decode_args(_args), do: {:error, :tool_arguments_must_be_map_or_json}
 
+  # Transient accounting: every decoded SSE event is charged here and compared
+  # with WHOLE-STREAM caps derived from the byte cap. The per-event caps
+  # (`max_nodes`/`max_map_keys`/`max_list_items`) are already enforced when each
+  # event is decoded (`json_limits/2`); applying them here as well turned them
+  # into a cumulative budget — a delta chunk carries ~9 map keys, so any reply
+  # longer than ~1,100 chunks failed as
+  # {:stream_limit_exceeded, :decoded_map_keys, 10_000} and surfaced as an
+  # opaque :invalid_stream (2026-08-29: every OpenAI/xAI advisory-council seat on
+  # a long question). A serialized map key costs at least 4 bytes, a node or
+  # list item at least one, so a stream under `max_response_bytes` cannot exceed
+  # these totals. Same bug and fix as `Adapter.ReqLLM.BoundedStream` (2026-08-25).
   defp charge_measurements(state, measurements) do
     nodes = state.decoded_nodes + Map.get(measurements, :nodes, 0)
     bytes = state.decoded_bytes + Map.get(measurements, :bytes, 0)
@@ -1017,12 +1047,50 @@ defmodule Arbor.LLM.OAuth.Responses do
     list_items = state.decoded_list_items + Map.get(measurements, :list_items, 0)
     work = state.work + Map.get(measurements, :nodes, 0)
 
+    max_response_bytes = state.limits.max_response_bytes
+    stream_max_map_keys = div(max_response_bytes, 4)
+
+    cond do
+      nodes > max_response_bytes ->
+        {:error, {:stream_limit_exceeded, :decoded_nodes, max_response_bytes}}
+
+      bytes > max_response_bytes ->
+        {:error, {:stream_limit_exceeded, :decoded_bytes, max_response_bytes}}
+
+      map_keys > stream_max_map_keys ->
+        {:error, {:stream_limit_exceeded, :decoded_map_keys, stream_max_map_keys}}
+
+      list_items > max_response_bytes ->
+        {:error, {:stream_limit_exceeded, :decoded_list_items, max_response_bytes}}
+
+      work > state.limits.max_work ->
+        {:error, {:stream_limit_exceeded, :work, state.limits.max_work}}
+
+      true ->
+        {:ok,
+         %{
+           state
+           | decoded_nodes: nodes,
+             decoded_bytes: bytes,
+             decoded_map_keys: map_keys,
+             decoded_list_items: list_items,
+             work: work
+         }}
+    end
+  end
+
+  # Retained accounting: decoded tool-call arguments are KEPT for the caller,
+  # so their aggregate stays under the tight per-term limits regardless of how
+  # few stream bytes produced them (a 9 KB event can decode to 4,500 items).
+  defp charge_retained(state, measurements) do
+    nodes = state.retained_nodes + Map.get(measurements, :nodes, 0)
+    map_keys = state.retained_map_keys + Map.get(measurements, :map_keys, 0)
+    list_items = state.retained_list_items + Map.get(measurements, :list_items, 0)
+    work = state.work + Map.get(measurements, :nodes, 0)
+
     cond do
       nodes > state.limits.max_nodes ->
         {:error, {:stream_limit_exceeded, :decoded_nodes, state.limits.max_nodes}}
-
-      bytes > state.limits.max_response_bytes ->
-        {:error, {:stream_limit_exceeded, :decoded_bytes, state.limits.max_response_bytes}}
 
       map_keys > state.limits.max_map_keys ->
         {:error, {:stream_limit_exceeded, :decoded_map_keys, state.limits.max_map_keys}}
@@ -1037,10 +1105,9 @@ defmodule Arbor.LLM.OAuth.Responses do
         {:ok,
          %{
            state
-           | decoded_nodes: nodes,
-             decoded_bytes: bytes,
-             decoded_map_keys: map_keys,
-             decoded_list_items: list_items,
+           | retained_nodes: nodes,
+             retained_map_keys: map_keys,
+             retained_list_items: list_items,
              work: work
          }}
     end

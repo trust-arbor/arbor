@@ -65,6 +65,34 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
             }} = Responses.parse_sse(raw)
   end
 
+  test "regression: a long streamed reply is not capped by the per-event map-key budget" do
+    # Every delta chunk is its own JSON document (~9 keys). Until 2026-08-29 the
+    # per-event `max_map_keys` (10_000) was also applied to the cumulative total,
+    # so any reply longer than ~1,100 chunks — a reasoning model answering a
+    # council question — failed as {:stream_limit_exceeded, :decoded_map_keys}
+    # and surfaced as an opaque :invalid_stream. Same bug and fix as
+    # `Arbor.LLM.Adapter.ReqLLM.BoundedStream` (2026-08-25).
+    chunk = fn i ->
+      sse(%{
+        "type" => "response.output_text.delta",
+        "delta" => "w#{i} ",
+        "sequence_number" => i,
+        "item_id" => "msg_1",
+        "output_index" => 0,
+        "content_index" => 0,
+        "logprobs" => [],
+        "obfuscation" => "x",
+        "extra" => "y"
+      })
+    end
+
+    raw = Enum.map_join(1..2_000, "", chunk) <> "data: [DONE]\n\n"
+
+    assert {:ok, %{text: text}} = Responses.parse_sse(raw)
+    assert String.starts_with?(text, "w1 w2 ")
+    assert String.ends_with?(text, "w2000 ")
+  end
+
   test "xAI in-progress function calls may have empty arguments before the terminal item" do
     raw =
       sse(%{
