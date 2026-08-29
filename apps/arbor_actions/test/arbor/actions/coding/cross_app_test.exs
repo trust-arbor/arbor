@@ -8,6 +8,7 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ContinuationCore
   alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore
+  alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Shell
   alias Arbor.Actions.Coding.CrossApp.Validate
   alias Arbor.Actions.Coding.Workspace
@@ -70,6 +71,13 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert :timeout in schema_keys
     assert :stage_timeout in schema_keys
     assert :test_stage_timeout in schema_keys
+    refute :progress in schema_keys
+    refute :cross_app_progress in schema_keys
+    refute :cross_app_progress_binding in schema_keys
+
+    tool_inspect = inspect(Validate.to_tool())
+    refute tool_inspect =~ "cross_app_progress"
+    refute tool_inspect =~ "cross_app_progress_binding"
 
     # Closed Core surface: only workspace_id and the three timeout controls.
     assert {:ok, input} =
@@ -927,6 +935,129 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute Jason.encode!(progress) =~ "apps/"
   end
 
+  test "progress window starts at first missing original batch and returns a token-free observation",
+       %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    context =
+      fixture.context
+      |> Map.put("cross_app_progress", bundle.progress)
+      |> Map.put("cross_app_progress_binding", bundle.binding)
+
+    assert {:ok, observation} = Validate.run(bundle.params, context)
+    assert observation["schema_version"] == 1
+    assert observation["disposition"] == %{"type" => "completed"}
+    refute Map.has_key?(observation, "new_receipts")
+    assert observation["progress"]["status"] == "completed"
+    assert observation["progress"]["next_batch_index"] == 3
+
+    assert observation["progress"]["passed_receipts"] ==
+             Enum.map(bundle.compact_plan, &Map.put(&1, "outcome", "passed"))
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--", "apps/beta/test/beta_test.exs"]}
+    refute_receive {:mix, _}, 25
+    encoded = Jason.encode!(observation)
+    refute encoded =~ "fence_token"
+    refute encoded =~ "authority"
+    refute encoded =~ "capability"
+    refute encoded =~ "credential"
+    refute Map.has_key?(observation, "continuation_id")
+    refute Map.has_key?(observation, "passed")
+  end
+
+  test "returned capacity progress is admitted by the next window at the next original batch",
+       %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+    started = :counters.new(1, [])
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      if :counters.get(started, 1) == 0, do: 0, else: 600_000
+    end)
+
+    on_exit(fn -> Application.delete_env(:arbor_actions, :cross_app_monotonic_ms) end)
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      :counters.add(started, 1, 1)
+      successful_mix()
+    end)
+
+    context =
+      fixture.context
+      |> Map.put("cross_app_progress", bundle.progress)
+      |> Map.put("cross_app_progress_binding", bundle.binding)
+
+    assert {:ok, first} = Validate.run(bundle.params, context)
+    assert first["disposition"] == %{"type" => "capacity_handoff"}
+    refute Map.has_key?(first, "new_receipts")
+    refute Map.has_key?(first["disposition"], "capacity")
+    refute Map.has_key?(first["disposition"], "capacity_handoff")
+    assert first["progress"]["status"] == "in_progress"
+    assert first["progress"]["next_batch_index"] == 2
+    assert first["progress"]["completed_batch_count"] == 1
+    assert is_map(first["progress"]["capacity"])
+    refute Map.has_key?(first["progress"]["capacity"], "unstarted_batches")
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--", "apps/alpha/test/alpha_test.exs"]}
+    refute_receive {:mix, _}, 25
+
+    Application.delete_env(:arbor_actions, :cross_app_monotonic_ms)
+
+    next_context = Map.put(context, "cross_app_progress", first["progress"])
+    assert {:ok, second} = Validate.run(bundle.params, next_context)
+    assert second["disposition"] == %{"type" => "completed"}
+    assert second["progress"]["status"] == "completed"
+    assert second["progress"]["next_batch_index"] == 3
+    refute Map.has_key?(second, "new_receipts")
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--", "apps/beta/test/beta_test.exs"]}
+    refute_receive {:mix, _}, 25
+    encoded = Jason.encode!(first)
+    refute encoded =~ "fence_token"
+    refute encoded =~ "unstarted_batches"
+  end
+
+  test "progress without compiler binding fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context = Map.put(fixture.context, "cross_app_progress", bundle.progress)
+
+    assert {:error, :missing_progress_binding} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "compiler binding without progress fails closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context = Map.put(fixture.context, "cross_app_progress_binding", bundle.binding)
+
+    assert {:error, :missing_progress} = Validate.run(bundle.params, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
   test "fully receipted bound continuation completes without a resource and emits nil reason", %{
     tmp_dir: tmp_dir
   } do
@@ -1574,6 +1705,111 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
       end
 
     Map.merge(bundle, rebuild_continuation(bundle, %{accepted_count: accepted_count}))
+  end
+
+  defp progress_window_bundle(fixture, opts) do
+    base = continuation_bundle(fixture, opts)
+    accepted_count = Keyword.get(opts, :accepted_count, 0)
+    static_digest = String.duplicate("d", 64)
+
+    binding = %{
+      "work_packet_digest" => "sha256:" <> String.duplicate("1", 64),
+      "toolchain_digest" => String.duplicate("2", 64),
+      "dependency_baseline_digest" => String.duplicate("3", 64),
+      "wrapper_digest" => String.duplicate("4", 64),
+      "static_stage_receipt_digest" => static_digest
+    }
+
+    identities =
+      base.identities
+      |> Map.put("work_packet_digest", "sha256:" <> String.duplicate("1", 64))
+      |> Map.put("toolchain_digest", String.duplicate("2", 64))
+      |> Map.put("dependency_baseline_digest", String.duplicate("3", 64))
+      |> Map.put("wrapper_digest", String.duplicate("4", 64))
+
+    bindings = %{
+      "identities" => identities,
+      "planned_batches" => base.compact_plan,
+      "static_stage_receipt_digest" => static_digest,
+      "per_batch_budget_ms" => base.params.timeout
+    }
+
+    {:ok, fresh} = ProgressCore.new(bindings)
+
+    {:ok, progress} =
+      cond do
+        accepted_count == 0 ->
+          {:ok, fresh}
+
+        accepted_count == length(base.compact_plan) ->
+          receipts = Enum.map(base.compact_plan, &Map.put(&1, "outcome", "passed"))
+
+          ProgressCore.advance(fresh, bindings, %{
+            "schema_version" => 1,
+            "new_receipts" => receipts,
+            "disposition" => %{"type" => "completed"}
+          })
+
+        true ->
+          completed = Enum.take(base.compact_plan, accepted_count)
+          receipts = Enum.map(completed, &Map.put(&1, "outcome", "passed"))
+          remaining = Enum.drop(base.compact_plan, accepted_count)
+
+          handoff =
+            progress_v3_handoff(
+              base.compact_plan,
+              completed,
+              nil,
+              remaining,
+              "runtime",
+              base.params.timeout
+            )
+
+          ProgressCore.advance(fresh, bindings, %{
+            "schema_version" => 1,
+            "new_receipts" => receipts,
+            "disposition" => %{
+              "type" => "capacity_handoff",
+              "capacity_handoff" => handoff
+            }
+          })
+      end
+
+    Map.merge(base, %{
+      progress: progress,
+      binding: binding,
+      identities: identities
+    })
+  end
+
+  defp progress_v3_handoff(planned, completed, interrupted, unstarted, phase, per_batch) do
+    digest_subject = if interrupted, do: [interrupted | unstarted], else: unstarted
+
+    {:ok, digest} =
+      Arbor.Contracts.Coding.ValidationCapacityHandoff.ordered_plan_digest(digest_subject)
+
+    completed_files = Enum.reduce(completed, 0, fn batch, acc -> acc + batch["count"] end)
+    interrupted_files = if is_map(interrupted), do: interrupted["count"], else: 0
+    unstarted_files = Enum.reduce(unstarted, 0, fn batch, acc -> acc + batch["count"] end)
+
+    {:ok, descriptor} =
+      Arbor.Contracts.Coding.ValidationCapacityHandoff.new(%{
+        "schema_version" => 3,
+        "phase" => phase,
+        "available_budget_ms" => 0,
+        "per_batch_budget_ms" => per_batch,
+        "completed_batch_count" => length(completed),
+        "completed_file_count" => completed_files,
+        "unstarted_batch_count" => length(unstarted),
+        "unstarted_file_count" => unstarted_files,
+        "total_batch_count" => length(planned),
+        "total_file_count" => completed_files + interrupted_files + unstarted_files,
+        "ordered_plan_sha256" => digest,
+        "interrupted_batch" => interrupted,
+        "unstarted_batches" => unstarted
+      })
+
+    Arbor.Contracts.Coding.ValidationCapacityHandoff.to_map(descriptor)
   end
 
   defp rebuild_continuation(bundle, overrides) do

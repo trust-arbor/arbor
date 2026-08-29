@@ -1435,6 +1435,55 @@ defmodule Arbor.Actions do
     end)
   end
 
+  @doc "Compact CrossApp progress schema version owned by ProgressCore."
+  @spec coding_cross_app_progress_schema_version() :: 1
+  def coding_cross_app_progress_schema_version do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.schema_version()
+    end)
+  end
+
+  @doc "Derived JSON ceilings for compact CrossApp progress."
+  @spec coding_cross_app_progress_limits() :: %{required(String.t()) => pos_integer()}
+  def coding_cross_app_progress_limits do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.limits()
+    end)
+  end
+
+  @doc "Construct fresh compact CrossApp progress from injected bindings."
+  @spec coding_cross_app_progress_new(term()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_progress_new(bindings) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.new(bindings)
+    end)
+  end
+
+  @doc "Rehydrate compact CrossApp progress against freshly injected bindings."
+  @spec coding_cross_app_progress_admit(term(), term()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_progress_admit(snapshot, bindings) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.admit(snapshot, bindings)
+    end)
+  end
+
+  @doc "Return the closed JSON snapshot of compact CrossApp progress, or fail closed."
+  @spec coding_cross_app_progress_show(term()) :: map() | {:error, atom()}
+  def coding_cross_app_progress_show(state) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.show(state)
+    end)
+  end
+
+  @doc "Advance compact CrossApp progress with a window observation."
+  @spec coding_cross_app_progress_advance(term(), term(), term()) ::
+          {:ok, map()} | {:error, atom()}
+  def coding_cross_app_progress_advance(state, bindings, observation) do
+    wrap_cross_app_continuation(fn ->
+      Arbor.Actions.Coding.CrossApp.ProgressCore.advance(state, bindings, observation)
+    end)
+  end
+
   defp wrap_cross_app_continuation(fun) when is_function(fun, 0) do
     fun.()
   rescue

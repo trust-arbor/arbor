@@ -42,6 +42,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore
+  alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Parser
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
@@ -52,18 +53,34 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   @base_mix_exs_max_file_bytes 64_000
   # Full lowercase hex commit OIDs only (SHA-1 40 or SHA-256 64) — lease authority.
   @full_commit_oid_re ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/
+  @progress_binding_keys Enum.sort(~w(
+    dependency_baseline_digest
+    static_stage_receipt_digest
+    toolchain_digest
+    work_packet_digest
+    wrapper_digest
+  ))
 
   @doc "Execute cross-app validation against a leased workspace."
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
   def run(input, context) when is_map(input) and is_map(context) do
+    run(input, context, :ordinary)
+  end
+
+  def run(_input, _context), do: {:error, :invalid_cross_app_input}
+
+  @doc false
+  @spec run(Core.input(), map(), :ordinary | {:window, term(), term()}) ::
+          {:ok, map()} | {:error, term()}
+  def run(input, context, window) when is_map(input) and is_map(context) do
     try do
-      do_run(input, context, stage_deadline(Map.get(input, :stage_timeout)))
+      do_run(input, context, stage_deadline(Map.get(input, :stage_timeout)), window)
     catch
       {:execution_error, reason} -> {:error, reason}
     end
   end
 
-  def run(_input, _context), do: {:error, :invalid_cross_app_input}
+  def run(_input, _context, _window), do: {:error, :invalid_cross_app_input}
 
   @doc false
   # Test seam: sequential batch test stage under dual budgets.
@@ -322,22 +339,28 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp do_run(input, context, validation_deadline) do
+  defp do_run(input, context, validation_deadline, window) do
     grant = Arbor.Actions.live_coding_cross_app_continuation_grant()
     legacy = Arbor.Actions.legacy_coding_cross_app_continuation_marker()
 
-    case {grant, legacy} do
-      {{:ok, live_grant}, _legacy} ->
+    case {grant, legacy, window} do
+      {{:ok, _live_grant}, _legacy, {:window, _progress, _binding}} ->
+        {:error, :invalid_cross_app_input}
+
+      {{:ok, live_grant}, _legacy, :ordinary} ->
         if continuation_grant_matches?(live_grant, input) do
           do_run_bound(input, live_grant, validation_deadline)
         else
           {:error, :continuation_execution_unauthorized}
         end
 
-      {:none, nil} ->
+      {:none, nil, :ordinary} ->
         do_run_unbound(input, context, validation_deadline)
 
-      {:none, _forged} ->
+      {:none, nil, {:window, progress, binding}} ->
+        do_run_progress_window(input, context, progress, binding, validation_deadline)
+
+      {:none, _forged, _window} ->
         {:error, :continuation_execution_unauthorized}
     end
   end
@@ -395,6 +418,636 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       end
     end
   end
+
+  defp do_run_progress_window(input, context, progress, binding, validation_deadline) do
+    with {:ok, binding} <- admit_progress_binding(binding),
+         {:ok, lease} <- resolve_lease(input.workspace_id, context),
+         {:ok, worktree_path, base_commit} <- lease_paths(lease),
+         {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
+         {:ok, resolved} <- resolve_selection(worktree_path, base_commit),
+         {:ok, prepared} <-
+           prepare_continuation_batches(resolved.selection, resolved.candidate_blob_manifest),
+         {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
+         {:ok, configuration_digest} <- Core.configuration_digest(input_params(input)),
+         {:ok, validation_plan_digest} <-
+           ValidationCapacityHandoff.ordered_plan_digest(compact_plan),
+         {:ok, identities} <-
+           assemble_progress_identities(
+             context,
+             binding,
+             configuration_digest,
+             validation_plan_digest,
+             base_commit,
+             base_tree_oid,
+             resolved
+           ),
+         bindings <-
+           %{
+             "identities" => identities,
+             "planned_batches" => compact_plan,
+             "static_stage_receipt_digest" => binding["static_stage_receipt_digest"],
+             "per_batch_budget_ms" => input.timeout
+           },
+         {:ok, admitted} <- ProgressCore.admit(progress, bindings) do
+      before_binding = %{
+        head: resolved.candidate_head,
+        tree_oid: resolved.candidate_tree_oid,
+        blob_manifest: resolved.candidate_blob_manifest
+      }
+
+      run_progress_suffix(
+        input,
+        admitted,
+        bindings,
+        worktree_path,
+        prepared.batches,
+        before_binding,
+        validation_deadline
+      )
+    else
+      {:error, :missing_progress_binding} = error -> error
+      {:error, :missing_progress} = error -> error
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :invalid_cross_app_input}
+  catch
+    {:execution_error, reason} -> {:error, reason}
+    _, _ -> {:error, :invalid_cross_app_input}
+  end
+
+  defp admit_progress_binding(binding) do
+    with :ok <- require_progress_json_object(binding),
+         :ok <- require_progress_exact_keys(binding, @progress_binding_keys),
+         :ok <- reject_progress_forbidden(binding) do
+      {:ok, binding}
+    else
+      {:error, _reason} -> {:error, :malformed_state}
+    end
+  end
+
+  defp assemble_progress_identities(
+         context,
+         binding,
+         configuration_digest,
+         validation_plan_digest,
+         base_commit,
+         base_tree_oid,
+         resolved
+       ) do
+    task_id = Workspace.context_task_id(context)
+    principal_id = Workspace.context_principal_id(context)
+
+    {:ok,
+     %{
+       "task_id" => task_id,
+       "work_packet_digest" => binding["work_packet_digest"],
+       "base_commit" => base_commit,
+       "base_tree_oid" => base_tree_oid,
+       "candidate_head" => resolved.candidate_head,
+       "candidate_tree_oid" => resolved.candidate_tree_oid,
+       "validation_plan_digest" => validation_plan_digest,
+       "toolchain_digest" => binding["toolchain_digest"],
+       "dependency_baseline_digest" => binding["dependency_baseline_digest"],
+       "wrapper_digest" => binding["wrapper_digest"],
+       "validator_id" => "coding_cross_app_validate",
+       "principal_id" => principal_id,
+       "configuration_digest" => configuration_digest
+     }}
+  end
+
+  defp input_params(input) do
+    %{
+      workspace_id: input.workspace_id,
+      timeout: input.timeout,
+      stage_timeout: input.stage_timeout,
+      test_stage_timeout: input.test_stage_timeout
+    }
+  end
+
+  defp run_progress_suffix(
+         input,
+         progress,
+         bindings,
+         worktree_path,
+         full_batches,
+         before_binding,
+         validation_deadline
+       ) do
+    accepted_count = progress["completed_batch_count"]
+    suffix = Enum.drop(full_batches, accepted_count)
+
+    result =
+      MixAction.with_validation_resource(
+        input.workspace_id,
+        %{
+          task_id: progress["identities"]["task_id"],
+          agent_id: progress["identities"]["principal_id"]
+        },
+        fn resource ->
+          snapshot_path =
+            Map.get(resource, :candidate_path) || Map.get(resource, "candidate_path")
+
+          cond do
+            not is_binary(snapshot_path) or snapshot_path == "" ->
+              progress_failed_observation([], "validation_infrastructure_failed")
+
+            snapshot_path == worktree_path ->
+              progress_failed_observation([], "validation_infrastructure_failed")
+
+            true ->
+              with :ok <- invoke_after_committable_snapshot_hook(snapshot_path),
+                   {:ok, observation} <-
+                     execute_progress_tests(
+                       input.test_stage_timeout,
+                       input.timeout,
+                       snapshot_path,
+                       full_batches,
+                       suffix,
+                       accepted_count,
+                       validation_deadline,
+                       resource
+                     ) do
+                finalize_progress_observation(
+                  observation,
+                  progress,
+                  bindings,
+                  snapshot_path,
+                  before_binding,
+                  resource
+                )
+              else
+                {:error, reason} ->
+                  progress_failed_observation([], failure_reason(reason))
+              end
+          end
+        end,
+        validation_resource_opts(input.timeout, validation_deadline) ++
+          [
+            committable_snapshot: true,
+            expected_tree_oid: before_binding.tree_oid,
+            expected_head: before_binding.head,
+            blob_manifest: Map.get(before_binding, :blob_manifest)
+          ]
+      )
+
+    case result do
+      {:ok, observation} -> {:ok, observation}
+      {:error, reason} -> progress_failed_observation([], failure_reason(reason))
+    end
+  end
+
+  defp execute_progress_tests(
+         _test_stage_timeout,
+         _operation_timeout,
+         _worktree_path,
+         _full_batches,
+         [],
+         _accepted_count,
+         _validation_deadline,
+         _resource
+       ) do
+    {:ok, %{new_receipts: [], disposition: %{"type" => "completed"}}}
+  end
+
+  defp execute_progress_tests(
+         test_stage_timeout,
+         operation_timeout,
+         worktree_path,
+         full_batches,
+         suffix,
+         accepted_count,
+         validation_deadline,
+         resource
+       ) do
+    {available_ms, test_deadline} =
+      validation_test_budget(test_stage_timeout, validation_deadline)
+
+    reserve_ms = MixAction.postflight_tree_binding_reserve_ms()
+
+    case Core.admit_test_batches(suffix, available_ms, operation_timeout, reserve_ms) do
+      :ok ->
+        deadline = test_deadline || monotonic_ms() + test_stage_timeout
+
+        with {:ok, execution} <- Core.new_test_execution(suffix, operation_timeout, reserve_ms) do
+          continue_progress_tests(
+            worktree_path,
+            execution,
+            deadline,
+            resource,
+            full_batches,
+            accepted_count,
+            []
+          )
+        end
+
+      {:capacity_exceeded, _check} ->
+        progress_capacity_observation(
+          full_batches,
+          accepted_count,
+          [],
+          nil,
+          suffix,
+          operation_timeout,
+          []
+        )
+
+      {:error, reason} ->
+        {:ok,
+         %{
+           new_receipts: [],
+           disposition: %{"type" => "failed", "reason" => failure_reason(reason)}
+         }}
+    end
+  end
+
+  defp continue_progress_tests(
+         worktree_path,
+         execution,
+         deadline,
+         resource,
+         full_batches,
+         accepted_count,
+         receipts
+       ) do
+    remaining_ms = deadline - monotonic_ms()
+
+    case Core.next_test_execution_step(execution, remaining_ms) do
+      {:complete, _check} ->
+        case after_progress_child(resource) do
+          :ok ->
+            {:ok, %{new_receipts: receipts, disposition: %{"type" => "completed"}}}
+
+          {:error, reason} ->
+            {:ok,
+             %{
+               new_receipts: receipts,
+               disposition: %{"type" => "failed", "reason" => failure_reason(reason)}
+             }}
+        end
+
+      {:capacity, completed, interrupted, unstarted} ->
+        progress_capacity_observation(
+          full_batches,
+          accepted_count,
+          completed,
+          interrupted,
+          unstarted,
+          execution.operation_timeout,
+          receipts
+        )
+
+      {:run, attempt, budget_ms} ->
+        opts =
+          [timeout: budget_ms]
+          |> Keyword.put(:validation_resource, resource)
+
+        case run_mix(worktree_path, MixAction.test_argv(attempt.paths), opts) do
+          {:ok, result} ->
+            case after_progress_child(resource) do
+              :ok ->
+                feedback = Core.feedback_from_result(result)
+
+                case Core.record_test_execution_attempt(
+                       execution,
+                       attempt,
+                       feedback,
+                       Core.runner_timed_out?(result),
+                       budget_ms,
+                       deadline - monotonic_ms()
+                     ) do
+                  {:continue, next} ->
+                    with {:ok, next_receipts} <-
+                           collect_completed_receipts(execution, next, receipts) do
+                      continue_progress_tests(
+                        worktree_path,
+                        next,
+                        deadline,
+                        resource,
+                        full_batches,
+                        accepted_count,
+                        next_receipts
+                      )
+                    end
+
+                  {:terminal, check} ->
+                    {:ok,
+                     %{
+                       new_receipts: receipts,
+                       disposition: %{
+                         "type" => "failed",
+                         "reason" => check["reason"] || "tests_failed"
+                       }
+                     }}
+
+                  {:capacity, completed, interrupted, unstarted} ->
+                    with {:ok, completed_receipts} <-
+                           collect_receipts_from_completed(completed, receipts) do
+                      progress_capacity_observation(
+                        full_batches,
+                        accepted_count,
+                        completed,
+                        interrupted,
+                        unstarted,
+                        execution.operation_timeout,
+                        completed_receipts
+                      )
+                    end
+
+                  {:error, reason} ->
+                    {:ok,
+                     %{
+                       new_receipts: receipts,
+                       disposition: %{
+                         "type" => "failed",
+                         "reason" => failure_reason(reason)
+                       }
+                     }}
+                end
+
+              {:error, reason} ->
+                {:ok,
+                 %{
+                   new_receipts: receipts,
+                   disposition: %{"type" => "failed", "reason" => failure_reason(reason)}
+                 }}
+            end
+
+          {:error, reason} ->
+            case after_progress_child(resource) do
+              {:error, recapture_reason} ->
+                {:ok,
+                 %{
+                   new_receipts: receipts,
+                   disposition: %{
+                     "type" => "failed",
+                     "reason" => failure_reason(recapture_reason)
+                   }
+                 }}
+
+              :ok ->
+                case Core.record_test_execution_prelaunch_error(
+                       execution,
+                       reason,
+                       deadline - monotonic_ms()
+                     ) do
+                  {:capacity, completed, interrupted, unstarted} ->
+                    progress_capacity_observation(
+                      full_batches,
+                      accepted_count,
+                      completed,
+                      interrupted,
+                      unstarted,
+                      execution.operation_timeout,
+                      receipts
+                    )
+
+                  {:execution_error, error} ->
+                    {:ok,
+                     %{
+                       new_receipts: receipts,
+                       disposition: %{
+                         "type" => "failed",
+                         "reason" => failure_reason(error)
+                       }
+                     }}
+
+                  {:error, error} ->
+                    {:ok,
+                     %{
+                       new_receipts: receipts,
+                       disposition: %{
+                         "type" => "failed",
+                         "reason" => failure_reason(error)
+                       }
+                     }}
+                end
+            end
+        end
+
+      {:error, reason} ->
+        {:ok,
+         %{
+           new_receipts: receipts,
+           disposition: %{"type" => "failed", "reason" => failure_reason(reason)}
+         }}
+    end
+  end
+
+  defp after_progress_child(resource) do
+    MixAction.recapture_committable_snapshot(resource)
+  end
+
+  defp progress_capacity_observation(
+         full_batches,
+         accepted_count,
+         completed,
+         interrupted,
+         unstarted,
+         operation_timeout,
+         receipts
+       ) do
+    prior = Enum.take(full_batches, accepted_count)
+
+    case Core.capacity_handoff(
+           :runtime,
+           0,
+           operation_timeout,
+           prior ++ completed,
+           interrupted,
+           unstarted
+         ) do
+      {:ok, check} ->
+        {:ok,
+         %{
+           new_receipts: receipts,
+           disposition: %{
+             "type" => "capacity_handoff",
+             "capacity_handoff" => check["capacity_handoff"]
+           }
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp finalize_progress_observation(
+         observation,
+         progress,
+         bindings,
+         worktree_path,
+         before_binding,
+         resource
+       ) do
+    observation =
+      case verify_progress_tree(worktree_path, before_binding, resource) do
+        :ok ->
+          observation
+
+        {:error, :validation_tree_mutated} ->
+          %{
+            observation
+            | new_receipts: [],
+              disposition: %{"type" => "failed", "reason" => "validation_tree_mutated"}
+          }
+
+        {:error, _reason} ->
+          %{
+            observation
+            | new_receipts: [],
+              disposition: %{
+                "type" => "failed",
+                "reason" => "validation_infrastructure_failed"
+              }
+          }
+      end
+
+    project_progress_observation(progress, bindings, observation)
+  end
+
+  defp verify_progress_tree(_worktree_path, _before_binding, resource) when is_map(resource) do
+    after_progress_child(resource)
+  end
+
+  defp verify_progress_tree(_worktree_path, _before_binding, _resource),
+    do: {:error, :validation_resource_required}
+
+  defp project_progress_observation(progress, bindings, observation) do
+    new_receipts = observation.new_receipts
+    disposition = observation.disposition
+
+    cond do
+      disposition["type"] == "failed" ->
+        progress_failed_observation(disposition["reason"] || "validation_infrastructure_failed")
+
+      disposition["type"] == "completed" ->
+        case ProgressCore.advance(progress, bindings, %{
+               "schema_version" => 1,
+               "new_receipts" => new_receipts,
+               "disposition" => %{"type" => "completed"}
+             }) do
+          {:ok, advanced} ->
+            emit_progress_envelope(advanced, "completed")
+
+          {:error, _reason} ->
+            progress_failed_observation("validation_infrastructure_failed")
+        end
+
+      disposition["type"] == "capacity_handoff" ->
+        case ProgressCore.advance(progress, bindings, %{
+               "schema_version" => 1,
+               "new_receipts" => new_receipts,
+               "disposition" => %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => disposition["capacity_handoff"]
+               }
+             }) do
+          {:ok, advanced} ->
+            emit_progress_envelope(advanced, "capacity_handoff")
+
+          {:error, _reason} ->
+            progress_failed_observation("validation_infrastructure_failed")
+        end
+
+      true ->
+        progress_failed_observation("validation_infrastructure_failed")
+    end
+  end
+
+  defp emit_progress_envelope(advanced, type) do
+    case ProgressCore.show(advanced) do
+      snapshot when is_map(snapshot) ->
+        envelope = %{
+          "schema_version" => 1,
+          "disposition" => %{"type" => type},
+          "progress" => snapshot
+        }
+
+        with :ok <- reject_progress_forbidden(envelope),
+             :ok <- bound_progress_envelope(envelope) do
+          {:ok, envelope}
+        else
+          _ -> progress_failed_observation("validation_infrastructure_failed")
+        end
+
+      _other ->
+        progress_failed_observation("validation_infrastructure_failed")
+    end
+  end
+
+  defp progress_failed_observation(reason) when is_binary(reason) do
+    envelope = %{
+      "schema_version" => 1,
+      "disposition" => %{"type" => "failed", "reason" => reason}
+    }
+
+    {:ok, envelope}
+  end
+
+  defp progress_failed_observation(_receipts, reason) when is_binary(reason) do
+    progress_failed_observation(reason)
+  end
+
+  defp bound_progress_envelope(envelope) do
+    max = ProgressCore.max_json_bytes() + 1_024
+
+    case Jason.encode(envelope) do
+      {:ok, encoded} when byte_size(encoded) <= max -> :ok
+      {:ok, _encoded} -> {:error, :oversized_observation}
+      {:error, _reason} -> {:error, :malformed_state}
+    end
+  end
+
+  defp require_progress_json_object(value) when is_map(value) and not is_struct(value) do
+    if progress_json_clean?(value), do: :ok, else: {:error, :malformed_state}
+  end
+
+  defp require_progress_json_object(_value), do: {:error, :malformed_state}
+
+  defp require_progress_exact_keys(map, keys) do
+    if Enum.sort(Map.keys(map)) == keys, do: :ok, else: {:error, :malformed_state}
+  end
+
+  defp reject_progress_forbidden(value) do
+    forbidden =
+      MapSet.new(~w(authority authorization capability credential fence_token secret token))
+
+    if progress_contains_forbidden?(value, forbidden),
+      do: {:error, :malformed_state},
+      else: :ok
+  end
+
+  defp progress_contains_forbidden?(value, forbidden)
+       when is_map(value) and not is_struct(value) do
+    Enum.any?(value, fn {key, nested} ->
+      (is_binary(key) and MapSet.member?(forbidden, key)) or
+        progress_contains_forbidden?(nested, forbidden)
+    end)
+  end
+
+  defp progress_contains_forbidden?(value, forbidden) when is_list(value),
+    do: Enum.any?(value, &progress_contains_forbidden?(&1, forbidden))
+
+  defp progress_contains_forbidden?(_value, _forbidden), do: false
+
+  defp progress_json_clean?(value) when is_map(value) and not is_struct(value) do
+    Enum.all?(value, fn
+      {key, nested} when is_binary(key) -> String.valid?(key) and progress_json_clean?(nested)
+      _ -> false
+    end)
+  end
+
+  defp progress_json_clean?(value) when is_list(value),
+    do: is_list(value) and Enum.all?(value, &progress_json_clean?/1)
+
+  defp progress_json_clean?(value) when is_binary(value), do: String.valid?(value)
+
+  defp progress_json_clean?(value)
+       when is_integer(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp progress_json_clean?(_value), do: false
 
   defp do_run_bound(input, grant, validation_deadline) do
     with :ok <- Arbor.Actions.recheck_coding_cross_app_continuation_execution(),

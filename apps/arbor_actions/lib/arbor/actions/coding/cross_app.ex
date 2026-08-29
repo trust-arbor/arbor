@@ -91,8 +91,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       workspace_id: param(params, :workspace_id)
     })
 
-    with {:ok, input} <- Core.new(params),
-         {:ok, result} <- Shell.run(input, context) do
+    with {:ok, params, window} <- take_window(params, context),
+         {:ok, input} <- Core.new(params),
+         {:ok, result} <- Shell.run(input, context, window) do
       Actions.emit_completed(__MODULE__, %{
         workspace_id: input.workspace_id,
         passed: result_passed(result),
@@ -108,6 +109,81 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   end
 
   def run(_params, _context), do: {:error, :invalid_cross_app_input}
+
+  defp take_window(params, context) do
+    with {:ok, params, param_progress} <-
+           pop_alias(params, "cross_app_progress", :cross_app_progress),
+         {:ok, params, param_binding} <-
+           pop_alias(params, "cross_app_progress_binding", :cross_app_progress_binding),
+         {:ok, context_progress} <-
+           fetch_alias(context, "cross_app_progress", :cross_app_progress),
+         {:ok, context_binding} <-
+           fetch_alias(context, "cross_app_progress_binding", :cross_app_progress_binding) do
+      resolve_window(params, param_progress, param_binding, context_progress, context_binding)
+    end
+  end
+
+  defp resolve_window(params, param_progress, param_binding, context_progress, context_binding) do
+    progress =
+      cond do
+        not is_nil(context_progress) -> context_progress
+        not is_nil(param_progress) -> param_progress
+        true -> nil
+      end
+
+    cond do
+      is_nil(progress) and is_nil(context_binding) and is_nil(param_binding) ->
+        {:ok, params, :ordinary}
+
+      not is_nil(param_progress) and not is_nil(context_progress) and
+          param_progress !== context_progress ->
+        {:error, :invalid_cross_app_input}
+
+      not is_nil(param_binding) and not is_nil(context_binding) and
+          param_binding !== context_binding ->
+        {:error, :invalid_cross_app_input}
+
+      is_nil(progress) ->
+        {:error, :missing_progress}
+
+      is_nil(context_binding) ->
+        {:error, :missing_progress_binding}
+
+      true ->
+        {:ok, params, {:window, progress, context_binding}}
+    end
+  end
+
+  defp pop_alias(map, string_key, atom_key) do
+    has_string = Map.has_key?(map, string_key)
+    has_atom = Map.has_key?(map, atom_key)
+
+    cond do
+      has_string and has_atom ->
+        {:error, :invalid_cross_app_input}
+
+      has_string ->
+        {:ok, Map.delete(map, string_key), Map.get(map, string_key)}
+
+      has_atom ->
+        {:ok, Map.delete(map, atom_key), Map.get(map, atom_key)}
+
+      true ->
+        {:ok, map, nil}
+    end
+  end
+
+  defp fetch_alias(map, string_key, atom_key) do
+    has_string = Map.has_key?(map, string_key)
+    has_atom = Map.has_key?(map, atom_key)
+
+    cond do
+      has_string and has_atom -> {:error, :invalid_cross_app_input}
+      has_string -> {:ok, Map.get(map, string_key)}
+      has_atom -> {:ok, Map.get(map, atom_key)}
+      true -> {:ok, nil}
+    end
+  end
 
   defp result_passed(result) when is_map(result) do
     case Map.get(result, :passed) do
