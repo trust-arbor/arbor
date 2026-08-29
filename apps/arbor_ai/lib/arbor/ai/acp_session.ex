@@ -62,6 +62,33 @@ defmodule Arbor.AI.AcpSession do
   - `{:agent, :acp_session_completed}` — prompt response received
   - `{:agent, :acp_session_error}` — error during session
   - `{:agent, :acp_session_closed}` — session terminated
+
+  ## Provider usage (prompt result, then session/update fallback)
+
+  `arbor.provider_usage.v1` is recorded once per completed prompt. The prompt
+  result still wins: a present top-level or `_meta` usage map is parsed as
+  today and never added to `session/update` totals. When the result carries
+  no usage, Arbor falls back to `pending_usage` accumulated from bound
+  `session/update` notifications during that prompt only.
+
+  A usage notification is accepted only when `sessionUpdate`/`kind` is one of
+  `usage_update` (ACP schema discriminator), `usage`, `tokenUsage`, or
+  `token_usage` (provider-extension aliases). Nested or inline
+  `input`/`output`/`total`/`cached` token fields are numbers only, bounded,
+  and non-negative. Official context-window `usage_update` payloads that
+  carry only `used`/`size` are ignored. Unrelated updates (for example
+  `agent_message_chunk`) that happen to nest a usage-shaped map are ignored.
+
+  Updates queued while transcript durability blocks the session are drained
+  again immediately before recording and clearing, so they stay attributed
+  to the completed prompt and cannot leak into a follow-up. The accumulator
+  is cleared when the prompt completes.
+
+  Tests construct the cursor-agent fixture from the ACP Usage schema
+  (`usage_update` + `inputTokens`/`outputTokens`/`totalTokens`/
+  `cachedReadTokens`). No captured cursor-agent session/update fixture
+  exists in this repository; `cachedReadTokens` is the schema cached-read
+  field, while snake_case aliases are provider extensions.
   """
 
   use GenServer
@@ -1482,12 +1509,15 @@ defmodule Arbor.AI.AcpSession do
     "text"
   ]
 
-  # ACP session/update shapes that may carry per-turn token usage instead of
-  # (or in addition to) the prompt result. Official Usage is camelCase;
-  # providers also emit snake_case. Context-window-only usage_update (used/size)
-  # is ignored because it has no input/output tokens.
+  # Discriminators that may carry per-turn token usage. `usage_update` is the
+  # ACP schema sessionUpdate value; `usage` / `tokenUsage` / `token_usage` are
+  # provider-extension aliases. Nested payloads are parsed only after this
+  # gate. Official context-window usage_update (`used`/`size`, no input/output)
+  # is ignored. Cursor-agent tests use a schema-constructed fixture — no
+  # captured session/update recording exists in-repo.
   @usage_update_types ["usage", "tokenUsage", "token_usage", "usage_update"]
   @max_session_usage_map_keys 32
+  @max_session_usage_tokens 1_000_000_000
   @session_usage_payload_keys [
     "usage",
     :usage,
@@ -1781,19 +1811,19 @@ defmodule Arbor.AI.AcpSession do
   defp maybe_accumulate_pending_usage(state, _update), do: state
 
   defp parse_session_usage_update(update) when is_map(update) do
-    if map_size(update) > @max_session_usage_map_keys do
-      :ignore
-    else
-      case session_usage_payload(update) do
-        {:ok, usage} ->
-          parse_closed_session_usage(usage)
+    cond do
+      map_size(update) > @max_session_usage_map_keys ->
+        :ignore
 
-        :invalid ->
-          :ignore
+      not usage_update_type?(update) ->
+        :ignore
 
-        :missing ->
-          if usage_update_type?(update), do: parse_closed_session_usage(update), else: :ignore
-      end
+      true ->
+        case session_usage_payload(update) do
+          {:ok, usage} -> parse_closed_session_usage(usage)
+          :invalid -> :ignore
+          :missing -> parse_closed_session_usage(update)
+        end
     end
   end
 
@@ -1859,19 +1889,43 @@ defmodule Arbor.AI.AcpSession do
     cached = min(cached, input)
     total = max(total, checked_add_tokens(input, output))
 
-    %{
-      input_tokens: input,
-      output_tokens: output,
-      total_tokens: total,
-      cached_tokens: cached,
-      subscription_usage_units: nil
-    }
+    if usage_token_within_bound?(input) and usage_token_within_bound?(output) and
+         usage_token_within_bound?(total) and usage_token_within_bound?(cached) do
+      %{
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        cached_tokens: cached,
+        subscription_usage_units: nil
+      }
+    else
+      existing
+    end
   end
 
   defp merge_pending_usage(_existing, incoming), do: incoming
 
   defp clear_pending_usage(state) when is_map(state), do: Map.put(state, :pending_usage, nil)
   defp clear_pending_usage(state), do: state
+
+  defp drain_bound_updates_after_durability(state, prompt) do
+    opts =
+      case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
+        {:ok, remaining_opts, _remaining} ->
+          remaining_opts
+
+        _ ->
+          case Arbor.AI.Timeout.start_deadline([], @stream_callback_timeout_ms) do
+            {:ok, fresh_opts, _timeout} -> fresh_opts
+            {:error, _reason} -> prompt.prompt_opts
+          end
+      end
+
+    case drain_pending_updates(state, opts) do
+      {:ok, state} -> state
+      {:error, :stream_callback_timeout, state} -> state
+    end
+  end
 
   # Keep the last valid signed-64 cumulative count when addition would overflow.
   defp checked_add_tokens(current, delta)
@@ -1884,13 +1938,19 @@ defmodule Arbor.AI.AcpSession do
   defp checked_add_tokens(current, _delta) when is_integer(current), do: current
   defp checked_add_tokens(_current, _delta), do: 0
 
+  defp usage_token_within_bound?(value)
+       when is_integer(value) and value >= 0 and value <= @max_session_usage_tokens,
+       do: true
+
+  defp usage_token_within_bound?(_value), do: false
+
   # -- Cost Attribution (durable ProviderUsageEvent then BudgetTracker) --
 
-  # Strict ledger parse: require a present usage map and both token fields.
-  # Missing or malformed usage emits no ledger fact (never invent zero-token events).
-  # When the prompt result carries no usage map, fall back to session/update
-  # pending_usage accumulated for this prompt only.
-  defp strict_prompt_usage(result, pending_usage) when is_map(result) do
+  # Strict ledger parse for one prompt turn. Precedence: a present prompt-result
+  # usage map wins (never merged with pending session/update totals). When the
+  # result carries no usage, fall back to pending_usage accumulated for this
+  # prompt only. Missing or malformed usage emits no ledger fact.
+  defp strict_turn_usage(result, pending_usage) when is_map(result) do
     case prompt_usage_map(result) do
       usage when is_map(usage) and map_size(usage) > 0 ->
         with {:ok, input} <-
@@ -1917,7 +1977,7 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp strict_prompt_usage(_result, pending_usage), do: strict_pending_usage(pending_usage)
+  defp strict_turn_usage(_result, pending_usage), do: strict_pending_usage(pending_usage)
 
   defp strict_pending_usage(
          %{
@@ -2029,7 +2089,7 @@ defmodule Arbor.AI.AcpSession do
   # An unset or failing snapshotted ledger must not emit admission-failure
   # observations for prompts that never produced authoritative usage.
   defp maybe_record_provider_usage(prompt, result, state) do
-    with {:ok, usage} <- strict_prompt_usage(result, Map.get(state, :pending_usage)),
+    with {:ok, usage} <- strict_turn_usage(result, Map.get(state, :pending_usage)),
          {:ok, event} <- build_acp_provider_usage_event(prompt, usage, state) do
       # Only after a strict event exists do we consult immutable ledger state.
       case usage_ledger_opts(state) do
@@ -3458,12 +3518,16 @@ defmodule Arbor.AI.AcpSession do
       {:ok, descriptor} ->
         result = maybe_attach_transcript_descriptor(result, descriptor)
 
+        # Drain updates queued while the transcript sink blocked this process
+        # so late usage stays on this prompt, then record and clear before any
+        # follow-up can inherit pending_usage.
+        state = drain_bound_updates_after_durability(state, prompt)
+
         new_state =
           %{state | status: :busy}
           |> accumulate_usage(result)
           |> mark_task_control_delivered(prompt)
 
-        # Report only after transcript durability succeeds, before follow-up chain.
         maybe_record_provider_usage(prompt, result, new_state)
         continue_after_durable_prompt(prompt, result, clear_pending_usage(new_state))
 

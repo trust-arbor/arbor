@@ -1908,6 +1908,32 @@ defmodule Arbor.AI.AcpSessionTest do
              }
     end
 
+    test "ignores a usage-shaped map on a non-usage sessionUpdate" do
+      state = %{
+        accumulated_text: "",
+        stream_callback: nil,
+        provider: :cursor,
+        session_id: "s1",
+        pending_usage: nil
+      }
+
+      send(
+        self(),
+        {:acp_session_update, "s1",
+         %{
+           "sessionUpdate" => "tool_call",
+           "usage" => %{
+             "inputTokens" => 9,
+             "outputTokens" => 3,
+             "totalTokens" => 12
+           }
+         }}
+      )
+
+      drained = AcpSession.drain_pending_updates(state)
+      assert drained.pending_usage == nil
+    end
+
     test "security regression: ignores updates for a different provider session" do
       state = %{
         accumulated_text: "",

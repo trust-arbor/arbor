@@ -2,6 +2,25 @@
 
 Read this when dispatching, steering, approving, resuming, or reviewing delegated ACP/MCP work. Entries retain the behavioral rule and the incident that motivated it.
 
+## Session/update token usage (AcpSession)
+
+`Arbor.AI.AcpSession` records `arbor.provider_usage.v1` from the prompt result
+first. When the result carries no usage map, it falls back to `pending_usage`
+accumulated from bound `session/update` notifications for that prompt only,
+then clears the accumulator so a follow-up cannot inherit those tokens.
+
+Accepted discriminators: ACP schema `usage_update`, plus provider-extension
+aliases `usage`, `tokenUsage`, and `token_usage`. Token fields are numbers
+only (camelCase and snake_case `input`/`output`/`total`/`cached`); official
+context-window `used`/`size` payloads are ignored. Unrelated `sessionUpdate`
+kinds that nest a usage-shaped map are ignored.
+
+The cursor-agent test fixture is constructed from the ACP Usage schema
+(`usage_update` + `inputTokens`/`outputTokens`/`totalTokens`/`cachedReadTokens`)
+because no captured cursor-agent session/update fixture exists in this
+repository. `cachedReadTokens` is schema-defined; snake_case aliases are
+provider extensions.
+
 ## Retained Applied Learning
 
 <!-- applied-learning: bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title -->
