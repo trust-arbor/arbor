@@ -1390,4 +1390,62 @@ defmodule Arbor.Shell.AppleContainerExecutionCoreTest do
       end
     end
   end
+
+  describe "validation_source envelope" do
+    @tag :security_regression
+    test "security regression: validation_source is read-only and worktree stays read-write" do
+      source = "/private/tmp/arbor-val/validation-source"
+
+      source_projections = %{
+        read_only:
+          base_projections().read_only ++
+            [actions_entry(source, :read_only, :validation_source)],
+        read_write:
+          Enum.reject(base_projections().read_write, fn entry ->
+            entry["purpose"] == "worktree" or entry[:purpose] == :worktree
+          end),
+        revision: "candidate"
+      }
+
+      assert {:ok, spec} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(cwd: source, filesystem_projections: source_projections)
+                 })
+               )
+
+      assert Enum.any?(spec.plan.mounts, fn mount ->
+               mount.purpose == :validation_source and mount.mode == :read_only
+             end)
+
+      refute Enum.any?(spec.plan.mounts, &(&1.purpose == :worktree))
+
+      both = %{
+        read_only:
+          base_projections().read_only ++
+            [actions_entry(source, :read_only, :validation_source)],
+        read_write: base_projections().read_write,
+        revision: "candidate"
+      }
+
+      assert {:error, _reason} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: both)}))
+
+      swapped =
+        put_group_entry(
+          base_projections(),
+          :read_write,
+          :worktree,
+          actions_entry(@worktree, :read_only, :worktree)
+        )
+
+      assert {:error, reason} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: swapped)}))
+
+      assert reason in [
+               {:projection_group_mode_mismatch, :read_write, :read_only},
+               {:projection_mode_mismatch, :worktree, :read_only}
+             ]
+    end
+  end
 end

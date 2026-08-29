@@ -55,6 +55,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
                            @maximum_test_stage_timeout
   @allowed_param_keys [:workspace_id, :timeout, :stage_timeout, :test_stage_timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
+  @configuration_digest_domain "arbor.actions.coding.cross_app.continuation.configuration"
+  @configuration_digest_schema_version 1
 
   @max_changed_files 2_000
   @max_apps 256
@@ -362,6 +364,66 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   def new(_params), do: {:error, :invalid_parameters}
+
+  @doc """
+  Canonical configuration identity for the three normalized CrossApp budgets.
+
+  `workspace_id` is deliberately excluded. The digest is over the values
+  admitted by `new/1`, so aliases, defaults, and decimal string inputs cannot
+  create distinct identities for the same effective configuration.
+  """
+  @spec configuration_digest(map()) :: {:ok, String.t()} | {:error, atom()}
+  def configuration_digest(params) when is_map(params) do
+    with {:ok, input} <- new(params),
+         {:ok, digest} <-
+           Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(%{
+             "domain" => @configuration_digest_domain,
+             "schema_version" => @configuration_digest_schema_version,
+             "stage_timeout" => input.stage_timeout,
+             "test_stage_timeout" => input.test_stage_timeout,
+             "timeout" => input.timeout
+           }) do
+      {:ok, digest}
+    end
+  end
+
+  def configuration_digest(_params), do: {:error, :invalid_parameters}
+
+  @doc "Project a complete path-bearing Core batch plan to its canonical compact form."
+  @spec compact_batch_plan(term()) :: {:ok, [map()]} | {:error, term()}
+  def compact_batch_plan([]), do: {:ok, []}
+
+  def compact_batch_plan(batches) when is_list(batches) do
+    if valid_remaining_batches?(batches) and hd(batches).index == 1 do
+      {:ok, Enum.map(batches, &compact_batch/1)}
+    else
+      {:error, :invalid_test_batch_plan}
+    end
+  rescue
+    _ -> {:error, :invalid_test_batch_plan}
+  end
+
+  def compact_batch_plan(_batches), do: {:error, :invalid_test_batch_plan}
+
+  @doc "Construct the canonical passed receipt for one admitted full original batch."
+  @spec passed_batch_receipt(term()) :: {:ok, map()} | {:error, term()}
+  def passed_batch_receipt(batch) when is_map(batch) do
+    if valid_test_batch?(batch),
+      do: {:ok, Map.put(compact_batch(batch), "outcome", "passed")},
+      else: {:error, :invalid_test_batch}
+  end
+
+  def passed_batch_receipt(_batch), do: {:error, :invalid_test_batch}
+
+  defp compact_batch(batch) do
+    %{
+      "index" => batch.index,
+      "total" => batch.total,
+      "count" => batch.count,
+      "label" => batch.label,
+      "inventory_sha256" => batch.inventory_sha256
+    }
+  end
 
   @doc "Build a dependency graph from pure app definitions. Fails closed on ambiguity."
   @spec build_graph([app_def()]) :: {:ok, graph()} | {:error, term()}

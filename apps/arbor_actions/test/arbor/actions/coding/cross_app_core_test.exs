@@ -2,6 +2,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.CrossApp.Core
+  alias Arbor.Actions.Coding.CrossApp.ContinuationCore
   alias Arbor.Actions.Mix, as: MixAction
 
   @moduletag :fast
@@ -98,6 +99,63 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.new(%{workspace_id: "ws_opaque", test_paths: ["apps/a/test"]})
 
     assert {:error, :invalid_workspace_id} = Core.new(%{})
+  end
+
+  test "configuration digest uses normalized budgets and compact helpers bind full batches" do
+    params = %{
+      workspace_id: "ws_digest",
+      timeout: "10000",
+      stage_timeout: "15000",
+      test_stage_timeout: "20000"
+    }
+
+    assert {:ok, digest} = Core.configuration_digest(params)
+
+    assert {:ok, ^digest} =
+             Core.configuration_digest(%{
+               workspace_id: "different-workspace",
+               timeout: 10_000,
+               stage_timeout: 15_000,
+               test_stage_timeout: 20_000
+             })
+
+    subject = %{
+      "domain" => "arbor.actions.coding.cross_app.continuation.configuration",
+      "schema_version" => 1,
+      "timeout" => 10_000,
+      "stage_timeout" => 15_000,
+      "test_stage_timeout" => 20_000
+    }
+
+    assert {:ok, ^digest} = ContinuationCore.digest(subject)
+
+    for {key, value} <- [
+          {"timeout", 10_001},
+          {"stage_timeout", 15_001},
+          {"test_stage_timeout", 20_001},
+          {"schema_version", 2},
+          {"domain", "arbor.actions.coding.cross_app.configuration"}
+        ] do
+      assert {:ok, changed} = ContinuationCore.digest(Map.put(subject, key, value))
+      refute changed == digest
+    end
+
+    files =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 3, "0")}_test.exs"
+      end
+
+    assert {:ok, batches} = Core.partition_test_batches(files)
+    assert {:ok, compact} = Core.compact_batch_plan(batches)
+    refute Jason.encode!(compact) =~ "\"paths\""
+    assert Enum.map(compact, & &1["index"]) == [1, 2]
+
+    assert {:ok, receipt} = Core.passed_batch_receipt(hd(batches))
+    assert receipt == Map.put(hd(compact), "outcome", "passed")
+    refute Map.has_key?(receipt, "paths")
+
+    assert {:error, :invalid_test_batch_plan} =
+             Core.compact_batch_plan(Enum.reverse(batches))
   end
 
   test "selects directly changed apps plus every downstream in-umbrella dependent" do

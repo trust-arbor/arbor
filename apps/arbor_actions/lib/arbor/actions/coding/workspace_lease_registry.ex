@@ -356,6 +356,40 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     do: {:error, :invalid_task_principal}
 
   @doc """
+  Return the unique active workspace_id for an exact opaque task+principal pair.
+  """
+  @spec active_workspace_for_lineage(String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def active_workspace_for_lineage(task_id, principal_id, opts \\ [])
+
+  def active_workspace_for_lineage(task_id, principal_id, opts)
+      when is_binary(task_id) and is_binary(principal_id) and is_list(opts) do
+    if valid_opaque_id?(task_id) and valid_opaque_id?(principal_id) do
+      call({:active_workspace_for_lineage, task_id, principal_id}, opts)
+    else
+      {:error, :invalid_task_principal}
+    end
+  end
+
+  def active_workspace_for_lineage(_task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
+
+  @doc false
+  @spec recapture_committable_snapshot(String.t(), map() | keyword()) :: :ok | {:error, term()}
+  def recapture_committable_snapshot(resource_id, opts \\ %{}) when is_binary(resource_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:recapture_committable_snapshot, resource_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec bind_committable_snapshot(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def bind_committable_snapshot(resource_id, opts \\ %{}) when is_binary(resource_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:bind_committable_snapshot, resource_id, caller}, server_opts)
+  end
+
+  @doc """
   Reactivate a retained lease by exact opaque workspace, task, and principal identity.
 
   The registry installs its own monitor for the calling process before the
@@ -692,6 +726,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def admit_security_regression_operator_attestation(attestation_id, proof, opts \\ %{})
       when is_binary(attestation_id) and (is_map(proof) or is_nil(proof)) do
     {server_opts, caller} = split_caller_opts(opts)
+
     call(
       {:admit_security_regression_operator_attestation, attestation_id, proof, caller},
       server_opts
@@ -1034,6 +1069,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         _from,
         state
       ) do
+    observe_lineage_inspect()
     caller = %{task_id: task_id, principal_id: principal_id, owner_pid: nil}
 
     case fetch_lineage_authorized(state, workspace_id, caller) do
@@ -1042,6 +1078,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:active_workspace_for_lineage, task_id, principal_id}, _from, state) do
+    matches =
+      state.leases
+      |> Map.values()
+      |> Enum.filter(fn lease ->
+        principal_task_match?(lease, %{task_id: task_id, principal_id: principal_id})
+      end)
+
+    case matches do
+      [lease] -> {:reply, {:ok, lease.workspace_id}, state}
+      [] -> {:reply, {:error, :not_found}, state}
+      _multiple -> {:reply, {:error, :ambiguous_workspace_lineage}, state}
     end
   end
 
@@ -1201,6 +1252,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {from_pid, _tag},
         state
       ) do
+    observe_validation_acquire()
     caller = %{caller | owner_pid: from_pid}
 
     with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
@@ -1208,6 +1260,85 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       perform_validation_resource_acquire(state, lease, from_pid, caller)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:recapture_committable_snapshot, resource_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_validation_resource(state, resource_id, caller) do
+      {:ok, resource} ->
+        expected = Map.get(resource, :expected_tree_oid)
+        owner = Map.get(resource, :resource_owner_pid)
+
+        cond do
+          not (is_binary(expected) and expected != "") ->
+            {:reply, {:error, :admitted_tree_mismatch}, state}
+
+          not is_pid(owner) ->
+            {:reply, {:error, :admitted_tree_mismatch}, state}
+
+          true ->
+            case ValidationResourceOwner.recapture_committable_candidate(
+                   owner,
+                   expected,
+                   dest_opts_from_caller(caller)
+                 ) do
+              :ok -> {:reply, :ok, state}
+              {:error, reason} -> {:reply, {:error, reason}, state}
+            end
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:bind_committable_snapshot, resource_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_validation_resource(state, resource_id, caller) do
+      {:ok, resource} ->
+        expected = Map.get(resource, :expected_tree_oid)
+        owner = Map.get(resource, :resource_owner_pid)
+
+        cond do
+          not (is_binary(expected) and expected != "") ->
+            {:reply, {:error, :admitted_tree_mismatch}, state}
+
+          not is_pid(owner) ->
+            {:reply, {:error, :admitted_tree_mismatch}, state}
+
+          true ->
+            case ValidationResourceOwner.bind_committable_candidate(
+                   owner,
+                   expected,
+                   dest_opts_from_caller(caller)
+                 ) do
+              {:ok, binding} ->
+                {:reply,
+                 {:ok,
+                  %{
+                    head: Map.get(resource, :expected_head) || Map.get(binding, :head),
+                    tree_oid: expected,
+                    paths: Map.get(binding, :paths, [])
+                  }}, state}
+
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+            end
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -1879,7 +2010,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
            caller.force_dependency_snapshot_failure,
            caller.cleanup_failures,
            caller.force_partial_cleanup_failure_once,
-           setup_opts_from_caller(caller)
+           setup_opts_from_caller(caller),
+           caller
          ) do
       {:ok, resource, state} -> {:reply, {:ok, validation_resource_view(resource)}, state}
       {:error, reason, state} -> {:reply, {:error, reason}, state}
@@ -1896,7 +2028,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       caller.force_dependency_snapshot_failure,
       caller.cleanup_failures,
       caller.force_partial_cleanup_failure_once,
-      setup_opts_from_caller(caller)
+      setup_opts_from_caller(caller),
+      caller
     )
   end
 
@@ -1908,12 +2041,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          force_dependency_snapshot_failure,
          cleanup_failures,
          force_partial_cleanup_failure_once,
-         setup_opts
+         setup_opts,
+         caller
        ) do
     owner_ref = Process.monitor(owner_pid)
     materializer = state.linux_dependency_baseline_materializer
+    committable_snapshot? = Map.get(caller, :committable_snapshot) == true
+    root_commit = if committable_snapshot?, do: :committable_snapshot, else: candidate_commit
 
-    case create_validation_root(state, lease, candidate_commit, materializer) do
+    case create_validation_root(state, lease, root_commit, materializer) do
       {:ok, resource_id, root_path, root_cleanup_identity, resource_owner_pid} ->
         resource =
           new_validation_resource(
@@ -1925,7 +2061,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             root_cleanup_identity,
             resource_owner_pid,
             candidate_commit,
-            cleanup_failures
+            cleanup_failures,
+            committable_snapshot?
           )
 
         case setup_validation_resource(
@@ -1934,7 +2071,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
                setup_opts
              ) do
           {:ok, resource} ->
-            {:ok, resource, put_validation_resource(state, resource)}
+            case maybe_materialize_committable_snapshot(resource, lease, caller) do
+              {:ok, resource} ->
+                {:ok, resource, put_validation_resource(state, resource)}
+
+              {:error, reason} ->
+                _ = rollback_partial_validation_resource(resource, false)
+                _ = stop_validation_resource_owner(resource)
+                Process.demonitor(owner_ref, [:flush])
+                {:error, reason}
+            end
 
           {:error, {:cleanup_required, reason}, failed_resource} ->
             handle_dependency_cleanup_required(
@@ -2070,7 +2216,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          root_cleanup_identity,
          resource_owner_pid,
          candidate_commit,
-         cleanup_failures
+         cleanup_failures,
+         committable_snapshot? \\ false
        ) do
     resource_owner_ref = Process.monitor(resource_owner_pid)
     candidate_runtime = Path.join(root_path, "candidate-runtime")
@@ -2096,11 +2243,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       owner_ref: owner_ref,
       repo_path: lease.repo_path,
       candidate_path:
-        if(is_binary(candidate_commit),
+        if(is_binary(candidate_commit) or committable_snapshot?,
           do: Path.join(root_path, "candidate"),
           else: lease.worktree_path
         ),
       candidate_commit: candidate_commit,
+      source_projection: if(committable_snapshot?, do: :read_only, else: :read_write),
+      expected_tree_oid: nil,
+      expected_head: nil,
       candidate_cleanup_identity: nil,
       base_commit: lease.base_commit,
       root_path: root_path,
@@ -2328,6 +2478,42 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp rollback_partial_validation_resource(resource, false),
     do: cleanup_actions_owned_validation_files(resource)
 
+  defp maybe_materialize_committable_snapshot(
+         %{source_projection: :read_only} = resource,
+         lease,
+         caller
+       ) do
+    expected = Map.get(caller, :expected_tree_oid)
+    head = Map.get(caller, :expected_head)
+
+    if is_binary(expected) and expected != "" do
+      case ValidationResourceOwner.create_committable_candidate(
+             resource.resource_owner_pid,
+             %{
+               source_worktree: lease.worktree_path,
+               expected_tree_oid: expected,
+               candidate_head: head,
+               blob_manifest: Map.get(caller, :blob_manifest)
+             }
+           ) do
+        {:ok, tree_oid} ->
+          {:ok,
+           %{
+             resource
+             | expected_tree_oid: tree_oid,
+               expected_head: if(is_binary(head) and head != "", do: head, else: nil)
+           }}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :admitted_tree_mismatch}
+    end
+  end
+
+  defp maybe_materialize_committable_snapshot(resource, _lease, _caller), do: {:ok, resource}
+
   defp create_candidate_snapshot_from_resource(%{candidate_commit: nil} = resource),
     do: {:ok, resource}
 
@@ -2547,6 +2733,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {:reply, {:error, reason}, state}
     end
   end
+
+  defp dest_opts_from_caller(caller) when is_map(caller) do
+    [
+      max_entries: Map.get(caller, :max_entries),
+      max_bytes: Map.get(caller, :max_bytes),
+      max_depth: Map.get(caller, :max_depth)
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp dest_opts_from_caller(_caller), do: []
 
   defp fetch_authorized_validation_resource(state, resource_id, caller) do
     with {:ok, resource} <- fetch_validation_resource(state, resource_id),
@@ -3211,6 +3408,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       repo_path: resource.repo_path,
       candidate_path: resource.candidate_path,
       candidate_commit: resource.candidate_commit,
+      source_projection: Map.get(resource, :source_projection, :read_write),
+      expected_tree_oid: Map.get(resource, :expected_tree_oid),
+      expected_head: Map.get(resource, :expected_head),
       base_commit: resource.base_commit,
       root_path: resource.root_path,
       stage_parent_path: Map.get(resource, :stage_parent_path),
@@ -3272,7 +3472,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         )
 
       candidate_path =
-        if is_binary(candidate_commit),
+        if is_binary(candidate_commit) or candidate_commit == :committable_snapshot,
           do: Path.join(root_path, "candidate"),
           else: lease.worktree_path
 
@@ -3281,7 +3481,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         repo_path: lease.repo_path,
         root_path: root_path,
         candidate_path: candidate_path,
-        candidate_commit: candidate_commit,
+        candidate_commit: if(is_binary(candidate_commit), do: candidate_commit, else: nil),
         base_path: Path.join(root_path, "base"),
         materializer: materializer,
         cleanup_retry_limit:
@@ -3728,6 +3928,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp maybe_cleanup_workspace_attestations(state, _workspace_id, :retain), do: state
+
   defp maybe_cleanup_workspace_attestations(state, _workspace_id, {:publish, _commit, :retain}),
     do: state
 
@@ -3970,7 +4171,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       deadline_ms: Keyword.get(opts, :deadline_ms),
       snapshot_bounds: Keyword.get(opts, :snapshot_bounds) || %{},
       candidate_commit: normalize_candidate_commit(Keyword.get(opts, :candidate_commit)),
-      repo_path: normalize_id(Keyword.get(opts, :repo_path))
+      repo_path: normalize_id(Keyword.get(opts, :repo_path)),
+      committable_snapshot: Keyword.get(opts, :committable_snapshot) == true,
+      expected_tree_oid: Keyword.get(opts, :expected_tree_oid),
+      expected_head: Keyword.get(opts, :expected_head),
+      blob_manifest: Keyword.get(opts, :blob_manifest),
+      max_entries: Keyword.get(opts, :max_entries),
+      max_bytes: Keyword.get(opts, :max_bytes),
+      max_depth: Keyword.get(opts, :max_depth)
     }
 
     {server_opts, caller}
@@ -4013,7 +4221,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         normalize_candidate_commit(
           Map.get(opts, :candidate_commit) || Map.get(opts, "candidate_commit")
         ),
-      repo_path: normalize_id(Map.get(opts, :repo_path) || Map.get(opts, "repo_path"))
+      repo_path: normalize_id(Map.get(opts, :repo_path) || Map.get(opts, "repo_path")),
+      committable_snapshot:
+        Map.get(opts, :committable_snapshot) == true ||
+          Map.get(opts, "committable_snapshot") == true,
+      expected_tree_oid: Map.get(opts, :expected_tree_oid) || Map.get(opts, "expected_tree_oid"),
+      expected_head: Map.get(opts, :expected_head) || Map.get(opts, "expected_head"),
+      blob_manifest: Map.get(opts, :blob_manifest) || Map.get(opts, "blob_manifest"),
+      max_entries: Map.get(opts, :max_entries) || Map.get(opts, "max_entries"),
+      max_bytes: Map.get(opts, :max_bytes) || Map.get(opts, "max_bytes"),
+      max_depth: Map.get(opts, :max_depth) || Map.get(opts, "max_depth")
     }
 
     {server, caller}
@@ -5773,6 +5990,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   # Exact task+principal only — never owner_pid / live-process authority.
+  defp observe_lineage_inspect do
+    case Application.get_env(:arbor_actions, :cross_app_lineage_inspect_observer) do
+      fun when is_function(fun, 0) -> fun.()
+      _other -> :ok
+    end
+  end
+
+  defp observe_validation_acquire do
+    case Application.get_env(:arbor_actions, :cross_app_validation_acquire_observer) do
+      fun when is_function(fun, 0) -> fun.()
+      _other -> :ok
+    end
+  end
+
   defp fetch_lineage_authorized(state, workspace_id, caller) do
     case Map.fetch(state.leases, workspace_id) do
       :error ->
@@ -6788,6 +7019,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case delete_retained_marker(state, retained) do
       :ok ->
         cancel_expiry(Map.get(retained, :expiry_ref))
+
         {:ok, Map.put(result, :status, "discarded"),
          drop_retained_and_attestations(state, retained)}
 

@@ -8,6 +8,7 @@ defmodule Arbor.Actions.Application do
 
   use Application
 
+  alias Arbor.Actions.Coding.ContinuationExecutionOwner
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Coding.WorkspaceRetentionDurableStore
   alias Arbor.Actions.Coding.ValidationResourceOwner
@@ -48,6 +49,7 @@ defmodule Arbor.Actions.Application do
       retention_store_children(journal) ++
       [
         ValidationResourceOwner.supervisor_child_spec(),
+        ContinuationExecutionOwner,
         # Coding workspace leases - monitored worktree lifecycle, independent of orchestrator.
         {WorkspaceLeaseRegistry, [retention_journal: journal]}
       ]

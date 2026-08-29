@@ -735,6 +735,35 @@ defmodule Arbor.Orchestrator do
     continuation_mutation("revoke_claim", continuation_id, input, caller_id, authority, opts)
   end
 
+  @doc """
+  Issue a live continuation execution grant and run CrossApp validation.
+
+  Engine/DOT wiring is deferred. Params/context are the real Validate inputs
+  and are not arm authority. The grant is held around the Actions facade.
+  """
+  @spec coding_cross_app_continuation_execute(
+          String.t(),
+          map(),
+          String.t(),
+          SigningAuthority.t(),
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_continuation_execute(
+        continuation_id,
+        input,
+        caller_id,
+        authority,
+        opts \\ []
+      ) do
+    Arbor.Orchestrator.CrossAppContinuation.Authorization.execute(
+      continuation_id,
+      input,
+      caller_id,
+      authority,
+      opts
+    )
+  end
+
   @doc "Complete a continuation after a full passed receipt prefix."
   @spec coding_cross_app_continuation_complete(
           String.t(),

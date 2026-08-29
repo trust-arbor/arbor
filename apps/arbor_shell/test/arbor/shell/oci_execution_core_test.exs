@@ -365,4 +365,71 @@ defmodule Arbor.Shell.OciExecutionCoreTest do
       assert {:error, :runtime_path_mismatch} = Core.new(valid_request(%{admission: admission}))
     end
   end
+
+  describe "validation_source envelope" do
+    @tag :security_regression
+    test "security regression: validation_source is read-only and worktree stays read-write" do
+      source = "/private/tmp/arbor-oci/validation-source"
+
+      source_projections = %{
+        read_only: [
+          actions_entry("/opt/erlang", :read_only, :runtime_erlang),
+          actions_entry("/opt/elixir", :read_only, :runtime_elixir),
+          actions_entry(@mix_wrapper, :read_only, :mix_wrapper),
+          actions_entry(@validation_runner_dir, :read_only, :validation_runner),
+          actions_entry(source, :read_only, :validation_source)
+        ],
+        read_write: [
+          actions_entry("/private/tmp/arbor-oci/home", :read_write, :home),
+          actions_entry("/private/tmp/arbor-oci/tmp", :read_write, :tmp),
+          actions_entry("/private/tmp/arbor-oci/build", :read_write, :build),
+          actions_entry("/private/tmp/arbor-oci/deps", :read_write, :deps),
+          actions_entry(@validation_result_dir, :read_write, :validation_result)
+        ],
+        revision: "candidate"
+      }
+
+      assert {:ok, spec} =
+               Core.new(
+                 valid_request(%{
+                   opts: valid_opts(cwd: source, filesystem_projections: source_projections)
+                 })
+               )
+
+      assert Enum.any?(spec.plan.mounts, fn mount ->
+               mount.purpose == :validation_source and mount.mode == :read_only and
+                 mount.guest_path == "/workspace"
+             end)
+
+      refute Enum.any?(spec.plan.mounts, &(&1.purpose == :worktree))
+
+      both = %{
+        read_only: source_projections.read_only,
+        read_write: [
+          actions_entry(@worktree, :read_write, :worktree)
+          | source_projections.read_write
+        ],
+        revision: "candidate"
+      }
+
+      assert {:error, _reason} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: both)}))
+
+      swapped =
+        Map.update!(base_projections(), :read_write, fn list ->
+          Enum.map(list, fn
+            %{"purpose" => "worktree"} = entry -> %{entry | "mode" => "read_only"}
+            entry -> entry
+          end)
+        end)
+
+      assert {:error, reason} =
+               Core.new(valid_request(%{opts: valid_opts(filesystem_projections: swapped)}))
+
+      assert reason in [
+               {:projection_group_mode_mismatch, :read_write, :read_only},
+               {:projection_mode_mismatch, :worktree, :read_only}
+             ]
+    end
+  end
 end

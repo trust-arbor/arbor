@@ -83,6 +83,9 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
   def durability_status(opts \\ []), do: call(opts, :durability_status)
   def refresh(opts \\ []), do: call(opts, :refresh)
 
+  def issue_execution_grant(continuation_id, input, opts \\ []),
+    do: call(opts, {:issue_execution_grant, continuation_id, input})
+
   defp call(opts, message) do
     server = Keyword.get(opts, :server, __MODULE__)
 
@@ -112,7 +115,8 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
         token_fun: resolved.token_fun,
         claim_ttl_ms: resolved.claim_ttl_ms,
         hydration_timeout_ms: resolved.hydration_timeout_ms,
-        inventory_count: 0
+        inventory_count: 0,
+        registered_name: Keyword.get(opts, :name, __MODULE__)
       }
 
       cond do
@@ -198,6 +202,11 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
     {reply, state} =
       do_mutate_for_principal(transition, continuation_id, input, principal_id, state)
 
+    {:reply, reply, state}
+  end
+
+  def handle_call({:issue_execution_grant, continuation_id, input}, _from, state) do
+    {reply, state} = do_issue_execution_grant(continuation_id, input, state)
     {:reply, reply, state}
   end
 
@@ -552,7 +561,8 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
          principal_id,
          state
        ) do
-    with :ok <- require_persist_first(effects, next_snapshot),
+    with :ok <- maybe_invalidate_prior_grant(transition, continuation_id, previous),
+         :ok <- require_persist_first(effects, next_snapshot),
          {:ok, derived} <- Actions.coding_cross_app_continuation_retained_effects(next_snapshot),
          :ok <- match_transition_effects(effects, derived),
          {:ok, payload_sha256} <- Actions.coding_cross_app_continuation_digest(payload),
@@ -1078,6 +1088,159 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Journal do
 
   defp default_token do
     Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+  end
+
+  defp bind_execution_witness(state) do
+    name = Map.get(state, :registered_name, __MODULE__)
+    Actions.bind_continuation_execution_witness(name)
+  end
+
+  @invalidate_transitions ~w(claim fail cancel expire_claim revoke_claim complete)
+
+  defp maybe_invalidate_prior_grant(transition, continuation_id, previous)
+       when transition in @invalidate_transitions do
+    case get_in(previous, ["snapshot", "claim", "fence_generation"]) do
+      generation when is_integer(generation) and generation > 0 ->
+        Actions.invalidate_coding_cross_app_continuation_execution(
+          continuation_id,
+          generation
+        )
+
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp maybe_invalidate_prior_grant(_transition, _continuation_id, _previous), do: :ok
+
+  defp do_issue_execution_grant(continuation_id, input, state) do
+    _ = bind_execution_witness(state)
+
+    with {:ok, continuation_id} <- Envelope.continuation_id(continuation_id),
+         :ok <- require_json_object(input),
+         {:ok, operation_id} <- Envelope.operation_id(input["operation_id"]),
+         {:ok, caller_id} <- require_binary(input["caller_id"]),
+         signed_request when not is_nil(signed_request) <- input["signed_request"],
+         {:ok, resource} <-
+           Arbor.Orchestrator.CrossAppContinuation.Authorization.resource(
+             continuation_id,
+             "execute",
+             operation_id
+           ),
+         :ok <- authorize_execution_proof(caller_id, resource, signed_request),
+         {:ok, record, data} <- load_admitted(continuation_id, state),
+         :ok <- bind_principal(data, caller_id),
+         snapshot = data["snapshot"],
+         :ok <- require_claimed_snapshot(snapshot),
+         :ok <- require_live_claim(snapshot, state),
+         {:ok, admitted_receipt} <-
+           Actions.coding_cross_app_continuation_static_receipt_admit(input["static_receipt"]),
+         {:ok, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(admitted_receipt),
+         :ok <- match_static_digest(snapshot["static_stage_receipt_digest"], digest),
+         :ok <- match_receipt_identities(snapshot, admitted_receipt),
+         {:ok, window} <-
+           Actions.coding_cross_app_continuation_execution_window_prepare(
+             snapshot,
+             admitted_receipt
+           ),
+         {:ok, workspace_id} <-
+           Actions.coding_active_workspace_for_lineage(
+             snapshot["identities"]["task_id"],
+             snapshot["identities"]["principal_id"]
+           ),
+         {:ok, remaining_ttl_ms} <- remaining_claim_ttl_ms(snapshot, state),
+         {:ok, handle} <-
+           Actions.arm_coding_cross_app_continuation_execution(%{
+             action: Arbor.Actions.Coding.CrossApp.Validate,
+             continuation_id: continuation_id,
+             workspace_id: workspace_id,
+             task_id: snapshot["identities"]["task_id"],
+             principal_id: snapshot["identities"]["principal_id"],
+             fence_generation: snapshot["claim"]["fence_generation"],
+             expires_at: snapshot["claim"]["expires_at"],
+             remaining_ttl_ms: remaining_ttl_ms,
+             window: window,
+             receipt: admitted_receipt
+           }) do
+      _ = record
+      {{:ok, handle}, state}
+    else
+      nil -> {{:error, :execution_grant_proof_required}, state}
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp authorize_execution_proof(caller_id, resource, signed_request) do
+    case Arbor.Security.authorize(
+           caller_id,
+           resource,
+           :execute,
+           signed_request: signed_request
+         ) do
+      {:ok, :authorized} -> :ok
+      {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+      {:error, :nonce_reused} = error -> error
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_authorization_result, other}}
+    end
+  rescue
+    _error -> {:error, :security_unavailable}
+  catch
+    :exit, _reason -> {:error, :security_unavailable}
+    _kind, _reason -> {:error, :security_unavailable}
+  end
+
+  defp require_claimed_snapshot(%{"status" => "claimed", "claim" => claim})
+       when is_map(claim) do
+    if is_binary(claim["fence_token"]) and claim["fence_token"] != "",
+      do: :ok,
+      else: {:error, :claim_required}
+  end
+
+  defp require_claimed_snapshot(_snapshot), do: {:error, :claim_required}
+
+  defp require_live_claim(snapshot, state) do
+    now = state.clock.()
+
+    case DateTime.from_iso8601(snapshot["claim"]["expires_at"]) do
+      {:ok, expires_at, _offset} ->
+        if DateTime.compare(now, expires_at) == :lt,
+          do: :ok,
+          else: {:error, :claim_expired}
+
+      _other ->
+        {:error, :claim_required}
+    end
+  end
+
+  defp match_static_digest(digest, digest) when is_binary(digest), do: :ok
+  defp match_static_digest(_known, _digest), do: {:error, :static_receipt_drift}
+
+  defp match_receipt_identities(snapshot, receipt) do
+    if snapshot["identities"] == receipt["identities"] do
+      :ok
+    else
+      {:error, :static_receipt_drift}
+    end
+  end
+
+  defp remaining_claim_ttl_ms(snapshot, state) do
+    now = state.clock.()
+
+    case DateTime.from_iso8601(snapshot["claim"]["expires_at"]) do
+      {:ok, expires_at, _offset} ->
+        remaining = DateTime.diff(expires_at, now, :millisecond)
+
+        if remaining > 0,
+          do: {:ok, remaining},
+          else: {:error, :claim_expired}
+
+      _other ->
+        {:error, :claim_required}
+    end
   end
 
   defp require_json_object(value) when is_map(value) and not is_struct(value), do: :ok

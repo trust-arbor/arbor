@@ -508,6 +508,7 @@ defmodule Arbor.Actions.Mix do
           caller
           |> Map.put(:deadline_ms, deadline_ms)
           |> Map.put(:snapshot_bounds, snapshot_bounds())
+          |> maybe_put_committable_snapshot(opts)
 
         case WorkspaceLeaseRegistry.acquire_validation_resource(workspace_id, acquire_opts) do
           {:ok, resource} ->
@@ -545,6 +546,71 @@ defmodule Arbor.Actions.Mix do
 
   def with_validation_resource(_workspace_id, _context, _fun, _opts),
     do: {:error, :invalid_validation_resource_request}
+
+  defp maybe_put_committable_snapshot(acquire_opts, opts) when is_list(opts) do
+    if Keyword.get(opts, :committable_snapshot) == true do
+      acquire_opts
+      |> Map.put(:committable_snapshot, true)
+      |> Map.put(:expected_tree_oid, Keyword.get(opts, :expected_tree_oid))
+      |> Map.put(:expected_head, Keyword.get(opts, :expected_head))
+      |> Map.put(:blob_manifest, Keyword.get(opts, :blob_manifest))
+    else
+      acquire_opts
+    end
+  end
+
+  @doc false
+  def recapture_committable_snapshot(resource, opts \\ [])
+
+  def recapture_committable_snapshot(resource, opts) when is_map(resource) and is_list(opts) do
+    snapshot_owner_call(
+      resource,
+      opts,
+      &WorkspaceLeaseRegistry.recapture_committable_snapshot/2
+    )
+  end
+
+  def recapture_committable_snapshot(_resource, _opts) do
+    {:error, :validation_resource_required}
+  end
+
+  @doc false
+  def bind_committable_snapshot(resource, opts \\ [])
+
+  def bind_committable_snapshot(resource, opts) when is_map(resource) and is_list(opts) do
+    snapshot_owner_call(
+      resource,
+      opts,
+      &WorkspaceLeaseRegistry.bind_committable_snapshot/2
+    )
+  end
+
+  def bind_committable_snapshot(_resource, _opts), do: {:error, :validation_resource_required}
+
+  defp snapshot_owner_call(resource, opts, fun)
+       when is_map(resource) and is_list(opts) and is_function(fun, 2) do
+    resource_id = Map.get(resource, :resource_id) || Map.get(resource, "resource_id")
+    task_id = Map.get(resource, :task_id) || Map.get(resource, "task_id")
+    principal_id = Map.get(resource, :principal_id) || Map.get(resource, "principal_id")
+
+    if is_binary(resource_id) and resource_id != "" do
+      caller =
+        %{task_id: task_id, principal_id: principal_id}
+        |> maybe_put_caller_bound(:max_entries, Keyword.get(opts, :max_entries))
+        |> maybe_put_caller_bound(:max_bytes, Keyword.get(opts, :max_bytes))
+        |> maybe_put_caller_bound(:max_depth, Keyword.get(opts, :max_depth))
+
+      fun.(resource_id, caller)
+    else
+      {:error, :validation_resource_required}
+    end
+  end
+
+  defp maybe_put_caller_bound(caller, key, value)
+       when is_map(caller) and is_atom(key) and is_integer(value) and value >= 0,
+       do: Map.put(caller, key, value)
+
+  defp maybe_put_caller_bound(caller, _key, _value), do: caller
 
   @doc false
   def last_validation_cleanup_failure do
@@ -855,18 +921,27 @@ defmodule Arbor.Actions.Mix do
         projection(paths.runner_dir_path, :read_only, :validation_runner)
       ]
 
+      snapshot? = resource_field(resource, :source_projection) == :read_only
+
+      {read_only, worktree_entries} =
+        if snapshot? and revision == :candidate do
+          {[projection(paths.worktree_path, :read_only, :validation_source) | read_only], []}
+        else
+          {read_only, [{paths.worktree_path, :worktree}]}
+        end
+
       # Never project the runtime parent: it owns the sibling typed children.
       # Mount only those children and worktree/deps so guest code cannot reach
       # unprojected control artifacts or create ancestor/descendant mount overlap.
       read_write =
-        [
-          {paths.worktree_path, :worktree},
-          {paths.home_path, :home},
-          {paths.tmp_path, :tmp},
-          {paths.build_path, :build},
-          {paths.deps_path, :deps},
-          {paths.result_dir_path, :validation_result}
-        ]
+        (worktree_entries ++
+           [
+             {paths.home_path, :home},
+             {paths.tmp_path, :tmp},
+             {paths.build_path, :build},
+             {paths.deps_path, :deps},
+             {paths.result_dir_path, :validation_result}
+           ])
         |> Enum.reject(fn {path, _} -> is_nil(path) or path == "" end)
         |> Enum.map(fn {path, purpose} -> projection(path, :read_write, purpose) end)
 
@@ -960,6 +1035,7 @@ defmodule Arbor.Actions.Mix do
       |> Keyword.put(:validation_revision, revision)
       |> Keyword.put(:default_env, default_mix_env(args))
       |> Keyword.put(:deadline_ms, deadline_ms)
+      |> maybe_put_resource_expected_tree(resource)
 
     case remaining_timeout(deadline_ms) do
       {:error, reason} ->
@@ -996,7 +1072,12 @@ defmodule Arbor.Actions.Mix do
            {:ok, expected_tree} <-
              admit_expected_tree_oid(Keyword.get(opts, :expected_tree_oid)),
            {:ok, before_binding} <-
-             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms, include_paths: true),
+             maybe_tree_binding(
+               prepared.cwd,
+               bind_tree?,
+               deadline_ms,
+               Keyword.put(opts, :include_paths, true)
+             ),
            :ok <- assert_expected_tree(before_binding, expected_tree, bind_tree?),
            {:ok, inventory_meta} <-
              publish_or_verify_source_inventory(prepared, before_binding, opts),
@@ -1005,7 +1086,12 @@ defmodule Arbor.Actions.Mix do
            {:ok, result} <-
              invoke_spawn_capable(prepared, args, child_timeout, opts),
            {:ok, after_binding} <-
-             maybe_tree_binding(prepared.cwd, bind_tree?, deadline_ms, include_paths: false),
+             maybe_tree_binding(
+               prepared.cwd,
+               bind_tree?,
+               deadline_ms,
+               Keyword.put(opts, :include_paths, false)
+             ),
            :ok <- assert_tree_stable(before_binding, after_binding) do
         result =
           if is_map(before_binding) do
@@ -1104,6 +1190,24 @@ defmodule Arbor.Actions.Mix do
         :error
     end
   end
+
+  defp maybe_put_resource_expected_tree(opts, resource) when is_list(opts) and is_map(resource) do
+    resource_oid = resource_field(resource, :expected_tree_oid)
+
+    oid =
+      if snapshot_source?(resource) do
+        resource_oid
+      else
+        Keyword.get(opts, :expected_tree_oid) || resource_oid
+      end
+
+    case oid do
+      oid when is_binary(oid) and oid != "" -> Keyword.put(opts, :expected_tree_oid, oid)
+      _missing -> opts
+    end
+  end
+
+  defp maybe_put_resource_expected_tree(opts, _resource), do: opts
 
   defp maybe_put_resource_profile(shell_opts, opts) do
     case Keyword.fetch(opts, :resource_profile) do
@@ -1272,6 +1376,9 @@ defmodule Arbor.Actions.Mix do
 
   defp format_prepare_error({:validation_infrastructure_error, _} = error),
     do: {:error, error}
+
+  defp format_prepare_error({:owner_snapshot_error, :validation_tree_mutated}),
+    do: {:error, :validation_tree_mutated}
 
   defp format_prepare_error(reason) when is_binary(reason), do: {:error, reason}
   defp format_prepare_error(reason), do: {:error, inspect(reason)}
@@ -2808,24 +2915,65 @@ defmodule Arbor.Actions.Mix do
   defp maybe_tree_binding(_cwd, false, _deadline, _opts), do: {:ok, nil}
 
   defp maybe_tree_binding(cwd, true, deadline_ms, opts) when is_list(opts) do
-    include_paths? = Keyword.get(opts, :include_paths, false) == true
+    resource = Keyword.get(opts, :validation_resource)
 
-    capture_opts =
-      [deadline_ms: deadline_ms]
-      |> Keyword.put(:include_paths, include_paths?)
-
-    if include_paths? do
-      do_committable_tree_capture(cwd, capture_opts)
+    if snapshot_source?(resource) do
+      owner_issued_snapshot_binding(resource, opts)
     else
-      case do_committable_tree_capture(cwd, capture_opts) do
-        {:ok, %{head: head, tree_oid: tree_oid}} ->
-          {:ok, %{head: head, tree_oid: tree_oid}}
+      include_paths? = Keyword.get(opts, :include_paths, false) == true
 
-        other ->
-          other
+      capture_opts =
+        [deadline_ms: deadline_ms]
+        |> Keyword.put(:include_paths, include_paths?)
+
+      if include_paths? do
+        do_committable_tree_capture(cwd, capture_opts)
+      else
+        case do_committable_tree_capture(cwd, capture_opts) do
+          {:ok, %{head: head, tree_oid: tree_oid}} ->
+            {:ok, %{head: head, tree_oid: tree_oid}}
+
+          other ->
+            other
+        end
       end
     end
   end
+
+  defp snapshot_source?(resource) when is_map(resource),
+    do: resource_field(resource, :source_projection) == :read_only
+
+  defp snapshot_source?(_resource), do: false
+
+  defp owner_issued_snapshot_binding(resource, opts) when is_map(resource) and is_list(opts) do
+    include_paths? = Keyword.get(opts, :include_paths, false) == true
+
+    case bind_committable_snapshot(resource) do
+      {:ok, %{head: head, tree_oid: tree_oid} = binding} ->
+        result = %{head: head, tree_oid: tree_oid}
+
+        if include_paths? do
+          paths = Map.get(binding, :paths)
+
+          if is_list(paths) do
+            {:ok, Map.put(result, :paths, paths)}
+          else
+            {:error, :source_inventory_paths_missing}
+          end
+        else
+          {:ok, result}
+        end
+
+      {:error, :validation_tree_mutated} ->
+        {:error, {:owner_snapshot_error, :validation_tree_mutated}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp owner_issued_snapshot_binding(_resource, _opts),
+    do: {:error, :validation_resource_required}
 
   defp assert_tree_stable(nil, nil), do: :ok
 

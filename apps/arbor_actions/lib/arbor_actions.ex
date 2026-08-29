@@ -133,10 +133,18 @@ defmodule Arbor.Actions do
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
   @active_action_authorization_key {__MODULE__, :active_action_authorization}
   @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
+  @coding_cross_app_continuation_execution_key {__MODULE__,
+                                                :coding_cross_app_continuation_execution}
 
   defmodule ActionAuthorization do
     @moduledoc false
     @enforce_keys [:principal_id, :action_module, :owner, :ref]
+    defstruct @enforce_keys
+  end
+
+  defmodule CodingCrossAppContinuationExecution do
+    @moduledoc false
+    @enforce_keys [:window, :receipt, :owner, :ref]
     defstruct @enforce_keys
   end
 
@@ -1027,6 +1035,172 @@ defmodule Arbor.Actions do
   def cross_app_maximum_stage_timeout_ms do
     Arbor.Actions.Coding.CrossApp.Core.maximum_stage_timeout()
   end
+
+  @doc "Canonical digest of Core-normalized CrossApp timeout configuration."
+  @spec coding_cross_app_configuration_digest(map()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_configuration_digest(params) do
+    Arbor.Actions.Coding.CrossApp.Core.configuration_digest(params)
+  end
+
+  @doc "Project a complete path-bearing CrossApp batch plan to compact continuation batches."
+  @spec coding_cross_app_compact_batch_plan(term()) :: {:ok, [map()]} | {:error, term()}
+  def coding_cross_app_compact_batch_plan(batches) do
+    Arbor.Actions.Coding.CrossApp.Core.compact_batch_plan(batches)
+  end
+
+  @doc "Construct a passed continuation receipt for one full original CrossApp batch."
+  @spec coding_cross_app_passed_batch_receipt(term()) :: {:ok, map()} | {:error, term()}
+  def coding_cross_app_passed_batch_receipt(batch) do
+    Arbor.Actions.Coding.CrossApp.Core.passed_batch_receipt(batch)
+  end
+
+  @doc """
+  Public continuation-execution wrapper. A caller-minted window/receipt is not
+  authority; this function never installs a binding and never invokes `fun`.
+  """
+  @spec with_coding_cross_app_continuation_execution(term(), term(), (-> result)) ::
+          {:error, :continuation_execution_unauthorized}
+        when result: term()
+  def with_coding_cross_app_continuation_execution(_window, _receipt, _fun),
+    do: {:error, :continuation_execution_unauthorized}
+
+  @doc false
+  @spec coding_cross_app_continuation_execution_binding() ::
+          {:ok, term(), term()} | :none
+  def coding_cross_app_continuation_execution_binding do
+    case live_coding_cross_app_continuation_grant() do
+      {:ok, grant} -> {:ok, grant.window, grant.receipt}
+      :none -> :none
+    end
+  end
+
+  @doc false
+  @spec legacy_coding_cross_app_continuation_marker() :: term()
+  def legacy_coding_cross_app_continuation_marker do
+    Process.get(@coding_cross_app_continuation_execution_key)
+  end
+
+  @doc """
+  Bind the ContinuationExecutionOwner to a registered witness process.
+
+  `from` of the Owner call must be `Process.whereis(registered_name)`.
+  Idempotent for the same live name+pid.
+  """
+  @spec bind_continuation_execution_witness(atom()) :: :ok | {:error, atom()}
+  def bind_continuation_execution_witness(registered_name) when is_atom(registered_name) do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.bind(registered_name)
+  end
+
+  def bind_continuation_execution_witness(_registered_name),
+    do: {:error, :invalid_witness}
+
+  @doc """
+  Return the unique active workspace_id for an exact opaque task+principal.
+  """
+  @spec coding_active_workspace_for_lineage(String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def coding_active_workspace_for_lineage(task_id, principal_id) do
+    Arbor.Actions.Coding.WorkspaceLeaseRegistry.active_workspace_for_lineage(
+      task_id,
+      principal_id
+    )
+  end
+
+  @doc "Witness-only arm of a process-local continuation execution grant."
+  @spec arm_coding_cross_app_continuation_execution(map()) ::
+          {:ok, String.t()} | {:error, atom()}
+  def arm_coding_cross_app_continuation_execution(scope) when is_map(scope) do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.arm(scope)
+  end
+
+  def arm_coding_cross_app_continuation_execution(_scope),
+    do: {:error, :invalid_execution_grant_scope}
+
+  @doc "Attach the execute-process to a one-shot owner-issued handoff handle."
+  @spec attach_coding_cross_app_continuation_execution(String.t()) ::
+          {:ok, map()} | {:error, atom()}
+  def attach_coding_cross_app_continuation_execution(handle) when is_binary(handle) do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.attach(handle)
+  end
+
+  def attach_coding_cross_app_continuation_execution(_handle),
+    do: {:error, :invalid_handoff}
+
+  @doc "Release the live grant for the calling executor."
+  @spec release_coding_cross_app_continuation_execution() :: :ok | {:error, atom()}
+  def release_coding_cross_app_continuation_execution do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.release()
+  end
+
+  @doc "Non-consuming recheck of the calling executor's attached grant."
+  @spec recheck_coding_cross_app_continuation_execution() :: :ok | {:error, atom()}
+  def recheck_coding_cross_app_continuation_execution do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.recheck_live()
+  end
+
+  @doc "Inspect-only live grant for the calling executor."
+  @spec live_coding_cross_app_continuation_grant() :: {:ok, map()} | :none
+  def live_coding_cross_app_continuation_grant do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.live_grant()
+  end
+
+  @doc "Witness-only abort of a continuation grant."
+  @spec abort_coding_cross_app_continuation_execution(String.t()) :: :ok | {:error, atom()}
+  def abort_coding_cross_app_continuation_execution(continuation_id)
+      when is_binary(continuation_id) do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.abort(continuation_id)
+  end
+
+  def abort_coding_cross_app_continuation_execution(_continuation_id),
+    do: {:error, :invalid_continuation_id}
+
+  @doc "Witness-only invalidate of a grant generation."
+  @spec invalidate_coding_cross_app_continuation_execution(String.t(), pos_integer()) ::
+          :ok | {:error, atom()}
+  def invalidate_coding_cross_app_continuation_execution(continuation_id, generation)
+      when is_binary(continuation_id) and is_integer(generation) do
+    Arbor.Actions.Coding.ContinuationExecutionOwner.invalidate(continuation_id, generation)
+  end
+
+  def invalidate_coding_cross_app_continuation_execution(_continuation_id, _generation),
+    do: {:error, :invalid_continuation_id}
+
+  @doc """
+  Grant-required host facade for CrossApp continuation validation.
+
+  Engine/DOT wiring is deferred; ordinary unbound Validate.run stays on
+  authorize_and_execute.
+  """
+  @spec run_coding_cross_app_validation(map(), map()) :: {:ok, map()} | {:error, term()}
+  def run_coding_cross_app_validation(params, context)
+      when is_map(params) and is_map(context) do
+    case live_coding_cross_app_continuation_grant() do
+      :none ->
+        {:error, :continuation_execution_unauthorized}
+
+      {:ok, grant} ->
+        workspace_id = param_value(params, :workspace_id)
+        task_id = context_value(context, :task_id)
+        principal_id = context_value(context, :agent_id) || context_value(context, :principal_id)
+
+        cond do
+          workspace_id != grant.workspace_id ->
+            {:error, :continuation_execution_unauthorized}
+
+          task_id != grant.task_id or principal_id != grant.principal_id ->
+            {:error, :continuation_execution_unauthorized}
+
+          true ->
+            with {:ok, input} <- Arbor.Actions.Coding.CrossApp.Core.new(params) do
+              Arbor.Actions.Coding.CrossApp.Shell.run(input, context)
+            end
+        end
+    end
+  end
+
+  def run_coding_cross_app_validation(_params, _context),
+    do: {:error, :invalid_cross_app_input}
 
   @doc "Continuation schema version owned by CrossApp ContinuationCore."
   @spec coding_cross_app_continuation_schema_version() :: 1

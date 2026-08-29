@@ -28,6 +28,7 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
       coding_cross_app_continuation_expire_claim: [2, 3],
       coding_cross_app_continuation_revoke_claim: [2, 3],
       coding_cross_app_continuation_complete: [2, 3],
+      coding_cross_app_continuation_execute: [3],
       coding_cross_app_continuation_durability_status: [0, 1],
       coding_cross_app_continuation_refresh: [0, 1]
     ]
@@ -421,6 +422,239 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
     assert FakeStore.record_count(store) == 0
   end
 
+  test "security regression: direct Journal execute grant without proof does not arm" do
+    {journal, _store} = start_journal()
+    legitimate = identity_and_authority("continuation-execute-proof")
+    input = open_input(legitimate.identity.agent_id, "open-execute")
+    {:ok, open_resource} = Authorization.open_resource(input)
+    grant!(legitimate.identity.agent_id, open_resource)
+
+    {:ok, opened} =
+      Orchestrator.coding_cross_app_continuation_open(
+        input,
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    continuation_id = opened["continuation_id"]
+    {:ok, claim_resource} = Authorization.resource(continuation_id, "claim", "claim-execute")
+    grant!(legitimate.identity.agent_id, claim_resource)
+
+    {:ok, _claimed} =
+      Orchestrator.coding_cross_app_continuation_claim(
+        continuation_id,
+        %{"operation_id" => "claim-execute"},
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    before = Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count()
+
+    assert {:error, reason} =
+             Journal.issue_execution_grant(
+               continuation_id,
+               %{"operation_id" => "execute-1"},
+               server: journal
+             )
+
+    assert reason in [:execution_grant_proof_required, :malformed_state, :unauthorized]
+    assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == before
+
+    assert {:error, _} =
+             GenServer.call(journal, {:issue_execution_grant, continuation_id, %{}})
+
+    assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == before
+    refute function_exported?(Orchestrator, :coding_cross_app_continuation_execute, 3)
+  end
+
+  test "security regression: revoke invalidates a live generation" do
+    {journal, _store} = start_journal()
+    legitimate = identity_and_authority("continuation-revoke-invalidate")
+    input = open_input(legitimate.identity.agent_id, "open-revoke")
+    {:ok, open_resource} = Authorization.open_resource(input)
+    grant!(legitimate.identity.agent_id, open_resource)
+
+    {:ok, opened} =
+      Orchestrator.coding_cross_app_continuation_open(
+        input,
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    continuation_id = opened["continuation_id"]
+    {:ok, claim_resource} = Authorization.resource(continuation_id, "claim", "claim-revoke")
+    grant!(legitimate.identity.agent_id, claim_resource)
+    {:ok, revoke_resource} = Authorization.resource(continuation_id, "revoke_claim", "revoke-1")
+    grant!(legitimate.identity.agent_id, revoke_resource)
+
+    {:ok, claimed} =
+      Orchestrator.coding_cross_app_continuation_claim(
+        continuation_id,
+        %{"operation_id" => "claim-revoke"},
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    fence = claimed["snapshot"]["claim"]
+
+    {:ok, _revoked} =
+      Orchestrator.coding_cross_app_continuation_revoke_claim(
+        continuation_id,
+        %{
+          "operation_id" => "revoke-1",
+          "fence_token" => fence["fence_token"],
+          "fence_generation" => fence["fence_generation"]
+        },
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == 0
+
+    {:ok, execute_resource} =
+      Authorization.resource(continuation_id, "execute", "execute-after-revoke")
+
+    grant!(legitimate.identity.agent_id, execute_resource)
+
+    assert {:error, _reason} =
+             Orchestrator.coding_cross_app_continuation_execute(
+               continuation_id,
+               %{
+                 "operation_id" => "execute-after-revoke",
+                 "params" => %{},
+                 "context" => %{},
+                 "static_receipt" => %{}
+               },
+               legitimate.identity.agent_id,
+               legitimate.authority,
+               server: journal
+             )
+
+    assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == 0
+  end
+
+  test "security regression: fail and cancel invalidate a live generation" do
+    for {operation, fun, op_id} <- [
+          {"fail", :coding_cross_app_continuation_fail, "fail-1"},
+          {"cancel", :coding_cross_app_continuation_cancel, "cancel-1"}
+        ] do
+      {journal, _store} = start_journal()
+      legitimate = identity_and_authority("continuation-#{operation}-invalidate")
+      input = open_input(legitimate.identity.agent_id, "open-#{op_id}")
+      {:ok, open_resource} = Authorization.open_resource(input)
+      grant!(legitimate.identity.agent_id, open_resource)
+
+      {:ok, opened} =
+        Orchestrator.coding_cross_app_continuation_open(
+          input,
+          legitimate.identity.agent_id,
+          legitimate.authority,
+          server: journal
+        )
+
+      continuation_id = opened["continuation_id"]
+      {:ok, claim_resource} = Authorization.resource(continuation_id, "claim", "claim-#{op_id}")
+      grant!(legitimate.identity.agent_id, claim_resource)
+      {:ok, mutation_resource} = Authorization.resource(continuation_id, operation, op_id)
+      grant!(legitimate.identity.agent_id, mutation_resource)
+
+      {:ok, execute_resource} =
+        Authorization.resource(continuation_id, "execute", "exec-#{op_id}")
+
+      grant!(legitimate.identity.agent_id, execute_resource)
+
+      {:ok, claimed} =
+        Orchestrator.coding_cross_app_continuation_claim(
+          continuation_id,
+          %{"operation_id" => "claim-#{op_id}"},
+          legitimate.identity.agent_id,
+          legitimate.authority,
+          server: journal
+        )
+
+      fence = claimed["snapshot"]["claim"]
+
+      {:ok, _mutated} =
+        apply(Orchestrator, fun, [
+          continuation_id,
+          %{
+            "operation_id" => op_id,
+            "fence_token" => fence["fence_token"],
+            "fence_generation" => fence["fence_generation"]
+          },
+          legitimate.identity.agent_id,
+          legitimate.authority,
+          [server: journal]
+        ])
+
+      assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == 0
+
+      assert {:error, _reason} =
+               Orchestrator.coding_cross_app_continuation_execute(
+                 continuation_id,
+                 %{
+                   "operation_id" => "exec-#{op_id}",
+                   "params" => %{},
+                   "context" => %{},
+                   "static_receipt" => %{}
+                 },
+                 legitimate.identity.agent_id,
+                 legitimate.authority,
+                 server: journal
+               )
+
+      assert Arbor.Actions.Coding.ContinuationExecutionOwner.grant_count() == 0
+    end
+  end
+
+  test "security regression: public get redacts fence_token" do
+    {journal, _store} = start_journal()
+    legitimate = identity_and_authority("continuation-get-redact")
+    input = open_input(legitimate.identity.agent_id, "open-redact")
+    {:ok, open_resource} = Authorization.open_resource(input)
+    grant!(legitimate.identity.agent_id, open_resource)
+
+    {:ok, opened} =
+      Orchestrator.coding_cross_app_continuation_open(
+        input,
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    continuation_id = opened["continuation_id"]
+    {:ok, claim_resource} = Authorization.resource(continuation_id, "claim", "claim-redact")
+    grant!(legitimate.identity.agent_id, claim_resource)
+    {:ok, get_resource} = Authorization.resource(continuation_id, "get")
+    grant!(legitimate.identity.agent_id, get_resource)
+
+    {:ok, claimed} =
+      Orchestrator.coding_cross_app_continuation_claim(
+        continuation_id,
+        %{"operation_id" => "claim-redact"},
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    assert is_binary(claimed["snapshot"]["claim"]["fence_token"])
+
+    {:ok, got} =
+      Orchestrator.coding_cross_app_continuation_get(
+        continuation_id,
+        legitimate.identity.agent_id,
+        legitimate.authority,
+        server: journal
+      )
+
+    refute Map.has_key?(got["snapshot"]["claim"], "fence_token")
+  end
+
   test "resource construction is closed and bounded" do
     continuation_id = "xappc_" <> String.duplicate("a", 64)
 
@@ -537,7 +771,14 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
       {"cancel", Map.merge(fence, %{"operation_id" => "table-cancel"})},
       {"expire_claim", Map.merge(fence, %{"operation_id" => "table-expire"})},
       {"revoke_claim", Map.merge(fence, %{"operation_id" => "table-revoke"})},
-      {"complete", Map.merge(fence, %{"operation_id" => "table-complete"})}
+      {"complete", Map.merge(fence, %{"operation_id" => "table-complete"})},
+      {"execute",
+       %{
+         "operation_id" => "table-execute",
+         "params" => %{},
+         "context" => %{},
+         "static_receipt" => %{}
+       }}
     ]
   end
 
@@ -574,6 +815,9 @@ defmodule Arbor.Orchestrator.CrossAppContinuationAuthorizationSecurityRegression
 
       "complete" ->
         apply(Orchestrator, :coding_cross_app_continuation_complete, args)
+
+      "execute" ->
+        apply(Orchestrator, :coding_cross_app_continuation_execute, args)
     end
   end
 

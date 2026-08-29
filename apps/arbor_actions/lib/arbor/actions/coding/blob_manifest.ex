@@ -92,15 +92,42 @@ defmodule Arbor.Actions.Coding.BlobManifest do
 
   def parse_ls_tree_z(_), do: {:error, :invalid_blob_manifest}
 
-  @doc false
-  @spec paths(term()) :: {:ok, [String.t()]} | {:error, term()}
-  def paths(manifest) when is_list(manifest) do
-    with {:ok, map} <- manifest_to_map(manifest) do
-      {:ok, map |> Map.keys() |> Enum.sort()}
+  @doc "Validate and return a canonical path-sorted blob manifest."
+  @spec canonical_entries(term()) :: {:ok, [entry()]} | {:error, term()}
+  def canonical_entries(entries) when is_list(entries) do
+    if length(entries) > @max_entries do
+      {:error, :blob_manifest_too_large}
+    else
+      entries
+      |> Enum.reduce_while({:ok, %{}}, fn entry, {:ok, acc} ->
+        case normalize_manifest_entry(entry) do
+          {:ok, path, mode, oid} ->
+            if Map.has_key?(acc, path) do
+              {:halt, {:error, {:duplicate_blob_manifest_path, path}}}
+            else
+              {:cont, {:ok, Map.put(acc, path, %{path: path, mode: mode, oid: oid})}}
+            end
+
+          {:error, _} = error ->
+            {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, by_path} -> {:ok, by_path |> Map.values() |> Enum.sort_by(& &1.path)}
+        {:error, _} = error -> error
+      end
     end
   end
 
-  def paths(_), do: {:error, :invalid_blob_manifest}
+  def canonical_entries(_), do: {:error, :invalid_blob_manifest}
+
+  @doc false
+  @spec paths(term()) :: {:ok, [String.t()]} | {:error, term()}
+  def paths(manifest) do
+    with {:ok, entries} <- canonical_entries(manifest) do
+      {:ok, Enum.map(entries, & &1.path)}
+    end
+  end
 
   defp parse_ls_tree_entry(entry) when is_binary(entry) do
     case :binary.split(entry, "\t") do
@@ -129,26 +156,8 @@ defmodule Arbor.Actions.Coding.BlobManifest do
   end
 
   defp manifest_to_map(entries) when is_list(entries) do
-    if length(entries) > @max_changed_files * 25 do
-      {:error, :blob_manifest_too_large}
-    else
-      Enum.reduce_while(entries, {:ok, %{}, MapSet.new()}, fn entry, {:ok, acc, seen} ->
-        case normalize_manifest_entry(entry) do
-          {:ok, path, mode, oid} ->
-            if MapSet.member?(seen, path) do
-              {:halt, {:error, {:duplicate_blob_manifest_path, path}}}
-            else
-              {:cont, {:ok, Map.put(acc, path, {mode, oid}), MapSet.put(seen, path)}}
-            end
-
-          {:error, _} = error ->
-            {:halt, error}
-        end
-      end)
-      |> case do
-        {:ok, map, _seen} -> {:ok, map}
-        {:error, _} = error -> error
-      end
+    with {:ok, canonical} <- canonical_entries(entries) do
+      {:ok, Map.new(canonical, &{&1.path, {&1.mode, &1.oid}})}
     end
   end
 

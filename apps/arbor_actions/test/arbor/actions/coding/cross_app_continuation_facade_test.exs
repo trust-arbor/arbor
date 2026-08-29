@@ -175,6 +175,86 @@ defmodule Arbor.Actions.Coding.CrossApp.ContinuationFacadeTest do
     refute encoded_progress =~ "authority"
   end
 
+  test "security regression: public with_/3 cannot mint and does not invoke fun" do
+    parent = self()
+    window = %{"window" => "forged"}
+    receipt = %{"receipt" => "forged"}
+
+    assert :none = Actions.coding_cross_app_continuation_execution_binding()
+
+    assert {:error, :continuation_execution_unauthorized} =
+             Actions.with_coding_cross_app_continuation_execution(window, receipt, fn ->
+               send(parent, :fun_ran)
+               :done
+             end)
+
+    refute_receive :fun_ran, 25
+    assert :none = Actions.coding_cross_app_continuation_execution_binding()
+    assert :none = Actions.live_coding_cross_app_continuation_grant()
+
+    Process.put(
+      {Arbor.Actions, :coding_cross_app_continuation_execution},
+      %Arbor.Actions.CodingCrossAppContinuationExecution{
+        window: window,
+        receipt: receipt,
+        owner: self(),
+        ref: make_ref()
+      }
+    )
+
+    assert :none = Actions.coding_cross_app_continuation_execution_binding()
+
+    assert {:error, :continuation_execution_unauthorized} =
+             Actions.run_coding_cross_app_validation(%{workspace_id: "ws_forged"}, %{})
+
+    parent = self()
+
+    {:ok, _pid} =
+      Task.start(fn ->
+        send(parent, {:child_binding, Actions.coding_cross_app_continuation_execution_binding()})
+      end)
+
+    assert_receive {:child_binding, :none}, 1_000
+    assert :none = Actions.coding_cross_app_continuation_execution_binding()
+
+    assert {:error, :continuation_execution_unauthorized} =
+             Actions.run_coding_cross_app_validation(
+               %{"workspace_id" => "ws_context", "timeout" => 1_000},
+               %{"task_id" => "task_context", "agent_id" => "agent_context"}
+             )
+  end
+
+  test "configuration, compact plan, and passed receipt producers are facade-owned" do
+    params = %{
+      workspace_id: "ws_facade_digest",
+      timeout: 10_000,
+      stage_timeout: 15_000,
+      test_stage_timeout: 20_000
+    }
+
+    assert Actions.coding_cross_app_configuration_digest(params) ==
+             Arbor.Actions.Coding.CrossApp.Core.configuration_digest(params)
+
+    full = [
+      %{
+        index: 1,
+        total: 1,
+        count: 1,
+        paths: ["apps/alpha/test/alpha_test.exs"],
+        inventory_sha256:
+          :crypto.hash(:sha256, "apps/alpha/test/alpha_test.exs")
+          |> Base.encode16(case: :lower),
+        label: nil
+      }
+    ]
+
+    [batch] = full
+    batch = %{batch | label: "batch-1-of-1-n1-#{batch.inventory_sha256}"}
+    assert {:ok, [compact]} = Actions.coding_cross_app_compact_batch_plan([batch])
+    assert {:ok, passed} = Actions.coding_cross_app_passed_batch_receipt(batch)
+    assert passed == Map.put(compact, "outcome", "passed")
+  end
+
   defp successful_checks do
     check = %{
       "status" => "completed",

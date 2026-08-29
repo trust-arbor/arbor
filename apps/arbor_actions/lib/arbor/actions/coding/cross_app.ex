@@ -95,8 +95,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
          {:ok, result} <- Shell.run(input, context) do
       Actions.emit_completed(__MODULE__, %{
         workspace_id: input.workspace_id,
-        passed: result.passed,
-        reason: result.reason
+        passed: result_passed(result),
+        reason: result_reason(result)
       })
 
       {:ok, result}
@@ -108,6 +108,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
   end
 
   def run(_params, _context), do: {:error, :invalid_cross_app_input}
+
+  defp result_passed(result) when is_map(result) do
+    case Map.get(result, :passed) do
+      value when is_boolean(value) -> value
+      _ -> get_in(result, ["disposition", "type"]) == "completed"
+    end
+  end
+
+  defp result_reason(result) when is_map(result) do
+    Map.get(result, :reason) || get_in(result, ["disposition", "reason"])
+  end
 
   defp param(params, key) do
     case Map.fetch(params, key) do

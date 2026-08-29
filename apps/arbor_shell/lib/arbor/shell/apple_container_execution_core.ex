@@ -98,13 +98,15 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   @read_only_purposes [:runtime_erlang, :runtime_elixir, :mix_wrapper, :validation_runner]
   @read_write_purposes [:worktree, :home, :tmp, :build, :deps, :validation_result]
-  @projection_specs Enum.map(@read_only_purposes, &{&1, :read_only}) ++
+  @read_only_purposes_source @read_only_purposes ++ [:validation_source]
+  @read_write_purposes_source [:home, :tmp, :build, :deps, :validation_result]
+  @projection_specs Enum.map(@read_only_purposes_source, &{&1, :read_only}) ++
                       Enum.map(@read_write_purposes, &{&1, :read_write})
 
   @projection_purposes Enum.map(@projection_specs, &elem(&1, 0))
   @projection_purpose_strings MapSet.new(Enum.map(@projection_purposes, &Atom.to_string/1))
   @required_modes Map.new(@projection_specs)
-  @read_only_purpose_set MapSet.new(@read_only_purposes)
+  @read_only_purpose_set MapSet.new(@read_only_purposes_source)
   @read_write_purpose_set MapSet.new(@read_write_purposes)
 
   @allowed_revisions MapSet.new(["candidate", "base"])
@@ -541,16 +543,64 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          {:ok, _revision} <- fetch_projection_revision(projections),
          {:ok, read_only_raw} <- fetch_projection_group(projections, :read_only),
          {:ok, read_write_raw} <- fetch_projection_group(projections, :read_write),
-         {:ok, read_only_entries} <-
-           normalize_projection_group(read_only_raw, :read_only, @read_only_purposes),
-         {:ok, read_write_entries} <-
-           normalize_projection_group(read_write_raw, :read_write, @read_write_purposes),
+         {:ok, read_only_entries, read_write_entries} <-
+           admit_projection_groups(read_only_raw, read_write_raw),
          {:ok, entries} <- merge_projection_groups(read_only_entries, read_write_entries) do
       finalize_projections(entries)
     end
   end
 
   defp parse_filesystem_projections(_), do: {:error, :invalid_filesystem_projections}
+
+  defp admit_projection_groups(read_only_raw, read_write_raw) do
+    worktree? = projection_purpose_present?(read_only_raw, read_write_raw, :worktree)
+
+    validation_source? =
+      projection_purpose_present?(read_only_raw, read_write_raw, :validation_source)
+
+    case {worktree?, validation_source?} do
+      {true, true} ->
+        {:error, :duplicate_projection_purpose}
+
+      {false, true} ->
+        normalize_projection_groups(
+          read_only_raw,
+          read_write_raw,
+          @read_only_purposes_source,
+          @read_write_purposes_source
+        )
+
+      _ordinary ->
+        normalize_projection_groups(
+          read_only_raw,
+          read_write_raw,
+          @read_only_purposes,
+          @read_write_purposes
+        )
+    end
+  end
+
+  defp normalize_projection_groups(read_only_raw, read_write_raw, read_only, read_write) do
+    with {:ok, read_only_entries} <-
+           normalize_projection_group(read_only_raw, :read_only, read_only),
+         {:ok, read_write_entries} <-
+           normalize_projection_group(read_write_raw, :read_write, read_write) do
+      {:ok, read_only_entries, read_write_entries}
+    end
+  end
+
+  defp projection_purpose_present?(read_only_raw, read_write_raw, purpose) do
+    purpose_string = Atom.to_string(purpose)
+
+    Enum.any?(read_only_raw ++ read_write_raw, fn
+      entry when is_map(entry) ->
+        value = get_field(entry, :purpose)
+        value == purpose or value == purpose_string
+
+      _other ->
+        false
+    end)
+  end
 
   defp validate_projection_envelope_keys(projections) do
     keys = Map.keys(projections)
@@ -856,11 +906,15 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   end
 
   defp finalize_projections(entries) do
-    paths = Enum.map(@projection_purposes, &Map.fetch!(entries, &1).path)
+    if Map.has_key?(entries, :worktree) and Map.has_key?(entries, :validation_source) do
+      {:error, :duplicate_projection_purpose}
+    else
+      paths = Enum.map(Map.values(entries), & &1.path)
 
-    with :ok <- reject_duplicate_paths(paths),
-         :ok <- reject_overlapping_paths(entries) do
-      {:ok, entries}
+      with :ok <- reject_duplicate_paths(paths),
+           :ok <- reject_overlapping_paths(entries) do
+        {:ok, entries}
+      end
     end
   end
 
@@ -874,8 +928,8 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp reject_overlapping_paths(entries) do
     pairs =
-      @projection_purposes
-      |> Enum.map(fn purpose -> {purpose, Map.fetch!(entries, purpose).path} end)
+      entries
+      |> Enum.map(fn {purpose, entry} -> {purpose, entry.path} end)
       |> combination_pairs()
 
     Enum.reduce_while(pairs, :ok, fn {{pa, path_a}, {pb, path_b}}, :ok ->
@@ -889,17 +943,24 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
 
   defp match_tool_and_cwd(tool_name, cwd, projections) do
     mix_wrapper = Map.fetch!(projections, :mix_wrapper).path
-    worktree = Map.fetch!(projections, :worktree).path
+    cwd_root = projection_cwd(projections)
 
     cond do
       tool_name != mix_wrapper ->
         {:error, :tool_name_mix_wrapper_mismatch}
 
-      cwd != worktree ->
+      cwd != cwd_root ->
         {:error, :cwd_worktree_mismatch}
 
       true ->
         :ok
+    end
+  end
+
+  defp projection_cwd(projections) do
+    case Map.get(projections, :validation_source) do
+      %{path: path} -> path
+      _missing -> Map.fetch!(projections, :worktree).path
     end
   end
 
@@ -932,18 +993,14 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   end
 
   defp reject_mix_wrapper_dir_overlap(wrapper_dir, projections) do
-    Enum.reduce_while(@projection_purposes, :ok, fn
-      :mix_wrapper, :ok ->
+    projections
+    |> Map.delete(:mix_wrapper)
+    |> Enum.reduce_while(:ok, fn {purpose, %{path: projection_path}}, :ok ->
+      if segment_path_overlap?(wrapper_dir, projection_path) do
+        {:halt, {:error, {:overlapping_projection_paths, :mix_wrapper_dir, purpose}}}
+      else
         {:cont, :ok}
-
-      purpose, :ok ->
-        projection_path = Map.fetch!(projections, purpose).path
-
-        if segment_path_overlap?(wrapper_dir, projection_path) do
-          {:halt, {:error, {:overlapping_projection_paths, :mix_wrapper_dir, purpose}}}
-        else
-          {:cont, :ok}
-        end
+      end
     end)
   end
 
@@ -1602,7 +1659,7 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
          resource_profile
        ) do
     plan_projections =
-      @plan_directory_projection_keys
+      plan_directory_keys(projections)
       |> Map.new(fn key ->
         {key, Map.fetch!(projections, key).path}
       end)
@@ -1627,6 +1684,14 @@ defmodule Arbor.Shell.AppleContainerExecutionCore do
   end
 
   # ── Shared helpers ─────────────────────────────────────────────────────
+
+  defp plan_directory_keys(projections) do
+    if Map.has_key?(projections, :validation_source) do
+      [:validation_source, :home, :build, :deps, :validation_runner, :validation_result]
+    else
+      @plan_directory_projection_keys
+    end
+  end
 
   defp get_field(map, key) when is_atom(key) and is_map(map) do
     case Map.fetch(map, key) do

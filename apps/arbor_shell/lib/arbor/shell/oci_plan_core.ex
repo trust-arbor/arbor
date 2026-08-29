@@ -60,10 +60,15 @@ defmodule Arbor.Shell.OciPlanCore do
     {:validation_result, @guest_validation_result_dir, :read_write},
     {:mix_wrapper_dir, @guest_mix_wrapper_dir, :read_only}
   ]
-
-  @projection_keys Enum.map(@projection_specs, &elem(&1, 0))
-  @projection_key_set MapSet.new(@projection_keys)
-  @projection_key_strings MapSet.new(Enum.map(@projection_keys, &Atom.to_string/1))
+  @source_projection_specs [
+    {:validation_source, "/workspace", :read_only},
+    {:home, "/arbor/home", :read_write},
+    {:build, "/arbor/build", :read_write},
+    {:deps, "/arbor/deps", :read_write},
+    {:validation_runner, @guest_validation_runner_dir, :read_only},
+    {:validation_result, @guest_validation_result_dir, :read_write},
+    {:mix_wrapper_dir, @guest_mix_wrapper_dir, :read_only}
+  ]
 
   @allowed_mix_envs MapSet.new(["dev", "test", "prod"])
 
@@ -449,31 +454,47 @@ defmodule Arbor.Shell.OciPlanCore do
   end
 
   defp validate_projection_keys(projections) do
+    specs = selected_projection_specs(projections)
     keys = Map.keys(projections)
+    spec_keys = Enum.map(specs, &elem(&1, 0))
+    spec_key_set = MapSet.new(spec_keys)
+    spec_key_strings = MapSet.new(Enum.map(spec_keys, &Atom.to_string/1))
 
     keys_ok? =
       Enum.all?(keys, fn
-        key when is_atom(key) -> MapSet.member?(@projection_key_set, key)
-        key when is_binary(key) -> MapSet.member?(@projection_key_strings, key)
+        key when is_atom(key) -> MapSet.member?(spec_key_set, key)
+        key when is_binary(key) -> MapSet.member?(spec_key_strings, key)
         _other -> false
       end)
 
     required_present? =
-      Enum.all?(@projection_keys, fn key ->
+      Enum.all?(spec_keys, fn key ->
         Map.has_key?(projections, key) or Map.has_key?(projections, Atom.to_string(key))
       end)
 
     cond do
       not keys_ok? -> {:error, :unsupported_projection_keys}
       not required_present? -> {:error, :missing_projections}
-      map_size(projections) != length(@projection_keys) -> {:error, :duplicate_projection_keys}
+      map_size(projections) != length(spec_keys) -> {:error, :duplicate_projection_keys}
       true -> :ok
     end
   end
 
+  defp selected_projection_specs(projections) do
+    if Map.has_key?(projections, :validation_source) or
+         Map.has_key?(projections, "validation_source") do
+      @source_projection_specs
+    else
+      @projection_specs
+    end
+  end
+
   defp normalize_projections(projections) do
+    specs = selected_projection_specs(projections)
+    keys = Enum.map(specs, &elem(&1, 0))
+
     {:ok,
-     Map.new(@projection_keys, fn key ->
+     Map.new(keys, fn key ->
        value =
          case Map.fetch(projections, key) do
            {:ok, v} -> v
@@ -567,7 +588,7 @@ defmodule Arbor.Shell.OciPlanCore do
   defp validate_absolute_canonical_path(_path), do: {:error, :invalid_path}
 
   defp build_mounts(projections) do
-    Enum.map(@projection_specs, fn {purpose, guest_path, mode} ->
+    Enum.map(selected_projection_specs(projections), fn {purpose, guest_path, mode} ->
       host_path = Map.fetch!(projections, purpose)
 
       %{

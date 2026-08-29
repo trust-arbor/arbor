@@ -44,6 +44,35 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Authorization do
     end
   end
 
+  @spec execute(String.t(), map(), String.t(), SigningAuthority.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def execute(continuation_id, input, caller_id, authority, opts) do
+    with {:ok, journal_opts} <- admit_opts(opts),
+         :ok <- require_json_object(input),
+         {:ok, operation_id} <- input_operation_id(input),
+         :ok <- require_execute_keys(input),
+         {:ok, resource} <- resource(continuation_id, "execute", operation_id),
+         {:ok, signed_request} <- signed_execute_request(caller_id, authority, resource),
+         grant_input <- %{
+           "operation_id" => operation_id,
+           "caller_id" => caller_id,
+           "signed_request" => signed_request,
+           "static_receipt" => Map.get(input, "static_receipt")
+         },
+         {:ok, handle} <-
+           Journal.issue_execution_grant(continuation_id, grant_input, journal_opts),
+         {:ok, _grant} <- Actions.attach_coding_cross_app_continuation_execution(handle) do
+      try do
+        Actions.run_coding_cross_app_validation(
+          Map.get(input, "params"),
+          Map.get(input, "context")
+        )
+      after
+        Actions.release_coding_cross_app_continuation_execution()
+      end
+    end
+  end
+
   @spec mutate(String.t(), String.t(), map(), String.t(), SigningAuthority.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def mutate(operation, continuation_id, input, caller_id, authority, opts) do
@@ -177,10 +206,35 @@ defmodule Arbor.Orchestrator.CrossAppContinuation.Authorization do
     end
   end
 
+  defp require_json_object(value) when is_map(value) and not is_struct(value), do: :ok
+  defp require_json_object(_value), do: {:error, :malformed_state}
+
+  defp require_execute_keys(input) do
+    keys = Map.keys(input) |> Enum.sort()
+
+    if keys == ["context", "operation_id", "params", "static_receipt"] do
+      :ok
+    else
+      {:error, :malformed_state}
+    end
+  end
+
+  defp signed_execute_request(caller_id, authority, resource) do
+    with {:ok, canonical} <- SigningAuthority.canonicalize(authority),
+         true <- canonical.principal_id == caller_id,
+         {:ok, signed_request} <- Arbor.Security.sign_with_authority(canonical, resource) do
+      {:ok, signed_request}
+    else
+      false -> {:error, :principal_mismatch}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :security_unavailable}
+    end
+  end
+
   defp validate_operation("get", nil), do: :ok
 
   defp validate_operation(operation, operation_id)
-       when operation == "open" or is_map_key(@mutations, operation) do
+       when operation in ["open", "execute"] or is_map_key(@mutations, operation) do
     case Envelope.operation_id(operation_id) do
       {:ok, _operation_id} -> :ok
       {:error, reason} -> {:error, reason}
