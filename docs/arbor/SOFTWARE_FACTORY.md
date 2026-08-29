@@ -669,6 +669,21 @@ Do not call `coding_produce_reviewable_change` through synchronous
 `arbor_run`. Request teardown kills the ACP session. Structured
 `coding_change` dispatch is the durable owner.
 
+### Worker token usage
+
+Every worker prompt records one `arbor.provider_usage.v1` event (task-attributed,
+appended to the provider-usage ledger). The usage comes from the ACP prompt
+*result* when the provider puts it there (`usage` / `_meta.usage`; the `claude`
+runtime does). Providers that report usage only through `session/update`
+notifications — cursor-agent is one — are covered by `Arbor.AI.AcpSession`
+accumulating recognised usage updates (`usage_update`, plus the `usage` /
+`tokenUsage` / `token_usage` extension aliases; numeric input / output / total /
+cached tokens only) as `pending_usage` for the prompt in flight. The result's
+own usage always wins; the accumulator is recorded and cleared when the prompt
+completes, so a follow-up prompt can never inherit it. If the post-completion
+drain times out, the queued updates are discarded with a logged count instead
+of leaking into the next prompt. Malformed usage payloads are ignored.
+
 ## Isolated validation (operators, not workers)
 
 The worker has no shell. When *you* run Mix against a retained worktree:

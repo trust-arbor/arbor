@@ -1922,8 +1922,30 @@ defmodule Arbor.AI.AcpSession do
       end
 
     case drain_pending_updates(state, opts) do
-      {:ok, state} -> state
-      {:error, :stream_callback_timeout, state} -> state
+      {:ok, state} ->
+        state
+
+      {:error, :stream_callback_timeout, state} ->
+        # The drain could not finish inside the callback budget. Whatever is
+        # still queued belongs to the prompt that just completed; leaving it in
+        # the mailbox would let the next prompt's drain attribute it to itself.
+        # Discard it explicitly and say so, rather than silently proceeding.
+        dropped = discard_queued_session_updates(0)
+
+        Logger.warning(
+          "[AcpSession] post-durability drain timed out; dropped #{dropped} queued " <>
+            "session update(s) so they cannot be attributed to the next prompt"
+        )
+
+        state
+    end
+  end
+
+  defp discard_queued_session_updates(count) do
+    receive do
+      {:acp_session_update, _session_id, _update} -> discard_queued_session_updates(count + 1)
+    after
+      0 -> count
     end
   end
 
