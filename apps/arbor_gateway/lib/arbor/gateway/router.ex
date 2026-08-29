@@ -24,7 +24,8 @@ defmodule Arbor.Gateway.Router do
   @mcp_http_init_opts [
     handler: Arbor.Gateway.MCP.Handler,
     handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
-    handler_call_timeout: 45_000,
+    handler_call_timeout:
+      Application.compile_env(:arbor_gateway, :mcp_handler_call_timeout_ms, 45_000),
     server_info: %{name: "arbor", version: "0.1.0"},
     protocol_mode: :legacy_only,
     sse_enabled: true,

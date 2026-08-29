@@ -340,3 +340,8 @@ config :arbor_kernel,
   ]
 
 import_config "provider_route_profile.exs"
+
+# Dev only: long-running MCP tool calls (a 13-seat council_consult takes
+# minutes) may complete instead of dying at the 45 s production bound. The
+# durable fix is an asynchronous council_consult (friction log, 2026-08-29).
+config :arbor_gateway, mcp_handler_call_timeout_ms: 600_000
