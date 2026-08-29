@@ -2,14 +2,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @moduledoc """
   Archives the immutable inputs and output of coding-plan compilation.
 
-  The caller supplies the per-task artifact root. Artifact names are fixed here
-  and never incorporate plan or task text. A private, mode-`0600` compilation
-  seal claims one bundle identity through an exclusive hard link before the
-  individual files are published through the same no-clobber pattern.
+  The caller supplies the per-task artifact root for compilation, terminal,
+  design, transcript, adoption, and reconciliation artifacts. Artifact names
+  are fixed here and never incorporate plan or task text. A private, mode-`0600`
+  compilation seal claims one bundle identity through an exclusive hard link
+  before the individual files are published through the same no-clobber pattern.
 
   The seal provides first-writer-wins immutability among callers using this API.
   It is not an OS-level defense against a same-user process deleting or replacing
   the entire artifact root or seal.
+
+  CrossApp static-stage receipts use a store-owned filename under the hashed
+  per-task root derived from `base_root` plus the exact task id. Callers never
+  select the filename or destination path. Publication is API-level first-writer
+  / no-clobber among callers of this API, not an OS guarantee against a malicious
+  same-UID process that can unlink, chmod, or replace the task root or file.
+  Receipt envelopes are JSON-clean and token-free.
   """
 
   @plan_filename "coding-plan.json"
@@ -56,6 +64,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @max_compilation_artifact_bytes 4_194_304
   @max_compilation_seal_bytes 4_096
   @compilation_publication_barrier_key {__MODULE__, :compilation_publication_barrier}
+  @static_receipt_filename "coding-cross-app-continuation-static-receipt.json"
+  @static_receipt_publication_barrier_key {__MODULE__, :static_receipt_publication_barrier}
 
   @terminal_result_keys MapSet.new(~w(
     status
@@ -97,6 +107,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     artifacts
   ))
 
+  alias Arbor.Actions
   alias Arbor.Common.SafePath
 
   alias Arbor.Contracts.Coding.{
@@ -495,6 +506,134 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
   def read_reconciliation_manifest(_root, _scope, _manifest_sha256, _expected_envelope_sha256),
     do: {:error, :invalid_reconciliation_manifest_digest}
+
+  @doc """
+  Archive one sealed CrossApp static-stage receipt under the hashed task root.
+
+  Filename and destination are store-owned. Callers supply `base_root` plus the
+  exact `task_id`, `continuation_id`, and expected receipt digest; they never
+  select the path. Publication is first-writer / no-clobber among callers of
+  this API, not an OS guarantee against a same-UID process that can unlink,
+  chmod, or replace the task root or file. Persisted envelopes are JSON-clean
+  and token-free.
+  """
+  @spec archive_cross_app_continuation_static_receipt(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          map()
+        ) :: {:ok, map()} | {:error, term()}
+  def archive_cross_app_continuation_static_receipt(
+        base_root,
+        task_id,
+        continuation_id,
+        expected_digest,
+        receipt
+      )
+      when is_binary(base_root) and is_binary(task_id) and is_binary(continuation_id) and
+             is_binary(expected_digest) and is_map(receipt) and not is_struct(receipt) do
+    with :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_sha256(expected_digest, :receipt_sha256),
+         :ok <- validate_static_receipt_continuation_id(continuation_id),
+         {:ok, admitted} <-
+           Actions.coding_cross_app_continuation_static_receipt_admit(receipt),
+         {:ok, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+         :ok <- match_static_receipt_task_id(admitted, task_id),
+         :ok <- match_static_receipt_continuation_id(admitted, continuation_id),
+         :ok <- match_static_receipt_digest(digest, expected_digest),
+         {:ok, encoded} <- encode_compact_canonical_json(admitted, :static_receipt),
+         {:ok, max_bytes} <- static_receipt_max_json_bytes(),
+         :ok <- validate_static_receipt_size(encoded, max_bytes),
+         {:ok, task_root} <- ensure_static_receipt_task_root(base_root, task_id),
+         path = Path.join(task_root, @static_receipt_filename),
+         :ok <- validate_static_receipt_path(task_root, path),
+         :ok <- write_static_receipt_once(path, encoded, task_root),
+         {:ok, descriptor} <-
+           verify_published_static_receipt(
+             base_root,
+             task_id,
+             continuation_id,
+             expected_digest
+           ) do
+      {:ok, descriptor}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :static_receipt_archive_error}
+    end
+  rescue
+    _ -> {:error, :static_receipt_archive_error}
+  catch
+    _, _ -> {:error, :static_receipt_archive_error}
+  end
+
+  def archive_cross_app_continuation_static_receipt(
+        _base_root,
+        _task_id,
+        _continuation_id,
+        _expected_digest,
+        _receipt
+      ),
+      do: {:error, :invalid_static_receipt_input}
+
+  @doc """
+  Read and re-verify the store-owned CrossApp static-stage receipt.
+
+  Resolves `base_root` plus the hashed exact task id to a fixed basename.
+  Missing, malformed, oversized, noncanonical, wrong-mode, symlink, hard-link,
+  directory, replaced, or tampered files fail closed. After admission, the
+  supplied task id, continuation id, and expected digest must exact-match.
+  Returns only the canonical admitted receipt plus a bounded JSON-clean
+  descriptor. Immutability is API-level first-writer / no-clobber, not an OS
+  guarantee against a malicious same-UID process.
+  """
+  @spec read_cross_app_continuation_static_receipt(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t()
+        ) :: {:ok, map()} | {:error, term()}
+  def read_cross_app_continuation_static_receipt(
+        base_root,
+        task_id,
+        continuation_id,
+        expected_digest
+      )
+      when is_binary(base_root) and is_binary(task_id) and is_binary(continuation_id) and
+             is_binary(expected_digest) do
+    with :ok <- validate_terminal_task_id(task_id),
+         :ok <- validate_sha256(expected_digest, :receipt_sha256),
+         :ok <- validate_static_receipt_continuation_id(continuation_id),
+         {:ok, encoded, admitted, digest} <-
+           load_and_admit_static_receipt(base_root, task_id),
+         :ok <- match_static_receipt_task_id(admitted, task_id),
+         :ok <- match_static_receipt_continuation_id(admitted, continuation_id),
+         :ok <- match_static_receipt_digest(digest, expected_digest) do
+      {:ok,
+       %{
+         "receipt" => admitted,
+         "descriptor" => static_receipt_descriptor(task_id, continuation_id, digest, encoded)
+       }}
+    else
+      {:error, :static_receipt_task_identity_mismatch} = error -> error
+      {:error, :static_receipt_continuation_mismatch} = error -> error
+      {:error, :static_receipt_digest_mismatch} = error -> error
+      _ -> {:error, :cross_app_static_receipt_unavailable}
+    end
+  rescue
+    _ -> {:error, :cross_app_static_receipt_unavailable}
+  catch
+    _, _ -> {:error, :cross_app_static_receipt_unavailable}
+  end
+
+  def read_cross_app_continuation_static_receipt(
+        _base_root,
+        _task_id,
+        _continuation_id,
+        _expected_digest
+      ),
+      do: {:error, :invalid_static_receipt_input}
 
   defp normalize_reconciliation_envelope(envelope)
        when is_map(envelope) and not is_struct(envelope) do
@@ -1693,6 +1832,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     error -> {:error, {:json_encode_failed, artifact, Exception.message(error)}}
   end
 
+  defp encode_compact_canonical_json(value, artifact) do
+    value
+    |> canonicalize_json()
+    |> Jason.encode()
+    |> case do
+      {:ok, encoded} -> {:ok, encoded}
+      {:error, reason} -> {:error, {:json_encode_failed, artifact, Exception.message(reason)}}
+    end
+  rescue
+    error -> {:error, {:json_encode_failed, artifact, Exception.message(error)}}
+  end
+
   defp canonicalize_json(map) when is_map(map) and not is_struct(map) do
     map
     |> Enum.sort_by(fn {key, _value} -> key end)
@@ -2006,6 +2157,225 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
       _other ->
         :ok
     end
+  end
+
+  defp maybe_wait_for_static_receipt_publication(stage) do
+    case Process.get(@static_receipt_publication_barrier_key) do
+      {owner, ^stage} when is_pid(owner) ->
+        send(owner, {:artifact_store_static_receipt_barrier, self(), stage})
+
+        receive do
+          {:artifact_store_static_receipt_continue, ^stage} -> :ok
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp verify_published_static_receipt(base_root, task_id, continuation_id, expected_digest) do
+    case read_cross_app_continuation_static_receipt(
+           base_root,
+           task_id,
+           continuation_id,
+           expected_digest
+         ) do
+      {:ok, %{"descriptor" => descriptor}} ->
+        {:ok, descriptor}
+
+      {:error, :cross_app_static_receipt_unavailable} ->
+        {:error, :static_receipt_verification_failed}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp load_and_admit_static_receipt(base_root, task_id) do
+    with {:ok, base_root} <- normalize_compilation_base(base_root),
+         {:ok, task_root} <- compilation_task_root(base_root, task_id),
+         path = Path.join(task_root, @static_receipt_filename),
+         :ok <- validate_static_receipt_path(task_root, path),
+         {:ok, max_bytes} <- static_receipt_max_json_bytes(),
+         {:ok, encoded} <- read_static_receipt_file(path, task_root, max_bytes),
+         {:ok, decoded} <- Jason.decode(encoded),
+         {:ok, admitted} <-
+           Actions.coding_cross_app_continuation_static_receipt_admit(decoded),
+         {:ok, digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+         {:ok, canonical} <- encode_compact_canonical_json(admitted, :static_receipt),
+         true <- canonical === encoded do
+      {:ok, encoded, admitted, digest}
+    else
+      false -> {:error, :cross_app_static_receipt_unavailable}
+      {:error, _reason} = error -> error
+      _other -> {:error, :cross_app_static_receipt_unavailable}
+    end
+  end
+
+  defp read_static_receipt_file(path, task_root, max_bytes) do
+    with {:ok, %File.Stat{type: :regular, mode: mode, size: size, links: links}} <-
+           File.lstat(path),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         true <- links == 1,
+         true <- is_integer(size) and size > 0 and size <= max_bytes,
+         {:ok, canonical} <- SafePath.resolve_real(path),
+         true <- canonical == path and SafePath.within?(canonical, task_root),
+         {:ok, content} <- File.read(canonical),
+         true <- byte_size(content) == size do
+      {:ok, content}
+    else
+      _ -> {:error, :cross_app_static_receipt_unavailable}
+    end
+  end
+
+  defp ensure_static_receipt_task_root(base_root, task_id) do
+    with {:ok, base_root} <- normalize_compilation_base(base_root),
+         digest = sha256(task_id),
+         {:ok, task_root} <- SafePath.safe_join(base_root, "task-" <> digest),
+         :ok <- create_root(task_root),
+         {:ok, canonical} <- compilation_task_root(base_root, task_id) do
+      {:ok, canonical}
+    end
+  end
+
+  defp validate_static_receipt_path(task_root, path) do
+    with true <- Path.basename(path) == @static_receipt_filename,
+         true <- Path.dirname(path) == task_root,
+         {:ok, ^path} <- SafePath.resolve_within(path, task_root),
+         {:ok, ^task_root} <- SafePath.resolve_real(Path.dirname(path)),
+         true <- SafePath.within?(path, task_root) do
+      :ok
+    else
+      _ -> {:error, :static_receipt_path_escape}
+    end
+  rescue
+    _ -> {:error, :static_receipt_path_escape}
+  end
+
+  defp write_static_receipt_once(path, content, task_root) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        write_static_receipt_new(path, content, task_root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode, links: links}} ->
+        cond do
+          Bitwise.band(mode, 0o777) != 0o600 ->
+            {:error, :insecure_static_receipt_mode}
+
+          links != 1 ->
+            {:error, :static_receipt_hard_link}
+
+          true ->
+            case File.read(path) do
+              {:ok, ^content} -> :ok
+              {:ok, _other} -> {:error, :static_receipt_conflict}
+              {:error, _reason} -> {:error, :write_static_receipt_failed}
+            end
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :static_receipt_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_static_receipt_file}
+
+      {:error, _reason} ->
+        {:error, :write_static_receipt_failed}
+    end
+  end
+
+  defp write_static_receipt_new(path, content, task_root) do
+    temporary_path = temporary_path(path)
+
+    publication =
+      try do
+        with :ok <- validate_static_receipt_path(task_root, path),
+             {:ok, %File.Stat{type: :directory}} <- File.lstat(task_root),
+             :ok <- write_secure_temp(temporary_path, content),
+             :ok <- maybe_wait_for_static_receipt_publication(:before_static_receipt_link),
+             :ok <- File.ln(temporary_path, path) do
+          :published
+        else
+          {:error, :eexist} -> :existing
+          {:error, _reason} -> {:error, :write_static_receipt_failed}
+          _other -> {:error, :write_static_receipt_failed}
+        end
+      after
+        File.rm(temporary_path)
+      end
+
+    case publication do
+      :published -> :ok
+      :existing -> write_static_receipt_once(path, content, task_root)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_static_receipt_continuation_id(value)
+       when is_binary(value) and byte_size(value) > 0 do
+    if String.valid?(value) and String.trim(value) != "" and not String.contains?(value, <<0>>) do
+      :ok
+    else
+      {:error, :invalid_static_receipt_input}
+    end
+  end
+
+  defp validate_static_receipt_continuation_id(_value),
+    do: {:error, :invalid_static_receipt_input}
+
+  defp match_static_receipt_task_id(%{"identities" => %{"task_id" => task_id}}, task_id),
+    do: :ok
+
+  defp match_static_receipt_task_id(_admitted, _task_id),
+    do: {:error, :static_receipt_task_identity_mismatch}
+
+  defp match_static_receipt_continuation_id(
+         %{"continuation_id" => continuation_id},
+         continuation_id
+       ),
+       do: :ok
+
+  defp match_static_receipt_continuation_id(_admitted, _continuation_id),
+    do: {:error, :static_receipt_continuation_mismatch}
+
+  defp match_static_receipt_digest(digest, digest), do: :ok
+
+  defp match_static_receipt_digest(_digest, _expected),
+    do: {:error, :static_receipt_digest_mismatch}
+
+  defp static_receipt_max_json_bytes do
+    case Actions.coding_cross_app_continuation_execution_limits() do
+      %{"max_static_receipt_json_bytes" => max} when is_integer(max) and max > 0 ->
+        {:ok, max}
+
+      _ ->
+        {:error, :static_receipt_limits_unavailable}
+    end
+  end
+
+  defp validate_static_receipt_size(encoded, max_bytes)
+       when is_binary(encoded) and is_integer(max_bytes) and max_bytes > 0 do
+    size = byte_size(encoded)
+
+    if size > 0 and size <= max_bytes do
+      :ok
+    else
+      {:error, :oversized_static_receipt}
+    end
+  end
+
+  defp validate_static_receipt_size(_encoded, _max_bytes),
+    do: {:error, :oversized_static_receipt}
+
+  defp static_receipt_descriptor(task_id, continuation_id, digest, encoded) do
+    %{
+      "schema_version" => 1,
+      "task_id" => task_id,
+      "continuation_id" => continuation_id,
+      "receipt_sha256" => digest,
+      "byte_size" => byte_size(encoded)
+    }
   end
 
   defp atomic_write(path, content) do

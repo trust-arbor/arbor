@@ -3,6 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   import Bitwise
 
+  alias Arbor.Actions
   alias Arbor.Actions.Coding.ContractChange.Core
   alias Arbor.Contracts.Coding.{TaskTerminalEnvelope, ValidationCapacityHandoff}
   alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, OutcomeMapper, ValidationCapacityTerminal}
@@ -11,6 +12,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   @compilation_seal_filename ".coding-compilation-seal.json"
   @compilation_publication_barrier_key {ArtifactStore, :compilation_publication_barrier}
+  @static_receipt_filename "coding-cross-app-continuation-static-receipt.json"
+  @static_receipt_publication_barrier_key {ArtifactStore, :static_receipt_publication_barrier}
   @verification_tree_oid String.duplicate("a", 40)
   @verification_observed_at "2026-07-22T12:00:00.000Z"
 
@@ -1985,6 +1988,504 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_design_artifact(root, task_id, 4, oversized)
   end
 
+  test "security regression: CrossApp static receipt archive and read bind a sealed compact artifact",
+       %{base: base} do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+    path = static_receipt_path(base, bundle.task_id)
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    assert descriptor == %{
+             "schema_version" => 1,
+             "task_id" => bundle.task_id,
+             "continuation_id" => bundle.continuation_id,
+             "receipt_sha256" => bundle.digest,
+             "byte_size" => byte_size(File.read!(path))
+           }
+
+    assert Path.expand(path) == path
+    assert Path.basename(path) == @static_receipt_filename
+    assert Path.dirname(path) == compilation_task_root(base, bundle.task_id)
+    assert {:ok, %File.Stat{type: :regular, mode: mode, links: 1}} = File.lstat(path)
+    assert (mode &&& 0o777) == 0o600
+    refute String.contains?(File.read!(path), "\n")
+
+    assert {:ok, envelope} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    assert envelope["receipt"] == bundle.receipt
+    assert envelope["descriptor"] == descriptor
+    assert {:ok, encoded_envelope} = Jason.encode(envelope)
+    refute encoded_envelope =~ "fence_token"
+    refute encoded_envelope =~ "capability"
+    refute encoded_envelope =~ "credential"
+    refute encoded_envelope =~ "authority"
+    refute encoded_envelope =~ "#PID"
+
+    assert {:ok, ^descriptor} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    assert File.ls!(Path.dirname(path)) == [@static_receipt_filename]
+    refute Enum.any?(File.ls!(Path.dirname(path)), &String.contains?(&1, ".tmp-"))
+  end
+
+  test "security regression: static receipt archive rejects a mismatched API task_id", %{
+    base: base
+  } do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+    other_task_id = "task_static_receipt_other"
+
+    assert {:ok, _admitted} =
+             Actions.coding_cross_app_continuation_static_receipt_admit(bundle.receipt)
+
+    assert {:error, :static_receipt_task_identity_mismatch} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               other_task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    refute File.exists?(static_receipt_path(base, other_task_id))
+    refute File.exists?(static_receipt_path(base, bundle.task_id))
+  end
+
+  test "security regression: static receipt archive rejects a mismatched continuation_id", %{
+    base: base
+  } do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+    other_continuation_id = "xappc_" <> String.duplicate("c", 64)
+
+    assert {:error, :static_receipt_continuation_mismatch} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               other_continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    refute File.exists?(static_receipt_path(base, bundle.task_id))
+  end
+
+  test "security regression: static receipt archive rejects a mismatched digest", %{base: base} do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+
+    other_digest =
+      if bundle.digest == String.duplicate("a", 64) do
+        String.duplicate("b", 64)
+      else
+        String.duplicate("a", 64)
+      end
+
+    assert {:error, :static_receipt_digest_mismatch} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               other_digest,
+               bundle.receipt
+             )
+
+    refute File.exists?(static_receipt_path(base, bundle.task_id))
+  end
+
+  test "security regression: static receipt archive rejects malformed receipts before creating files",
+       %{base: base} do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+    failed = put_in(bundle.receipt, ["checks", "compile", "passed"], false)
+
+    assert {:error, :malformed_envelope} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               failed
+             )
+
+    assert {:error, :malformed_envelope} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               %{}
+             )
+
+    assert {:error, :invalid_static_receipt_input} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               DateTime.utc_now()
+             )
+
+    assert {:error, :invalid_static_receipt_input} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               nil,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    refute File.exists?(static_receipt_path(base, bundle.task_id))
+  end
+
+  test "security regression: static receipt archive rejects conflicting replay", %{base: base} do
+    File.mkdir_p!(base)
+    first = static_receipt_bundle()
+    second = static_receipt_bundle(excerpt: "different-check-bytes")
+    path = static_receipt_path(base, first.task_id)
+
+    assert first.task_id == second.task_id
+    assert first.continuation_id == second.continuation_id
+    assert first.digest != second.digest
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               first.task_id,
+               first.continuation_id,
+               first.digest,
+               first.receipt
+             )
+
+    original = File.read!(path)
+
+    assert {:error, :static_receipt_conflict} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               second.task_id,
+               second.continuation_id,
+               second.digest,
+               second.receipt
+             )
+
+    assert File.read!(path) == original
+
+    assert {:ok, envelope} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               first.task_id,
+               first.continuation_id,
+               first.digest
+             )
+
+    assert envelope["descriptor"] == descriptor
+    assert envelope["receipt"] == first.receipt
+  end
+
+  test "security regression: concurrent different static receipt writers produce one immutable file",
+       %{base: base} do
+    File.mkdir_p!(base)
+    parent = self()
+    stage = :before_static_receipt_link
+    first = static_receipt_bundle(excerpt: "first-writer")
+    second = static_receipt_bundle(excerpt: "second-writer")
+    path = static_receipt_path(base, first.task_id)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               first.task_id,
+               first.continuation_id,
+               first.digest
+             )
+
+    tasks =
+      Enum.map([first, second], fn bundle ->
+        Task.async(fn ->
+          Process.put(@static_receipt_publication_barrier_key, {parent, stage})
+          send(parent, {:static_receipt_writer_ready, self()})
+
+          receive do
+            :start_static_receipt_writer -> :ok
+          end
+
+          {bundle,
+           ArtifactStore.archive_cross_app_continuation_static_receipt(
+             base,
+             bundle.task_id,
+             bundle.continuation_id,
+             bundle.digest,
+             bundle.receipt
+           )}
+        end)
+      end)
+
+    Enum.each(tasks, fn task ->
+      assert_receive {:static_receipt_writer_ready, writer_pid} when writer_pid == task.pid, 1_000
+    end)
+
+    Enum.each(tasks, &send(&1.pid, :start_static_receipt_writer))
+
+    Enum.each(tasks, fn task ->
+      assert_receive {:artifact_store_static_receipt_barrier, writer_pid, ^stage}
+                     when writer_pid == task.pid,
+                     1_000
+    end)
+
+    Enum.each(tasks, &send(&1.pid, {:artifact_store_static_receipt_continue, stage}))
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert [{winner, {:ok, _descriptor}}] =
+             Enum.filter(results, fn {_bundle, result} -> match?({:ok, _}, result) end)
+
+    assert [{loser, {:error, :static_receipt_conflict}}] =
+             Enum.reject(results, fn {_bundle, result} -> match?({:ok, _}, result) end)
+
+    assert {:ok, envelope} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               winner.task_id,
+               winner.continuation_id,
+               winner.digest
+             )
+
+    assert envelope["receipt"] == winner.receipt
+    assert File.exists?(path)
+
+    assert {:error, :static_receipt_conflict} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               loser.task_id,
+               loser.continuation_id,
+               loser.digest,
+               loser.receipt
+             )
+  end
+
+  test "security regression: static receipt reader rejects missing, tampered, and rebound artifacts",
+       %{base: base} do
+    File.mkdir_p!(base)
+    bundle = static_receipt_bundle()
+    path = static_receipt_path(base, bundle.task_id)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    File.chmod!(path, 0o644)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    File.chmod!(path, 0o600)
+    original = File.read!(path)
+    outside = Path.join(base, "outside-static-receipt.json")
+    File.write!(outside, original)
+    File.chmod!(outside, 0o600)
+    File.rm!(path)
+    File.ln_s!(outside, path)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    File.rm!(path)
+    File.write!(path, original)
+    File.chmod!(path, 0o600)
+
+    sibling = Path.join(Path.dirname(path), "sibling-hard-link")
+    File.ln!(path, sibling)
+    assert {:ok, %File.Stat{links: 2}} = File.lstat(path)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    File.rm!(sibling)
+    File.rm!(path)
+    File.mkdir!(path)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    File.rmdir!(path)
+    File.write!(path, original)
+    File.chmod!(path, 0o600)
+    File.write!(path, String.slice(original, 0, byte_size(original) - 1))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    {:ok, decoded} = Jason.decode(original)
+    File.write!(path, Jason.encode!(decoded, pretty: true))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    limits = Actions.coding_cross_app_continuation_execution_limits()
+    File.write!(path, :binary.copy("x", limits["max_static_receipt_json_bytes"] + 1))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :cross_app_static_receipt_unavailable} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    other = static_receipt_bundle(task_id: "task_static_receipt_replaced")
+
+    assert {:ok, _} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               other.task_id,
+               other.continuation_id,
+               other.digest,
+               other.receipt
+             )
+
+    File.rm!(path)
+    File.cp!(static_receipt_path(base, other.task_id), path)
+    File.chmod!(path, 0o600)
+
+    assert {:error, :static_receipt_task_identity_mismatch} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    File.rm!(path)
+    File.write!(path, original)
+    File.chmod!(path, 0o600)
+
+    assert {:error, :static_receipt_continuation_mismatch} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               "xappc_" <> String.duplicate("c", 64),
+               bundle.digest
+             )
+
+    other_digest =
+      if bundle.digest == String.duplicate("a", 64) do
+        String.duplicate("b", 64)
+      else
+        String.duplicate("a", 64)
+      end
+
+    assert {:error, :static_receipt_digest_mismatch} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               other_digest
+             )
+  end
+
+  test "security regression: near-max compact static receipt remains archivable", %{base: base} do
+    File.mkdir_p!(base)
+    excerpt = String.duplicate(<<0>>, 2_000)
+    bundle = static_receipt_bundle(excerpt: excerpt)
+    limits = Actions.coding_cross_app_continuation_execution_limits()
+    path = static_receipt_path(base, bundle.task_id)
+
+    assert {:ok, _admitted} =
+             Actions.coding_cross_app_continuation_static_receipt_admit(bundle.receipt)
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest,
+               bundle.receipt
+             )
+
+    encoded = File.read!(path)
+    assert descriptor["byte_size"] == byte_size(encoded)
+    assert byte_size(encoded) <= limits["max_static_receipt_json_bytes"]
+    assert byte_size(encoded) > div(limits["max_static_receipt_json_bytes"], 2)
+    refute String.contains?(encoded, "\n")
+
+    assert {:ok, envelope} =
+             ArtifactStore.read_cross_app_continuation_static_receipt(
+               base,
+               bundle.task_id,
+               bundle.continuation_id,
+               bundle.digest
+             )
+
+    assert envelope["receipt"] == bundle.receipt
+    assert envelope["descriptor"] == descriptor
+  end
+
   defp plan_fixture do
     %{
       "version" => 1,
@@ -2367,6 +2868,79 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   end
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+
+  defp static_receipt_path(base, task_id),
+    do: Path.join(compilation_task_root(base, task_id), @static_receipt_filename)
+
+  defp static_receipt_bundle(opts \\ []) do
+    task_id = Keyword.get(opts, :task_id, "task_static_receipt_1")
+    excerpt = Keyword.get(opts, :excerpt, "")
+    identities = static_receipt_identities(task_id)
+    checks = static_receipt_checks(excerpt)
+
+    {:ok, receipt, digest} =
+      Actions.coding_cross_app_continuation_static_receipt_new(identities, checks)
+
+    {:ok, admitted} = Actions.coding_cross_app_continuation_static_receipt_admit(receipt)
+    {:ok, ^digest} = Actions.coding_cross_app_continuation_static_receipt_digest(admitted)
+
+    %{
+      task_id: task_id,
+      continuation_id: admitted["continuation_id"],
+      digest: digest,
+      receipt: admitted
+    }
+  end
+
+  defp static_receipt_identities(task_id) do
+    inventory = String.duplicate("a", 64)
+    plan = [static_receipt_batch(1, 1, 1, inventory)]
+    {:ok, digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)
+    oid = String.duplicate("1", 40)
+
+    %{
+      "task_id" => task_id,
+      "work_packet_digest" => "sha256:" <> String.duplicate("c", 64),
+      "base_commit" => oid,
+      "base_tree_oid" => String.duplicate("2", 40),
+      "candidate_head" => oid,
+      "candidate_tree_oid" => String.duplicate("3", 40),
+      "validation_plan_digest" => digest,
+      "toolchain_digest" => String.duplicate("3", 64),
+      "dependency_baseline_digest" => String.duplicate("4", 64),
+      "wrapper_digest" => String.duplicate("5", 64),
+      "validator_id" => "coding_cross_app_validate",
+      "principal_id" => "agent_principal",
+      "configuration_digest" => String.duplicate("6", 64)
+    }
+  end
+
+  defp static_receipt_batch(index, total, count, inventory) do
+    %{
+      "index" => index,
+      "total" => total,
+      "count" => count,
+      "label" => "batch-#{index}-of-#{total}-n#{count}-#{inventory}",
+      "inventory_sha256" => inventory
+    }
+  end
+
+  defp static_receipt_checks(excerpt) do
+    check = %{
+      "status" => "completed",
+      "passed" => true,
+      "exit_code" => 0,
+      "reason" => nil,
+      "stdout_excerpt" => excerpt,
+      "stderr_excerpt" => excerpt,
+      "stdout_truncated" => excerpt != "",
+      "stderr_truncated" => excerpt != "",
+      "stdout_sha256" => String.duplicate("a", 64),
+      "stderr_sha256" => String.duplicate("b", 64)
+    }
+
+    %{"compile" => check, "xref" => check, "test_compile" => check}
+  end
 
   defp read_artifacts(descriptor) do
     Map.new(artifact_paths(descriptor), fn {name, path} -> {name, File.read!(path)} end)
