@@ -582,6 +582,17 @@ defmodule Mix.Tasks.Arbor.Coding.RunTest do
 
     assert real["task_id"] == @task_id
     assert real["worktree"] == "/tmp/ws"
+
+    # The node's RPC struct carries the same documented fields atom-keyed.
+    atom_keyed = %{
+      id: "irq_atom",
+      action: :coding_reviewed_validation,
+      metadata: %{approval_context: %{provenance: %{task_id: @task_id}, path: "/tmp/ws"}}
+    }
+
+    [projected] = Mix.Tasks.Arbor.Coding.Run.__project_approvals_for_test__([atom_keyed])
+    assert projected["task_id"] == @task_id
+    assert projected["worktree"] == "/tmp/ws"
   end
 
   defp pending(id, action, task_id \\ @task_id) do
