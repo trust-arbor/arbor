@@ -501,11 +501,13 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
         _other -> nil
       end
 
+    # A fresh wall-clock stamp on every touch unless a test injects :now_iso;
+    # reusing the stamp taken at dispatch printed one timestamp on every
+    # follow line (first live runs, 2026-08-28).
     iso =
       cond do
         is_binary(iso) -> iso
-        is_binary(state.now_iso) -> state.now_iso
-        true -> DateTime.to_iso8601(DateTime.utc_now())
+        true -> DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
       end
 
     %{state | now_ms: safe_now(ctx.now_ms), now_iso: iso}
