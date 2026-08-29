@@ -2661,7 +2661,14 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              Council.ReviewChange.run(params, context)
 
     assert result.finding_ledger == completed_ledger
-    assert [%{"id" => "completed-finding"}] = result.feedback["review"]["active_findings"]
+    # Worker-facing findings are the consolidated view of the *completed*
+    # ledger (one issue with its owners), never the incoming one.
+    assert [finding] = result.feedback["review"]["findings"]
+    assert finding["title"] == "New contract finding"
+    # A hand-built ledger entry without issue_key consolidates to nothing, so
+    # the per-owner active finding is shown; either way it is the completed one.
+    assert finding["id"] == "completed-finding" or is_binary(finding["issue_key"])
+    assert result.feedback["review"]["per_owner_active_finding_count"] == 1
 
     assert {:ok, %{council_decision_digest: first_digest}} =
              WorkspaceLeaseRegistry.claim_review_attestation(first_id, fixture.context)
