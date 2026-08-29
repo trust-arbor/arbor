@@ -966,6 +966,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :design_streamed_duplicate_envelope,
                :cross_app_capacity_then_complete,
                :cross_app_capacity_then_domain_rework,
+               :cross_app_capacity_then_tampered_resume,
+               :cross_app_completed_flags_in_progress_status,
                :cross_app_legacy_capacity_exceeded
              ] ->
           if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
@@ -1013,7 +1015,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     defp reviewed_validation_response(scenario, counters, state, args) do
       cond do
-        scenario in [:cross_app_capacity_then_complete, :cross_app_capacity_then_domain_rework] ->
+        scenario in [
+          :cross_app_capacity_then_complete,
+          :cross_app_capacity_then_domain_rework,
+          :cross_app_capacity_then_tampered_resume,
+          :cross_app_completed_flags_in_progress_status
+        ] ->
           n = Map.get(counters, :validate, 0)
 
           Agent.update(state, fn s ->
@@ -1128,6 +1135,182 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     @cross_app_generation_a String.duplicate("a", 64)
     @cross_app_generation_b String.duplicate("b", 64)
+
+    defp cross_app_window_response(:cross_app_completed_flags_in_progress_status, 0, _args) do
+      {:ok,
+       %{
+         interaction_outcome: "",
+         request_id: "",
+         note: "",
+         disposition_type: "completed",
+         progress_status: "in_progress",
+         passed: true
+       }}
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_tampered_resume, 0, args) do
+      if seed_args?(args) do
+        {envelope, plan, bindings} =
+          cross_app_window_response(:g3a_fixture, :build_capacity, :fixture)
+
+        state = Process.get(:coding_change_fake_state)
+
+        Agent.update(state, fn current ->
+          Map.put(current, :cross_app_resume, {plan, bindings})
+        end)
+
+        {:ok, envelope}
+      else
+        {:error, "first window was not a seed"}
+      end
+    end
+
+    defp cross_app_window_response(:cross_app_capacity_then_tampered_resume, _n, args) do
+      progress = present_window_arg(args, "cross_app_progress", :cross_app_progress)
+
+      binding =
+        present_window_arg(args, "cross_app_progress_binding", :cross_app_progress_binding)
+
+      state = Process.get(:coding_change_fake_state)
+      {_plan, bindings} = Agent.get(state, &Map.fetch!(&1, :cross_app_resume))
+
+      tampered =
+        if is_map(progress) do
+          Map.put(progress, "passed_receipts_digest", String.duplicate("0", 64))
+        else
+          %{"passed_receipts_digest" => String.duplicate("0", 64)}
+        end
+
+      binding_digest =
+        cond do
+          is_map(binding) ->
+            binding["static_stage_receipt_digest"] || binding[:static_stage_receipt_digest]
+
+          true ->
+            nil
+        end
+
+      progress_digest =
+        if is_map(tampered), do: tampered["static_stage_receipt_digest"]
+
+      if is_binary(binding_digest) and is_binary(progress_digest) and
+           binding_digest != progress_digest do
+        {:error, "static_receipt_drift"}
+      else
+        case Arbor.Actions.coding_cross_app_progress_admit(tampered, bindings) do
+          {:ok, _admitted} ->
+            {:error, "tampered progress was incorrectly admitted"}
+
+          {:error, reason} ->
+            {:error, inspect(reason)}
+        end
+      end
+    end
+
+    defp cross_app_window_response(:g3a_fixture, :build_capacity, :fixture) do
+      inv1 = String.duplicate("a", 64)
+      inv2 = String.duplicate("b", 64)
+
+      plan = [
+        %{
+          "index" => 1,
+          "total" => 2,
+          "count" => 1,
+          "label" => "batch-1-of-2-n1-#{inv1}",
+          "inventory_sha256" => inv1
+        },
+        %{
+          "index" => 2,
+          "total" => 2,
+          "count" => 1,
+          "label" => "batch-2-of-2-n1-#{inv2}",
+          "inventory_sha256" => inv2
+        }
+      ]
+
+      {:ok, plan_digest} =
+        Arbor.Contracts.Coding.ValidationCapacityHandoff.ordered_plan_digest(plan)
+
+      digest = String.duplicate("d", 64)
+
+      identities = %{
+        "task_id" => "task_pipeline_g3a",
+        "work_packet_digest" => "sha256:" <> String.duplicate("c", 64),
+        "base_commit" => String.duplicate("1", 40),
+        "base_tree_oid" => String.duplicate("2", 40),
+        "candidate_head" => String.duplicate("1", 40),
+        "candidate_tree_oid" => String.duplicate("4", 40),
+        "validation_plan_digest" => plan_digest,
+        "toolchain_digest" => String.duplicate("5", 64),
+        "dependency_baseline_digest" => String.duplicate("6", 64),
+        "wrapper_digest" => String.duplicate("7", 64),
+        "validator_id" => "coding_cross_app_validate",
+        "principal_id" => "agent_pipeline",
+        "configuration_digest" => String.duplicate("8", 64)
+      }
+
+      bindings = %{
+        "identities" => identities,
+        "planned_batches" => plan,
+        "static_stage_receipt_digest" => digest,
+        "per_batch_budget_ms" => 1_000
+      }
+
+      {:ok, fresh} = Arbor.Actions.coding_cross_app_progress_new(bindings)
+      [first, second] = plan
+
+      {:ok, remaining_digest} =
+        Arbor.Contracts.Coding.ValidationCapacityHandoff.ordered_plan_digest([second])
+
+      {:ok, descriptor} =
+        Arbor.Contracts.Coding.ValidationCapacityHandoff.new(%{
+          "schema_version" => Arbor.Contracts.Coding.ValidationCapacityHandoff.schema_version(),
+          "phase" => "runtime",
+          "available_budget_ms" => 0,
+          "per_batch_budget_ms" => 1_000,
+          "completed_batch_count" => 1,
+          "completed_file_count" => 1,
+          "unstarted_batch_count" => 1,
+          "unstarted_file_count" => 1,
+          "total_batch_count" => 2,
+          "total_file_count" => 2,
+          "ordered_plan_sha256" => remaining_digest,
+          "interrupted_batch" => nil,
+          "unstarted_batches" => [second]
+        })
+
+      handoff = Arbor.Contracts.Coding.ValidationCapacityHandoff.to_map(descriptor)
+
+      {:ok, progress} =
+        Arbor.Actions.coding_cross_app_progress_advance(fresh, bindings, %{
+          "schema_version" => 1,
+          "new_receipts" => [Map.put(first, "outcome", "passed")],
+          "disposition" => %{
+            "type" => "capacity_handoff",
+            "capacity_handoff" => handoff
+          }
+        })
+
+      binding = %{
+        "work_packet_digest" => identities["work_packet_digest"],
+        "toolchain_digest" => identities["toolchain_digest"],
+        "wrapper_digest" => identities["wrapper_digest"],
+        "dependency_baseline_digest" => identities["dependency_baseline_digest"],
+        "static_stage_receipt_digest" => digest
+      }
+
+      envelope = %{
+        interaction_outcome: "",
+        request_id: "",
+        note: "",
+        disposition_type: "capacity_handoff",
+        progress_status: "in_progress",
+        progress: progress,
+        progress_binding: binding
+      }
+
+      {envelope, plan, bindings}
+    end
 
     defp cross_app_window_response(:cross_app_capacity_then_complete, 0, args) do
       if seed_args?(args) do
@@ -2923,6 +3106,38 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["total_rework_count"] in [nil, "0", 0]
       assert called?(calls, "coding_reviewed_commit")
       assert_cross_app_progress_budget(result.context)
+    end
+
+    test "cross_app tampered resumed progress fails validate and never reaches commit or review" do
+      {{:ok, result}, calls, _plan, _compilation} =
+        run_compiled_v2_fixture(
+          :cross_app_capacity_then_tampered_resume,
+          "design_required",
+          %{
+            "validation_profile" => "cross_app"
+          }
+        )
+
+      assert result.context["status"] == "validation_failed"
+      assert "status_validation_failed" in result.completed_nodes
+      refute called?(calls, "coding_reviewed_commit")
+      refute called?(calls, "council_review_change")
+      assert length(action_calls(calls, "coding_reviewed_validation")) >= 2
+    end
+
+    test "cross_app completed flags with in_progress status cannot reach commit" do
+      {{:ok, result}, calls, _plan, _compilation} =
+        run_compiled_v2_fixture(
+          :cross_app_completed_flags_in_progress_status,
+          "design_required",
+          %{
+            "validation_profile" => "cross_app"
+          }
+        )
+
+      refute called?(calls, "coding_reviewed_commit")
+      refute called?(calls, "council_review_change")
+      assert result.context["status"] in ["pipeline_error", "validation_failed"]
     end
 
     test "cross_app legacy capacity envelope cannot enter continuation or domain rework" do

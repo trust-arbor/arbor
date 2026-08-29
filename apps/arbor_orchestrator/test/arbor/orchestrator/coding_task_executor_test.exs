@@ -28,6 +28,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     ValidationProgram
   }
 
+  alias Arbor.Actions
   alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.Config
   alias Arbor.Security
@@ -3832,6 +3833,164 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
     end
 
+    defp run_with_g2_cross_app_verification(opts \\ []) do
+      task_id = "task_g2_#{System.unique_integer([:positive, :monotonic])}"
+      {envelope, receipt, digest} = g2_completed_envelope(task_id)
+      archive? = Keyword.get(opts, :archive, true)
+      extra_context = Keyword.get(opts, :context, %{})
+      public_envelope = Map.delete(envelope, "sealed_static_receipt")
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, runner_opts ->
+          logs_root = Keyword.fetch!(runner_opts, :logs_root)
+
+          if archive? do
+            assert {:ok, _} =
+                     ArtifactStore.archive_cross_app_static_receipt(
+                       logs_root,
+                       task_id,
+                       digest,
+                       receipt
+                     )
+          end
+
+          program =
+            runner_opts
+            |> Keyword.fetch!(:initial_values)
+            |> Map.fetch!("coding_plan_validation_program")
+
+          context =
+            completed_turn_context()
+            |> Map.merge(%{
+              "status" => "change_committed",
+              "commit_hash" => @verification_head_oid,
+              "validation" => public_envelope,
+              "coding_plan_validation_program" => program,
+              "validation_candidate_tree_oid" => @verification_tree_oid,
+              "validation_observed_at" => @verification_observed_at
+            })
+            |> Map.merge(extra_context)
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(runner_opts, :run_id),
+             context: context,
+             completed_nodes: ["validate"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{}
+           }}
+        end
+      )
+
+      CodingTaskExecutor.run(
+        "agent_1",
+        verification_task("cross_app"),
+        valid_context(%{"task_id" => task_id})
+      )
+    end
+
+    defp g2_completed_envelope(task_id) do
+      inv1 = String.duplicate("a", 64)
+      inv2 = String.duplicate("b", 64)
+
+      plan = [
+        %{
+          "index" => 1,
+          "total" => 2,
+          "count" => 1,
+          "label" => "batch-1-of-2-n1-#{inv1}",
+          "inventory_sha256" => inv1
+        },
+        %{
+          "index" => 2,
+          "total" => 2,
+          "count" => 1,
+          "label" => "batch-2-of-2-n1-#{inv2}",
+          "inventory_sha256" => inv2
+        }
+      ]
+
+      {:ok, plan_digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)
+
+      identities = %{
+        "task_id" => task_id,
+        "work_packet_digest" => "sha256:" <> @verification_digest,
+        "base_commit" => @verification_head_oid,
+        "base_tree_oid" => @verification_head_oid,
+        "candidate_head" => @verification_head_oid,
+        "candidate_tree_oid" => @verification_tree_oid,
+        "validation_plan_digest" => plan_digest,
+        "toolchain_digest" => String.duplicate("3", 64),
+        "dependency_baseline_digest" => String.duplicate("4", 64),
+        "wrapper_digest" => String.duplicate("5", 64),
+        "validator_id" => "coding_cross_app_validate",
+        "principal_id" => "agent_principal",
+        "configuration_digest" => String.duplicate("6", 64)
+      }
+
+      check = %{
+        "status" => "completed",
+        "passed" => true,
+        "exit_code" => 0,
+        "reason" => nil,
+        "stdout_excerpt" => "",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => @verification_digest,
+        "stderr_sha256" => @verification_other_digest
+      }
+
+      {:ok, receipt, digest} =
+        Actions.coding_cross_app_continuation_static_receipt_new(identities, %{
+          "compile" => check,
+          "xref" => check,
+          "test_compile" => check
+        })
+
+      bindings = %{
+        "identities" => identities,
+        "planned_batches" => plan,
+        "static_stage_receipt_digest" => digest
+      }
+
+      {:ok, fresh} = Actions.coding_cross_app_progress_new(bindings)
+
+      receipts = Enum.map(plan, &Map.put(&1, "outcome", "passed"))
+
+      {:ok, progress} =
+        Actions.coding_cross_app_progress_advance(fresh, bindings, %{
+          "schema_version" => 1,
+          "new_receipts" => receipts,
+          "disposition" => %{"type" => "completed"}
+        })
+
+      binding = %{
+        "work_packet_digest" => identities["work_packet_digest"],
+        "toolchain_digest" => identities["toolchain_digest"],
+        "wrapper_digest" => identities["wrapper_digest"],
+        "dependency_baseline_digest" => identities["dependency_baseline_digest"],
+        "static_stage_receipt_digest" => digest
+      }
+
+      envelope = %{
+        "schema_version" => 1,
+        "disposition_type" => "completed",
+        "progress_status" => "completed",
+        "progress" => progress,
+        "progress_binding" => binding,
+        "passed" => true,
+        "sealed_static_receipt" => receipt,
+        "validated_tree_oid" => identities["candidate_tree_oid"],
+        "validated_head" => identities["candidate_head"]
+      }
+
+      {envelope, receipt, digest}
+    end
+
     defp run_with_profile_verification(profile, action_result, context_overrides \\ %{}) do
       task_id =
         "task_verification_#{profile}_#{System.unique_integer([:positive, :monotonic])}"
@@ -4233,6 +4392,69 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
         refute inspect(result["verification_report"]) =~ "ignored raw feedback"
       end
+    end
+
+    test "completed G2 CrossApp progress projects a bounded public validation summary" do
+      assert {:ok, result} = run_with_g2_cross_app_verification()
+      assert result["verification_report"]["status"] == "passed"
+
+      assert [%{"disposition_type" => "completed", "passed" => true} = summary] =
+               result["validation"]
+
+      refute Map.has_key?(summary, "progress")
+      refute Map.has_key?(summary, "progress_binding")
+      refute Map.has_key?(summary, "passed_receipts")
+      refute Map.has_key?(summary, "sealed_static_receipt")
+      refute Map.has_key?(summary, "identities")
+      refute inspect(result) =~ ~s("passed_receipts" =>)
+      refute inspect(result) =~ ~s("sealed_static_receipt" =>)
+      assert is_binary(summary["plan_digest"])
+      assert is_binary(summary["static_stage_receipt_digest"])
+    end
+
+    test "malformed or oversized G2 values are omitted from the public projection" do
+      {envelope, _receipt, _digest} = g2_completed_envelope("task_public_projection")
+      envelope = Map.delete(envelope, "sealed_static_receipt")
+
+      malformed = [
+        Map.put(envelope, "progress_binding", "not-an-object"),
+        Map.put(envelope, "schema_version", String.duplicate("x", 100_000)),
+        Map.put(envelope, "disposition_type", String.duplicate("x", 100_000)),
+        Map.put(envelope, "progress_status", String.duplicate("x", 100_000)),
+        Map.put(envelope, "passed", String.duplicate("x", 100_000)),
+        put_in(envelope, ["progress", "schema_version"], "1"),
+        put_in(envelope, ["progress", "total_file_count"], 10_000_001)
+      ]
+
+      for invalid <- malformed do
+        flat =
+          invalid
+          |> Enum.map(fn {key, value} -> {"validation." <> key, value} end)
+          |> Map.new()
+          |> Map.put("status", "no_changes")
+
+        assert {:ok, result} = run_with_engine_result(flat)
+        refute Map.has_key?(result, "validation")
+      end
+    end
+
+    test "latest completed validation window supersedes stale top-level in-progress progress" do
+      stale = %{
+        "status" => "in_progress",
+        "passed_receipts" => [%{"index" => 1, "outcome" => "passed"}]
+      }
+
+      assert {:ok, result} =
+               run_with_g2_cross_app_verification(context: %{"cross_app_progress" => stale})
+
+      assert result["verification_report"]["status"] == "passed"
+      assert [%{"disposition_type" => "completed", "passed" => true}] = result["validation"]
+      refute inspect(result["validation"]) =~ ~s("passed_receipts" =>)
+    end
+
+    test "unpublished CrossApp static receipt cannot become a success terminal" do
+      assert {:error, {:invalid_terminal_evidence, _reason}} =
+               run_with_g2_cross_app_verification(archive: false)
     end
 
     test "accepts passed verification for a validated candidate success terminal" do

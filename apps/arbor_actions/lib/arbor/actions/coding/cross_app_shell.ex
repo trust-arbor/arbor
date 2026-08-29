@@ -572,7 +572,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              "per_batch_budget_ms" => input.timeout
            },
          {:ok, progress} <- ProgressCore.new(bindings) do
-      run_progress_suffix(
+      finish_admitted_progress(
         input,
         progress,
         bindings,
@@ -652,7 +652,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         blob_manifest: resolved.candidate_blob_manifest
       }
 
-      run_progress_suffix(
+      finish_admitted_progress(
         input,
         admitted,
         bindings,
@@ -857,6 +857,44 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       stage_timeout: input.stage_timeout,
       test_stage_timeout: input.test_stage_timeout
     }
+  end
+
+  defp finish_admitted_progress(
+         _input,
+         %{"status" => "completed"} = progress,
+         _bindings,
+         _worktree_path,
+         _full_batches,
+         _before_binding,
+         _validation_deadline,
+         _resource,
+         binding
+       ) do
+    emit_progress_envelope(progress, "completed", binding)
+  end
+
+  defp finish_admitted_progress(
+         input,
+         progress,
+         bindings,
+         worktree_path,
+         full_batches,
+         before_binding,
+         validation_deadline,
+         resource,
+         binding
+       ) do
+    run_progress_suffix(
+      input,
+      progress,
+      bindings,
+      worktree_path,
+      full_batches,
+      before_binding,
+      validation_deadline,
+      resource,
+      binding
+    )
   end
 
   defp run_progress_suffix(
@@ -1369,7 +1407,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       "progress_status" => snapshot["status"],
       "progress" => snapshot,
       "progress_binding" => binding,
-      "passed" => snapshot["status"] == "completed"
+      "passed" => snapshot["status"] == "completed",
+      "validated_tree_oid" => snapshot["identities"]["candidate_tree_oid"],
+      "validated_head" => snapshot["identities"]["candidate_head"]
     }
   end
 

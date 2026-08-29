@@ -94,8 +94,37 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
                )
              )
 
-    assert {:error, :invalid_batch_plan} =
+    assert {:error, :plan_drift} =
              ProgressCore.new(Map.put(fresh_bindings(), "planned_batches", []))
+  end
+
+  test "new/1 constructs completed compact progress for an exact empty plan" do
+    {:ok, expected_digest} = ValidationCapacityHandoff.ordered_plan_digest([])
+    {:ok, identities_digest} = ContinuationCore.digest(identities([]))
+    {:ok, receipts_digest} = ContinuationCore.digest([])
+    {:ok, state} = ProgressCore.new(empty_bindings())
+
+    assert state["status"] == "completed"
+    assert state["plan_digest"] == expected_digest
+    assert state["identities_digest"] == identities_digest
+    assert state["total_batch_count"] == 0
+    assert state["total_file_count"] == 0
+    assert state["passed_receipts"] == []
+    assert state["passed_receipts_digest"] == receipts_digest
+    assert state["completed_batch_count"] == 0
+    assert state["completed_file_count"] == 0
+    assert state["next_batch_index"] == 1
+    assert state["window_ordinal"] == 0
+    assert state["capacity"] == nil
+    assert {:ok, ^state} = ProgressCore.admit(ProgressCore.show(state), empty_bindings())
+    assert Enum.to_list(state) == Enum.to_list(ProgressCore.show(state))
+  end
+
+  test "in_progress empty plan is malformed" do
+    {:ok, state} = ProgressCore.new(empty_bindings())
+    forged = Map.put(ProgressCore.show(state), "status", "in_progress")
+    assert {:error, :malformed_state} = ProgressCore.admit(forged, empty_bindings())
+    assert {:error, :malformed_state} = ProgressCore.show(forged)
   end
 
   test "admit/2 rejects status open" do
@@ -319,6 +348,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
              ProgressCore.show(Map.put(state, "total_batch_count", "2"))
 
     assert {:error, :malformed_state} =
+             ProgressCore.show(Map.put(state, "total_file_count", 0))
+
+    assert {:error, :malformed_state} =
              ProgressCore.show(Map.put(state, "identities_digest", String.duplicate("0", 64)))
 
     niled = Map.put(ProgressCore.show(state), "capacity", "not-a-capacity")
@@ -342,6 +374,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
         "new_receipts" => [passed(first), passed(second)],
         "disposition" => %{"type" => "completed"}
       })
+
+    assert {:error, :malformed_state} =
+             ProgressCore.show(Map.put(completed, "total_file_count", 1))
 
     wrong_receipt_digest =
       Map.put(ProgressCore.show(completed), "passed_receipts_digest", String.duplicate("0", 64))
@@ -639,6 +674,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     %{
       "identities" => identities(plan()),
       "planned_batches" => plan(),
+      "static_stage_receipt_digest" => @static
+    }
+  end
+
+  defp empty_bindings do
+    %{
+      "identities" => identities([]),
+      "planned_batches" => [],
       "static_stage_receipt_digest" => @static
     }
   end

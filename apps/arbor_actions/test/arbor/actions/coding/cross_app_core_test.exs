@@ -1602,6 +1602,10 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.partition_test_batches([" apps/alpha/test/a_test.exs"])
 
     assert {:ok, []} = Core.partition_test_batches([])
+    assert {:ok, []} = Core.partition_test_batches([], ["alpha"])
+
+    assert {:error, :invalid_app_order_input} =
+             Core.partition_test_batches([], ["not/an/app"])
   end
 
   test "classify_app_test_result preserves tests_failed vs tests_timed_out" do

@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Actions
   alias Arbor.Actions.Coding.ContractChange.Core
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -1027,6 +1028,57 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
     assert "validation_evidence_invalid" in Enum.map(report["diagnostics"], & &1["code"])
   end
 
+  test "completed G2 CrossApp progress with sealed receipt produces a passed report" do
+    {envelope, _receipt} = completed_progress_envelope()
+    assert {:ok, report} = verify("cross_app", envelope)
+    assert report["status"] == "passed"
+    assert Enum.map(report["diagnostics"], & &1["gate_id"]) == @gate_ids["cross_app"]
+    assert Enum.all?(report["diagnostics"], &(&1["decision"] == "passed"))
+    assert String.match?(report["evidence_ref"], ~r/\Asha256:[0-9a-f]{64}\z/)
+
+    refute inspect(report) =~ "passed_receipts"
+    refute inspect(report) =~ "sealed_static_receipt"
+  end
+
+  test "completed empty-plan CrossApp progress produces a passed report" do
+    {envelope, _receipt} = completed_progress_envelope(plan: [])
+    assert envelope["progress"]["passed_receipts"] == []
+    assert {:ok, report} = verify("cross_app", envelope)
+    assert report["status"] == "passed"
+    assert Enum.all?(report["diagnostics"], &(&1["decision"] == "passed"))
+  end
+
+  test "in-progress, capacity, missing receipt, and tampered G2 envelopes are invalid evidence" do
+    {completed, receipt} = completed_progress_envelope()
+
+    in_progress = %{
+      "schema_version" => 1,
+      "disposition_type" => "capacity_handoff",
+      "progress_status" => "in_progress",
+      "progress" => Map.put(completed["progress"], "status", "in_progress"),
+      "progress_binding" => completed["progress_binding"],
+      "passed" => true,
+      "sealed_static_receipt" => receipt
+    }
+
+    assert_invalid_evidence("cross_app", in_progress)
+    assert_invalid_evidence("cross_app", Map.delete(completed, "sealed_static_receipt"))
+
+    forged_flags =
+      completed
+      |> Map.put("progress", Map.put(completed["progress"], "status", "in_progress"))
+
+    assert_invalid_evidence("cross_app", forged_flags)
+
+    tampered_prefix =
+      put_in(completed, ["progress", "passed_receipts_digest"], String.duplicate("0", 64))
+
+    assert_invalid_evidence("cross_app", tampered_prefix)
+
+    extra = Map.put(completed, "extra", "nope")
+    assert_invalid_evidence("cross_app", extra)
+  end
+
   test "validates the closed program and injected timestamp before adapting evidence" do
     invalid_program = Map.put(program!("default"), "result_adapter", "cross_app_v1")
 
@@ -1138,6 +1190,112 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCoreTest do
       "stdout_sha256" => @digest,
       "stderr_sha256" => @other_digest
     }
+  end
+
+  defp completed_progress_envelope(opts \\ []) do
+    plan = Keyword.get(opts, :plan, progress_plan())
+    {:ok, plan_digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)
+
+    identities = %{
+      "task_id" => "task_progress_g3a",
+      "work_packet_digest" => "sha256:" <> @digest,
+      "base_commit" => @base_oid,
+      "base_tree_oid" => @base_oid,
+      "candidate_head" => @base_oid,
+      "candidate_tree_oid" => @sha1,
+      "validation_plan_digest" => plan_digest,
+      "toolchain_digest" => String.duplicate("3", 64),
+      "dependency_baseline_digest" => String.duplicate("4", 64),
+      "wrapper_digest" => String.duplicate("5", 64),
+      "validator_id" => "coding_cross_app_validate",
+      "principal_id" => "agent_principal",
+      "configuration_digest" => String.duplicate("6", 64)
+    }
+
+    check = %{
+      "status" => "completed",
+      "passed" => true,
+      "exit_code" => 0,
+      "reason" => nil,
+      "stdout_excerpt" => "",
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => @digest,
+      "stderr_sha256" => @other_digest
+    }
+
+    {:ok, receipt, digest} =
+      Actions.coding_cross_app_continuation_static_receipt_new(identities, %{
+        "compile" => check,
+        "xref" => check,
+        "test_compile" => check
+      })
+
+    bindings = %{
+      "identities" => identities,
+      "planned_batches" => plan,
+      "static_stage_receipt_digest" => digest
+    }
+
+    {:ok, fresh} = Actions.coding_cross_app_progress_new(bindings)
+
+    {:ok, progress} =
+      if plan == [] do
+        {:ok, fresh}
+      else
+        receipts = Enum.map(plan, &Map.put(&1, "outcome", "passed"))
+
+        Actions.coding_cross_app_progress_advance(fresh, bindings, %{
+          "schema_version" => 1,
+          "new_receipts" => receipts,
+          "disposition" => %{"type" => "completed"}
+        })
+      end
+
+    binding = %{
+      "work_packet_digest" => identities["work_packet_digest"],
+      "toolchain_digest" => identities["toolchain_digest"],
+      "wrapper_digest" => identities["wrapper_digest"],
+      "dependency_baseline_digest" => identities["dependency_baseline_digest"],
+      "static_stage_receipt_digest" => digest
+    }
+
+    envelope = %{
+      "schema_version" => 1,
+      "disposition_type" => "completed",
+      "progress_status" => "completed",
+      "progress" => progress,
+      "progress_binding" => binding,
+      "passed" => true,
+      "sealed_static_receipt" => receipt,
+      "validated_tree_oid" => identities["candidate_tree_oid"],
+      "validated_head" => identities["candidate_head"]
+    }
+
+    {envelope, receipt}
+  end
+
+  defp progress_plan do
+    inv1 = String.duplicate("a", 64)
+    inv2 = String.duplicate("b", 64)
+
+    [
+      %{
+        "index" => 1,
+        "total" => 2,
+        "count" => 1,
+        "label" => "batch-1-of-2-n1-#{inv1}",
+        "inventory_sha256" => inv1
+      },
+      %{
+        "index" => 2,
+        "total" => 2,
+        "count" => 1,
+        "label" => "batch-2-of-2-n1-#{inv2}",
+        "inventory_sha256" => inv2
+      }
+    ]
   end
 
   defp cross_result do

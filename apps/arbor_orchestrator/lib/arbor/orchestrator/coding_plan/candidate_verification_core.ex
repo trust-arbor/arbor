@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   @moduledoc false
 
+  alias Arbor.Actions
   alias Arbor.Contracts.Coding.{Diagnostic, ValidationCapacityHandoff, VerificationReport}
   alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Orchestrator.CodingPlan.{ValidationCapacityTerminal, ValidationProgram}
@@ -32,6 +33,32 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     status passed exit_code reason stdout_excerpt stderr_excerpt stdout_truncated stderr_truncated
     stdout_sha256 stderr_sha256
   ]
+  @cross_app_progress_required_keys MapSet.new(~w(
+    disposition_type
+    passed
+    progress
+    progress_binding
+    progress_status
+    schema_version
+  ))
+  @cross_app_progress_optional_keys MapSet.new(~w(
+    sealed_static_receipt
+    validated_head
+    validated_tree_oid
+  ))
+  @cross_app_progress_binding_keys Enum.sort(~w(
+    dependency_baseline_digest
+    static_stage_receipt_digest
+    toolchain_digest
+    work_packet_digest
+    wrapper_digest
+  ))
+  @cross_app_progress_binding_identity_keys ~w(
+    work_packet_digest
+    toolchain_digest
+    wrapper_digest
+    dependency_baseline_digest
+  )
   @contract_fields ~w[
     passed reason base_commit changed_files test_paths preflight test validated_tree_oid
     validated_head feedback_json
@@ -398,6 +425,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   end
 
   defp adapt_cross_app(result) do
+    case adapt_legacy_cross_app(result) do
+      {:ok, evidence, assessment} -> {:ok, evidence, assessment}
+      :error -> adapt_completed_cross_app_progress(result)
+    end
+  end
+
+  defp adapt_legacy_cross_app(result) do
     with {:ok, values, _style} <- exact_envelope(result, @cross_fields),
          true <- is_boolean(values.passed),
          true <- is_binary(values.reason),
@@ -450,6 +484,175 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
       {:ok, evidence, %{status: status, gates: Enum.map(gate_checks, &cross_gate/1)}}
     else
       _other -> :error
+    end
+  end
+
+  defp adapt_completed_cross_app_progress(result)
+       when is_map(result) and not is_struct(result) do
+    with :ok <- require_cross_app_progress_envelope(result),
+         {:ok, receipt} <- admit_injected_static_receipt(result["sealed_static_receipt"]),
+         {:ok, receipt_digest} <-
+           Actions.coding_cross_app_continuation_static_receipt_digest(receipt),
+         {:ok, progress} <- require_json_object_result(result["progress"]),
+         {:ok, binding} <- admit_progress_binding(result["progress_binding"]),
+         :ok <-
+           match_exact(
+             progress["static_stage_receipt_digest"],
+             receipt_digest
+           ),
+         :ok <- match_exact(binding["static_stage_receipt_digest"], receipt_digest),
+         :ok <- match_exact(progress["identities"], receipt["identities"]),
+         :ok <- match_binding_identities(binding, receipt["identities"]),
+         {:ok, planned} <- planned_from_receipts(progress["passed_receipts"]),
+         {:ok, admitted} <-
+           Actions.coding_cross_app_progress_admit(progress, %{
+             "identities" => receipt["identities"],
+             "planned_batches" => planned,
+             "static_stage_receipt_digest" => receipt_digest,
+             "window_ordinal" => progress["window_ordinal"]
+           }),
+         :ok <- require_completed_progress(admitted),
+         identities = admitted["identities"],
+         :ok <- match_optional_oid(result, "validated_tree_oid", identities["candidate_tree_oid"]),
+         :ok <- match_optional_oid(result, "validated_head", identities["candidate_head"]),
+         :ok <- require_completed_outer_flags(result) do
+      evidence = %{
+        "adapter" => "cross_app_v1",
+        "candidate_tree_oid" => identities["candidate_tree_oid"],
+        "validated_head" => identities["candidate_head"],
+        "base_commit" => identities["base_commit"],
+        "passed" => true,
+        "reason" => "cross_app_validated",
+        "identities_digest" => admitted["identities_digest"],
+        "plan_digest" => admitted["plan_digest"],
+        "passed_receipts_digest" => admitted["passed_receipts_digest"],
+        "static_stage_receipt_digest" => admitted["static_stage_receipt_digest"],
+        "completed_batch_count" => admitted["completed_batch_count"],
+        "completed_file_count" => admitted["completed_file_count"],
+        "total_batch_count" => admitted["total_batch_count"],
+        "total_file_count" => admitted["total_file_count"],
+        "window_ordinal" => admitted["window_ordinal"]
+      }
+
+      {:ok, evidence,
+       %{
+         status: "passed",
+         gates: [
+           {:passed, "validation_passed"},
+           {:passed, "validation_passed"},
+           {:passed, "validation_passed"},
+           {:passed, "validation_passed"}
+         ]
+       }}
+    else
+      _other -> :error
+    end
+  end
+
+  defp adapt_completed_cross_app_progress(_result), do: :error
+
+  defp require_cross_app_progress_envelope(result) do
+    keys = MapSet.new(Map.keys(result))
+    allowed = MapSet.union(@cross_app_progress_required_keys, @cross_app_progress_optional_keys)
+
+    cond do
+      not Enum.all?(Map.keys(result), &is_binary/1) ->
+        :error
+
+      not MapSet.subset?(keys, allowed) ->
+        :error
+
+      not MapSet.subset?(@cross_app_progress_required_keys, keys) ->
+        :error
+
+      result["schema_version"] != 1 ->
+        :error
+
+      true ->
+        :ok
+    end
+  end
+
+  defp admit_injected_static_receipt(receipt) do
+    case Actions.coding_cross_app_continuation_static_receipt_admit(receipt) do
+      {:ok, admitted} -> {:ok, admitted}
+      _other -> :error
+    end
+  end
+
+  defp require_json_object_result(value) when is_map(value) and not is_struct(value),
+    do: {:ok, value}
+
+  defp require_json_object_result(_value), do: :error
+
+  defp admit_progress_binding(binding) when is_map(binding) and not is_struct(binding) do
+    if Enum.all?(Map.keys(binding), &is_binary/1) and
+         Enum.sort(Map.keys(binding)) == @cross_app_progress_binding_keys do
+      {:ok, binding}
+    else
+      :error
+    end
+  end
+
+  defp admit_progress_binding(_binding), do: :error
+
+  defp match_exact(left, right) when left === right, do: :ok
+  defp match_exact(_left, _right), do: :error
+
+  defp match_binding_identities(binding, identities) when is_map(identities) do
+    if Enum.all?(@cross_app_progress_binding_identity_keys, fn key ->
+         binding[key] === identities[key]
+       end) do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp match_binding_identities(_binding, _identities), do: :error
+
+  defp planned_from_receipts(receipts) when is_list(receipts) do
+    receipts
+    |> Enum.reduce_while({:ok, []}, fn receipt, {:ok, acc} ->
+      if is_map(receipt) and not is_struct(receipt) do
+        {:cont, {:ok, [Map.delete(receipt, "outcome") | acc]}}
+      else
+        {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, planned} -> {:ok, Enum.reverse(planned)}
+      :error -> :error
+    end
+  end
+
+  defp planned_from_receipts(_receipts), do: :error
+
+  defp require_completed_progress(%{"status" => "completed", "capacity" => nil} = admitted) do
+    if admitted["completed_batch_count"] === admitted["total_batch_count"] do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp require_completed_progress(_admitted), do: :error
+
+  defp require_completed_outer_flags(result) do
+    if result["disposition_type"] === "completed" and
+         result["progress_status"] === "completed" and
+         result["passed"] === true do
+      :ok
+    else
+      :error
+    end
+  end
+
+  defp match_optional_oid(result, key, expected) do
+    case Map.fetch(result, key) do
+      :error -> :ok
+      {:ok, value} when value === expected -> :ok
+      {:ok, _value} -> :error
     end
   end
 
@@ -1346,15 +1549,26 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
         {:ok, evidence}
 
       {:ok, keys} ->
-        Enum.reduce_while(keys, {:ok, evidence}, fn key, {:ok, acc} ->
-          case Map.fetch(acc, key) do
-            {:ok, list} when is_list(list) ->
-              {:cont, {:ok, Map.put(acc, key, inventory_summary(list))}}
+        present = Enum.count(keys, &Map.has_key?(evidence, &1))
 
-            _other ->
-              {:halt, :error}
-          end
-        end)
+        cond do
+          present == 0 ->
+            {:ok, evidence}
+
+          present != length(keys) ->
+            :error
+
+          true ->
+            Enum.reduce_while(keys, {:ok, evidence}, fn key, {:ok, acc} ->
+              case Map.fetch(acc, key) do
+                {:ok, list} when is_list(list) ->
+                  {:cont, {:ok, Map.put(acc, key, inventory_summary(list))}}
+
+                _other ->
+                  {:halt, :error}
+              end
+            end)
+        end
     end
   end
 

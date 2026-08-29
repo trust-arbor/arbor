@@ -2126,6 +2126,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   """
   @spec partition_test_batches([String.t()], [String.t()]) ::
           {:ok, [test_batch()]} | {:error, term()}
+  def partition_test_batches([], ordered_apps) do
+    with {:ok, _normalized_apps} <- normalize_ordered_app_ids(ordered_apps) do
+      {:ok, []}
+    end
+  end
+
   def partition_test_batches(files, ordered_apps) when is_list(ordered_apps) do
     with {:ok, ordered_files} <- normalize_expanded_test_files(files, ordered_apps),
          {:ok, packed} <- pack_test_batches(ordered_files) do

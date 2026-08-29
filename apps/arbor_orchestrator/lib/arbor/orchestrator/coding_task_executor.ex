@@ -153,6 +153,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_metric_usage_string_bytes 1_024
   @max_metric_usage_encoded_bytes 16_384
   @max_validation_failure_reason_bytes 512
+  @max_cross_app_summary_count 10_000_000
   @prior_validation_stage_fields ~w(preflight compile xref test_compile test candidate base)
   @prior_validation_stage_excerpt_fields ~w(stdout_excerpt stderr_excerpt reason)
   @max_prior_validation_stage_source_bytes 16_384
@@ -429,7 +430,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                  engine_result,
                  started_at,
                  Map.fetch!(canonical_plan.worker, "provider"),
-                 Map.get(canonical_plan.worker, "model")
+                 Map.get(canonical_plan.worker, "model"),
+                 %{task_id: exec_ctx.task_id, logs_root: logs_root}
                ),
              release_artifacts = attach_workspace_release_artifact(artifacts, result),
              {:ok, public_artifacts} <-
@@ -2977,32 +2979,40 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Result adapter
   # ===========================================================================
 
-  defp adapt_result(%{context: context} = engine_result, started_at, acp_agent, requested_model)
+  defp adapt_result(
+         %{context: context} = engine_result,
+         started_at,
+         acp_agent,
+         requested_model,
+         shell
+       )
        when is_map(context) do
-    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model)
+    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model, shell)
   end
 
   defp adapt_result(
          %{"context" => context} = engine_result,
          started_at,
          acp_agent,
-         requested_model
+         requested_model,
+         shell
        )
        when is_map(context) do
-    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model)
+    adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model, shell)
   end
 
-  defp adapt_result({:ok, result}, started_at, acp_agent, requested_model),
-    do: adapt_result(result, started_at, acp_agent, requested_model)
+  defp adapt_result({:ok, result}, started_at, acp_agent, requested_model, shell),
+    do: adapt_result(result, started_at, acp_agent, requested_model, shell)
 
-  defp adapt_result({:error, _} = error, _started_at, _acp_agent, _requested_model), do: error
+  defp adapt_result({:error, _} = error, _started_at, _acp_agent, _requested_model, _shell),
+    do: error
 
-  defp adapt_result(_other, _started_at, _acp_agent, _requested_model),
+  defp adapt_result(_other, _started_at, _acp_agent, _requested_model, _shell),
     do: {:error, :invalid_engine_result}
 
-  defp adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model) do
+  defp adapt_engine_result(context, engine_result, started_at, acp_agent, requested_model, shell) do
     with {:ok, payload} <-
-           adapt_context(context, engine_result, acp_agent, requested_model) do
+           adapt_context(context, engine_result, acp_agent, requested_model, shell) do
       wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
 
       {:ok,
@@ -3013,7 +3023,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp adapt_context(context, engine_result, worker_provider, requested_model)
+  defp adapt_context(context, engine_result, worker_provider, requested_model, shell)
        when is_map(context) do
     clean = json_clean_map(context)
     legacy = context_get(clean, "legacy_status")
@@ -3049,7 +3059,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                  worker_provider: worker_provider
                ),
              {:ok, verification_report} <-
-               adapt_terminal_verification(context, clean, status, legacy) do
+               adapt_terminal_verification(context, clean, status, legacy, shell) do
           {:ok,
            clean
            |> build_coding_payload(status, legacy)
@@ -3077,7 +3087,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> Map.put("error", RunLifecycleAdapter.bound_failure_reason(reason) || reason)
   end
 
-  defp adapt_terminal_verification(raw_context, clean_context, status, legacy_status) do
+  defp adapt_terminal_verification(raw_context, clean_context, status, legacy_status, shell) do
     if terminal_validation_claimed?(raw_context, status) do
       {public_status, canonical_status} = terminal_status_pair(status, legacy_status)
 
@@ -3087,11 +3097,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              fetch_verification_evidence(clean_context, "validation_candidate_tree_oid"),
            {:ok, observed_at} <-
              fetch_verification_evidence(clean_context, "validation_observed_at"),
+           evidence <-
+             attach_cross_app_static_receipt(
+               terminal_validation_evidence(clean_context),
+               shell
+             ),
            {:ok, report} <-
              CandidateVerificationCore.verify(
                program,
                candidate_tree_oid,
-               terminal_validation_evidence(clean_context),
+               evidence,
                observed_at
              ),
            :ok <-
@@ -3127,6 +3142,49 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       _other ->
         extract_prefixed_map(clean_context, "validation.") ||
           context_get(clean_context, "validation.result")
+    end
+  end
+
+  defp attach_cross_app_static_receipt(evidence, shell)
+       when is_map(evidence) and not is_struct(evidence) and is_map(shell) do
+    with true <- g2_cross_app_validation?(evidence),
+         task_id when is_binary(task_id) and task_id != "" <- Map.get(shell, :task_id),
+         logs_root when is_binary(logs_root) and logs_root != "" <- Map.get(shell, :logs_root),
+         digest when is_binary(digest) <-
+           progress_static_receipt_digest(evidence),
+         true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, digest),
+         {:ok, %{"receipt" => receipt}} <-
+           ArtifactStore.read_cross_app_static_receipt(logs_root, task_id, digest) do
+      Map.put(evidence, "sealed_static_receipt", receipt)
+    else
+      _other -> evidence
+    end
+  end
+
+  defp attach_cross_app_static_receipt(evidence, _shell), do: evidence
+
+  defp progress_static_receipt_digest(evidence) do
+    progress = Map.get(evidence, "progress")
+    binding = Map.get(evidence, "progress_binding")
+
+    progress_digest =
+      if is_map(progress) and not is_struct(progress),
+        do: Map.get(progress, "static_stage_receipt_digest")
+
+    binding_digest =
+      if is_map(binding) and not is_struct(binding),
+        do: Map.get(binding, "static_stage_receipt_digest")
+
+    cond do
+      is_binary(progress_digest) and is_binary(binding_digest) and
+          progress_digest === binding_digest ->
+        progress_digest
+
+      is_binary(progress_digest) and is_nil(binding_digest) ->
+        progress_digest
+
+      true ->
+        nil
     end
   end
 
@@ -3963,15 +4021,166 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         nil
 
       validation when is_map(validation) ->
-        [validation]
+        case project_public_cross_app_validation(validation) do
+          {:ok, summary} -> [summary]
+          :legacy -> [validation]
+          :omit -> nil
+        end
 
       validations when is_list(validations) ->
-        validations
+        projected =
+          Enum.flat_map(validations, fn
+            item when is_map(item) and not is_struct(item) ->
+              case project_public_cross_app_validation(item) do
+                {:ok, summary} -> [summary]
+                :legacy -> [item]
+                :omit -> []
+              end
+
+            item ->
+              [item]
+          end)
+
+        if projected == [], do: nil, else: projected
 
       _ ->
         nil
     end
   end
+
+  defp g2_cross_app_validation?(map) when is_map(map) and not is_struct(map) do
+    Map.has_key?(map, "progress") or Map.has_key?(map, "progress_binding") or
+      map["disposition_type"] in ["completed", "capacity_handoff"]
+  end
+
+  defp g2_cross_app_validation?(_map), do: false
+
+  defp project_public_cross_app_validation(map) when is_map(map) and not is_struct(map) do
+    if g2_cross_app_validation?(map) do
+      case bounded_cross_app_summary(map) do
+        {:ok, summary} -> {:ok, summary}
+        _other -> :omit
+      end
+    else
+      :legacy
+    end
+  end
+
+  defp project_public_cross_app_validation(_map), do: :legacy
+
+  defp bounded_cross_app_summary(map) do
+    with progress when is_map(progress) and not is_struct(progress) <- Map.get(map, "progress"),
+         binding when is_map(binding) and not is_struct(binding) <-
+           Map.get(map, "progress_binding"),
+         1 <- Map.get(map, "schema_version"),
+         1 <- Map.get(progress, "schema_version"),
+         disposition when disposition in ["completed", "capacity_handoff"] <-
+           Map.get(map, "disposition_type"),
+         status when status in ["completed", "in_progress"] <-
+           Map.get(map, "progress_status"),
+         true <- progress["status"] === status,
+         true <- valid_cross_app_summary_disposition?(map, disposition, status),
+         true <- valid_cross_app_summary_counts?(progress, status),
+         true <- valid_cross_app_summary_digests?(progress, binding) do
+      summary = %{
+        "schema_version" => 1,
+        "disposition_type" => disposition,
+        "progress_status" => status,
+        "completed_batch_count" => progress["completed_batch_count"],
+        "completed_file_count" => progress["completed_file_count"],
+        "total_batch_count" => progress["total_batch_count"],
+        "total_file_count" => progress["total_file_count"],
+        "window_ordinal" => progress["window_ordinal"],
+        "plan_digest" => progress["plan_digest"],
+        "passed_receipts_digest" => progress["passed_receipts_digest"],
+        "static_stage_receipt_digest" => progress["static_stage_receipt_digest"]
+      }
+
+      summary =
+        case Map.fetch(map, "passed") do
+          {:ok, passed} -> Map.put(summary, "passed", passed)
+          :error -> summary
+        end
+
+      {:ok,
+       summary
+       |> maybe_put_cross_app_reason(map["reason"])
+       |> maybe_put_cross_app_oid(
+         "validated_tree_oid",
+         map["validated_tree_oid"] ||
+           nested_get(progress["identities"], "candidate_tree_oid")
+       )
+       |> maybe_put_cross_app_oid(
+         "validated_head",
+         map["validated_head"] || nested_get(progress["identities"], "candidate_head")
+       )}
+    else
+      _other -> :error
+    end
+  end
+
+  defp valid_cross_app_summary_disposition?(map, "completed", "completed"),
+    do: Map.get(map, "passed") === true
+
+  defp valid_cross_app_summary_disposition?(map, "capacity_handoff", "in_progress"),
+    do: not Map.has_key?(map, "passed")
+
+  defp valid_cross_app_summary_disposition?(_map, _disposition, _status), do: false
+
+  defp valid_cross_app_summary_counts?(progress, status) do
+    values =
+      Enum.map(
+        ~w(completed_batch_count completed_file_count total_batch_count total_file_count window_ordinal),
+        &Map.get(progress, &1)
+      )
+
+    with true <-
+           Enum.all?(values, fn value ->
+             is_integer(value) and not is_boolean(value) and
+               value in 0..@max_cross_app_summary_count
+           end),
+         [completed_batches, completed_files, total_batches, total_files, _ordinal] <- values,
+         true <- completed_batches <= total_batches,
+         true <- completed_files <= total_files do
+      case status do
+        "completed" -> completed_batches == total_batches and completed_files == total_files
+        "in_progress" -> completed_batches < total_batches
+      end
+    else
+      _other -> false
+    end
+  end
+
+  defp valid_cross_app_summary_digests?(progress, binding) do
+    plan_digest = progress["plan_digest"]
+    receipts_digest = progress["passed_receipts_digest"]
+    static_digest = progress["static_stage_receipt_digest"]
+
+    valid_sha256_hex?(plan_digest) and valid_sha256_hex?(receipts_digest) and
+      valid_sha256_hex?(static_digest) and
+      binding["static_stage_receipt_digest"] === static_digest
+  end
+
+  defp valid_sha256_hex?(value) when is_binary(value) and byte_size(value) == 64,
+    do: Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+
+  defp valid_sha256_hex?(_value), do: false
+
+  defp maybe_put_cross_app_reason(map, reason)
+       when is_binary(reason) and byte_size(reason) in 1..64 do
+    if String.valid?(reason), do: Map.put(map, "reason", reason), else: map
+  end
+
+  defp maybe_put_cross_app_reason(map, _reason), do: map
+
+  defp maybe_put_cross_app_oid(map, key, value)
+       when is_binary(value) do
+    if Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, value),
+      do: Map.put(map, key, value),
+      else: map
+  end
+
+  defp maybe_put_cross_app_oid(map, _key, _value), do: map
 
   defp drop_validation_transport(map) when is_map(map) and not is_struct(map) do
     case Map.delete(map, "result") do

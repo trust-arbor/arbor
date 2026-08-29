@@ -1136,6 +1136,83 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute encoded =~ "unstarted_batches"
   end
 
+  test "tampered resumed progress fails closed before Mix and does not emit passed", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 1)
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context = window_context(fixture.context, bundle)
+
+    tampered_digest =
+      put_in(bundle.progress, ["passed_receipts_digest"], String.duplicate("0", 64))
+
+    assert {:error, reason} =
+             Validate.run(
+               bundle.params,
+               Map.put(context, "cross_app_progress", tampered_digest)
+             )
+
+    assert reason in [:malformed_state, :receipt_prefix_drift]
+
+    forged_completed =
+      bundle.progress
+      |> Map.put("status", "completed")
+      |> Map.put("capacity", nil)
+
+    assert {:error, forged_reason} =
+             Validate.run(
+               bundle.params,
+               Map.put(context, "cross_app_progress", forged_completed)
+             )
+
+    assert forged_reason in [:malformed_state, :capacity_drift, :ordinal_drift]
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "empty-plan seed after static pass emits completed without test Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+
+    File.rm_rf!(Path.join(fixture.lease.worktree_path, "apps/alpha/test"))
+    File.rm_rf!(Path.join(fixture.lease.worktree_path, "apps/beta/test"))
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    context = seed_context(fixture.context, bundle)
+    assert {:ok, observation} = Validate.run(bundle.params, context)
+    assert observation["disposition_type"] == "completed"
+    assert observation["progress_status"] == "completed"
+    assert observation["passed"] == true
+    assert observation["progress"]["passed_receipts"] == []
+    assert observation["progress"]["total_batch_count"] == 0
+    assert is_binary(observation["validated_tree_oid"])
+    assert is_binary(observation["validated_head"])
+
+    mix_calls =
+      Stream.repeatedly(fn ->
+        receive do
+          {:mix, args} -> args
+        after
+          25 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    assert Enum.any?(mix_calls, &(hd(&1) == "compile"))
+    refute Enum.any?(mix_calls, &(hd(&1) == "test"))
+  end
+
   test "progress without compiler binding fails closed before Mix", %{tmp_dir: tmp_dir} do
     fixture = continuation_fixture(tmp_dir)
     bundle = progress_window_bundle(fixture, accepted_count: 1)

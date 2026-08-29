@@ -108,7 +108,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   def project_failure(_reason), do: {:error, :validation_infrastructure_failed}
 
-  @doc "Construct fresh in_progress compact progress from injected bindings."
+  @doc "Construct fresh compact progress from injected bindings."
   @spec new(term()) :: {:ok, state()} | {:error, error()}
   def new(bindings) do
     with {:ok, parsed} <- parse_bindings(bindings, :fresh),
@@ -247,9 +247,11 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   defp build_fresh(parsed) do
     with {:ok, receipts_digest} <- ContinuationCore.digest([]) do
+      status = if parsed.total_batches == 0, do: "completed", else: "in_progress"
+
       {:ok,
        build_state(%{
-         status: "in_progress",
+         status: status,
          identities: parsed.identities,
          identities_digest: parsed.identities_digest,
          plan_digest: parsed.plan_digest,
@@ -336,8 +338,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          :ok <- match(plan_digest, identities["validation_plan_digest"], :malformed_state),
          {:ok, identities_digest} <- parse_hex(state["identities_digest"]),
          :ok <- match(identities_digest, expected_identities_digest, :malformed_state),
-         {:ok, total_batches} <- parse_positive_integer(state["total_batch_count"]),
-         {:ok, total_files} <- parse_positive_integer(state["total_file_count"]),
+         {:ok, total_batches} <- parse_nonnegative_integer(state["total_batch_count"]),
+         {:ok, total_files} <- parse_nonnegative_integer(state["total_file_count"]),
          {:ok, receipts} <- canonicalize_receipts(state["passed_receipts"], total_batches),
          {:ok, expected_receipts_digest} <- ContinuationCore.digest(receipts),
          {:ok, receipts_digest} <- parse_hex(state["passed_receipts_digest"]),
@@ -348,6 +350,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          :ok <- match(state["completed_file_count"], completed_files, :malformed_state),
          :ok <- match(state["next_batch_index"], completed_batches + 1, :malformed_state),
          :ok <- check_intrinsic_completion(status, completed_batches, total_batches),
+         :ok <-
+           check_intrinsic_file_totals(
+             status,
+             total_batches,
+             total_files,
+             completed_files
+           ),
          {:ok, capacity} <- canonicalize_capacity(state["capacity"]),
          :ok <-
            check_intrinsic_capacity(
@@ -466,6 +475,19 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   defp check_intrinsic_completion("in_progress", completed, total) when completed < total, do: :ok
 
   defp check_intrinsic_completion(_status, _completed, _total), do: {:error, :malformed_state}
+
+  defp check_intrinsic_file_totals("completed", 0, 0, 0), do: :ok
+
+  defp check_intrinsic_file_totals("completed", total_batches, total_files, completed_files)
+       when total_batches > 0 and total_files >= total_batches and completed_files == total_files,
+       do: :ok
+
+  defp check_intrinsic_file_totals("in_progress", total_batches, total_files, completed_files)
+       when total_batches > 0 and total_files >= total_batches and completed_files <= total_files,
+       do: :ok
+
+  defp check_intrinsic_file_totals(_status, _total_batches, _total_files, _completed_files),
+    do: {:error, :malformed_state}
 
   defp check_intrinsic_capacity(nil, "completed", _total_batches, _total_files, _done, _files),
     do: :ok
@@ -994,6 +1016,16 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   defp remaining_batches(_interrupted, _unstarted), do: :invalid
 
+  defp admit_planned_batches([]) do
+    with {:ok, digest} <- plan_digest([]) do
+      {:ok, [], digest, 0, 0}
+    else
+      {:error, :invalid_batch_plan} = error -> error
+      {:error, :malformed_state} = error -> error
+      {:error, _} -> {:error, :invalid_batch_plan}
+    end
+  end
+
   defp admit_planned_batches(batches) when is_list(batches) and batches != [] do
     with :ok <- require_json_clean_list(batches),
          :ok <- require_contiguous_plan(batches),
@@ -1069,6 +1101,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   defp parse_positive_integer(_value), do: {:error, :malformed_state}
 
+  defp parse_nonnegative_integer(value)
+       when is_integer(value) and not is_boolean(value) and value >= 0,
+       do: {:ok, value}
+
+  defp parse_nonnegative_integer(_value), do: {:error, :malformed_state}
+
   defp require_nonnegative_integer(value)
        when is_integer(value) and not is_boolean(value) and value >= 0,
        do: :ok
@@ -1081,6 +1119,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     do: match(stored, expected, :ordinal_drift)
 
   defp check_ordinal_shape(0, [], nil, "in_progress"), do: :ok
+  defp check_ordinal_shape(0, [], nil, "completed"), do: :ok
   defp check_ordinal_shape(0, _receipts, _capacity, _status), do: {:error, :ordinal_drift}
 
   defp check_ordinal_shape(ordinal, _receipts, capacity, "in_progress")
