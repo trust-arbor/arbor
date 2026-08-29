@@ -9,6 +9,22 @@ defmodule Arbor.Actions.SessionGoalsTest do
   # UpdateGoals
   # ============================================================================
 
+  describe "pipeline_internal classification" do
+    test "session_goals_* are graph syscalls, not ordinary tools" do
+      for module <- [
+            SessionGoals.UpdateGoals,
+            SessionGoals.StoreDecompositions,
+            SessionGoals.ProcessProposalDecisions,
+            SessionGoals.StoreIdentity,
+            SessionGoals.PruneStaleIntents
+          ] do
+        assert "pipeline_internal" in Enum.map(module.tags(), &to_string/1)
+        assert Arbor.Actions.pipeline_internal_action?(module)
+        refute module in Arbor.Actions.exposed_actions()
+      end
+    end
+  end
+
   describe "UpdateGoals — schema" do
     test "action metadata" do
       assert SessionGoals.UpdateGoals.name() == "session_goals_update"

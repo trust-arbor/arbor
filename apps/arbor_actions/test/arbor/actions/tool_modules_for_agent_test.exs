@@ -89,14 +89,13 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
       assert Arbor.Actions.Memory.Remember in modules
     end
 
-    test "session_memory graph syscalls never surface as ordinary tools" do
-      # `session_memory.*` appear ONLY as DOT pipeline node targets
-      # (heartbeat-bare/full/goals, bdi-cycle) and route through
-      # `arbor://orchestrator/execute`. They carried no tags, so
-      # pipeline_internal_action?/1 said false and six graph syscalls sat in the
-      # conversational tool menu next to memory_recall — exactly what the
-      # exposure index claims to prevent ("capability grants alone cannot
-      # surface graph syscalls as ordinary tools").
+    test "session graph syscalls never surface as ordinary tools" do
+      # session_memory/goals/exec/llm appear ONLY as DOT pipeline node targets
+      # (heartbeat-bare/full/goals, bdi-cycle, turn) and route through
+      # `arbor://orchestrator/execute`. Untagged, pipeline_internal_action?/1
+      # said false and graph syscalls sat in the conversational tool menu —
+      # exactly what the exposure index claims to prevent ("capability grants
+      # alone cannot surface graph syscalls as ordinary tools").
       #
       # The Engine path sets allow_pipeline_internal: true, so the graphs that
       # legitimately call these are unaffected.
@@ -106,7 +105,15 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
             Arbor.Actions.SessionMemory.Checkpoint,
             Arbor.Actions.SessionMemory.Consolidate,
             Arbor.Actions.SessionMemory.UpdateWorkingMemory,
-            Arbor.Actions.SessionMemory.BackgroundChecks
+            Arbor.Actions.SessionMemory.BackgroundChecks,
+            Arbor.Actions.SessionGoals.UpdateGoals,
+            Arbor.Actions.SessionGoals.StoreDecompositions,
+            Arbor.Actions.SessionGoals.ProcessProposalDecisions,
+            Arbor.Actions.SessionGoals.StoreIdentity,
+            Arbor.Actions.SessionGoals.PruneStaleIntents,
+            Arbor.Actions.SessionExecution.RouteActions,
+            Arbor.Actions.SessionExecution.ExecuteActions,
+            Arbor.Actions.SessionLlm.BuildPrompt
           ] do
         assert Arbor.Actions.pipeline_internal_action?(module),
                "#{inspect(module)} is a graph syscall and must be pipeline_internal"
@@ -114,6 +121,19 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
         refute module in Arbor.Actions.exposed_actions(),
                "#{inspect(module)} leaked into the exposed tool catalog"
       end
+    end
+
+    test "APIAgent exposure keeps dual-use graph actions and hides session syscalls even with orchestrator grant",
+         %{agent_id: agent_id} do
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://orchestrator/execute")
+
+      modules = Arbor.Actions.tool_modules_for_agent(agent_id)
+
+      assert Arbor.Actions.File.Read in modules
+      refute Arbor.Actions.SessionGoals.UpdateGoals in modules
+      refute Arbor.Actions.SessionExecution.RouteActions in modules
+      refute Arbor.Actions.SessionLlm.BuildPrompt in modules
     end
 
     test "is a subset of all_actions/0", %{agent_id: agent_id} do
@@ -144,6 +164,9 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
       refute "file_list" in names
       refute "shell_execute" in names
       refute "session_memory_recall" in names
+      refute "session_goals_update" in names
+      refute "session_exec_route_actions" in names
+      refute "session_llm_build_prompt" in names
 
       # tool_find_tools honours the same set. Exact-name queries so the test
       # exercises the FILTER, not search ranking in an isolated test BEAM.
@@ -159,6 +182,10 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
       refute "file_list" in find.("file_list")
       # blocked → never
       refute "shell_execute" in find.("shell_execute")
+      # pipeline_internal graph syscalls stay undisclosed even on exact-name search
+      refute "session_goals_update" in find.("session_goals_update")
+      refute "session_exec_route_actions" in find.("session_exec_route_actions")
+      refute "session_llm_build_prompt" in find.("session_llm_build_prompt")
     end
   end
 

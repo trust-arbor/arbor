@@ -9,6 +9,16 @@ defmodule Arbor.Actions.SessionExecutionTest do
   # RouteActions
   # ============================================================================
 
+  describe "pipeline_internal classification" do
+    test "session_exec_* are graph syscalls, not ordinary tools" do
+      for module <- [SessionExecution.RouteActions, SessionExecution.ExecuteActions] do
+        assert "pipeline_internal" in Enum.map(module.tags(), &to_string/1)
+        assert Arbor.Actions.pipeline_internal_action?(module)
+        refute module in Arbor.Actions.exposed_actions()
+      end
+    end
+  end
+
   describe "RouteActions — schema" do
     test "action metadata" do
       assert SessionExecution.RouteActions.name() == "session_exec_route_actions"

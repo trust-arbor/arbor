@@ -9,6 +9,14 @@ defmodule Arbor.Actions.SessionLlmTest do
   # BuildPrompt
   # ============================================================================
 
+  describe "pipeline_internal classification" do
+    test "session_llm_build_prompt is a graph syscall, not an ordinary tool" do
+      assert "pipeline_internal" in Enum.map(SessionLlm.BuildPrompt.tags(), &to_string/1)
+      assert Arbor.Actions.pipeline_internal_action?(SessionLlm.BuildPrompt)
+      refute SessionLlm.BuildPrompt in Arbor.Actions.exposed_actions()
+    end
+  end
+
   describe "BuildPrompt — schema" do
     test "action metadata" do
       assert SessionLlm.BuildPrompt.name() == "session_llm_build_prompt"

@@ -112,6 +112,9 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
                FindTools.run(%{query: "session memory recall", limit: 10}, %{})
 
       refute "session_memory_recall" in names
+      refute "session_goals_update" in names
+      refute "session_exec_route_actions" in names
+      refute "session_llm_build_prompt" in names
     end
   end
 
