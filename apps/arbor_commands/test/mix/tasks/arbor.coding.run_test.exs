@@ -563,11 +563,35 @@ defmodule Mix.Tasks.Arbor.Coding.RunTest do
     end
   end
 
+  @tag :security_regression
+  test "security regression: an approval whose task identity is not in documented provenance is ignored" do
+    flat = %{
+      id: "irq_flat",
+      action: :coding_reviewed_validation,
+      metadata: %{"task_id" => @task_id, "worktree" => "/tmp/ws"}
+    }
+
+    [view] = Mix.Tasks.Arbor.Coding.Run.__project_approvals_for_test__([flat])
+    assert view["task_id"] == nil
+    assert view["worktree"] == nil
+
+    [real] =
+      Mix.Tasks.Arbor.Coding.Run.__project_approvals_for_test__([
+        pending("irq_real", :coding_reviewed_validation)
+      ])
+
+    assert real["task_id"] == @task_id
+    assert real["worktree"] == "/tmp/ws"
+  end
+
   defp pending(id, action, task_id \\ @task_id) do
     %{
       id: id,
       action: action,
-      metadata: %{"task_id" => task_id, "worktree" => "/tmp/ws"}
+      metadata: %{
+        "approval_context" => %{"provenance" => %{"task_id" => task_id}, "path" => "/tmp/ws"},
+        "provenance" => %{"task_id" => task_id}
+      }
     }
   end
 

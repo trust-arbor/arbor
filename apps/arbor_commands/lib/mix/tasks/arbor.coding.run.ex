@@ -385,6 +385,10 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
 
   defp project_approvals(other), do: other
 
+  @doc false
+  def __project_approvals_for_test__(list) when is_list(list),
+    do: Enum.map(list, &project_approval/1)
+
   defp project_approval(%{"id" => id, "action" => action} = view)
        when is_binary(id) and is_binary(action) do
     view
@@ -392,14 +396,24 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
     |> Map.put_new("worktree", nil)
   end
 
+  # Documented PendingApproval shape (Arbor.Agent.Orchestration): the task
+  # identity is provenance metadata — `metadata.approval_context.provenance
+  # .task_id` (mirrored at `metadata.provenance.task_id`) — and the worktree
+  # is `metadata.approval_context.path`. Nothing else is consulted; an
+  # approval without that provenance has no task identity and is ignored.
   defp project_approval(%{id: id} = approval) do
     metadata = Map.get(approval, :metadata) || %{}
+    approval_context = documented_map(metadata, "approval_context")
+
+    task_id =
+      documented_meta(documented_map(approval_context, "provenance"), "task_id") ||
+        documented_meta(documented_map(metadata, "provenance"), "task_id")
 
     %{
       "id" => to_string(id),
       "action" => action_name(Map.get(approval, :action)),
-      "task_id" => documented_meta(metadata, "task_id"),
-      "worktree" => documented_meta(metadata, "worktree")
+      "task_id" => task_id,
+      "worktree" => documented_meta(approval_context, "path")
     }
   end
 
@@ -415,6 +429,15 @@ defmodule Mix.Tasks.Arbor.Coding.Run do
   end
 
   defp documented_meta(_map, _key), do: nil
+
+  defp documented_map(map, key) when is_map(map) do
+    case Map.fetch(map, key) do
+      {:ok, value} when is_map(value) -> value
+      _other -> %{}
+    end
+  end
+
+  defp documented_map(_map, _key), do: %{}
 
   defp action_name(action) when is_atom(action), do: Atom.to_string(action)
   defp action_name(action) when is_binary(action), do: action
