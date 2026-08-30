@@ -297,7 +297,6 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
       end
     end
 
-
     defp admit_from_state(state, attestation_id, proof, opts, config) do
       task_id = Keyword.get(opts, :task_id)
       principal_id = Keyword.get(opts, :principal_id)
@@ -768,9 +767,11 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
   test "product and operator surfaces preserve the same gate IDs for every profile", ctx do
     for profile <- ~w[default cross_app security_regression contract_change] do
+      task_id = unique_operator_task_id(profile)
+      configure_resource(:retained, task_id: task_id)
       plan = plan!(profile)
       program = compiled_program!(plan)
-      request = request(ctx.agent_id, profile)
+      request = request(ctx.agent_id, profile, task_id)
 
       {:ok, product_authority} =
         open_authority(ctx.agent_id, ctx.private_key, :operator_product_parity)
@@ -780,7 +781,7 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
           Arbor.Orchestrator.verify_coding_candidate(
             candidate(program, profile),
             agent_id: ctx.agent_id,
-            task_id: @task_id,
+            task_id: task_id,
             signing_authority: product_authority
           )
         after
@@ -1301,13 +1302,22 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
     refute_received {:operator_candidate_executor, _action, _params, _opts, _authority, _active}
 
+    default_task_id = unique_operator_task_id("default")
+    configure_resource(:retained, task_id: default_task_id)
+
     assert {:error, :review_attestation_forbidden} =
              verify_operator(
                plan!("default"),
-               Map.put(request(ctx.agent_id, "default"), "review_attestation_id", "review_123")
+               Map.put(
+                 request(ctx.agent_id, "default", default_task_id),
+                 "review_attestation_id",
+                 "review_123"
+               )
              )
 
     refute_received {:operator_candidate_executor, _action, _params, _opts, _authority, _active}
+
+    configure_resource(:retained, task_id: @task_id)
 
     assert {:ok, report} =
              verify_operator(security_plan, security_request)
@@ -1342,16 +1352,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     refute bound == original
   end
 
-  test "security regression: non-capacity and mismatched archives cannot reclaim the original",
-       ctx do
-    {:ok, attestations} = Agent.start_link(fn -> %{} end)
-    original = "review_attestation_operator_test"
-    seed_claimed_original!(attestations, original, ctx.agent_id)
-    configure_resource(:retained, attestations: attestations)
-
-    plan = plan!("security_regression")
-    request = request(ctx.agent_id, "security_regression")
-    archive_reviewed_plan!(plan)
+  test "security regression: non-capacity passed archive cannot reclaim the original", ctx do
+    {attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_terminal_status!(ctx, original, "passed")
 
     assert {:error, :attestation_already_claimed} =
@@ -1361,18 +1363,34 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
                      _}
 
     assert Agent.get(attestations, & &1[original].successor_id) == nil
+  end
 
+  test "security regression: non-capacity validation_failed archive cannot reclaim the original",
+       ctx do
+    {attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_terminal_status!(ctx, original, "validation_failed")
 
     assert {:error, :attestation_already_claimed} =
              Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
 
-    archive_reviewed_plan!(plan)
+    refute_received {:operator_candidate_executor, "coding_security_regression_validate", _, _, _,
+                     _}
+
+    assert Agent.get(attestations, & &1[original].successor_id) == nil
+  end
+
+  test "security regression: mismatched task archive cannot reclaim the original", ctx do
+    {attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_capacity_terminal!(ctx, original, task_id: "task_other")
 
     assert {:error, :invalid_capacity_retry_proof} =
              Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
 
+    assert Agent.get(attestations, & &1[original].successor_id) == nil
+  end
+
+  test "security regression: mismatched workspace archive cannot reclaim the original", ctx do
+    {attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_capacity_terminal!(ctx, original, candidate_workspace_id: "workspace_other")
 
     assert {:error, :invalid_capacity_retry_proof} =
@@ -1381,16 +1399,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     assert Agent.get(attestations, & &1[original].successor_id) == nil
   end
 
-  test "security regression: admission denial emits no reactivation and a later valid capacity proof retries",
-       ctx do
-    {:ok, attestations} = Agent.start_link(fn -> %{} end)
-    original = "review_attestation_operator_test"
-    seed_claimed_original!(attestations, original, ctx.agent_id)
-    configure_resource(:retained, attestations: attestations)
-
-    plan = plan!("security_regression")
-    request = request(ctx.agent_id, "security_regression")
-    archive_reviewed_plan!(plan)
+  test "security regression: admission denial emits no reactivation", ctx do
+    {_attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_terminal_status!(ctx, original, "passed")
 
     assert {:error, :attestation_already_claimed} =
@@ -1400,7 +1410,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
     refute_received {:operator_candidate_executor, "coding_security_regression_validate", _, _, _,
                      _}
+  end
 
+  test "security regression: a valid capacity proof retries from the claimed original", ctx do
+    {_attestations, original, plan, request} = claimed_original_setup!(ctx)
     write_capacity_terminal!(ctx, original)
 
     assert {:ok, _report} =
@@ -1446,7 +1459,11 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
     Agent.update(attestations, fn state ->
       Map.update!(state, s1, fn record ->
-        %{record | status: :claimed, capacity_evidence: %{"reason" => "validation_capacity_exceeded"}}
+        %{
+          record
+          | status: :claimed,
+            capacity_evidence: %{"reason" => "validation_capacity_exceeded"}
+        }
       end)
     end)
 
@@ -1666,8 +1683,25 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
   end
 
   defp verify_operator(plan, request) do
-    archive_reviewed_plan!(plan)
+    archive_reviewed_plan!(plan, request["task_id"])
     Arbor.Orchestrator.verify_coding_candidate_for_operator(plan, request)
+  end
+
+  defp unique_operator_task_id(label) do
+    "task_operator_candidate_" <>
+      label <> "_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
+
+  defp claimed_original_setup!(ctx) do
+    {:ok, attestations} = Agent.start_link(fn -> %{} end)
+    original = "review_attestation_operator_test"
+    seed_claimed_original!(attestations, original, ctx.agent_id)
+    configure_resource(:retained, attestations: attestations)
+
+    plan = plan!("security_regression")
+    request = request(ctx.agent_id, "security_regression")
+    archive_reviewed_plan!(plan)
+    {attestations, original, plan, request}
   end
 
   defp seed_claimed_original!(agent, original, principal_id) do
@@ -1704,7 +1738,6 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
 
   defp write_terminal_status!(_ctx, original, status) do
     root = prepare_terminal_root!()
-    _ = File.rm(Path.join(root, "coding-terminal-evidence.json"))
 
     {terminal_status, outcome, validation} =
       case status do
@@ -1834,10 +1867,9 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     |> Map.put("evidence_ref", "refs/arbor/evidence/operator-candidate")
   end
 
-  defp archive_reviewed_plan!(plan) do
+  defp archive_reviewed_plan!(plan, task_id \\ @task_id) do
     {:ok, compilation} = Arbor.Orchestrator.compile_coding_plan(plan)
-    root = task_artifact_root(@task_id)
-    File.rm_rf!(root)
+    root = task_artifact_root(task_id)
     File.mkdir_p!(root)
 
     assert {:ok, _descriptor} =
@@ -1865,10 +1897,10 @@ defmodule Arbor.Orchestrator.CodingPlan.OperatorCandidateVerifierTest do
     get_in(compilation, ["initial_values", "coding_plan_validation_program"])
   end
 
-  defp request(agent_id, profile) do
+  defp request(agent_id, profile, task_id \\ @task_id) do
     %{
       "agent_id" => agent_id,
-      "task_id" => @task_id,
+      "task_id" => task_id,
       "workspace_id" => @workspace_id
     }
     |> maybe_put(

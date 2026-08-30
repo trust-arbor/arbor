@@ -1357,11 +1357,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
   end
 
-  defp prepare_finalize_artifacts do
+  defp unique_finalize_task_id do
+    "task_coding_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
+
+  defp prepare_finalize_artifacts(task_id \\ "task_coding_1") do
     put_success_runner_reply()
-    {:ok, result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+    {:ok, result} =
+      CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
+
     Process.put(:finalize_run_result, result)
-    task_terminal_root("task_coding_1")
+    task_terminal_root(task_id)
+  end
+
+  defp capacity_finalize_variant(task_id, validation) do
+    root = prepare_finalize_artifacts(task_id)
+
+    result =
+      root
+      |> finalize_result()
+      |> Map.put("status", "validation_capacity_exceeded")
+      |> Map.put("canonical_status", "validation_capacity_exceeded")
+      |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
+      |> Map.put("validation", validation)
+
+    {result, valid_context(%{"task_id" => task_id})}
   end
 
   defp finalize_result(root) do
@@ -7192,50 +7213,42 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "requires complete CrossApp capacity evidence and rejects status mismatches" do
-      root = prepare_finalize_artifacts()
-
-      malformed =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put("validation", [%{"reason" => "validation_capacity_exceeded"}])
+      {malformed, malformed_context} =
+        capacity_finalize_variant(unique_finalize_task_id(), [
+          %{"reason" => "validation_capacity_exceeded"}
+        ])
 
       assert {:error, {:invalid_finalize_result, :capacity_handoff}} =
-               CodingTaskExecutor.finalize_task("agent_1", malformed, [], valid_context())
+               CodingTaskExecutor.finalize_task("agent_1", malformed, [], malformed_context)
 
-      valid =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put("validation", capacity_validation_fixture())
+      {valid, valid_ctx} =
+        capacity_finalize_variant(unique_finalize_task_id(), capacity_validation_fixture())
 
       assert {:ok, _finalized} =
-               CodingTaskExecutor.finalize_task("agent_1", valid, [], valid_context())
+               CodingTaskExecutor.finalize_task("agent_1", valid, [], valid_ctx)
 
-      default_capacity =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put("validation", default_capacity_validation_fixture())
+      {default_capacity, default_context} =
+        capacity_finalize_variant(
+          unique_finalize_task_id(),
+          default_capacity_validation_fixture()
+        )
 
       assert {:ok, finalized_default} =
-               CodingTaskExecutor.finalize_task("agent_1", default_capacity, [], valid_context())
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 default_capacity,
+                 [],
+                 default_context
+               )
 
       assert [report] = finalized_default["validation"]
       assert report["reason"] == "validation_capacity_exceeded"
       assert report["termination"]["killed"] == true
 
       # Security capacity requires timed_out; killed-only security reports fail closed.
-      security_killed_only =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put(
-          "validation",
+      {security_killed_only, security_killed_context} =
+        capacity_finalize_variant(
+          unique_finalize_task_id(),
           security_capacity_validation_fixture(timed_out: false, killed: true)
         )
 
@@ -7244,17 +7257,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  security_killed_only,
                  [],
-                 valid_context()
+                 security_killed_context
                )
 
       # evidence_type-only killed report must not fall through default killed-only path.
-      evidence_type_killed_only =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put(
-          "validation",
+      {evidence_type_killed_only, evidence_type_killed_context} =
+        capacity_finalize_variant(
+          unique_finalize_task_id(),
           security_capacity_validation_fixture(
             timed_out: false,
             killed: true,
@@ -7267,16 +7276,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  evidence_type_killed_only,
                  [],
-                 valid_context()
+                 evidence_type_killed_context
                )
 
-      security_timed_out =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put(
-          "validation",
+      {security_timed_out, security_timed_out_context} =
+        capacity_finalize_variant(
+          unique_finalize_task_id(),
           security_capacity_validation_fixture(timed_out: true, killed: false)
         )
 
@@ -7285,19 +7290,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  security_timed_out,
                  [],
-                 valid_context()
+                 security_timed_out_context
                )
 
       assert [security_report] = finalized_security["validation"]
       assert security_report["termination"]["timed_out"] == true
 
-      evidence_type_timed_out =
-        finalize_result(root)
-        |> Map.put("status", "validation_capacity_exceeded")
-        |> Map.put("canonical_status", "validation_capacity_exceeded")
-        |> Map.put("outcome", terminal_outcome("validation_capacity_exceeded"))
-        |> Map.put(
-          "validation",
+      {evidence_type_timed_out, evidence_type_timed_out_context} =
+        capacity_finalize_variant(
+          unique_finalize_task_id(),
           security_capacity_validation_fixture(
             timed_out: true,
             killed: false,
@@ -7310,7 +7311,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  evidence_type_timed_out,
                  [],
-                 valid_context()
+                 evidence_type_timed_out_context
                )
 
       assert [evidence_type_report] = finalized_evidence_type["validation"]
@@ -7324,7 +7325,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         |> Map.put("outcome", terminal_outcome("validation_failed"))
 
       assert {:error, {:invalid_finalize_result, :capacity_evidence_mismatch}} =
-               CodingTaskExecutor.finalize_task("agent_1", mismatched, [], valid_context())
+               CodingTaskExecutor.finalize_task("agent_1", mismatched, [], valid_ctx)
     end
 
     test "attaches evidence while preserving the successful executor result" do

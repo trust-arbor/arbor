@@ -315,7 +315,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       # execute_actions, update_goals, prune_intents, check_loop,
       # build_followup, llm_followup, done = 20 nodes
       # (2026-08-06: harness bg_checks removed; memory_checks and store_identity
-      # added — see heartbeat.dot)
+      # added. Idle is an extra mode_router edge to prune_intents, not a new node.)
       assert map_size(graph.nodes) == 20
 
       # Verify mode-specific nodes exist
@@ -358,6 +358,7 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       assert graph.nodes["select_mode"].attrs["type"] == "exec"
       assert graph.nodes["select_mode"].attrs["action"] == "session.mode_select"
+      assert graph.nodes["select_mode"].attrs["param.idle_every"] == "10"
 
       assert graph.nodes["process"].attrs["type"] == "exec"
       assert graph.nodes["process"].attrs["action"] == "session.process_results"
@@ -381,7 +382,7 @@ defmodule Arbor.Orchestrator.SessionTest do
     end
 
     @tag :spike
-    test "mode_router has four conditional outgoing edges" do
+    test "mode_router has five conditional outgoing edges" do
       graph = parse!(@heartbeat_dot_path)
 
       mode_edges =
@@ -389,9 +390,8 @@ defmodule Arbor.Orchestrator.SessionTest do
           edge.from == "mode_router"
         end)
 
-      assert length(mode_edges) == 4
+      assert length(mode_edges) == 5
 
-      # Each should have a condition
       conditions =
         Enum.map(mode_edges, fn edge ->
           Map.get(edge.attrs, "condition", "")
@@ -399,6 +399,12 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       assert Enum.all?(conditions, &(&1 != "")),
              "All mode_router edges should have conditions"
+
+      assert Enum.any?(conditions, &(&1 =~ "goal_pursuit"))
+      assert Enum.any?(conditions, &(&1 =~ "reflection"))
+      assert Enum.any?(conditions, &(&1 =~ "plan_execution"))
+      assert Enum.any?(conditions, &(&1 =~ "consolidation"))
+      assert Enum.any?(conditions, &(&1 =~ "idle"))
     end
 
     @tag :spike
@@ -428,6 +434,14 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       assert length(to_consolidate) == 1
       assert hd(to_consolidate) |> elem(1) =~ "consolidation"
+
+      # idle skips the LLM and process path, going straight to prune_intents
+      to_prune =
+        mode_edges
+        |> Enum.filter(fn {to, _cond} -> to == "prune_intents" end)
+
+      assert length(to_prune) == 1
+      assert hd(to_prune) |> elem(1) =~ "idle"
     end
 
     @tag :spike
@@ -447,6 +461,11 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       # The followup loop also re-enters process
       assert MapSet.member?(converge_sources, "llm_followup")
+
+      # Idle is intentional and does not visit process; it joins at prune_intents.
+      refute Enum.any?(graph.edges, fn edge ->
+               edge.from == "mode_router" and edge.to == "process"
+             end)
     end
 
     @tag :spike

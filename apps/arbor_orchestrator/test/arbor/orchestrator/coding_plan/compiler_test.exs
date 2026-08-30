@@ -326,15 +326,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
+    byte_count = byte_size(ctx.template_source)
+    node_count = map_size(graph.nodes)
+    edge_count = length(graph.edges)
 
-    assert byte_size(ctx.template_source) == 90_794
-    assert map_size(graph.nodes) == 259
-    assert length(graph.edges) == 378
-    assert byte_size(ctx.template_source) <= 262_144
+    assert byte_count <= 262_144
     # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
-    assert map_size(graph.nodes) <= 320
-    assert length(graph.edges) <= 512
+    assert node_count <= 320
+    assert edge_count <= 512
+
+    # Exact parser inventory of the current intentional compiler-owned template.
+    assert {byte_count, node_count, edge_count} == {91_073, 260, 379}
   end
 
   test "v2 direct prompts bind the frozen packet without opening checkpoints", ctx do
