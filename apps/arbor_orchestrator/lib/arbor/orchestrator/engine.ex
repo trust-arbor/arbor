@@ -53,6 +53,7 @@ defmodule Arbor.Orchestrator.Engine do
   @max_result_failure_reasons 32
   @max_result_failure_node_id_bytes 256
   @max_result_failure_input_bytes 4_096
+  @orchestrator_execute_resource "arbor://orchestrator/execute"
 
   # Public API delegations for backward compatibility
   defdelegate should_retry_exception?(exception), to: Executor
@@ -3054,30 +3055,61 @@ defmodule Arbor.Orchestrator.Engine do
         _ -> Keyword.get(opts, :agent_id)
       end
 
-    auth_opts =
-      case authority do
-        %RunAuthorization{} -> RunAuthorization.scope_opts(authority)
-        _ -> []
-      end
-
     case agent_id do
       nil ->
         :ok
 
       agent_id ->
-        with result <-
+        scope_opts = resume_scope_opts(authority)
+
+        with {:ok, auth_opts} <- resume_auth_opts(scope_opts, opts),
+             result <-
                Arbor.Security.authorize(
                  agent_id,
-                 "arbor://orchestrator/execute",
+                 @orchestrator_execute_resource,
                  :resume,
                  auth_opts
                ),
              :ok <- normalize_resume_authorization(result),
-             :ok <- revalidate_resume_caller(authority, auth_opts) do
+             :ok <- revalidate_resume_caller(authority, scope_opts) do
           :ok
         end
     end
   end
+
+  # Resume reauthorization needs a fresh, single-use identity proof. The
+  # process-local SigningAuthority was validated by RunAuthorization.prepare/2
+  # and is principal-bound for authorized runs. It never enters the checkpoint
+  # or run authorization projection.
+  defp resume_auth_opts(scope_opts, opts) do
+    case Keyword.fetch(opts, :signing_authority) do
+      {:ok, %SigningAuthority{} = signing_authority} ->
+        case Arbor.Security.sign_with_authority(
+               signing_authority,
+               @orchestrator_execute_resource
+             ) do
+          {:ok, signed_request} ->
+            {:ok, Keyword.put(scope_opts, :signed_request, signed_request)}
+
+          {:error, reason} ->
+            {:error, {:unauthorized_resume, {:authority_signing_failed, reason}}}
+
+          _other ->
+            {:error, {:unauthorized_resume, :unexpected_authority_signing_result}}
+        end
+
+      {:ok, _invalid} ->
+        {:error, {:unauthorized_resume, :invalid_signing_authority}}
+
+      :error ->
+        {:ok, scope_opts}
+    end
+  end
+
+  defp resume_scope_opts(%RunAuthorization{} = authority),
+    do: RunAuthorization.scope_opts(authority)
+
+  defp resume_scope_opts(_authority), do: []
 
   defp normalize_resume_authorization(:ok), do: :ok
   defp normalize_resume_authorization({:ok, :authorized}), do: :ok
@@ -3102,7 +3134,7 @@ defmodule Arbor.Orchestrator.Engine do
            Enum.any?(capabilities, fn capability ->
              Arbor.Security.capability_authorizes?(
                capability,
-               "arbor://orchestrator/execute",
+               @orchestrator_execute_resource,
                scope_opts
              )
            end) do

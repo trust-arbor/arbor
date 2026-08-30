@@ -79,6 +79,15 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
   }
   """
 
+  @authority_resume_dot """
+  digraph AuthorityResumeGate {
+    graph [goal="resume with fresh authority identity proof"]
+    start [shape=Mdiamond]
+    done [shape=Msquare]
+    start -> done
+  }
+  """
+
   defp logs_root do
     Path.join(
       System.tmp_dir!(),
@@ -203,4 +212,106 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
                function_handler: fn _args -> {:ok, %{ran: true}} end
              )
   end
+
+  test "security regression: SigningAuthority supplies a fresh resume identity proof", ctx do
+    previous = %{
+      identity_verification: Application.get_env(:arbor_security, :identity_verification),
+      capability_signing: Application.get_env(:arbor_security, :capability_signing_required),
+      strict_identity: Application.get_env(:arbor_security, :strict_identity_mode),
+      uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
+      reflex: Application.get_env(:arbor_security, :reflex_checking_enabled)
+    }
+
+    Application.put_env(:arbor_security, :identity_verification, true)
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+
+    {:ok, identity} =
+      Arbor.Contracts.Security.Identity.generate(name: "engine-resume-authority-proof")
+
+    :ok =
+      Arbor.Security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity))
+
+    :ok = Arbor.Security.store_signing_key(identity.agent_id, identity.private_key)
+    :ok = TestCapabilities.grant_orchestrator_access(identity.agent_id)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        identity.agent_id,
+        identity.private_key,
+        purpose: :engine_resume_test,
+        owner: self()
+      )
+
+    {:ok, authority} = Arbor.Security.open_signing_authority(proof)
+
+    root = logs_root()
+    run_id = "resume_authority_proof_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      _ = Arbor.Security.close_signing_authority(authority)
+      _ = TestCapabilities.revoke_all(identity.agent_id)
+      _ = Arbor.Security.delete_signing_key(identity.agent_id)
+      _ = Arbor.Security.deregister_identity(identity.agent_id)
+      File.rm_rf(root)
+
+      restore_env(
+        :identity_verification,
+        previous.identity_verification
+      )
+
+      restore_env(:capability_signing_required, previous.capability_signing)
+      restore_env(:strict_identity_mode, previous.strict_identity)
+      restore_env(:uri_registry_enforcement, previous.uri_registry)
+      restore_env(:reflex_checking_enabled, previous.reflex)
+    end)
+
+    {:ok, _} =
+      Arbor.Orchestrator.run_as(
+        @authority_resume_dot,
+        identity.agent_id,
+        authority,
+        logs_root: root,
+        run_id: run_id,
+        task_id: run_id,
+        journal_opts: ctx.journal_opts
+      )
+
+    checkpoint_path = Path.join(root, "checkpoint.json")
+    assert File.exists?(checkpoint_path)
+
+    assert {:ok, %Record{} = finished} =
+             RunJournal.get_record(run_id, ctx.journal_opts)
+
+    assert :ok =
+             RunJournal.put(
+               %Record{
+                 finished
+                 | status: :recovering,
+                   finished_at: nil,
+                   duration_ms: nil,
+                   failure_reason: nil,
+                   owner_node: node(),
+                   spawning_pid: nil
+               },
+               ctx.journal_opts
+             )
+
+    assert {:ok, _result} =
+             Arbor.Orchestrator.run_as(
+               @authority_resume_dot,
+               identity.agent_id,
+               authority,
+               logs_root: root,
+               resume_from: checkpoint_path,
+               run_id: run_id,
+               task_id: run_id,
+               journal_opts: ctx.journal_opts
+             )
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_security, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_security, key, value)
 end

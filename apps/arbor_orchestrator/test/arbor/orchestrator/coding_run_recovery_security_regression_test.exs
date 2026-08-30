@@ -65,15 +65,19 @@ defmodule Arbor.Orchestrator.CodingRunRecoverySecurityRegressionTest do
   end
 
   test "coordinator skip contract never opens an authority for task-owned or unavailable coding roots" do
+    suffix = :crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)
+
     record = %Record{
-      run_id: "task_missing_#{System.unique_integer([:positive])}",
+      run_id: "task_missing_#{suffix}",
       pipeline_id: "p",
       graph_hash: String.duplicate("a", 64),
       execution_principal: "agent_x",
       logs_root: "/tmp/not-a-coding-root"
     }
 
-    assert {:error, :authentication_unavailable} =
+    # An unavailable coding logs root must remain TaskStore-owned. Letting the
+    # generic coordinator proceed here could create a second lifecycle writer.
+    assert {:skip, :task_store_owned} =
              CodingRunRecovery.resolve_coordinator_options(record)
   end
 
