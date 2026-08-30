@@ -4659,6 +4659,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       {envelope, receipt, digest} = g2_completed_envelope(task_id)
       archive? = Keyword.get(opts, :archive, true)
       extra_context = Keyword.get(opts, :context, %{})
+
+      envelope =
+        case Keyword.get(opts, :transform_envelope) do
+          fun when is_function(fun, 1) -> fun.(envelope)
+          nil -> envelope
+        end
+
       public_envelope = Map.delete(envelope, "sealed_static_receipt")
 
       Application.put_env(
@@ -4810,6 +4817,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       }
 
       {envelope, receipt, digest}
+    end
+
+    defp legacy_v1_progress_envelope(envelope) when is_map(envelope) do
+      progress =
+        envelope
+        |> Map.fetch!("progress")
+        |> Map.put("schema_version", 1)
+        |> Map.delete("refinement")
+
+      Map.put(envelope, "progress", progress)
     end
 
     defp run_with_profile_verification(profile, action_result, context_overrides \\ %{}) do
@@ -5273,6 +5290,44 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["verification_report"]["status"] == "passed"
       assert [%{"disposition_type" => "completed", "passed" => true}] = result["validation"]
       refute inspect(result["validation"]) =~ ~s("passed_receipts" =>)
+    end
+
+    test "legacy schema-v1 CrossApp progress still projects a bounded public validation summary" do
+      assert {:ok, result} =
+               run_with_g2_cross_app_verification(
+                 transform_envelope: &legacy_v1_progress_envelope/1
+               )
+
+      assert result["verification_report"]["status"] == "passed"
+
+      assert [%{"disposition_type" => "completed", "passed" => true} = summary] =
+               result["validation"]
+
+      refute Map.has_key?(summary, "progress")
+      refute Map.has_key?(summary, "progress_binding")
+      refute Map.has_key?(summary, "passed_receipts")
+      refute Map.has_key?(summary, "sealed_static_receipt")
+      refute Map.has_key?(summary, "identities")
+      refute Map.has_key?(summary, "refinement")
+      refute inspect(result) =~ ~s("passed_receipts" =>)
+      refute inspect(result) =~ ~s("sealed_static_receipt" =>)
+      assert summary["schema_version"] == 1
+      assert is_binary(summary["plan_digest"])
+      assert is_binary(summary["static_stage_receipt_digest"])
+    end
+
+    test "unsupported future CrossApp progress schema is not exposed as a public validation summary" do
+      current = Actions.coding_cross_app_progress_schema_version()
+      assert is_integer(current) and not is_boolean(current) and current >= 1
+      unsupported = current + 1
+      refute unsupported == 1
+
+      assert {:error, {:invalid_terminal_evidence, _reason}} =
+               run_with_g2_cross_app_verification(
+                 transform_envelope: fn envelope ->
+                   put_in(envelope, ["progress", "schema_version"], unsupported)
+                 end
+               )
     end
 
     test "unpublished CrossApp static receipt cannot become a success terminal" do

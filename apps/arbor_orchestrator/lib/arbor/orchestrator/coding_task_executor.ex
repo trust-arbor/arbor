@@ -5606,7 +5606,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          binding when is_map(binding) and not is_struct(binding) <-
            Map.get(map, "progress_binding"),
          1 <- Map.get(map, "schema_version"),
-         1 <- Map.get(progress, "schema_version"),
+         true <- supported_cross_app_progress_schema?(Map.get(progress, "schema_version")),
          disposition when disposition in ["completed", "capacity_handoff"] <-
            Map.get(map, "disposition_type"),
          status when status in ["completed", "in_progress"] <-
@@ -5651,6 +5651,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       _other -> :error
     end
   end
+
+  # Admit exact current Actions-reported CrossApp progress schema plus legacy v1.
+  # Facade errors, non-integers, and unknown versions fail closed.
+  defp supported_cross_app_progress_schema?(version)
+       when is_integer(version) and not is_boolean(version) and version >= 1 do
+    case Arbor.Actions.coding_cross_app_progress_schema_version() do
+      current when is_integer(current) and not is_boolean(current) and current >= 1 ->
+        version === 1 or version === current
+
+      _other ->
+        false
+    end
+  end
+
+  defp supported_cross_app_progress_schema?(_version), do: false
 
   defp valid_cross_app_summary_disposition?(map, "completed", "completed"),
     do: Map.get(map, "passed") === true
