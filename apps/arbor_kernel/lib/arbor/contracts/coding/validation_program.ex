@@ -14,8 +14,8 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   Executor and authorization wiring is the **next packet** and is intentionally
   absent here: policy for the exact resource URI, `SignedRequest` and approval
   binding, approved-retry equality, argv `--` separation, and revalidation
-  before execution. See the council decision of 2026-08-29 (13/13) and
-  `.arbor/roadmap/0-inbox/software-factory-operator-loop-and-remote-hosting.md`.
+  before execution. See the council decision of 2026-08-29 (13/13) and the
+  durable factory contract in `docs/arbor/SOFTWARE_FACTORY.md`.
   """
 
   use TypedStruct
@@ -27,15 +27,17 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   @digest_prefix "sha256:"
   @uri_prefix "arbor://action/coding/validate/v1/"
   @hex64_re ~r/\A[0-9a-f]{64}\z/
+  @snapshot_digest_re ~r/\Asha256:[0-9a-f]{64}\z/
+  @c0_del_re ~r/[\x00-\x1F\x7F]/
   @drive_letter_re ~r/\A[A-Za-z]:/
   @max_json_safe_integer 9_007_199_254_740_991
   @max_text_bytes 256
-  @max_digest_bytes 128
   @max_path_bytes 4_096
   @max_component_bytes 255
   @max_path_depth 48
   @max_stages 16
   @max_test_paths 256
+  @max_inventory_entries 4_096
   @fields [
     :schema_version,
     :profile,
@@ -88,11 +90,16 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   @spec stage_kinds() :: [stage_kind()]
   def stage_kinds, do: @stage_kinds
 
+  @doc "Canonical candidate-tree digest pattern: `sha256:` plus 64 lowercase hex."
+  @spec snapshot_digest_pattern() :: Regex.t()
+  def snapshot_digest_pattern, do: @snapshot_digest_re
+
   @doc """
   Construct and validate a closed validation-program manifest.
 
   `inventory` is constructor-only (not stored). When `mix_test` stages are
-  present, paths are admitted through `admit_test_paths/2`.
+  present, requested paths are admitted first and the inventory is indexed
+  once, then reused across those stages.
   """
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
@@ -131,12 +138,16 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   `{path, type}` / `%{path, type}` records (`:regular`, `:directory`,
   `:symlink`). Directory and symlink rejection uses that type, never a
   lexical prefix of another path.
+
+  Requested paths are validated before the inventory is scanned. The scan is
+  bounded and retains only entries whose normalized path is in the requested
+  set. Inventory-entry failures use `{:invalid_inventory, reason}`.
   """
   @spec admit_test_paths([term()], [inventory_entry()]) ::
           {:ok, [String.t()]} | {:error, term()}
   def admit_test_paths(paths, inventory) when is_list(paths) and is_list(inventory) do
-    with {:ok, index} <- inventory_index(inventory),
-         {:ok, normalized} <- normalize_requested_paths(paths) do
+    with {:ok, normalized} <- normalize_requested_paths(paths),
+         {:ok, index} <- inventory_index(inventory, MapSet.new(normalized)) do
       lookup_admitted_paths(normalized, index)
     end
   rescue
@@ -182,25 +193,23 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   Canonical reviewed-validation resource URI.
 
   The digest hex is a path segment:
-  `arbor://action/coding/validate/v1/<hex>`. A `#fragment` form is rejected
-  by `parse_resource_uri/1`.
+  `arbor://action/coding/validate/v1/<hex>`. `parse_resource_uri/1` accepts
+  only that exact spelling and rejects `#fragment`, query, trailing slash,
+  and invalid UTF-8.
   """
   @spec resource_uri(t()) :: String.t()
   def resource_uri(%__MODULE__{} = program) do
     @uri_prefix <> digest_hex(digest(program))
   end
 
-  @doc "Parse a path-segment resource URI and return the `sha256:` digest."
+  @doc "Parse an exact path-segment resource URI and return the `sha256:` digest."
   @spec parse_resource_uri(String.t()) :: {:ok, String.t()} | {:error, term()}
   def parse_resource_uri(uri) when is_binary(uri) do
-    with :ok <- reject_fragment_or_query(uri),
-         {:ok, parsed} <- CapabilityUri.parse(uri),
-         :ok <- match_resource_segments(parsed.segments) do
-      {:ok, @digest_prefix <> List.last(parsed.segments)}
-    else
-      {:error, _reason} = error -> error
-      _ -> {:error, {:invalid_resource_uri, :malformed}}
-    end
+    parse_valid_resource_uri(uri)
+  rescue
+    _ -> {:error, {:invalid_resource_uri, :malformed}}
+  catch
+    _, _ -> {:error, {:invalid_resource_uri, :malformed}}
   end
 
   def parse_resource_uri(_uri), do: {:error, {:invalid_resource_uri, :malformed}}
@@ -208,8 +217,9 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   @doc """
   Human-readable manifest for the operator gate.
 
-  Profile, stage list, exact paths, counts, budget split, snapshot id, and
-  digest fingerprint are taken from the same canonical bytes as `digest/1`.
+  Interpolates admitted struct fields (profile, stages, exact paths, counts,
+  budget split, snapshot id, containment, executor). Only the digest and
+  fingerprint are derived from `canonical_encode/1` via `digest/1`.
   """
   @spec render(t()) :: String.t()
   def render(%__MODULE__{} = program) do
@@ -236,6 +246,21 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
     |> Enum.join("\n")
   end
 
+  defp parse_valid_resource_uri(uri) do
+    with true <- String.valid?(uri),
+         :ok <- reject_fragment_or_query(uri),
+         {:ok, parsed} <- CapabilityUri.parse(uri),
+         {:ok, hex} <- resource_hex(parsed.segments),
+         true <- uri == @uri_prefix <> hex do
+      {:ok, @digest_prefix <> hex}
+    else
+      false -> {:error, {:invalid_resource_uri, :malformed}}
+      {:error, {:invalid_resource_uri, _}} = error -> error
+      {:error, _reason} -> {:error, {:invalid_resource_uri, :malformed}}
+      _ -> {:error, {:invalid_resource_uri, :malformed}}
+    end
+  end
+
   defp normalize_constructor(attrs) do
     with {:ok, attrs} <- normalize_object(attrs, @constructor_fields) do
       {inventory, attrs} = Map.pop(attrs, :inventory, [])
@@ -258,10 +283,20 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   end
 
   defp admit_snapshot_digest(value) when is_binary(value) do
-    admit_text(value, "snapshot_digest", @max_digest_bytes)
+    cond do
+      not String.valid?(value) ->
+        {:error, {:invalid_field, "snapshot_digest", :invalid_utf8}}
+
+      Regex.match?(@snapshot_digest_re, value) ->
+        {:ok, value}
+
+      true ->
+        {:error, {:invalid_field, "snapshot_digest", :not_a_digest}}
+    end
   end
 
-  defp admit_snapshot_digest(_value), do: {:error, {:missing_field, "snapshot_digest"}}
+  defp admit_snapshot_digest(_value),
+    do: {:error, {:invalid_field, "snapshot_digest", :not_a_digest}}
 
   defp normalize_budget(attrs) do
     case Map.fetch(attrs, :budget) do
@@ -276,44 +311,94 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
          {:ok, compile_share_ms} <- required_integer(budget, :compile_share_ms),
          {:ok, evidence_share_ms} <- required_integer(budget, :evidence_share_ms),
          {:ok, total_ms} <- required_integer(budget, :total_ms) do
-      if compile_share_ms + evidence_share_ms <= total_ms do
-        {:ok,
-         %{
-           compile_share_ms: compile_share_ms,
-           evidence_share_ms: evidence_share_ms,
-           total_ms: total_ms
-         }}
-      else
-        {:error, {:invalid_field, "budget", :shares_exceed_total}}
-      end
+      finish_budget(compile_share_ms, evidence_share_ms, total_ms)
+    end
+  end
+
+  defp finish_budget(compile_share_ms, evidence_share_ms, total_ms) do
+    if compile_share_ms + evidence_share_ms <= total_ms do
+      {:ok,
+       %{
+         compile_share_ms: compile_share_ms,
+         evidence_share_ms: evidence_share_ms,
+         total_ms: total_ms
+       }}
+    else
+      {:error, {:invalid_field, "budget", :shares_exceed_total}}
     end
   end
 
   defp normalize_stages(attrs, inventory) do
     case Map.fetch(attrs, :stages) do
-      {:ok, stages} when is_list(stages) -> collect_stages(stages, inventory, 0, [])
+      {:ok, stages} when is_list(stages) -> prepare_and_admit_stages(stages, inventory)
       {:ok, _stages} -> {:error, {:invalid_field, "stages", :expected_list}}
       :error -> {:error, {:missing_field, "stages"}}
     end
   end
 
-  defp collect_stages([], _inventory, _index, acc), do: {:ok, Enum.reverse(acc)}
-
-  defp collect_stages(_stages, _inventory, index, _acc) when index >= @max_stages,
-    do: {:error, {:invalid_field, "stages", :list_too_large}}
-
-  defp collect_stages([stage | rest], inventory, index, acc) do
-    with {:ok, stage} <- admit_stage(stage, inventory) do
-      collect_stages(rest, inventory, index + 1, [stage | acc])
+  defp prepare_and_admit_stages(stages, inventory) do
+    with {:ok, prepared} <- collect_prepared_stages(stages, 0, []),
+         {:ok, index} <- inventory_index_for_stages(prepared, inventory) do
+      admit_prepared_stages(prepared, index, [])
     end
   end
 
-  defp collect_stages(_improper, _inventory, _index, _acc),
+  defp collect_prepared_stages([], _index, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp collect_prepared_stages(_stages, index, _acc) when index >= @max_stages,
+    do: {:error, {:invalid_field, "stages", :list_too_large}}
+
+  defp collect_prepared_stages([stage | rest], index, acc) do
+    with {:ok, prepared} <- prepare_stage(stage) do
+      collect_prepared_stages(rest, index + 1, [prepared | acc])
+    end
+  end
+
+  defp collect_prepared_stages(_improper, _index, _acc),
     do: {:error, {:invalid_field, "stages", :improper_list}}
 
-  defp admit_stage(stage, inventory) do
-    with {:ok, kind, params} <- split_stage(stage) do
-      admit_stage_kind(kind, params, inventory)
+  defp prepare_stage(stage) do
+    with {:ok, kind, params} <- split_stage(stage),
+         {:ok, kind} <- canonicalize_stage_kind(kind) do
+      prepare_stage_kind(kind, params)
+    end
+  end
+
+  defp prepare_stage_kind(:mix_compile, params), do: admit_mix_compile(params)
+
+  defp prepare_stage_kind(:mix_test, params) do
+    with {:ok, params} <- normalize_object(params, [:paths]),
+         {:ok, paths} <- fetch_mix_test_paths(params),
+         {:ok, normalized} <- normalize_requested_paths(paths) do
+      {:ok, %{kind: :mix_test, paths: normalized}}
+    end
+  end
+
+  defp inventory_index_for_stages(prepared, inventory) do
+    requested =
+      prepared
+      |> Enum.flat_map(fn
+        %{kind: :mix_test, paths: paths} -> paths
+        _stage -> []
+      end)
+      |> MapSet.new()
+
+    if MapSet.size(requested) == 0 do
+      {:ok, %{}}
+    else
+      inventory_index(inventory, requested)
+    end
+  end
+
+  defp admit_prepared_stages([], _index, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp admit_prepared_stages([%{kind: :mix_compile} = stage | rest], index, acc) do
+    admit_prepared_stages(rest, index, [stage | acc])
+  end
+
+  defp admit_prepared_stages([%{kind: :mix_test, paths: paths} | rest], index, acc) do
+    with {:ok, admitted} <- lookup_admitted_paths(paths, index) do
+      admit_prepared_stages(rest, index, [%{kind: :mix_test, paths: admitted} | acc])
     end
   end
 
@@ -322,31 +407,15 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   defp split_stage({kind, params}), do: {:ok, kind, params}
   defp split_stage(_stage), do: {:error, {:invalid_field, "stages", :unknown_stage}}
 
-  defp admit_stage_kind(kind, params, inventory) do
-    case canonicalize_stage_kind(kind) do
-      {:ok, :mix_compile} -> admit_mix_compile(params)
-      {:ok, :mix_test} -> admit_mix_test(params, inventory)
-      :error -> {:error, {:invalid_field, "stages", :unknown_stage}}
-    end
-  end
-
   defp canonicalize_stage_kind(kind) when kind in @stage_kinds, do: {:ok, kind}
   defp canonicalize_stage_kind("mix_compile"), do: {:ok, :mix_compile}
   defp canonicalize_stage_kind("mix_test"), do: {:ok, :mix_test}
-  defp canonicalize_stage_kind(_kind), do: :error
+  defp canonicalize_stage_kind(_kind), do: {:error, {:invalid_field, "stages", :unknown_stage}}
 
   defp admit_mix_compile(params) do
     with {:ok, params} <- normalize_object(params, [:profile]),
          {:ok, profile} <- required_text(params, :profile, @max_text_bytes) do
       {:ok, %{kind: :mix_compile, profile: profile}}
-    end
-  end
-
-  defp admit_mix_test(params, inventory) do
-    with {:ok, params} <- normalize_object(params, [:paths]),
-         {:ok, paths} <- fetch_mix_test_paths(params),
-         {:ok, admitted} <- admit_test_paths(paths, inventory) do
-      {:ok, %{kind: :mix_test, paths: admitted}}
     end
   end
 
@@ -371,16 +440,20 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
 
   defp collect_requested_paths([path | rest], acc, seen) do
     with {:ok, path} <- normalize_test_path(path) do
-      if MapSet.member?(seen, path) do
-        {:error, {:invalid_test_path, :duplicate}}
-      else
-        collect_requested_paths(rest, [path | acc], MapSet.put(seen, path))
-      end
+      collect_unique_path(path, rest, acc, seen)
     end
   end
 
   defp collect_requested_paths(_improper, _acc, _seen),
     do: {:error, {:invalid_test_path, :improper_list}}
+
+  defp collect_unique_path(path, rest, acc, seen) do
+    if MapSet.member?(seen, path) do
+      {:error, {:invalid_test_path, :duplicate}}
+    else
+      collect_requested_paths(rest, [path | acc], MapSet.put(seen, path))
+    end
+  end
 
   defp lookup_admitted_paths(paths, index) do
     Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
@@ -391,42 +464,69 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
         :error -> {:halt, {:error, {:invalid_test_path, :not_in_inventory}}}
       end
     end)
-    |> case do
-      {:ok, acc} -> {:ok, acc |> Enum.reverse() |> Enum.sort()}
-      {:error, _reason} = error -> error
+    |> finish_admitted_paths()
+  end
+
+  defp finish_admitted_paths({:ok, acc}), do: {:ok, acc |> Enum.reverse() |> Enum.sort()}
+  defp finish_admitted_paths({:error, _reason} = error), do: error
+
+  defp inventory_index(entries, requested) do
+    with {:ok, entries} <- take_inventory_entries(entries) do
+      reduce_inventory(entries, requested, %{})
     end
   end
 
-  defp inventory_index(entries) do
-    Enum.reduce_while(entries, {:ok, %{}}, fn entry, {:ok, acc} ->
-      case inventory_entry(entry) do
-        {:ok, path, type} -> merge_inventory_entry(acc, path, type)
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+  defp take_inventory_entries(entries) when is_list(entries) do
+    taken = Enum.take(entries, @max_inventory_entries + 1)
+
+    if length(taken) > @max_inventory_entries do
+      {:error, {:invalid_inventory, :list_too_large}}
+    else
+      {:ok, taken}
+    end
   end
 
-  defp merge_inventory_entry(acc, path, type) do
+  defp take_inventory_entries(_entries), do: {:error, {:invalid_inventory, :expected_list}}
+
+  defp reduce_inventory([], _requested, acc), do: {:ok, acc}
+
+  defp reduce_inventory([entry | rest], requested, acc) do
+    case inventory_entry(entry) do
+      {:ok, path, type} ->
+        merge_requested_entry(path, type, rest, requested, acc)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp merge_requested_entry(path, type, rest, requested, acc) do
+    if MapSet.member?(requested, path) do
+      case merge_inventory_type(acc, path, type) do
+        {:ok, acc} -> reduce_inventory(rest, requested, acc)
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      reduce_inventory(rest, requested, acc)
+    end
+  end
+
+  defp merge_inventory_type(acc, path, type) do
     case Map.fetch(acc, path) do
-      :error ->
-        {:cont, {:ok, Map.put(acc, path, type)}}
-
-      {:ok, ^type} ->
-        {:cont, {:ok, acc}}
-
-      {:ok, _other} ->
-        {:halt, {:error, {:invalid_inventory, :type_conflict}}}
+      :error -> {:ok, Map.put(acc, path, type)}
+      {:ok, ^type} -> {:ok, acc}
+      {:ok, _other} -> {:error, {:invalid_inventory, :type_conflict}}
     end
   end
 
   defp inventory_entry(path) when is_binary(path) do
-    with {:ok, path} <- normalize_relative_path(path) do
+    with {:ok, path} <- normalize_relative_path(path, :invalid_inventory) do
       {:ok, path, :regular}
     end
   end
 
   defp inventory_entry({path, type}) do
-    with {:ok, path} <- normalize_relative_path(path),
+    with {:ok, path} <- normalize_relative_path(path, :invalid_inventory),
          {:ok, type} <- inventory_type(type) do
       {:ok, path, type}
     end
@@ -434,7 +534,7 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
 
   defp inventory_entry(%{} = entry) do
     with {:ok, path} <- fetch_inventory_path(entry),
-         {:ok, path} <- normalize_relative_path(path),
+         {:ok, path} <- normalize_relative_path(path, :invalid_inventory),
          {:ok, type} <- inventory_type(Map.get(entry, :type, Map.get(entry, "type", :regular))) do
       {:ok, path, type}
     end
@@ -453,7 +553,7 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   defp inventory_type(_type), do: {:error, {:invalid_inventory, :type}}
 
   defp normalize_test_path(path) do
-    with {:ok, path} <- normalize_relative_path(path) do
+    with {:ok, path} <- normalize_relative_path(path, :invalid_test_path) do
       if String.ends_with?(path, "_test.exs") do
         {:ok, path}
       else
@@ -462,39 +562,53 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
     end
   end
 
-  defp normalize_relative_path(path) when is_binary(path) do
+  defp normalize_relative_path(path, tag) when is_binary(path) do
     cond do
       not String.valid?(path) ->
-        {:error, {:invalid_test_path, :invalid_utf8}}
+        {:error, {tag, :invalid_utf8}}
 
-      :binary.match(path, <<0>>) != :nomatch ->
-        {:error, {:invalid_test_path, :nul}}
+      unsafe_display?(path) ->
+        display_path_reason(path, tag)
 
-      byte_size(path) == 0 or byte_size(path) > @max_path_bytes ->
-        {:error, {:invalid_test_path, :empty_component}}
+      byte_size(path) == 0 ->
+        {:error, {tag, :empty_path}}
+
+      byte_size(path) > @max_path_bytes ->
+        {:error, {tag, :path_too_long}}
 
       true ->
         path
         |> String.replace("\\", "/")
         |> String.normalize(:nfc)
-        |> validate_relative_components()
+        |> validate_relative_components(tag)
     end
   end
 
-  defp normalize_relative_path(_path), do: {:error, {:invalid_test_path, :expected_string}}
+  defp normalize_relative_path(_path, tag), do: {:error, {tag, :expected_string}}
 
-  defp validate_relative_components(path) do
+  defp display_path_reason(path, tag) do
+    if :binary.match(path, <<0>>) != :nomatch do
+      {:error, {tag, :nul}}
+    else
+      {:error, {tag, :control_character}}
+    end
+  end
+
+  defp validate_relative_components(path, tag) do
     segments = :binary.split(path, <<"/">>, [:global])
 
     cond do
       absolute_path?(path) ->
-        {:error, {:invalid_test_path, :absolute}}
+        {:error, {tag, :absolute}}
 
-      segments == [] or length(segments) > @max_path_depth ->
-        {:error, {:invalid_test_path, :empty_component}}
+      segments == [] ->
+        {:error, {tag, :empty_path}}
+
+      length(segments) > @max_path_depth ->
+        {:error, {tag, :path_depth}}
 
       Enum.any?(segments, &forbidden_component?/1) ->
-        component_reason(segments)
+        component_reason(segments, tag)
 
       true ->
         {:ok, path}
@@ -506,16 +620,22 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
       String.starts_with?(segment, "-") or byte_size(segment) > @max_component_bytes
   end
 
-  defp component_reason(segments) do
+  defp component_reason(segments, tag) do
     cond do
       ".." in segments ->
-        {:error, {:invalid_test_path, :dot_dot}}
+        {:error, {tag, :dot_dot}}
 
       Enum.any?(segments, &String.starts_with?(&1, "-")) ->
-        {:error, {:invalid_test_path, :leading_dash}}
+        {:error, {tag, :leading_dash}}
+
+      Enum.any?(segments, &(&1 == <<".">>)) ->
+        {:error, {tag, :dot_component}}
+
+      Enum.any?(segments, &(byte_size(&1) > @max_component_bytes)) ->
+        {:error, {tag, :component_too_long}}
 
       true ->
-        {:error, {:invalid_test_path, :empty_component}}
+        {:error, {tag, :empty_component}}
     end
   end
 
@@ -542,8 +662,8 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
       byte_size(value) > maximum ->
         {:error, {:invalid_field, field, :text_too_large}}
 
-      String.contains?(value, <<0>>) ->
-        {:error, {:invalid_field, field, :nul}}
+      unsafe_display?(value) ->
+        {:error, {:invalid_field, field, :control_character}}
 
       true ->
         {:ok, value}
@@ -552,6 +672,26 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
 
   defp admit_text(_value, field, _maximum),
     do: {:error, {:invalid_field, field, :expected_string}}
+
+  defp unsafe_display?(value) do
+    String.match?(value, @c0_del_re) or unsafe_unicode_display?(value)
+  end
+
+  defp unsafe_unicode_display?(value) do
+    value
+    |> String.to_charlist()
+    |> Enum.any?(&unsafe_codepoint?/1)
+  end
+
+  defp unsafe_codepoint?(codepoint) when codepoint <= 0x1F, do: true
+  defp unsafe_codepoint?(0x7F), do: true
+  defp unsafe_codepoint?(codepoint) when codepoint in 0x80..0x9F, do: true
+  defp unsafe_codepoint?(codepoint) when codepoint in 0x200B..0x200F, do: true
+  defp unsafe_codepoint?(codepoint) when codepoint in 0x202A..0x202E, do: true
+  defp unsafe_codepoint?(0x2028), do: true
+  defp unsafe_codepoint?(0x2029), do: true
+  defp unsafe_codepoint?(codepoint) when codepoint in 0x2066..0x2069, do: true
+  defp unsafe_codepoint?(_codepoint), do: false
 
   defp required_integer(attrs, field) do
     case Map.fetch(attrs, field) do
@@ -567,9 +707,7 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   end
 
   defp require_keys(map, fields, label) do
-    missing =
-      Enum.reject(fields, &Map.has_key?(map, &1))
-      |> Enum.map(&Atom.to_string/1)
+    missing = fields |> Enum.reject(&Map.has_key?(map, &1)) |> Enum.map(&Atom.to_string/1)
 
     if missing == [], do: :ok, else: {:error, {:missing_field, label <> "." <> hd(missing)}}
   end
@@ -658,13 +796,13 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
       else: :ok
   end
 
-  defp match_resource_segments(["action", "coding", "validate", "v1", hex]) do
+  defp resource_hex(["action", "coding", "validate", "v1", hex]) do
     if Regex.match?(@hex64_re, hex),
-      do: :ok,
+      do: {:ok, hex},
       else: {:error, {:invalid_resource_uri, :malformed}}
   end
 
-  defp match_resource_segments(_segments), do: {:error, {:invalid_resource_uri, :malformed}}
+  defp resource_hex(_segments), do: {:error, {:invalid_resource_uri, :malformed}}
 
   defp digest_hex(@digest_prefix <> hex), do: hex
 
