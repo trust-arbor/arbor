@@ -2396,6 +2396,10 @@ defmodule Arbor.Actions do
   `:idempotent`, `:idempotent_with_key`, `:side_effecting`, or `:read_only`.
   Missing, malformed, unavailable, raising, and unresolved declarations all
   fail closed to `:side_effecting`.
+
+  `execution_idempotency/2` prefers `execution_idempotency/1` when the action
+  exports it, using static params as the classification input. Actions that
+  only declare arity 0 keep that declaration.
   """
   @spec execution_idempotency(module() | String.t()) ::
           :idempotent | :idempotent_with_key | :side_effecting | :read_only
@@ -2424,6 +2428,35 @@ defmodule Arbor.Actions do
   end
 
   def execution_idempotency(_action), do: :side_effecting
+
+  @spec execution_idempotency(module() | String.t(), map()) ::
+          :idempotent | :idempotent_with_key | :side_effecting | :read_only
+  def execution_idempotency(action_name, params) when is_binary(action_name) and is_map(params) do
+    case name_to_module(action_name) do
+      {:ok, action_module} -> execution_idempotency(action_module, params)
+      {:error, _reason} -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
+  end
+
+  def execution_idempotency(action_module, params)
+      when is_atom(action_module) and is_map(params) do
+    with {:ok, effect_class} <- runtime_effect_class(action_module),
+         {:ok, class} <- runtime_execution_idempotency(action_module, effect_class, params) do
+      class
+    else
+      _other -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
+  end
+
+  def execution_idempotency(_action, _params), do: :side_effecting
 
   @doc """
   Return deterministic nested action names this module may invoke internally.
@@ -2542,8 +2575,8 @@ defmodule Arbor.Actions do
       else: {:error, :invalid_effect_class}
   end
 
-  defp runtime_execution_idempotency(action_module, effect_class) do
-    class = declared_execution_idempotency(action_module)
+  defp runtime_execution_idempotency(action_module, effect_class, params \\ :arity_0) do
+    class = declared_execution_idempotency(action_module, params)
 
     if effect_class != :read and class in [:idempotent, :read_only] do
       {:error, :execution_idempotency_effect_class_conflict}
@@ -2552,12 +2585,30 @@ defmodule Arbor.Actions do
     end
   end
 
-  defp declared_execution_idempotency(action_module) do
+  defp declared_execution_idempotency(action_module, :arity_0) do
     with {:module, ^action_module} <- Code.ensure_loaded(action_module),
          true <- function_exported?(action_module, :execution_idempotency, 0),
          class <- action_module.execution_idempotency(),
          true <- class in @execution_idempotency_classes do
       class
+    else
+      _other -> :side_effecting
+    end
+  rescue
+    _exception -> :side_effecting
+  catch
+    _kind, _reason -> :side_effecting
+  end
+
+  defp declared_execution_idempotency(action_module, params) when is_map(params) do
+    with {:module, ^action_module} <- Code.ensure_loaded(action_module) do
+      if function_exported?(action_module, :execution_idempotency, 1) do
+        class = action_module.execution_idempotency(params)
+
+        if class in @execution_idempotency_classes, do: class, else: :side_effecting
+      else
+        declared_execution_idempotency(action_module, :arity_0)
+      end
     else
       _other -> :side_effecting
     end

@@ -77,7 +77,7 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
   end
 
   describe "pending" do
-    test "halts as indeterminate even when checkpoint looks advanced" do
+    test "same-execution marker is structural inconsistency even when checkpoint looks advanced" do
       effect = pending_effect("task", "exec_abc")
       record = base_record(current_effect: effect, completed_nodes: ["start"])
 
@@ -89,7 +89,7 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
         }
       }
 
-      assert {:error, {:indeterminate_effect, "task", "exec_abc"}} =
+      assert {:error, {:effect_recovery_inconsistent, :pending_same_execution_marker}} =
                EffectRecoveryCore.decide(record, checkpoint)
     end
 
@@ -103,6 +103,155 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
                  outcomes: %{},
                  execution_digests: %{}
                })
+    end
+
+    test "malformed pending marker fails closed instead of admitting replay" do
+      effect = pending_effect("task", "exec_pending", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect)
+
+      checkpoint = %{
+        completed_nodes: [],
+        outcomes: %{},
+        execution_digests: %{"task" => %{"execution_id" => 123}}
+      }
+
+      assert {:error, {:effect_recovery_inconsistent, :invalid_execution_marker}} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view())
+    end
+  end
+
+  describe "keyed replay admission" do
+    test "pending same-execution marker is structural inconsistency even with keyed live view" do
+      effect = pending_effect("task", "exec_abc", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect, completed_nodes: ["start", "task"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "task"],
+        outcomes: %{},
+        execution_digests: %{
+          "task" => marker("exec_abc", @input_hash_a, :success)
+        }
+      }
+
+      assert {:error, {:effect_recovery_inconsistent, :pending_same_execution_marker}} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view())
+    end
+
+    test "security regression: stale repeated-node marker plus completed_nodes membership still replays pending" do
+      effect = pending_effect("task", "exec_new", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect, completed_nodes: ["start", "task"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "task"],
+        outcomes: %{"task" => %Outcome{status: :success}},
+        execution_digests: %{
+          "task" => marker("exec_old", @input_hash_a, :success)
+        }
+      }
+
+      assert {:ok, :replay, spec} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view())
+
+      assert spec.kind == :reuse_pending
+      assert spec.execution_id == "exec_new"
+      assert spec.started_at == effect["started_at"]
+      assert spec.generation == 1
+      assert spec.node_id == "task"
+    end
+
+    test "pending absent marker with keyed live view replays" do
+      effect = pending_effect("task", "exec_pending", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect)
+
+      assert {:ok, :replay, spec} =
+               EffectRecoveryCore.decide(
+                 record,
+                 %{completed_nodes: [], outcomes: %{}, execution_digests: %{}},
+                 keyed_live_view()
+               )
+
+      assert spec.kind == :reuse_pending
+      assert spec.execution_id == "exec_pending"
+    end
+
+    test "pending stale marker with live side_effecting or binding_ok false stays indeterminate" do
+      effect = pending_effect("task", "exec_new", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect, completed_nodes: ["start", "task"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "task"],
+        outcomes: %{},
+        execution_digests: %{"task" => marker("exec_old", @input_hash_a, :success)}
+      }
+
+      assert {:error, {:indeterminate_effect, "task", "exec_new"}} =
+               EffectRecoveryCore.decide(
+                 record,
+                 checkpoint,
+                 keyed_live_view(idempotency: :side_effecting)
+               )
+
+      assert {:error, {:indeterminate_effect, "task", "exec_new"}} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view(binding_ok: false))
+    end
+
+    test "completed missing or stale marker with keyed live view is successor_after_settle" do
+      outcome = %Outcome{status: :success, context_updates: %{"k" => "v"}}
+
+      effect =
+        completed_effect("task", "exec_1", outcome, idempotency_class: "idempotent_with_key")
+
+      record = base_record(current_effect: effect, completed_nodes: ["start"])
+
+      checkpoint = %{
+        completed_nodes: ["start", "task"],
+        outcomes: %{"task" => outcome},
+        execution_digests: %{}
+      }
+
+      assert {:ok, :replay, spec} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view())
+
+      assert spec.kind == :successor_after_settle
+      assert spec.execution_id == "exec_1"
+      assert spec.generation == 1
+    end
+
+    test "settled missing or stale marker with keyed live view is successor_from_settled" do
+      outcome = %Outcome{status: :success, context_updates: %{"k" => "v"}}
+      effect = settled_effect("task", "exec_1", outcome, idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect, completed_nodes: ["start", "task"])
+
+      checkpoint = %{
+        completed_nodes: ["start"],
+        outcomes: %{},
+        execution_digests: %{}
+      }
+
+      assert {:ok, :replay, spec} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view())
+
+      assert spec.kind == :successor_from_settled
+      assert spec.execution_id == "exec_1"
+    end
+
+    test "next-node, handler, input-hash, and class disagreement stay fail-closed" do
+      effect = pending_effect("task", "exec_pending", idempotency_class: "idempotent_with_key")
+      record = base_record(current_effect: effect)
+      checkpoint = %{completed_nodes: [], outcomes: %{}, execution_digests: %{}}
+
+      assert {:error, {:indeterminate_effect, "task", "exec_pending"}} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view(next_node_id: nil))
+
+      assert {:error, {:indeterminate_effect, "task", "exec_pending"}} =
+               EffectRecoveryCore.decide(record, checkpoint, keyed_live_view(handler_id: "Other"))
+
+      assert {:error, {:indeterminate_effect, "task", "exec_pending"}} =
+               EffectRecoveryCore.decide(
+                 record,
+                 checkpoint,
+                 keyed_live_view(input_hash: @input_hash_b)
+               )
     end
   end
 
@@ -563,11 +712,21 @@ defmodule Arbor.Orchestrator.RunLifecycleEffectRecoveryCoreTest do
         "execution_id" => execution_id,
         "handler" => "Arbor.Orchestrator.Handlers.ExecHandler",
         "input_hash" => input_hash,
-        "idempotency_class" => "side_effecting",
+        "idempotency_class" => Keyword.get(opts, :idempotency_class, "side_effecting"),
         "started_at" => "2026-07-15T12:00:00.000000Z"
       })
 
     effect
+  end
+
+  defp keyed_live_view(opts \\ []) do
+    %{
+      next_node_id: Keyword.get(opts, :next_node_id, "task"),
+      handler_id: Keyword.get(opts, :handler_id, "Arbor.Orchestrator.Handlers.ExecHandler"),
+      input_hash: Keyword.get(opts, :input_hash, @input_hash_a),
+      idempotency: Keyword.get(opts, :idempotency, :idempotent_with_key),
+      binding_ok: Keyword.get(opts, :binding_ok, true)
+    }
   end
 
   defp completed_effect(node_id, execution_id, %Outcome{} = outcome, opts \\ []) do

@@ -15,6 +15,12 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
 
   Canonical effect safety is **not** bypassable by `force_replay` or DOT
   `on_resume="retry"` (those apply only to legacy checkpoint pending_intents).
+
+  Verified `:idempotent_with_key` pending / completed-unapplied /
+  settled-unapplied visits may return `{:ok, :replay, spec}` when a live
+  view proves next node, handler, input hash, and runtime binding. Side
+  effecting and malformed cases stay fail-closed. Visit identity is the
+  execution marker, not `completed_nodes` membership.
   """
 
   alias Arbor.Orchestrator.Engine.EffectOwner
@@ -35,9 +41,33 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
           {:sync_progress, [String.t()]}
           | {:settle, pos_integer(), String.t()}
 
+  @type live_view :: %{
+          required(:next_node_id) => String.t() | nil,
+          required(:handler_id) => String.t(),
+          required(:input_hash) => String.t(),
+          required(:idempotency) => atom(),
+          required(:binding_ok) => boolean()
+        }
+
+  @type replay_kind :: :reuse_pending | :successor_after_settle | :successor_from_settled
+
+  @type replay_spec :: %{
+          required(:kind) => replay_kind(),
+          required(:node_id) => String.t(),
+          required(:execution_id) => String.t(),
+          required(:generation) => pos_integer(),
+          required(:input_hash) => String.t(),
+          required(:handler) => String.t(),
+          required(:idempotency_class) => String.t(),
+          required(:started_at) => String.t(),
+          required(:status) => String.t(),
+          required(:effect) => map()
+        }
+
   @type decision ::
           {:ok, :continue}
           | {:ok, :reconcile, [reconcile_action()]}
+          | {:ok, :replay, replay_spec()}
           | {:error, error_reason()}
 
   @type error_reason ::
@@ -53,37 +83,40 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   `%Checkpoint{}`-shaped map or the Engine resume state fields
   (`completed_nodes` + `outcomes` + `execution_digests`).
   """
-  @spec decide(Record.t() | map() | nil, checkpoint_view() | map() | nil) :: decision()
-  def decide(record, checkpoint)
+  @spec decide(Record.t() | map() | nil, checkpoint_view() | map() | nil, live_view() | nil) ::
+          decision()
+  def decide(record, checkpoint, live_view \\ nil)
 
-  def decide(nil, _checkpoint), do: {:error, {:effect_recovery_inconsistent, :record_missing}}
+  def decide(nil, _checkpoint, _live_view),
+    do: {:error, {:effect_recovery_inconsistent, :record_missing}}
 
-  def decide(%Record{} = record, checkpoint) do
+  def decide(%Record{} = record, checkpoint, live_view) do
     decide_effect(
       record.current_effect,
       record.completed_nodes || [],
-      checkpoint_view(checkpoint)
+      checkpoint_view(checkpoint),
+      live_view
     )
   end
 
-  def decide(%{current_effect: effect, completed_nodes: nodes}, checkpoint)
+  def decide(%{current_effect: effect, completed_nodes: nodes}, checkpoint, live_view)
       when is_list(nodes) or is_nil(nodes) do
-    decide_effect(effect, nodes || [], checkpoint_view(checkpoint))
+    decide_effect(effect, nodes || [], checkpoint_view(checkpoint), live_view)
   end
 
-  def decide(%{"current_effect" => effect, "completed_nodes" => nodes}, checkpoint)
+  def decide(%{"current_effect" => effect, "completed_nodes" => nodes}, checkpoint, live_view)
       when is_list(nodes) or is_nil(nodes) do
-    decide_effect(effect, nodes || [], checkpoint_view(checkpoint))
+    decide_effect(effect, nodes || [], checkpoint_view(checkpoint), live_view)
   end
 
-  def decide(_record, _checkpoint),
+  def decide(_record, _checkpoint, _live_view),
     do: {:error, {:effect_recovery_inconsistent, :invalid_record}}
 
   # No current effect: still require ordered progress coherence so a divergent
   # or checkpoint-behind journal cannot enter Engine with checkpoint traversal
   # disagreeing with durable completed_nodes. Equal continues; record strict
   # prefix may sync from authenticated checkpoint; never overwrite durable progress.
-  defp decide_effect(nil, record_nodes, checkpoint) do
+  defp decide_effect(nil, record_nodes, checkpoint, _live_view) do
     case ordered_progress_relation(record_nodes, checkpoint.completed_nodes) do
       :equal ->
         {:ok, :continue}
@@ -96,34 +129,52 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
     end
   end
 
-  defp decide_effect(effect, record_nodes, checkpoint) when is_map(effect) do
+  defp decide_effect(effect, record_nodes, checkpoint, live_view) when is_map(effect) do
     case EffectEnvelope.validate(effect) do
       {:ok, validated} ->
-        classify(validated, record_nodes, checkpoint)
+        classify(validated, record_nodes, checkpoint, live_view)
 
       {:error, reason} ->
         {:error, {:invalid_current_effect, reason}}
     end
   end
 
-  defp decide_effect(_effect, _record_nodes, _checkpoint),
+  defp decide_effect(_effect, _record_nodes, _checkpoint, _live_view),
     do: {:error, {:invalid_current_effect, :invalid_type}}
 
-  # Pending is always indeterminate — never settle, never replay.
-  defp classify(%{"status" => "pending"} = effect, _record_nodes, _checkpoint) do
-    {:error, {:indeterminate_effect, effect["node_id"], effect["execution_id"]}}
+  # Pending: same-execution marker is structural inconsistency. Only an
+  # absent or stale marker may replay a verified keyed visit.
+  defp classify(%{"status" => "pending"} = effect, _record_nodes, checkpoint, live_view) do
+    case match_pending_execution_marker(effect, checkpoint) do
+      {:ok, :same_execution_marker} ->
+        {:error, {:effect_recovery_inconsistent, :pending_same_execution_marker}}
+
+      {:error, :missing_or_stale_marker} ->
+        maybe_replay(
+          effect,
+          live_view,
+          :reuse_pending,
+          {:indeterminate_effect, effect["node_id"], effect["execution_id"]}
+        )
+
+      {:error, reason} when is_atom(reason) ->
+        {:error, {:effect_recovery_inconsistent, reason}}
+    end
   end
 
-  defp classify(%{"status" => "completed"} = effect, record_nodes, checkpoint) do
+  defp classify(%{"status" => "completed"} = effect, record_nodes, checkpoint, live_view) do
     node_id = effect["node_id"]
     execution_id = effect["execution_id"]
     generation = effect["generation"]
 
     case match_current_execution_marker(effect, checkpoint) do
       {:error, :missing_or_stale_marker} ->
-        # Absent marker or a different visit's marker — completed but checkpoint
-        # never applied *this* execution. Halt without replay.
-        {:error, {:completed_effect_unapplied, node_id, execution_id}}
+        maybe_replay(
+          effect,
+          live_view,
+          :successor_after_settle,
+          {:completed_effect_unapplied, node_id, execution_id}
+        )
 
       {:error, reason} when is_atom(reason) ->
         # Same execution_id present but fields disagree / are malformed.
@@ -168,7 +219,7 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
     end
   end
 
-  defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint) do
+  defp classify(%{"status" => "settled"} = effect, record_nodes, checkpoint, live_view) do
     # Settled proves its own node was durably settled. Exact marker + outcome
     # evidence is required; the effect node must appear in BOTH record and
     # checkpoint completed_nodes before equal progress may continue or a
@@ -216,15 +267,64 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
         end
 
       {:error, :missing_or_stale_marker} ->
-        {:error, {:effect_recovery_inconsistent, :settled_marker_missing}}
+        maybe_replay(
+          effect,
+          live_view,
+          :successor_from_settled,
+          {:effect_recovery_inconsistent, :settled_marker_missing}
+        )
 
       {:error, reason} when is_atom(reason) ->
         {:error, {:effect_recovery_inconsistent, reason}}
     end
   end
 
-  defp classify(_effect, _record_nodes, _checkpoint),
+  defp classify(_effect, _record_nodes, _checkpoint, _live_view),
     do: {:error, {:invalid_current_effect, :invalid_status}}
+
+  defp maybe_replay(effect, live_view, kind, fallback) do
+    if replay_admissible?(effect, live_view) do
+      {:ok, :replay, replay_spec(effect, kind)}
+    else
+      {:error, fallback}
+    end
+  end
+
+  defp replay_admissible?(effect, live_view) when is_map(effect) and is_map(live_view) do
+    next_node_id = Map.get(live_view, :next_node_id)
+    handler_id = Map.get(live_view, :handler_id)
+    input_hash = Map.get(live_view, :input_hash)
+    idempotency = Map.get(live_view, :idempotency)
+    binding_ok = Map.get(live_view, :binding_ok)
+
+    effect["idempotency_class"] == "idempotent_with_key" and
+      idempotency == :idempotent_with_key and
+      binding_ok == true and
+      is_binary(next_node_id) and
+      next_node_id == effect["node_id"] and
+      is_binary(handler_id) and
+      handler_id == effect["handler"] and
+      is_binary(input_hash) and
+      input_hash == effect["input_hash"]
+  end
+
+  defp replay_admissible?(_effect, _live_view), do: false
+
+  defp replay_spec(effect, kind)
+       when kind in [:reuse_pending, :successor_after_settle, :successor_from_settled] do
+    %{
+      kind: kind,
+      node_id: effect["node_id"],
+      execution_id: effect["execution_id"],
+      generation: effect["generation"],
+      input_hash: effect["input_hash"],
+      handler: effect["handler"],
+      idempotency_class: effect["idempotency_class"],
+      started_at: effect["started_at"],
+      status: effect["status"],
+      effect: effect
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # Execution visit marker (Checkpoint.execution_digests)
@@ -234,6 +334,32 @@ defmodule Arbor.Orchestrator.RunLifecycle.EffectRecoveryCore do
   # - {:ok, :marker_match} — marker.execution_id == effect.execution_id and fields agree
   # - {:error, :missing_or_stale_marker} — absent or different execution_id
   # - {:error, atom} — same execution_id with malformed / mismatching fields
+  defp match_pending_execution_marker(effect, checkpoint) do
+    node_id = effect["node_id"]
+    execution_id = effect["execution_id"]
+    digests = checkpoint.execution_digests || %{}
+
+    case Map.fetch(digests, node_id) do
+      :error ->
+        {:error, :missing_or_stale_marker}
+
+      {:ok, marker} when is_map(marker) ->
+        case marker_get(marker, :execution_id) do
+          ^execution_id ->
+            {:ok, :same_execution_marker}
+
+          marker_execution_id when is_binary(marker_execution_id) ->
+            {:error, :missing_or_stale_marker}
+
+          _malformed ->
+            {:error, :invalid_execution_marker}
+        end
+
+      {:ok, _malformed} ->
+        {:error, :invalid_execution_marker}
+    end
+  end
+
   defp match_current_execution_marker(effect, checkpoint) do
     node_id = effect["node_id"]
     execution_id = effect["execution_id"]

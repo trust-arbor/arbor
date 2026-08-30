@@ -115,6 +115,77 @@ defmodule Arbor.Actions.Coding.ReviewedValidationTest do
              ])
   end
 
+  test "security regression: only the exact compiler-pinned cross_app pin is keyed replay" do
+    cross_app_params = %{
+      pinned_action: "coding_cross_app_validate",
+      pinned_profile_id: "cross_app",
+      pinned_params_json: "{}"
+    }
+
+    assert ReviewedValidation.execution_idempotency(cross_app_params) == :idempotent_with_key
+
+    assert Arbor.Actions.execution_idempotency(ReviewedValidation, cross_app_params) ==
+             :idempotent_with_key
+
+    assert Arbor.Actions.execution_idempotency(
+             "coding_reviewed_validation",
+             %{
+               "pinned_action" => "coding_cross_app_validate",
+               "pinned_profile_id" => "cross_app",
+               "pinned_params_json" => "{}"
+             }
+           ) == :idempotent_with_key
+
+    assert Arbor.Actions.execution_idempotency(ReviewedValidation) == :side_effecting
+    assert Arbor.Actions.execution_idempotency("coding_reviewed_validation") == :side_effecting
+
+    assert {:ok, descriptor} = Arbor.Actions.runtime_descriptor(ReviewedValidation)
+    assert descriptor["execution_idempotency"] == "side_effecting"
+
+    refute ReviewedValidation.execution_idempotency(default_pin_params()) == :idempotent_with_key
+
+    for params <- [
+          %{
+            pinned_action: "mix_compile",
+            pinned_profile_id: "default",
+            pinned_params_json: "{}"
+          },
+          %{
+            pinned_action: "coding_security_regression_validate",
+            pinned_profile_id: "security_regression",
+            pinned_params_json: "{}"
+          },
+          %{
+            pinned_action: "coding_contract_change_validate",
+            pinned_profile_id: "contract_change",
+            pinned_params_json: "{}"
+          },
+          %{
+            pinned_action: "coding_cross_app_validate",
+            pinned_profile_id: "default",
+            pinned_params_json: "{}"
+          },
+          %{
+            pinned_action: "mix_compile",
+            pinned_profile_id: "cross_app",
+            pinned_params_json: "{}"
+          },
+          %{pinned_action: "coding_cross_app_validate", pinned_profile_id: "cross_app"},
+          %{pinned_params_json: "{}"},
+          %{},
+          %{
+            pinned_action: "coding_cross_app_validate",
+            pinned_profile_id: "cross_app",
+            pinned_params_json: "[]"
+          }
+        ] do
+      assert ReviewedValidation.execution_idempotency(params) == :side_effecting,
+             inspect(params)
+    end
+
+    assert ReviewedValidation.execution_idempotency(:not_a_map) == :side_effecting
+  end
+
   test "closed allowlist rejects forged and non-profile pins" do
     # Registered but not an admitted nested validator.
     assert {:error, reason} =

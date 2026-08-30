@@ -24,7 +24,10 @@ defmodule Arbor.Orchestrator.Engine.State do
           # The Engine owns this state directly — no external GenServer
           # dependency. Written to the :arbor_pipeline_runs ETS table
           # on each transition for dashboard/Facade visibility.
-          run_state: Arbor.Orchestrator.RunState.Core.t() | nil
+          run_state: Arbor.Orchestrator.RunState.Core.t() | nil,
+          # Process-local canonical keyed-replay spec. Never checkpointed,
+          # never written into Engine context or journal.
+          canonical_replay: map() | nil
         }
 
   defstruct [
@@ -42,6 +45,7 @@ defmodule Arbor.Orchestrator.Engine.State do
     pending: [],
     opts: [],
     run_state: nil,
+    canonical_replay: nil,
     tracking: %{
       node_durations: %{},
       content_hashes: %{},

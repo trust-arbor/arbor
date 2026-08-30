@@ -127,6 +127,28 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
   def effect_class, do: :local_write
 
   @doc """
+  Parameter-sensitive replay class.
+
+  Only the exact compiler-pinned `cross_app` / `coding_cross_app_validate`
+  pin is `:idempotent_with_key`. Every other profile, pin, or malformed
+  input fails closed to `:side_effecting`. There is no arity-0 keyed
+  declaration — name-only classification stays side-effecting.
+  """
+  @spec execution_idempotency(map()) ::
+          :idempotent | :idempotent_with_key | :side_effecting | :read_only
+  def execution_idempotency(params) when is_map(params) do
+    case resolve_pin(params) do
+      {:ok, %{profile_id: "cross_app", action: "coding_cross_app_validate"}} ->
+        :idempotent_with_key
+
+      _other ->
+        :side_effecting
+    end
+  end
+
+  def execution_idempotency(_params), do: :side_effecting
+
+  @doc """
   Closed set of nested validators the compiler may pin.
 
   Runtime selection is only from the immutable pin string against

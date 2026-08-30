@@ -146,6 +146,59 @@ defmodule Arbor.Actions.TestFixtures.ReplayDriftReplacementAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.ReplayKeyedPinAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "test_g3c1_keyed_pin",
+    description: "Parameterized keyed-replay classification fixture",
+    schema: [
+      pin: [type: :string, required: false, default: ""],
+      payload: [type: :string, required: false]
+    ]
+
+  def effect_class, do: :local_write
+  def execution_idempotency, do: :side_effecting
+
+  def execution_idempotency(params) when is_map(params) do
+    pin = Map.get(params, :pin) || Map.get(params, "pin")
+    if pin == "cross_app", do: :idempotent_with_key, else: :side_effecting
+  end
+
+  @impl true
+  def run(params, context) do
+    execution_id = Map.get(context, :execution_id) || Map.get(context, "execution_id")
+
+    if pid = Application.get_env(:arbor_orchestrator, :g3c1_keyed_replay_test_pid) do
+      send(pid, {:g3c1_keyed, execution_id})
+    end
+
+    break_logs_root_once()
+
+    {:ok,
+     %{
+       "ok" => true,
+       "pin" => Map.get(params, :pin) || Map.get(params, "pin"),
+       "token" => System.unique_integer([:positive])
+     }}
+  end
+
+  defp break_logs_root_once do
+    case Application.get_env(:arbor_orchestrator, :g3c1_break_logs_root) do
+      {path, counter} when is_binary(path) ->
+        if Agent.get_and_update(counter, fn n -> {n, n + 1} end) == 0 do
+          _ = File.rm_rf(path)
+          :ok = File.write(path, "not-a-directory")
+        end
+
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+end
+
 defmodule Arbor.Orchestrator.TestFixtures.ReplayRevocableCapabilitySecurity do
   @moduledoc false
 
@@ -179,5 +232,35 @@ defmodule Arbor.Orchestrator.TestFixtures.ReplayActionsExecutor do
     end
 
     {:ok, %{fixture: name}}
+  end
+end
+
+defmodule Arbor.Orchestrator.TestFixtures.BoundProtocolInjectedExecutor do
+  @moduledoc false
+
+  def resolve_execution_binding(name, _opts) when is_binary(name) do
+    {:ok,
+     %{
+       executor: __MODULE__,
+       action_name: name,
+       action_module: Arbor.Actions.Coding.ReviewedValidation,
+       descriptor: %{
+         "name" => name,
+         "execution_idempotency" => "idempotent_with_key"
+       },
+       bound_executor: true
+     }}
+  end
+
+  def execute_bound(name, args, workdir, _binding, opts) do
+    execute(name, args, workdir, opts)
+  end
+
+  def execute(name, _args, _workdir, opts) do
+    if pid = Application.get_env(:arbor_orchestrator, :action_replay_test_pid) do
+      send(pid, {:bound_injected_executor_called, name, Keyword.get(opts, :execution_id)})
+    end
+
+    {:ok, %{fixture: name, injected: true}}
   end
 end

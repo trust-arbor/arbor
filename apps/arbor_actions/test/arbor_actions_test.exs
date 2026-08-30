@@ -56,6 +56,34 @@ defmodule Arbor.ActionsTest do
     def execution_idempotency, do: throw(:invalid_replay_declaration)
   end
 
+  defmodule ParameterizedKeyedReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :side_effecting
+
+    def execution_idempotency(params) when is_map(params) do
+      pin = Map.get(params, :pin) || Map.get(params, "pin")
+      if pin == "cross_app", do: :idempotent_with_key, else: :side_effecting
+    end
+  end
+
+  defmodule ParameterizedInvalidReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :idempotent_with_key
+    def execution_idempotency(_params), do: "keyed"
+  end
+
+  defmodule ParameterizedRaisingReplayAction do
+    @moduledoc false
+    def execution_idempotency, do: :read_only
+    def execution_idempotency(_params), do: raise("invalid parameterized replay declaration")
+  end
+
+  defmodule ParameterizedWriteIdempotentReplayAction do
+    @moduledoc false
+    def effect_class, do: :local_write
+    def execution_idempotency(_params), do: :idempotent
+  end
+
   describe "list_actions/0" do
     test "returns actions organized by category" do
       actions = Actions.list_actions()
@@ -178,6 +206,36 @@ defmodule Arbor.ActionsTest do
       assert Actions.execution_idempotency(Arbor.Actions.DefinitelyMissing) == :side_effecting
       assert Actions.execution_idempotency("definitely_missing_action") == :side_effecting
       assert Actions.execution_idempotency(%{}) == :side_effecting
+    end
+  end
+
+  describe "execution_idempotency/2" do
+    test "prefers arity-1 declarations and fails closed on malformed params" do
+      assert Actions.execution_idempotency(ParameterizedKeyedReplayAction, %{"pin" => "cross_app"}) ==
+               :idempotent_with_key
+
+      assert Actions.execution_idempotency(ParameterizedKeyedReplayAction, %{pin: "cross_app"}) ==
+               :idempotent_with_key
+
+      assert Actions.execution_idempotency(ParameterizedKeyedReplayAction, %{"pin" => "default"}) ==
+               :side_effecting
+
+      assert Actions.execution_idempotency(ParameterizedKeyedReplayAction) == :side_effecting
+      assert Actions.execution_idempotency(KeyedReplayAction, %{}) == :idempotent_with_key
+
+      assert Actions.execution_idempotency(ParameterizedInvalidReplayAction, %{}) ==
+               :side_effecting
+
+      assert Actions.execution_idempotency(ParameterizedRaisingReplayAction, %{}) ==
+               :side_effecting
+
+      assert Actions.execution_idempotency("definitely_missing_action", %{}) == :side_effecting
+      assert Actions.execution_idempotency(ReadOnlyReplayAction, :not_a_map) == :side_effecting
+    end
+
+    test "security regression: parameterized idempotent declarations on write effects fail closed" do
+      assert Actions.execution_idempotency(ParameterizedWriteIdempotentReplayAction, %{}) ==
+               :side_effecting
     end
   end
 

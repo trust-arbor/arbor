@@ -90,7 +90,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   def idempotency(node) do
     case {Map.get(node.attrs, "target", "tool"), Map.get(node.attrs, "action")} do
       {"action", action_name} when is_binary(action_name) and action_name != "" ->
-        Arbor.Actions.execution_idempotency(action_name)
+        declared_action_idempotency(action_name, node)
 
       _other ->
         :side_effecting
@@ -106,34 +106,47 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
          true <- is_binary(action_name) and action_name != "",
          {:ok, [{_slot, executor}]} <- execution_delegates(node, opts) do
       if executor == ActionsExecutor do
-        classify_bound_action(executor, action_name, opts)
+        classify_bound_action(executor, action_name, opts, node)
       else
-        classify_injected_action(executor, action_name, opts)
+        classify_injected_action(executor, action_name, opts, node)
       end
     else
       _other -> {:ok, %{idempotency: :side_effecting, binding: nil}}
     end
   end
 
-  defp classify_injected_action(executor, action_name, opts) do
-    if is_atom(executor) and Code.ensure_loaded?(executor) and
-         function_exported?(executor, :resolve_execution_binding, 2) and
-         function_exported?(executor, :execute_bound, 5) do
-      classify_bound_action(executor, action_name, opts)
+  defp classify_injected_action(executor, action_name, opts, _node) do
+    {:ok,
+     %{
+       idempotency: :side_effecting,
+       binding: injected_action_binding(executor, action_name, opts)
+     }}
+  end
+
+  defp injected_action_binding(executor, action_name, opts) do
+    if bound_injected_executor?(executor) do
+      case executor.resolve_execution_binding(action_name, opts) do
+        {:ok, binding} when is_map(binding) ->
+          binding
+          |> Map.put(:executor, executor)
+          |> Map.put(:action_name, action_name)
+          |> Map.put(:injected_executor, true)
+
+        _other ->
+          %{executor: executor, action_name: action_name, injected_executor: true}
+      end
     else
-      {:ok,
-       %{
-         idempotency: :side_effecting,
-         binding: %{
-           executor: executor,
-           action_name: action_name,
-           injected_executor: true
-         }
-       }}
+      %{executor: executor, action_name: action_name, injected_executor: true}
     end
   end
 
-  defp classify_bound_action(executor, action_name, opts) do
+  defp bound_injected_executor?(executor) do
+    is_atom(executor) and Code.ensure_loaded?(executor) and
+      function_exported?(executor, :resolve_execution_binding, 2) and
+      function_exported?(executor, :execute_bound, 5)
+  end
+
+  defp classify_bound_action(executor, action_name, opts, node) do
     with {:ok,
           %{
             executor: ^executor,
@@ -141,13 +154,40 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             descriptor: descriptor
           } = binding} <- executor.resolve_execution_binding(action_name, opts),
          true <- is_map(descriptor),
-         {:ok, idempotency} <-
+         {:ok, _descriptor_class} <-
            descriptor_idempotency(descriptor["execution_idempotency"]) do
-      {:ok, %{idempotency: idempotency, binding: binding}}
+      {:ok, %{idempotency: live_action_idempotency(binding, node), binding: binding}}
     else
       {:error, _reason} = error -> error
       _other -> {:error, :invalid_bound_action_executor_classification}
     end
+  end
+
+  defp live_action_idempotency(%{action_module: module}, node) when is_atom(module) do
+    declared_action_idempotency(module, node)
+  end
+
+  defp live_action_idempotency(_binding, _node), do: :side_effecting
+
+  # Parameter-sensitive replay classification is derived only from immutable
+  # node attributes. A context key with the same normalized action-parameter
+  # name would win later in build_action_args/3, so such nodes cannot safely
+  # inherit the static declaration's replay class.
+  defp declared_action_idempotency(action, node) do
+    attr_args = parse_attr_args(node.id, node.attrs)
+
+    if context_overrides_static_arg?(node.attrs, attr_args) do
+      :side_effecting
+    else
+      Arbor.Actions.execution_idempotency(action, attr_args)
+    end
+  end
+
+  defp context_overrides_static_arg?(attrs, attr_args) do
+    attrs
+    |> action_context_keys()
+    |> Enum.map(&action_param_name/1)
+    |> Enum.any?(&Map.has_key?(attr_args, &1))
   end
 
   @doc false

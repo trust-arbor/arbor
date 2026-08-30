@@ -323,7 +323,9 @@ defmodule Arbor.Orchestrator.Engine do
                run_id,
                lifecycle_meta,
                journal_opts,
-               opts
+               opts,
+               graph,
+               run_authorization
              ) do
           {:error, reason} = error ->
             handle_prepared_pipeline_error(
@@ -350,6 +352,22 @@ defmodule Arbor.Orchestrator.Engine do
               opts,
               tracking
             )
+
+          {:ok, run_state, spec} ->
+            after_canonical_recovery(
+              state,
+              run_state,
+              graph,
+              run_authorization,
+              logs_root,
+              max_steps,
+              pipeline_started_at,
+              run_id,
+              lifecycle_meta,
+              opts,
+              tracking,
+              spec
+            )
         end
 
       {:error, reason} = error ->
@@ -375,6 +393,21 @@ defmodule Arbor.Orchestrator.Engine do
   # Enum.reverse of newest-first internal state). Engine State.completed is
   # newest-first. Terminal resumes finalize with chronological order unchanged.
   defp after_canonical_recovery(
+         state,
+         run_state,
+         graph,
+         run_authorization,
+         logs_root,
+         max_steps,
+         pipeline_started_at,
+         run_id,
+         lifecycle_meta,
+         opts,
+         tracking,
+         spec \\ nil
+       )
+
+  defp after_canonical_recovery(
          %{next_node_id: nil, context: context, completed_nodes: completed, outcomes: outcomes},
          run_state,
          _graph,
@@ -385,7 +418,8 @@ defmodule Arbor.Orchestrator.Engine do
          run_id,
          lifecycle_meta,
          opts,
-         _tracking
+         _tracking,
+         nil
        ) do
     # Chronological checkpoint order — do not reverse.
     last_id = List.last(completed)
@@ -432,11 +466,18 @@ defmodule Arbor.Orchestrator.Engine do
          _run_id,
          _lifecycle_meta,
          opts,
-         tracking
+         tracking,
+         spec
        ) do
+    node_id =
+      case spec do
+        %{node_id: spec_node_id} when is_binary(spec_node_id) -> spec_node_id
+        _other -> state.next_node_id
+      end
+
     engine_state = %State{
       graph: graph,
-      node_id: state.next_node_id,
+      node_id: node_id,
       incoming_edge: nil,
       context: state.context,
       logs_root: logs_root,
@@ -450,7 +491,8 @@ defmodule Arbor.Orchestrator.Engine do
       pipeline_started_at: pipeline_started_at,
       tracking: tracking,
       run_state: run_state,
-      run_authorization: run_authorization
+      run_authorization: run_authorization,
+      canonical_replay: if(is_map(spec), do: spec, else: nil)
     }
 
     safe_loop(engine_state)
@@ -794,7 +836,8 @@ defmodule Arbor.Orchestrator.Engine do
         cached_outcome = Map.get(state.outcomes, node.id)
 
         skip? =
-          stored_hash != nil and
+          not canonical_replay_target?(state.canonical_replay, node.id) and
+            stored_hash != nil and
             ContentHash.can_skip?(node, computed_hash, stored_hash, idempotency, cached_outcome)
 
         if skip? do
@@ -953,7 +996,8 @@ defmodule Arbor.Orchestrator.Engine do
                handler,
                idempotency,
                computed_hash,
-               journal_opts
+               journal_opts,
+               state.canonical_replay
              ) do
           {:error, reason} ->
             # Preserve node_started RunState when prepare fails closed.
@@ -1041,7 +1085,16 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp maybe_prepare_effect(false, _run_id, _node, _handler, _idempotency, _hash, _jopts) do
+  defp maybe_prepare_effect(
+         false,
+         _run_id,
+         _node,
+         _handler,
+         _idempotency,
+         _hash,
+         _jopts,
+         _replay
+       ) do
     {:ok, nil}
   end
 
@@ -1052,7 +1105,105 @@ defmodule Arbor.Orchestrator.Engine do
          handler,
          idempotency,
          computed_hash,
-         journal_opts
+         journal_opts,
+         %{kind: :reuse_pending, node_id: node_id} = spec
+       )
+       when is_binary(run_id) and node_id == node.id do
+    if replay_prepare_current_matches?(spec, handler, idempotency, computed_hash) do
+      attrs =
+        EffectOwner.prepare_attrs(
+          run_id,
+          node.id,
+          spec.execution_id,
+          spec.handler,
+          :idempotent_with_key,
+          spec.input_hash,
+          spec.started_at
+        )
+
+      case PipelineStatus.prepare_effect(run_id, attrs, journal_opts) do
+        {:ok, :already_prepared, %{"execution_id" => execution_id, "generation" => generation}}
+        when execution_id == spec.execution_id and generation == spec.generation ->
+          {:ok,
+           %{
+             execution_id: spec.execution_id,
+             generation: spec.generation,
+             run_id: run_id,
+             journal_opts: journal_opts,
+             input_hash: spec.input_hash
+           }}
+
+        {:ok, _tag, _effect} ->
+          {:error, {:effect_prepare_failed, :replay_prepare_conflict}}
+
+        {:error, reason} ->
+          {:error, {:effect_prepare_failed, reason}}
+      end
+    else
+      {:error, {:effect_prepare_failed, :replay_prepare_conflict}}
+    end
+  end
+
+  defp maybe_prepare_effect(
+         true,
+         run_id,
+         node,
+         handler,
+         idempotency,
+         computed_hash,
+         journal_opts,
+         %{kind: kind, node_id: node_id} = spec
+       )
+       when is_binary(run_id) and
+              kind in [:successor_after_settle, :successor_from_settled] and
+              node_id == node.id do
+    if replay_prepare_current_matches?(spec, handler, idempotency, computed_hash) do
+      started_at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      attrs =
+        EffectOwner.prepare_attrs(
+          run_id,
+          node.id,
+          spec.execution_id,
+          EffectOwner.handler_identity(handler),
+          :idempotent_with_key,
+          computed_hash,
+          started_at
+        )
+
+      case PipelineStatus.prepare_effect(run_id, attrs, journal_opts) do
+        {:ok, :prepared, %{"execution_id" => execution_id, "generation" => generation}}
+        when execution_id == spec.execution_id and is_integer(generation) and
+               generation > spec.generation ->
+          {:ok,
+           %{
+             execution_id: spec.execution_id,
+             generation: generation,
+             run_id: run_id,
+             journal_opts: journal_opts,
+             input_hash: computed_hash
+           }}
+
+        {:ok, _tag, _effect} ->
+          {:error, {:effect_prepare_failed, :replay_prepare_conflict}}
+
+        {:error, reason} ->
+          {:error, {:effect_prepare_failed, reason}}
+      end
+    else
+      {:error, {:effect_prepare_failed, :replay_prepare_conflict}}
+    end
+  end
+
+  defp maybe_prepare_effect(
+         true,
+         run_id,
+         node,
+         handler,
+         idempotency,
+         computed_hash,
+         journal_opts,
+         _replay
        )
        when is_binary(run_id) do
     # Impure inputs obtained once at the Engine boundary, then pure construction.
@@ -1088,7 +1239,7 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
-  defp maybe_prepare_effect(true, _run_id, _node, _handler, _idempotency, _hash, _jopts) do
+  defp maybe_prepare_effect(true, _run_id, _node, _handler, _idempotency, _hash, _jopts, _replay) do
     {:error, {:effect_prepare_failed, :run_id_missing}}
   end
 
@@ -1182,6 +1333,11 @@ defmodule Arbor.Orchestrator.Engine do
                         fail_from_engine_state(partial_after_progress, reason)
 
                       :ok ->
+                        partial_after_progress = %{
+                          partial_after_progress
+                          | canonical_replay: nil
+                        }
+
                         # Status/artifact publication and graph routing only after
                         # settle (or non-journaled path with no effect protocol).
                         if status_files_enabled?(),
@@ -2293,7 +2449,9 @@ defmodule Arbor.Orchestrator.Engine do
          run_id,
          lifecycle_meta,
          journal_opts,
-         opts
+         opts,
+         graph,
+         run_authorization
        ) do
     if resume_or_recovery?(opts) do
       case PipelineStatus.get_record(run_id, journal_opts) do
@@ -2317,7 +2475,10 @@ defmodule Arbor.Orchestrator.Engine do
             execution_digests: Map.get(state, :execution_digests, %{})
           }
 
-          case EffectRecoveryCore.decide(record, checkpoint_view) do
+          live_view =
+            build_effect_replay_live_view(record, state, graph, run_authorization, opts)
+
+          case EffectRecoveryCore.decide(record, checkpoint_view, live_view) do
             {:ok, :continue} ->
               seed_run_state_from_checkpoint(
                 run_state,
@@ -2337,6 +2498,9 @@ defmodule Arbor.Orchestrator.Engine do
                 journal_opts
               )
 
+            {:ok, :replay, spec} ->
+              admit_canonical_replay(spec, run_state, run_id, journal_opts)
+
             {:error, reason} ->
               {:error, reason}
           end
@@ -2346,6 +2510,241 @@ defmodule Arbor.Orchestrator.Engine do
       {:ok, run_state}
     end
   end
+
+  defp admit_canonical_replay(
+         %{kind: :successor_after_settle, generation: generation, execution_id: execution_id} =
+           spec,
+         run_state,
+         run_id,
+         journal_opts
+       )
+       when is_integer(generation) and is_binary(execution_id) do
+    case PipelineStatus.settle_effect(run_id, generation, execution_id, journal_opts) do
+      {:ok, tag, _effect} when tag in [:settled, :already_settled] ->
+        {:ok, run_state, spec}
+
+      {:error, reason} ->
+        {:error, {:effect_recovery_settle_failed, reason}}
+    end
+  end
+
+  defp admit_canonical_replay(
+         %{kind: kind} = spec,
+         run_state,
+         _run_id,
+         _journal_opts
+       )
+       when kind in [:reuse_pending, :successor_from_settled] do
+    {:ok, run_state, spec}
+  end
+
+  defp admit_canonical_replay(_spec, _run_state, _run_id, _journal_opts),
+    do: {:error, {:effect_recovery_inconsistent, :unknown_recovery_action}}
+
+  defp build_effect_replay_live_view(
+         %Arbor.Orchestrator.RunLifecycle.Record{} = record,
+         state,
+         graph,
+         run_authorization,
+         opts
+       ) do
+    node_id = effect_replay_node_id(record.current_effect)
+    next_node_id = Map.get(state, :next_node_id)
+
+    cond do
+      not is_binary(node_id) or node_id == "" ->
+        fail_closed_replay_live_view(next_node_id)
+
+      not is_map(graph) or not is_map(graph.nodes) or not Map.has_key?(graph.nodes, node_id) ->
+        fail_closed_replay_live_view(next_node_id)
+
+      true ->
+        build_present_node_replay_live_view(
+          Map.fetch!(graph.nodes, node_id),
+          next_node_id,
+          state,
+          graph,
+          run_authorization,
+          opts
+        )
+    end
+  end
+
+  defp build_effect_replay_live_view(_record, state, _graph, _run_authorization, _opts) do
+    fail_closed_replay_live_view(Map.get(state, :next_node_id))
+  end
+
+  defp effect_replay_node_id(%{"node_id" => node_id}) when is_binary(node_id), do: node_id
+  defp effect_replay_node_id(_effect), do: nil
+
+  defp fail_closed_replay_live_view(next_node_id) do
+    %{
+      next_node_id: next_node_id,
+      handler_id: "",
+      input_hash: "",
+      idempotency: :side_effecting,
+      binding_ok: false
+    }
+  end
+
+  defp build_present_node_replay_live_view(
+         node,
+         next_node_id,
+         state,
+         graph,
+         run_authorization,
+         opts
+       ) do
+    step_now = DateTime.utc_now()
+
+    authority_context =
+      RunAuthorization.enforce_context(state.context, run_authorization)
+
+    fidelity = Fidelity.resolve(node, nil, graph, authority_context)
+
+    hash_context =
+      authority_context
+      |> Context.set("current_node", node.id, node.id, step_now)
+      |> Context.set("internal.fidelity.mode", fidelity.mode, node.id, step_now)
+      |> maybe_set_fidelity_thread(fidelity, node.id, step_now)
+
+    input_hash = ContentHash.compute(node, hash_context)
+    {handler, resolved_node} = Executor.resolve_handler(node)
+
+    binding_result =
+      verify_replay_runtime_bindings(run_authorization, handler, resolved_node, opts)
+
+    {idempotency, binding_ok, handler_id} =
+      case binding_result do
+        {:ok, class, true} ->
+          {class, true, EffectOwner.handler_identity(handler)}
+
+        {:ok, class, false} ->
+          {class, false, EffectOwner.handler_identity(handler)}
+
+        {:error, _reason} ->
+          {:side_effecting, false, EffectOwner.handler_identity(handler)}
+      end
+
+    %{
+      next_node_id: next_node_id,
+      handler_id: handler_id,
+      input_hash: input_hash,
+      idempotency: idempotency,
+      binding_ok: binding_ok
+    }
+  rescue
+    _exception -> fail_closed_replay_live_view(next_node_id)
+  catch
+    _kind, _reason -> fail_closed_replay_live_view(next_node_id)
+  end
+
+  defp verify_replay_runtime_bindings(run_authorization, handler, node, opts) do
+    with :ok <- verify_replay_handler(run_authorization, node, handler),
+         {:ok, delegates} <- replay_execution_delegates(handler, node, opts),
+         :ok <- verify_replay_delegates(run_authorization, node, delegates),
+         {:ok, %{idempotency: class, binding: binding}} <-
+           Handler.execution_classification(handler, node, opts),
+         true <- exact_replay_action_binding?(node, binding, delegates) do
+      {:ok, class, true}
+    else
+      {:ok, %{idempotency: class, binding: _binding}} ->
+        {:ok, class, false}
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :replay_binding_unverified}
+    end
+  end
+
+  defp verify_replay_handler(%RunAuthorization{} = authority, node, handler) do
+    RunAuthorization.verify_handler(authority, node, handler)
+  end
+
+  defp verify_replay_handler(_authority, _node, _handler), do: :ok
+
+  defp replay_execution_delegates(handler, node, opts) do
+    Code.ensure_loaded(handler)
+
+    cond do
+      function_exported?(handler, :execution_delegates, 2) ->
+        normalize_replay_delegates(handler.execution_delegates(node, opts))
+
+      function_exported?(handler, :execution_delegates, 1) ->
+        normalize_replay_delegates(handler.execution_delegates(node))
+
+      true ->
+        {:ok, []}
+    end
+  end
+
+  defp normalize_replay_delegates({:ok, delegates}) when is_list(delegates), do: {:ok, delegates}
+  defp normalize_replay_delegates({:error, _reason} = error), do: error
+  defp normalize_replay_delegates(_other), do: {:error, :invalid_execution_delegate}
+
+  defp verify_replay_delegates(authority, node, delegates) do
+    Enum.reduce_while(delegates, :ok, fn
+      {slot, module}, :ok when is_binary(slot) ->
+        case RunAuthorization.verify_execution_module(authority, node, slot, module) do
+          :ok -> {:cont, :ok}
+          {:error, _reason} = error -> {:halt, error}
+        end
+
+      _other, _acc ->
+        {:halt, {:error, :invalid_execution_delegate}}
+    end)
+  end
+
+  defp exact_replay_action_binding?(node, binding, delegates) do
+    target = Map.get(node.attrs, "target", "tool")
+    action_name = Map.get(node.attrs, "action")
+    action_delegate? = action_executor_delegate?(delegates)
+
+    cond do
+      target == "action" or action_delegate? ->
+        is_map(binding) and
+          is_atom(Map.get(binding, :action_module)) and
+          Map.get(binding, :action_name) == action_name and
+          Map.get(binding, :injected_executor) != true
+
+      is_map(binding) and Map.get(binding, :injected_executor) == true ->
+        false
+
+      is_nil(binding) ->
+        not action_delegate?
+
+      is_map(binding) ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp canonical_replay_target?(%{node_id: node_id}, node_id) when is_binary(node_id), do: true
+  defp canonical_replay_target?(_spec, _node_id), do: false
+
+  defp replay_prepare_current_matches?(spec, handler, idempotency, computed_hash)
+       when is_map(spec) do
+    is_binary(spec.handler) and
+      spec.handler == EffectOwner.handler_identity(handler) and
+      idempotency == :idempotent_with_key and
+      is_binary(computed_hash) and
+      computed_hash == spec.input_hash
+  end
+
+  defp replay_prepare_current_matches?(_spec, _handler, _idempotency, _computed_hash), do: false
+
+  defp action_executor_delegate?(delegates) when is_list(delegates) do
+    Enum.any?(delegates, fn
+      {"exec:action", _module} -> true
+      _other -> false
+    end)
+  end
+
+  defp action_executor_delegate?(_delegates), do: false
 
   defp apply_effect_recovery_actions(
          actions,

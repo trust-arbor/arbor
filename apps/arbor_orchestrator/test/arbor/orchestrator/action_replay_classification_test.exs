@@ -26,6 +26,7 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
   alias Arbor.Orchestrator.RunJournal
 
   alias Arbor.Orchestrator.TestFixtures.{
+    BoundProtocolInjectedExecutor,
     ReplayActionsExecutor,
     ReplayRevocableCapabilitySecurity
   }
@@ -83,6 +84,93 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
 
     unresolved = compiled_graph!(action_dot("test_replay_missing"))
     assert unresolved.nodes["task"].idempotency == :side_effecting
+  end
+
+  test "security regression: compiler-pinned cross_app reviewed validation is keyed replay" do
+    cross_app =
+      %Arbor.Orchestrator.Graph.Node{
+        id: "validate",
+        attrs: %{
+          "target" => "action",
+          "action" => "coding_reviewed_validation",
+          "param.pinned_action" => "coding_cross_app_validate",
+          "param.pinned_profile_id" => "cross_app",
+          "param.pinned_params_json" => "{}"
+        }
+      }
+
+    assert Handler.idempotency_of(ExecHandler, cross_app) == :idempotent_with_key
+
+    assert {:ok, %{idempotency: :idempotent_with_key, binding: binding}} =
+             Handler.execution_classification(ExecHandler, cross_app, [])
+
+    assert binding.action_module == Arbor.Actions.Coding.ReviewedValidation
+
+    default =
+      %Arbor.Orchestrator.Graph.Node{
+        id: "validate",
+        attrs: %{
+          "target" => "action",
+          "action" => "coding_reviewed_validation",
+          "param.pinned_action" => "mix_compile",
+          "param.pinned_profile_id" => "default",
+          "param.pinned_params_json" => "{}"
+        }
+      }
+
+    assert Handler.idempotency_of(ExecHandler, default) == :side_effecting
+
+    assert {:ok, %{idempotency: :side_effecting}} =
+             Handler.execution_classification(ExecHandler, default, [])
+
+    missing_pins =
+      %Arbor.Orchestrator.Graph.Node{
+        id: "validate",
+        attrs: %{"target" => "action", "action" => "coding_reviewed_validation"}
+      }
+
+    assert Handler.idempotency_of(ExecHandler, missing_pins) == :side_effecting
+  end
+
+  test "security regression: bound injected executors remain side_effecting" do
+    node = %Arbor.Orchestrator.Graph.Node{
+      id: "validate",
+      attrs: %{
+        "target" => "action",
+        "action" => "coding_reviewed_validation",
+        "param.pinned_action" => "coding_cross_app_validate",
+        "param.pinned_profile_id" => "cross_app",
+        "param.pinned_params_json" => "{}"
+      }
+    }
+
+    assert Handler.idempotency_of(ExecHandler, node) == :idempotent_with_key
+
+    assert {:ok, %{idempotency: :side_effecting, binding: binding}} =
+             Handler.execution_classification(ExecHandler, node,
+               actions_executor: BoundProtocolInjectedExecutor
+             )
+
+    assert binding.injected_executor == true
+    assert binding.executor == BoundProtocolInjectedExecutor
+    assert binding.action_name == "coding_reviewed_validation"
+
+    journal = start_isolated_journal("bound_injected_keyed")
+    jopts = [server: journal.name]
+    graph = compiled_graph!(reviewed_cross_app_dot())
+
+    assert {:ok, _result} =
+             Engine.run(graph,
+               run_id: journal.run_id,
+               logs_root: tmp_logs("bound_injected_keyed"),
+               journal_opts: jopts,
+               actions_executor: BoundProtocolInjectedExecutor
+             )
+
+    record = PipelineStatus.get_record(journal.run_id, jopts)
+    assert record.current_effect["status"] == "settled"
+    assert record.current_effect["idempotency_class"] == "side_effecting"
+    assert_receive {:bound_injected_executor_called, "coding_reviewed_validation", _exec_id}
   end
 
   test "tool, shell, function, and unknown exec targets remain side_effecting" do
@@ -398,6 +486,17 @@ defmodule Arbor.Orchestrator.ActionReplayClassificationTest do
     digraph ActionReplay {
       start [shape=Mdiamond]
       task [type="exec", target="action", action="#{action_name}"#{extra}]
+      done [shape=Msquare]
+      start -> task -> done
+    }
+    """
+  end
+
+  defp reviewed_cross_app_dot do
+    """
+    digraph ActionReplay {
+      start [shape=Mdiamond]
+      task [type="exec", target="action", action="coding_reviewed_validation", param.pinned_action="coding_cross_app_validate", param.pinned_profile_id="cross_app", param.pinned_params_json="{}"]
       done [shape=Msquare]
       start -> task -> done
     }
