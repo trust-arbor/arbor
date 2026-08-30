@@ -17,8 +17,9 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
   admits). Executables come from `config :arbor_commands,
   :baseline_image_executables`. The task pre-flights the pinned `FROM`
   digest and fails closed with `base_image_missing` plus the exact
-  `podman pull <ref>` remedy when it is absent — it does not pull
-  automatically. Pull the reviewed Debian base once first
+  `podman pull <ref>` remedy (and `container image pull <ref>` for
+  Apple Container) when it is absent — it does not pull automatically.
+  Pull the reviewed Debian base once first
   (`podman pull` / `container image pull debian:bookworm-slim@sha256:…` —
   digest in `images/validation-runtime/Containerfile`);
   see `images/validation-runtime/README.md`.

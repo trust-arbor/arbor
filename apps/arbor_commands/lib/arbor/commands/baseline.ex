@@ -347,7 +347,6 @@ defmodule Arbor.Commands.Baseline do
     # `spawn_executable`, which does not resolve a relative `./bin/mix` against
     # `:cd` — on Linux it fails with :enoent before the child starts (V7,
     # 2026-08-26). Same absolute-wrapper contract as `Arbor.Actions.Mix`.
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.get"],
            cd: repo_root,
            env: staging_mix_env(deps_path),
@@ -387,7 +386,6 @@ defmodule Arbor.Commands.Baseline do
     # Take the tree digest after this so the unit can compile with --network none.
     File.mkdir_p!(staging_build_path(deps_path))
 
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.compile"],
            cd: repo_root,
            env: staging_mix_env(deps_path),
@@ -490,10 +488,18 @@ defmodule Arbor.Commands.Baseline do
     with {:ok, text} <- read_containerfile(request.containerfile),
          {:ok, ref} <- BuildCore.pinned_from_reference(text),
          {:ok, args} <- BuildCore.image_exists_args(driver, ref) do
-      if image_present?(ctx, executable, ref, args) do
-        :ok
-      else
-        {:error, {:base_image_missing, ref}}
+      case probe_base_image(ctx, executable, driver, ref, args) do
+        {:ok, true} ->
+          :ok
+
+        {:ok, false} ->
+          {:error, {:base_image_missing, ref}}
+
+        {:error, diagnostic} when is_map(diagnostic) ->
+          {:error, {:base_image_preflight_failed, diagnostic}}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -507,19 +513,36 @@ defmodule Arbor.Commands.Baseline do
 
   defp read_containerfile(_path), do: {:error, :containerfile_unreadable}
 
-  defp image_present?(ctx, executable, ref, args) do
+  defp probe_base_image(ctx, executable, driver, ref, args) do
     case ctx.image_exists do
       fun when is_function(fun, 1) ->
-        fun.(ref) == true
+        interpret_injected_exists(fun.(ref), executable)
 
       _missing ->
-        case run_image_cmd(ctx, executable, args) do
-          {_output, 0} -> true
-          {_output, _status} -> false
-        end
+        run_exists_probe(ctx, executable, driver, args)
     end
+  end
+
+  defp interpret_injected_exists(true, _executable), do: {:ok, true}
+  defp interpret_injected_exists(false, _executable), do: {:ok, false}
+
+  defp interpret_injected_exists({:ok, present}, _executable) when is_boolean(present),
+    do: {:ok, present}
+
+  defp interpret_injected_exists({:error, reason}, _executable), do: {:error, reason}
+
+  defp interpret_injected_exists(other, executable) do
+    {:error, BuildCore.failure_diagnostic(executable, nil, inspect(other))}
+  end
+
+  defp run_exists_probe(ctx, executable, driver, args) do
+    BuildCore.interpret_image_exists(driver, executable, run_image_cmd(ctx, executable, args))
   rescue
-    _error -> false
+    error ->
+      {:error, BuildCore.failure_diagnostic(executable, nil, Exception.message(error))}
+  catch
+    kind, reason ->
+      {:error, BuildCore.failure_diagnostic(executable, nil, "#{kind}: #{inspect(reason)}")}
   end
 
   defp run_image_cmd(ctx, executable, args) do

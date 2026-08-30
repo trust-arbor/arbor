@@ -52,6 +52,20 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     defp test_pid, do: :persistent_term.get({__MODULE__, :test_pid})
   end
 
+  defmodule AppleFakeShell do
+    @moduledoc false
+
+    def linux_dependency_baseline_tree_digest(_source_root, _platform) do
+      {:ok, String.duplicate("a", 64)}
+    end
+
+    def validation_runtime_status,
+      do: %{"state" => "pinned", "reason" => nil, "driver" => "apple_container"}
+
+    def validation_runtime_probe,
+      do: {:ok, %{"state" => "available", "driver" => "apple_container"}}
+  end
+
   defmodule ProbeFlunkShell do
     @moduledoc false
 
@@ -178,6 +192,9 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
 
     File.write!(script, """
     #!/bin/sh
+    if [ "$1" = "image" ] && [ "$2" = "exists" ]; then
+      exit 0
+    fi
     echo "STEP 1/8: FROM #{@pinned_from}"
     echo "Error: creating build container: initializing source docker://#{@pinned_from}: image not known"
     exit 125
@@ -199,7 +216,6 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                repo_root: repo,
                deps_path: deps,
                platform: "linux/amd64",
-               image_exists: fn _ref -> true end,
                deps_fetch: fn _ctx -> :ok end,
                deps_compile: fn _ctx -> :ok end,
                smoke_test: fn _copy, _platform -> :ok end,
@@ -230,12 +246,16 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                repo_root: repo,
                deps_path: deps,
                platform: "linux/amd64",
-               image_exists: fn ref ->
-                 send(self(), {:image_exists, ref})
-                 false
-               end,
                image_cmd: fn _exe, args ->
-                 flunk("must not build when base image is missing, got #{inspect(args)}")
+                 send(self(), {:image_cmd, args})
+
+                 case args do
+                   ["image", "exists", @pinned_from] ->
+                     {"", 1}
+
+                   other ->
+                     flunk("must not build when base image is missing, got #{inspect(other)}")
+                 end
                end,
                deps_fetch: fn _ctx -> :ok end,
                deps_compile: fn _ctx -> :ok end,
@@ -243,7 +263,8 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                shell: FakeShell
              )
 
-    assert_received {:image_exists, @pinned_from}
+    assert_received {:image_cmd, ["image", "exists", @pinned_from]}
+    refute_received {:image_cmd, ["build" | _]}
 
     printed = Build.format_error({:base_image_missing, @pinned_from})
     assert printed =~ "base_image_missing"
@@ -260,13 +281,16 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                repo_root: repo,
                deps_path: deps,
                platform: "linux/amd64",
-               image_exists: fn ref ->
-                 send(self(), {:image_exists, ref})
-                 true
-               end,
                image_cmd: fn exe, args ->
                  send(self(), {:image_cmd, exe, args})
-                 {"Error: dockerfile parse error line 3: unknown instruction: BANANA\n", 1}
+
+                 case args do
+                   ["image", "exists", @pinned_from] ->
+                     {"", 0}
+
+                   ["build" | _rest] ->
+                     {"Error: dockerfile parse error line 3: unknown instruction: BANANA\n", 1}
+                 end
                end,
                deps_fetch: fn _ctx -> :ok end,
                deps_compile: fn _ctx -> :ok end,
@@ -274,10 +298,153 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                shell: FakeShell
              )
 
-    assert_received {:image_exists, @pinned_from}
+    assert_received {:image_cmd, _exe, ["image", "exists", @pinned_from]}
     assert_received {:image_cmd, _exe, ["build" | _rest]}
     assert diagnostic.reason == :unknown
     assert diagnostic.tail =~ "unknown instruction"
+  end
+
+  test "podman exists operational failure is not reported as a missing base image",
+       %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:base_image_preflight_failed, diagnostic}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               image_cmd: fn _exe, args ->
+                 case args do
+                   ["image", "exists", @pinned_from] ->
+                     {"Error: cannot connect to Podman socket\n", 125}
+
+                   other ->
+                     flunk("must not build after exists probe failure, got #{inspect(other)}")
+                 end
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert diagnostic.exit_status == 125
+    assert diagnostic.tail =~ "cannot connect"
+
+    printed = Build.format_error({:base_image_preflight_failed, diagnostic})
+    assert printed =~ "base_image_preflight_failed"
+    assert printed =~ "cannot connect"
+  end
+
+  test "podman exists exception is a preflight failure, not a missing image", %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:base_image_preflight_failed, diagnostic}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               image_cmd: fn _exe, args ->
+                 case args do
+                   ["image", "exists", @pinned_from] ->
+                     raise "podman socket missing"
+
+                   other ->
+                     flunk("must not build after exists probe exception, got #{inspect(other)}")
+                 end
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert diagnostic.tail =~ "podman socket missing"
+  end
+
+  test "Apple Container inspects the pin before build and stops when it is absent",
+       %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:base_image_missing, @pinned_from}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/arm64",
+               image_cmd: fn _exe, args ->
+                 send(self(), {:image_cmd, args})
+
+                 case args do
+                   ["image", "inspect", @pinned_from] ->
+                     {"Error: unknown image: #{@pinned_from}\n", 1}
+
+                   other ->
+                     flunk(
+                       "must not build when Apple base image is missing, got #{inspect(other)}"
+                     )
+                 end
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: AppleFakeShell
+             )
+
+    assert_received {:image_cmd, ["image", "inspect", @pinned_from]}
+    refute_received {:image_cmd, ["build" | _]}
+
+    printed = Build.format_error({:base_image_missing, @pinned_from})
+    assert printed =~ "container image pull #{@pinned_from}"
+  end
+
+  test "Apple Container nonzero build returns a bounded diagnostic", %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:image_build_failed, diagnostic}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/arm64",
+               image_cmd: fn _exe, args ->
+                 send(self(), {:image_cmd, args})
+
+                 case args do
+                   ["image", "inspect", @pinned_from] ->
+                     {~s([{"configuration":{}}]), 0}
+
+                   ["build" | _rest] ->
+                     {"Error: no image found in manifest list for architecture linux/riscv64\n",
+                      1}
+
+                   other ->
+                     flunk("unexpected Apple command #{inspect(other)}")
+                 end
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: AppleFakeShell
+             )
+
+    assert_received {:image_cmd, ["image", "inspect", @pinned_from]}
+    assert_received {:image_cmd, ["build" | _rest]}
+    assert diagnostic.reason == :platform_unsupported
+    assert diagnostic.exit_status == 1
+    assert diagnostic.tail =~ "no image found in manifest list"
+    assert byte_size(diagnostic.tail) <= 4096
+
+    printed = Build.format_error({:image_build_failed, diagnostic})
+    assert printed =~ "image_build_failed"
+    assert printed =~ "platform_unsupported"
+    assert printed =~ "no image found in manifest list"
   end
 
   test "build does not overwrite active validation-runtime.json", %{root: root} do

@@ -302,6 +302,53 @@ defmodule Arbor.Commands.BaselineCoreTest do
     safe = BuildCore.failure_diagnostic("/usr/bin/podman", 125, invalid)
     assert String.valid?(safe.tail)
     assert safe.reason == :base_image_missing
+
+    prefix = String.duplicate("ok\n", 50_000)
+    late = BuildCore.failure_diagnostic("/usr/bin/podman", 1, prefix <> "no space left on device")
+    assert late.reason == :disk_full
+    assert byte_size(late.tail) <= 4096
+  end
+
+  test "interpret_image_exists treats only documented absence as missing" do
+    assert {:ok, true} =
+             BuildCore.interpret_image_exists("podman", "/usr/bin/podman", {"", 0})
+
+    assert {:ok, false} =
+             BuildCore.interpret_image_exists("podman", "/usr/bin/podman", {"", 1})
+
+    assert {:error, socket} =
+             BuildCore.interpret_image_exists(
+               "podman",
+               "/usr/bin/podman",
+               {"Error: cannot connect to Podman socket", 125}
+             )
+
+    assert socket.exit_status == 125
+    assert socket.tail =~ "cannot connect"
+
+    assert {:ok, true} =
+             BuildCore.interpret_image_exists(
+               "apple_container",
+               "/usr/local/bin/container",
+               {"{}", 0}
+             )
+
+    assert {:ok, false} =
+             BuildCore.interpret_image_exists(
+               "apple_container",
+               "/usr/local/bin/container",
+               {"Error: unknown image: #{@pinned_from}", 1}
+             )
+
+    assert {:error, refused} =
+             BuildCore.interpret_image_exists(
+               "apple_container",
+               "/usr/local/bin/container",
+               {"Error: connection refused", 1}
+             )
+
+    assert refused.exit_status == 1
+    assert refused.reason == :unknown
   end
 
   test "pinned_from_reference reads digest-form FROM and names the pull remedy" do
@@ -323,9 +370,13 @@ defmodule Arbor.Commands.BaselineCoreTest do
 
     assert BuildCore.pull_remedy(@pinned_from) == "podman pull #{@pinned_from}"
 
+    assert BuildCore.pull_remedy(@pinned_from, "apple_container") ==
+             "container image pull #{@pinned_from}"
+
     formatted = BuildCore.format_failure({:base_image_missing, @pinned_from})
     assert formatted =~ "base_image_missing"
     assert formatted =~ "podman pull #{@pinned_from}"
+    assert formatted =~ "container image pull #{@pinned_from}"
 
     diag = BuildCore.failure_diagnostic("/usr/bin/podman", 125, @missing_image_not_known)
     shown = BuildCore.format_failure({:image_build_failed, diag})

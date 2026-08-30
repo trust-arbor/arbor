@@ -1,6 +1,10 @@
 defmodule Arbor.Commands.Baseline.BuildCore do
   @moduledoc """
-  Pure layout and document decisions for `mix arbor.baseline.build`.
+  Pure decisions for `mix arbor.baseline.build`.
+
+  Owns baseline layout and activation documents, image-backend selection,
+  failure diagnostics, pinned `FROM` parse, image-exists argv, exists-result
+  interpretation, pull remedies, and Mix failure text.
   """
 
   @hex64_re ~r/\A[0-9a-f]{64}\z/
@@ -372,6 +376,7 @@ defmodule Arbor.Commands.Baseline.BuildCore do
 
   @max_tail_lines 40
   @max_tail_bytes 4096
+  @raw_scan_bytes 8192
   @from_digest_re ~r/^FROM[ \t]+(\S+@sha256:[0-9a-f]{64})\s*$/m
 
   @type failure_reason :: :base_image_missing | :platform_unsupported | :disk_full | :unknown
@@ -392,11 +397,11 @@ defmodule Arbor.Commands.Baseline.BuildCore do
   """
   @spec failure_diagnostic(term(), term(), term()) :: failure_diagnostic()
   def failure_diagnostic(executable, exit_status, output) do
-    text = sanitize_output(output_text(output))
+    text = sanitize_output(bound_raw_output(output))
 
     %{
       reason: classify_reason(text),
-      tail: bounded_tail(text),
+      tail: take_last_utf8_bytes(text, @max_tail_bytes),
       executable: stringify(executable),
       exit_status: normalize_status(exit_status)
     }
@@ -429,30 +434,93 @@ defmodule Arbor.Commands.Baseline.BuildCore do
 
   def image_exists_args(_driver, _ref), do: {:error, :image_backend_unsupported}
 
-  @doc "Exact reviewed pull command for a missing pinned base image."
+  @doc """
+  Interpret a backend image-exists / image-inspect command result.
+
+  `{:ok, true}` means the image is present. `{:ok, false}` is only the
+  backend's documented absent-image result (`podman image exists` exit 1,
+  or Apple `container image inspect` output that names a missing image).
+  Any other status, output, or shape is `{:error, diagnostic}`.
+  """
+  @spec interpret_image_exists(term(), term(), term()) ::
+          {:ok, boolean()} | {:error, failure_diagnostic()}
+  def interpret_image_exists("podman", _executable, {_output, 0}), do: {:ok, true}
+  def interpret_image_exists("podman", _executable, {_output, 1}), do: {:ok, false}
+
+  def interpret_image_exists("podman", executable, {output, status}) when is_integer(status) do
+    {:error, failure_diagnostic(executable, status, output)}
+  end
+
+  def interpret_image_exists("apple_container", _executable, {_output, 0}), do: {:ok, true}
+
+  def interpret_image_exists("apple_container", executable, {output, status})
+      when is_integer(status) do
+    diagnostic = failure_diagnostic(executable, status, output)
+
+    if inspect_reports_absent?(diagnostic) do
+      {:ok, false}
+    else
+      {:error, diagnostic}
+    end
+  end
+
+  def interpret_image_exists(driver, executable, other) when is_binary(driver) do
+    {:error, failure_diagnostic(executable, nil, inspect(other))}
+  end
+
+  def interpret_image_exists(_driver, executable, other) do
+    {:error, failure_diagnostic(executable, nil, inspect(other))}
+  end
+
+  @doc """
+  Exact pull command for a missing pinned base image.
+
+  `podman pull <ref>` is the reviewed Linux pin in SOFTWARE_FACTORY.md.
+  Pass `"apple_container"` for `container image pull <ref>`.
+  `format_failure/1` prints both so Mix stays correct on either backend.
+  """
   @spec pull_remedy(term()) :: String.t()
-  def pull_remedy(ref) when is_binary(ref) and ref != "", do: "podman pull " <> ref
-  def pull_remedy(_ref), do: "podman pull <pinned FROM reference>"
+  @spec pull_remedy(term(), term()) :: String.t()
+  def pull_remedy(ref, driver \\ "podman")
+
+  def pull_remedy(ref, "apple_container") when is_binary(ref) and ref != "",
+    do: "container image pull " <> ref
+
+  def pull_remedy(ref, _driver) when is_binary(ref) and ref != "", do: "podman pull " <> ref
+  def pull_remedy(_ref, _driver), do: "podman pull <pinned FROM reference>"
 
   @doc "Operator-facing Mix error text. Convert step for build failures."
   @spec format_failure(term()) :: String.t()
   def format_failure({:image_build_failed, diagnostic}) when is_map(diagnostic) do
-    reason = Map.get(diagnostic, :reason) || Map.get(diagnostic, "reason") || :unknown
-    tail = Map.get(diagnostic, :tail) || Map.get(diagnostic, "tail") || ""
+    format_diagnostic_error("image_build_failed", diagnostic)
+  end
 
-    case String.trim(tail) do
-      "" -> "image_build_failed (#{reason})"
-      trimmed -> "image_build_failed (#{reason})\n#{trimmed}"
-    end
+  def format_failure({:base_image_preflight_failed, diagnostic}) when is_map(diagnostic) do
+    format_diagnostic_error("base_image_preflight_failed", diagnostic)
   end
 
   def format_failure({:base_image_missing, ref}) when is_binary(ref) do
-    "base_image_missing: #{ref}\nPull the reviewed pin first: #{pull_remedy(ref)}"
+    """
+    base_image_missing: #{ref}
+    Pull the reviewed pin first: #{pull_remedy(ref, "podman")}
+    Apple Container: #{pull_remedy(ref, "apple_container")}
+    """
+    |> String.trim()
   end
 
   def format_failure(:image_build_failed), do: "image_build_failed"
   def format_failure(reason) when is_atom(reason), do: Atom.to_string(reason)
   def format_failure(reason), do: inspect(reason)
+
+  defp format_diagnostic_error(tag, diagnostic) do
+    reason = Map.get(diagnostic, :reason) || Map.get(diagnostic, "reason") || :unknown
+    tail = Map.get(diagnostic, :tail) || Map.get(diagnostic, "tail") || ""
+
+    case String.trim(tail) do
+      "" -> "#{tag} (#{reason})"
+      trimmed -> "#{tag} (#{reason})\n#{trimmed}"
+    end
+  end
 
   defp classify_reason(text) do
     down = String.downcase(text)
@@ -465,9 +533,21 @@ defmodule Arbor.Commands.Baseline.BuildCore do
     end
   end
 
+  defp inspect_reports_absent?(%{reason: :base_image_missing}), do: true
+  defp inspect_reports_absent?(%{tail: tail}) when is_binary(tail), do: inspect_absent_text?(tail)
+  defp inspect_reports_absent?(_other), do: false
+
+  defp inspect_absent_text?(text) do
+    down = String.downcase(text)
+
+    String.contains?(down, "unknown image") or String.contains?(down, "image not found")
+  end
+
   defp base_image_missing?(down, original) do
     String.contains?(down, "image not known") or
       String.contains?(down, "no such image") or
+      String.contains?(down, "unknown image") or
+      String.contains?(down, "image not found") or
       (String.contains?(down, "creating build container") and
          String.contains?(original, "@sha256:"))
   end
@@ -518,12 +598,36 @@ defmodule Arbor.Commands.Baseline.BuildCore do
     end
   end
 
-  defp bounded_tail(text) do
-    text
-    |> String.split("\n")
-    |> Enum.take(-@max_tail_lines)
-    |> Enum.join("\n")
-    |> take_last_utf8_bytes(@max_tail_bytes)
+  defp bound_raw_output(output) do
+    output
+    |> output_text()
+    |> take_last_bytes_raw(@raw_scan_bytes)
+    |> take_last_newlines(@max_tail_lines)
+  end
+
+  defp take_last_bytes_raw(bin, max) when byte_size(bin) <= max, do: bin
+
+  defp take_last_bytes_raw(bin, max) do
+    binary_part(bin, byte_size(bin) - max, max)
+  end
+
+  defp take_last_newlines(bin, max_lines) do
+    size = byte_size(bin)
+    start = newline_start(bin, size - 1, 0, max_lines)
+    binary_part(bin, start, size - start)
+  end
+
+  defp newline_start(_bin, pos, _count, _max) when pos < 0, do: 0
+
+  defp newline_start(bin, pos, count, max) do
+    case :binary.at(bin, pos) do
+      ?\n ->
+        next = count + 1
+        if next >= max, do: pos + 1, else: newline_start(bin, pos - 1, next, max)
+
+      _other ->
+        newline_start(bin, pos - 1, count, max)
+    end
   end
 
   defp take_last_utf8_bytes(text, max) when byte_size(text) <= max, do: text
