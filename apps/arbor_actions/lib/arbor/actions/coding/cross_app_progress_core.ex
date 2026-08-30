@@ -29,6 +29,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   @max_identities_json_bytes 4_096
   @max_observation_json_bytes 163_840
   @max_refinement_json_bytes 4_096
+  @max_failure_feedback_json_bytes 16_384
   @digest_regex ~r/\A[0-9a-f]{64}\z/
   @forbidden_keys MapSet.new(
                     ~w(authority authorization capability credential fence_token secret token)
@@ -75,6 +76,19 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     unstarted_file_count
   ))
   @statuses ~w(completed in_progress)
+  @failure_check_keys Enum.sort(~w(
+    exit_code
+    passed
+    reason
+    status
+    stderr_excerpt
+    stderr_sha256
+    stderr_truncated
+    stdout_excerpt
+    stdout_sha256
+    stdout_truncated
+  ))
+  @failure_check_reasons ~w(tests_failed tests_timed_out)
 
   @type error :: atom()
   @type state :: %{required(String.t()) => term()}
@@ -91,6 +105,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   @spec limits() :: %{required(String.t()) => pos_integer()}
   def limits do
     %{
+      "max_failure_feedback_json_bytes" => @max_failure_feedback_json_bytes,
       "max_identities_json_bytes" => @max_identities_json_bytes,
       "max_observation_json_bytes" => @max_observation_json_bytes,
       "max_refinement_json_bytes" => @max_refinement_json_bytes,
@@ -98,25 +113,137 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     }
   end
 
-  @doc "Project a stable validation failure into a domain result or terminal infrastructure error."
+  @doc """
+  Project a stable validation failure into a domain result or terminal
+  infrastructure error.
+
+  The arity-1 form keeps the closed four-field envelope. A second argument
+  admits Core's already-bounded aggregate check into `feedback_json` with
+  explicit byte ceilings and no arbitrary map passthrough.
+  """
   @spec project_failure(term()) :: {:ok, map()} | {:error, atom()}
-  def project_failure("validation_infrastructure_failed"),
+  @spec project_failure(term(), term()) :: {:ok, map()} | {:error, atom()}
+  def project_failure(reason, check \\ nil)
+
+  def project_failure("validation_infrastructure_failed", _check),
     do: {:error, :validation_infrastructure_failed}
 
-  def project_failure("validation_tree_mutated"), do: {:error, :validation_tree_mutated}
-  def project_failure("validation_stage_timeout"), do: {:error, :validation_stage_timeout}
+  def project_failure("validation_tree_mutated", _check),
+    do: {:error, :validation_tree_mutated}
 
-  def project_failure(reason) when is_binary(reason) do
-    {:ok,
-     %{
-       "schema_version" => 1,
-       "disposition_type" => "failed",
-       "passed" => false,
-       "reason" => reason
-     }}
+  def project_failure("validation_stage_timeout", _check),
+    do: {:error, :validation_stage_timeout}
+
+  def project_failure(reason, nil) when is_binary(reason) do
+    {:ok, domain_failure_projection(reason)}
   end
 
-  def project_failure(_reason), do: {:error, :validation_infrastructure_failed}
+  def project_failure(reason, check) when is_binary(reason) do
+    with {:ok, admitted} <- admit_failure_check(check),
+         :ok <- match(admitted["reason"], reason, :malformed_failure_feedback),
+         {:ok, feedback_json} <- encode_failure_feedback(admitted) do
+      {:ok, Map.put(domain_failure_projection(reason), "feedback_json", feedback_json)}
+    else
+      {:error, :oversized_failure_feedback} = error -> error
+      {:error, :malformed_failure_feedback} = error -> error
+      {:error, _reason} -> {:error, :malformed_failure_feedback}
+    end
+  end
+
+  def project_failure(_reason, _check), do: {:error, :validation_infrastructure_failed}
+
+  defp domain_failure_projection(reason) when is_binary(reason) do
+    %{
+      "schema_version" => 1,
+      "disposition_type" => "failed",
+      "passed" => false,
+      "reason" => reason
+    }
+  end
+
+  defp admit_failure_check(check) when is_map(check) and not is_struct(check) do
+    with :ok <- require_json_object(check),
+         :ok <- reject_forbidden_keys(check),
+         :ok <- require_exact_keys(check, @failure_check_keys),
+         :ok <- match(check["status"], "completed", :malformed_failure_feedback),
+         :ok <- match(check["passed"], false, :malformed_failure_feedback),
+         :ok <- require_failure_check_reason(check["reason"]),
+         :ok <- require_exit_code(check["exit_code"]),
+         :ok <- require_boolean(check["stdout_truncated"]),
+         :ok <- require_boolean(check["stderr_truncated"]),
+         {:ok, stdout_excerpt} <- admit_failure_excerpt(check["stdout_excerpt"]),
+         {:ok, stderr_excerpt} <- admit_failure_excerpt(check["stderr_excerpt"]),
+         {:ok, stdout_sha256} <- parse_failure_hex(check["stdout_sha256"]),
+         {:ok, stderr_sha256} <- parse_failure_hex(check["stderr_sha256"]) do
+      {:ok,
+       %{
+         "status" => "completed",
+         "passed" => false,
+         "exit_code" => check["exit_code"],
+         "reason" => check["reason"],
+         "stdout_excerpt" => stdout_excerpt,
+         "stderr_excerpt" => stderr_excerpt,
+         "stdout_truncated" => check["stdout_truncated"],
+         "stderr_truncated" => check["stderr_truncated"],
+         "stdout_sha256" => stdout_sha256,
+         "stderr_sha256" => stderr_sha256
+       }}
+    else
+      {:error, :oversized_failure_feedback} = error -> error
+      {:error, :malformed_failure_feedback} = error -> error
+      {:error, _reason} -> {:error, :malformed_failure_feedback}
+    end
+  end
+
+  defp admit_failure_check(_check), do: {:error, :malformed_failure_feedback}
+
+  defp require_failure_check_reason(reason) when reason in @failure_check_reasons, do: :ok
+
+  defp require_failure_check_reason(_reason), do: {:error, :malformed_failure_feedback}
+
+  defp require_exit_code(nil), do: :ok
+
+  defp require_exit_code(code) when is_integer(code) and not is_boolean(code), do: :ok
+
+  defp require_exit_code(_code), do: {:error, :malformed_failure_feedback}
+
+  defp require_boolean(value) when is_boolean(value), do: :ok
+  defp require_boolean(_value), do: {:error, :malformed_failure_feedback}
+
+  defp admit_failure_excerpt(value) when is_binary(value) do
+    cond do
+      byte_size(value) > Core.max_aggregate_excerpt() ->
+        {:error, :oversized_failure_feedback}
+
+      not String.valid?(value) ->
+        {:error, :malformed_failure_feedback}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp admit_failure_excerpt(_value), do: {:error, :malformed_failure_feedback}
+
+  defp parse_failure_hex(value) do
+    case parse_hex(value) do
+      {:ok, digest} -> {:ok, digest}
+      {:error, _reason} -> {:error, :malformed_failure_feedback}
+    end
+  end
+
+  defp encode_failure_feedback(admitted) do
+    case Jason.encode(admitted) do
+      {:ok, encoded} when byte_size(encoded) <= @max_failure_feedback_json_bytes ->
+        {:ok, encoded}
+
+      {:ok, _encoded} ->
+        {:error, :oversized_failure_feedback}
+
+      {:error, _reason} ->
+        {:error, :malformed_failure_feedback}
+    end
+  end
 
   @doc "Construct fresh compact progress from injected bindings."
   @spec new(term()) :: {:ok, state()} | {:error, error()}

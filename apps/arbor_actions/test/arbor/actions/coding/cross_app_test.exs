@@ -456,6 +456,83 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert hd(compile_args) == "compile"
   end
 
+  test "seed/progress-window test failure retains bounded diagnostic in feedback_json", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+
+    diagnostic =
+      """
+      Compiling 4 files (.ex)
+      Generated alpha app
+      Running ExUnit with seed: 4242, max_cases: 1
+
+      .
+
+        1) test value is one (AlphaTest)
+           Assertion with == failed
+           code:  assert Alpha.value() == 1
+           left:  99
+           right: 1
+
+      Finished in 0.04 seconds
+      1 test, 1 failure
+      """
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      case args do
+        ["test", "--no-deps-check", "--" | _] ->
+          {:ok, %{exit_code: 1, stdout: diagnostic, stderr: "", timed_out: false}}
+
+        _other ->
+          successful_mix()
+      end
+    end)
+
+    context = seed_context(fixture.context, bundle)
+    assert {:ok, result} = Validate.run(bundle.params, context)
+    assert result["schema_version"] == 1
+    assert result["disposition_type"] == "failed"
+    assert result["passed"] == false
+    assert result["reason"] == "tests_failed"
+    assert is_binary(result["feedback_json"])
+    refute Map.has_key?(result, "progress")
+    refute Map.has_key?(result, "planned_batches")
+    refute Map.has_key?(result, "test_paths")
+    refute Map.has_key?(result, "changed_files")
+
+    decoded = Jason.decode!(result["feedback_json"])
+    assert decoded["exit_code"] == 1
+    assert decoded["passed"] == false
+    assert decoded["reason"] == "tests_failed"
+    assert decoded["stdout_excerpt"] =~ "Assertion with == failed"
+    assert decoded["stdout_excerpt"] =~ "left:  99"
+    assert decoded["stdout_excerpt"] =~ "[batch-"
+    assert [_, label] = Regex.run(~r/\[(batch-[^\]]+)\]/, decoded["stdout_excerpt"])
+    assert label =~ ~r/\Abatch-\d+-of-\d+-n\d+-[0-9a-f]{64}\z/
+    assert decoded["stdout_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert decoded["stderr_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    refute decoded["stdout_sha256"] == empty_sha256()
+    refute Map.has_key?(decoded, "planned_batches")
+    refute Map.has_key?(decoded, "test_paths")
+    refute Map.has_key?(decoded, "paths")
+    refute result["feedback_json"] =~ "planned_batches"
+
+    stdout_digest = sha256_hex(diagnostic)
+    stderr_digest = sha256_hex("")
+    assert decoded["stdout_sha256"] == sha256_hex(label <> "\n" <> stdout_digest)
+    assert decoded["stderr_sha256"] == sha256_hex(label <> "\n" <> stderr_digest)
+
+    window = window_context(fixture.context, bundle)
+    assert {:ok, progress_result} = Validate.run(bundle.params, window)
+    assert progress_result["disposition_type"] == "failed"
+    assert progress_result["reason"] == "tests_failed"
+    progress_decoded = Jason.decode!(progress_result["feedback_json"])
+    assert progress_decoded["stdout_excerpt"] =~ "Assertion with == failed"
+    assert progress_decoded["stdout_sha256"] == decoded["stdout_sha256"]
+  end
+
   test "ordinary absence with no static-receipt boundary signal still runs Mix", %{
     tmp_dir: tmp_dir
   } do
@@ -1749,6 +1826,12 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   defp successful_mix do
     {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
   end
+
+  defp sha256_hex(data) when is_binary(data) do
+    :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
+  end
+
+  defp empty_sha256, do: sha256_hex("")
 
   defp timeout_mix do
     {:ok, %{exit_code: nil, stdout: "killed", stderr: "", timed_out: true}}

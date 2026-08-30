@@ -65,6 +65,100 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     assert domain_failure["disposition_type"] == "failed"
     assert domain_failure["passed"] == false
     assert domain_failure["reason"] == "tests_failed"
+
+    assert Enum.sort(Map.keys(domain_failure)) ==
+             ~w(disposition_type passed reason schema_version)
+
+    refute Map.has_key?(domain_failure, "feedback_json")
+    refute Map.has_key?(domain_failure, "planned_batches")
+    refute Map.has_key?(domain_failure, "test_paths")
+  end
+
+  test "project_failure admits a bounded check into feedback_json and fails closed on malformed or oversized input" do
+    label = "batch-1-of-2-n1-#{@inv1}"
+
+    diagnostic =
+      "  1) test value is one (AlphaTest)\n     Assertion with == failed\n     left:  99\n     right: 1"
+
+    check = failure_check(label: label, stdout: diagnostic)
+    assert {:ok, projected} = ProgressCore.project_failure("tests_failed", check)
+    assert projected["schema_version"] == 1
+    assert projected["disposition_type"] == "failed"
+    assert projected["passed"] == false
+    assert projected["reason"] == "tests_failed"
+    assert is_binary(projected["feedback_json"])
+
+    assert byte_size(projected["feedback_json"]) <=
+             ProgressCore.limits()["max_failure_feedback_json_bytes"]
+
+    decoded = Jason.decode!(projected["feedback_json"])
+    assert Enum.sort(Map.keys(decoded)) == failure_check_keys()
+    assert decoded["status"] == "completed"
+    assert decoded["passed"] == false
+    assert decoded["reason"] == "tests_failed"
+    assert decoded["exit_code"] == 1
+    assert decoded["stdout_excerpt"] =~ "[#{label}]"
+    assert decoded["stdout_excerpt"] =~ "Assertion with == failed"
+    assert decoded["stdout_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert decoded["stderr_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert is_boolean(decoded["stdout_truncated"])
+    assert is_boolean(decoded["stderr_truncated"])
+    refute Map.has_key?(decoded, "planned_batches")
+    refute Map.has_key?(decoded, "test_paths")
+    refute Map.has_key?(decoded, "paths")
+    refute projected["feedback_json"] =~ "planned_batches"
+    refute projected["feedback_json"] =~ "test_paths"
+    assert {:ok, _} = Jason.encode(projected)
+
+    assert {:ok, ^projected} = ProgressCore.project_failure("tests_failed", check)
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", Map.put(check, "test_paths", ["x"]))
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure(
+               "tests_failed",
+               Map.put(check, "planned_batches", [batch(1, 2, 1, @inv1)])
+             )
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure(
+               "tests_failed",
+               Map.put(check, "extra", %{"nested" => 1})
+             )
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", Map.put(check, "token", "nope"))
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", Map.delete(check, "stdout_sha256"))
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", Map.put(check, "passed", true))
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_timed_out", check)
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", %{})
+
+    assert {:error, :malformed_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", [])
+
+    oversized =
+      Map.put(check, "stdout_excerpt", String.duplicate("x", Core.max_aggregate_excerpt() + 1))
+
+    assert {:error, :oversized_failure_feedback} =
+             ProgressCore.project_failure("tests_failed", oversized)
+
+    assert {:error, :validation_infrastructure_failed} =
+             ProgressCore.project_failure("validation_infrastructure_failed", check)
+
+    assert {:error, :validation_tree_mutated} =
+             ProgressCore.project_failure("validation_tree_mutated", check)
+
+    assert {:error, :validation_stage_timeout} =
+             ProgressCore.project_failure("validation_stage_timeout", check)
   end
 
   test "admit/2 rehydrates a show/1 snapshot against freshly injected bindings" do
@@ -853,6 +947,40 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
   end
 
   defp passed(batch), do: Map.put(batch, "outcome", "passed")
+
+  defp failure_check_keys do
+    Enum.sort(~w(
+      exit_code
+      passed
+      reason
+      status
+      stderr_excerpt
+      stderr_sha256
+      stderr_truncated
+      stdout_excerpt
+      stdout_sha256
+      stdout_truncated
+    ))
+  end
+
+  defp failure_check(opts) do
+    label = Keyword.fetch!(opts, :label)
+    stdout = Keyword.fetch!(opts, :stdout)
+
+    classified =
+      Core.classify_app_test_result(label, %{
+        "exit_code" => 1,
+        "passed" => false,
+        "stdout_excerpt" => stdout,
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("a", 64),
+        "stderr_sha256" => String.duplicate("b", 64)
+      })
+
+    Core.aggregate_test_check([classified])
+  end
 
   defp identities(plan) do
     {:ok, digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)

@@ -1200,7 +1200,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                        disposition: %{
                          "type" => "failed",
                          "reason" => check["reason"] || "tests_failed"
-                       }
+                       },
+                       check: check
                      }}
 
                   {:capacity, completed, interrupted, unstarted} ->
@@ -1382,19 +1383,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
         {:error, :validation_tree_mutated} ->
           %{
-            observation
-            | new_receipts: [],
-              disposition: %{"type" => "failed", "reason" => "validation_tree_mutated"}
+            new_receipts: [],
+            disposition: %{"type" => "failed", "reason" => "validation_tree_mutated"}
           }
 
         {:error, _reason} ->
           %{
-            observation
-            | new_receipts: [],
-              disposition: %{
-                "type" => "failed",
-                "reason" => "validation_infrastructure_failed"
-              }
+            new_receipts: [],
+            disposition: %{
+              "type" => "failed",
+              "reason" => "validation_infrastructure_failed"
+            }
           }
       end
 
@@ -1414,7 +1413,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
     cond do
       disposition["type"] == "failed" ->
-        domain_or_infra_failure(disposition["reason"] || "validation_infrastructure_failed")
+        domain_or_infra_failure(
+          disposition["reason"] || "validation_infrastructure_failed",
+          Map.get(observation, :check)
+        )
 
       disposition["type"] == "completed" ->
         case ProgressCore.advance(progress, bindings, %{
@@ -1487,7 +1489,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     }
   end
 
-  defp domain_or_infra_failure(reason), do: ProgressCore.project_failure(reason)
+  defp domain_or_infra_failure(reason, check \\ nil),
+    do: ProgressCore.project_failure(reason, check)
 
   defp progress_failed_observation(reason) when is_binary(reason) do
     domain_or_infra_failure(reason)
