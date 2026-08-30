@@ -37,7 +37,10 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
   @max_path_depth 48
   @max_stages 16
   @max_test_paths 256
-  @max_inventory_entries 4_096
+  # A candidate-tree inventory lists every regular file the snapshot holds;
+  # this umbrella alone tracks >4,100 files, so the bound must cover a real
+  # monorepo while still refusing an unbounded list (council, 2026-08-29).
+  @max_inventory_entries 65_536
   @fields [
     :schema_version,
     :profile,
@@ -564,17 +567,19 @@ defmodule Arbor.Contracts.Coding.ValidationProgram do
 
   defp normalize_relative_path(path, tag) when is_binary(path) do
     cond do
+      byte_size(path) == 0 ->
+        {:error, {tag, :empty_path}}
+
+      # Bound the input before any per-codepoint scan so an oversized path is
+      # refused in O(1) instead of being converted to a charlist first.
+      byte_size(path) > @max_path_bytes ->
+        {:error, {tag, :path_too_long}}
+
       not String.valid?(path) ->
         {:error, {tag, :invalid_utf8}}
 
       unsafe_display?(path) ->
         display_path_reason(path, tag)
-
-      byte_size(path) == 0 ->
-        {:error, {tag, :empty_path}}
-
-      byte_size(path) > @max_path_bytes ->
-        {:error, {tag, :path_too_long}}
 
       true ->
         path

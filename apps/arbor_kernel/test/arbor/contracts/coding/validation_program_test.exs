@@ -170,6 +170,22 @@ defmodule Arbor.Contracts.Coding.ValidationProgramTest do
                ValidationProgram.admit_test_paths([@path_b, @path_a], @inventory)
     end
 
+    test "regression: an inventory larger than 4,096 entries is admitted (a real monorepo exceeds that)" do
+      # Council cycle 2 (2026-08-29): the 4,096 cap rejected every real tree —
+      # this umbrella alone tracks >4,100 files.
+      big = for i <- 1..5_000, do: "apps/x/lib/file_#{i}.ex"
+      inventory = [@path_a | big]
+
+      assert {:ok, [@path_a]} = ValidationProgram.admit_test_paths([@path_a], inventory)
+    end
+
+    test "regression: an oversized path is refused by length before any codepoint scan" do
+      long = String.duplicate("a", 5_000) <> "_test.exs"
+
+      assert {:error, {:invalid_test_path, :path_too_long}} =
+               ValidationProgram.admit_test_paths([long], @inventory)
+    end
+
     test "rejects an absolute path" do
       assert {:error, {:invalid_test_path, :absolute}} =
                ValidationProgram.admit_test_paths(["/" <> @path_a], @inventory)
