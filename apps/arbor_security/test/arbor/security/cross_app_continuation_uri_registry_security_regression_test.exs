@@ -13,16 +13,15 @@ defmodule Arbor.Security.CrossAppContinuationUriRegistrySecurityRegressionTest d
     :ok
   end
 
-  test "continuation namespace is canonical and segment-aware" do
+  test "retired continuation prefix remains unknown (security regression)" do
     prefix = "arbor://orchestrator/cross_app_continuation"
     continuation_id = "xappc_" <> String.duplicate("a", 64)
 
-    assert prefix in UriRegistry.canonical_prefixes()
-    assert UriRegistry.registered?("#{prefix}/#{continuation_id}/get")
-    assert UriRegistry.registered?("#{prefix}/#{continuation_id}/claim/op-1")
-    assert UriRegistry.registered?("#{prefix}/journal/durability_status")
-    assert UriRegistry.registered?("#{prefix}/journal/refresh")
-    refute UriRegistry.registered?("#{prefix}s/#{continuation_id}/get")
-    refute UriRegistry.registered?("#{prefix}_evil/#{continuation_id}/get")
+    refute prefix in UriRegistry.canonical_prefixes()
+    refute UriRegistry.registered?(prefix)
+    refute UriRegistry.registered?("#{prefix}/#{continuation_id}/get")
+    refute UriRegistry.registered?("#{prefix}/#{continuation_id}/claim/op-1")
+    refute UriRegistry.registered?("#{prefix}/journal/durability_status")
+    refute UriRegistry.registered?("#{prefix}/journal/refresh")
   end
 end

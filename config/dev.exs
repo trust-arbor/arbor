@@ -144,12 +144,6 @@ config :arbor_orchestrator, :engine_checkpoints,
   store_child_opts: [],
   durability_class: :node_restart
 
-config :arbor_orchestrator, :cross_app_continuation,
-  backend: Arbor.Persistence.QueryableStore.Postgres,
-  store_name: :arbor_cross_app_continuations,
-  backend_opts: [repo: Arbor.Persistence.Repo],
-  start_store: false
-
 # Agent — auto-start infrastructure agents on boot.
 #
 # DISABLED 2026-06-22: the at-boot diagnostician seed was broken — its identity

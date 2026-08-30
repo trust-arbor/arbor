@@ -434,7 +434,7 @@ defmodule Arbor.Commands.CodingG3C1CrashAndExactSuffixTest do
     assert length(final_progress["passed_receipts"]) == 2
 
     {:ok, expected_digest} =
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(final_progress["passed_receipts"])
+      Arbor.Actions.coding_cross_app_digest(final_progress["passed_receipts"])
 
     assert final_progress["passed_receipts_digest"] == expected_digest
     assert lineage_snapshot(published_payload!(fixture)) == lineage

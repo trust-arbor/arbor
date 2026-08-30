@@ -492,7 +492,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
     with :ok <- require_cross_app_progress_envelope(result),
          {:ok, receipt} <- admit_injected_static_receipt(result["sealed_static_receipt"]),
          {:ok, receipt_digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(receipt),
+           Actions.coding_cross_app_static_receipt_digest(receipt),
          {:ok, progress} <- require_json_object_result(result["progress"]),
          {:ok, binding} <- admit_progress_binding(result["progress_binding"]),
          :ok <-
@@ -574,7 +574,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CandidateVerificationCore do
   end
 
   defp admit_injected_static_receipt(receipt) do
-    case Actions.coding_cross_app_continuation_static_receipt_admit(receipt) do
+    case Actions.coding_cross_app_static_receipt_admit(receipt) do
       {:ok, admitted} -> {:ok, admitted}
       _other -> :error
     end

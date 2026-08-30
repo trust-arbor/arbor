@@ -19,8 +19,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   budget are injected.
   """
 
-  alias Arbor.Actions.Coding.CrossApp.ContinuationCore
   alias Arbor.Actions.Coding.CrossApp.Core
+  alias Arbor.Actions.Coding.CrossApp.EvidenceCore
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @schema_version 2
@@ -182,9 +182,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          :ok <- require_keys(bindings, @required_binding_keys),
          :ok <- reject_snapshot_keys(bindings),
          :ok <- reject_forbidden_keys(bindings),
-         {:ok, identities} <- ContinuationCore.admit_identities(bindings["identities"]),
+         {:ok, identities} <- EvidenceCore.admit_identities(bindings["identities"]),
          :ok <- bound_json(identities, @max_identities_json_bytes, :oversized_state),
-         {:ok, identities_digest} <- ContinuationCore.digest(identities),
+         {:ok, identities_digest} <- EvidenceCore.digest(identities),
          {:ok, planned, plan_digest, total_batches, total_files} <-
            admit_planned_batches(bindings["planned_batches"]),
          :ok <- match_plan_digest(identities["validation_plan_digest"], plan_digest),
@@ -256,7 +256,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   end
 
   defp build_fresh(parsed) do
-    with {:ok, receipts_digest} <- ContinuationCore.digest([]) do
+    with {:ok, receipts_digest} <- EvidenceCore.digest([]) do
       status = if parsed.total_batches == 0, do: "completed", else: "in_progress"
 
       {:ok,
@@ -300,7 +300,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
              :static_receipt_drift
            ),
          {:ok, receipts} <- parse_prefix(snapshot["passed_receipts"], parsed.planned),
-         {:ok, receipts_digest} <- ContinuationCore.digest(receipts),
+         {:ok, receipts_digest} <- EvidenceCore.digest(receipts),
          :ok <-
            match(snapshot["passed_receipts_digest"], receipts_digest, :receipt_prefix_drift),
          completed_batches = length(receipts),
@@ -372,8 +372,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          :ok <- require_exact_keys(state, @state_keys),
          :ok <- require_schema(state["schema_version"]),
          {:ok, status} <- parse_status(state["status"]),
-         {:ok, identities} <- ContinuationCore.admit_identities(state["identities"]),
-         {:ok, expected_identities_digest} <- ContinuationCore.digest(identities),
+         {:ok, identities} <- EvidenceCore.admit_identities(state["identities"]),
+         {:ok, expected_identities_digest} <- EvidenceCore.digest(identities),
          {:ok, static_digest} <- parse_hex(state["static_stage_receipt_digest"]),
          {:ok, plan_digest} <- parse_hex(state["plan_digest"]),
          :ok <- match(plan_digest, identities["validation_plan_digest"], :malformed_state),
@@ -382,7 +382,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          {:ok, total_batches} <- parse_nonnegative_integer(state["total_batch_count"]),
          {:ok, total_files} <- parse_nonnegative_integer(state["total_file_count"]),
          {:ok, receipts} <- canonicalize_receipts(state["passed_receipts"], total_batches),
-         {:ok, expected_receipts_digest} <- ContinuationCore.digest(receipts),
+         {:ok, expected_receipts_digest} <- EvidenceCore.digest(receipts),
          {:ok, receipts_digest} <- parse_hex(state["passed_receipts_digest"]),
          :ok <- match(receipts_digest, expected_receipts_digest, :malformed_state),
          completed_batches = length(receipts),
@@ -708,7 +708,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     completed_files = file_count(receipts)
     next_index = completed_batches + 1
 
-    with {:ok, receipts_digest} <- ContinuationCore.digest(receipts),
+    with {:ok, receipts_digest} <- EvidenceCore.digest(receipts),
          :ok <- check_ordinal_shape(ordinal, receipts, capacity, status),
          :ok <- check_completed_shape(status, receipts, parsed.planned, capacity) do
       {:ok,
@@ -1149,7 +1149,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   end
 
   defp match_identities(snapshot_identities, binding_identities) do
-    with {:ok, admitted} <- ContinuationCore.admit_identities(snapshot_identities) do
+    with {:ok, admitted} <- EvidenceCore.admit_identities(snapshot_identities) do
       match(admitted, binding_identities, :identity_drift)
     else
       {:error, _} -> {:error, :identity_drift}

@@ -401,7 +401,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def configuration_digest(params) when is_map(params) do
     with {:ok, input} <- new(params),
          {:ok, digest} <-
-           Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(%{
+           Arbor.Actions.Coding.CrossApp.EvidenceCore.digest(%{
              "domain" => @configuration_digest_domain,
              "schema_version" => @configuration_digest_schema_version,
              "stage_timeout" => input.stage_timeout,
@@ -1515,7 +1515,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   defp refinement_marker(%{prior_frontier: prior} = state, records, attempt_digest)
        when is_map(prior) do
-    {:ok, prior_digest} = Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(prior)
+    {:ok, prior_digest} = Arbor.Actions.Coding.CrossApp.EvidenceCore.digest(prior)
 
     "[cross_app_refinement strategy=ordered_binary_split_v1 original=#{state.current_original.label} window_attempts=#{length(records)} refined_children=#{state.refined_child_count} resumed=1 prior_sha256=#{prior_digest} attempted_outputs_sha256=#{attempt_digest}]"
   end

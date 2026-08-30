@@ -99,9 +99,9 @@ defmodule Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary do
     with :ok <- admit_digest(digest),
          {:ok, source} <- source(context),
          {:ok, raw} <- call_source(source, digest),
-         {:ok, admitted} <- Actions.coding_cross_app_continuation_static_receipt_admit(raw),
+         {:ok, admitted} <- Actions.coding_cross_app_static_receipt_admit(raw),
          {:ok, canonical_digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+           Actions.coding_cross_app_static_receipt_digest(admitted),
          :ok <- match_static_receipt_digest(canonical_digest, digest) do
       {:ok, admitted}
     end

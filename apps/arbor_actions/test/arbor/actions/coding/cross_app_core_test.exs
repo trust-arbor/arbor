@@ -2,7 +2,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.CrossApp.Core
-  alias Arbor.Actions.Coding.CrossApp.ContinuationCore
+  alias Arbor.Actions.Coding.CrossApp.EvidenceCore
   alias Arbor.Actions.Mix, as: MixAction
 
   @moduletag :fast
@@ -127,7 +127,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       "test_stage_timeout" => 20_000
     }
 
-    assert {:ok, ^digest} = ContinuationCore.digest(subject)
+    assert {:ok, ^digest} = EvidenceCore.digest(subject)
 
     for {key, value} <- [
           {"timeout", 10_001},
@@ -136,7 +136,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
           {"schema_version", 2},
           {"domain", "arbor.actions.coding.cross_app.configuration"}
         ] do
-      assert {:ok, changed} = ContinuationCore.digest(Map.put(subject, key, value))
+      assert {:ok, changed} = EvidenceCore.digest(Map.put(subject, key, value))
       refute changed == digest
     end
 

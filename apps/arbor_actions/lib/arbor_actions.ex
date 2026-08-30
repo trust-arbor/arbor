@@ -133,18 +133,10 @@ defmodule Arbor.Actions do
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
   @active_action_authorization_key {__MODULE__, :active_action_authorization}
   @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
-  @coding_cross_app_continuation_execution_key {__MODULE__,
-                                                :coding_cross_app_continuation_execution}
 
   defmodule ActionAuthorization do
     @moduledoc false
     @enforce_keys [:principal_id, :action_module, :owner, :ref]
-    defstruct @enforce_keys
-  end
-
-  defmodule CodingCrossAppContinuationExecution do
-    @moduledoc false
-    @enforce_keys [:window, :receipt, :owner, :ref]
     defstruct @enforce_keys
   end
 
@@ -1092,57 +1084,17 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Core.configuration_digest(params)
   end
 
-  @doc "Project a complete path-bearing CrossApp batch plan to compact continuation batches."
+  @doc "Project a complete path-bearing CrossApp batch plan to compact validation batches."
   @spec coding_cross_app_compact_batch_plan(term()) :: {:ok, [map()]} | {:error, term()}
   def coding_cross_app_compact_batch_plan(batches) do
     Arbor.Actions.Coding.CrossApp.Core.compact_batch_plan(batches)
   end
 
-  @doc "Construct a passed continuation receipt for one full original CrossApp batch."
+  @doc "Construct a passed receipt for one full original CrossApp batch."
   @spec coding_cross_app_passed_batch_receipt(term()) :: {:ok, map()} | {:error, term()}
   def coding_cross_app_passed_batch_receipt(batch) do
     Arbor.Actions.Coding.CrossApp.Core.passed_batch_receipt(batch)
   end
-
-  @doc """
-  Public continuation-execution wrapper. A caller-minted window/receipt is not
-  authority; this function never installs a binding and never invokes `fun`.
-  """
-  @spec with_coding_cross_app_continuation_execution(term(), term(), (-> result)) ::
-          {:error, :continuation_execution_unauthorized}
-        when result: term()
-  def with_coding_cross_app_continuation_execution(_window, _receipt, _fun),
-    do: {:error, :continuation_execution_unauthorized}
-
-  @doc false
-  @spec coding_cross_app_continuation_execution_binding() ::
-          {:ok, term(), term()} | :none
-  def coding_cross_app_continuation_execution_binding do
-    case live_coding_cross_app_continuation_grant() do
-      {:ok, grant} -> {:ok, grant.window, grant.receipt}
-      :none -> :none
-    end
-  end
-
-  @doc false
-  @spec legacy_coding_cross_app_continuation_marker() :: term()
-  def legacy_coding_cross_app_continuation_marker do
-    Process.get(@coding_cross_app_continuation_execution_key)
-  end
-
-  @doc """
-  Bind the ContinuationExecutionOwner to a registered witness process.
-
-  `from` of the Owner call must be `Process.whereis(registered_name)`.
-  Idempotent for the same live name+pid.
-  """
-  @spec bind_continuation_execution_witness(atom()) :: :ok | {:error, atom()}
-  def bind_continuation_execution_witness(registered_name) when is_atom(registered_name) do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.bind(registered_name)
-  end
-
-  def bind_continuation_execution_witness(_registered_name),
-    do: {:error, :invalid_witness}
 
   @doc """
   Return the unique active workspace_id for an exact opaque task+principal.
@@ -1156,260 +1108,58 @@ defmodule Arbor.Actions do
     )
   end
 
-  @doc "Witness-only arm of a process-local continuation execution grant."
-  @spec arm_coding_cross_app_continuation_execution(map()) ::
-          {:ok, String.t()} | {:error, atom()}
-  def arm_coding_cross_app_continuation_execution(scope) when is_map(scope) do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.arm(scope)
-  end
-
-  def arm_coding_cross_app_continuation_execution(_scope),
-    do: {:error, :invalid_execution_grant_scope}
-
-  @doc "Attach the execute-process to a one-shot owner-issued handoff handle."
-  @spec attach_coding_cross_app_continuation_execution(String.t()) ::
-          {:ok, map()} | {:error, atom()}
-  def attach_coding_cross_app_continuation_execution(handle) when is_binary(handle) do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.attach(handle)
-  end
-
-  def attach_coding_cross_app_continuation_execution(_handle),
-    do: {:error, :invalid_handoff}
-
-  @doc "Release the live grant for the calling executor."
-  @spec release_coding_cross_app_continuation_execution() :: :ok | {:error, atom()}
-  def release_coding_cross_app_continuation_execution do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.release()
-  end
-
-  @doc "Non-consuming recheck of the calling executor's attached grant."
-  @spec recheck_coding_cross_app_continuation_execution() :: :ok | {:error, atom()}
-  def recheck_coding_cross_app_continuation_execution do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.recheck_live()
-  end
-
-  @doc "Inspect-only live grant for the calling executor."
-  @spec live_coding_cross_app_continuation_grant() :: {:ok, map()} | :none
-  def live_coding_cross_app_continuation_grant do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.live_grant()
-  end
-
-  @doc "Witness-only abort of a continuation grant."
-  @spec abort_coding_cross_app_continuation_execution(String.t()) :: :ok | {:error, atom()}
-  def abort_coding_cross_app_continuation_execution(continuation_id)
-      when is_binary(continuation_id) do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.abort(continuation_id)
-  end
-
-  def abort_coding_cross_app_continuation_execution(_continuation_id),
-    do: {:error, :invalid_continuation_id}
-
-  @doc "Witness-only invalidate of a grant generation."
-  @spec invalidate_coding_cross_app_continuation_execution(String.t(), pos_integer()) ::
-          :ok | {:error, atom()}
-  def invalidate_coding_cross_app_continuation_execution(continuation_id, generation)
-      when is_binary(continuation_id) and is_integer(generation) do
-    Arbor.Actions.Coding.ContinuationExecutionOwner.invalidate(continuation_id, generation)
-  end
-
-  def invalidate_coding_cross_app_continuation_execution(_continuation_id, _generation),
-    do: {:error, :invalid_continuation_id}
-
-  @doc """
-  Grant-required host facade for CrossApp continuation validation.
-
-  Engine/DOT wiring is deferred; ordinary unbound Validate.run stays on
-  authorize_and_execute.
-  """
-  @spec run_coding_cross_app_validation(map(), map()) :: {:ok, map()} | {:error, term()}
-  def run_coding_cross_app_validation(params, context)
-      when is_map(params) and is_map(context) do
-    case live_coding_cross_app_continuation_grant() do
-      :none ->
-        {:error, :continuation_execution_unauthorized}
-
-      {:ok, grant} ->
-        workspace_id = param_value(params, :workspace_id)
-        task_id = context_value(context, :task_id)
-        principal_id = context_value(context, :agent_id) || context_value(context, :principal_id)
-
-        cond do
-          workspace_id != grant.workspace_id ->
-            {:error, :continuation_execution_unauthorized}
-
-          task_id != grant.task_id or principal_id != grant.principal_id ->
-            {:error, :continuation_execution_unauthorized}
-
-          true ->
-            with {:ok, input} <- Arbor.Actions.Coding.CrossApp.Core.new(params) do
-              Arbor.Actions.Coding.CrossApp.Shell.run(input, context)
-            end
-        end
-    end
-  end
-
-  def run_coding_cross_app_validation(_params, _context),
-    do: {:error, :invalid_cross_app_input}
-
-  @doc "Continuation schema version owned by CrossApp ContinuationCore."
-  @spec coding_cross_app_continuation_schema_version() :: 1
-  def coding_cross_app_continuation_schema_version do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.schema_version()
+  @doc "Admit a closed CrossApp identities map."
+  @spec coding_cross_app_admit_identities(term()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_admit_identities(identities) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.EvidenceCore.admit_identities(identities)
     end)
   end
 
-  @doc "Derived JSON ceilings for CrossApp continuation state and effects."
-  @spec coding_cross_app_continuation_limits() :: %{required(String.t()) => pos_integer()}
-  def coding_cross_app_continuation_limits do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.limits()
-    end)
-  end
-
-  @doc "Construct or rehydrate a closed CrossApp continuation snapshot."
-  @spec coding_cross_app_continuation_new(term()) :: {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_new(input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.new(input)
-    end)
-  end
-
-  @doc "Return the JSON snapshot of an admitted continuation, or fail closed."
-  @spec coding_cross_app_continuation_show(term()) :: map() | {:error, atom()}
-  def coding_cross_app_continuation_show(input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.show(input)
-    end)
-  end
-
-  @doc "Deterministic `xappc_` lineage key for an admitted continuation."
-  @spec coding_cross_app_continuation_lineage_key(term()) ::
-          {:ok, String.t()} | {:error, atom()}
-  def coding_cross_app_continuation_lineage_key(input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.lineage_key(input)
+  @doc "Canonical SHA-256 digest of a JSON-clean CrossApp evidence value."
+  @spec coding_cross_app_digest(term()) :: {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_digest(value) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.EvidenceCore.digest(value)
     end)
   end
 
   @doc """
-  Derive persist, successor, and terminal from a fully rehydrated snapshot.
+  Deterministic stored lineage key from admitted identities.
 
-  Orchestrator durability must exact-match stored successor/terminal to this
-  result. Shape checks are insufficient.
+  Still emits the historical `xappc_` prefix so static-receipt `continuation_id`
+  values remain admit-compatible. This is identity evidence, not live
+  continuation authority.
   """
-  @spec coding_cross_app_continuation_retained_effects(term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_retained_effects(input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.retained_effects(input)
+  @spec coding_cross_app_identity_lineage_key(term()) :: {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_identity_lineage_key(identities) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.EvidenceCore.lineage_key_for_identities(identities)
     end)
   end
 
-  @doc "Canonical SHA-256 digest of a JSON-clean continuation value."
-  @spec coding_cross_app_continuation_digest(term()) :: {:ok, String.t()} | {:error, atom()}
-  def coding_cross_app_continuation_digest(input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(input)
+  @doc "Static-receipt schema version owned by StaticReceiptCore."
+  @spec coding_cross_app_static_receipt_schema_version() :: 1
+  def coding_cross_app_static_receipt_schema_version do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.StaticReceiptCore.schema_version()
     end)
   end
 
-  @doc "Open a fenced single-owner continuation window."
-  @spec coding_cross_app_continuation_claim(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_claim(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.claim(state, input)
-    end)
-  end
-
-  @doc "Accept the next planned batch as passed under a live claim."
-  @spec coding_cross_app_continuation_accept_passed_receipt(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_accept_passed_receipt(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.accept_passed_receipt(state, input)
-    end)
-  end
-
-  @doc "Admit live schema-v3 capacity evidence and emit persist plus mint_successor."
-  @spec coding_cross_app_continuation_accept_capacity_handoff(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_accept_capacity_handoff(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.accept_capacity_handoff(state, input)
-    end)
-  end
-
-  @doc "Terminal failure under a live unexpired claim."
-  @spec coding_cross_app_continuation_fail(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_fail(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.fail(state, input)
-    end)
-  end
-
-  @doc "Terminal cancellation under a live unexpired claim."
-  @spec coding_cross_app_continuation_cancel(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_cancel(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.cancel(state, input)
-    end)
-  end
-
-  @doc "Clear an expired claim."
-  @spec coding_cross_app_continuation_expire_claim(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_expire_claim(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.expire_claim(state, input)
-    end)
-  end
-
-  @doc "Revoke the active claim. Time is parsed and ignored by the core."
-  @spec coding_cross_app_continuation_revoke_claim(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_revoke_claim(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.revoke_claim(state, input)
-    end)
-  end
-
-  @doc "Complete only under an active matching unexpired claim with a full receipt prefix."
-  @spec coding_cross_app_continuation_complete(term(), term()) ::
-          {:ok, map(), [map()]} | {:error, atom()}
-  def coding_cross_app_continuation_complete(state, input) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.complete(state, input)
-    end)
-  end
-
-  @doc "Execution-envelope schema version owned by ContinuationExecutionCore."
-  @spec coding_cross_app_continuation_execution_schema_version() :: 1
-  def coding_cross_app_continuation_execution_schema_version do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.schema_version()
-    end)
-  end
-
-  @doc "Encoded JSON ceilings for CrossApp continuation execution envelopes."
-  @spec coding_cross_app_continuation_execution_limits() :: %{
-          required(String.t()) => pos_integer()
-        }
-  def coding_cross_app_continuation_execution_limits do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.limits()
+  @doc "Derived JSON ceilings for CrossApp static receipts."
+  @spec coding_cross_app_static_receipt_limits() :: %{required(String.t()) => pos_integer()}
+  def coding_cross_app_static_receipt_limits do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.StaticReceiptCore.limits()
     end)
   end
 
   @doc "Construct a closed static pretest receipt from identities and successful checks."
-  @spec coding_cross_app_continuation_static_receipt_new(term(), term()) ::
+  @spec coding_cross_app_static_receipt_new(term(), term()) ::
           {:ok, map(), String.t()} | {:error, atom()}
-  def coding_cross_app_continuation_static_receipt_new(identities, checks) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.new_static_stage_receipt(
+  def coding_cross_app_static_receipt_new(identities, checks) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.StaticReceiptCore.new_static_stage_receipt(
         identities,
         checks
       )
@@ -1417,77 +1167,25 @@ defmodule Arbor.Actions do
   end
 
   @doc "Admit an arbitrary closed static pretest receipt."
-  @spec coding_cross_app_continuation_static_receipt_admit(term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_static_receipt_admit(receipt) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_static_stage_receipt(receipt)
+  @spec coding_cross_app_static_receipt_admit(term()) :: {:ok, map()} | {:error, atom()}
+  def coding_cross_app_static_receipt_admit(receipt) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.StaticReceiptCore.admit_static_stage_receipt(receipt)
     end)
   end
 
   @doc "Canonical SHA-256 digest of an admitted static pretest receipt."
-  @spec coding_cross_app_continuation_static_receipt_digest(term()) ::
-          {:ok, String.t()} | {:error, atom()}
-  def coding_cross_app_continuation_static_receipt_digest(receipt) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.static_receipt_digest(receipt)
-    end)
-  end
-
-  @doc "Project a token-free claimed execution window from state and static receipt."
-  @spec coding_cross_app_continuation_execution_window_prepare(term(), term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_execution_window_prepare(state, receipt) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.prepare_execution_window(
-        state,
-        receipt
-      )
-    end)
-  end
-
-  @doc "Admit a token-free claimed execution window with its static receipt."
-  @spec coding_cross_app_continuation_execution_window_admit(term(), term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_execution_window_admit(window, receipt) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_execution_window(
-        window,
-        receipt
-      )
-    end)
-  end
-
-  @doc "Construct progress from a trusted observation bound to an admitted window."
-  @spec coding_cross_app_continuation_progress_new(term(), term(), term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_progress_new(window, receipt, observation) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.new_progress(
-        window,
-        receipt,
-        observation
-      )
-    end)
-  end
-
-  @doc "Admit arbitrary progress against an admitted window and static receipt."
-  @spec coding_cross_app_continuation_progress_admit(term(), term(), term()) ::
-          {:ok, map()} | {:error, atom()}
-  def coding_cross_app_continuation_progress_admit(window, receipt, progress) do
-    wrap_cross_app_continuation(fn ->
-      Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore.admit_progress(
-        window,
-        receipt,
-        progress
-      )
+  @spec coding_cross_app_static_receipt_digest(term()) :: {:ok, String.t()} | {:error, atom()}
+  def coding_cross_app_static_receipt_digest(receipt) do
+    wrap_cross_app(fn ->
+      Arbor.Actions.Coding.CrossApp.StaticReceiptCore.static_receipt_digest(receipt)
     end)
   end
 
   @doc "Compact CrossApp progress schema version owned by ProgressCore."
   @spec coding_cross_app_progress_schema_version() :: 2
   def coding_cross_app_progress_schema_version do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.schema_version()
     end)
   end
@@ -1495,7 +1193,7 @@ defmodule Arbor.Actions do
   @doc "Derived JSON ceilings for compact CrossApp progress."
   @spec coding_cross_app_progress_limits() :: %{required(String.t()) => pos_integer()}
   def coding_cross_app_progress_limits do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.limits()
     end)
   end
@@ -1503,7 +1201,7 @@ defmodule Arbor.Actions do
   @doc "Construct fresh compact CrossApp progress from injected bindings."
   @spec coding_cross_app_progress_new(term()) :: {:ok, map()} | {:error, atom()}
   def coding_cross_app_progress_new(bindings) do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.new(bindings)
     end)
   end
@@ -1511,7 +1209,7 @@ defmodule Arbor.Actions do
   @doc "Rehydrate compact CrossApp progress against freshly injected bindings."
   @spec coding_cross_app_progress_admit(term(), term()) :: {:ok, map()} | {:error, atom()}
   def coding_cross_app_progress_admit(snapshot, bindings) do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.admit(snapshot, bindings)
     end)
   end
@@ -1519,7 +1217,7 @@ defmodule Arbor.Actions do
   @doc "Return the closed JSON snapshot of compact CrossApp progress, or fail closed."
   @spec coding_cross_app_progress_show(term()) :: map() | {:error, atom()}
   def coding_cross_app_progress_show(state) do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.show(state)
     end)
   end
@@ -1528,12 +1226,12 @@ defmodule Arbor.Actions do
   @spec coding_cross_app_progress_advance(term(), term(), term()) ::
           {:ok, map()} | {:error, atom()}
   def coding_cross_app_progress_advance(state, bindings, observation) do
-    wrap_cross_app_continuation(fn ->
+    wrap_cross_app(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.advance(state, bindings, observation)
     end)
   end
 
-  defp wrap_cross_app_continuation(fun) when is_function(fun, 0) do
+  defp wrap_cross_app(fun) when is_function(fun, 0) do
     fun.()
   rescue
     _ -> {:error, :malformed_state}

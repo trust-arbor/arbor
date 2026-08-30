@@ -450,7 +450,7 @@ defmodule Arbor.Commands.CodingG3C2CancellationAndCleanupTest do
     assert_convergence(fixture, store, runner_pid)
 
     {:ok, expected_digest} =
-      Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(held_progress["passed_receipts"])
+      Arbor.Actions.coding_cross_app_digest(held_progress["passed_receipts"])
 
     final_progress = published_progress!(fixture)
     assert final_progress["status"] == "in_progress"

@@ -764,14 +764,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   chmod, or replace the task root or file. Persisted envelopes are JSON-clean
   and token-free.
   """
-  @spec archive_cross_app_continuation_static_receipt(
+  @spec archive_cross_app_task_static_receipt(
           String.t(),
           String.t(),
           String.t(),
           String.t(),
           map()
         ) :: {:ok, map()} | {:error, term()}
-  def archive_cross_app_continuation_static_receipt(
+  def archive_cross_app_task_static_receipt(
         base_root,
         task_id,
         continuation_id,
@@ -784,9 +784,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_sha256(expected_digest, :receipt_sha256),
          :ok <- validate_static_receipt_continuation_id(continuation_id),
          {:ok, admitted} <-
-           Actions.coding_cross_app_continuation_static_receipt_admit(receipt),
+           Actions.coding_cross_app_static_receipt_admit(receipt),
          {:ok, digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+           Actions.coding_cross_app_static_receipt_digest(admitted),
          :ok <- match_static_receipt_task_id(admitted, task_id),
          :ok <- match_static_receipt_continuation_id(admitted, continuation_id),
          :ok <- match_static_receipt_digest(digest, expected_digest),
@@ -815,7 +815,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     _, _ -> {:error, :static_receipt_archive_error}
   end
 
-  def archive_cross_app_continuation_static_receipt(
+  def archive_cross_app_task_static_receipt(
         _base_root,
         _task_id,
         _continuation_id,
@@ -835,13 +835,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   descriptor. Immutability is API-level first-writer / no-clobber, not an OS
   guarantee against a malicious same-UID process.
   """
-  @spec read_cross_app_continuation_static_receipt(
+  @spec read_cross_app_task_static_receipt(
           String.t(),
           String.t(),
           String.t(),
           String.t()
         ) :: {:ok, map()} | {:error, term()}
-  def read_cross_app_continuation_static_receipt(
+  def read_cross_app_task_static_receipt(
         base_root,
         task_id,
         continuation_id,
@@ -874,7 +874,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     _, _ -> {:error, :cross_app_static_receipt_unavailable}
   end
 
-  def read_cross_app_continuation_static_receipt(
+  def read_cross_app_task_static_receipt(
         _base_root,
         _task_id,
         _continuation_id,
@@ -898,9 +898,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     with :ok <- validate_terminal_task_id(task_id),
          :ok <- validate_sha256(expected_digest, :receipt_sha256),
          {:ok, admitted} <-
-           Actions.coding_cross_app_continuation_static_receipt_admit(receipt),
+           Actions.coding_cross_app_static_receipt_admit(receipt),
          {:ok, digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+           Actions.coding_cross_app_static_receipt_digest(admitted),
          :ok <- match_static_receipt_task_id(admitted, task_id),
          :ok <- match_static_receipt_digest(digest, expected_digest),
          {:ok, encoded} <- encode_compact_canonical_json(admitted, :static_receipt),
@@ -3126,7 +3126,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp verify_published_static_receipt(base_root, task_id, continuation_id, expected_digest) do
-    case read_cross_app_continuation_static_receipt(
+    case read_cross_app_task_static_receipt(
            base_root,
            task_id,
            continuation_id,
@@ -3152,9 +3152,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          {:ok, encoded} <- read_static_receipt_file(path, task_root, max_bytes),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, admitted} <-
-           Actions.coding_cross_app_continuation_static_receipt_admit(decoded),
+           Actions.coding_cross_app_static_receipt_admit(decoded),
          {:ok, digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+           Actions.coding_cross_app_static_receipt_digest(admitted),
          {:ok, canonical} <- encode_compact_canonical_json(admitted, :static_receipt),
          true <- canonical === encoded do
       {:ok, encoded, admitted, digest}
@@ -3297,7 +3297,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     do: {:error, :static_receipt_digest_mismatch}
 
   defp static_receipt_max_json_bytes do
-    case Actions.coding_cross_app_continuation_execution_limits() do
+    case Actions.coding_cross_app_static_receipt_limits() do
       %{"max_static_receipt_json_bytes" => max} when is_integer(max) and max > 0 ->
         {:ok, max}
 
@@ -3503,9 +3503,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          {:ok, encoded} <- read_static_receipt_file(path, generation_root, max_bytes),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, admitted} <-
-           Actions.coding_cross_app_continuation_static_receipt_admit(decoded),
+           Actions.coding_cross_app_static_receipt_admit(decoded),
          {:ok, digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_digest(admitted),
+           Actions.coding_cross_app_static_receipt_digest(admitted),
          {:ok, canonical} <- encode_compact_canonical_json(admitted, :static_receipt),
          true <- canonical === encoded do
       {:ok, encoded, admitted, digest}

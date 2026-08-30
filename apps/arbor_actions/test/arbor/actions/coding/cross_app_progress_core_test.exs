@@ -1,7 +1,7 @@
 defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Actions.Coding.CrossApp.ContinuationCore
+  alias Arbor.Actions.Coding.CrossApp.EvidenceCore
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
@@ -20,8 +20,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
   test "new/1 constructs in_progress compact progress without plan or remaining suffix" do
     plan = plan()
     {:ok, expected_digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)
-    {:ok, identities_digest} = ContinuationCore.digest(identities(plan))
-    {:ok, receipts_digest} = ContinuationCore.digest([])
+    {:ok, identities_digest} = EvidenceCore.digest(identities(plan))
+    {:ok, receipts_digest} = EvidenceCore.digest([])
     {:ok, state} = ProgressCore.new(fresh_bindings())
 
     assert state["schema_version"] == 2
@@ -102,8 +102,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
 
   test "new/1 constructs completed compact progress for an exact empty plan" do
     {:ok, expected_digest} = ValidationCapacityHandoff.ordered_plan_digest([])
-    {:ok, identities_digest} = ContinuationCore.digest(identities([]))
-    {:ok, receipts_digest} = ContinuationCore.digest([])
+    {:ok, identities_digest} = EvidenceCore.digest(identities([]))
+    {:ok, receipts_digest} = EvidenceCore.digest([])
     {:ok, state} = ProgressCore.new(empty_bindings())
 
     assert state["status"] == "completed"
@@ -235,8 +235,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
 
   test "canonical digest is stable across show/1 and key shuffle of bindings" do
     {:ok, state} = ProgressCore.new(fresh_bindings())
-    {:ok, digest} = ContinuationCore.digest(ProgressCore.show(state))
-    {:ok, again} = ContinuationCore.digest(ProgressCore.show(state))
+    {:ok, digest} = EvidenceCore.digest(ProgressCore.show(state))
+    {:ok, again} = EvidenceCore.digest(ProgressCore.show(state))
     assert digest == again
     assert digest =~ ~r/\A[0-9a-f]{64}\z/
   end
@@ -795,7 +795,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     {:ok, fresh} = ProgressCore.new(bindings)
     prefix = Enum.map(Enum.take(plan, length(plan) - 1), &passed/1)
     last = List.last(plan)
-    {:ok, prefix_digest} = ContinuationCore.digest(prefix)
+    {:ok, prefix_digest} = EvidenceCore.digest(prefix)
     {:ok, remaining_digest} = ValidationCapacityHandoff.ordered_plan_digest([last])
     completed_files = Enum.reduce(prefix, 0, fn receipt, acc -> acc + receipt["count"] end)
     unstarted_files = 0

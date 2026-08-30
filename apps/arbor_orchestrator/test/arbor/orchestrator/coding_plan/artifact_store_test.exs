@@ -2166,7 +2166,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     path = static_receipt_path(base, bundle.task_id)
 
     assert {:ok, descriptor} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2190,7 +2190,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     refute String.contains?(File.read!(path), "\n")
 
     assert {:ok, envelope} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2207,7 +2207,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     refute encoded_envelope =~ "#PID"
 
     assert {:ok, ^descriptor} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2227,10 +2227,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     other_task_id = "task_static_receipt_other"
 
     assert {:ok, _admitted} =
-             Actions.coding_cross_app_continuation_static_receipt_admit(bundle.receipt)
+             Actions.coding_cross_app_static_receipt_admit(bundle.receipt)
 
     assert {:error, :static_receipt_task_identity_mismatch} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                other_task_id,
                bundle.continuation_id,
@@ -2250,7 +2250,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     other_continuation_id = "xappc_" <> String.duplicate("c", 64)
 
     assert {:error, :static_receipt_continuation_mismatch} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                other_continuation_id,
@@ -2273,7 +2273,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       end
 
     assert {:error, :static_receipt_digest_mismatch} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2291,7 +2291,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     failed = put_in(bundle.receipt, ["checks", "compile", "passed"], false)
 
     assert {:error, :malformed_envelope} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2300,7 +2300,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              )
 
     assert {:error, :malformed_envelope} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2309,7 +2309,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              )
 
     assert {:error, :invalid_static_receipt_input} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2318,7 +2318,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              )
 
     assert {:error, :invalid_static_receipt_input} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                nil,
                bundle.task_id,
                bundle.continuation_id,
@@ -2340,7 +2340,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert first.digest != second.digest
 
     assert {:ok, descriptor} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                first.task_id,
                first.continuation_id,
@@ -2351,7 +2351,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     original = File.read!(path)
 
     assert {:error, :static_receipt_conflict} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                second.task_id,
                second.continuation_id,
@@ -2362,7 +2362,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert File.read!(path) == original
 
     assert {:ok, envelope} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                first.task_id,
                first.continuation_id,
@@ -2383,7 +2383,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     path = static_receipt_path(base, first.task_id)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                first.task_id,
                first.continuation_id,
@@ -2401,7 +2401,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           end
 
           {bundle,
-           ArtifactStore.archive_cross_app_continuation_static_receipt(
+           ArtifactStore.archive_cross_app_task_static_receipt(
              base,
              bundle.task_id,
              bundle.continuation_id,
@@ -2434,7 +2434,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              Enum.reject(results, fn {_bundle, result} -> match?({:ok, _}, result) end)
 
     assert {:ok, envelope} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                winner.task_id,
                winner.continuation_id,
@@ -2445,7 +2445,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert File.exists?(path)
 
     assert {:error, :static_receipt_conflict} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                loser.task_id,
                loser.continuation_id,
@@ -2461,7 +2461,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     path = static_receipt_path(base, bundle.task_id)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2469,7 +2469,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              )
 
     assert {:ok, _descriptor} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2480,7 +2480,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.chmod!(path, 0o644)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2496,7 +2496,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.ln_s!(outside, path)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2512,7 +2512,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert {:ok, %File.Stat{links: 2}} = File.lstat(path)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2524,7 +2524,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.mkdir!(path)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2538,7 +2538,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.chmod!(path, 0o600)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2550,19 +2550,19 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.chmod!(path, 0o600)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
                bundle.digest
              )
 
-    limits = Actions.coding_cross_app_continuation_execution_limits()
+    limits = Actions.coding_cross_app_static_receipt_limits()
     File.write!(path, :binary.copy("x", limits["max_static_receipt_json_bytes"] + 1))
     File.chmod!(path, 0o600)
 
     assert {:error, :cross_app_static_receipt_unavailable} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2572,7 +2572,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     other = static_receipt_bundle(task_id: "task_static_receipt_replaced")
 
     assert {:ok, _} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                other.task_id,
                other.continuation_id,
@@ -2585,7 +2585,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.chmod!(path, 0o600)
 
     assert {:error, :static_receipt_task_identity_mismatch} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2597,7 +2597,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.chmod!(path, 0o600)
 
     assert {:error, :static_receipt_continuation_mismatch} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                "xappc_" <> String.duplicate("c", 64),
@@ -2612,7 +2612,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       end
 
     assert {:error, :static_receipt_digest_mismatch} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2624,14 +2624,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     File.mkdir_p!(base)
     excerpt = String.duplicate(<<0>>, 2_000)
     bundle = static_receipt_bundle(excerpt: excerpt)
-    limits = Actions.coding_cross_app_continuation_execution_limits()
+    limits = Actions.coding_cross_app_static_receipt_limits()
     path = static_receipt_path(base, bundle.task_id)
 
     assert {:ok, _admitted} =
-             Actions.coding_cross_app_continuation_static_receipt_admit(bundle.receipt)
+             Actions.coding_cross_app_static_receipt_admit(bundle.receipt)
 
     assert {:ok, descriptor} =
-             ArtifactStore.archive_cross_app_continuation_static_receipt(
+             ArtifactStore.archive_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -2646,7 +2646,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     refute String.contains?(encoded, "\n")
 
     assert {:ok, envelope} =
-             ArtifactStore.read_cross_app_continuation_static_receipt(
+             ArtifactStore.read_cross_app_task_static_receipt(
                base,
                bundle.task_id,
                bundle.continuation_id,
@@ -3166,10 +3166,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     checks = static_receipt_checks(excerpt)
 
     {:ok, receipt, digest} =
-      Actions.coding_cross_app_continuation_static_receipt_new(identities, checks)
+      Actions.coding_cross_app_static_receipt_new(identities, checks)
 
-    {:ok, admitted} = Actions.coding_cross_app_continuation_static_receipt_admit(receipt)
-    {:ok, ^digest} = Actions.coding_cross_app_continuation_static_receipt_digest(admitted)
+    {:ok, admitted} = Actions.coding_cross_app_static_receipt_admit(receipt)
+    {:ok, ^digest} = Actions.coding_cross_app_static_receipt_digest(admitted)
 
     %{
       task_id: task_id,

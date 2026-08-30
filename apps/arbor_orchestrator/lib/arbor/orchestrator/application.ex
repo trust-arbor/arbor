@@ -34,26 +34,12 @@ defmodule Arbor.Orchestrator.Application do
             {:error, reason}
 
           {:ok, checkpoint_children} ->
-            case Config.fetch_cross_app_continuation() do
-              {:error, reason} ->
-                {:error, {:invalid_cross_app_continuation, reason}}
-
-              {:ok, continuation_opts} ->
-                case continuation_store_child_spec(continuation_opts) do
-                  {:error, reason} ->
-                    {:error, reason}
-
-                  {:ok, continuation_children} ->
-                    start_with_children(
-                      journal_opts,
-                      checkpoint_children,
-                      continuation_opts,
-                      continuation_children,
-                      event_log_backend,
-                      event_log_name
-                    )
-                end
-            end
+            start_with_children(
+              journal_opts,
+              checkpoint_children,
+              event_log_backend,
+              event_log_name
+            )
         end
     end
   end
@@ -61,15 +47,12 @@ defmodule Arbor.Orchestrator.Application do
   defp start_with_children(
          journal_opts,
          checkpoint_children,
-         continuation_opts,
-         continuation_children,
          event_log_backend,
          event_log_name
        ) do
     children =
       maybe_run_journal_store_child(journal_opts) ++
         checkpoint_children ++
-        continuation_children ++
         [
           Arbor.Common.HandlerRegistry,
           {event_log_backend, name: event_log_name},
@@ -77,7 +60,6 @@ defmodule Arbor.Orchestrator.Application do
           Arbor.Orchestrator.SignalsBridge,
           # Canonical current-run lifecycle store (optional durable Store via config)
           {Arbor.Orchestrator.RunJournal, journal_opts},
-          {Arbor.Orchestrator.CrossAppContinuation.Journal, continuation_opts},
           # Historical JobRegistry only — no current-run lifecycle dual-write
           Arbor.Orchestrator.JobRegistry,
           Arbor.Orchestrator.DotCache,
@@ -137,25 +119,6 @@ defmodule Arbor.Orchestrator.Application do
         # Configured backend cannot be supervised here — require it already
         # running. RunJournal will surface durable errors if it is not.
         []
-    end
-  end
-
-  @doc false
-  @spec continuation_store_child_spec(keyword()) ::
-          {:ok, [tuple()]} | {:error, {:continuation_store_unstartable, term()}}
-  def continuation_store_child_spec(opts) when is_list(opts) do
-    checkpoint_store_child_spec(
-      store: Keyword.get(opts, :backend),
-      start_store: Keyword.get(opts, :start_store, false),
-      store_name: Keyword.get(opts, :store_name),
-      store_child_opts: Keyword.get(opts, :store_child_opts, [])
-    )
-    |> case do
-      {:error, {:checkpoint_store_unstartable, reason}} ->
-        {:error, {:continuation_store_unstartable, reason}}
-
-      other ->
-        other
     end
   end
 

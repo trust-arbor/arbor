@@ -4862,7 +4862,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       }
 
       {:ok, receipt, digest} =
-        Actions.coding_cross_app_continuation_static_receipt_new(identities, %{
+        Actions.coding_cross_app_static_receipt_new(identities, %{
           "compile" => check,
           "xref" => check,
           "test_compile" => check

@@ -42,7 +42,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions
   alias Arbor.Actions.Coding.CrossApp.Core
-  alias Arbor.Actions.Coding.CrossApp.ContinuationExecutionCore
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Parser
   alias Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary
@@ -342,46 +341,20 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   defp do_run(input, context, validation_deadline, window) do
-    grant = Arbor.Actions.live_coding_cross_app_continuation_grant()
-    legacy = Arbor.Actions.legacy_coding_cross_app_continuation_marker()
-
-    case {grant, legacy, window} do
-      {{:ok, _live_grant}, _legacy, {:window, _progress, _binding}} ->
-        {:error, :invalid_cross_app_input}
-
-      {{:ok, _live_grant}, _legacy, :seed} ->
-        {:error, :invalid_cross_app_input}
-
-      {{:ok, live_grant}, _legacy, :ordinary} ->
-        if continuation_grant_matches?(live_grant, input) do
-          do_run_bound(input, live_grant, validation_deadline)
-        else
-          {:error, :continuation_execution_unauthorized}
-        end
-
-      {:none, nil, :ordinary} ->
+    case window do
+      :ordinary ->
         do_run_unbound(input, context, validation_deadline)
 
-      {:none, nil, :seed} ->
+      :seed ->
         do_run_seed_window(input, context, validation_deadline)
 
-      {:none, nil, {:window, progress, binding}} ->
+      {:window, progress, binding} ->
         do_run_progress_window(input, context, progress, binding, validation_deadline)
-
-      {:none, _forged, _window} ->
-        {:error, :continuation_execution_unauthorized}
     end
   end
 
-  defp continuation_grant_matches?(grant, input) do
-    grant.action == Arbor.Actions.Coding.CrossApp.Validate and
-      grant.workspace_id == input.workspace_id and
-      grant.status == :attached
-  end
-
-  # Keep the ordinary action path isolated from continuation execution. In
-  # particular it retains owner/context lease fallback and the exact historical
-  # compile -> xref -> test_compile -> tests behavior.
+  # Ordinary Validate.run retains owner/context lease fallback and the exact
+  # historical compile -> xref -> test_compile -> tests behavior.
   defp do_run_unbound(input, context, validation_deadline) do
     with {:ok, lease} <- resolve_lease(input.workspace_id, context),
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
@@ -498,7 +471,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
        ) do
     with :ok <- invoke_after_committable_snapshot_hook(snapshot_path),
          {:ok, prepared} <-
-           prepare_continuation_batches(resolved.selection, resolved.candidate_blob_manifest),
+           prepare_progress_batches(resolved.selection, resolved.candidate_blob_manifest),
          {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
          {:ok, static_checks} <-
            run_static_stage_checks(
@@ -557,7 +530,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              resolved
            ),
          {:ok, receipt, digest} <-
-           Actions.coding_cross_app_continuation_static_receipt_new(
+           Actions.coding_cross_app_static_receipt_new(
              identities,
              static_checks
            ),
@@ -615,7 +588,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
          {:ok, resolved} <- resolve_selection(worktree_path, base_commit),
          {:ok, prepared} <-
-           prepare_continuation_batches(resolved.selection, resolved.candidate_blob_manifest),
+           prepare_progress_batches(resolved.selection, resolved.candidate_blob_manifest),
          {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
          {:ok, configuration_digest} <- Core.configuration_digest(input_params(input)),
          {:ok, validation_plan_digest} <-
@@ -1584,112 +1557,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   defp progress_json_clean?(_value), do: false
 
-  defp do_run_bound(input, grant, validation_deadline) do
-    with :ok <- Arbor.Actions.recheck_coding_cross_app_continuation_execution(),
-         {:ok, admitted_window} <-
-           ContinuationExecutionCore.admit_execution_window(grant.window, grant.receipt),
-         :ok <- match_grant_window(grant, admitted_window) do
-      execute_admitted_continuation(
-        input,
-        grant,
-        admitted_window,
-        grant.receipt,
-        validation_deadline
-      )
-    else
-      {:error, :continuation_execution_unauthorized} = error -> error
-      {:error, :execution_grant_expired} -> {:error, :continuation_execution_unauthorized}
-      {:error, :witness_unbound} -> {:error, :continuation_execution_unauthorized}
-      {:error, _reason} -> {:error, :continuation_execution_unauthorized}
-    end
-  end
-
-  defp match_grant_window(grant, window) do
-    identities = window["identities"]
-
-    if grant.continuation_id == window["continuation_id"] and
-         grant.task_id == identities["task_id"] and
-         grant.principal_id == identities["principal_id"] and
-         grant.fence_generation == window["fence_generation"] and
-         grant.expires_at == window["expires_at"] do
-      :ok
-    else
-      {:error, :continuation_execution_unauthorized}
-    end
-  end
-
-  defp execute_admitted_continuation(input, grant, window, receipt, validation_deadline) do
-    result =
-      with :ok <- Arbor.Actions.recheck_coding_cross_app_continuation_execution(),
-           {:ok, lease} <-
-             resolve_lease_by_lineage(grant.workspace_id, grant.task_id, grant.principal_id),
-           {:ok, worktree_path, base_commit} <- lease_paths(lease),
-           {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
-           {:ok, resolved} <- resolve_selection(worktree_path, base_commit),
-           {:ok, prepared} <-
-             prepare_continuation_batches(
-               resolved.selection,
-               resolved.candidate_blob_manifest
-             ),
-           {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
-           {:ok, configuration_digest} <- Core.configuration_digest(input),
-           {:ok, validation_plan_digest} <-
-             ValidationCapacityHandoff.ordered_plan_digest(compact_plan),
-           :ok <-
-             match_continuation_execution(
-               window,
-               compact_plan,
-               configuration_digest,
-               validation_plan_digest,
-               base_commit,
-               base_tree_oid,
-               resolved,
-               input.timeout
-             ) do
-        before_binding = %{
-          head: resolved.candidate_head,
-          tree_oid: resolved.candidate_tree_oid,
-          blob_manifest: resolved.candidate_blob_manifest
-        }
-
-        run_continuation_suffix(
-          input,
-          window,
-          receipt,
-          worktree_path,
-          prepared.batches,
-          before_binding,
-          validation_deadline,
-          window["per_batch_budget_ms"]
-        )
-      end
-
-    case result do
-      {:ok, progress} ->
-        {:ok, progress}
-
-      {:error, reason} ->
-        continuation_failed_progress(window, receipt, [], failure_reason(reason))
-    end
-  rescue
-    _ -> continuation_failed_progress(window, receipt, [], "validation_infrastructure_failed")
-  catch
-    _, _ -> continuation_failed_progress(window, receipt, [], "validation_infrastructure_failed")
-  end
-
-  defp resolve_lease_by_lineage(workspace_id, task_id, principal_id) do
-    case WorkspaceLeaseRegistry.inspect_lease_by_lineage(
-           workspace_id,
-           task_id,
-           principal_id
-         ) do
-      {:ok, lease} -> {:ok, lease}
-      {:error, :not_found} -> {:error, :workspace_not_found}
-      {:error, :unauthorized} -> {:error, :workspace_unauthorized}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp commit_tree_oid(worktree_path, commit) do
     with :ok <- validate_full_commit_oid(commit),
          {:ok, output} <- git(worktree_path, ["rev-parse", "--verify", "#{commit}^{tree}"]),
@@ -1701,7 +1568,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end
   end
 
-  defp prepare_continuation_batches(selection, candidate_blob_manifest) do
+  defp prepare_progress_batches(selection, candidate_blob_manifest) do
     with {:ok, normalized} <- normalize_selection(selection),
          {:ok, ordered_apps} <- execution_ordered_apps(normalized),
          {:ok, test_dirs} <- test_dirs_for_apps(ordered_apps),
@@ -1709,349 +1576,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
            frozen_test_files(candidate_blob_manifest, test_dirs, ordered_apps),
          {:ok, batches} <- Core.partition_test_batches(files, ordered_apps) do
       {:ok, %{ordered_apps: ordered_apps, test_dirs: test_dirs, batches: batches}}
-    end
-  end
-
-  defp match_continuation_execution(
-         window,
-         compact_plan,
-         configuration_digest,
-         validation_plan_digest,
-         base_commit,
-         base_tree_oid,
-         resolved,
-         operation_timeout
-       ) do
-    identities = window["identities"]
-
-    independently_derived = [
-      {window["planned_batches"], compact_plan},
-      {identities["validation_plan_digest"], validation_plan_digest},
-      {identities["configuration_digest"], configuration_digest},
-      {identities["base_commit"], base_commit},
-      {identities["base_tree_oid"], base_tree_oid},
-      {identities["candidate_head"], resolved.candidate_head},
-      {identities["candidate_tree_oid"], resolved.candidate_tree_oid},
-      {identities["validator_id"], "coding_cross_app_validate"},
-      {window["per_batch_budget_ms"], operation_timeout}
-    ]
-
-    if Enum.all?(independently_derived, fn {known, derived} -> known === derived end),
-      do: :ok,
-      else: {:error, :continuation_identity_drift}
-  end
-
-  defp run_continuation_suffix(
-         input,
-         window,
-         receipt,
-         worktree_path,
-         full_batches,
-         before_binding,
-         validation_deadline,
-         operation_timeout
-       ) do
-    accepted_count = length(window["accepted_receipts"])
-    suffix = Enum.drop(full_batches, accepted_count)
-
-    case Arbor.Actions.recheck_coding_cross_app_continuation_execution() do
-      :ok ->
-        run_continuation_resource_suffix(
-          input,
-          window,
-          receipt,
-          worktree_path,
-          full_batches,
-          suffix,
-          accepted_count,
-          before_binding,
-          validation_deadline,
-          operation_timeout
-        )
-
-      {:error, _reason} ->
-        continuation_failed_progress(
-          window,
-          receipt,
-          [],
-          "validation_infrastructure_failed"
-        )
-    end
-  end
-
-  defp run_continuation_resource_suffix(
-         input,
-         window,
-         receipt,
-         worktree_path,
-         full_batches,
-         suffix,
-         accepted_count,
-         before_binding,
-         validation_deadline,
-         operation_timeout
-       ) do
-    MixAction.with_validation_resource(
-      input.workspace_id,
-      %{
-        task_id: window["identities"]["task_id"],
-        agent_id: window["identities"]["principal_id"]
-      },
-      fn resource ->
-        snapshot_path =
-          Map.get(resource, :candidate_path) || Map.get(resource, "candidate_path")
-
-        cond do
-          not is_binary(snapshot_path) or snapshot_path == "" ->
-            continuation_failed_progress(
-              window,
-              receipt,
-              [],
-              "validation_infrastructure_failed"
-            )
-
-          snapshot_path == worktree_path ->
-            continuation_failed_progress(
-              window,
-              receipt,
-              [],
-              "validation_infrastructure_failed"
-            )
-
-          true ->
-            with :ok <- invoke_after_committable_snapshot_hook(snapshot_path),
-                 {:ok, observation} <-
-                   execute_continuation_tests(
-                     input.test_stage_timeout,
-                     operation_timeout,
-                     snapshot_path,
-                     full_batches,
-                     suffix,
-                     accepted_count,
-                     validation_deadline,
-                     resource
-                   ) do
-              finalize_continuation_observation(
-                observation,
-                window,
-                receipt,
-                snapshot_path,
-                before_binding,
-                resource
-              )
-            else
-              {:error, reason} ->
-                continuation_failed_progress(window, receipt, [], failure_reason(reason))
-            end
-        end
-      end,
-      validation_resource_opts(operation_timeout, validation_deadline) ++
-        [
-          committable_snapshot: true,
-          expected_tree_oid: before_binding.tree_oid,
-          expected_head: before_binding.head,
-          blob_manifest: Map.get(before_binding, :blob_manifest)
-        ]
-    )
-  end
-
-  defp execute_continuation_tests(
-         _test_stage_timeout,
-         _operation_timeout,
-         _worktree_path,
-         _full_batches,
-         [],
-         _accepted_count,
-         _validation_deadline,
-         _resource
-       ) do
-    {:ok, %{new_receipts: [], disposition: %{"type" => "completed"}}}
-  end
-
-  defp execute_continuation_tests(
-         test_stage_timeout,
-         operation_timeout,
-         worktree_path,
-         full_batches,
-         suffix,
-         accepted_count,
-         validation_deadline,
-         resource
-       ) do
-    {available_ms, test_deadline} =
-      validation_test_budget(test_stage_timeout, validation_deadline)
-
-    reserve_ms = MixAction.postflight_tree_binding_reserve_ms()
-
-    case Core.admit_test_batches(suffix, available_ms, operation_timeout, reserve_ms) do
-      :ok ->
-        deadline = test_deadline || monotonic_ms() + test_stage_timeout
-
-        with {:ok, execution} <- Core.new_test_execution(suffix, operation_timeout, reserve_ms) do
-          continue_continuation_tests(
-            worktree_path,
-            execution,
-            deadline,
-            resource,
-            full_batches,
-            accepted_count,
-            []
-          )
-        end
-
-      {:capacity_exceeded, _check} ->
-        continuation_capacity_observation(
-          full_batches,
-          accepted_count,
-          [],
-          nil,
-          suffix,
-          operation_timeout,
-          []
-        )
-
-      {:error, reason} ->
-        continuation_failure_observation([], failure_reason(reason))
-    end
-  end
-
-  defp continue_continuation_tests(
-         worktree_path,
-         execution,
-         deadline,
-         resource,
-         full_batches,
-         accepted_count,
-         receipts
-       ) do
-    remaining_ms = deadline - monotonic_ms()
-
-    case Core.next_test_execution_step(execution, remaining_ms) do
-      {:complete, _check} ->
-        case after_continuation_child(resource) do
-          :ok ->
-            {:ok, %{new_receipts: receipts, disposition: %{"type" => "completed"}}}
-
-          {:error, reason} ->
-            continuation_failure_observation(receipts, failure_reason(reason))
-        end
-
-      {:capacity, completed, interrupted, unstarted} ->
-        continuation_capacity_observation(
-          full_batches,
-          accepted_count,
-          completed,
-          interrupted,
-          unstarted,
-          execution.operation_timeout,
-          receipts
-        )
-
-      {:run, attempt, budget_ms} ->
-        opts =
-          [timeout: budget_ms]
-          |> Keyword.put(:validation_resource, resource)
-
-        case run_mix(worktree_path, MixAction.test_argv(attempt.paths), opts) do
-          {:ok, result} ->
-            case after_continuation_child(resource) do
-              :ok ->
-                feedback = Core.feedback_from_result(result)
-
-                case Core.record_test_execution_attempt(
-                       execution,
-                       attempt,
-                       feedback,
-                       Core.runner_timed_out?(result),
-                       budget_ms,
-                       deadline - monotonic_ms()
-                     ) do
-                  {:continue, next} ->
-                    with {:ok, next_receipts} <-
-                           collect_completed_receipts(execution, next, receipts) do
-                      continue_continuation_tests(
-                        worktree_path,
-                        next,
-                        deadline,
-                        resource,
-                        full_batches,
-                        accepted_count,
-                        next_receipts
-                      )
-                    end
-
-                  {:terminal, check} ->
-                    {:ok,
-                     %{
-                       new_receipts: receipts,
-                       disposition: %{
-                         "type" => "failed",
-                         "reason" => check["reason"] || "tests_failed"
-                       }
-                     }}
-
-                  {:capacity, completed, interrupted, unstarted} ->
-                    with {:ok, completed_receipts} <-
-                           collect_receipts_from_completed(completed, receipts) do
-                      continuation_capacity_observation(
-                        full_batches,
-                        accepted_count,
-                        completed,
-                        interrupted,
-                        unstarted,
-                        execution.operation_timeout,
-                        completed_receipts
-                      )
-                    end
-
-                  {:error, reason} ->
-                    continuation_failure_observation(receipts, failure_reason(reason))
-                end
-
-              {:error, reason} ->
-                continuation_failure_observation(receipts, failure_reason(reason))
-            end
-
-          {:error, reason} ->
-            case after_continuation_child(resource) do
-              {:error, recapture_reason} ->
-                continuation_failure_observation(receipts, failure_reason(recapture_reason))
-
-              :ok ->
-                case Core.record_test_execution_prelaunch_error(
-                       execution,
-                       reason,
-                       deadline - monotonic_ms()
-                     ) do
-                  {:capacity, completed, interrupted, unstarted} ->
-                    continuation_capacity_observation(
-                      full_batches,
-                      accepted_count,
-                      completed,
-                      interrupted,
-                      unstarted,
-                      execution.operation_timeout,
-                      receipts
-                    )
-
-                  {:execution_error, error} ->
-                    continuation_failure_observation(receipts, failure_reason(error))
-
-                  {:error, error} ->
-                    continuation_failure_observation(receipts, failure_reason(error))
-                end
-            end
-        end
-
-      {:error, reason} ->
-        continuation_failure_observation(receipts, failure_reason(reason))
-    end
-  end
-
-  defp after_continuation_child(resource) do
-    with :ok <- Arbor.Actions.recheck_coding_cross_app_continuation_execution(),
-         :ok <- MixAction.recapture_committable_snapshot(resource) do
-      :ok
     end
   end
 
@@ -2078,106 +1602,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     end)
   end
 
-  defp continuation_capacity_observation(
-         full_batches,
-         accepted_count,
-         completed,
-         interrupted,
-         unstarted,
-         operation_timeout,
-         receipts
-       ) do
-    prior = Enum.take(full_batches, accepted_count)
-
-    case Core.capacity_handoff(
-           :runtime,
-           0,
-           operation_timeout,
-           prior ++ completed,
-           interrupted,
-           unstarted
-         ) do
-      {:ok, check} ->
-        {:ok,
-         %{
-           new_receipts: receipts,
-           disposition: %{
-             "type" => "capacity_handoff",
-             "capacity_handoff" => check["capacity_handoff"]
-           }
-         }}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp finalize_continuation_observation(
-         observation,
-         window,
-         receipt,
-         worktree_path,
-         before_binding,
-         resource
-       ) do
-    observation =
-      case verify_final_continuation_tree(worktree_path, before_binding, resource) do
-        :ok ->
-          observation
-
-        {:error, :validation_tree_mutated} ->
-          %{
-            observation
-            | new_receipts: [],
-              disposition: %{"type" => "failed", "reason" => "validation_tree_mutated"}
-          }
-
-        {:error, _reason} ->
-          %{
-            observation
-            | new_receipts: [],
-              disposition: %{
-                "type" => "failed",
-                "reason" => "validation_infrastructure_failed"
-              }
-          }
-      end
-
-    ContinuationExecutionCore.new_progress(
-      window,
-      receipt,
-      %{
-        "new_receipts" => observation.new_receipts,
-        "disposition" => observation.disposition
-      }
-    )
-  end
-
-  defp verify_final_continuation_tree(_worktree_path, _before_binding, resource)
-       when is_map(resource) do
-    after_continuation_child(resource)
-  end
-
-  defp verify_final_continuation_tree(_worktree_path, _before_binding, _resource),
-    do: {:error, :validation_resource_required}
-
-  defp continuation_failed_progress(window, receipt, receipts, reason) do
-    ContinuationExecutionCore.new_progress(window, receipt, %{
-      "new_receipts" => receipts,
-      "disposition" => %{"type" => "failed", "reason" => reason}
-    })
-  end
-
-  defp continuation_failure_observation(receipts, reason) do
-    {:ok,
-     %{
-       new_receipts: receipts,
-       disposition: %{"type" => "failed", "reason" => reason}
-     }}
-  end
-
   # Stable, path-free progress vocabulary. Infrastructure details remain in
-  # local logs/errors and never enter durable continuation progress.
+  # local logs/errors and never enter durable validation progress.
   defp failure_reason(:validation_tree_mutated), do: "validation_tree_mutated"
   defp failure_reason({:validation_stage_timeout, _}), do: "validation_stage_timeout"
   defp failure_reason(_), do: "validation_infrastructure_failed"
