@@ -38,6 +38,7 @@ defmodule Arbor.Agent.Config do
   """
 
   @app :arbor_agent
+  @default_legacy_agents_dir ".arbor/agents"
   @default_task_executor Arbor.Agent.Orchestration.TaskRunner
   # Best-effort bound for optional task_status/2 and cancel_task/2 callbacks.
   # Short on purpose: hung executors must not freeze status or cancellation.
@@ -252,6 +253,44 @@ defmodule Arbor.Agent.Config do
       _ ->
         Arbor.Comms
     end
+  end
+
+  @doc """
+  Directory scanned for legacy `.agent.json` profile files.
+
+  Always returns an absolute path. Production default is
+  `<cwd>/.arbor/agents`. Tests may set `:legacy_agents_dir` to an
+  absolute temporary directory. A trusted relative override is expanded
+  against the process CWD; blank or non-binary values, and values that
+  cannot be expanded to an absolute path, fall back to the production
+  default.
+  """
+  @spec legacy_agents_dir() :: String.t()
+  def legacy_agents_dir do
+    case Application.get_env(@app, :legacy_agents_dir) do
+      dir when is_binary(dir) ->
+        case String.trim(dir) do
+          "" -> default_legacy_agents_dir()
+          trimmed -> absolute_legacy_agents_dir(trimmed)
+        end
+
+      _other ->
+        default_legacy_agents_dir()
+    end
+  end
+
+  defp absolute_legacy_agents_dir(dir) do
+    expanded = Path.expand(dir)
+
+    if Path.type(expanded) == :absolute do
+      expanded
+    else
+      default_legacy_agents_dir()
+    end
+  end
+
+  defp default_legacy_agents_dir do
+    Path.expand(@default_legacy_agents_dir)
   end
 
   defp lookup_executor(executors, kind) when is_map(executors) and is_binary(kind) do

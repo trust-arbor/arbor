@@ -11,20 +11,23 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
 
   @moduletag :fast
 
-  @agents_dir Path.join(
-                System.tmp_dir!(),
-                "arbor_lifecycle_edge_test_#{System.unique_integer([:positive])}"
-              )
-
   setup do
-    File.rm_rf!(@agents_dir)
-    File.mkdir_p!(@agents_dir)
+    agents_dir =
+      Path.join(
+        Path.expand(System.tmp_dir!()),
+        "arbor_lifecycle_edge_test_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(agents_dir)
+    previous_legacy_dir = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
+    Application.put_env(:arbor_agent, :legacy_agents_dir, agents_dir)
 
     on_exit(fn ->
-      File.rm_rf!(@agents_dir)
+      restore_fetched_env(:arbor_agent, :legacy_agents_dir, previous_legacy_dir)
+      File.rm_rf!(agents_dir)
     end)
 
-    :ok
+    {:ok, agents_dir: agents_dir}
   end
 
   # ============================================================================
@@ -134,10 +137,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
                Lifecycle.restore("totally_nonexistent_#{System.unique_integer([:positive])}")
     end
 
-    test "returns deserialize error for corrupted JSON file" do
+    test "returns deserialize error for corrupted JSON file", %{agents_dir: agents_dir} do
       corrupt_id = "corrupt-agent-#{System.unique_integer([:positive])}"
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
       path = Path.join(agents_dir, "#{corrupt_id}.agent.json")
 
       # Write corrupt JSON
@@ -154,10 +155,10 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       File.rm(path)
     end
 
-    test "returns deserialize error for valid JSON but invalid profile structure" do
+    test "returns deserialize error for valid JSON but invalid profile structure", %{
+      agents_dir: agents_dir
+    } do
       invalid_id = "invalid-profile-#{System.unique_integer([:positive])}"
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
       path = Path.join(agents_dir, "#{invalid_id}.agent.json")
 
       # Write valid JSON but missing required fields
@@ -182,10 +183,8 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       File.rm(path)
     end
 
-    test "handles empty JSON file" do
+    test "handles empty JSON file", %{agents_dir: agents_dir} do
       empty_id = "empty-agent-#{System.unique_integer([:positive])}"
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
       path = Path.join(agents_dir, "#{empty_id}.agent.json")
 
       File.write!(path, "")
@@ -306,16 +305,14 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
   # ============================================================================
 
   describe "list_agents/0 resilience" do
-    test "returns empty list when agents directory does not exist" do
-      # list_agents reads from cwd-relative path, which may or may not exist
-      agents = Lifecycle.list_agents()
-      assert is_list(agents)
+    test "returns empty list when agents directory does not exist", %{agents_dir: agents_dir} do
+      File.rm_rf!(agents_dir)
+
+      refute File.exists?(agents_dir)
+      assert Lifecycle.list_agents() == []
     end
 
-    test "list_agents skips corrupted files gracefully" do
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "list_agents skips corrupted files gracefully", %{agents_dir: agents_dir} do
       # Write a valid profile
       character = Character.new(name: "ValidAgent")
 
@@ -355,10 +352,7 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
   # ============================================================================
 
   describe "concurrent lifecycle operations" do
-    test "concurrent restore calls for same agent do not interfere" do
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "concurrent restore calls for same agent do not interfere", %{agents_dir: agents_dir} do
       agent_id = "concurrent-restore-#{System.unique_integer([:positive])}"
       character = Character.new(name: "ConcurrentAgent")
 
@@ -455,4 +449,7 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       end
     end
   end
+
+  defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_fetched_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 end

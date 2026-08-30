@@ -54,6 +54,7 @@ defmodule Arbor.Agent.ProfileStore do
   The store name is `:arbor_agent_profiles`.
   """
 
+  alias Arbor.Agent.Config
   alias Arbor.Agent.Profile
   alias Arbor.Agent.ProfileAuthorityMutationCore
   alias Arbor.Contracts.Persistence.Record
@@ -62,7 +63,6 @@ defmodule Arbor.Agent.ProfileStore do
   require Logger
 
   @store_name :arbor_agent_profiles
-  @legacy_dir ".arbor/agents"
   @max_agent_id_bytes 256
   @max_record_id_bytes 256
   @agent_id_re ~r/\Aagent_[A-Za-z0-9_-]+\z/
@@ -710,6 +710,6 @@ defmodule Arbor.Agent.ProfileStore do
   end
 
   defp legacy_agents_dir do
-    Path.join(File.cwd!(), @legacy_dir)
+    Config.legacy_agents_dir()
   end
 end

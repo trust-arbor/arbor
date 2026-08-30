@@ -9,7 +9,9 @@ defmodule Arbor.Actions.TaintEnforcementPublicApiTest do
   setup do
     unique = System.unique_integer([:positive])
     principal = "agent_param_taint_regression_#{unique}"
-    workspace = Path.join(File.cwd!(), ".arbor_param_taint_test_#{unique}")
+
+    workspace =
+      Path.join(Path.expand(System.tmp_dir!()), "arbor_param_taint_test_#{unique}")
 
     File.mkdir_p!(workspace)
 

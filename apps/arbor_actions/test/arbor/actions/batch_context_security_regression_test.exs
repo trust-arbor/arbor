@@ -20,7 +20,10 @@ defmodule Arbor.Actions.BatchContextSecurityRegressionTest do
     {:ok, identity} = Arbor.Security.generate_identity(name: "batch-context-#{unique}")
     :ok = Arbor.Security.register_identity(identity)
     principal = identity.agent_id
-    workspace = Path.join(File.cwd!(), ".arbor_batch_context_test_#{unique}")
+
+    workspace =
+      Path.join(Path.expand(System.tmp_dir!()), "arbor_batch_context_test_#{unique}")
+
     File.mkdir_p!(workspace)
 
     {:ok, profile} = Arbor.Contracts.Trust.Profile.new(principal)

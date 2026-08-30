@@ -7,10 +7,6 @@ defmodule Arbor.Agent.ProfileStoreTest do
   alias Arbor.Persistence.BufferedStore
 
   @store_name :arbor_agent_profiles
-  @test_agents_dir Path.join(
-                     System.tmp_dir!(),
-                     "arbor_profile_store_test_#{System.unique_integer([:positive])}"
-                   )
 
   defmodule FailingProfileBackend do
     @moduledoc false
@@ -38,11 +34,22 @@ defmodule Arbor.Agent.ProfileStoreTest do
       )
     )
 
+    agents_dir =
+      Path.join(
+        Path.expand(System.tmp_dir!()),
+        "arbor_profile_store_test_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(agents_dir)
+    previous_legacy_dir = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
+    Application.put_env(:arbor_agent, :legacy_agents_dir, agents_dir)
+
     on_exit(fn ->
-      File.rm_rf!(@test_agents_dir)
+      restore_fetched_env(:arbor_agent, :legacy_agents_dir, previous_legacy_dir)
+      File.rm_rf!(agents_dir)
     end)
 
-    :ok
+    {:ok, agents_dir: agents_dir}
   end
 
   defp make_profile(agent_id, opts \\ []) do
@@ -200,11 +207,7 @@ defmodule Arbor.Agent.ProfileStoreTest do
   # ============================================================================
 
   describe "migrate_json_profiles/0" do
-    test "migrates profiles from JSON files" do
-      # Write a JSON profile to the legacy directory
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "migrates profiles from JSON files", %{agents_dir: agents_dir} do
       agent_id = "migrate-test-#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id, name: "Migrated Agent")
       {:ok, json} = Profile.to_json(profile)
@@ -226,10 +229,7 @@ defmodule Arbor.Agent.ProfileStoreTest do
       File.rm(path)
     end
 
-    test "migration is idempotent" do
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "migration is idempotent", %{agents_dir: agents_dir} do
       agent_id = "idempotent-#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id)
       {:ok, json} = Profile.to_json(profile)
@@ -253,10 +253,7 @@ defmodule Arbor.Agent.ProfileStoreTest do
   # ============================================================================
 
   describe "dual-read fallback" do
-    test "load_profile falls back to JSON file and lazy-migrates" do
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "load_profile falls back to JSON file and lazy-migrates", %{agents_dir: agents_dir} do
       agent_id = "fallback-#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id, name: "Fallback Agent")
       {:ok, json} = Profile.to_json(profile)
@@ -276,10 +273,9 @@ defmodule Arbor.Agent.ProfileStoreTest do
       File.rm(path)
     end
 
-    test "load_profile_readonly reads legacy JSON without migrating or deleting" do
-      agents_dir = Path.join(File.cwd!(), ".arbor/agents")
-      File.mkdir_p!(agents_dir)
-
+    test "load_profile_readonly reads legacy JSON without migrating or deleting", %{
+      agents_dir: agents_dir
+    } do
       agent_id = "readonly-#{System.unique_integer([:positive])}"
       profile = make_profile(agent_id, name: "Readonly Agent")
       {:ok, json} = Profile.to_json(profile)
@@ -446,6 +442,9 @@ defmodule Arbor.Agent.ProfileStoreTest do
       assert loaded.metadata.last_model_config.fallback_chain == chain
     end
   end
+
+  defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_fetched_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 
   # Helper: load directly from store (no JSON fallback)
   defp load_from_store_only(agent_id) do

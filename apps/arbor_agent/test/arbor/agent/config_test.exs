@@ -26,6 +26,7 @@ defmodule Arbor.Agent.ConfigTest do
 
     original_authorizer = Application.get_env(:arbor_agent, :executor_authorizer)
     original_await = Application.get_env(:arbor_agent, :executor_interaction_await)
+    original_legacy_agents_dir = Application.get_env(:arbor_agent, :legacy_agents_dir)
 
     on_exit(fn ->
       restore_env(:task_executors, original_executors)
@@ -35,6 +36,7 @@ defmodule Arbor.Agent.ConfigTest do
       restore_env(:executor_finalization_timeout_ms, original_finalization_timeout)
       restore_env(:executor_authorizer, original_authorizer)
       restore_env(:executor_interaction_await, original_await)
+      restore_env(:legacy_agents_dir, original_legacy_agents_dir)
     end)
 
     :ok
@@ -226,6 +228,46 @@ defmodule Arbor.Agent.ConfigTest do
 
     # Plain string tasks still use the default runner, not the kinded executor.
     assert {:ok, TaskRunner} = Config.validated_default_task_executor()
+  end
+
+  describe "legacy_agents_dir/0" do
+    test "production default is the absolute cwd/.arbor/agents path" do
+      Application.delete_env(:arbor_agent, :legacy_agents_dir)
+
+      result = Config.legacy_agents_dir()
+      assert Path.type(result) == :absolute
+      assert result == Path.expand(".arbor/agents")
+    end
+
+    test "configured absolute directory is used as the legacy-agents root" do
+      override =
+        Path.join(
+          Path.expand(System.tmp_dir!()),
+          "arbor_legacy_agents_override_#{System.unique_integer([:positive])}"
+        )
+
+      Application.put_env(:arbor_agent, :legacy_agents_dir, override)
+      assert Config.legacy_agents_dir() == override
+      assert Path.type(Config.legacy_agents_dir()) == :absolute
+    end
+
+    test "relative override is expanded to an absolute path" do
+      Application.put_env(:arbor_agent, :legacy_agents_dir, "relative-legacy-agents")
+
+      result = Config.legacy_agents_dir()
+      assert Path.type(result) == :absolute
+      assert result == Path.expand("relative-legacy-agents")
+    end
+
+    test "blank or invalid override falls back to the production default" do
+      default = Path.expand(".arbor/agents")
+
+      Application.put_env(:arbor_agent, :legacy_agents_dir, "   ")
+      assert Config.legacy_agents_dir() == default
+
+      Application.put_env(:arbor_agent, :legacy_agents_dir, :not_a_path)
+      assert Config.legacy_agents_dir() == default
+    end
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_agent, key)
