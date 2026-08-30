@@ -2321,6 +2321,7 @@ defmodule Arbor.Agent.Orchestration do
       state: normalize_task_state(value(status, :state)),
       current_step: value(status, :current_step),
       waiting_on: value(status, :waiting_on),
+      worker_phase: value(status, :worker_phase),
       started_at: value(status, :started_at),
       updated_at: value(status, :updated_at),
       completed_at: value(status, :completed_at),

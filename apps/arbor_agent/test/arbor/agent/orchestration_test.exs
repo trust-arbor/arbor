@@ -245,6 +245,7 @@ defmodule Arbor.Agent.OrchestrationTest do
            state: :running,
            current_step: "running",
            waiting_on: nil,
+           worker_phase: "implement",
            started_at: DateTime.utc_now(),
            updated_at: DateTime.utc_now(),
            completed_at: nil,
@@ -940,6 +941,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert status.task_id == "task_1"
       assert status.agent_id == "agent_1"
       assert status.state == :running
+      assert status.worker_phase == "implement"
 
       assert_received {:authorize, "human_1", "arbor://agent/task/read/task_1", :read, auth_opts}
       assert Keyword.get(auth_opts, :verify_identity) == false
