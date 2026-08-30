@@ -768,11 +768,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     root: root
   } do
     File.mkdir_p!(root)
+    verified_root = isolated_terminal_root(root, "verified")
     report = verification_report()
-    result = Map.put(terminal_result(root), "verification_report", report)
+    result = Map.put(terminal_result(verified_root), "verification_report", report)
 
     assert {:ok, descriptor} =
-             ArtifactStore.archive_terminal_evidence(root, "task_verified", result, [])
+             ArtifactStore.archive_terminal_evidence(verified_root, "task_verified", result, [])
 
     evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
     assert evidence["schema_version"] == 1
@@ -783,8 +784,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         "worker_msg" => %{"delivery_status" => "delivered", "stop_reason" => "end_turn"}
       })
 
+    rework_root = isolated_terminal_root(root, "rework")
+
     compatible_rework =
-      result
+      terminal_result(rework_root)
       |> Map.put("status", "validation_failed")
       |> Map.put("canonical_status", "rework_exhausted")
       |> Map.put("outcome", rework_outcome)
@@ -792,7 +795,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
     assert {:ok, _descriptor} =
              ArtifactStore.archive_terminal_evidence(
-               root,
+               rework_root,
                "task_rework_validation",
                compatible_rework,
                []
@@ -801,17 +804,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     forged = Map.put(result, "verification_report", verification_report("blocked"))
 
     assert {:error, {:invalid_terminal_result, :verification_status_mismatch}} =
-             ArtifactStore.archive_terminal_evidence(root, "task_forged", forged, [])
+             ArtifactStore.archive_terminal_evidence(verified_root, "task_forged", forged, [])
 
     malformed = Map.put(result, "verification_report", Map.put(report, "authority", "secret"))
 
     assert {:error, {:invalid_terminal_field, "verification_report"}} =
-             ArtifactStore.archive_terminal_evidence(root, "task_malformed", malformed, [])
+             ArtifactStore.archive_terminal_evidence(
+               verified_root,
+               "task_malformed",
+               malformed,
+               []
+             )
 
-    legacy = terminal_result(root)
+    legacy_root = isolated_terminal_root(root, "legacy")
+    legacy = terminal_result(legacy_root)
 
     assert {:ok, legacy_descriptor} =
-             ArtifactStore.archive_terminal_evidence(root, "task_legacy_v1", legacy, [])
+             ArtifactStore.archive_terminal_evidence(legacy_root, "task_legacy_v1", legacy, [])
 
     legacy_evidence = legacy_descriptor["path"] |> File.read!() |> Jason.decode!()
     assert legacy_evidence["schema_version"] == 1
@@ -1094,6 +1103,102 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              ArtifactStore.archive_task_terminal(root, "task_coding_1", conflicting, [])
 
     assert File.read!(first["path"]) == first_bytes
+  end
+
+  test "empty incoming controls restore exact first-writer settled control history", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+    controls = [terminal_control()]
+
+    assert {:ok, first} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, controls)
+
+    first_bytes = File.read!(first["path"])
+
+    assert {:ok, restored} =
+             ArtifactStore.reconcile_settled_controls(root, "task_coding_1", [])
+
+    assert restored === controls
+
+    assert {:ok, second} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    assert second == first
+    assert File.read!(second["path"]) == first_bytes
+  end
+
+  test "conflicting non-empty controls are rejected without rewriting first-writer terminal",
+       %{root: root} do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+    controls = [terminal_control()]
+
+    assert {:ok, first} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, controls)
+
+    first_bytes = File.read!(first["path"])
+
+    conflicting = [terminal_control(%{"control_id" => "control_other"})]
+
+    assert {:error, :task_terminal_conflict} =
+             ArtifactStore.archive_task_terminal(
+               root,
+               "task_coding_1",
+               envelope,
+               conflicting
+             )
+
+    assert File.read!(first["path"]) == first_bytes
+  end
+
+  test "empty incoming controls do not invent history when the task terminal is absent", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    result = terminal_result(root)
+    controls = [terminal_control()]
+
+    assert {:ok, _evidence} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, controls)
+
+    assert {:ok, []} = ArtifactStore.reconcile_settled_controls(root, "task_coding_1", [])
+
+    envelope = successful_task_terminal_envelope("task_coding_1")
+
+    assert {:ok, descriptor} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    body = descriptor["path"] |> File.read!() |> Jason.decode!()
+    assert body["controls"] == []
+  end
+
+  test "reconcile_settled_controls rejects non-list controls", %{root: root} do
+    File.mkdir_p!(root)
+
+    assert {:error, {:invalid_terminal_controls, :expected_list}} =
+             ArtifactStore.reconcile_settled_controls(root, "task_coding_1", %{})
+  end
+
+  test "reconcile_settled_controls fails closed on exception-raising malformed input", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    envelope = successful_task_terminal_envelope("task_coding_1")
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive_task_terminal(root, "task_coding_1", envelope, [])
+
+    Process.put({ArtifactStore, :bounded_read_pre_open_hook}, fn _path ->
+      raise "malformed settled-control input"
+    end)
+
+    assert {:error, :unavailable} =
+             ArtifactStore.reconcile_settled_controls(root, "task_coding_1", [])
+
+    Process.delete({ArtifactStore, :bounded_read_pre_open_hook})
   end
 
   test "rejects malformed or noncanonical task terminals and mismatched controls", %{root: root} do
@@ -1702,6 +1807,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert second == first
     assert File.read!(second["path"]) == first_bytes
 
+    conflicting =
+      Map.put(result, "validation", [
+        %{"command" => "mix test", "passed" => true},
+        %{"command" => "mix compile", "passed" => true}
+      ])
+
+    assert {:error, :terminal_evidence_conflict} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", conflicting, [])
+
+    assert File.read!(first["path"]) == first_bytes
+
+    File.rm!(first["path"])
+    File.write!(first["path"], "{not-json")
+    File.chmod!(first["path"], 0o600)
+
+    assert {:error, :terminal_evidence_conflict} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
+
+    assert File.read!(first["path"]) == "{not-json"
+
     top_level_keys =
       ~r/^  "([^"]+)":/m
       |> Regex.scan(first_bytes, capture: :all_but_first)
@@ -1764,13 +1889,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         {"node_#{index}", index}
       end)
 
+    oversized_root = isolated_terminal_root(root, "oversized")
+
     oversized =
-      result
+      oversized_root
+      |> terminal_result()
+      |> Map.put("metrics", metrics)
       |> put_in(["metrics", "node_durations_ms"], node_durations)
       |> put_in(["metrics", "usage"], %{"input_tokens" => 9, "note" => "drop", "cost" => 0.5})
 
     assert {:ok, bounded_descriptor} =
-             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", oversized, [])
+             ArtifactStore.archive_terminal_evidence(
+               oversized_root,
+               "task_coding_oversized",
+               oversized,
+               []
+             )
 
     bounded = bounded_descriptor["path"] |> File.read!() |> Jason.decode!()
     assert map_size(bounded["metrics"]["node_durations_ms"]) == 256
@@ -2652,6 +2786,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
   defp compilation_task_root(base, task_id) do
     digest = :crypto.hash(:sha256, task_id) |> Base.encode16(case: :lower)
     Path.join(base, "task-" <> digest)
+  end
+
+  defp isolated_terminal_root(root, name) do
+    case_root = Path.join(root, name)
+    File.mkdir_p!(case_root)
+    {:ok, resolved} = Arbor.Common.SafePath.resolve_real(case_root)
+    resolved
   end
 
   defp compilation_seal_path(root), do: Path.join(root, @compilation_seal_filename)

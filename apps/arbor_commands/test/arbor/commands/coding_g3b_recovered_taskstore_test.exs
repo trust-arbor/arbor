@@ -25,6 +25,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     @observed "2026-07-22T12:00:00.000Z"
 
     def run_file_as(_path, _principal, %Arbor.Contracts.Security.SigningAuthority{}, opts) do
+      maybe_wait_for_hold()
       iv = Keyword.get(opts, :initial_values, %{})
 
       {:ok,
@@ -86,6 +87,40 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
          node_durations: %{}
        }}
     end
+
+    defp maybe_wait_for_hold do
+      case Application.get_env(:arbor_orchestrator, :g3b_runner_hold) do
+        pid when is_pid(pid) ->
+          send(pid, {:g3b_runner_waiting, self()})
+
+          receive do
+            :g3b_runner_release -> :ok
+          after
+            15_000 -> :ok
+          end
+
+        _other ->
+          :ok
+      end
+    end
+  end
+
+  defmodule AuthenticExecutor do
+    @moduledoc false
+
+    defdelegate run(agent_id, task, context), to: CodingTaskExecutor
+    defdelegate recover_task(agent_id, context), to: CodingTaskExecutor
+    defdelegate probe_recovery(agent_id, context), to: CodingTaskExecutor
+    defdelegate finalize_task(agent_id, result, controls, context), to: CodingTaskExecutor
+
+    defdelegate finalize_terminal_task(agent_id, envelope, controls, context),
+      to: CodingTaskExecutor
+
+    defdelegate adopt_task(agent_id, result, request, context), to: CodingTaskExecutor
+    defdelegate cancel_task(agent_id, context), to: CodingTaskExecutor
+    defdelegate task_status(agent_id, context), to: CodingTaskExecutor
+
+    def steer_task(_agent_id, _control, _context), do: {:ok, :same_session_follow_up}
   end
 
   defmodule FakeCompiler do
@@ -554,6 +589,374 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
                task_id
              )
   end
+
+  test "TaskStore A-to-B restart keeps settled change_committed artifacts byte-identical", %{
+    repo: repo,
+    agent: agent,
+    caller: caller
+  } do
+    previous_executors = Application.get_env(:arbor_agent, :task_executors)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AuthenticExecutor
+    })
+
+    Application.put_env(:arbor_orchestrator, :g3b_runner_hold, self())
+
+    on_exit(fn ->
+      restore(:arbor_agent, :task_executors, previous_executors)
+      Application.delete_env(:arbor_orchestrator, :g3b_runner_hold)
+    end)
+
+    supervisor = start_supervised!({Task.Supervisor, name: unique(:sup_ab)})
+    store_a = start_recovery_store(supervisor, :store_a, true)
+
+    {task_id, control} =
+      complete_settled_coding_task(store_a, agent, caller, repo)
+
+    root = task_root(task_id)
+    terminal_path = Path.join(root, "coding-task-terminal.json")
+    evidence_path = Path.join(root, "coding-terminal-evidence.json")
+    terminal_bytes = File.read!(terminal_path)
+    evidence_bytes = File.read!(evidence_path)
+    terminal_sha = sha256(terminal_bytes)
+    evidence_sha = sha256(evidence_bytes)
+
+    archived = Jason.decode!(terminal_bytes)
+    assert archived["terminal_envelope"]["outcome"]["code"] == "change_committed"
+    assert archived["controls"] != []
+    assert hd(archived["controls"])["control_id"] == control["control_id"]
+    assert hd(archived["controls"])["status"] == "delivered"
+
+    {:ok, task_read_uri} = TaskControlLease.uri(:task_read, task_id)
+    {:ok, task_adopt_uri} = TaskControlLease.uri(:task_adopt, task_id)
+
+    assert wait_until(fn ->
+             task_id
+             |> TrackingSecurity.caps_for()
+             |> Enum.map(& &1.resource_uri)
+             |> MapSet.new() == MapSet.new([task_read_uri, task_adopt_uri])
+           end)
+
+    true = Process.exit(store_a, :kill)
+    Process.sleep(30)
+
+    store_b = start_recovery_store(supervisor, :store_b, false)
+
+    unless wait_until(fn -> TaskStore.recovery_ready?(name: store_b) end, 1_000) do
+      flunk("store B never became recovery-ready")
+    end
+
+    assert wait_for_done(store_b, task_id)
+
+    assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store_b)
+    assert {:ok, completed} = TaskStore.result(task_id, name: store_b)
+    assert completed.result_type == :coding_change
+    assert completed.raw["status"] == "change_committed"
+    refute get_in(completed.raw, ["outcome", "code"]) == "task_finalization_failed"
+
+    assert File.read!(terminal_path) == terminal_bytes
+    assert File.read!(evidence_path) == evidence_bytes
+    assert sha256(File.read!(terminal_path)) == terminal_sha
+    assert sha256(File.read!(evidence_path)) == evidence_sha
+
+    assert wait_until(fn ->
+             task_id
+             |> TrackingSecurity.caps_for()
+             |> Enum.map(& &1.resource_uri)
+             |> MapSet.new() == MapSet.new([task_read_uri, task_adopt_uri])
+           end)
+
+    refute task_id in TrackingSecurity.revokes_by_task()
+
+    assert {:ok, _marker} =
+             TaskControlRecoveryMemory.buffered_store_authoritative_get(
+               :arbor_agent_task_control_recovery,
+               task_id
+             )
+  end
+
+  test "identity-mismatched first-writer task terminal fails closed across TaskStore restart", %{
+    repo: repo,
+    agent: agent,
+    caller: caller
+  } do
+    previous_executors = Application.get_env(:arbor_agent, :task_executors)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AuthenticExecutor
+    })
+
+    Application.put_env(:arbor_orchestrator, :g3b_runner_hold, self())
+
+    on_exit(fn ->
+      restore(:arbor_agent, :task_executors, previous_executors)
+      Application.delete_env(:arbor_orchestrator, :g3b_runner_hold)
+    end)
+
+    supervisor = start_supervised!({Task.Supervisor, name: unique(:sup_tamper)})
+    store_a = start_recovery_store(supervisor, :store_tamper_a, true)
+
+    {task_id, _control} =
+      complete_settled_coding_task(store_a, agent, caller, repo)
+
+    root = task_root(task_id)
+    terminal_path = Path.join(root, "coding-task-terminal.json")
+    evidence_path = Path.join(root, "coding-terminal-evidence.json")
+    terminal_bytes = File.read!(terminal_path)
+    evidence_bytes = File.read!(evidence_path)
+
+    {:ok, body} = ArtifactStore.read_task_terminal(root, task_id)
+    tampered = Map.put(body, "task_id", "task_identity_mismatch")
+    File.rm!(terminal_path)
+    File.write!(terminal_path, Jason.encode!(tampered))
+    File.chmod!(terminal_path, 0o600)
+
+    true = Process.exit(store_a, :kill)
+    Process.sleep(30)
+
+    store_b = start_recovery_store(supervisor, :store_tamper_b, false)
+
+    unless wait_until(fn -> TaskStore.recovery_ready?(name: store_b) end, 1_000) do
+      flunk("tamper store B never became recovery-ready")
+    end
+
+    unless wait_until(
+             fn ->
+               case TaskStore.status(task_id, name: store_b) do
+                 {:ok, %{state: state}} when state in [:failed, :cancelled] -> true
+                 {:ok, %{state: :done}} -> true
+                 _other -> false
+               end
+             end,
+             1_000
+           ) do
+      flunk(
+        "timeout waiting for fail-closed recovery; " <>
+          "status=#{inspect(TaskStore.status(task_id, name: store_b))}; " <>
+          "result=#{inspect(TaskStore.result(task_id, name: store_b))}"
+      )
+    end
+
+    assert {:ok, %{state: state}} = TaskStore.status(task_id, name: store_b)
+    refute state == :done
+
+    case TaskStore.result(task_id, name: store_b) do
+      {:ok, completed} ->
+        refute_settled_change_committed(completed)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    refute File.read!(terminal_path) == terminal_bytes
+    assert File.read!(evidence_path) == evidence_bytes
+  end
+
+  test "tampered first-writer coding-terminal-evidence fails closed across TaskStore restart", %{
+    repo: repo,
+    agent: agent,
+    caller: caller
+  } do
+    previous_executors = Application.get_env(:arbor_agent, :task_executors)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AuthenticExecutor
+    })
+
+    Application.put_env(:arbor_orchestrator, :g3b_runner_hold, self())
+
+    on_exit(fn ->
+      restore(:arbor_agent, :task_executors, previous_executors)
+      Application.delete_env(:arbor_orchestrator, :g3b_runner_hold)
+    end)
+
+    supervisor = start_supervised!({Task.Supervisor, name: unique(:sup_ev_tamper)})
+    store_a = start_recovery_store(supervisor, :store_ev_tamper_a, true)
+
+    {task_id, _control} =
+      complete_settled_coding_task(store_a, agent, caller, repo)
+
+    root = task_root(task_id)
+    terminal_path = Path.join(root, "coding-task-terminal.json")
+    evidence_path = Path.join(root, "coding-terminal-evidence.json")
+    terminal_bytes = File.read!(terminal_path)
+    File.rm!(evidence_path)
+    File.write!(evidence_path, "{not-json")
+    File.chmod!(evidence_path, 0o600)
+
+    true = Process.exit(store_a, :kill)
+    Process.sleep(30)
+
+    store_b = start_recovery_store(supervisor, :store_ev_tamper_b, false)
+
+    unless wait_until(fn -> TaskStore.recovery_ready?(name: store_b) end, 1_000) do
+      flunk("evidence-tamper store B never became recovery-ready")
+    end
+
+    unless wait_until(
+             fn ->
+               case TaskStore.status(task_id, name: store_b) do
+                 {:ok, %{state: state}} when state in [:failed, :cancelled] -> true
+                 {:ok, %{state: :done}} -> true
+                 _other -> false
+               end
+             end,
+             1_000
+           ) do
+      flunk(
+        "timeout waiting for evidence tamper fail-closed recovery; " <>
+          "status=#{inspect(TaskStore.status(task_id, name: store_b))}; " <>
+          "result=#{inspect(TaskStore.result(task_id, name: store_b))}"
+      )
+    end
+
+    assert {:ok, %{state: state}} = TaskStore.status(task_id, name: store_b)
+    refute state == :done
+
+    case TaskStore.result(task_id, name: store_b) do
+      {:ok, completed} ->
+        refute_settled_change_committed(completed)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    assert File.read!(terminal_path) == terminal_bytes
+    assert File.read!(evidence_path) == "{not-json"
+  end
+
+  defp complete_settled_coding_task(store, agent, caller, repo) do
+    task = %{
+      "kind" => "coding_change",
+      "task" => "add a feature",
+      "repo_path" => repo,
+      "acp_agent" => "codex"
+    }
+
+    assert {:ok, %{task_id: task_id, reservation_token: token}} =
+             TaskStore.reserve(agent, name: store)
+
+    assert :ok =
+             TaskStore.commit_recovery_marker(task_id, token,
+               name: store,
+               agent_id: agent,
+               executor_kind: "coding_change",
+               control_principal_id: caller,
+               cleanup: %{"caller_id" => caller, "principal_id" => agent}
+             )
+
+    lease = grant_full_lease(caller, task_id)
+
+    assert {:ok, ^task_id} =
+             TaskStore.activate(agent, task, task_id, token,
+               name: store,
+               task_control_lease: lease,
+               caller_id: caller
+             )
+
+    runner_pid =
+      receive do
+        {:g3b_runner_waiting, pid} -> pid
+      after
+        10_000 -> flunk("coding runner never reached the hold")
+      end
+
+    assert wait_until(fn ->
+             match?({:ok, %{state: :running}}, TaskStore.status(task_id, name: store))
+           end)
+
+    assert {:ok, control} =
+             TaskStore.steer(task_id, "apply the correction",
+               name: store,
+               sender_id: caller
+             )
+
+    assert control["status"] == "delivered"
+
+    send(runner_pid, :g3b_runner_release)
+    assert wait_for_done(store, task_id)
+
+    root = task_root(task_id)
+    {:ok, binding} = ArtifactStore.read_run_binding(root)
+
+    PipelineStatusETS.put_record(task_id, %{
+      run_id: task_id,
+      execution_principal: agent,
+      graph_hash: binding["graph_hash"],
+      status: :completed
+    })
+
+    {task_id, control}
+  end
+
+  defp grant_full_lease(caller, task_id) do
+    ids =
+      Map.new(TaskControlLease.grant_order(), fn kind ->
+        {:ok, spec} = TaskControlLease.grant_spec(kind, caller, task_id, DateTime.utc_now())
+        {:ok, record} = TrackingSecurity.grant(spec)
+        {kind, record.id}
+      end)
+
+    {:ok, lease} = TaskControlLease.new(task_id, ids)
+    lease
+  end
+
+  defp start_recovery_store(supervisor, prefix, force_ready?) do
+    name = unique(prefix)
+
+    store =
+      start_supervised!(
+        {TaskStore,
+         name: name,
+         task_supervisor: supervisor,
+         cleanup_supervisor: supervisor,
+         recovery_force_ready: force_ready?,
+         task_control_recovery_facade: TaskControlRecoveryMemory,
+         task_control_security_module: TrackingSecurity},
+        id: name
+      )
+
+    if force_ready? do
+      true = TaskStore.recovery_ready?(name: store)
+    end
+
+    store
+  end
+
+  defp wait_for_done(store, task_id) do
+    unless wait_until(
+             fn ->
+               match?({:ok, %{state: :done}}, TaskStore.status(task_id, name: store))
+             end,
+             1_000
+           ) do
+      flunk(
+        "timeout waiting for settled terminal; " <>
+          "status=#{inspect(TaskStore.status(task_id, name: store))}; " <>
+          "result=#{inspect(TaskStore.result(task_id, name: store))}"
+      )
+    end
+
+    true
+  end
+
+  defp refute_settled_change_committed(result) when is_map(result) do
+    payload =
+      cond do
+        is_map_key(result, :raw) -> Map.get(result, :raw)
+        is_map_key(result, "raw") -> Map.get(result, "raw")
+        true -> result
+      end
+
+    payload = if is_map(payload), do: payload, else: %{}
+
+    refute Map.get(payload, "status") == "change_committed"
+    refute get_in(payload, ["outcome", "code"]) == "change_committed"
+  end
+
+  defp sha256(bytes) when is_binary(bytes),
+    do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp task_root(task_id) do
     base = Application.fetch_env!(:arbor_orchestrator, :coding_pipeline_logs_root)

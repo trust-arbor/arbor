@@ -714,9 +714,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
          :ok <- validate_exact_context_task_id(context, exec_ctx.task_id),
+         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+         {:ok, controls} <-
+           reconcile_settled_controls(logs_root, exec_ctx.task_id, controls),
          {:ok, archive} <-
            build_task_terminal_archive(exec_ctx.task_id, terminal_envelope, controls),
-         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          {:ok, descriptor} <-
            archive_task_terminal(logs_root, exec_ctx.task_id, terminal_envelope, controls),
          :ok <- validate_task_terminal_descriptor(descriptor, logs_root, archive) do
@@ -1419,6 +1421,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       true ->
         invoke_task_terminal_store(store, root, task_id, terminal_envelope, controls)
     end
+  end
+
+  defp reconcile_settled_controls(root, task_id, controls) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not is_atom(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not Code.ensure_loaded?(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not function_exported?(store, :reconcile_settled_controls, 3) ->
+        {:ok, controls}
+
+      true ->
+        case store.reconcile_settled_controls(root, task_id, controls) do
+          {:ok, reconciled} when is_list(reconciled) -> {:ok, reconciled}
+          {:error, _reason} = error -> error
+          _other -> {:error, :invalid_reconciled_terminal_controls}
+        end
+    end
+  rescue
+    _exception -> {:error, :coding_plan_artifact_store_unavailable}
+  catch
+    _kind, _reason -> {:error, :coding_plan_artifact_store_unavailable}
   end
 
   defp invoke_task_terminal_store(store, root, task_id, terminal_envelope, controls) do
@@ -3823,12 +3851,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          archive,
          task_id,
          logs_root,
-         compilation_bundle,
-         plan,
-         compilation,
+         _compilation_bundle,
+         _plan,
+         _compilation,
          binding,
-         record,
-         started_at
+         _record,
+         _started_at
        )
        when is_map(archive) do
     envelope = Map.get(archive, "terminal_envelope")
@@ -3839,17 +3867,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          state = envelope["terminal_state"] do
       case {state, Map.get(evidence, "kind"), Map.get(evidence, "result")} do
         {"done", "executor_result", result} when is_map(result) ->
-          admit_joined_executor_result(
-            result,
-            logs_root,
-            compilation_bundle,
-            plan,
-            compilation,
-            binding,
-            record,
-            started_at,
-            task_id
-          )
+          admit_joined_executor_result(result, logs_root, binding)
 
         {"cancelled", _, _} ->
           {:error, :cancelled}
@@ -3868,45 +3886,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp admit_joined_executor_result(
-         result,
-         logs_root,
-         compilation_bundle,
-         plan,
-         compilation,
-         binding,
-         record,
-         started_at,
-         task_id
-       ) do
+  defp drop_host_task_evidence(result) when is_map(result) and not is_struct(result) do
+    case Map.get(result, "artifacts") do
+      artifacts when is_map(artifacts) and not is_struct(artifacts) ->
+        Map.put(result, "artifacts", Map.delete(artifacts, "task_evidence"))
+
+      _other ->
+        result
+    end
+  end
+
+  defp drop_host_task_evidence(result), do: result
+
+  defp admit_joined_executor_result(result, logs_root, binding) do
     with {:ok, receipt} <- read_recovery_engine_terminal(logs_root),
          {:ok, decision} <- read_recovery_terminal_decision(logs_root),
          :ok <-
            CodingRunRecoveryCore.admit_terminal_identity(binding, decision, receipt) do
       case CodingRunRecoveryCore.admit_executor_result(receipt, decision, result) do
         :ok ->
-          with {:ok, adapted} <-
-                 adapt_from_receipt(
-                   receipt,
-                   compilation_bundle,
-                   plan,
-                   compilation,
-                   binding,
-                   record,
-                   started_at,
-                   logs_root,
-                   task_id
-                 ),
-               true <- adapted["status"] == result["status"],
-               true <-
-                 (adapted["canonical_status"] || adapted["status"]) ==
-                   (result["canonical_status"] || result["status"]) do
-            {:ok, adapted}
-          else
-            false -> {:error, :unprovable_recovery}
-            {:error, _} = error -> error
-            _ -> {:error, :unprovable_recovery}
-          end
+          # Authenticated first-writer executor result is the public recovery
+          # payload. Do not rebuild recovery-local metrics from started_at.
+          # Strip the host-added output-only descriptor so finalize_task can
+          # replay remaining result bytes against immutable evidence.
+          {:ok, drop_host_task_evidence(result)}
 
         {:error, :binding_mismatch} ->
           {:continue_receipt}

@@ -185,6 +185,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       )
     end
 
+    def reconcile_settled_controls(root, task_id, controls) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.reconcile_settled_controls(
+        root,
+        task_id,
+        controls
+      )
+    end
+
     def read_task_compilation(base, task_id) do
       case Process.get(:coding_executor_read_task_compilation_reply) do
         nil ->
@@ -2203,6 +2211,87 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, third} = CodingTaskExecutor.recover_task("agent_1", valid_context())
       assert first["status"] == second["status"]
       assert second["status"] == third["status"]
+    end
+
+    test "settled recover returns the authenticated archived executor result, not recovery-local metrics" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 original,
+                 controls,
+                 valid_context()
+               )
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      root = task_terminal_root("task_coding_1")
+      terminal_path = Path.join(root, "coding-task-terminal.json")
+      evidence_path = Path.join(root, "coding-terminal-evidence.json")
+      terminal_bytes = File.read!(terminal_path)
+      evidence_bytes = File.read!(evidence_path)
+      original_metrics = finalized["metrics"]
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      Process.sleep(30)
+
+      assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert recovered["status"] == "change_committed"
+      assert recovered["metrics"] == original_metrics
+      refute Map.has_key?(recovered["artifacts"], "task_evidence")
+
+      stale_recovered =
+        put_in(recovered, ["artifacts", "task_evidence"], %{
+          "path" => evidence_path,
+          "sha256" => String.duplicate("e", 64)
+        })
+
+      assert {:error, {:invalid_finalize_artifacts, :fields}} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 stale_recovered,
+                 [],
+                 valid_context()
+               )
+
+      assert {:ok, refinialized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 recovered,
+                 [],
+                 valid_context()
+               )
+
+      assert refinialized["status"] == "change_committed"
+      assert refinialized["metrics"] == original_metrics
+      assert refinialized["artifacts"]["task_evidence"]["sha256"] == sha256(evidence_bytes)
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      assert File.read!(terminal_path) == terminal_bytes
+      assert File.read!(evidence_path) == evidence_bytes
     end
 
     test "conflicting terminal CAS is not mapped to ok" do
@@ -6863,6 +6952,35 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  controls,
                  valid_context()
                )
+    end
+
+    test "empty incoming controls restore first-writer history without rewriting bytes" do
+      task_id = "task_coding_1"
+      envelope = successful_terminal_envelope(task_id)
+      controls = [reconciled_control()]
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      path = Path.join(task_terminal_root(task_id), "coding-task-terminal.json")
+      first_bytes = File.read!(path)
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      assert File.read!(path) == first_bytes
+      body = Jason.decode!(first_bytes)
+      assert body["controls"] == controls
     end
 
     test "accepts cancellation and legacy-finalizer failure terminal semantics" do

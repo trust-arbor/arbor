@@ -464,7 +464,34 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
-  @doc "Archive the closed, deterministic terminal evidence for a coding task."
+  @doc """
+  Restore exact settled control history from the authenticated first-writer
+  `coding-task-terminal.json` when incoming controls are empty.
+
+  Non-empty incoming controls that differ from that archive are rejected.
+  Missing first-writer archives leave the incoming list unchanged.
+  Unsafe existing targets retain the writer-side fail-closed classifications
+  used by `archive_task_terminal/4`.
+  """
+  @spec reconcile_settled_controls(String.t(), String.t(), list()) ::
+          {:ok, list()} | {:error, term()}
+  def reconcile_settled_controls(root, task_id, controls) do
+    with {:ok, root} <- normalize_task_terminal_root(root),
+         :ok <- validate_terminal_task_id(task_id) do
+      do_reconcile_settled_controls(root, task_id, controls)
+    end
+  rescue
+    _exception -> {:error, :unavailable}
+  catch
+    _kind, _reason -> {:error, :unavailable}
+  end
+
+  @doc """
+  Archive the closed, deterministic terminal evidence for a coding task.
+
+  Publication is first-writer-wins: identical replay is idempotent, and a
+  conflicting body is rejected without replacing the accepted file.
+  """
   @spec archive_terminal_evidence(String.t(), String.t(), map(), list()) ::
           {:ok, map()} | {:error, term()}
   def archive_terminal_evidence(root, task_id, result, controls) do
@@ -475,12 +502,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          {:ok, result} <- normalize_terminal_capacity(result),
          {:ok, result} <- normalize_terminal_verification_report(result),
          {:ok, result} <- normalize_terminal_descriptors(result),
+         {:ok, controls} <- do_reconcile_settled_controls(root, task_id, controls),
          {:ok, controls} <- TaskTerminalArchiveCore.validate_control_history(task_id, controls),
          {:ok, body} <- build_terminal_evidence(result, task_id, controls),
          {:ok, encoded} <- encode_canonical_json(body, :terminal_evidence),
          :ok <- validate_terminal_evidence_size(encoded),
          path <- Path.join(root, @terminal_evidence_filename),
-         :ok <- atomic_write(path, encoded),
+         :ok <- write_terminal_evidence_once(path, encoded, root),
          {:ok, descriptor} <- verify_terminal_evidence(path, task_id, encoded) do
       {:ok, descriptor}
     end
@@ -495,6 +523,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
           {:ok, map()} | {:error, term()}
   def archive_task_terminal(root, task_id, terminal_envelope, controls) do
     with {:ok, root} <- normalize_task_terminal_root(root),
+         {:ok, controls} <- do_reconcile_settled_controls(root, task_id, controls),
          {:ok, archive} <- TaskTerminalArchiveCore.build(task_id, terminal_envelope, controls),
          path = Path.join(root, @task_terminal_filename),
          :ok <- validate_task_terminal_path(root, path),
@@ -2093,23 +2122,80 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
-  defp write_task_terminal_once(path, content, root) do
+  defp do_reconcile_settled_controls(root, task_id, controls) when is_list(controls) do
+    # Classify the existing target with writer-side fail-closed atoms before any
+    # recovery-style read. `read_task_terminal/2` collapses symlink, non-regular,
+    # and insecure-mode files to :malformed.
+    path = Path.join(root, @task_terminal_filename)
+
+    case classify_task_terminal_target(path) do
+      :absent ->
+        {:ok, controls}
+
+      :present ->
+        reconcile_present_task_terminal(path, task_id, controls)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_reconcile_settled_controls(_root, _task_id, _controls),
+    do: {:error, {:invalid_terminal_controls, :expected_list}}
+
+  defp reconcile_present_task_terminal(path, task_id, controls) do
+    case read_descriptor_bounded_file(path, @max_task_terminal_bytes) do
+      {:ok, encoded} ->
+        case decode_task_terminal_archive(encoded, task_id) do
+          {:ok, archive} ->
+            reconcile_existing_settled_controls(archive, controls)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, :enoent} ->
+        {:ok, controls}
+
+      {:error, :malformed} ->
+        {:error, :malformed}
+
+      {:error, _reason} ->
+        {:error, :task_terminal_unreadable}
+    end
+  end
+
+  defp reconcile_existing_settled_controls(archive, controls) when is_map(archive) do
+    archived = Map.get(archive, "controls") || []
+
+    cond do
+      not is_list(archived) ->
+        {:error, :malformed}
+
+      controls == [] ->
+        {:ok, archived}
+
+      controls === archived ->
+        {:ok, controls}
+
+      true ->
+        {:error, :task_terminal_conflict}
+    end
+  end
+
+  defp reconcile_existing_settled_controls(_archive, _controls),
+    do: {:error, :malformed}
+
+  defp classify_task_terminal_target(path) do
     case File.lstat(path) do
       {:error, :enoent} ->
-        write_task_terminal_new(path, content, root)
+        :absent
 
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        cond do
-          Bitwise.band(mode, 0o777) != 0o600 ->
-            {:error, :insecure_task_terminal_mode}
-
-          true ->
-            case read_descriptor_bounded_file(path, @max_task_terminal_bytes) do
-              {:ok, ^content} -> :ok
-              {:ok, _other} -> {:error, :task_terminal_conflict}
-              {:error, :malformed} -> {:error, :task_terminal_conflict}
-              {:error, _reason} -> {:error, :task_terminal_unreadable}
-            end
+        if Bitwise.band(mode, 0o777) != 0o600 do
+          {:error, :insecure_task_terminal_mode}
+        else
+          :present
         end
 
       {:ok, %File.Stat{type: :symlink}} ->
@@ -2120,6 +2206,73 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
       {:error, _reason} ->
         {:error, :task_terminal_unavailable}
+    end
+  end
+
+  defp write_task_terminal_once(path, content, root) do
+    case classify_task_terminal_target(path) do
+      :absent ->
+        write_task_terminal_new(path, content, root)
+
+      :present ->
+        case read_descriptor_bounded_file(path, @max_task_terminal_bytes) do
+          {:ok, ^content} -> :ok
+          {:ok, _other} -> {:error, :task_terminal_conflict}
+          {:error, :malformed} -> {:error, :task_terminal_conflict}
+          {:error, _reason} -> {:error, :task_terminal_unreadable}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp write_terminal_evidence_once(path, content, root) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        write_terminal_evidence_new(path, content, root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        cond do
+          Bitwise.band(mode, 0o777) != 0o600 ->
+            {:error, :insecure_mode}
+
+          true ->
+            case read_descriptor_bounded_file(path, @max_terminal_evidence_bytes) do
+              {:ok, ^content} -> :ok
+              {:ok, _other} -> {:error, :terminal_evidence_conflict}
+              {:error, :malformed} -> {:error, :terminal_evidence_conflict}
+              {:error, _reason} -> {:error, :terminal_evidence_unreadable}
+            end
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :terminal_evidence_symlink}
+
+      {:ok, _other} ->
+        {:error, :invalid_terminal_evidence_file}
+
+      {:error, _reason} ->
+        {:error, :terminal_evidence_unavailable}
+    end
+  end
+
+  defp write_terminal_evidence_new(path, content, root) do
+    temporary_path = temporary_path(path)
+
+    try do
+      with :ok <- validate_task_terminal_path(root, path),
+           {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+           :ok <- write_secure_temp(temporary_path, content),
+           :ok <- File.ln(temporary_path, path) do
+        :ok
+      else
+        {:error, :eexist} -> write_terminal_evidence_once(path, content, root)
+        {:error, reason} -> {:error, {:write_artifact_failed, Path.basename(path), reason}}
+        _other -> {:error, {:write_artifact_failed, Path.basename(path), :failed}}
+      end
+    after
+      File.rm(temporary_path)
     end
   end
 
