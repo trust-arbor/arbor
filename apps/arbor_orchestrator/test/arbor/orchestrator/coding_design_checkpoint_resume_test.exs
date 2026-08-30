@@ -15,6 +15,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.PipelineStatus
   alias Arbor.Orchestrator.RunJournal
+  alias Arbor.Orchestrator.RunLifecycle.EffectEnvelope
   alias Arbor.Orchestrator.RunLifecycle.Record
 
   # Persists the journal value before holding its reply. This gives the test an
@@ -378,7 +379,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     assert result.context["accepted_design_evidence"] == probe.terminal_evidence
   end
 
-  test "blocked read-only Await resumes with the exact durable identity and never reopens" do
+  test "injected ActionExecutor fail-closed on pending Await: indeterminate_effect and no replay" do
     configure_file_only_checkpoints!()
     probe = start_action_store!(await_mode: :block)
     harness = start_journal!("await_pending")
@@ -401,31 +402,30 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     assert_await_identity(await_args, probe)
 
     before_kill = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
-    refute before_kill.current_effect["node_id"] == "await_design_checkpoint"
-    refute before_kill.current_effect["status"] == "pending"
+    assert_pending_await_effect!(before_kill)
+    exec_id = before_kill.current_effect["execution_id"]
 
     kill_engine!(engine_pid, mon)
     :ok = ActionStore.unblock(probe.key)
 
     assert %Record{status: :interrupted} =
-             PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
+             interrupted = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
+
+    assert_pending_await_effect!(interrupted)
+    assert interrupted.current_effect["execution_id"] == exec_id
 
     publish_interrupted_for_public_resume!(harness, logs_root, dot)
 
-    assert {:ok, result} =
+    assert {:error, {:indeterminate_effect, "await_design_checkpoint", ^exec_id}} =
              Orchestrator.resume(harness.run_id,
                identity_private_key: identity,
                actions_executor: ActionExecutor
              )
 
-    assert [{:open, _}, {:await, ^await_args}, {:await, resumed_await_args}] =
-             ActionStore.events(probe.key)
-
-    assert_await_identity(resumed_await_args, probe)
-    assert result.context["accepted_design_evidence"] == probe.terminal_evidence
+    assert [{:open, _}, {:await, ^await_args}] = ActionStore.events(probe.key)
   end
 
-  test "terminal Await safely replays when owner dies before its outcome checkpoint" do
+  test "injected ActionExecutor fail-closed when completed Await is uncheckpointed: completed_effect_unapplied and no replay" do
     checkpoint_store = unique_name("await_pre_checkpoint")
 
     {:ok, _} =
@@ -453,26 +453,27 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     assert_await_identity(await_args, probe)
     assert_receive {:await_checkpoint_write_held, "await_design_checkpoint"}, 5_000
 
+    before_kill = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
+    assert_completed_await_effect!(before_kill)
+    exec_id = before_kill.current_effect["execution_id"]
+
     kill_engine!(engine_pid, mon)
     :ok = PreAwaitCheckpointHoldStore.discard_held_write(checkpoint_store)
 
     interrupted = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
     assert %Record{status: :interrupted} = interrupted
-    refute interrupted.current_effect["node_id"] == "await_design_checkpoint"
+    assert_completed_await_effect!(interrupted)
+    assert interrupted.current_effect["execution_id"] == exec_id
 
     publish_interrupted_for_public_resume!(harness, logs_root, dot)
 
-    assert {:ok, result} =
+    assert {:error, {:completed_effect_unapplied, "await_design_checkpoint", ^exec_id}} =
              Orchestrator.resume(harness.run_id,
                identity_private_key: identity,
                actions_executor: ActionExecutor
              )
 
-    assert [{:open, _}, {:await, ^await_args}, {:await, resumed_await_args}] =
-             ActionStore.events(probe.key)
-
-    assert_await_identity(resumed_await_args, probe)
-    assert result.context["accepted_design_evidence"] == probe.terminal_evidence
+    assert [{:open, _}, {:await, ^await_args}] = ActionStore.events(probe.key)
   end
 
   test "checkpointed terminal Await resumes through accepted-evidence transform without replay" do
@@ -502,7 +503,7 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     :ok = HoldStore.release(harness.store_name)
     interrupted = PipelineStatus.get_record(harness.run_id, server: harness.journal_name)
     assert %Record{status: :interrupted} = interrupted
-    refute interrupted.current_effect["node_id"] == "await_design_checkpoint"
+    assert_completed_await_effect!(interrupted)
 
     publish_interrupted_for_public_resume!(harness, logs_root, dot)
 
@@ -727,6 +728,30 @@ defmodule Arbor.Orchestrator.CodingDesignCheckpointResumeTest do
     assert args["owner_deadline_unix_ms"] == probe.owner_deadline_unix_ms
     assert args["evidence"] == probe.open_evidence
     assert args["run_deadline_unix_ms"] == probe.owner_deadline_unix_ms
+  end
+
+  defp assert_pending_await_effect!(record) do
+    effect = record.current_effect
+    assert is_map(effect)
+    assert {:ok, validated} = EffectEnvelope.validate(effect)
+    assert validated["status"] == "pending"
+    assert validated["node_id"] == "await_design_checkpoint"
+    assert validated["run_id"] == record.run_id
+    assert is_binary(validated["execution_id"]) and validated["execution_id"] != ""
+    assert validated["idempotency_class"] == "side_effecting"
+    assert is_integer(validated["generation"]) and validated["generation"] >= 1
+  end
+
+  defp assert_completed_await_effect!(record) do
+    effect = record.current_effect
+    assert is_map(effect)
+    assert {:ok, validated} = EffectEnvelope.validate(effect)
+    assert validated["status"] == "completed"
+    assert validated["node_id"] == "await_design_checkpoint"
+    assert validated["run_id"] == record.run_id
+    assert is_binary(validated["execution_id"]) and validated["execution_id"] != ""
+    assert validated["idempotency_class"] == "side_effecting"
+    assert validated["outcome_status"] in ["success", "partial_success"]
   end
 
   defp deadline_values(probe),

@@ -219,7 +219,8 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
           Client.from_env(
             discover_acp: false,
             discover_local: false,
-            discover_oauth: false
+            discover_oauth: false,
+            discover_keyless: false
           )
         end
       end)

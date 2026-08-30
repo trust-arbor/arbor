@@ -4,51 +4,42 @@ defmodule Arbor.Orchestrator.EventsTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.Events
+  alias Arbor.Persistence.EventLog.ETS
 
   setup do
-    # Injected Historian sink; default hot Config target is Historian.EventLog.ETS.
-    # read_run_events reads from the configured event_log_name.
-    # We need both to point at the same process.
-    event_log_name = Arbor.Historian.EventLog.ETS
-    backend = Arbor.Persistence.EventLog.ETS
+    # Durable-first Historian writes: isolated authoritative ETS plus a separate
+    # hot projection. read_run_events observes the durable authority.
+    suffix = System.unique_integer([:positive])
+    # credo:disable-for-lines:2 Credo.Check.Security.UnsafeAtomConversion
+    durable = :"orchestrator_events_durable_#{suffix}"
+    hot = :"orchestrator_events_hot_#{suffix}"
 
-    case apply(backend, :start_link, [[name: event_log_name]]) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _}} -> :ok
-    end
+    start_supervised!({ETS, name: durable}, id: durable)
+    start_supervised!({ETS, name: hot, mode: :projection}, id: hot)
 
-    # Point read_run_events at the same process durable_emit writes to
-    prev = Application.get_env(:arbor_orchestrator, :event_log_name)
-    Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
+    originals = %{
+      event_log_name: Application.fetch_env(:arbor_orchestrator, :event_log_name),
+      event_log_backend: Application.fetch_env(:arbor_orchestrator, :event_log_backend),
+      durable: Application.fetch_env(:arbor_historian, :durable_event_log_target),
+      hot: Application.fetch_env(:arbor_historian, :hot_event_log_target)
+    }
+
+    Application.put_env(:arbor_orchestrator, :event_log_name, durable)
+    Application.put_env(:arbor_orchestrator, :event_log_backend, ETS)
+    configure_historian_target(:durable_event_log_target, durable)
+    configure_historian_target(:hot_event_log_target, hot)
 
     Arbor.Signals.Config.Testing.isolate_namespace()
     Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
-    prev_hot = Application.get_env(:arbor_historian, :hot_event_log_target, :unset)
-
-    Application.put_env(:arbor_historian, :hot_event_log_target, %{
-      name: event_log_name,
-      backend: backend,
-      opts: []
-    })
-
     on_exit(fn ->
-      if prev,
-        do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
-        else: Application.delete_env(:arbor_orchestrator, :event_log_name)
-
-      if prev_hot == :unset,
-        do: Application.delete_env(:arbor_historian, :hot_event_log_target),
-        else: Application.put_env(:arbor_historian, :hot_event_log_target, prev_hot)
-
-      try do
-        if Process.whereis(event_log_name), do: GenServer.stop(event_log_name)
-      catch
-        :exit, _ -> :ok
-      end
+      restore_env(:arbor_orchestrator, :event_log_name, originals.event_log_name)
+      restore_env(:arbor_orchestrator, :event_log_backend, originals.event_log_backend)
+      restore_env(:arbor_historian, :durable_event_log_target, originals.durable)
+      restore_env(:arbor_historian, :hot_event_log_target, originals.hot)
     end)
 
-    :ok
+    %{durable: durable, hot: hot}
   end
 
   describe "stream_id/1" do
@@ -168,12 +159,20 @@ defmodule Arbor.Orchestrator.EventsTest do
 
     test "gracefully handles missing EventLog process" do
       run_id = "run_test_#{System.unique_integer([:positive])}"
+      previous = Application.fetch_env(:arbor_historian, :durable_event_log_target)
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      missing = :"orchestrator_events_missing_#{System.unique_integer([:positive])}"
 
-      # Use a non-existent event log name to simulate unavailability
+      configure_historian_target(:durable_event_log_target, missing)
+
       event = %{type: :stage_started, node_id: "test"}
 
-      # Should not crash — graceful degradation
-      assert :ok = Events.dual_emit(event, run_id: run_id)
+      try do
+        # Should not crash — graceful degradation when durable authority is down
+        assert :ok = Events.dual_emit(event, run_id: run_id)
+      after
+        restore_env(:arbor_historian, :durable_event_log_target, previous)
+      end
     end
   end
 
@@ -185,4 +184,11 @@ defmodule Arbor.Orchestrator.EventsTest do
       assert events == []
     end
   end
+
+  defp configure_historian_target(key, name) do
+    Application.put_env(:arbor_historian, key, %{name: name, backend: ETS, opts: []})
+  end
+
+  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
 end

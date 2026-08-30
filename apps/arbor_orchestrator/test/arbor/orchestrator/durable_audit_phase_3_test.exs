@@ -10,6 +10,7 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.{Engine, Event, Events, JsonSafe}
+  alias Arbor.Persistence.EventLog.ETS
 
   @moduletag :fast
 
@@ -84,44 +85,36 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
 
   describe "durable persistence of an enriched, struct-bearing event" do
     setup do
-      # Injected Historian sink; default hot Config target is Historian.EventLog.ETS.
-      # Point read_run_events at the same process.
-      event_log_name = Arbor.Historian.EventLog.ETS
-      backend = Arbor.Persistence.EventLog.ETS
+      # Durable-first Historian writes: isolated authoritative ETS plus a separate
+      # hot projection. read_run_events observes the durable authority.
+      suffix = System.unique_integer([:positive])
+      # credo:disable-for-lines:2 Credo.Check.Security.UnsafeAtomConversion
+      durable = :"durable_audit_phase3_durable_#{suffix}"
+      hot = :"durable_audit_phase3_hot_#{suffix}"
 
-      case apply(backend, :start_link, [[name: event_log_name]]) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _}} -> :ok
-      end
+      start_supervised!({ETS, name: durable}, id: durable)
+      start_supervised!({ETS, name: hot, mode: :projection}, id: hot)
 
-      prev = Application.get_env(:arbor_orchestrator, :event_log_name)
-      Application.put_env(:arbor_orchestrator, :event_log_name, event_log_name)
+      originals = %{
+        event_log_name: Application.fetch_env(:arbor_orchestrator, :event_log_name),
+        event_log_backend: Application.fetch_env(:arbor_orchestrator, :event_log_backend),
+        durable: Application.fetch_env(:arbor_historian, :durable_event_log_target),
+        hot: Application.fetch_env(:arbor_historian, :hot_event_log_target)
+      }
+
+      Application.put_env(:arbor_orchestrator, :event_log_name, durable)
+      Application.put_env(:arbor_orchestrator, :event_log_backend, ETS)
+      configure_historian_target(:durable_event_log_target, durable)
+      configure_historian_target(:hot_event_log_target, hot)
 
       Arbor.Signals.Config.Testing.isolate_namespace()
       Arbor.Signals.Config.Testing.put(:durable_sink_module, Arbor.Historian)
 
-      prev_hot = Application.get_env(:arbor_historian, :hot_event_log_target, :unset)
-
-      Application.put_env(:arbor_historian, :hot_event_log_target, %{
-        name: event_log_name,
-        backend: backend,
-        opts: []
-      })
-
       on_exit(fn ->
-        if prev,
-          do: Application.put_env(:arbor_orchestrator, :event_log_name, prev),
-          else: Application.delete_env(:arbor_orchestrator, :event_log_name)
-
-        if prev_hot == :unset,
-          do: Application.delete_env(:arbor_historian, :hot_event_log_target),
-          else: Application.put_env(:arbor_historian, :hot_event_log_target, prev_hot)
-
-        try do
-          if Process.whereis(event_log_name), do: GenServer.stop(event_log_name)
-        catch
-          :exit, _ -> :ok
-        end
+        restore_env(:arbor_orchestrator, :event_log_name, originals.event_log_name)
+        restore_env(:arbor_orchestrator, :event_log_backend, originals.event_log_backend)
+        restore_env(:arbor_historian, :durable_event_log_target, originals.durable)
+        restore_env(:arbor_historian, :hot_event_log_target, originals.hot)
       end)
 
       :ok
@@ -198,4 +191,11 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
       refute File.exists?(Path.join([tmp, "n", "status.json"]))
     end
   end
+
+  defp configure_historian_target(key, name) do
+    Application.put_env(:arbor_historian, key, %{name: name, backend: ETS, opts: []})
+  end
+
+  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
 end
