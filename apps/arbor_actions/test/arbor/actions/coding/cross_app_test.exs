@@ -1136,6 +1136,48 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute encoded =~ "unstarted_batches"
   end
 
+  test "nil-frontier residual exhaustion is a structural handoff and launches no Mix tests", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+    calls = :counters.new(1, [])
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      :ok = :counters.add(calls, 1, 1)
+      count = :counters.get(calls, 1)
+      if count <= 1, do: 0, else: 5_000_000
+    end)
+
+    on_exit(fn -> Application.delete_env(:arbor_actions, :cross_app_monotonic_ms) end)
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    context = window_context(fixture.context, bundle)
+    assert {:ok, observation} = Validate.run(bundle.params, context)
+    assert observation["disposition_type"] == "capacity_handoff"
+    assert observation["progress"]["capacity"]["phase"] == "structural"
+    assert observation["progress"]["capacity"]["interrupted_batch"] == nil
+    assert observation["progress"]["refinement"] == nil
+    assert observation["progress"]["passed_receipts"] == []
+
+    mix_calls =
+      Stream.repeatedly(fn ->
+        receive do
+          {:mix, args} -> args
+        after
+          25 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    refute Enum.any?(mix_calls, &(hd(&1) == "test"))
+  end
+
   test "tampered resumed progress fails closed before Mix and does not emit passed", %{
     tmp_dir: tmp_dir
   } do
@@ -1173,6 +1215,201 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
              )
 
     assert forged_reason in [:malformed_state, :capacity_drift, :ordinal_drift]
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "progress window resumes at the next refined leaf and never emits a child receipt", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+
+    for index <- 1..3 do
+      name = String.pad_leading(Integer.to_string(index), 2, "0")
+
+      File.write!(
+        Path.join(fixture.lease.worktree_path, "apps/alpha/test/extra_#{name}_test.exs"),
+        "defmodule Extra#{name}Test do\n  use ExUnit.Case\nend\n"
+      )
+    end
+
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+    clock = :counters.new(1, [])
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      :counters.get(clock, 1)
+    end)
+
+    on_exit(fn -> Application.delete_env(:arbor_actions, :cross_app_monotonic_ms) end)
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+
+      case args do
+        ["test", "--no-deps-check", "--" | files] ->
+          if length(files) == 1 do
+            :counters.put(clock, 1, 600_000)
+            successful_mix()
+          else
+            timeout_mix()
+          end
+
+        _other ->
+          successful_mix()
+      end
+    end)
+
+    context = window_context(fixture.context, bundle)
+    assert {:ok, first} = Validate.run(bundle.params, context)
+    assert first["disposition_type"] == "capacity_handoff"
+    assert first["progress"]["passed_receipts"] == []
+    assert is_map(first["progress"]["refinement"])
+    assert first["progress"]["refinement"]["accepted_positions"] == ["rootLL"]
+    assert first["progress"]["refinement"]["pending_positions"] == ["rootLR", "rootR"]
+
+    test_calls =
+      Stream.repeatedly(fn ->
+        receive do
+          {:mix, ["test", "--no-deps-check", "--" | files]} -> files
+          {:mix, _other} -> :skip
+        after
+          25 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+      |> Enum.reject(&(&1 == :skip))
+
+    assert length(hd(test_calls)) == 4
+    assert length(Enum.at(test_calls, 1)) == 2
+    assert length(Enum.at(test_calls, 2)) == 1
+    passed_leaf = Enum.at(test_calls, 2)
+    refute_receive {:mix, _}, 25
+
+    Application.delete_env(:arbor_actions, :cross_app_monotonic_ms)
+    :counters.put(clock, 1, 0)
+
+    next_context = Map.put(context, "cross_app_progress", first["progress"])
+    assert {:ok, _second} = Validate.run(bundle.params, next_context)
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--" | next_files]}
+    assert length(next_files) == 1
+    refute next_files == hd(test_calls)
+    refute next_files == passed_leaf
+  end
+
+  test "full-budget timeout of a multi-file argv checkpoints children not tests_timed_out", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+
+    for index <- 1..3 do
+      name = String.pad_leading(Integer.to_string(index), 2, "0")
+
+      File.write!(
+        Path.join(fixture.lease.worktree_path, "apps/alpha/test/extra_#{name}_test.exs"),
+        "defmodule Extra#{name}Test do\n  use ExUnit.Case\nend\n"
+      )
+    end
+
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+    clock = :counters.new(1, [])
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      :counters.get(clock, 1)
+    end)
+
+    on_exit(fn -> Application.delete_env(:arbor_actions, :cross_app_monotonic_ms) end)
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+
+      case args do
+        ["test", "--no-deps-check", "--" | files] ->
+          :counters.put(clock, 1, 600_000)
+          if length(files) > 1, do: timeout_mix(), else: successful_mix()
+
+        _other ->
+          successful_mix()
+      end
+    end)
+
+    context = window_context(fixture.context, bundle)
+    assert {:ok, first} = Validate.run(bundle.params, context)
+    assert first["disposition_type"] == "capacity_handoff"
+    refute first["progress"]["status"] == "failed"
+    assert is_map(first["progress"]["refinement"])
+    assert first["progress"]["refinement"]["pending_positions"] == ["rootL", "rootR"]
+    assert first["progress"]["passed_receipts"] == []
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--" | root_files]}
+    assert length(root_files) == 4
+    refute_receive {:mix, ["test" | _]}, 25
+
+    Application.delete_env(:arbor_actions, :cross_app_monotonic_ms)
+    :counters.put(clock, 1, 0)
+    next_context = Map.put(context, "cross_app_progress", first["progress"])
+    assert {:ok, _second} = Validate.run(bundle.params, next_context)
+    assert_receive {:mix, ["test", "--no-deps-check", "--" | child_files]}
+    assert length(child_files) < 4
+    assert child_files != root_files
+  end
+
+  test "tampered refinement pending positions fail closed before Mix", %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+
+    for index <- 1..3 do
+      name = String.pad_leading(Integer.to_string(index), 2, "0")
+
+      File.write!(
+        Path.join(fixture.lease.worktree_path, "apps/alpha/test/extra_#{name}_test.exs"),
+        "defmodule Extra#{name}Test do\n  use ExUnit.Case\nend\n"
+      )
+    end
+
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+    parent = self()
+    clock = :counters.new(1, [])
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      :counters.get(clock, 1)
+    end)
+
+    on_exit(fn -> Application.delete_env(:arbor_actions, :cross_app_monotonic_ms) end)
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+
+      case args do
+        ["test", "--no-deps-check", "--" | files] ->
+          :counters.put(clock, 1, 600_000)
+          if length(files) > 1, do: timeout_mix(), else: successful_mix()
+
+        _other ->
+          successful_mix()
+      end
+    end)
+
+    context = window_context(fixture.context, bundle)
+    assert {:ok, first} = Validate.run(bundle.params, context)
+
+    tampered =
+      put_in(first["progress"], ["refinement", "pending_positions"], ["rootX", "rootR"])
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    Application.delete_env(:arbor_actions, :cross_app_monotonic_ms)
+
+    assert {:error, reason} =
+             Validate.run(
+               bundle.params,
+               Map.put(context, "cross_app_progress", tampered)
+             )
+
+    assert reason in [:malformed_state, :invalid_refinement_state]
     refute_receive {:unexpected_mix, _}, 25
   end
 
@@ -2423,6 +2660,10 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
 
   defp successful_mix do
     {:ok, %{exit_code: 0, stdout: "ok", stderr: "", timed_out: false}}
+  end
+
+  defp timeout_mix do
+    {:ok, %{exit_code: nil, stdout: "killed", stderr: "", timed_out: true}}
   end
 
   defp git_output(path, args) do

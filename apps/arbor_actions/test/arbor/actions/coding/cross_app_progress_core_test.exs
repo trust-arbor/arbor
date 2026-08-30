@@ -2,6 +2,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Actions.Coding.CrossApp.ContinuationCore
+  alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -23,7 +24,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     {:ok, receipts_digest} = ContinuationCore.digest([])
     {:ok, state} = ProgressCore.new(fresh_bindings())
 
-    assert state["schema_version"] == 1
+    assert state["schema_version"] == 2
+    assert state["refinement"] == nil
     assert state["status"] == "in_progress"
     refute state["status"] == "open"
     assert state["plan_digest"] == expected_digest
@@ -155,6 +157,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     assert handed["capacity"]["completed_batch_count"] == 0
     assert handed["capacity"]["unstarted_batch_count"] == 2
     assert handed["capacity"]["interrupted_batch"] == nil
+    assert handed["refinement"] == nil
     {:ok, suffix_digest} = ValidationCapacityHandoff.ordered_plan_digest(plan)
     assert handed["capacity"]["remaining_suffix_digest"] == suffix_digest
     refute Jason.encode!(handed) =~ "unstarted_batches"
@@ -561,6 +564,207 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
     assert {:error, :malformed_state} = ProgressCore.admit(forged, fresh_bindings())
   end
 
+  test "schema-v1 snapshots without refinement upgrade; v1 with refinement and v2 gaps fail closed" do
+    {:ok, state} = ProgressCore.new(fresh_bindings())
+    v2 = ProgressCore.show(state)
+    assert v2["schema_version"] == 2
+    assert v2["refinement"] == nil
+
+    v1 =
+      v2
+      |> Map.delete("refinement")
+      |> Map.put("schema_version", 1)
+
+    assert {:ok, upgraded} = ProgressCore.admit(v1, fresh_bindings())
+    assert upgraded["schema_version"] == 2
+    assert upgraded["refinement"] == nil
+    assert {:error, :malformed_state} = ProgressCore.show(v1)
+
+    v1_with_frontier = Map.put(v1, "refinement", nil)
+    assert {:error, :malformed_state} = ProgressCore.admit(v1_with_frontier, fresh_bindings())
+
+    v2_missing = Map.delete(v2, "refinement")
+    assert {:error, :malformed_state} = ProgressCore.admit(v2_missing, fresh_bindings())
+
+    v3 = Map.put(v2, "schema_version", 3)
+    assert {:error, :malformed_state} = ProgressCore.admit(v3, fresh_bindings())
+  end
+
+  test "schema-v1 observations advance schema-v2 snapshots; observation schema 2 fails closed" do
+    {:ok, state} = ProgressCore.new(fresh_bindings())
+    assert state["schema_version"] == 2
+    [first, second] = plan()
+
+    assert {:ok, completed} =
+             ProgressCore.advance(state, fresh_bindings(), %{
+               "schema_version" => 1,
+               "new_receipts" => [passed(first), passed(second)],
+               "disposition" => %{"type" => "completed"}
+             })
+
+    assert completed["schema_version"] == 2
+    assert completed["status"] == "completed"
+
+    assert {:error, :malformed_observation} =
+             ProgressCore.advance(state, fresh_bindings(), %{
+               "schema_version" => 2,
+               "new_receipts" => [passed(first), passed(second)],
+               "disposition" => %{"type" => "completed"}
+             })
+  end
+
+  test "refinement fail-closed table rejects tamper, overlap, gaps, reorder, drift, and oversized state" do
+    {original, compact, frontier, bindings} = wide_frontier_fixture()
+    {:ok, fresh} = ProgressCore.new(bindings)
+    handoff = v3_handoff([compact], [], compact, [], "runtime")
+
+    assert {:ok, handed} =
+             ProgressCore.advance(fresh, Map.put(bindings, "per_batch_budget_ms", 1_000), %{
+               "schema_version" => 1,
+               "new_receipts" => [],
+               "disposition" => %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => handoff,
+                 "refinement" => frontier
+               }
+             })
+
+    assert handed["refinement"]["pending_positions"] == frontier["pending_positions"]
+    assert handed["passed_receipts"] == []
+    snapshot = ProgressCore.show(handed)
+
+    tampered = put_in(snapshot, ["refinement", "pending_positions"], ["rootX"])
+    assert {:error, reason} = ProgressCore.admit(tampered, bindings)
+    assert reason in [:malformed_state, :invalid_refinement_state]
+
+    overlap =
+      put_in(snapshot, ["refinement", "accepted_positions"], ["rootL"])
+      |> put_in(["refinement", "pending_positions"], ["rootLL", "rootR"])
+      |> put_in(["refinement", "accepted_file_count"], 2)
+      |> put_in(["refinement", "pending_file_count"], 3)
+
+    assert {:error, overlap_reason} = ProgressCore.admit(overlap, bindings)
+    assert overlap_reason in [:malformed_state, :invalid_refinement_state]
+
+    gap =
+      snapshot
+      |> put_in(["refinement", "accepted_positions"], [])
+      |> put_in(["refinement", "pending_positions"], ["rootR"])
+      |> put_in(["refinement", "accepted_file_count"], 0)
+      |> put_in(["refinement", "pending_file_count"], 2)
+      |> put_in(["refinement", "refined_child_count"], 2)
+
+    assert {:error, gap_reason} = ProgressCore.admit(gap, bindings)
+    assert gap_reason in [:malformed_state, :invalid_refinement_state]
+
+    reordered =
+      put_in(snapshot, ["refinement", "pending_positions"], ["rootR", "rootLR"])
+
+    assert {:error, reorder_reason} = ProgressCore.admit(reordered, bindings)
+    assert reorder_reason in [:malformed_state, :invalid_refinement_state]
+
+    drifted_index = put_in(snapshot, ["refinement", "original_index"], 9)
+    assert {:error, :plan_drift} = ProgressCore.admit(drifted_index, bindings)
+
+    drifted_inventory =
+      put_in(snapshot, ["refinement", "original_inventory_sha256"], String.duplicate("f", 64))
+
+    assert {:error, :plan_drift} = ProgressCore.admit(drifted_inventory, bindings)
+
+    drifted_ids = Map.put(identities([compact]), "task_id", "task_other")
+
+    assert {:error, :identity_drift} =
+             ProgressCore.admit(snapshot, Map.put(bindings, "identities", drifted_ids))
+
+    oversized =
+      put_in(
+        snapshot,
+        ["refinement", "pending_positions"],
+        Enum.map(1..21, fn i -> "root" <> String.duplicate("L", rem(i, 5) + 1) end)
+      )
+
+    assert {:error, oversized_reason} = ProgressCore.admit(oversized, bindings)
+    assert oversized_reason in [:malformed_state, :invalid_refinement_state, :oversized_state]
+
+    forbidden = put_in(snapshot, ["refinement", "token"], "nope")
+    assert {:error, :malformed_state} = ProgressCore.admit(forbidden, bindings)
+
+    structural = v3_handoff([compact], [], nil, [compact], "structural")
+
+    assert {:error, :malformed_state} =
+             ProgressCore.advance(fresh, Map.put(bindings, "per_batch_budget_ms", 1_000), %{
+               "schema_version" => 1,
+               "new_receipts" => [],
+               "disposition" => %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => structural,
+                 "refinement" => frontier
+               }
+             })
+
+    completed_bindings = bindings
+
+    assert {:error, :malformed_observation} =
+             ProgressCore.advance(fresh, completed_bindings, %{
+               "schema_version" => 1,
+               "new_receipts" => [passed(compact)],
+               "disposition" => %{"type" => "completed", "refinement" => frontier}
+             })
+
+    child_receipt = Map.put(compact, "label", original.label <> ":refine-rootLL-n1-dead")
+
+    assert {:error, child_reason} =
+             ProgressCore.advance(fresh, Map.put(bindings, "per_batch_budget_ms", 1_000), %{
+               "schema_version" => 1,
+               "new_receipts" => [passed(child_receipt)],
+               "disposition" => %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => handoff,
+                 "refinement" => frontier
+               }
+             })
+
+    assert child_reason in [:contradictory_receipt, :malformed_state, :reordered_receipt]
+  end
+
+  test "20-path refinement snapshot round-trips under the compact progress byte ceiling" do
+    paths =
+      for i <- 1..20 do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    {:ok, [compact]} = Core.compact_batch_plan([original])
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    max_state = progress_refine_until_last_leaf(execution, 100_000)
+    assert {:ok, frontier} = Core.compact_refinement_frontier(max_state)
+    bindings = bindings_for([compact]) |> Map.put("per_batch_budget_ms", 1_000)
+    {:ok, fresh} = ProgressCore.new(bindings)
+    handoff = v3_handoff([compact], [], compact, [], "runtime")
+
+    assert {:ok, handed} =
+             ProgressCore.advance(fresh, bindings, %{
+               "schema_version" => 1,
+               "new_receipts" => [],
+               "disposition" => %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => handoff,
+                 "refinement" => frontier
+               }
+             })
+
+    snapshot = ProgressCore.show(handed)
+    encoded = Jason.encode!(snapshot)
+    assert byte_size(encoded) <= ProgressCore.max_json_bytes()
+
+    assert byte_size(Jason.encode!(snapshot["refinement"])) <=
+             ProgressCore.limits()["max_refinement_json_bytes"]
+
+    assert {:ok, admitted} = ProgressCore.admit(Jason.decode!(encoded), bindings)
+    assert admitted["refinement"]["refined_child_count"] == 38
+    assert admitted["refinement"]["pending_file_count"] == 1
+  end
+
   test "343 and 604 compact snapshots stay at or below 163840 bytes; 604 capacity-before-final is the measured max" do
     current = current_max_batches()
     historical = historical_five_file_max_batches()
@@ -723,6 +927,96 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
       })
 
     ValidationCapacityHandoff.to_map(descriptor)
+  end
+
+  defp wide_frontier_fixture do
+    paths =
+      for i <- 1..4 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    {:ok, [original]} = Core.partition_test_batches(paths)
+    {:ok, [compact]} = Core.compact_batch_plan([original])
+    {:ok, execution} = Core.new_test_execution([original], 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, after_root} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               progress_test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(after_root, 10_000)
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               after_root,
+               left,
+               progress_test_feedback(nil, "left timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left_left, 10_000} = Core.next_test_execution_step(after_left, 10_000)
+
+    assert {:continue, after_leaf} =
+             Core.record_test_execution_attempt(
+               after_left,
+               left_left,
+               progress_test_feedback(0, "leaf pass"),
+               false,
+               10_000,
+               0
+             )
+
+    {:ok, frontier} = Core.compact_refinement_frontier(after_leaf)
+    bindings = bindings_for([compact])
+    {original, compact, frontier, bindings}
+  end
+
+  defp progress_refine_until_last_leaf(state, residual) do
+    assert {:run, attempt, 10_000} = Core.next_test_execution_step(state, residual)
+
+    {runner_timeout, exit_code, stdout} =
+      if attempt.count > 1 do
+        {true, nil, "#{attempt.position} timeout"}
+      else
+        {false, 0, "#{attempt.position} pass"}
+      end
+
+    assert {:continue, next} =
+             Core.record_test_execution_attempt(
+               state,
+               attempt,
+               progress_test_feedback(exit_code, stdout),
+               runner_timeout,
+               10_000,
+               residual - 1
+             )
+
+    if length(next.accepted_paths) == 19 and length(next.work_queue) == 1 do
+      next
+    else
+      progress_refine_until_last_leaf(next, residual - 1)
+    end
+  end
+
+  defp progress_test_feedback(exit_code, stdout) do
+    %{
+      "exit_code" => exit_code,
+      "passed" => exit_code == 0,
+      "stdout_excerpt" => stdout,
+      "stderr_excerpt" => "",
+      "stdout_truncated" => false,
+      "stderr_truncated" => false,
+      "stdout_sha256" => :crypto.hash(:sha256, stdout) |> Base.encode16(case: :lower),
+      "stderr_sha256" => :crypto.hash(:sha256, "") |> Base.encode16(case: :lower)
+    }
   end
 
   defp current_max_batches do

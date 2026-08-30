@@ -1009,7 +1009,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                0
              )
 
-    assert {:capacity, [], ^original, [^suffix]} =
+    assert {:continue, after_left_capacity} =
              Core.record_test_execution_attempt(
                refined,
                left,
@@ -1018,6 +1018,9 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                10_000,
                0
              )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.next_test_execution_step(after_left_capacity, 0)
 
     assert {:continue, after_left} =
              Core.record_test_execution_attempt(
@@ -1043,6 +1046,366 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:capacity, [^original], nil, [^suffix]} =
              Core.next_test_execution_step(resolved_original, 0)
+  end
+
+  test "window 1 checkpoints a 20-then-10-then-5 cut and window 2 resumes at the next leaf" do
+    paths =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original, suffix] = batches} = Core.partition_test_batches(paths)
+    assert original.count == 20
+    assert {:ok, execution} = Core.new_test_execution(batches, 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, after_root} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(after_root, 10_000)
+    assert left.position == "rootL"
+    assert left.count == 10
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               after_root,
+               left,
+               test_feedback(nil, "left timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left_left, 10_000} = Core.next_test_execution_step(after_left, 10_000)
+    assert left_left.position == "rootLL"
+    assert left_left.count == 5
+
+    assert {:continue, after_leaf} =
+             Core.record_test_execution_attempt(
+               after_left,
+               left_left,
+               test_feedback(0, "left-left pass"),
+               false,
+               10_000,
+               0
+             )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.next_test_execution_step(after_leaf, 0)
+
+    assert {:error, :invalid_test_batch} =
+             Core.passed_batch_receipt(%{
+               label: left_left.label,
+               paths: left_left.paths,
+               index: original.index,
+               total: original.total,
+               count: left_left.count,
+               inventory_sha256: left_left.inventory_sha256
+             })
+
+    assert {:ok, original_receipt} = Core.passed_batch_receipt(original)
+    assert original_receipt["index"] == original.index
+
+    assert {:ok, frontier} = Core.compact_refinement_frontier(after_leaf)
+    assert frontier["accepted_positions"] == ["rootLL"]
+    assert frontier["pending_positions"] == ["rootLR", "rootR"]
+    assert frontier["accepted_file_count"] == 5
+    assert frontier["pending_file_count"] == 15
+    assert frontier["refined_child_count"] == 4
+    refute Map.has_key?(frontier, "paths")
+    refute Jason.encode!(frontier) =~ "stdout"
+
+    assert {:ok, window2} = Core.new_test_execution(batches, 10_000)
+    assert {:ok, resumed} = Core.resume_test_execution(window2, frontier)
+    assert resumed.attempt_records == []
+    assert is_map(resumed.prior_frontier)
+    assert {:run, next_leaf, 10_000} = Core.next_test_execution_step(resumed, 10_000)
+    assert next_leaf.position == "rootLR"
+    assert next_leaf.count == 5
+    refute next_leaf.position == "root"
+    refute next_leaf.position == "rootLL"
+
+    assert {:continue, after_right_left} =
+             Core.record_test_execution_attempt(
+               resumed,
+               next_leaf,
+               test_feedback(0, "window2 left-right pass"),
+               false,
+               10_000,
+               9_000
+             )
+
+    assert {:run, right, 9_000} = Core.next_test_execution_step(after_right_left, 9_000)
+    assert right.position == "rootR"
+
+    assert {:continue, complete} =
+             Core.record_test_execution_attempt(
+               after_right_left,
+               right,
+               test_feedback(0, "window2 right pass"),
+               false,
+               9_000,
+               8_000
+             )
+
+    assert complete.completed_originals == [original]
+    [result] = complete.original_results
+    assert result.refinement.resumed == true
+    assert result.refinement.attempt_count == 2
+    assert result.refinement.prior["accepted_positions"] == ["rootLL"]
+    refute String.contains?(result.stdout_excerpt, "root timeout")
+    refute String.contains?(result.stdout_excerpt, "left timeout")
+    assert String.contains?(result.stdout_excerpt, "resumed=1")
+
+    assert {:ok, receipt} = Core.passed_batch_receipt(original)
+    assert receipt["outcome"] == "passed"
+    assert receipt["count"] == 20
+    refute receipt["label"] =~ "refine-"
+  end
+
+  test "compact preserves exact sibling leaves instead of collapsing accepted paths" do
+    paths =
+      for i <- 1..20 do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, after_root} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(after_root, 10_000)
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               after_root,
+               left,
+               test_feedback(nil, "left timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left_left, 10_000} = Core.next_test_execution_step(after_left, 10_000)
+
+    assert {:continue, after_ll} =
+             Core.record_test_execution_attempt(
+               after_left,
+               left_left,
+               test_feedback(0, "left-left pass"),
+               false,
+               10_000,
+               9_000
+             )
+
+    assert {:run, left_right, 9_000} = Core.next_test_execution_step(after_ll, 9_000)
+
+    assert {:continue, after_lr} =
+             Core.record_test_execution_attempt(
+               after_ll,
+               left_right,
+               test_feedback(0, "left-right pass"),
+               false,
+               9_000,
+               0
+             )
+
+    assert after_lr.accepted_paths == Enum.take(original.paths, 10)
+    assert after_lr.accepted_positions == ["rootLL", "rootLR"]
+    assert Enum.map(after_lr.work_queue, & &1.position) == ["rootR"]
+    assert after_lr.refined_child_count == 4
+    assert {:capacity, [], ^original, []} = Core.next_test_execution_step(after_lr, 0)
+
+    assert {:ok, frontier} = Core.compact_refinement_frontier(after_lr)
+    assert frontier["accepted_positions"] == ["rootLL", "rootLR"]
+    refute frontier["accepted_positions"] == ["rootL"]
+    assert frontier["pending_positions"] == ["rootR"]
+    assert frontier["accepted_file_count"] == 10
+    assert frontier["pending_file_count"] == 10
+    assert frontier["refined_child_count"] == 4
+
+    assert {:ok, window2} = Core.new_test_execution([original], 10_000)
+    assert {:ok, resumed} = Core.resume_test_execution(window2, frontier)
+    assert resumed.accepted_positions == ["rootLL", "rootLR"]
+    assert {:run, right, 10_000} = Core.next_test_execution_step(resumed, 10_000)
+    assert right.position == "rootR"
+    assert right.count == 10
+  end
+
+  test "resumed sibling pass keeps exact accepted positions on the next capacity" do
+    paths =
+      for i <- 1..20 do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 20_000)
+
+    assert {:continue, after_root} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(after_root, 10_000)
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               after_root,
+               left,
+               test_feedback(nil, "left timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left_left, 10_000} = Core.next_test_execution_step(after_left, 10_000)
+
+    assert {:continue, after_ll} =
+             Core.record_test_execution_attempt(
+               after_left,
+               left_left,
+               test_feedback(0, "left-left pass"),
+               false,
+               10_000,
+               0
+             )
+
+    assert {:ok, first_cut} = Core.compact_refinement_frontier(after_ll)
+    assert first_cut["accepted_positions"] == ["rootLL"]
+    assert first_cut["pending_positions"] == ["rootLR", "rootR"]
+
+    assert {:ok, window2} = Core.new_test_execution([original], 10_000)
+    assert {:ok, resumed} = Core.resume_test_execution(window2, first_cut)
+    assert {:run, left_right, 10_000} = Core.next_test_execution_step(resumed, 10_000)
+
+    assert {:continue, after_lr} =
+             Core.record_test_execution_attempt(
+               resumed,
+               left_right,
+               test_feedback(0, "window2 left-right pass"),
+               false,
+               10_000,
+               0
+             )
+
+    assert after_lr.accepted_paths == Enum.take(original.paths, 10)
+    assert after_lr.accepted_positions == ["rootLL", "rootLR"]
+    assert {:ok, second_cut} = Core.compact_refinement_frontier(after_lr)
+    assert second_cut["accepted_positions"] == ["rootLL", "rootLR"]
+    refute second_cut["accepted_positions"] == ["rootL"]
+    assert second_cut["pending_positions"] == ["rootR"]
+    assert second_cut["refined_child_count"] == 4
+    assert {:run, right, _} = Core.next_test_execution_step(after_lr, 10_000)
+    assert right.position == "rootR"
+  end
+
+  test "full-budget multi-file timeout with exhausted residual splits then capacities" do
+    paths =
+      for i <- 1..4 do
+        "apps/alpha/test/f#{i}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    assert {:run, root, 10_000} = Core.next_test_execution_step(execution, 10_000)
+
+    assert {:continue, split} =
+             Core.record_test_execution_attempt(
+               execution,
+               root,
+               test_feedback(nil, "full-budget timeout"),
+               true,
+               10_000,
+               0
+             )
+
+    assert hd(split.work_queue).position == "rootL"
+    assert {:capacity, [], ^original, []} = Core.next_test_execution_step(split, 0)
+    assert {:ok, frontier} = Core.compact_refinement_frontier(split)
+    assert frontier["pending_positions"] == ["rootL", "rootR"]
+    assert frontier["accepted_positions"] == []
+  end
+
+  test "largest 20-path refinement frontier round-trips under the JSON bound" do
+    paths =
+      for i <- 1..20 do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([original], 10_000)
+    max_state = refine_until_last_leaf(execution, 100_000)
+    assert length(max_state.accepted_paths) == 19
+    assert length(max_state.work_queue) == 1
+    assert hd(max_state.work_queue).count == 1
+    assert max_state.refined_child_count == 38
+
+    assert {:ok, frontier} = Core.compact_refinement_frontier(max_state)
+    assert length(frontier["accepted_positions"]) == 19
+    assert frontier["pending_positions"] |> length() == 1
+    assert frontier["refined_child_count"] == 38
+    encoded = Jason.encode!(frontier)
+    assert byte_size(encoded) <= Core.max_refinement_json_bytes()
+    assert {:ok, decoded} = Jason.decode(encoded)
+    assert {:ok, admitted} = Core.admit_refinement_frontier(decoded, original)
+    assert admitted["pending_positions"] == frontier["pending_positions"]
+
+    assert {:ok, fresh} = Core.new_test_execution([original], 10_000)
+    assert {:ok, resumed} = Core.resume_test_execution(fresh, admitted)
+    assert resumed.attempt_records == []
+    assert {:run, last, _} = Core.next_test_execution_step(resumed, 10_000)
+    assert last.count == 1
+    assert last.paths == [List.last(original.paths)]
+    refute last.position == "root"
+  end
+
+  defp refine_until_last_leaf(state, residual) do
+    assert {:run, attempt, 10_000} = Core.next_test_execution_step(state, residual)
+
+    {runner_timeout, exit_code, stdout} =
+      if attempt.count > 1 do
+        {true, nil, "#{attempt.position} timeout"}
+      else
+        {false, 0, "#{attempt.position} pass"}
+      end
+
+    assert {:continue, next} =
+             Core.record_test_execution_attempt(
+               state,
+               attempt,
+               test_feedback(exit_code, stdout),
+               runner_timeout,
+               10_000,
+               residual - 1
+             )
+
+    if length(next.accepted_paths) == 19 and length(next.work_queue) == 1 do
+      next
+    else
+      refine_until_last_leaf(next, residual - 1)
+    end
   end
 
   test "maximum current per-app-root plan is representable by the handoff contract" do
@@ -2612,7 +2975,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert {:run, equal_root, ^reduced} =
              Core.next_test_execution_step(equal_execution, reduced)
 
-    assert {:terminal, equal_timeout} =
+    assert {:continue, equal_split} =
              Core.record_test_execution_attempt(
                equal_execution,
                equal_root,
@@ -2622,8 +2985,12 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                reserve
              )
 
-    assert equal_timeout["reason"] == "tests_timed_out"
-    refute Map.has_key?(equal_timeout, "capacity_handoff")
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.next_test_execution_step(equal_split, reserve)
+
+    {:ok, equal_frontier} = Core.compact_refinement_frontier(equal_split)
+    assert equal_frontier["pending_positions"] == ["rootL", "rootR"]
+    refute hd(equal_split.work_queue).position == "root"
 
     assert {:continue, _equal_refined} =
              Core.record_test_execution_attempt(
@@ -2748,7 +3115,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:run, left, _} = Core.next_test_execution_step(split_state, reserve + 1)
 
-    assert {:capacity, [], ^original, [^suffix]} =
+    assert {:continue, after_left_leftover} =
              Core.record_test_execution_attempt(
                split_state,
                left,
@@ -2757,6 +3124,9 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
                reduced,
                reserve
              )
+
+    assert {:capacity, [], ^original, [^suffix]} =
+             Core.next_test_execution_step(after_left_leftover, reserve)
   end
 
   defp test_feedback(exit_code, stdout) do

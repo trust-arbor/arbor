@@ -5,10 +5,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   Closed snapshot keys: schema_version, status, identities, identities_digest,
   plan_digest, total_batch_count, total_file_count, passed_receipts,
   passed_receipts_digest, completed_batch_count, completed_file_count,
-  next_batch_index, window_ordinal, static_stage_receipt_digest, capacity.
+  next_batch_index, window_ordinal, static_stage_receipt_digest, capacity,
+  refinement.
 
-  Statuses: in_progress | completed. The immutable full plan is an injected
-  binding, never retained. Capacity is a compact summary (no remaining suffix).
+  Statuses: in_progress | completed. Schema v2 always includes refinement
+  (nil or a bounded ordered_binary_split_v1 cut). Exact schema-v1 snapshots
+  without a refinement key upgrade to refinement=nil. The immutable full plan
+  is an injected binding, never retained. Capacity is a compact summary (no
+  remaining suffix).
 
   CRC: no filesystem, process, clock, randomness, Application env, Registry,
   GenServer, or device IO. Identities, plan, static digest, and per-batch
@@ -16,18 +20,21 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   """
 
   alias Arbor.Actions.Coding.CrossApp.ContinuationCore
+  alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
-  @schema_version 1
+  @schema_version 2
+  @v1_schema_version 1
   @max_state_json_bytes 163_840
   @max_identities_json_bytes 4_096
   @max_observation_json_bytes 163_840
+  @max_refinement_json_bytes 4_096
   @digest_regex ~r/\A[0-9a-f]{64}\z/
   @forbidden_keys MapSet.new(
                     ~w(authority authorization capability credential fence_token secret token)
                   )
 
-  @state_keys Enum.sort(~w(
+  @v1_state_keys Enum.sort(~w(
     capacity
     completed_batch_count
     completed_file_count
@@ -44,6 +51,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     total_file_count
     window_ordinal
   ))
+  @state_keys Enum.sort(@v1_state_keys ++ ["refinement"])
 
   @binding_keys MapSet.new(
                   ~w(identities per_batch_budget_ms planned_batches static_stage_receipt_digest window_ordinal)
@@ -51,6 +59,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   @required_binding_keys ~w(identities planned_batches static_stage_receipt_digest)
   @batch_keys Enum.sort(~w(count index inventory_sha256 label total))
   @receipt_keys Enum.sort(~w(count index inventory_sha256 label outcome total))
+  @observation_schema_version 1
   @observation_keys Enum.sort(~w(disposition new_receipts schema_version))
   @capacity_keys Enum.sort(~w(
     available_budget_ms
@@ -71,7 +80,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   @type state :: %{required(String.t()) => term()}
 
   @doc "Progress schema version."
-  @spec schema_version() :: 1
+  @spec schema_version() :: 2
   def schema_version, do: @schema_version
 
   @doc "Maximum encoded compact-progress JSON bytes."
@@ -84,6 +93,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     %{
       "max_identities_json_bytes" => @max_identities_json_bytes,
       "max_observation_json_bytes" => @max_observation_json_bytes,
+      "max_refinement_json_bytes" => @max_refinement_json_bytes,
       "max_state_json_bytes" => @max_state_json_bytes
     }
   end
@@ -264,13 +274,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          next_batch_index: 1,
          window_ordinal: 0,
          static_digest: parsed.static_digest,
-         capacity: nil
+         capacity: nil,
+         refinement: nil
        })}
     end
   end
 
   defp rehydrate(snapshot, parsed) do
-    with :ok <- require_json_object(snapshot),
+    with {:ok, snapshot} <- upgrade_snapshot(snapshot),
          :ok <- reject_forbidden_keys(snapshot),
          :ok <- require_exact_keys(snapshot, @state_keys),
          :ok <- require_schema(snapshot["schema_version"]),
@@ -304,7 +315,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          :ok <- match_next_index(snapshot["next_batch_index"], expected_next, status, parsed),
          {:ok, ordinal} <- parse_stored_ordinal(snapshot["window_ordinal"]),
          :ok <- match_binding_ordinal(parsed.window_ordinal, ordinal),
-         :ok <- check_ordinal_shape(ordinal, receipts, capacity, status) do
+         :ok <- check_ordinal_shape(ordinal, receipts, capacity, status),
+         {:ok, refinement} <-
+           parse_refinement(
+             snapshot["refinement"],
+             capacity,
+             status,
+             snapshot["next_batch_index"]
+           ) do
       {:ok,
        build_state(%{
          status: status,
@@ -320,8 +338,31 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          next_batch_index: snapshot["next_batch_index"],
          window_ordinal: ordinal,
          static_digest: parsed.static_digest,
-         capacity: capacity
+         capacity: capacity,
+         refinement: refinement
        })}
+    end
+  end
+
+  defp upgrade_snapshot(snapshot) do
+    with :ok <- require_json_object(snapshot),
+         :ok <- reject_forbidden_keys(snapshot) do
+      case snapshot["schema_version"] do
+        @v1_schema_version ->
+          with :ok <- require_exact_keys(snapshot, @v1_state_keys),
+               :ok <- reject_key(snapshot, "refinement") do
+            {:ok,
+             snapshot
+             |> Map.put("schema_version", @schema_version)
+             |> Map.put("refinement", nil)}
+          end
+
+        @schema_version ->
+          {:ok, snapshot}
+
+        _other ->
+          {:error, :malformed_state}
+      end
     end
   end
 
@@ -369,6 +410,13 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
            ),
          {:ok, ordinal} <- parse_stored_ordinal(state["window_ordinal"]),
          :ok <- check_ordinal_shape(ordinal, receipts, capacity, status),
+         {:ok, refinement} <-
+           parse_refinement(
+             state["refinement"],
+             capacity,
+             status,
+             completed_batches + 1
+           ),
          rebuilt <-
            build_state(%{
              status: status,
@@ -384,7 +432,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
              next_batch_index: completed_batches + 1,
              window_ordinal: ordinal,
              static_digest: static_digest,
-             capacity: capacity
+             capacity: capacity,
+             refinement: refinement
            }),
          :ok <- bound_state(rebuilt) do
       {:ok, rebuilt}
@@ -570,7 +619,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
     with :ok <- require_json_object(observation),
          :ok <- reject_forbidden_keys(observation),
          :ok <- require_exact_keys(observation, @observation_keys),
-         :ok <- require_schema(observation["schema_version"]),
+         :ok <- require_observation_schema(observation["schema_version"]),
          :ok <- require_json_clean_list(observation["new_receipts"]),
          :ok <- require_json_object(observation["disposition"]),
          :ok <-
@@ -601,7 +650,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   defp apply_disposition(state, parsed, receipts, %{"type" => "completed"} = disposition) do
     with :ok <- require_exact_keys(disposition, ~w(type)),
          :ok <- require_complete_prefix(receipts, parsed.planned) do
-      finalize(state, parsed, receipts, "completed", nil, state["window_ordinal"] + 1)
+      finalize(state, parsed, receipts, "completed", nil, nil, state["window_ordinal"] + 1)
+    else
+      {:error, :malformed_state} -> {:error, :malformed_observation}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -611,23 +663,47 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          receipts,
          %{"type" => "capacity_handoff"} = disposition
        ) do
-    with :ok <-
-           require_exact_keys(disposition, Enum.sort(~w(capacity_handoff type))),
+    with {:ok, frontier} <- capacity_disposition_frontier(disposition),
          {:ok, compact} <-
            reduce_capacity_handoff(
              disposition["capacity_handoff"],
              parsed.planned,
              receipts,
              parsed.per_batch
-           ) do
-      finalize(state, parsed, receipts, "in_progress", compact, state["window_ordinal"] + 1)
+           ),
+         {:ok, refinement} <-
+           parse_refinement(frontier, compact, "in_progress", length(receipts) + 1) do
+      finalize(
+        state,
+        parsed,
+        receipts,
+        "in_progress",
+        compact,
+        refinement,
+        state["window_ordinal"] + 1
+      )
     end
   end
 
   defp apply_disposition(_state, _parsed, _receipts, _disposition),
     do: {:error, :malformed_observation}
 
-  defp finalize(state, parsed, receipts, status, capacity, ordinal) do
+  defp capacity_disposition_frontier(disposition) do
+    keys = Enum.sort(Map.keys(disposition))
+
+    cond do
+      keys == Enum.sort(~w(capacity_handoff type)) ->
+        {:ok, nil}
+
+      keys == Enum.sort(~w(capacity_handoff refinement type)) ->
+        {:ok, disposition["refinement"]}
+
+      true ->
+        {:error, :malformed_observation}
+    end
+  end
+
+  defp finalize(state, parsed, receipts, status, capacity, refinement, ordinal) do
     completed_batches = length(receipts)
     completed_files = file_count(receipts)
     next_index = completed_batches + 1
@@ -650,7 +726,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
          next_batch_index: next_index,
          window_ordinal: ordinal,
          static_digest: parsed.static_digest,
-         capacity: capacity
+         capacity: capacity,
+         refinement: refinement
        })}
     end
   end
@@ -1155,6 +1232,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
   defp require_schema(@schema_version), do: :ok
   defp require_schema(_version), do: {:error, :malformed_state}
 
+  defp require_observation_schema(@observation_schema_version), do: :ok
+  defp require_observation_schema(_version), do: {:error, :malformed_observation}
+
   defp parse_hex(value) when is_binary(value) do
     if Regex.match?(@digest_regex, value), do: {:ok, value}, else: {:error, :malformed_state}
   end
@@ -1177,9 +1257,36 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
       "next_batch_index" => attrs.next_batch_index,
       "window_ordinal" => attrs.window_ordinal,
       "static_stage_receipt_digest" => attrs.static_digest,
-      "capacity" => attrs.capacity
+      "capacity" => attrs.capacity,
+      "refinement" => attrs.refinement
     }
   end
+
+  defp parse_refinement(nil, _capacity, "completed", _next_index), do: {:ok, nil}
+
+  defp parse_refinement(nil, _capacity, "in_progress", _next_index), do: {:ok, nil}
+
+  defp parse_refinement(frontier, %{"phase" => "runtime"} = capacity, "in_progress", next_index)
+       when is_map(frontier) do
+    interrupted = capacity["interrupted_batch"]
+
+    with true <- is_map(interrupted),
+         :ok <- match(next_index, interrupted["index"], :plan_drift),
+         {:ok, admitted} <- Core.admit_refinement_frontier(frontier, interrupted),
+         :ok <- match(admitted["original_index"], interrupted["index"], :plan_drift),
+         :ok <- match(admitted["original_index"], next_index, :plan_drift) do
+      {:ok, admitted}
+    else
+      {:error, :plan_drift} = error -> error
+      {:error, :oversized_state} = error -> error
+      {:error, :malformed_state} = error -> error
+      {:error, :invalid_refinement_state} = error -> error
+      _ -> {:error, :malformed_state}
+    end
+  end
+
+  defp parse_refinement(_frontier, _capacity, _status, _next_index),
+    do: {:error, :malformed_state}
 
   defp build_capacity(attrs) do
     %{

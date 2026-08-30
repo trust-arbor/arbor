@@ -922,6 +922,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
        ) do
     accepted_count = progress["completed_batch_count"]
     suffix = Enum.drop(full_batches, accepted_count)
+    frontier = Map.get(progress, "refinement")
 
     result =
       MixAction.with_validation_resource(
@@ -951,6 +952,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                        full_batches,
                        suffix,
                        accepted_count,
+                       frontier,
                        validation_deadline,
                        resource
                      ) do
@@ -998,6 +1000,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
        when is_map(resource) do
     accepted_count = progress["completed_batch_count"]
     suffix = Enum.drop(full_batches, accepted_count)
+    frontier = Map.get(progress, "refinement")
 
     with {:ok, observation} <-
            execute_progress_tests(
@@ -1007,6 +1010,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              full_batches,
              suffix,
              accepted_count,
+             frontier,
              validation_deadline,
              resource
            ) do
@@ -1031,6 +1035,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          _full_batches,
          [],
          _accepted_count,
+         _frontier,
          _validation_deadline,
          _resource
        ) do
@@ -1044,6 +1049,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          full_batches,
          suffix,
          accepted_count,
+         frontier,
          validation_deadline,
          resource
        ) do
@@ -1052,33 +1058,90 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
     reserve_ms = MixAction.postflight_tree_binding_reserve_ms()
 
-    case Core.admit_test_batches(suffix, available_ms, operation_timeout, reserve_ms) do
-      :ok ->
-        deadline = test_deadline || monotonic_ms() + test_stage_timeout
+    cond do
+      is_nil(frontier) ->
+        case Core.admit_test_batches(suffix, available_ms, operation_timeout, reserve_ms) do
+          :ok ->
+            start_progress_tests(
+              test_stage_timeout,
+              operation_timeout,
+              worktree_path,
+              full_batches,
+              suffix,
+              accepted_count,
+              nil,
+              test_deadline,
+              resource,
+              reserve_ms
+            )
 
-        with {:ok, execution} <- Core.new_test_execution(suffix, operation_timeout, reserve_ms) do
-          continue_progress_tests(
-            worktree_path,
-            execution,
-            deadline,
-            resource,
-            full_batches,
-            accepted_count,
-            []
-          )
+          {:capacity_exceeded, check} ->
+            {:ok,
+             %{
+               new_receipts: [],
+               disposition: %{
+                 "type" => "capacity_handoff",
+                 "capacity_handoff" => check["capacity_handoff"]
+               }
+             }}
+
+          {:error, reason} ->
+            {:ok,
+             %{
+               new_receipts: [],
+               disposition: %{"type" => "failed", "reason" => failure_reason(reason)}
+             }}
         end
 
-      {:capacity_exceeded, _check} ->
-        progress_capacity_observation(
-          full_batches,
-          accepted_count,
-          [],
-          nil,
-          suffix,
+      is_map(frontier) ->
+        start_progress_tests(
+          test_stage_timeout,
           operation_timeout,
-          []
+          worktree_path,
+          full_batches,
+          suffix,
+          accepted_count,
+          frontier,
+          test_deadline,
+          resource,
+          reserve_ms
         )
 
+      true ->
+        {:ok,
+         %{
+           new_receipts: [],
+           disposition: %{"type" => "failed", "reason" => "invalid_refinement_state"}
+         }}
+    end
+  end
+
+  defp start_progress_tests(
+         test_stage_timeout,
+         operation_timeout,
+         worktree_path,
+         full_batches,
+         suffix,
+         accepted_count,
+         frontier,
+         test_deadline,
+         resource,
+         reserve_ms
+       ) do
+    deadline = test_deadline || monotonic_ms() + test_stage_timeout
+
+    with {:ok, execution} <- Core.new_test_execution(suffix, operation_timeout, reserve_ms),
+         {:ok, execution} <- Core.resume_test_execution(execution, frontier) do
+      continue_progress_tests(
+        worktree_path,
+        execution,
+        deadline,
+        resource,
+        full_batches,
+        accepted_count,
+        []
+      )
+    else
       {:error, reason} ->
         {:ok,
          %{
@@ -1114,13 +1177,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         end
 
       {:capacity, completed, interrupted, unstarted} ->
-        progress_capacity_observation(
+        progress_capacity_from_execution(
+          execution,
           full_batches,
           accepted_count,
           completed,
           interrupted,
           unstarted,
-          execution.operation_timeout,
           receipts
         )
 
@@ -1170,13 +1233,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                   {:capacity, completed, interrupted, unstarted} ->
                     with {:ok, completed_receipts} <-
                            collect_receipts_from_completed(completed, receipts) do
-                      progress_capacity_observation(
+                      progress_capacity_from_execution(
+                        execution,
                         full_batches,
                         accepted_count,
                         completed,
                         interrupted,
                         unstarted,
-                        execution.operation_timeout,
                         completed_receipts
                       )
                     end
@@ -1219,13 +1282,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                        deadline - monotonic_ms()
                      ) do
                   {:capacity, completed, interrupted, unstarted} ->
-                    progress_capacity_observation(
+                    progress_capacity_from_execution(
+                      execution,
                       full_batches,
                       accepted_count,
                       completed,
                       interrupted,
                       unstarted,
-                      execution.operation_timeout,
                       receipts
                     )
 
@@ -1265,6 +1328,33 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     MixAction.recapture_committable_snapshot(resource)
   end
 
+  defp progress_capacity_from_execution(
+         execution,
+         full_batches,
+         accepted_count,
+         completed,
+         interrupted,
+         unstarted,
+         receipts
+       ) do
+    case Core.compact_refinement_frontier(execution) do
+      {:ok, frontier} ->
+        progress_capacity_observation(
+          full_batches,
+          accepted_count,
+          completed,
+          interrupted,
+          unstarted,
+          execution.operation_timeout,
+          receipts,
+          frontier
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp progress_capacity_observation(
          full_batches,
          accepted_count,
@@ -1272,7 +1362,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          interrupted,
          unstarted,
          operation_timeout,
-         receipts
+         receipts,
+         frontier
        ) do
     prior = Enum.take(full_batches, accepted_count)
 
@@ -1285,14 +1376,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
            unstarted
          ) do
       {:ok, check} ->
-        {:ok,
-         %{
-           new_receipts: receipts,
-           disposition: %{
-             "type" => "capacity_handoff",
-             "capacity_handoff" => check["capacity_handoff"]
-           }
-         }}
+        disposition = %{
+          "type" => "capacity_handoff",
+          "capacity_handoff" => check["capacity_handoff"]
+        }
+
+        disposition =
+          if is_map(frontier),
+            do: Map.put(disposition, "refinement", frontier),
+            else: disposition
+
+        {:ok, %{new_receipts: receipts, disposition: disposition}}
 
       {:error, reason} ->
         {:error, reason}
@@ -1366,10 +1460,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         case ProgressCore.advance(progress, bindings, %{
                "schema_version" => 1,
                "new_receipts" => new_receipts,
-               "disposition" => %{
-                 "type" => "capacity_handoff",
-                 "capacity_handoff" => disposition["capacity_handoff"]
-               }
+               "disposition" => disposition
              }) do
           {:ok, advanced} ->
             emit_progress_envelope(advanced, "capacity_handoff", binding)

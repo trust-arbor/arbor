@@ -1485,7 +1485,7 @@ defmodule Arbor.Actions do
   end
 
   @doc "Compact CrossApp progress schema version owned by ProgressCore."
-  @spec coding_cross_app_progress_schema_version() :: 1
+  @spec coding_cross_app_progress_schema_version() :: 2
   def coding_cross_app_progress_schema_version do
     wrap_cross_app_continuation(fn ->
       Arbor.Actions.Coding.CrossApp.ProgressCore.schema_version()

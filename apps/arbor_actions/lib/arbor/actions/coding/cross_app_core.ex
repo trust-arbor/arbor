@@ -7,8 +7,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   without filesystem, process, clock, or registry operations.
 
   Multi-path test batches use deterministic timeout refinement. This module owns
-  the pure `test_execution` state and every refinement decision; the shell only
-  interprets the resulting effects.
+  the pure `test_execution` state, every refinement decision, and the bounded
+  JSON-clean frontier that ProgressCore may persist across graph windows. The
+  shell only interprets the resulting effects. Full-budget multi-file timeouts
+  always split; residual only decides whether the next step runs or capacities.
 
   Test-stage admission is residual-budget based: a Mix-launchable child timeout
   `min(operation_timeout, remaining)` strictly above the injected Mix postflight
@@ -87,6 +89,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   # "root" plus bit_length(max_files - 1): the split tree's worst-case depth.
   @max_refinement_position_bytes byte_size("root") +
                                    length(Integer.digits(@max_test_batch_files - 1, 2))
+  @refinement_position_regex ~r/\Aroot([LR])*\z/
+  @refinement_frontier_schema_version 1
+  @max_refinement_json_bytes 4_096
+  @refinement_frontier_keys Enum.sort(~w(
+    accepted_file_count
+    accepted_positions
+    original_count
+    original_index
+    original_inventory_sha256
+    pending_file_count
+    pending_positions
+    refined_child_count
+    schema_version
+    strategy
+  ))
+  @refinement_forbidden_keys MapSet.new(
+                               ~w(authority authorization capability credential fence_token secret token)
+                             )
   @max_test_batch_arg_bytes 65_536
   @max_output_list 2_000
   # Process/stream excerpts and aggregate evidence are fixed-size by *bytes*.
@@ -248,6 +268,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   and `original_suffix` are its exact ordered partition. `work_queue` contains
   only runtime attempt descriptors for the current original; Shell may read
   `operation_timeout` but all state transitions and validation stay in Core.
+  `accepted_positions` is the exact ordered cut of accepted nodes. `prior_frontier`
+  is the admitted compact cut rehydrated in this process, or nil.
+  `attempt_records` are Mix observations from this process only.
   """
   @type test_execution :: %{
           original_batches: [test_batch()],
@@ -256,6 +279,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           original_suffix: [test_batch()],
           work_queue: [test_attempt()],
           accepted_paths: [String.t()],
+          accepted_positions: [String.t()],
           original_results: [app_test_result()],
           attempt_records: [test_attempt_record()],
           current_started: boolean(),
@@ -263,7 +287,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           refined_child_count: non_neg_integer(),
           total_attempt_count: non_neg_integer(),
           operation_timeout: pos_integer(),
-          postflight_reserve_ms: non_neg_integer()
+          postflight_reserve_ms: non_neg_integer(),
+          prior_frontier: map() | nil
         }
 
   @typedoc "Bounded evidence for a validation capacity handoff."
@@ -703,6 +728,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def max_test_batch_arg_bytes, do: @max_test_batch_arg_bytes
 
   @doc false
+  def max_refinement_json_bytes, do: @max_refinement_json_bytes
+
+  @doc false
+  def refinement_frontier_schema_version, do: @refinement_frontier_schema_version
+
+  @doc false
   def root_wide_path?(path) when is_binary(path) do
     cond do
       MapSet.member?(@root_wide_exact, path) -> true
@@ -1019,6 +1050,108 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     do: {:error, :invalid_test_batch_plan}
 
   @doc """
+  Project a bounded, non-accepting ordered_binary_split_v1 cut from live state.
+
+  Returns nil when there is no current original, the current original is
+  unrefined, or the work queue is still the unsplit root. Never includes Mix
+  observations.
+  """
+  @spec compact_refinement_frontier(term()) :: {:ok, map() | nil} | {:error, term()}
+  def compact_refinement_frontier(state) when is_map(state) do
+    with :ok <- validate_test_execution(state) do
+      cond do
+        is_nil(state.current_original) ->
+          {:ok, nil}
+
+        not state.refined? ->
+          {:ok, nil}
+
+        state.work_queue == [root_attempt(state.current_original)] and
+            state.accepted_paths == [] ->
+          {:ok, nil}
+
+        true ->
+          encode_live_frontier(state)
+      end
+    end
+  end
+
+  def compact_refinement_frontier(_state), do: {:error, :invalid_refinement_state}
+
+  @doc """
+  Admit a compact refinement frontier against a path-free original batch.
+
+  Count-only left-first simulation enforces no overlap, no gaps, and a
+  reachable cut of the unique split tree. Mix observations are forbidden.
+  """
+  @spec admit_refinement_frontier(term(), term()) :: {:ok, map()} | {:error, atom()}
+  def admit_refinement_frontier(frontier, compact_original) do
+    with {:ok, compact} <- normalize_compact_original(compact_original),
+         {:ok, parsed} <- parse_frontier_shape(frontier),
+         :ok <- match_frontier_original(parsed, compact),
+         {:ok, splits} <-
+           simulate_frontier_cut(
+             parsed["original_count"],
+             parsed["accepted_positions"],
+             parsed["pending_positions"]
+           ),
+         :ok <- match_frontier_geometry(parsed, splits) do
+      {:ok, build_frontier(parsed)}
+    end
+  rescue
+    _ -> {:error, :malformed_state}
+  catch
+    _, _ -> {:error, :malformed_state}
+  end
+
+  @doc """
+  Rehydrate live execution to an admitted compact frontier.
+
+  `nil` is identity only for an unrefined execution. A map reconstructs
+  accepted paths and the pending work queue from the original path list and
+  sets `prior_frontier`. Does not invent Mix attempt records.
+  """
+  @spec resume_test_execution(term(), term()) :: {:ok, test_execution()} | {:error, atom()}
+  def resume_test_execution(state, nil) when is_map(state) do
+    with :ok <- validate_test_execution(state),
+         {:ok, nil} <- compact_refinement_frontier(state),
+         true <- is_nil(state.prior_frontier) do
+      {:ok, state}
+    else
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  def resume_test_execution(state, frontier) when is_map(state) do
+    with :ok <- validate_test_execution(state),
+         true <- is_nil(state.prior_frontier),
+         %{} = current <- state.current_original,
+         {:ok, admitted} <- admit_refinement_frontier(frontier, compact_batch(current)),
+         {:ok, accepted_paths, pending} <- reconstruct_frontier_attempts(current, admitted) do
+      resumed = %{
+        state
+        | work_queue: pending,
+          accepted_paths: accepted_paths,
+          accepted_positions: admitted["accepted_positions"],
+          attempt_records: [],
+          current_started: true,
+          refined?: true,
+          refined_child_count: admitted["refined_child_count"],
+          prior_frontier: admitted
+      }
+
+      with :ok <- validate_test_execution(resumed) do
+        {:ok, resumed}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  def resume_test_execution(_state, _frontier), do: {:error, :invalid_refinement_state}
+
+  @doc """
   Decide the next process effect under the caller-supplied shared-deadline residual.
 
   Capacity effects always contain original batches only.
@@ -1064,8 +1197,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @doc """
   Purely reduce one launched process result into the next refinement state/effect.
 
-  Non-timeout failures win over deadline exhaustion. Multi-path ordinary
-  timeouts refine only while residual can still launch a Mix child.
+  Non-timeout failures win over deadline exhaustion. A clipped aggregate-deadline
+  timeout leaves the attempt pending. A singleton full-budget timeout is
+  candidate-actionable. Multi-file full-budget timeouts always split; residual
+  only decides whether the next step runs or capacities.
   """
   @spec record_test_execution_attempt(
           test_execution(),
@@ -1120,15 +1255,6 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           {:capacity, state.completed_originals, state.current_original, state.original_suffix}
 
         runner_timeout and attempt.count == 1 ->
-          result = original_result(state, feedback, false, true)
-          {:terminal, aggregate_test_check(state.original_results ++ [result])}
-
-        runner_timeout and
-            not residual_allows_mix_launch?(
-              remaining_after,
-              state.operation_timeout,
-              reserve
-            ) ->
           result = original_result(state, feedback, false, true)
           {:terminal, aggregate_test_check(state.original_results ++ [result])}
 
@@ -1209,6 +1335,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       original_suffix: [],
       work_queue: [],
       accepted_paths: [],
+      accepted_positions: [],
       original_results: [],
       attempt_records: [],
       current_started: false,
@@ -1216,23 +1343,23 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       refined_child_count: 0,
       total_attempt_count: 0,
       operation_timeout: operation_timeout,
-      postflight_reserve_ms: postflight_reserve_ms
+      postflight_reserve_ms: postflight_reserve_ms,
+      prior_frontier: nil
     }
   end
 
-  defp accept_passing_attempt(state, attempt, rest, feedback, remaining_after) do
+  defp accept_passing_attempt(state, attempt, rest, feedback, _remaining_after) do
     accepted_paths = state.accepted_paths ++ attempt.paths
-    state = %{state | accepted_paths: accepted_paths, work_queue: rest}
+    accepted_positions = state.accepted_positions ++ [attempt.position]
+
+    state = %{
+      state
+      | accepted_paths: accepted_paths,
+        accepted_positions: accepted_positions,
+        work_queue: rest
+    }
 
     cond do
-      rest != [] and
-          not residual_allows_mix_launch?(
-            remaining_after,
-            state.operation_timeout,
-            state.postflight_reserve_ms
-          ) ->
-        {:capacity, state.completed_originals, state.current_original, state.original_suffix}
-
       rest != [] ->
         {:continue, state}
 
@@ -1258,11 +1385,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
             original_suffix: suffix,
             work_queue: [root_attempt(next)],
             accepted_paths: [],
+            accepted_positions: [],
             original_results: results,
             attempt_records: [],
             current_started: false,
             refined?: false,
-            refined_child_count: 0
+            refined_child_count: 0,
+            prior_frontier: nil
         }
 
       [] ->
@@ -1273,11 +1402,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
             original_suffix: [],
             work_queue: [],
             accepted_paths: [],
+            accepted_positions: [],
             original_results: results,
             attempt_records: [],
             current_started: false,
             refined?: false,
-            refined_child_count: 0
+            refined_child_count: 0,
+            prior_frontier: nil
         }
     end
   end
@@ -1345,13 +1476,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   defp original_result(state, final_feedback, passed, timed_out) do
     records = state.attempt_records
     attempt_digest = attempt_records_digest(records)
-
-    marker =
-      if state.refined? do
-        "[cross_app_refinement strategy=ordered_binary_split_v1 original=#{state.current_original.label} attempts=#{length(records)} refined_children=#{state.refined_child_count} attempted_outputs_sha256=#{attempt_digest}]"
-      else
-        ""
-      end
+    marker = refinement_marker(state, records, attempt_digest)
 
     stdout =
       records
@@ -1384,12 +1509,39 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       stderr_truncated: stderr_aggregate_truncated or Enum.any?(records, & &1.stderr_truncated),
       stdout_sha256: attempt_stream_digest(records, :stdout_sha256),
       stderr_sha256: attempt_stream_digest(records, :stderr_sha256),
-      refinement: %{
-        strategy: "ordered_binary_split_v1",
-        attempt_count: length(records),
-        refined_child_count: state.refined_child_count,
-        attempted_outputs_sha256: attempt_digest
-      }
+      refinement: refinement_metadata(state, records, attempt_digest)
+    }
+  end
+
+  defp refinement_marker(%{prior_frontier: prior} = state, records, attempt_digest)
+       when is_map(prior) do
+    {:ok, prior_digest} = Arbor.Actions.Coding.CrossApp.ContinuationCore.digest(prior)
+
+    "[cross_app_refinement strategy=ordered_binary_split_v1 original=#{state.current_original.label} window_attempts=#{length(records)} refined_children=#{state.refined_child_count} resumed=1 prior_sha256=#{prior_digest} attempted_outputs_sha256=#{attempt_digest}]"
+  end
+
+  defp refinement_marker(state, records, attempt_digest) do
+    "[cross_app_refinement strategy=ordered_binary_split_v1 original=#{state.current_original.label} attempts=#{length(records)} refined_children=#{state.refined_child_count} attempted_outputs_sha256=#{attempt_digest}]"
+  end
+
+  defp refinement_metadata(%{prior_frontier: prior} = state, records, attempt_digest)
+       when is_map(prior) do
+    %{
+      strategy: "ordered_binary_split_v1",
+      attempt_count: length(records),
+      refined_child_count: state.refined_child_count,
+      attempted_outputs_sha256: attempt_digest,
+      resumed: true,
+      prior: prior
+    }
+  end
+
+  defp refinement_metadata(state, records, attempt_digest) do
+    %{
+      strategy: "ordered_binary_split_v1",
+      attempt_count: length(records),
+      refined_child_count: state.refined_child_count,
+      attempted_outputs_sha256: attempt_digest
     }
   end
 
@@ -1447,6 +1599,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :original_suffix,
       :work_queue,
       :accepted_paths,
+      :accepted_positions,
       :original_results,
       :attempt_records,
       :current_started,
@@ -1454,7 +1607,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :refined_child_count,
       :total_attempt_count,
       :operation_timeout,
-      :postflight_reserve_ms
+      :postflight_reserve_ms,
+      :prior_frontier
     ]
 
     cond do
@@ -1469,8 +1623,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
       not is_list(state.original_batches) or not is_list(state.completed_originals) or
         not is_list(state.original_suffix) or not is_list(state.work_queue) or
-        not is_list(state.accepted_paths) or not is_list(state.original_results) or
-          not is_list(state.attempt_records) ->
+        not is_list(state.accepted_paths) or not is_list(state.accepted_positions) or
+        not is_list(state.original_results) or not is_list(state.attempt_records) ->
         {:error, :invalid_refinement_state}
 
       not is_boolean(state.current_started) or not is_boolean(state.refined?) or
@@ -1492,10 +1646,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   defp validate_empty_test_execution(state) do
     if state.completed_originals == [] and is_nil(state.current_original) and
          state.original_suffix == [] and state.work_queue == [] and
-         state.accepted_paths == [] and state.original_results == [] and
+         state.accepted_paths == [] and state.accepted_positions == [] and
+         state.original_results == [] and
          state.attempt_records == [] and state.current_started == false and
          state.refined? == false and state.refined_child_count == 0 and
-         state.total_attempt_count == 0 do
+         state.total_attempt_count == 0 and is_nil(state.prior_frontier) do
       :ok
     else
       {:error, :invalid_refinement_state}
@@ -1522,8 +1677,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
          completed_attempt_count
        ) do
     if state.work_queue == [] and state.original_suffix == [] and state.accepted_paths == [] and
+         state.accepted_positions == [] and
          state.attempt_records == [] and state.current_started == false and
          state.refined? == false and state.refined_child_count == 0 and
+         is_nil(state.prior_frontier) and
          length(state.completed_originals) == length(state.original_batches) and
          state.total_attempt_count == completed_attempt_count do
       :ok
@@ -1557,6 +1714,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       state.total_attempt_count != completed_attempt_count + length(state.attempt_records) ->
         {:error, :invalid_refinement_state}
 
+      state.accepted_paths ++ queue_paths(state.work_queue) != Map.get(current, :paths) ->
+        {:error, :invalid_refinement_state}
+
+      is_map(state.prior_frontier) ->
+        validate_resumed_test_execution_fields(state, current, max_refined_children)
+
+      not is_nil(state.prior_frontier) ->
+        {:error, :invalid_refinement_state}
+
       state.current_started != state.refined? ->
         {:error, :invalid_refinement_state}
 
@@ -1572,18 +1738,64 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
       not state.refined? and
           (state.refined_child_count != 0 or state.accepted_paths != [] or
+             state.accepted_positions != [] or
              state.work_queue != [root_attempt(current)]) ->
         {:error, :invalid_refinement_state}
 
       state.refined? and not valid_refined_origin_record?(state.attempt_records, current) ->
         {:error, :invalid_refinement_state}
 
-      state.accepted_paths ++ queue_paths(state.work_queue) != Map.get(current, :paths) ->
-        {:error, :invalid_refinement_state}
+      state.refined? ->
+        validate_live_cut(state, current)
 
       true ->
         :ok
     end
+  end
+
+  defp validate_resumed_test_execution_fields(state, current, max_refined_children) do
+    prior = state.prior_frontier
+    window_splits = window_split_count(state.attempt_records)
+    expected_children = prior["refined_child_count"] + 2 * window_splits
+
+    with {:ok, _admitted} <- admit_refinement_frontier(prior, compact_batch(current)),
+         true <- state.current_started == true,
+         true <- state.refined? == true,
+         true <- is_integer(state.refined_child_count),
+         true <- rem(state.refined_child_count, 2) == 0,
+         true <- state.refined_child_count == expected_children,
+         true <- state.refined_child_count >= prior["refined_child_count"],
+         true <- state.refined_child_count <= max_refined_children,
+         :ok <- validate_live_cut(state, current) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp validate_live_cut(state, current) do
+    pending = Enum.map(state.work_queue, & &1.position)
+
+    with true <- is_list(state.accepted_positions),
+         {:ok, accepted_positions, pending_positions, splits} <- replay_live_cut(state),
+         true <- accepted_positions == state.accepted_positions,
+         true <- pending_positions == pending,
+         true <- 2 * splits == state.refined_child_count,
+         {:ok, expected_accepted} <- collect_position_paths(current, accepted_positions),
+         true <- expected_accepted == state.accepted_paths do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp window_split_count(records) when is_list(records) do
+    Enum.count(records, fn record ->
+      is_map(record) and record.timed_out == true and is_integer(record.count) and
+        record.count > 1
+    end)
   end
 
   defp queue_paths(queue), do: Enum.flat_map(queue, &Map.fetch!(&1, :paths))
@@ -1600,7 +1812,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
          {:ok, original_label} <- Map.fetch(original, :label),
          true <-
            is_binary(position) and byte_size(position) <= @max_refinement_position_bytes and
-             Regex.match?(~r/\Aroot([LR])*\z/, position),
+             Regex.match?(@refinement_position_regex, position),
          true <- is_list(paths) and paths != [],
          :ok <- validate_batch_member_paths(paths),
          true <- count == length(paths),
@@ -1652,20 +1864,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         {:ok, 1}
 
       {true, refinement} when is_map(refinement) ->
-        max_attempts = 2 * Map.get(batch, :count, 0) - 1
-        max_refined_children = 2 * (Map.get(batch, :count, 0) - 1)
-        attempts = Map.get(refinement, :attempt_count)
-        children = Map.get(refinement, :refined_child_count)
-
-        if Map.get(refinement, :strategy) == "ordered_binary_split_v1" and
-             is_integer(attempts) and attempts >= 3 and attempts <= max_attempts and
-             is_integer(children) and children == canonical_refined_child_count(attempts) and
-             rem(children, 2) == 0 and
-             children <= max_refined_children and
-             valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)) do
-          {:ok, attempts}
+        if Map.get(refinement, :resumed) == true do
+          completed_resumed_attempt_count(batch, refinement)
         else
-          :error
+          max_attempts = 2 * Map.get(batch, :count, 0) - 1
+          max_refined_children = 2 * (Map.get(batch, :count, 0) - 1)
+          attempts = Map.get(refinement, :attempt_count)
+          children = Map.get(refinement, :refined_child_count)
+
+          if Map.get(refinement, :strategy) == "ordered_binary_split_v1" and
+               is_integer(attempts) and attempts >= 3 and attempts <= max_attempts and
+               is_integer(children) and children == canonical_refined_child_count(attempts) and
+               rem(children, 2) == 0 and
+               children <= max_refined_children and
+               valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)) do
+            {:ok, attempts}
+          else
+            :error
+          end
         end
 
       _ ->
@@ -1674,6 +1890,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp completed_result_attempt_count(_batch, _result), do: :error
+
+  defp completed_resumed_attempt_count(batch, refinement) do
+    attempts = Map.get(refinement, :attempt_count)
+    children = Map.get(refinement, :refined_child_count)
+    prior = Map.get(refinement, :prior)
+    max_refined_children = 2 * (Map.get(batch, :count, 0) - 1)
+
+    with true <- Map.get(refinement, :strategy) == "ordered_binary_split_v1",
+         true <- is_integer(attempts) and attempts >= 1,
+         true <- is_integer(children) and rem(children, 2) == 0,
+         true <- children <= max_refined_children,
+         true <- valid_sha256?(Map.get(refinement, :attempted_outputs_sha256)),
+         {:ok, admitted} <- admit_refinement_frontier(prior, compact_batch(batch)),
+         true <- children >= admitted["refined_child_count"] do
+      {:ok, attempts}
+    else
+      _ -> :error
+    end
+  end
 
   # The root is not a refined child, so its materialized tree has node_count - 1 children.
   defp canonical_refined_child_count(materialized_node_count), do: materialized_node_count - 1
@@ -3397,6 +3632,474 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :error -> Map.get(params, Atom.to_string(key))
     end
   end
+
+  defp encode_live_frontier(state) do
+    original = state.current_original
+    accepted_positions = state.accepted_positions
+    pending_positions = Enum.map(state.work_queue, & &1.position)
+
+    with {:ok, replayed_accepted, replayed_pending, splits} <- replay_live_cut(state),
+         true <- replayed_accepted == accepted_positions,
+         true <- replayed_pending == pending_positions,
+         {:ok, accepted_paths} <- collect_position_paths(original, accepted_positions),
+         true <- accepted_paths == state.accepted_paths,
+         parsed <- %{
+           "schema_version" => @refinement_frontier_schema_version,
+           "strategy" => "ordered_binary_split_v1",
+           "original_index" => original.index,
+           "original_count" => original.count,
+           "original_inventory_sha256" => original.inventory_sha256,
+           "accepted_positions" => accepted_positions,
+           "pending_positions" => pending_positions,
+           "accepted_file_count" => length(state.accepted_paths),
+           "pending_file_count" => pending_file_count(state.work_queue),
+           "refined_child_count" => state.refined_child_count
+         },
+         :ok <- match(parsed["refined_child_count"], 2 * splits, :invalid_refinement_state),
+         {:ok, admitted} <- admit_refinement_frontier(parsed, compact_batch(original)) do
+      {:ok, admitted}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp pending_file_count(queue) do
+    Enum.reduce(queue, 0, fn attempt, acc -> acc + attempt.count end)
+  end
+
+  defp replay_live_cut(state) do
+    original = state.current_original
+
+    with {:ok, accepted, pending, splits} <-
+           replay_initial_cut(original, state.prior_frontier) do
+      replay_attempt_records(state.attempt_records, original, accepted, pending, splits)
+    end
+  end
+
+  defp replay_initial_cut(original, nil) do
+    {:ok, [], [root_attempt(original)], 0}
+  end
+
+  defp replay_initial_cut(original, prior) when is_map(prior) do
+    with {:ok, admitted} <- admit_refinement_frontier(prior, compact_batch(original)),
+         {:ok, _accepted_paths, pending} <- reconstruct_frontier_attempts(original, admitted) do
+      {:ok, admitted["accepted_positions"], pending, div(admitted["refined_child_count"], 2)}
+    end
+  end
+
+  defp replay_initial_cut(_original, _prior), do: {:error, :invalid_refinement_state}
+
+  defp replay_attempt_records(records, original, accepted, pending, splits)
+       when is_list(records) do
+    records
+    |> Enum.reduce_while({:ok, {accepted, pending, splits}}, fn record,
+                                                                {:ok, {accepted, pending, splits}} ->
+      replay_one_record(record, original, accepted, pending, splits)
+    end)
+    |> case do
+      {:ok, {accepted, pending, splits}} ->
+        {:ok, accepted, Enum.map(pending, & &1.position), splits}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp replay_one_record(record, original, accepted, [head | rest], splits) do
+    cond do
+      not record_matches_attempt?(record, head) ->
+        {:halt, {:error, :invalid_refinement_state}}
+
+      record.timed_out == true and head.count > 1 ->
+        case split_attempt(original, head) do
+          {:ok, left, right} ->
+            {:cont, {:ok, {accepted, [left, right | rest], splits + 1}}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+
+      record.timed_out == false ->
+        {:cont, {:ok, {accepted ++ [head.position], rest, splits}}}
+
+      true ->
+        {:halt, {:error, :invalid_refinement_state}}
+    end
+  end
+
+  defp replay_one_record(_record, _original, _accepted, _pending, _splits),
+    do: {:halt, {:error, :invalid_refinement_state}}
+
+  defp record_matches_attempt?(record, attempt) when is_map(record) and is_map(attempt) do
+    record.attempt_label == attempt.label and record.count == attempt.count and
+      record.inventory_sha256 == attempt.inventory_sha256
+  end
+
+  defp record_matches_attempt?(_record, _attempt), do: false
+
+  defp reconstruct_frontier_attempts(original, frontier) do
+    with {:ok, _splits} <-
+           simulate_frontier_cut(
+             original.count,
+             frontier["accepted_positions"],
+             frontier["pending_positions"]
+           ),
+         {:ok, accepted_paths} <-
+           collect_position_paths(original, frontier["accepted_positions"]),
+         {:ok, pending} <-
+           collect_pending_attempts(original, frontier["pending_positions"]) do
+      {:ok, accepted_paths, pending}
+    end
+  end
+
+  defp collect_position_paths(original, positions) do
+    positions
+    |> Enum.reduce_while({:ok, []}, fn position, {:ok, acc} ->
+      case position_paths(original, position) do
+        {:ok, paths} -> {:cont, {:ok, acc ++ paths}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp collect_pending_attempts(original, positions) do
+    positions
+    |> Enum.reduce_while({:ok, []}, fn position, {:ok, acc} ->
+      case position_paths(original, position) do
+        {:ok, paths} -> {:cont, {:ok, acc ++ [refined_attempt(original, position, paths)]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp position_paths(original, position) do
+    case position_range(original.count, position) do
+      {:ok, {start, len}} -> {:ok, Enum.slice(original.paths, start, len)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_frontier_shape(frontier) do
+    with :ok <- require_frontier_object(frontier),
+         :ok <- reject_frontier_forbidden(frontier),
+         :ok <- require_exact_frontier_keys(frontier),
+         :ok <-
+           match(
+             frontier["schema_version"],
+             @refinement_frontier_schema_version,
+             :malformed_state
+           ),
+         :ok <- match(frontier["strategy"], "ordered_binary_split_v1", :malformed_state),
+         {:ok, original_index} <- parse_positive_int(frontier["original_index"]),
+         {:ok, original_count} <- parse_frontier_count(frontier["original_count"]),
+         {:ok, inventory} <- parse_frontier_hex(frontier["original_inventory_sha256"]),
+         {:ok, accepted_positions} <-
+           parse_position_list(frontier["accepted_positions"], @max_test_batch_files - 1),
+         {:ok, pending_positions} <-
+           parse_pending_positions(frontier["pending_positions"]),
+         :ok <-
+           require_unique_positions(accepted_positions ++ pending_positions),
+         {:ok, accepted_file_count} <- parse_nonneg_int(frontier["accepted_file_count"]),
+         {:ok, pending_file_count} <- parse_positive_int(frontier["pending_file_count"]),
+         {:ok, refined_child_count} <- parse_even_pos_int(frontier["refined_child_count"]),
+         :ok <-
+           bound_frontier_json(frontier),
+         true <- length(accepted_positions) + length(pending_positions) <= @max_test_batch_files,
+         true <- accepted_file_count + pending_file_count == original_count,
+         true <- refined_child_count <= 2 * (original_count - 1) do
+      {:ok,
+       %{
+         "schema_version" => @refinement_frontier_schema_version,
+         "strategy" => "ordered_binary_split_v1",
+         "original_index" => original_index,
+         "original_count" => original_count,
+         "original_inventory_sha256" => inventory,
+         "accepted_positions" => accepted_positions,
+         "pending_positions" => pending_positions,
+         "accepted_file_count" => accepted_file_count,
+         "pending_file_count" => pending_file_count,
+         "refined_child_count" => refined_child_count
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :malformed_state}
+    end
+  end
+
+  defp match_frontier_original(parsed, compact) do
+    with :ok <- match(parsed["original_index"], compact["index"], :plan_drift),
+         :ok <- match(parsed["original_count"], compact["count"], :plan_drift),
+         :ok <-
+           match(parsed["original_inventory_sha256"], compact["inventory_sha256"], :plan_drift) do
+      :ok
+    end
+  end
+
+  defp match_frontier_geometry(parsed, splits) do
+    with {:ok, accepted_files} <-
+           sum_position_files(parsed["original_count"], parsed["accepted_positions"]),
+         {:ok, pending_files} <-
+           sum_position_files(parsed["original_count"], parsed["pending_positions"]),
+         :ok <- match(parsed["accepted_file_count"], accepted_files, :invalid_refinement_state),
+         :ok <- match(parsed["pending_file_count"], pending_files, :invalid_refinement_state),
+         :ok <- match(parsed["refined_child_count"], 2 * splits, :invalid_refinement_state) do
+      :ok
+    end
+  end
+
+  defp simulate_frontier_cut(count, accepted, pending)
+       when is_integer(count) and count >= 2 and is_list(accepted) and is_list(pending) do
+    simulate_frontier_cut([{"root", 0, count}], accepted, pending, 0)
+  end
+
+  defp simulate_frontier_cut(_count, _accepted, _pending),
+    do: {:error, :invalid_refinement_state}
+
+  defp simulate_frontier_cut(queue, accepted, pending, splits) do
+    queue_positions = Enum.map(queue, fn {pos, _start, _len} -> pos end)
+
+    cond do
+      accepted == [] and queue_positions == pending ->
+        {:ok, splits}
+
+      queue == [] ->
+        {:error, :invalid_refinement_state}
+
+      true ->
+        [{pos, start, len} | rest] = queue
+        next_accepted = List.first(accepted)
+
+        cond do
+          next_accepted == pos ->
+            if position_prefix_of_any?(pos, Enum.drop(accepted, 1) ++ pending) do
+              {:error, :invalid_refinement_state}
+            else
+              simulate_frontier_cut(rest, Enum.drop(accepted, 1), pending, splits)
+            end
+
+          position_prefix_of_any?(pos, accepted ++ pending) and len >= 2 ->
+            split_at = div(len + 1, 2)
+            right_len = len - split_at
+
+            if split_at >= 1 and right_len >= 1 do
+              left = {pos <> "L", start, split_at}
+              right = {pos <> "R", start + split_at, right_len}
+              simulate_frontier_cut([left, right | rest], accepted, pending, splits + 1)
+            else
+              {:error, :invalid_refinement_state}
+            end
+
+          true ->
+            {:error, :invalid_refinement_state}
+        end
+    end
+  end
+
+  defp position_prefix_of_any?(pos, positions) when is_binary(pos) and is_list(positions) do
+    Enum.any?(positions, fn other ->
+      is_binary(other) and other != pos and String.starts_with?(other, pos)
+    end)
+  end
+
+  defp position_range(count, "root") when is_integer(count) and count > 0, do: {:ok, {0, count}}
+
+  defp position_range(count, position) when is_binary(position) do
+    parent = String.slice(position, 0, byte_size(position) - 1)
+    side = String.last(position)
+
+    with {:ok, {start, len}} <- position_range(count, parent),
+         true <- len >= 2,
+         split_at = div(len + 1, 2),
+         right_len = len - split_at,
+         true <- split_at >= 1 and right_len >= 1 do
+      case side do
+        "L" -> {:ok, {start, split_at}}
+        "R" -> {:ok, {start + split_at, right_len}}
+        _ -> {:error, :invalid_refinement_state}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp position_range(_count, _position), do: {:error, :invalid_refinement_state}
+
+  defp sum_position_files(count, positions) do
+    positions
+    |> Enum.reduce_while({:ok, 0}, fn position, {:ok, acc} ->
+      case position_range(count, position) do
+        {:ok, {_start, len}} -> {:cont, {:ok, acc + len}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp parse_position_list(list, max_len) when is_list(list) and is_integer(max_len) do
+    if length(list) <= max_len and Enum.all?(list, &valid_frontier_position?/1) do
+      {:ok, list}
+    else
+      {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp parse_position_list(_list, _max_len), do: {:error, :malformed_state}
+
+  defp parse_pending_positions(list) when is_list(list) and list != [] do
+    parse_position_list(list, @max_test_batch_files)
+  end
+
+  defp parse_pending_positions(_list), do: {:error, :invalid_refinement_state}
+
+  defp valid_frontier_position?(position) when is_binary(position) do
+    byte_size(position) <= @max_refinement_position_bytes and
+      Regex.match?(@refinement_position_regex, position)
+  end
+
+  defp valid_frontier_position?(_position), do: false
+
+  defp require_unique_positions(positions) do
+    if length(Enum.uniq(positions)) == length(positions) do
+      :ok
+    else
+      {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp parse_frontier_count(value)
+       when is_integer(value) and not is_boolean(value) and value >= 2 and
+              value <= @max_test_batch_files,
+       do: {:ok, value}
+
+  defp parse_frontier_count(_value), do: {:error, :malformed_state}
+
+  defp parse_positive_int(value)
+       when is_integer(value) and not is_boolean(value) and value > 0,
+       do: {:ok, value}
+
+  defp parse_positive_int(_value), do: {:error, :malformed_state}
+
+  defp parse_nonneg_int(value)
+       when is_integer(value) and not is_boolean(value) and value >= 0,
+       do: {:ok, value}
+
+  defp parse_nonneg_int(_value), do: {:error, :malformed_state}
+
+  defp parse_even_pos_int(value)
+       when is_integer(value) and not is_boolean(value) and value >= 2 and rem(value, 2) == 0,
+       do: {:ok, value}
+
+  defp parse_even_pos_int(_value), do: {:error, :malformed_state}
+
+  defp parse_frontier_hex(value) when is_binary(value) do
+    if String.match?(value, ~r/\A[0-9a-f]{64}\z/),
+      do: {:ok, value},
+      else: {:error, :malformed_state}
+  end
+
+  defp parse_frontier_hex(_value), do: {:error, :malformed_state}
+
+  defp normalize_compact_original(batch) when is_map(batch) and not is_struct(batch) do
+    cond do
+      Map.has_key?(batch, :index) ->
+        {:ok, compact_batch(batch)}
+
+      Map.has_key?(batch, "index") ->
+        {:ok,
+         %{
+           "index" => batch["index"],
+           "total" => batch["total"],
+           "count" => batch["count"],
+           "label" => batch["label"],
+           "inventory_sha256" => batch["inventory_sha256"]
+         }}
+
+      true ->
+        {:error, :malformed_state}
+    end
+  end
+
+  defp normalize_compact_original(_batch), do: {:error, :malformed_state}
+
+  defp build_frontier(parsed) do
+    %{
+      "schema_version" => parsed["schema_version"],
+      "strategy" => parsed["strategy"],
+      "original_index" => parsed["original_index"],
+      "original_count" => parsed["original_count"],
+      "original_inventory_sha256" => parsed["original_inventory_sha256"],
+      "accepted_positions" => parsed["accepted_positions"],
+      "pending_positions" => parsed["pending_positions"],
+      "accepted_file_count" => parsed["accepted_file_count"],
+      "pending_file_count" => parsed["pending_file_count"],
+      "refined_child_count" => parsed["refined_child_count"]
+    }
+  end
+
+  defp require_frontier_object(value) when is_map(value) and not is_struct(value) do
+    if frontier_json_value?(value), do: :ok, else: {:error, :malformed_state}
+  end
+
+  defp require_frontier_object(_value), do: {:error, :malformed_state}
+
+  defp require_exact_frontier_keys(map) do
+    if Enum.sort(Map.keys(map)) == @refinement_frontier_keys,
+      do: :ok,
+      else: {:error, :malformed_state}
+  end
+
+  defp reject_frontier_forbidden(value) do
+    if contains_frontier_forbidden?(value),
+      do: {:error, :malformed_state},
+      else: :ok
+  end
+
+  defp contains_frontier_forbidden?(value) when is_map(value) and not is_struct(value) do
+    Enum.any?(value, fn {key, nested} ->
+      (is_binary(key) and MapSet.member?(@refinement_forbidden_keys, key)) or
+        not is_binary(key) or contains_frontier_forbidden?(nested)
+    end)
+  end
+
+  defp contains_frontier_forbidden?(value) when is_list(value),
+    do: Enum.any?(value, &contains_frontier_forbidden?/1)
+
+  defp contains_frontier_forbidden?(_value), do: false
+
+  defp frontier_json_value?(value) when is_map(value) and not is_struct(value) do
+    Enum.all?(value, fn
+      {key, nested} when is_binary(key) -> String.valid?(key) and frontier_json_value?(nested)
+      _ -> false
+    end)
+  end
+
+  defp frontier_json_value?(value) when is_list(value) do
+    proper_frontier_list?(value) and Enum.all?(value, &frontier_json_value?/1)
+  end
+
+  defp frontier_json_value?(value) when is_binary(value), do: String.valid?(value)
+
+  defp frontier_json_value?(value)
+       when is_integer(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp frontier_json_value?(_value), do: false
+
+  defp proper_frontier_list?([]), do: true
+  defp proper_frontier_list?([_head | tail]), do: proper_frontier_list?(tail)
+  defp proper_frontier_list?(_tail), do: false
+
+  defp bound_frontier_json(value) do
+    case Jason.encode(value) do
+      {:ok, encoded} when byte_size(encoded) <= @max_refinement_json_bytes -> :ok
+      {:ok, _encoded} -> {:error, :oversized_state}
+      {:error, _reason} -> {:error, :malformed_state}
+    end
+  end
+
+  defp match(left, right, _error) when left === right, do: :ok
+  defp match(_left, _right, error), do: {:error, error}
 
   defp sha256(output) when is_binary(output) do
     :crypto.hash(:sha256, output) |> Base.encode16(case: :lower)
