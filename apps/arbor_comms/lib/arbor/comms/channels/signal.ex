@@ -71,6 +71,14 @@ defmodule Arbor.Comms.Channels.Signal do
       nil ->
         {:error, :no_account_configured}
 
+      account when recipient in [nil, ""] ->
+        # No explicit recipient: fall back to the configured default (`:to`,
+        # i.e. SIGNAL_TO) or note-to-self on the sending account, so
+        # `Arbor.Comms.send_signal(nil, msg)` reaches the operator instead of
+        # producing signal-cli's "Invalid phone number ''" (found 2026-08-30
+        # when Signal became the primary outbound channel).
+        send_message(config(:to) || account, message, opts)
+
       account ->
         formatted = do_format(message)
         attachments = Keyword.get(opts, :attachments, [])

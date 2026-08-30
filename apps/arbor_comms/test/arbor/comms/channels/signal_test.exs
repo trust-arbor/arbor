@@ -165,4 +165,53 @@ defmodule Arbor.Comms.Channels.SignalTest do
     |> Path.wildcard()
     |> Enum.sort()
   end
+
+  describe "send_message/3 default recipient" do
+    test "nil recipient falls back to configured :to, then the account (note-to-self)" do
+      # Regression (2026-08-30): send_signal(nil, msg) passed nil through to
+      # signal-cli, which failed with "Invalid phone number ''". A nil/empty
+      # recipient must resolve to :to or the sending account.
+      original = Application.get_env(:arbor_comms, :signal, [])
+
+      on_exit(fn -> Application.put_env(:arbor_comms, :signal, original) end)
+
+      defmodule CaptureRunner do
+        def execute(command, _opts) do
+          send(self(), {:signal_command, command})
+          {:ok, %{exit_code: 0, stdout: ""}}
+        end
+      end
+
+      Application.put_env(
+        :arbor_comms,
+        :signal,
+        Keyword.merge(original,
+          account: "+15550001111",
+          to: nil,
+          command_runner: CaptureRunner,
+          signal_cli_path: "/bin/echo"
+        )
+      )
+
+      assert :ok = Arbor.Comms.Channels.Signal.send_message(nil, "hello", [])
+      assert_received {:signal_command, command}
+      assert command =~ "+15550001111 send"
+      assert String.ends_with?(command, "+15550001111")
+
+      Application.put_env(
+        :arbor_comms,
+        :signal,
+        Keyword.merge(original,
+          account: "+15550001111",
+          to: "+15559998888",
+          command_runner: CaptureRunner,
+          signal_cli_path: "/bin/echo"
+        )
+      )
+
+      assert :ok = Arbor.Comms.Channels.Signal.send_message("", "hello", [])
+      assert_received {:signal_command, command2}
+      assert String.ends_with?(command2, "+15559998888")
+    end
+  end
 end
