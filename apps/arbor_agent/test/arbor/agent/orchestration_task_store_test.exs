@@ -2047,6 +2047,38 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert outcome == envelope["outcome"]
   end
 
+  test "lifecycle regression: runner {:error, :cancelled} publishes task_cancelled", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "runner_cancelled"},
+               name: store
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:error, :cancelled}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+    assert envelope["terminal_state"] == "cancelled"
+    assert envelope["evidence"] == %{"kind" => "task_cancelled"}
+    assert envelope["outcome"]["code"] == "task_cancelled"
+    refute envelope["outcome"]["code"] == "task_runner_failed"
+    refute envelope["outcome"]["code"] == "task_finalization_failed"
+
+    assert_eventually(fn ->
+      assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+      assert {:ok, %{state: :cancelled, outcome: outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert outcome == envelope["outcome"]
+    end)
+  end
+
   test "lifecycle regression: abnormal owner DOWN is canonical and drops raw reason", %{
     supervisor: supervisor
   } do

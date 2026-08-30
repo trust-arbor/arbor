@@ -12336,6 +12336,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        ),
        do: approval_owner_terminated_envelope(record, approval_id)
 
+  # Recovered and runner-completed cancel both return `{:error, :cancelled}`.
+  # Map that onto the same lifecycle envelope as owner cancel so a later
+  # finalize is identical to the first-writer `task_cancelled` archive.
+  defp terminal_envelope(record, {:runner_result, {:error, :cancelled}}),
+    do: lifecycle_envelope!("task_cancelled", record, %{"kind" => "task_cancelled"})
+
   defp terminal_envelope(record, {:runner_result, {:error, raw_error}}) do
     # The public terminal is deliberately evidence-free; the node log is the
     # only place an operator can learn why the runner failed (2026-08-28: two

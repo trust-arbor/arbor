@@ -205,6 +205,7 @@ defmodule Arbor.Agent.Orchestration.TaskControlCrashReplaySecurityRegressionTest
     @moduledoc false
     def run(_, _, _), do: Process.sleep(60_000)
     def recover_task(_, _), do: {:error, :cancelled}
+    def finalize_terminal_task(_agent_id, _envelope, _controls, _context), do: :ok
 
     def probe_recovery(agent_id, context) do
       {:ok,
@@ -808,6 +809,12 @@ defmodule Arbor.Agent.Orchestration.TaskControlCrashReplaySecurityRegressionTest
     assert wait_until(fn ->
              match?({:ok, %{state: :cancelled}}, TaskStore.status(task_id, name: store2))
            end)
+
+    assert {:ok, %{state: :cancelled}} = TaskStore.status(task_id, name: store2)
+    assert {:ok, envelope} = TaskStore.result(task_id, name: store2)
+    assert envelope["terminal_state"] == "cancelled"
+    assert get_in(envelope, ["evidence", "kind"]) == "task_cancelled"
+    assert get_in(envelope, ["outcome", "code"]) == "task_cancelled"
   end
 
   test "security regression: probe orphan routes through revoke_by_task and marker delete" do
