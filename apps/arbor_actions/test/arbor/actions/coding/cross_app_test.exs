@@ -533,6 +533,76 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert progress_decoded["stdout_sha256"] == decoded["stdout_sha256"]
   end
 
+  test "security regression: seed/progress-window failure feedback redacts secrets from excerpts",
+       %{tmp_dir: tmp_dir} do
+    fixture = continuation_fixture(tmp_dir)
+    bundle = progress_window_bundle(fixture, accepted_count: 0)
+
+    bearer_token = "Bearer " <> String.duplicate("a0B1", 8)
+    authorization_value = "assigned-auth-value-123456"
+    db_password = "credential-db-pass"
+    database_uri = "postgres://arbor_ci:" <> db_password <> "@db.internal:5432/arbor"
+    secret_value = "cross-app-secret-value"
+
+    stdout =
+      """
+        1) test value is one (AlphaTest)
+           Assertion with == failed
+           left:  99
+           #{bearer_token}
+           authorization = "#{authorization_value}"
+      """
+
+    stderr =
+      """
+      DATABASE_URL=#{database_uri}
+      secret: "#{secret_value}"
+      """
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      case args do
+        ["test", "--no-deps-check", "--" | _] ->
+          {:ok, %{exit_code: 1, stdout: stdout, stderr: stderr, timed_out: false}}
+
+        _other ->
+          successful_mix()
+      end
+    end)
+
+    secrets = [
+      bearer_token,
+      authorization_value,
+      db_password,
+      database_uri,
+      secret_value
+    ]
+
+    context = seed_context(fixture.context, bundle)
+    assert {:ok, result} = Validate.run(bundle.params, context)
+    decoded = Jason.decode!(result["feedback_json"])
+    assert decoded["stdout_excerpt"] =~ "Assertion with == failed"
+    assert [_, label] = Regex.run(~r/\[(batch-[^\]]+)\]/, decoded["stdout_excerpt"])
+    assert decoded["stdout_sha256"] == sha256_hex(label <> "\n" <> sha256_hex(stdout))
+    assert decoded["stderr_sha256"] == sha256_hex(label <> "\n" <> sha256_hex(stderr))
+
+    Enum.each(secrets, fn secret ->
+      refute String.contains?(result["feedback_json"], secret)
+    end)
+
+    window = window_context(fixture.context, bundle)
+    assert {:ok, progress_result} = Validate.run(bundle.params, window)
+    progress_decoded = Jason.decode!(progress_result["feedback_json"])
+    assert progress_decoded["stdout_excerpt"] =~ "Assertion with == failed"
+    assert progress_decoded["stdout_excerpt"] == decoded["stdout_excerpt"]
+    assert progress_decoded["stderr_excerpt"] == decoded["stderr_excerpt"]
+    assert progress_decoded["stdout_sha256"] == decoded["stdout_sha256"]
+    assert progress_decoded["stderr_sha256"] == decoded["stderr_sha256"]
+
+    Enum.each(secrets, fn secret ->
+      refute String.contains?(progress_result["feedback_json"], secret)
+    end)
+  end
+
   test "ordinary absence with no static-receipt boundary signal still runs Mix", %{
     tmp_dir: tmp_dir
   } do

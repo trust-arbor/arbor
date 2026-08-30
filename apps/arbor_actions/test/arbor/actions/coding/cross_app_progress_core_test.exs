@@ -161,6 +161,44 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
              ProgressCore.project_failure("validation_stage_timeout", check)
   end
 
+  test "project_failure redacts secrets from excerpts and preserves original aggregate hashes" do
+    label = "batch-1-of-2-n1-#{@inv1}"
+    bearer_token = "Bearer " <> String.duplicate("a0B1", 8)
+    authorization_value = "assigned-auth-value-123456"
+    db_password = "credential-db-pass"
+    database_uri = "postgres://arbor_ci:" <> db_password <> "@db.internal:5432/arbor"
+    secret_value = "cross-app-secret-value"
+
+    stdout =
+      """
+        1) test value is one (AlphaTest)
+           Assertion with == failed
+           #{bearer_token}
+           authorization = "#{authorization_value}"
+      """
+
+    stderr =
+      """
+      DATABASE_URL=#{database_uri}
+      secret: "#{secret_value}"
+      """
+
+    check = failure_check(label: label, stdout: stdout, stderr: stderr)
+    assert {:ok, projected} = ProgressCore.project_failure("tests_failed", check)
+    decoded = Jason.decode!(projected["feedback_json"])
+
+    assert decoded["stdout_sha256"] == check["stdout_sha256"]
+    assert decoded["stderr_sha256"] == check["stderr_sha256"]
+    assert decoded["stdout_excerpt"] =~ "Assertion with == failed"
+
+    Enum.each(
+      [bearer_token, authorization_value, db_password, database_uri, secret_value],
+      fn secret ->
+        refute String.contains?(projected["feedback_json"], secret)
+      end
+    )
+  end
+
   test "admit/2 rehydrates a show/1 snapshot against freshly injected bindings" do
     {:ok, state} = ProgressCore.new(fresh_bindings())
     snapshot = ProgressCore.show(state)
@@ -966,13 +1004,14 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCoreTest do
   defp failure_check(opts) do
     label = Keyword.fetch!(opts, :label)
     stdout = Keyword.fetch!(opts, :stdout)
+    stderr = Keyword.get(opts, :stderr, "")
 
     classified =
       Core.classify_app_test_result(label, %{
         "exit_code" => 1,
         "passed" => false,
         "stdout_excerpt" => stdout,
-        "stderr_excerpt" => "",
+        "stderr_excerpt" => stderr,
         "stdout_truncated" => false,
         "stderr_truncated" => false,
         "stdout_sha256" => String.duplicate("a", 64),

@@ -21,6 +21,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.EvidenceCore
+  alias Arbor.Common.SensitiveData
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
   @schema_version 2
@@ -119,7 +120,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
 
   The arity-1 form keeps the closed four-field envelope. A second argument
   admits Core's already-bounded aggregate check into `feedback_json` with
-  explicit byte ceilings and no arbitrary map passthrough.
+  explicit byte ceilings and no arbitrary map passthrough. Public excerpts are
+  secret-redacted after UTF-8 and size admission; original aggregate hashes
+  stay as evidence.
   """
   @spec project_failure(term()) :: {:ok, map()} | {:error, atom()}
   @spec project_failure(term(), term()) :: {:ok, map()} | {:error, atom()}
@@ -219,7 +222,8 @@ defmodule Arbor.Actions.Coding.CrossApp.ProgressCore do
         {:error, :malformed_failure_feedback}
 
       true ->
-        {:ok, value}
+        # Bound and UTF-8-validate first; redact only this public projection.
+        {:ok, SensitiveData.redact_secrets(value)}
     end
   end
 
