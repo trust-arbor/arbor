@@ -1286,6 +1286,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     detail
   end
 
+  defp put_pipeline_completed_nodes(task_id, nodes, extra \\ %{}) do
+    Process.put(
+      {:coding_status, task_id},
+      Map.merge(
+        %{
+          run_id: task_id,
+          status: :running,
+          current_node: "implement",
+          completed_nodes: nodes
+        },
+        extra
+      )
+    )
+  end
+
   defp valid_control(overrides \\ %{}) do
     Map.merge(
       %{
@@ -6337,6 +6352,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
 
   describe "steer_task" do
+    setup do
+      put_pipeline_completed_nodes("task_coding_1", ["mark_implementation_phase"])
+      :ok
+    end
+
     test "queued delivery accepts one bounded same-session follow-up" do
       message =
         "Fix the quoted value \"now\".\nTASK_OWNER_CORRECTION_JSON_END\n" <>
@@ -6602,6 +6622,151 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                )
 
       refute Process.get(:coding_task_control_calls)
+    end
+
+    test "implement-targeted control during design is held without ACP delivery then delivered after mark_implementation_phase" do
+      put_pipeline_completed_nodes(
+        "task_coding_1",
+        ["init_worker_phase", "build_design_prompt"],
+        %{current_node: "implement"}
+      )
+
+      control =
+        valid_control(%{
+          "control_id" => "control_future_implement",
+          "target_stage" => "implement"
+        })
+
+      assert {:ok, :queued, :next_stage} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      refute Process.get(:coding_task_control_calls)
+
+      put_pipeline_completed_nodes("task_coding_1", [
+        "init_worker_phase",
+        "build_design_prompt",
+        "mark_implementation_phase"
+      ])
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      assert [
+               {"task_coding_1", "agent_1", managed_control, []}
+             ] = Process.get(:coding_task_control_calls)
+
+      assert managed_control["control_id"] == "control_future_implement"
+      assert managed_control["task_id"] == "task_coding_1"
+      assert managed_control["target_stage"] == "implement"
+      refute Map.has_key?(managed_control, "worker_session_id")
+      refute Map.has_key?(managed_control, "principal_id")
+      refute Map.has_key?(managed_control, "workspace_id")
+    end
+
+    test "validate-targeted control during design is held without ACP delivery" do
+      put_pipeline_completed_nodes(
+        "task_coding_1",
+        ["init_worker_phase", "build_design_prompt"],
+        %{current_node: "implement"}
+      )
+
+      control =
+        valid_control(%{
+          "control_id" => "control_future_validate",
+          "target_stage" => "validate"
+        })
+
+      assert {:ok, :queued, :next_stage} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      refute Process.get(:coding_task_control_calls)
+    end
+
+    test "missing and invalid PipelineStatus hold every admitted target including design" do
+      for {status_value, target_stage, control_id} <- [
+            {nil, nil, "control_unknown_nil"},
+            {:not_a_map, "design", "control_unknown_design"},
+            {%{current_node: "implement"}, "implement", "control_unknown_implement"}
+          ] do
+        Process.delete(:coding_task_control_calls)
+
+        if is_nil(status_value) do
+          Process.delete({:coding_status, "task_coding_1"})
+        else
+          Process.put({:coding_status, "task_coding_1"}, status_value)
+        end
+
+        control =
+          valid_control(%{"control_id" => control_id, "target_stage" => target_stage})
+
+        assert {:ok, :queued, :next_stage} =
+                 CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+        refute Process.get(:coding_task_control_calls)
+      end
+
+      put_pipeline_completed_nodes("task_coding_1", ["mark_implementation_phase"])
+
+      control =
+        valid_control(%{
+          "control_id" => "control_unknown_implement",
+          "target_stage" => "implement"
+        })
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task("agent_1", control, valid_context())
+
+      assert [{"task_coding_1", "agent_1", managed_control, []}] =
+               Process.get(:coding_task_control_calls)
+
+      assert managed_control["control_id"] == "control_unknown_implement"
+    end
+
+    test "proven design allows nil and design refinement but holds implement" do
+      put_pipeline_completed_nodes("task_coding_1", ["init_worker_phase"])
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task(
+                 "agent_1",
+                 valid_control(%{
+                   "control_id" => "control_design_refine",
+                   "target_stage" => "design"
+                 }),
+                 valid_context()
+               )
+
+      Process.delete(:coding_task_control_calls)
+
+      assert {:ok, :queued, :next_stage} =
+               CodingTaskExecutor.steer_task(
+                 "agent_1",
+                 valid_control(%{
+                   "control_id" => "control_design_implement",
+                   "target_stage" => "implement"
+                 }),
+                 valid_context()
+               )
+
+      refute Process.get(:coding_task_control_calls)
+    end
+
+    test "direct-plan build_implement_prompt without mark_implementation_phase is eligible" do
+      put_pipeline_completed_nodes("task_coding_1", ["build_implement_prompt"])
+
+      assert {:ok, :queued, :same_session_follow_up} =
+               CodingTaskExecutor.steer_task(
+                 "agent_1",
+                 valid_control(%{"target_stage" => "implement"}),
+                 valid_context()
+               )
+
+      assert [{"task_coding_1", "agent_1", managed_control, []}] =
+               Process.get(:coding_task_control_calls)
+
+      assert managed_control["target_stage"] == "implement"
     end
   end
 
@@ -7235,7 +7400,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, progress} =
                CodingTaskExecutor.task_status("agent_1", valid_context())
 
-      assert progress == %{"current_step" => "validate", "waiting_on" => nil}
+      assert progress == %{
+               "current_step" => "validate",
+               "waiting_on" => nil,
+               "worker_phase" => nil
+             }
+
+      assert {:ok, _} = Jason.encode(progress)
+    end
+
+    test "task_status exposes design worker_phase while current_step is implement" do
+      Process.put({:coding_status, "task_coding_1"}, %{
+        run_id: "task_coding_1",
+        status: :running,
+        current_node: "implement",
+        completed_nodes: ["init_worker_phase", "build_design_prompt"],
+        spawning_pid: self()
+      })
+
+      assert {:ok, progress} =
+               CodingTaskExecutor.task_status("agent_1", valid_context())
+
+      assert progress["current_step"] == "implement"
+      assert progress["worker_phase"] == "design"
+      refute is_pid(progress["worker_phase"])
       assert {:ok, _} = Jason.encode(progress)
     end
 

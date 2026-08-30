@@ -8,7 +8,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Compiler,
     Profiles,
     SemanticPreflight,
-    ValidationProgram
+    ValidationProgram,
+    WorkerPhaseCore
   }
 
   alias Arbor.Orchestrator.Dot.Parser
@@ -57,6 +58,55 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              "route_publish",
              "context.submit_review=false"
            )
+  end
+
+  test "worker phase derivation nodes are pinned on compiled graphs", ctx do
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    for checkpoint_policy <- ["direct", "design_required"] do
+      plan = v2_plan!(checkpoint_policy)
+      assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+      assert {:ok, compilation} = compile(plan, ctx)
+      graph = compiled_graph!(compilation.dot_source)
+
+      assert :ok =
+               preflight(graph, profile["semantic_policy"],
+                 review_profile: "binding",
+                 checkpoint_policy: checkpoint_policy,
+                 checkpoint_work_packet_json: packet_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      for node_id <- WorkerPhaseCore.derivation_nodes() do
+        assert Map.has_key?(graph.nodes, node_id),
+               "missing derivation node #{node_id} for #{checkpoint_policy}"
+      end
+
+      dropped = %{
+        graph
+        | nodes: Map.delete(graph.nodes, "mark_implementation_phase"),
+          edges:
+            Enum.reject(graph.edges, fn edge ->
+              edge.from == "mark_implementation_phase" or
+                edge.to == "mark_implementation_phase"
+            end),
+          adjacency: %{},
+          reverse_adjacency: %{}
+      }
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(dropped, profile["semantic_policy"],
+                 review_profile: "binding",
+                 checkpoint_policy: checkpoint_policy,
+                 checkpoint_work_packet_json: packet_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "worker_phase_derivation_nodes_missing" and
+                 "mark_implementation_phase" in error["detail"]["missing_nodes"]
+             end)
+    end
   end
 
   test "cross_app loop pins fail closed on caller progress params and rewired edges", ctx do

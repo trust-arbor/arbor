@@ -679,7 +679,10 @@ defmodule Arbor.AI.AcpTaskControlTest do
     assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
 
     assert {:ok, :queued, :same_session_follow_up} =
-             AcpSession.deliver_task_control(session, control("c-1", "follow-1"))
+             AcpSession.deliver_task_control(
+               session,
+               Map.put(control("c-1", "follow-1"), "target_stage", "implement")
+             )
 
     assert {:ok, :queued, :same_session_follow_up} =
              AcpSession.deliver_task_control(session, control("c-2", "follow-2"))
@@ -693,7 +696,10 @@ defmodule Arbor.AI.AcpTaskControlTest do
     assert {:ok, %{"text" => "last"}} = Task.await(caller)
 
     assert {:ok, :delivered, :same_session_follow_up} =
-             AcpSession.deliver_task_control(session, control("c-1", "follow-1"))
+             AcpSession.deliver_task_control(
+               session,
+               Map.put(control("c-1", "follow-1"), "target_stage", "implement")
+             )
 
     assert_durable_control_signal(
       :acp_task_control_queued,
@@ -1377,6 +1383,44 @@ defmodule Arbor.AI.AcpTaskControlTest do
              )
 
     assert_receive {:managed_control, %{"task_id" => "task-1", "control_id" => "managed-1"}}
+  end
+
+  test "extra target_stage does not select session or change control identity" do
+    registry = :"task_control_stage_registry_#{System.unique_integer([:positive])}"
+    start_supervised!({SessionRegistry, name: registry})
+
+    assert {:ok, _} =
+             SessionRegistry.register(
+               %{
+                 session_pid: self(),
+                 session_module: ControlSession,
+                 provider: :test,
+                 task_id: "task-1",
+                 principal_id: "agent-1"
+               },
+               server: registry
+             )
+
+    control = %{
+      "control_id" => "managed-stage-1",
+      "message" => "continue",
+      "task_id" => "task-1",
+      "target_stage" => "implement"
+    }
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AI.acp_managed_deliver_task_control("task-1", "agent-1", control, server: registry)
+
+    assert_receive {:managed_control, delivered}
+    assert delivered["control_id"] == "managed-stage-1"
+    assert delivered["task_id"] == "task-1"
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AI.acp_managed_deliver_task_control("task-1", "agent-1", control, server: registry)
+
+    assert_receive {:managed_control, replayed}
+    assert replayed["control_id"] == "managed-stage-1"
+    assert replayed["task_id"] == "task-1"
   end
 
   test "capability reporting defaults to follow-up and permits explicit operator declaration" do

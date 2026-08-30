@@ -891,6 +891,81 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:steer_task_called, _, _, _, _}, 50
   end
 
+  test "next_stage HOLB blocks later initial delivery until the held control is promoted", %{
+    supervisor: supervisor
+  } do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn control, call_count ->
+         cond do
+           control["sequence"] == 1 and call_count == 1 ->
+             {:ok, :queued, :next_stage}
+
+           control["sequence"] == 1 and call_count == 2 ->
+             {:ok, :queued, :same_session_follow_up}
+
+           control["sequence"] == 1 ->
+             {:ok, :same_session_follow_up}
+
+           control["sequence"] == 2 and call_count == 1 ->
+             {:ok, :queued, :same_session_follow_up}
+
+           true ->
+             {:ok, :same_session_follow_up}
+         end
+       end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 20
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, first} =
+             TaskStore.steer(task_id, "implement later",
+               name: store,
+               target_stage: "implement"
+             )
+
+    assert first["target_stage"] == "implement"
+    assert first["delivery_mode"] == "next_stage"
+
+    assert {:ok, second} = TaskStore.steer(task_id, "design refine", name: store)
+    assert second["control_id"] != first["control_id"]
+    assert second["message"] == "design refine"
+    assert second["delivery_mode"] == nil
+    assert steer_call_count_for(second["control_id"]) == 0
+
+    assert_eventually(fn ->
+      first_updated = get_control(store, task_id, first["control_id"])
+      assert first_updated["delivery_mode"] == "same_session_follow_up"
+      assert first_updated["status"] == "queued"
+      assert first_updated["control_id"] == first["control_id"]
+      assert first_updated["message"] == "implement later"
+      assert first_updated["target_stage"] == "implement"
+    end)
+
+    assert_eventually(fn ->
+      assert steer_call_count_for(second["control_id"]) >= 1
+      second_updated = get_control(store, task_id, second["control_id"])
+      assert second_updated["delivery_mode"] == "same_session_follow_up"
+    end)
+
+    assert_eventually(fn ->
+      first_updated = get_control(store, task_id, first["control_id"])
+      second_updated = get_control(store, task_id, second["control_id"])
+      assert first_updated["status"] == "delivered"
+      assert second_updated["status"] == "delivered"
+    end)
+  end
+
   test "same_session_follow_up queued acceptance is once with same-id confirmation", %{
     supervisor: supervisor
   } do
@@ -2845,6 +2920,66 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert count == 4
   end
 
+  test "two-control FIFO: confirmation retries exhaustion of control 1 advances control 2",
+       %{supervisor: supervisor} do
+    fresh_steer_call_counter()
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:steer_fn,
+       fn control, call_count ->
+         cond do
+           control["sequence"] == 1 and call_count == 1 ->
+             {:ok, :queued, :next_stage}
+
+           control["sequence"] == 1 ->
+             {:error, :transport_down}
+
+           control["sequence"] == 2 and call_count == 1 ->
+             {:ok, :queued, :next_stage}
+
+           true ->
+             {:ok, :next_stage}
+         end
+       end}
+    )
+
+    store =
+      start_configured_steering_store(supervisor,
+        steer_confirmation_delay_ms: 10,
+        max_steering_confirmations: 3
+      )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, first} = TaskStore.steer(task_id, "exhaust confirmations", name: store)
+    assert first["sequence"] == 1
+    assert first["delivery_mode"] == "next_stage"
+
+    assert {:ok, second} = TaskStore.steer(task_id, "after exhausted hold", name: store)
+    assert second["sequence"] == 2
+    assert second["delivery_mode"] == nil
+    assert steer_call_count_for(second["control_id"]) == 0
+
+    assert_eventually(fn ->
+      first_updated = get_control(store, task_id, first["control_id"])
+      assert first_updated["status"] == "delivery_unconfirmed"
+      assert first_updated["error"] == "confirmation_retries_exhausted"
+      assert first_updated["delivered_at"] == nil
+    end)
+
+    assert_eventually(fn ->
+      second_updated = get_control(store, task_id, second["control_id"])
+      assert second_updated["status"] == "delivered"
+      assert second_updated["delivered_at"] != nil
+    end)
+
+    assert steer_call_count_for(first["control_id"]) == 4
+    assert steer_call_count_for(second["control_id"]) >= 2
+  end
+
   test "still-queued confirmations can exceed the operational confirmation-error budget and later deliver",
        %{
          supervisor: supervisor
@@ -3018,21 +3153,19 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, first} = TaskStore.steer(task_id, "first", name: store)
     assert first["sequence"] == 1
     assert first["status"] == "queued"
+    assert first["delivery_mode"] == "next_stage"
 
     assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
     assert second["sequence"] == 2
     assert second["status"] == "queued"
+    assert second["delivery_mode"] == nil
+    assert steer_call_count_for(second["control_id"]) == 0
 
-    # While control 1 is still being confirmed (3 still-queued responses + 1 delivered),
-    # control 2 should receive only its initial delivery call (count == 1).
+    # While control 1 is held at next_stage, control 2 is not initially delivered.
     assert_eventually(fn ->
       first_updated = get_control(store, task_id, first["control_id"])
       assert first_updated["status"] == "delivered"
     end)
-
-    # Control 2 was NOT confirmed while control 1 was unresolved.
-    second_count_while_blocked = steer_call_count_for(second["control_id"])
-    assert second_count_while_blocked == 1
 
     # After control 1 resolves, control 2's confirmation starts.
     assert_eventually(fn ->
@@ -3082,10 +3215,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
     assert second["sequence"] == 2
     assert second["status"] == "queued"
-
-    # Control 2 is NOT confirmed while control 1 is unresolved.
-    second_count_while_blocked = steer_call_count_for(second["control_id"])
-    assert second_count_while_blocked == 1
+    assert second["delivery_mode"] == nil
+    assert steer_call_count_for(second["control_id"]) == 0
 
     # Control 1 cycles through accept -> confirm not_delivered -> replay -> accept -> confirm delivered.
     assert_eventually(fn ->
@@ -3140,6 +3271,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
     assert second["sequence"] == 2
+    assert steer_call_count_for(second["control_id"]) == 0
 
     # Control 1 terminalizes as delivery_unconfirmed after replay returns delivery_unknown.
     assert_eventually(fn ->
@@ -3206,6 +3338,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert {:ok, second} = TaskStore.steer(task_id, "after cycle", name: store)
     assert second["sequence"] == 2
+    assert steer_call_count_for(second["control_id"]) == 0
 
     # Control 1 exhausts its replay budget and terminalizes.
     assert_eventually(fn ->
@@ -4259,7 +4392,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_received {:configured_executor, _, _, _, _}
   end
 
-  test "status projects only current_step and waiting_on from task_status/2", %{
+  test "status projects only current_step, waiting_on, and worker_phase from task_status/2", %{
     supervisor: supervisor
   } do
     Application.put_env(:arbor_agent, :task_executors, %{
@@ -4269,6 +4402,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     Application.put_env(:arbor_agent, :task_store_test_progress, %{
       "current_step" => "validating",
       "waiting_on" => "approval_9",
+      "worker_phase" => "design",
       "task_id" => "forged_task",
       "state" => "done",
       "started_at" => "forged",
@@ -4303,6 +4437,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.agent_id == "agent_1"
     assert status.current_step == "validating"
     assert status.waiting_on == "approval_9"
+    assert status.worker_phase == "design"
     assert status.metadata == %{"ticket" => "P-1"}
     assert %DateTime{} = status.started_at
     assert %DateTime{} = status.updated_at

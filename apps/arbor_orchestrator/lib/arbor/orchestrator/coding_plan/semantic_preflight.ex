@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   is correct for directed graphs that contain cycles.
   """
 
+  alias Arbor.Orchestrator.CodingPlan.WorkerPhaseCore
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
 
@@ -2631,8 +2632,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     errors
     |> check_design_checkpoint_writers(graph)
+    |> check_worker_phase_derivation_nodes(graph)
     |> check_design_checkpoint_prompts(graph, checkpoint)
     |> check_design_checkpoint_topology(graph, checkpoint.policy, rework_max_cycles)
+  end
+
+  defp check_worker_phase_derivation_nodes(errors, graph) do
+    expected = Enum.sort(WorkerPhaseCore.derivation_nodes())
+    missing = Enum.reject(expected, &Map.has_key?(graph.nodes, &1))
+
+    if missing == [] do
+      errors
+    else
+      [
+        error("worker_phase_derivation_nodes_missing", nil, %{
+          "expected_nodes" => expected,
+          "missing_nodes" => missing
+        })
+        | errors
+      ]
+    end
   end
 
   defp require_design_checkpoint_node_attrs(errors, graph, node_id, expected) do

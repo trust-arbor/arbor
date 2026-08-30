@@ -470,7 +470,10 @@ defmodule Arbor.Gateway.MCP.Handler do
             },
             target_stage: %{
               type: "string",
-              description: "Optional executor-specific target stage"
+              description:
+                "Optional scheduling eligibility predicate for when the control may " <>
+                  "be delivered; it does not change task, principal, capability, " <>
+                  "workspace, or session authority"
             }
           },
           required: ["task_id", "message"]

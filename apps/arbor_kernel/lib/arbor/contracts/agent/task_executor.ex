@@ -32,10 +32,10 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Configured executors may implement `task_status/2` and `cancel_task/2`.
   TaskStore best-effort calls them for configured (non-override) executors:
 
-  - `task_status/2` may project only `current_step` and `waiting_on` onto the
-    outer status view while the task is running. Non-JSON progress or invalid
-    field values are ignored; outer ids/state/timestamps/metadata are never
-    overridden.
+  - `task_status/2` may project only `current_step`, `waiting_on`, and
+    `worker_phase` onto the outer status view while the task is running.
+    Non-JSON progress or invalid field values are ignored; outer
+    ids/state/timestamps/metadata are never overridden.
   - `cancel_task/2` is invoked before the existing cancel-turn bridge and hard
     kill; callback errors/exits/timeouts never block cancellation completion
 
@@ -220,9 +220,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   @typedoc """
   Best-effort progress projection from a configured executor.
 
-  JSON-clean string-keyed map. Only `"current_step"` and `"waiting_on"`
-  (string or nil) are merged into the outer TaskStore status view. Outer ids,
-  state, timestamps, and metadata are never overridden.
+  JSON-clean string-keyed map. Only `"current_step"`, `"waiting_on"`, and
+  `"worker_phase"` (string or nil) are merged into the outer TaskStore status
+  view. Outer ids, state, timestamps, and metadata are never overridden.
   """
   @type progress :: json_map()
 
@@ -314,7 +314,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
 
   Called by TaskStore while the outer task is `:running`. Must accept the same
   JSON-clean context passed to `run/3`. Return a JSON-clean progress map; only
-  `current_step` and `waiting_on` are projected onto the outer status.
+  `current_step`, `waiting_on`, and `worker_phase` are projected onto the outer
+  status.
   """
   @callback task_status(agent_id(), execution_context()) ::
               {:ok, progress()} | {:error, term()}

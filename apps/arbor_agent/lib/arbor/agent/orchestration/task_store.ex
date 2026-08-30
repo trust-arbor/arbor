@@ -193,6 +193,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   @type task_status :: %{
           optional(:outcome) => map(),
+          optional(:worker_phase) => String.t() | nil,
           task_id: task_id(),
           agent_id: String.t(),
           state: state_name(),
@@ -818,6 +819,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   accepted control is confirmed delivered, the control enters the terminal
   `"delivery_unconfirmed"` state. Initial delivery, confirmation-error, and
   replay budgets are independent; FIFO ordering is enforced by the store.
+  An accepted `"next_stage"` control is executor-owned but not ACP-visible
+  and head-of-line blocks later initial deliveries until it leaves
+  `"next_stage"`.
 
   ## Hot-state upgrade compatibility
 
@@ -11705,10 +11709,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:confirmed_delivered, mode} ->
         state
         |> accept_control(record.task_id, control["control_id"], "delivered", mode)
-        |> advance_confirmation(record.task_id)
+        |> continue_after_resolved_control(record.task_id)
 
-      :still_queued ->
-        schedule_next_confirmation(state, record.task_id, control["control_id"])
+      {:still_queued, mode} ->
+        confirm_still_queued(state, record.task_id, control["control_id"], mode)
 
       {:confirm_deferred, error} ->
         defer_confirmation(state, record.task_id, control["control_id"], error)
@@ -11719,7 +11723,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:terminalize, error} ->
         state
         |> terminalize_as_unconfirmed(record.task_id, control["control_id"], error)
-        |> advance_confirmation(record.task_id)
+        |> continue_after_resolved_control(record.task_id)
     end
   end
 
@@ -11729,7 +11733,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         {:confirmed_delivered, mode}
 
       {:ok, :queued, mode} when mode in @delivery_modes ->
-        :still_queued
+        {:still_queued, mode}
 
       {:error, :not_delivered} ->
         :positive_nondelivery
@@ -11760,6 +11764,57 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   # retries, tracked in a separate counter (`queued_confirmations`) so
   # repeated still-queued observations cannot exhaust or interact with the
   # operational-failure budget.
+  #
+  # `next_stage` is executor-accepted but not ACP-visible. Persist the latest
+  # mode (bookkeeping only) so a later ACP accept (`same_session_follow_up`)
+  # lifts head-of-line blocking and later controls may start initial delivery.
+  defp confirm_still_queued(state, task_id, control_id, mode) do
+    state = persist_delivery_mode(state, task_id, control_id, mode)
+
+    state =
+      if mode == :next_stage do
+        state
+      else
+        advance_mailbox(state, task_id)
+      end
+
+    schedule_next_confirmation(state, task_id, control_id)
+  end
+
+  defp persist_delivery_mode(state, task_id, control_id, mode)
+       when mode in @delivery_modes do
+    mode_string = Atom.to_string(mode)
+    record = Map.fetch!(state.tasks, task_id)
+    control = find_control(record, control_id)
+
+    if is_map(control) and control["delivery_mode"] == mode_string do
+      state
+    else
+      update_control(state, task_id, control_id, fn value ->
+        Map.put(value, "delivery_mode", mode_string)
+      end)
+    end
+  end
+
+  # After a held or confirmed control leaves the mailbox head, start later
+  # unaccepted controls and arm confirmation for an already-accepted successor
+  # that was blocked from `maybe_schedule_confirmation/3` while a predecessor
+  # was first_confirmable. Do not double-arm a control that advance_mailbox
+  # just accepted as queued (that path already scheduled confirmation).
+  defp continue_after_resolved_control(state, task_id) do
+    prior = first_confirmable_control(Map.fetch!(state.tasks, task_id))
+    state = advance_mailbox(state, task_id)
+    now = first_confirmable_control(Map.fetch!(state.tasks, task_id))
+
+    if is_binary(now) and now == prior do
+      record = Map.fetch!(state.tasks, task_id)
+      attempts = Map.get(record.queued_confirmations, now, 0)
+      schedule_confirmation(state, task_id, now, attempts)
+    else
+      state
+    end
+  end
+
   defp schedule_next_confirmation(state, task_id, control_id) do
     record = Map.fetch!(state.tasks, task_id)
     attempts = Map.get(record.queued_confirmations, control_id, 0) + 1
@@ -11800,7 +11855,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     else
       state
       |> terminalize_as_unconfirmed(task_id, control_id, "confirmation_retries_exhausted")
-      |> advance_confirmation(task_id)
+      |> continue_after_resolved_control(task_id)
     end
   end
 
@@ -11830,7 +11885,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     else
       state
       |> terminalize_as_unconfirmed(task_id, control_id, "replay_exhausted")
-      |> advance_confirmation(task_id)
+      |> continue_after_resolved_control(task_id)
     end
   end
 
@@ -11927,13 +11982,33 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     do: Enum.find(record.controls, &(&1["control_id"] == control_id))
 
   defp first_pending_control(record) do
-    record.controls
-    |> Enum.find(&deliverable_control?(record, &1))
+    Enum.reduce_while(record.controls, :open, fn control, :open ->
+      cond do
+        held_future_stage?(record, control) ->
+          {:halt, nil}
+
+        deliverable_control?(record, control) ->
+          {:halt, control["control_id"]}
+
+        true ->
+          {:cont, :open}
+      end
+    end)
     |> case do
-      nil -> nil
-      control -> control["control_id"]
+      :open -> nil
+      other -> other
     end
   end
+
+  defp held_future_stage?(record, %{
+         "status" => "queued",
+         "control_id" => control_id,
+         "delivery_mode" => "next_stage"
+       }) do
+    MapSet.member?(record.accepted_control_ids, control_id)
+  end
+
+  defp held_future_stage?(_record, _control), do: false
 
   defp deliverable_control?(_record, %{"status" => "deferred"}), do: true
 
@@ -12944,6 +13019,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               status
               |> put_projected_field(:current_step, clean_progress)
               |> put_projected_field(:waiting_on, clean_progress)
+              |> put_projected_field(:worker_phase, clean_progress)
 
             {:error, _} ->
               status

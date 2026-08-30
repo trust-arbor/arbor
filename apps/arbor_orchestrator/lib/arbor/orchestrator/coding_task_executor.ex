@@ -96,11 +96,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     Readiness,
     ReadinessCore,
     SemanticPreflight,
+    SteeringEligibilityCore,
     TaskTerminalArchiveCore,
     TerminalReclassifyCore,
     ValidationCapacityTerminal,
     ValidationProgram,
-    CodingRunRecoveryCore
+    CodingRunRecoveryCore,
+    WorkerPhaseCore
   }
 
   alias Arbor.Orchestrator.CodingRunRecovery
@@ -568,8 +570,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @doc """
   Project JSON-clean progress for TaskStore from PipelineStatus.
 
-  Returns only `current_step` and `waiting_on` (string or nil). Never returns
-  PIDs or RunState structs.
+  Returns `current_step`, `waiting_on`, and semantic `worker_phase` (string
+  or nil). `worker_phase` is derived from Engine-owned completed-node
+  milestones, not from `current_node`. Never returns PIDs or RunState structs.
   """
   @impl true
   @spec task_status(String.t(), map() | keyword()) ::
@@ -631,7 +634,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   - `{:ok, mode}` — delivered immediately. TaskStore sets `delivered_at`.
   - `{:ok, :queued, mode}` — accepted only. TaskStore confirms by calling
-    `steer_task/3` again with the same control.
+    `steer_task/3` again with the same control. `:next_stage` means the
+    control is task-owned but not handed to ACP until PipelineStatus
+    completed-node milestones prove an eligible worker phase.
   - `{:error, :not_delivered}` — positive nondelivery. During confirmation,
     TaskStore clears accepted ownership and triggers a bounded same-ID replay.
     During initial delivery or replay delivery it is retryable (bounded by the
@@ -658,9 +663,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_steering_agent_id(agent_id),
          {:ok, control_data} <- validate_steering_control(control),
          {:ok, exec_ctx} <- validate_context(context),
-         :ok <- ensure_same_task(control_data.task_id, exec_ctx.task_id),
-         {:ok, managed_control} <- build_managed_control(control_data) do
-      deliver_managed_control(control_data.task_id, agent_id, managed_control)
+         :ok <- ensure_same_task(control_data.task_id, exec_ctx.task_id) do
+      case SteeringEligibilityCore.decide(
+             control_data.target_stage,
+             worker_phase_for_task(exec_ctx.task_id)
+           ) do
+        :ineligible ->
+          {:ok, :queued, :next_stage}
+
+        :eligible ->
+          with {:ok, managed_control} <- build_managed_control(control_data) do
+            deliver_managed_control(control_data.task_id, agent_id, managed_control)
+          end
+      end
     end
   end
 
@@ -5900,8 +5915,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         true -> nil
       end
 
-    %{"current_step" => current_step, "waiting_on" => waiting_on}
+    %{
+      "current_step" => current_step,
+      "waiting_on" => waiting_on,
+      "worker_phase" =>
+        WorkerPhaseCore.to_status(WorkerPhaseCore.project(completed_nodes_from_entry(entry)))
+    }
   end
+
+  defp worker_phase_for_task(task_id) do
+    entry =
+      try do
+        Config.pipeline_status_module().get(task_id)
+      rescue
+        _exception -> :unknown_status
+      catch
+        _kind, _reason -> :unknown_status
+      end
+
+    WorkerPhaseCore.project(completed_nodes_from_entry(entry))
+  end
+
+  defp completed_nodes_from_entry(entry) when is_map(entry) and not is_struct(entry) do
+    WorkerPhaseCore.admit_completed_nodes(
+      Map.get(entry, :completed_nodes, Map.get(entry, "completed_nodes"))
+    )
+  end
+
+  defp completed_nodes_from_entry(_entry), do: []
 
   # ===========================================================================
   # JSON cleanliness helpers (result adaptation only)
