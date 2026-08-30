@@ -88,7 +88,14 @@ not pick capability ids or the `task_id`.
 - A clean clone of the Arbor umbrella you intend to change. That path must
   sit inside the configured coding repo roots.
 - Disk space for isolated worktrees. In `MIX_ENV=dev`, Arbor creates
-  `$TMPDIR/arbor-coding-worktrees` automatically.
+  `$TMPDIR/arbor-coding-worktrees` automatically. On hosts where `/tmp` is
+  a small tmpfs (Arch/Omarchy: 8 GB with a user quota), worktrees and
+  validation captures fail with `:edquot`; put
+  `TMPDIR=/home/<user>/.arbor/tmp` in the repo's `.env` before
+  `arbor.start` (every factory root derives from `System.tmp_dir!()`).
+- The ACP worker CLI the plan names (`cursor-agent`, `claude`, `codex`, …)
+  installed on **this** host and logged in for the operator's account.
+  Readiness reports `acp_health: acp_health_degraded` until it is.
 
 ### Arbor runtime
 
@@ -240,6 +247,18 @@ Copy the printed `agent_...` id. That is the only valid `agent_id` for
 dispatch.
 
 ### Caller grants
+
+Order matters: the key must be registered on the live node (previous
+section — otherwise every signed call is `401 … signature rejected`,
+`:unknown_agent` in the gateway log) **and** the caller must already hold
+`arbor://agent/dispatch` before the loop can run readiness at all. Without
+that first grant the task prints `coding grant: malformed_report` with
+`rounds: 1`, because an unauthorized caller gets no authority horizon to
+read. Grant it once on the live node:
+
+```bash
+./bin/mix arbor.rpc 'Arbor.Security.grant(principal: "agent_<caller_from_key_file>", resource: "arbor://agent/dispatch")'
+```
 
 Close the authority-horizon loop with the Mix task. It runs coding dispatch
 readiness for the plan against the coordinator, grants the capability URIs
@@ -393,16 +412,28 @@ substitute identity for dispatch.
 
 Do these once per machine / identity.
 
-1. `./bin/mix arbor.setup` then `./bin/mix arbor.start`.
+1. `./bin/mix arbor.setup` then `./bin/mix arbor.start` (set `TMPDIR` in
+   `.env` first if `/tmp` is a small tmpfs — see Host).
 2. Confirm `http://localhost:4000/mcp` and `http://localhost:4001`.
-3. Register an external agent (or generate `~/.arbor/identity.key`) and
-   `chmod 600` the key file.
-4. Start a `coding_agent` coordinator and record its `agent_id`.
-5. Grant `arbor://agent/dispatch` to the caller. Grant any readiness-named
-   horizon URIs the same way.
-6. Complete Arbor-owned xAI device login on the live node (`./bin/mix arbor.login xai`).
-7. Point the MCP host at `./bin/mix arbor.signer` with absolute paths.
-8. `arbor_status` with `component: "agents"` — you should see the
+3. Validation runtime: pull the pinned base image, then
+   `./bin/mix arbor.baseline.build`, `arbor.baseline.activate <digest>`,
+   `arbor.restart`, and confirm `arbor.baseline.status` shows
+   `image_reachable=true`. A build that fails with only
+   `image_build_failed` almost always means the base image was not pulled
+   (`--pull=never`); the build's own output is not shown yet.
+4. Register an external agent (or generate `~/.arbor/identity.key`),
+   `chmod 600` the key file, and **register that key on the live node**
+   (Operator identity — the `register_identity` snippet).
+5. Start a `coding_agent` coordinator and record its `agent_id` from the
+   `Started agent … (agent_…)` line.
+6. Grant `arbor://agent/dispatch` to the caller, then run
+   `./bin/mix arbor.coding.grant` for the plan until it names nothing.
+7. Log the worker CLI in on this host (`cursor-agent login`, `claude`, …)
+   and complete the Arbor-owned provider logins on the live node
+   (`./bin/mix arbor.login xai`, `arbor.login openai`; `arbor.login status`
+   should show `ready`).
+8. Point the MCP host at `./bin/mix arbor.signer` with absolute paths.
+9. `arbor_status` with `component: "agents"` — you should see the
    coordinator.
 
 ## First run
@@ -447,6 +478,17 @@ ssh user@factory-host 'cd /absolute/path/to/arbor && \
 
 Do not add a second transport. Signed MCP and this Mix command are the
 two supported operator paths.
+
+Two remote-operation traps (2026-08-29):
+
+- Keep the approval watcher **on the factory host** (`nohup`/`tmux`), not in
+  your SSH session — a dropped connection mid-run leaves the task waiting at
+  a gate with nobody to answer it.
+- Arch/Omarchy hosts ship an nftables rule that rejects more than five new
+  connections per second per source with `admin-prohibited`, which your
+  client shows as `ssh: Connection refused` for about a minute. Poll no
+  faster than once a second, or multiplex (`ControlMaster auto` in
+  `~/.ssh/config`) so polling reuses one connection.
 
 Use a tiny, reversible packet. The point is to prove admission, worker
 launch, validation, and review — not to land a feature.
@@ -558,7 +600,7 @@ Call `arbor_coding_dispatch_readiness` with the **exact** `agent_id`,
 | `readiness` | Meaning |
 | --- | --- |
 | `ready` | Admission planes look healthy at snapshot time |
-| `degraded` | Admission may still succeed; inspect `readiness.planes` |
+| `degraded` | Admission may still succeed; inspect `readiness.planes`. A healthy dev host commonly shows `acp_health_degraded` (worker CLI evidence unconfirmed), `validation_capacity_unavailable` (no capacity observer in dev) and `review_panel_degraded` (some council providers not logged in) and still dispatches |
 | `blocked` | At least one plane will refuse (missing authority, bad roots, template drift) |
 | `error` | A plane projection failed; not a transport error |
 
