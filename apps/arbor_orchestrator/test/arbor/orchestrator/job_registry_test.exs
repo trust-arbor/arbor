@@ -8,7 +8,13 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
   @store_name :arbor_orchestrator_jobs
 
   setup do
-    # Clear the store
+    clear_store()
+    on_exit(fn -> clear_store() end)
+
+    :ok
+  end
+
+  defp clear_store do
     case Arbor.Persistence.BufferedStore.list(name: @store_name) do
       {:ok, keys} ->
         Enum.each(keys, fn key ->
@@ -18,8 +24,6 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       _ ->
         :ok
     end
-
-    :ok
   end
 
   # Helper to insert an entry directly into the BufferedStore
