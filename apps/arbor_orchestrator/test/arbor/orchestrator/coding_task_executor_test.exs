@@ -62,7 +62,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                Application.get_env(:arbor_orchestrator, :coding_executor_final_context) ||
                  default_context(engine_opts),
              completed_nodes: [],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -93,6 +93,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     defp default_context(opts) do
       iv = Keyword.get(opts, :initial_values, %{})
 
+      tree = String.duplicate("a", 40)
+
       %{
         "status" => "change_committed",
         "branch" => "arbor/coding-agent/test",
@@ -101,6 +103,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "worktree_path" => "/tmp/ws_test",
         "workspace_id" => "ws_1",
         "worker_session_id" => "worker_1",
+        "coding_plan_validation_program" => Map.get(iv, "coding_plan_validation_program"),
+        "validation_candidate_tree_oid" => tree,
+        "validation_observed_at" => "2026-07-22T12:00:00.000Z",
+        "validation" => %{
+          "path" => "/owner/worktree",
+          "exit_code" => 0,
+          "passed" => true,
+          "reason" => nil,
+          "stdout" => "compile output",
+          "stderr" => "",
+          "feedback" => %{
+            "exit_code" => 0,
+            "passed" => true,
+            "stdout_excerpt" => "ignored output",
+            "stderr_excerpt" => "",
+            "stdout_truncated" => false,
+            "stderr_truncated" => false,
+            "stdout_sha256" => String.duplicate("c", 64),
+            "stderr_sha256" => String.duplicate("d", 64)
+          },
+          "feedback_json" => "ignored raw feedback",
+          "validated_tree_oid" => tree,
+          "validated_head" => String.duplicate("b", 40),
+          "termination" => nil
+        },
         "worker" => %{
           "worker_session_id" => "worker_1",
           "provider" => Map.get(iv, "acp_agent", "codex"),
@@ -156,6 +183,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         terminal_envelope,
         controls
       )
+    end
+
+    def read_task_compilation(base, task_id) do
+      case Process.get(:coding_executor_read_task_compilation_reply) do
+        nil ->
+          Arbor.Orchestrator.CodingPlan.ArtifactStore.read_task_compilation(base, task_id)
+
+        reply ->
+          reply
+      end
+    end
+
+    def read_task_terminal(root, task_id) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.read_task_terminal(root, task_id)
+    end
+
+    def read_descriptor_bounded_file(path, max_bytes) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.read_descriptor_bounded_file(path, max_bytes)
     end
 
     def archive_adoption_evidence(root, task_id, candidate, proof) do
@@ -474,6 +519,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule MutatingArchivedArtifactStore do
     @moduledoc false
 
+    defdelegate read_descriptor_bounded_file(path, max_bytes), to: ArtifactStore
+
     def archive(root, plan, dot_source, manifest) do
       {:ok, descriptor} =
         Arbor.Orchestrator.CodingTaskExecutorTest.FakeArtifactStore.archive(
@@ -511,6 +558,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defmodule InvalidTerminalArtifactStoreReply do
     @moduledoc false
+
+    defdelegate read_task_compilation(base, task_id), to: ArtifactStore
+    defdelegate read_descriptor_bounded_file(path, max_bytes), to: ArtifactStore
+
     def archive_terminal_evidence(_root, _task_id, _result, _controls),
       do: {:ok, %{"unexpected" => "reply"}}
   end
@@ -568,12 +619,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defmodule RaisingTerminalArtifactStore do
     @moduledoc false
+
+    defdelegate read_task_compilation(base, task_id), to: ArtifactStore
+    defdelegate read_descriptor_bounded_file(path, max_bytes), to: ArtifactStore
+
     def archive_terminal_evidence(_root, _task_id, _result, _controls),
       do: raise("terminal evidence store failed")
   end
 
   defmodule InsecureTerminalArtifactStore do
     @moduledoc false
+
+    defdelegate read_task_compilation(base, task_id), to: ArtifactStore
+    defdelegate read_descriptor_bounded_file(path, max_bytes), to: ArtifactStore
 
     def archive_terminal_evidence(root, task_id, result, controls) do
       with {:ok, descriptor} <-
@@ -617,6 +675,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
            {:ok, derived} <-
              Arbor.Security.derive_secret_with_authority(authority, :coding_task_reload) do
         send(Keyword.fetch!(opts, :spawning_pid), {:reloaded_authority, authority, derived})
+        iv = Keyword.get(opts, :initial_values, %{})
+        tree = String.duplicate("a", 40)
 
         {:ok,
          %{
@@ -630,6 +690,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              "workspace_id" => "ws_reload",
              "worker_session_id" => "worker_reload",
              "worker_provider_session_id" => "provider_session_reload",
+             "coding_plan_validation_program" => Map.get(iv, "coding_plan_validation_program"),
+             "validation_candidate_tree_oid" => tree,
+             "validation_observed_at" => "2026-07-22T12:00:00.000Z",
+             "validation" => %{
+               "path" => "/owner/worktree",
+               "exit_code" => 0,
+               "passed" => true,
+               "reason" => nil,
+               "stdout" => "compile output",
+               "stderr" => "",
+               "feedback" => %{
+                 "exit_code" => 0,
+                 "passed" => true,
+                 "stdout_excerpt" => "ignored output",
+                 "stderr_excerpt" => "",
+                 "stdout_truncated" => false,
+                 "stderr_truncated" => false,
+                 "stdout_sha256" => String.duplicate("c", 64),
+                 "stderr_sha256" => String.duplicate("d", 64)
+               },
+               "feedback_json" => "ignored raw feedback",
+               "validated_tree_oid" => tree,
+               "validated_head" => String.duplicate("b", 40),
+               "termination" => nil
+             },
              "worker" => %{
                "worker_session_id" => "worker_reload",
                "provider" => "codex",
@@ -648,7 +733,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              }
            },
            completed_nodes: [],
-           final_outcome: nil,
+           final_outcome: %{status: :success},
            taint: %{},
            node_durations: %{}
          }}
@@ -716,7 +801,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         _ -> :ok
       end
 
-      :ok
+      case Process.get(:coding_executor_close_reply) do
+        nil -> :ok
+        reply -> reply
+      end
     end
 
     def close_signing_authority(other) do
@@ -841,6 +929,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
+    def get_record(run_id) do
+      case Process.get(:coding_journal_unavailable) do
+        true ->
+          {:error, :journal_unavailable}
+
+        _ ->
+          case Process.get({:coding_record, run_id}) do
+            nil -> nil
+            record -> record
+          end
+      end
+    end
+
     def mark_abandoned(run_id) do
       abandoned = Process.get(:coding_abandoned_runs, [])
       Process.put(:coding_abandoned_runs, [run_id | abandoned])
@@ -902,7 +1003,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Application.get_env(:arbor_orchestrator, :coding_executor_final_context),
       coding_auth_reply: Application.get_env(:arbor_orchestrator, :coding_auth_reply),
       coding_executor_test_observer:
-        Application.get_env(:arbor_orchestrator, :coding_executor_test_observer)
+        Application.get_env(:arbor_orchestrator, :coding_executor_test_observer),
+      coding_pipeline_resumer: Application.get_env(:arbor_orchestrator, :coding_pipeline_resumer)
     }
 
     Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, CapturingRunner)
@@ -975,6 +1077,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.delete(:coding_executor_initial_value_mutation)
     Process.delete(:coding_executor_archived_artifact_mutation)
     Process.delete(:coding_abandoned_runs)
+    Process.delete(:coding_journal_unavailable)
+    Process.delete(:coding_executor_close_reply)
+    Process.delete(:coding_executor_read_task_compilation_reply)
+    Process.delete(:coding_executor_resume_reply)
+    Process.delete(:coding_executor_last_resume)
+    Process.delete({:coding_record, "task_coding_1"})
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
     Process.delete(:coding_reconciliation_resource_inventory_reply)
@@ -1024,6 +1132,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_executor_final_context, originals.coding_executor_final_context)
       restore(:coding_auth_reply, originals.coding_auth_reply)
       restore(:coding_executor_test_observer, originals.coding_executor_test_observer)
+      restore(:coding_pipeline_resumer, originals.coding_pipeline_resumer)
       File.rm_rf(tmp_dir)
     end)
 
@@ -1109,7 +1218,47 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     do: valid_direct_task(%{"validation_profile" => profile})
 
   defp valid_context(overrides \\ %{}) do
-    Map.merge(%{"task_id" => "task_coding_1"}, overrides)
+    Map.merge(%{"task_id" => "task_coding_1", "caller_id" => "caller_test"}, overrides)
+  end
+
+  defp put_success_runner_reply(profile_id \\ "default") do
+    Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
+      iv = Keyword.get(opts, :initial_values, %{})
+      tree = @verification_tree_oid
+
+      {:ok,
+       %{
+         run_id: Keyword.get(opts, :run_id),
+         context:
+           Map.merge(completed_turn_context(), %{
+             "status" => "change_committed",
+             "branch" => "arbor/coding-agent/test",
+             "commit_hash" => "abc123def",
+             "workspace_id" => "ws_1",
+             "worker_session_id" => "worker_1",
+             "coding_plan_validation_program" => Map.get(iv, "coding_plan_validation_program"),
+             "validation_candidate_tree_oid" => tree,
+             "validation_observed_at" => @verification_observed_at,
+             "validation" => validation_result(profile_id)
+           }),
+         completed_nodes: [],
+         final_outcome: %{status: :success},
+         taint: %{},
+         node_durations: %{}
+       }}
+    end)
+  end
+
+  defp seed_matching_record!(task_id, agent_id, status \\ :interrupted) do
+    root = task_terminal_root(task_id)
+    {:ok, binding} = ArtifactStore.read_run_binding(root)
+
+    Process.put({:coding_record, task_id}, %{
+      run_id: task_id,
+      execution_principal: agent_id,
+      graph_hash: binding["graph_hash"],
+      status: status
+    })
   end
 
   defp assert_coding_admission_failed(result, expected_gate_id, expected_code) do
@@ -1186,21 +1335,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp prepare_finalize_artifacts do
-    task_id = "task_coding_1"
-    digest = Base.encode16(:crypto.hash(:sha256, task_id), case: :lower)
-    root = Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
-    File.mkdir_p!(root)
-
-    for filename <- ["coding-plan.json", "coding-pipeline.dot", "coding-compile-manifest.json"] do
-      path = Path.join(root, filename)
-      File.write!(path, "{}")
-      File.chmod!(path, 0o600)
-    end
-
-    root
+    put_success_runner_reply()
+    {:ok, result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+    Process.put(:finalize_run_result, result)
+    task_terminal_root("task_coding_1")
   end
 
   defp finalize_result(root) do
+    run_artifacts =
+      :finalize_run_result
+      |> Process.get(%{})
+      |> Map.get("artifacts", %{})
+
     %{
       "status" => "change_committed",
       "canonical_status" => "change_committed",
@@ -1222,8 +1368,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "coding_plan_path" => Path.join(root, "coding-plan.json"),
         "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
         "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
-        "graph_hash" => String.duplicate("a", 64),
-        "compiler_version" => "coding-plan-1"
+        "graph_hash" => Map.get(run_artifacts, "graph_hash", String.duplicate("a", 64)),
+        "compiler_version" => Map.get(run_artifacts, "compiler_version", "coding-plan-1")
       }
     }
   end
@@ -1332,17 +1478,83 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp maybe_add_verification_evidence(context) do
+    status = Map.get(context, "status")
+
     validation_claimed? =
-      Map.get(context, "status") in ~w(validation_failed validation_capacity_exceeded) or
+      status in ~w(validation_failed validation_capacity_exceeded) or
         Enum.any?(
           ~w(validation validation_candidate_tree_oid validation_observed_at),
           &Map.has_key?(context, &1)
         )
 
-    if validation_claimed?,
-      do: Map.merge(default_verification_evidence(), context),
-      else: context
+    cond do
+      status in ~w(change_committed pr_created) ->
+        default_verification_evidence()
+        |> Map.put("validation", default_action_result(status))
+        |> Map.merge(context)
+        |> ensure_object_validation(status)
+
+      validation_claimed? ->
+        default_verification_evidence()
+        |> Map.merge(context)
+        |> ensure_object_validation(status)
+
+      true ->
+        context
+    end
   end
+
+  defp ensure_object_validation(context, status)
+       when status in ~w(change_committed pr_created validation_failed validation_capacity_exceeded) do
+    case Map.get(context, "validation") do
+      map when is_map(map) and not is_struct(map) ->
+        context
+
+      _other ->
+        if prefixed_validation?(context) do
+          context
+        else
+          Map.put(context, "validation", default_action_result(status))
+        end
+    end
+  end
+
+  defp ensure_object_validation(context, _status), do: context
+
+  defp prefixed_validation?(context) when is_map(context) do
+    Enum.any?(context, fn
+      {key, _value} when is_binary(key) -> String.starts_with?(key, "validation.")
+      _ -> false
+    end)
+  end
+
+  defp default_action_result("validation_failed") do
+    validation_result("default")
+    |> Map.merge(%{
+      "passed" => false,
+      "exit_code" => 1,
+      "feedback" => Map.delete(validation_check(%{"passed" => false, "exit_code" => 1}), "reason")
+    })
+  end
+
+  defp default_action_result("validation_capacity_exceeded") do
+    validation_result("default")
+    |> Map.merge(%{
+      "passed" => false,
+      "exit_code" => 137,
+      "reason" => "validation_capacity_exceeded",
+      "termination" => %{
+        "timed_out" => false,
+        "killed" => true,
+        "output_limit_exceeded" => false,
+        "cancelled" => false
+      },
+      "feedback" =>
+        Map.delete(validation_check(%{"passed" => false, "exit_code" => 137}), "reason")
+    })
+  end
+
+  defp default_action_result(_status), do: validation_result("default")
 
   defp default_verification_evidence do
     %{
@@ -1728,6 +1940,553 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # Validation
   # ---------------------------------------------------------------------------
 
+  defmodule CapturingResumer do
+    @moduledoc false
+
+    def resume(task_id, opts) do
+      Process.put(:coding_executor_last_resume, {task_id, opts})
+
+      case Process.get(:coding_executor_resume_reply) do
+        nil ->
+          {:ok,
+           %{
+             run_id: task_id,
+             context:
+               %{
+                 "status" => "change_committed",
+                 "branch" => "arbor/coding-agent/resume",
+                 "commit_hash" => "resume123",
+                 "workspace_id" => "ws_resume",
+                 "worker_session_id" => "worker_1",
+                 "worker_provider_session_id" => "provider_session_1",
+                 "worker" => %{
+                   "worker_session_id" => "worker_1",
+                   "provider" => "codex",
+                   "model" => "default"
+                 },
+                 "worker_status" => %{
+                   "worker_session_id" => "worker_1",
+                   "provider" => "codex",
+                   "model" => "default",
+                   "session_id" => "provider_session_1"
+                 },
+                 "worker_msg" => %{
+                   "delivery_status" => "delivered",
+                   "stop_reason" => "end_turn",
+                   "session_id" => "provider_session_1"
+                 }
+               }
+               |> Map.merge(resume_validation_context(opts)),
+             completed_nodes: [],
+             final_outcome: %{status: :success},
+             taint: %{},
+             node_durations: %{}
+           }}
+
+        fun when is_function(fun, 2) ->
+          fun.(task_id, opts)
+
+        reply ->
+          reply
+      end
+    end
+
+    defp resume_validation_context(opts) do
+      task_id = Keyword.fetch!(opts, :task_id)
+      logs_root = Keyword.fetch!(opts, :logs_root)
+
+      {:ok, bundle} =
+        Arbor.Orchestrator.CodingPlan.ArtifactStore.read_task_compilation(
+          Path.dirname(logs_root),
+          task_id
+        )
+
+      plan = Map.fetch!(bundle, "plan")
+
+      {:ok, profile} =
+        Arbor.Orchestrator.CodingPlan.Profiles.fetch_executable(
+          Map.fetch!(plan, "validation_profile")
+        )
+
+      {:ok, program} =
+        Arbor.Orchestrator.CodingPlan.ValidationProgram.build(
+          Map.fetch!(profile, "validation_strategy"),
+          Map.fetch!(plan, "budgets")
+        )
+
+      tree = String.duplicate("a", 40)
+
+      %{
+        "coding_plan_validation_program" => program,
+        "validation_candidate_tree_oid" => tree,
+        "validation_observed_at" => "2026-07-22T12:00:00.000Z",
+        "validation" => %{
+          "path" => "/owner/worktree",
+          "exit_code" => 0,
+          "passed" => true,
+          "reason" => nil,
+          "stdout" => "compile output",
+          "stderr" => "",
+          "feedback" => %{
+            "exit_code" => 0,
+            "passed" => true,
+            "stdout_excerpt" => "ignored output",
+            "stderr_excerpt" => "",
+            "stdout_truncated" => false,
+            "stderr_truncated" => false,
+            "stdout_sha256" => String.duplicate("c", 64),
+            "stderr_sha256" => String.duplicate("d", 64)
+          },
+          "feedback_json" => "ignored raw feedback",
+          "validated_tree_oid" => tree,
+          "validated_head" => String.duplicate("b", 40),
+          "termination" => nil
+        }
+      }
+    end
+  end
+
+  describe "recover_task" do
+    @tag :security_regression
+    test "security regression: closed receipt preserves completed-turn evidence across recovery" do
+      put_success_runner_reply()
+
+      assert {:ok, original} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      root = task_terminal_root("task_coding_1")
+      assert {:ok, receipt} = ArtifactStore.read_engine_terminal(root)
+      assert receipt["delivery_state"] == "delivered"
+      assert receipt["completion_state"] == "end_turn"
+
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, recovered} =
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+
+      assert recovered["status"] == original["status"]
+      assert recovered["artifacts"] == original["artifacts"]
+      assert {:ok, :orphan} != CodingTaskExecutor.probe_recovery("agent_1", valid_context())
+
+      assert {:ok, {:recoverable, projection}} =
+               CodingTaskExecutor.probe_recovery("agent_1", valid_context())
+
+      assert projection["binding_digest"]
+      assert byte_size(projection["binding_digest"]) == 64
+      assert map_size(projection) == 10
+      assert projection["execution_principal"] == "agent_1"
+    end
+
+    @tag :security_regression
+    test "security regression: change_committed without adapter-input is rejected before public success" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      File.rm(Path.join(root, "coding-adapter-input.json"))
+      File.rm(Path.join(root, "coding-terminal-decision.json"))
+      {:ok, receipt} = ArtifactStore.read_engine_terminal(root)
+      stripped = Map.drop(receipt, ["adapter_input_digest", "decision_digest"])
+      path = Path.join(root, "coding-engine-terminal.json")
+      File.rm!(path)
+      File.write!(path, Jason.encode!(stripped))
+      File.chmod!(path, 0o600)
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      result = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      refute match?({:ok, %{"status" => "change_committed"}}, result)
+      assert match?({:error, _}, result)
+    end
+
+    test "crash-state recover uses adapter-input when task-terminal and legacy evidence are absent" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      File.rm(Path.join(root, "coding-task-terminal.json"))
+      File.rm(Path.join(root, "coding-terminal-evidence.json"))
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert recovered["status"] == original["status"]
+      assert recovered["status"] == "change_committed"
+    end
+
+    test "crash-state missing, replaced, tampered, or oversized adapter-input fails closed" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      File.rm(Path.join(root, "coding-task-terminal.json"))
+      File.rm(Path.join(root, "coding-terminal-evidence.json"))
+      seed_matching_record!("task_coding_1", "agent_1")
+      adapter_path = Path.join(root, "coding-adapter-input.json")
+
+      File.rm!(adapter_path)
+
+      refute match?(
+               {:ok, %{"status" => "change_committed"}},
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+             )
+
+      put_success_runner_reply()
+      File.rm_rf!(root)
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      File.rm(Path.join(root, "coding-task-terminal.json"))
+      seed_matching_record!("task_coding_1", "agent_1")
+      File.write!(adapter_path, String.duplicate("x", 100))
+      File.chmod!(adapter_path, 0o600)
+
+      refute match?(
+               {:ok, %{"status" => "change_committed"}},
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+             )
+    end
+
+    test "recovers graph/domain failure through the canonical adapter" do
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
+        {:ok,
+         %{
+           run_id: Keyword.get(opts, :run_id),
+           context: %{"status" => "pipeline_error", "error" => "graph_domain"},
+           completed_nodes: ["validate"],
+           final_outcome: %{status: :fail},
+           taint: %{},
+           node_durations: %{},
+           node_failure_reasons: %{"validate" => "graph_domain"}
+         }}
+      end)
+
+      assert {:error, {:pipeline_error, original}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      root = task_terminal_root("task_coding_1")
+      assert {:ok, receipt} = ArtifactStore.read_engine_terminal(root)
+      assert receipt["coding_status"] == "pipeline_error"
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:error, {:pipeline_error, recovered}} =
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+
+      assert recovered == original
+    end
+
+    test "abandoned journal status maps to cancelled" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      File.rm!(Path.join(task_terminal_root("task_coding_1"), "coding-engine-terminal.json"))
+
+      seed_matching_record!("task_coding_1", "agent_1", :abandoned)
+
+      assert {:error, :cancelled} =
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+    end
+
+    test "duplicate recover from the same receipt is idempotent" do
+      put_success_runner_reply()
+      assert {:ok, first} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, second} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert {:ok, third} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert first["status"] == second["status"]
+      assert second["status"] == third["status"]
+    end
+
+    test "conflicting terminal CAS is not mapped to ok" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      {:ok, receipt} = ArtifactStore.read_engine_terminal(root)
+      other = Map.put(receipt, "canonical_status", "failed")
+
+      other =
+        Map.put(
+          other,
+          "idempotence_key",
+          Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore.idempotence_key(
+            receipt["task_id"],
+            receipt["run_id"],
+            receipt["graph_hash"],
+            receipt["artifact_identity"],
+            "failed"
+          )
+        )
+
+      assert {:error, :stale_or_duplicate_terminal} =
+               ArtifactStore.archive_engine_terminal(root, other)
+    end
+
+    test "planted same-task executor_result status does not replace a committed receipt" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      envelope = successful_terminal_envelope("task_coding_1")
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_resumer, CapturingResumer)
+      Process.put(:coding_executor_resume_reply, {:error, :should_not_resume})
+
+      assert {:ok, recovered} =
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+
+      refute recovered["status"] == "no_changes"
+      assert recovered["status"] == original["status"]
+    end
+
+    test "capacity-loop restart rederives process-local opts without initial_values" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      File.rm!(Path.join(root, "coding-engine-terminal.json"))
+      seed_matching_record!("task_coding_1", "agent_1", :interrupted)
+
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_resumer, CapturingResumer)
+      Process.put(:coding_executor_resume_reply, nil)
+
+      assert {:ok, _} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert {"task_coding_1", opts} = Process.get(:coding_executor_last_resume)
+      refute Keyword.has_key?(opts, :initial_values)
+      assert opts[:execution_manifest]
+      assert opts[:execution_manifest_digest]
+      assert opts[:pinned_action_bindings]
+      assert opts[:pinned_handler_bindings]
+      assert opts[:workdir]
+      assert opts[:transcript_sink]
+      assert opts[:design_artifact_sink]
+      assert opts[:design_artifact_source]
+      assert opts[:cross_app_static_receipt_sink]
+      assert opts[:cross_app_static_receipt_source]
+      assert is_integer(opts[:timeout]) and opts[:timeout] > 0
+      assert is_integer(opts[:approval_timeout_ms]) and opts[:approval_timeout_ms] > 0
+      assert opts[:caller_id] == "caller_test"
+    end
+
+    test "probe treats binding mismatch as an authoritative orphan" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, :orphan} =
+               CodingTaskExecutor.probe_recovery("agent_other", valid_context())
+    end
+
+    test "journal transport outage is unavailable not orphan" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      Process.put(:coding_journal_unavailable, true)
+
+      assert {:error, :unavailable} =
+               CodingTaskExecutor.probe_recovery("agent_1", valid_context())
+    end
+
+    test "normal recover close failure is not treated as success" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      File.rm!(Path.join(task_terminal_root("task_coding_1"), "coding-engine-terminal.json"))
+      seed_matching_record!("task_coding_1", "agent_1", :interrupted)
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_resumer, CapturingResumer)
+      Process.put(:coding_executor_close_reply, {:error, :forced_close_failure})
+
+      assert {:error, {:authority_close_failed, :forced_close_failure, :resume_succeeded}} =
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+
+      inspected =
+        inspect(
+          {:authority_close_failed, :forced_close_failure, :resume_succeeded},
+          limit: :infinity,
+          printable_limit: :infinity
+        )
+
+      refute inspected =~ "final_outcome"
+      refute inspected =~ "verification_report"
+      refute inspected =~ "SigningAuthority"
+    end
+
+    @tag :security_regression
+    test "security regression: reviewed terminal with dropped non-JSON producer cannot become not_applicable success" do
+      dropped = self()
+
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
+        {:ok,
+         %{
+           run_id: Keyword.get(opts, :run_id),
+           context:
+             Map.merge(completed_turn_context(), %{
+               "status" => "human_review_required",
+               "canonical_status" => "human_review_required",
+               "coding_plan_validation_program" => dropped,
+               "branch" => "arbor/coding-agent/test",
+               "commit_hash" => "abc123def",
+               "workspace_id" => "ws_1",
+               "worker_session_id" => "worker_1"
+             }),
+           completed_nodes: [],
+           final_outcome: %{status: :success},
+           taint: %{},
+           node_durations: %{}
+         }}
+      end)
+
+      run_result = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      refute match?({:ok, %{"status" => "human_review_required"}}, run_result)
+      refute match?({:ok, %{"canonical_status" => "human_review_required"}}, run_result)
+
+      root = task_terminal_root("task_coding_1")
+
+      case ArtifactStore.read_terminal_decision(root) do
+        {:error, _} ->
+          :ok
+
+        {:ok, decision} ->
+          refute decision["validation_requirement"] == "not_applicable"
+      end
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      recover_result = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      refute match?({:ok, %{"status" => "human_review_required"}}, recover_result)
+      refute match?({:ok, %{"canonical_status" => "human_review_required"}}, recover_result)
+    end
+
+    @tag :security_regression
+    test "security regression: valid-JSON adapter tamper fails closed" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      File.rm(Path.join(root, "coding-task-terminal.json"))
+      seed_matching_record!("task_coding_1", "agent_1")
+      path = Path.join(root, "coding-adapter-input.json")
+      {:ok, adapter} = ArtifactStore.read_adapter_input(root)
+      tampered = put_in(adapter, ["action_result", "passed"], false)
+      File.rm!(path)
+      File.write!(path, Jason.encode!(tampered))
+      File.chmod!(path, 0o600)
+
+      refute match?(
+               {:ok, %{"status" => "change_committed"}},
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+             )
+    end
+
+    test "recovered public success includes a verification_report not an archive payload" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert recovered["status"] == original["status"]
+      assert is_map(recovered["verification_report"])
+    end
+
+    test "partial validation evidence on a reviewed terminal fails closed" do
+      binding_fields = ["program_digest"]
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+      {:ok, decision} = ArtifactStore.read_terminal_decision(root)
+
+      partial =
+        decision
+        |> Map.put("canonical_status", "human_review_required")
+        |> Map.put("validation_requirement", "not_applicable")
+        |> Map.put("adapter_input_digest", "")
+        |> Map.put("candidate_tree_oid", "")
+        |> Map.put("observed_at", "")
+        |> Map.put("program_digest", String.duplicate("a", 64))
+
+      {:ok, digest} =
+        Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore.decision_digest(partial)
+
+      partial = Map.put(partial, "decision_digest", digest)
+      path = Path.join(root, "coding-terminal-decision.json")
+      File.rm!(path)
+      File.write!(path, Jason.encode!(partial))
+      File.chmod!(path, 0o600)
+      File.rm(Path.join(root, "coding-task-terminal.json"))
+      File.rm(Path.join(root, "coding-adapter-input.json"))
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      refute match?(
+               {:ok, _},
+               CodingTaskExecutor.recover_task("agent_1", valid_context())
+             )
+
+      _ = binding_fields
+    end
+
+    test "reviewed-none recover succeeds without adapter or injected compilation program" do
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
+        {:ok,
+         %{
+           run_id: Keyword.get(opts, :run_id),
+           context:
+             Map.merge(completed_turn_context(), %{
+               "status" => "human_review_required",
+               "canonical_status" => "human_review_required",
+               "branch" => "arbor/coding-agent/test",
+               "commit_hash" => "abc123def",
+               "workspace_id" => "ws_1",
+               "worker_session_id" => "worker_1"
+             }),
+           completed_nodes: [],
+           final_outcome: %{status: :success},
+           taint: %{},
+           node_durations: %{}
+         }}
+      end)
+
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert original["status"] == "human_review_required"
+
+      root = task_terminal_root("task_coding_1")
+      assert {:error, :not_found} = ArtifactStore.read_adapter_input(root)
+      assert {:ok, decision} = ArtifactStore.read_terminal_decision(root)
+      assert decision["validation_requirement"] == "not_applicable"
+      assert decision["program_digest"] == ""
+      assert decision["adapter_input_digest"] == ""
+      assert decision["candidate_tree_oid"] == ""
+      assert decision["observed_at"] == ""
+
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      assert recovered["status"] == "human_review_required"
+      refute Map.has_key?(recovered, "coding_plan_validation_program")
+    end
+
+    test "probe treats compilation EIO as unavailable so the marker is preserved" do
+      put_success_runner_reply()
+      assert {:ok, _} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      Process.put(:coding_executor_read_task_compilation_reply, {:error, :eio})
+
+      assert {:error, :unavailable} =
+               CodingTaskExecutor.probe_recovery("agent_1", valid_context())
+    end
+
+    test "finalize_task reconstructs sealed compilation artifacts after a real run" do
+      put_success_runner_reply()
+      assert {:ok, result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      root = task_terminal_root("task_coding_1")
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", result, [], valid_context())
+
+      assert finalized["artifacts"]["graph_hash"] == result["artifacts"]["graph_hash"]
+      assert finalized["artifacts"]["compiler_version"] == result["artifacts"]["compiler_version"]
+
+      assert {:ok, bundle} =
+               ArtifactStore.read_task_compilation(Path.dirname(root), "task_coding_1")
+
+      assert is_binary(bundle["artifact_identity"])
+      assert byte_size(bundle["artifact_identity"]) == 64
+    end
+  end
+
   describe "task/context validation" do
     test "rejects non-map and wrong-kind tasks" do
       assert_coding_admission_failed(
@@ -1910,6 +2669,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  valid_task(),
                  valid_context(%{"signer" => "evil"})
+               )
+    end
+
+    test "requires caller control principal instead of falling back to the target agent" do
+      assert {:error, :missing_control_principal} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 %{"task_id" => "task_coding_1"}
                )
     end
 
@@ -2468,25 +3236,42 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "security regression: real authority signs and derives after Security facade reload" do
       ensure_real_authority_stack!()
       {:ok, identity} = Identity.generate(name: "coding-task-reload")
+      {:ok, caller_identity} = Identity.generate(name: "coding-task-reload-caller")
+      caller_id = caller_identity.agent_id
       :ok = Security.register_identity(Identity.public_only(identity))
+      :ok = Security.register_identity(Identity.public_only(caller_identity))
       :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
-      :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
-      :ok = Arbor.Orchestrator.TestCapabilities.grant_capability(identity.agent_id, "arbor://**")
+
+      for principal <- [identity.agent_id, caller_id] do
+        assert {:ok, _capability} =
+                 Security.grant(
+                   principal: principal,
+                   resource: "arbor://**",
+                   delegation_depth: 0,
+                   constraints: %{},
+                   metadata: %{test: true}
+                 )
+      end
 
       Application.put_env(:arbor_orchestrator, :security_module, Security)
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, ReloadingRunner)
 
       on_exit(fn ->
         _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
+        _ = Arbor.Orchestrator.TestCapabilities.revoke_all(caller_id)
         _ = Security.delete_signing_key(identity.agent_id)
         _ = Security.deregister_identity(identity.agent_id)
+        _ = Security.deregister_identity(caller_id)
       end)
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
                  identity.agent_id,
                  valid_task(),
-                 valid_context(%{"task_id" => "task_reload_stable"})
+                 valid_context(%{
+                   "task_id" => "task_reload_stable",
+                   "caller_id" => caller_id
+                 })
                )
 
       assert_receive {:reloaded_authority, authority, derived}
@@ -2917,6 +3702,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       # test_stage_timeout above the 600s guaranteed reserve ceiling.
       wall_clock_ms = 4_300_000
       effective_timeout_ms = 4_300_000
+      put_success_runner_reply("cross_app")
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
@@ -2962,6 +3748,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "shorter trusted outer timeout recomputes cap and reserves with post-validation headroom" do
       wall_clock_ms = 4_300_000
       short_timeout_ms = 100_000
+      put_success_runner_reply("cross_app")
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
@@ -2999,7 +3786,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     test "security regression: authority closes after success, runner error, and timeout" do
-      assert {:ok, _result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_authority_close_success"})
+               )
+
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
 
       Process.delete(:coding_executor_closed_authorities)
@@ -3011,7 +3804,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       )
 
       assert {:error, :runner_failed} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_authority_close_runner_error"})
+               )
 
       assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
 
@@ -3022,7 +3819,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                CodingTaskExecutor.run(
                  "agent_1",
                  valid_task(),
-                 valid_context(%{"timeout" => 20})
+                 valid_context(%{
+                   "task_id" => "task_authority_close_timeout",
+                   "timeout" => 20
+                 })
                )
 
       assert timeout_detail["error"] == "pipeline_timeout"
@@ -3796,8 +4596,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
 
   describe "final context mapping" do
+    defp unique_run_task_id do
+      "task_coding_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+    end
+
     defp run_with_context(context) do
       context = maybe_add_verification_evidence(context)
+      task_id = unique_run_task_id()
 
       Application.put_env(
         :arbor_orchestrator,
@@ -3805,19 +4610,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Map.merge(completed_turn_context(), context)
       )
 
-      CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
     end
 
     defp run_with_engine_result(context, overrides \\ %{}) do
       context = maybe_add_verification_evidence(context)
+      task_id = unique_run_task_id()
 
       engine_result =
         Map.merge(
           %{
-            run_id: "task_coding_1",
+            run_id: task_id,
             context: Map.merge(completed_turn_context(), context),
             completed_nodes: [],
-            final_outcome: nil,
+            final_outcome: %{status: :success},
             taint: %{},
             node_durations: %{}
           },
@@ -3830,7 +4636,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         {:ok, engine_result}
       )
 
-      CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
     end
 
     defp run_with_g2_cross_app_verification(opts \\ []) do
@@ -3878,7 +4684,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              run_id: Keyword.fetch!(runner_opts, :run_id),
              context: context,
              completed_nodes: ["validate"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -4023,7 +4829,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
              run_id: Keyword.fetch!(opts, :run_id),
              context: context,
              completed_nodes: ["validate"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -4147,7 +4953,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                    :release_workspace => 3,
                    self() => 999
                  },
-                 final_outcome: %{rich: self()},
+                 final_outcome: %{status: :success, rich: self()},
                  taint: %{rich: make_ref()}
                })
 
@@ -4262,12 +5068,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
            %{
              run_id: Keyword.fetch!(opts, :run_id),
              context:
-               Map.merge(completed_turn_context(), %{
+               completed_turn_context()
+               |> Map.merge(default_verification_evidence())
+               |> Map.merge(%{
                  "status" => "change_committed",
-                 "worktree_path" => "/tmp/ws"
+                 "worktree_path" => "/tmp/ws",
+                 "validation" => validation_result("default")
                }),
              completed_nodes: ["start", "validate", "done"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{"start" => 0, "validate" => 19, "done" => 0}
            }}
@@ -4412,7 +5221,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert is_binary(summary["static_stage_receipt_digest"])
     end
 
-    test "malformed or oversized G2 values are omitted from the public projection" do
+    test "malformed or oversized G2 values fail closed before public projection" do
       {envelope, _receipt, _digest} = g2_completed_envelope("task_public_projection")
       envelope = Map.delete(envelope, "sealed_static_receipt")
 
@@ -4433,8 +5242,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           |> Map.new()
           |> Map.put("status", "no_changes")
 
-        assert {:ok, result} = run_with_engine_result(flat)
-        refute Map.has_key?(result, "validation")
+        assert {:error, :partial_validation_evidence} = run_with_engine_result(flat)
       end
     end
 
@@ -4674,7 +5482,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:error,
               {:invalid_terminal_evidence,
                {:missing_verification_evidence, "coding_plan_validation_program"}}} =
-               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => unique_run_task_id()})
+               )
 
       for {field, malformed, expected} <- [
             {"coding_plan_validation_program", %{}, :invalid_validation_program},
@@ -4690,7 +5502,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Application.put_env(:arbor_orchestrator, :coding_executor_final_context, context)
 
         assert {:error, {:invalid_terminal_evidence, ^expected}} =
-                 CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+                 CodingTaskExecutor.run(
+                   "agent_1",
+                   valid_task(),
+                   valid_context(%{"task_id" => unique_run_task_id()})
+                 )
       end
     end
 
@@ -4703,7 +5519,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                })
 
       assert result["status"] == "validation_failed"
-      assert result["validation"] == [%{"passed" => false}]
+      assert [%{"passed" => false} | _] = List.wrap(result["validation"])
 
       assert {:ok, capacity} =
                run_with_context(%{
@@ -4811,7 +5627,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                Map.merge(default_verification_evidence(), %{
                  "status" => "validation_failed",
                  "worktree_path" => "/tmp/ws",
-                 "validation" => [%{"passed" => false}],
+                 "validation" => default_action_result("validation_failed"),
                  "worker_session_id" => "worker_transcript",
                  "worker_provider_session_id" => "provider-session",
                  "worker" => %{"provider" => "codex", "model" => "default"},
@@ -4824,7 +5640,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "exec.implement.transcript" => descriptor
                }),
              completed_nodes: ["worker_message", "validate"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -4888,7 +5704,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "exec.implement.transcript" => descriptor
                }),
              completed_nodes: ["worker_message", "validate"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -4944,7 +5760,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "exec.implement.transcript" => descriptor
                }),
              completed_nodes: ["worker_message", "validate"],
-             final_outcome: nil,
+             final_outcome: %{status: :success},
              taint: %{},
              node_durations: %{}
            }}
@@ -5474,14 +6290,28 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
         owner = self()
 
-        Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, _opts ->
+        Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
           send(
             owner,
             {:uri_registry_at_runner, Arbor.Security.uri_registered?(@known_cross_app_prefix),
              Arbor.Security.uri_registered?(@unknown_action_prefix)}
           )
 
-          {:ok, %{context: Map.put(completed_turn_context(), "status", "change_committed")}}
+          {:ok,
+           %{
+             run_id: Keyword.get(opts, :run_id),
+             context:
+               completed_turn_context()
+               |> Map.merge(default_verification_evidence())
+               |> Map.merge(%{
+                 "status" => "change_committed",
+                 "validation" => validation_result("default")
+               }),
+             completed_nodes: [],
+             final_outcome: %{status: :success},
+             taint: %{},
+             node_durations: %{}
+           }}
         end)
 
         assert {:ok, _result} =

@@ -918,7 +918,13 @@ defmodule Arbor.Agent.Orchestration do
 
     with {:ok, %{task_id: task_id, reservation_token: token}} <-
            reserve_task_identity(store, agent_id, store_opts),
-         :ok <- commit_recovery_marker(store, task_id, token, store_opts) do
+         :ok <-
+           commit_recovery_marker(
+             store,
+             task_id,
+             token,
+             recovery_marker_opts(store_opts, agent_id, task, caller_id, opts)
+           ) do
       case grant_task_control_lease(caller_id, task_id, opts) do
         {:ok, lease, granted} ->
           activate_opts =
@@ -1000,6 +1006,42 @@ defmodule Arbor.Agent.Orchestration do
         {:error, sanitize_public_reason(other)}
     end
   end
+
+  defp recovery_marker_opts(store_opts, agent_id, task, caller_id, opts) do
+    case dispatch_task_kind(task) do
+      {:ok, kind} ->
+        cleanup =
+          %{"caller_id" => caller_id, "principal_id" => agent_id}
+          |> maybe_put_cleanup_trace_string(opt(opts, :trace_id))
+
+        Keyword.merge(store_opts,
+          agent_id: agent_id,
+          executor_kind: kind,
+          control_principal_id: caller_id,
+          cleanup: cleanup
+        )
+
+      _ ->
+        store_opts
+    end
+  end
+
+  defp maybe_put_cleanup_trace_string(cleanup, trace_id)
+       when is_binary(trace_id) and trace_id != "" do
+    Map.put(cleanup, "trace_id", trace_id)
+  end
+
+  defp maybe_put_cleanup_trace_string(cleanup, _), do: cleanup
+
+  defp dispatch_task_kind(%{"kind" => kind}) when is_binary(kind) or is_atom(kind) do
+    Arbor.Agent.Config.normalize_kind(kind)
+  end
+
+  defp dispatch_task_kind(%{kind: kind}) when is_binary(kind) or is_atom(kind) do
+    Arbor.Agent.Config.normalize_kind(kind)
+  end
+
+  defp dispatch_task_kind(_), do: :none
 
   defp commit_recovery_marker(store, task_id, token, store_opts) do
     case apply_if_exported(store, :commit_recovery_marker, [task_id, token, store_opts]) do

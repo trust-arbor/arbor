@@ -13,11 +13,16 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
   #       "task_cancel" => id, "task_adopt" => id, "approval_answer" => id
   #     }}
   #
-  # Closed recovery marker (map_size == 3, no capability ids):
+  # Closed recovery marker v1 (map_size == 3, no capability ids):
   #   %{"schema_version" => 1, "task_id" => task_id, "created_at" => iso8601}
+  #
+  # Closed recovery marker v2 (map_size == 8, no capability ids):
+  #   schema_version=2, task_id, created_at, agent_id, executor_kind, run_id,
+  #   control_principal_id, cleanup (closed caller_id/principal_id[/trace_id])
 
   @schema_version 1
   @marker_schema_version 1
+  @marker_schema_version_v2 2
   @max_task_id_bytes 256
   @task_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
   @active_ttl_seconds 86_400
@@ -46,6 +51,21 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
   @kind_strings Enum.map(@kinds, &Atom.to_string/1)
   @lease_outer_keys MapSet.new(["schema_version", "task_id", "capabilities"])
   @marker_outer_keys MapSet.new(["schema_version", "task_id", "created_at"])
+  @marker_v2_outer_keys MapSet.new([
+                          "schema_version",
+                          "task_id",
+                          "created_at",
+                          "agent_id",
+                          "executor_kind",
+                          "run_id",
+                          "control_principal_id",
+                          "cleanup"
+                        ])
+  @cleanup_required_keys MapSet.new(["caller_id", "principal_id"])
+  @cleanup_optional_keys MapSet.new(["trace_id"])
+  @max_executor_kind_bytes 64
+  @max_principal_bytes 256
+  @executor_kind_pattern ~r/\A[A-Za-z][A-Za-z0-9_]*\z/
 
   @type kind ::
           :task_read
@@ -87,7 +107,9 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
   # capabilities: "task_read"|"approval_read"|"task_steer"|"task_cancel"|
   #               "task_adopt"|"approval_answer" (map_size==6)
   # lease: "schema_version"|"task_id"|"capabilities" (map_size==3)
-  # marker: "schema_version"|"task_id"|"created_at" (map_size==3)
+  # marker v1: "schema_version"|"task_id"|"created_at" (map_size==3)
+  # marker v2: v1 keys plus agent_id, executor_kind, run_id,
+  #            control_principal_id, cleanup (map_size==8)
 
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
@@ -286,6 +308,33 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
 
   def marker_new(_task_id, _now), do: {:error, :invalid_marker}
 
+  @spec marker_new(String.t(), DateTime.t(), map()) :: {:ok, marker()} | {:error, term()}
+  def marker_new(task_id, %DateTime{} = now, attrs) when is_map(attrs) do
+    with {:ok, agent_id} <- required_principal(attrs, :agent_id),
+         {:ok, executor_kind} <- required_executor_kind(attrs),
+         {:ok, run_id} <- required_run_id(attrs, task_id),
+         {:ok, control_principal_id} <- required_principal(attrs, :control_principal_id),
+         {:ok, cleanup} <- normalize_cleanup(attrs, agent_id, control_principal_id) do
+      if valid_task_id?(task_id) do
+        {:ok,
+         %{
+           "schema_version" => @marker_schema_version_v2,
+           "task_id" => task_id,
+           "created_at" => DateTime.to_iso8601(now),
+           "agent_id" => agent_id,
+           "executor_kind" => executor_kind,
+           "run_id" => run_id,
+           "control_principal_id" => control_principal_id,
+           "cleanup" => cleanup
+         }}
+      else
+        {:error, :invalid_task_id}
+      end
+    end
+  end
+
+  def marker_new(_task_id, _now, _attrs), do: {:error, :invalid_marker}
+
   @spec marker_normalize(term()) :: {:ok, marker()} | {:error, term()}
   def marker_normalize(
         %{
@@ -315,7 +364,120 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
     end
   end
 
+  def marker_normalize(
+        %{
+          "schema_version" => @marker_schema_version_v2,
+          "task_id" => task_id,
+          "created_at" => created_at,
+          "agent_id" => agent_id,
+          "executor_kind" => executor_kind,
+          "run_id" => run_id,
+          "control_principal_id" => control_principal_id,
+          "cleanup" => cleanup
+        } = marker
+      )
+      when is_binary(task_id) and is_binary(created_at) and is_binary(agent_id) and
+             is_binary(executor_kind) and is_binary(run_id) and is_binary(control_principal_id) and
+             is_map(cleanup) and map_size(marker) == 8 do
+    cond do
+      not closed_marker_v2_outer_keys?(marker) ->
+        {:error, :invalid_marker}
+
+      not valid_task_id?(task_id) ->
+        {:error, :invalid_task_id}
+
+      not valid_principal_id?(agent_id) ->
+        {:error, :invalid_marker}
+
+      not valid_principal_id?(control_principal_id) ->
+        {:error, :invalid_marker}
+
+      not valid_executor_kind?(executor_kind) ->
+        {:error, :invalid_marker}
+
+      run_id != task_id or not valid_task_id?(run_id) ->
+        {:error, :invalid_marker}
+
+      not String.valid?(created_at) or byte_size(created_at) > 64 ->
+        {:error, :invalid_marker}
+
+      true ->
+        case normalize_cleanup_map(cleanup, agent_id, control_principal_id) do
+          {:ok, closed_cleanup} ->
+            {:ok,
+             %{
+               "schema_version" => @marker_schema_version_v2,
+               "task_id" => task_id,
+               "created_at" => created_at,
+               "agent_id" => agent_id,
+               "executor_kind" => executor_kind,
+               "run_id" => run_id,
+               "control_principal_id" => control_principal_id,
+               "cleanup" => closed_cleanup
+             }}
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
   def marker_normalize(_), do: {:error, :invalid_marker}
+
+  @spec recoverable_v2?(term()) :: boolean()
+  def recoverable_v2?(%{"schema_version" => @marker_schema_version_v2} = marker)
+      when is_map(marker) and map_size(marker) == 8,
+      do: match?({:ok, _}, marker_normalize(marker))
+
+  def recoverable_v2?(_), do: false
+
+  @spec from_listed_capabilities(String.t(), list()) :: {:ok, lease() | nil} | {:error, term()}
+  def from_listed_capabilities(task_id, caps) when is_binary(task_id) and is_list(caps) do
+    if not valid_task_id?(task_id) do
+      {:error, :invalid_task_id}
+    else
+      reduced =
+        Enum.reduce_while(caps, {:ok, %{}}, fn cap, {:ok, acc} ->
+          case listed_capability_kind_and_id(cap, task_id) do
+            {:ok, kind, id} ->
+              case Map.get(acc, kind) do
+                nil ->
+                  {:cont, {:ok, Map.put(acc, kind, id)}}
+
+                ^id ->
+                  {:cont, {:ok, acc}}
+
+                _other ->
+                  {:halt, {:error, :duplicate_capability_conflict}}
+              end
+
+            :error ->
+              {:cont, {:ok, acc}}
+          end
+        end)
+
+      case reduced do
+        {:error, _} = error ->
+          error
+
+        {:ok, kind_to_id} when kind_to_id == %{} ->
+          {:ok, nil}
+
+        {:ok, kind_to_id} ->
+          capabilities =
+            Map.new(kind_to_id, fn {kind, id} -> {Atom.to_string(kind), id} end)
+
+          {:ok,
+           %{
+             "schema_version" => @schema_version,
+             "task_id" => task_id,
+             "capabilities" => capabilities
+           }}
+      end
+    end
+  end
+
+  def from_listed_capabilities(_task_id, _caps), do: {:error, :invalid_lease}
 
   @spec marker_key(String.t()) :: String.t()
   def marker_key(task_id) when is_binary(task_id), do: task_id
@@ -402,6 +564,157 @@ defmodule Arbor.Agent.Orchestration.TaskControlLease do
   end
 
   defp closed_marker_outer_keys?(_), do: false
+
+  defp closed_marker_v2_outer_keys?(marker) when is_map(marker) do
+    MapSet.equal?(MapSet.new(Map.keys(marker)), @marker_v2_outer_keys)
+  end
+
+  defp closed_marker_v2_outer_keys?(_), do: false
+
+  defp valid_principal_id?(id) when is_binary(id) do
+    byte_size(id) > 0 and byte_size(id) <= @max_principal_bytes and valid_task_id?(id)
+  end
+
+  defp valid_principal_id?(_), do: false
+
+  defp valid_executor_kind?(kind)
+       when is_binary(kind) and byte_size(kind) > 0 and
+              byte_size(kind) <= @max_executor_kind_bytes do
+    String.valid?(kind) and Regex.match?(@executor_kind_pattern, kind)
+  end
+
+  defp valid_executor_kind?(_), do: false
+
+  defp required_principal(attrs, key) do
+    value = attr_get(attrs, key)
+
+    if valid_principal_id?(value), do: {:ok, value}, else: {:error, :invalid_marker}
+  end
+
+  defp required_executor_kind(attrs) do
+    value = attr_get(attrs, :executor_kind)
+
+    if valid_executor_kind?(value), do: {:ok, value}, else: {:error, :invalid_marker}
+  end
+
+  defp required_run_id(attrs, task_id) do
+    value = attr_get(attrs, :run_id) || task_id
+
+    if is_binary(value) and value == task_id and valid_task_id?(value) do
+      {:ok, value}
+    else
+      {:error, :invalid_marker}
+    end
+  end
+
+  defp normalize_cleanup(attrs, agent_id, control_principal_id) do
+    cleanup = attr_get(attrs, :cleanup)
+
+    cond do
+      is_map(cleanup) ->
+        normalize_cleanup_map(cleanup, agent_id, control_principal_id)
+
+      is_nil(cleanup) ->
+        {:ok,
+         %{
+           "caller_id" => control_principal_id,
+           "principal_id" => agent_id
+         }}
+
+      true ->
+        {:error, :invalid_marker}
+    end
+  end
+
+  defp normalize_cleanup_map(cleanup, agent_id, control_principal_id) when is_map(cleanup) do
+    caller_id = attr_get(cleanup, :caller_id)
+    principal_id = attr_get(cleanup, :principal_id)
+    trace_id = attr_get(cleanup, :trace_id)
+    keys = MapSet.new(Enum.map(Map.keys(cleanup), &stringify_cleanup_key/1))
+
+    cond do
+      not MapSet.subset?(keys, MapSet.union(@cleanup_required_keys, @cleanup_optional_keys)) ->
+        {:error, :invalid_marker}
+
+      not MapSet.subset?(@cleanup_required_keys, keys) ->
+        {:error, :invalid_marker}
+
+      map_size(cleanup) not in [2, 3] ->
+        {:error, :invalid_marker}
+
+      caller_id != control_principal_id or not valid_principal_id?(caller_id) ->
+        {:error, :invalid_marker}
+
+      principal_id != agent_id or not valid_principal_id?(principal_id) ->
+        {:error, :invalid_marker}
+
+      is_binary(trace_id) and
+          (not String.valid?(trace_id) or trace_id == "" or byte_size(trace_id) > 256) ->
+        {:error, :invalid_marker}
+
+      is_binary(trace_id) ->
+        {:ok,
+         %{
+           "caller_id" => caller_id,
+           "principal_id" => principal_id,
+           "trace_id" => trace_id
+         }}
+
+      is_nil(trace_id) and map_size(cleanup) == 2 ->
+        {:ok, %{"caller_id" => caller_id, "principal_id" => principal_id}}
+
+      true ->
+        {:error, :invalid_marker}
+    end
+  end
+
+  defp normalize_cleanup_map(_cleanup, _agent_id, _control_principal_id),
+    do: {:error, :invalid_marker}
+
+  defp attr_get(map, key) when is_atom(key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key)))
+  end
+
+  defp stringify_cleanup_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp stringify_cleanup_key(key) when is_binary(key), do: key
+  defp stringify_cleanup_key(_), do: ""
+
+  defp listed_capability_kind_and_id(cap, task_id) when is_map(cap) do
+    id = listed_cap_id(cap)
+    resource = listed_cap_resource(cap)
+    cap_task_id = listed_cap_task_id(cap)
+
+    cond do
+      not is_binary(id) or id == "" ->
+        :error
+
+      is_binary(cap_task_id) and cap_task_id != task_id ->
+        :error
+
+      true ->
+        Enum.find_value(@kinds, :error, fn kind ->
+          case uri(kind, task_id) do
+            {:ok, ^resource} -> {:ok, kind, id}
+            _ -> nil
+          end
+        end) || :error
+    end
+  end
+
+  defp listed_capability_kind_and_id(_cap, _task_id), do: :error
+
+  defp listed_cap_id(%{id: id}) when is_binary(id), do: id
+  defp listed_cap_id(%{"id" => id}) when is_binary(id), do: id
+  defp listed_cap_id(_), do: nil
+
+  defp listed_cap_resource(%{resource_uri: uri}) when is_binary(uri), do: uri
+  defp listed_cap_resource(%{resource: uri}) when is_binary(uri), do: uri
+  defp listed_cap_resource(%{"resource_uri" => uri}) when is_binary(uri), do: uri
+  defp listed_cap_resource(_), do: nil
+
+  defp listed_cap_task_id(%{task_id: id}) when is_binary(id), do: id
+  defp listed_cap_task_id(%{"task_id" => id}) when is_binary(id), do: id
+  defp listed_cap_task_id(_), do: nil
 
   defp normalize_capability_map(map) when is_map(map) do
     # Reject unknown keys first, including non-atom/non-binary key types.

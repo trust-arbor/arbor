@@ -6,8 +6,8 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
 
   alias Arbor.Agent.Orchestration
   alias Arbor.Agent.Orchestration.TaskStore
-  alias Arbor.Contracts.Coding.{TaskOutcome, TaskTerminalEnvelope}
-  alias Arbor.Orchestrator.CodingPlan.ArtifactStore
+  alias Arbor.Contracts.Coding.{Plan, TaskOutcome, TaskTerminalEnvelope}
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Readiness}
   alias Arbor.Orchestrator.CodingTaskExecutor
 
   @agent_id "agent_outcome_canary"
@@ -56,6 +56,14 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
       reply = CodingTaskExecutor.adopt_task(agent_id, result, request, context)
       notify({:canary_adopt_task_reply, context["task_id"], self(), reply})
       reply
+    end
+
+    def recover_task(agent_id, context) do
+      CodingTaskExecutor.recover_task(agent_id, context)
+    end
+
+    def probe_recovery(agent_id, context) do
+      CodingTaskExecutor.probe_recovery(agent_id, context)
     end
 
     defp canary_result(task_id) do
@@ -110,12 +118,18 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
     File.mkdir_p!(tmp_dir)
     {:ok, tmp_dir} = Arbor.Common.SafePath.resolve_real(tmp_dir)
     logs_root = Path.join(tmp_dir, "artifacts")
+    worktree_root = Path.join(tmp_dir, "worktrees")
+    {git_root, 0} = System.cmd("git", ["rev-parse", "--show-toplevel"])
+    git_root = String.trim(git_root)
     File.mkdir_p!(logs_root)
+    File.mkdir_p!(worktree_root)
 
     originals = %{
       agent_executors: Application.get_env(:arbor_agent, :task_executors),
       artifact_store: Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store),
       logs_root: Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
+      repo_roots: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
+      worktree_roots: Application.get_env(:arbor_orchestrator, :coding_worktree_roots),
       observer: Application.get_env(:arbor_orchestrator, :coding_outcome_canary_observer),
       results: Application.get_env(:arbor_orchestrator, :coding_outcome_canary_results)
     }
@@ -126,6 +140,8 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
 
     Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, ArtifactStore)
     Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, logs_root)
+    Application.put_env(:arbor_orchestrator, :coding_repo_roots, [git_root])
+    Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [worktree_root])
     Application.put_env(:arbor_orchestrator, :coding_outcome_canary_observer, self())
     Application.put_env(:arbor_orchestrator, :coding_outcome_canary_results, %{})
 
@@ -154,6 +170,8 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
       )
 
       restore_env(:arbor_orchestrator, :coding_pipeline_logs_root, originals.logs_root)
+      restore_env(:arbor_orchestrator, :coding_repo_roots, originals.repo_roots)
+      restore_env(:arbor_orchestrator, :coding_worktree_roots, originals.worktree_roots)
       restore_env(:arbor_orchestrator, :coding_outcome_canary_observer, originals.observer)
       restore_env(:arbor_orchestrator, :coding_outcome_canary_results, originals.results)
       File.rm_rf(tmp_dir)
@@ -258,9 +276,7 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
 
       status = await_terminal_status(store, canary.task_id)
 
-      if canary.runner_result == :terminal do
-        assert_receive {:canary_finalize_task_reply, ^task_id, {:ok, _finalized}}, 1_000
-      end
+      refute_receive {:canary_finalize_task_reply, ^task_id, _reply}, 50
 
       assert_receive {:canary_finalize_terminal_reply, ^task_id, :ok}, 1_000
       assert status.state == canary.state
@@ -691,26 +707,37 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
 
   defp prepare_compilation_artifacts(logs_root, task_id) do
     root = task_root(logs_root, task_id)
-    File.mkdir_p!(root)
 
-    for filename <- ["coding-plan.json", "coding-pipeline.dot", "coding-compile-manifest.json"] do
-      path = Path.join(root, filename)
-      File.write!(path, "{}")
-      File.chmod!(path, 0o600)
-    end
+    assert {:ok, plan, compilation} =
+             Readiness.prepare(%{
+               "version" => 1,
+               "task" => "exercise terminal outcome canary",
+               "repo_root" => File.cwd!(),
+               "worker" => %{"provider" => "grok"}
+             })
+
+    assert {:ok, _descriptor} =
+             ArtifactStore.archive(
+               root,
+               Plan.to_map(plan),
+               compilation.dot_source,
+               compilation.manifest
+             )
 
     root
   end
 
   defp compilation_artifacts(logs_root, task_id) do
     root = task_root(logs_root, task_id)
+    manifest_path = Path.join(root, "coding-compile-manifest.json")
+    manifest = manifest_path |> File.read!() |> Jason.decode!()
 
     %{
       "coding_plan_path" => Path.join(root, "coding-plan.json"),
       "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
-      "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
-      "graph_hash" => String.duplicate("a", 64),
-      "compiler_version" => "coding-plan-1"
+      "compile_manifest_path" => manifest_path,
+      "graph_hash" => manifest["graph_hash"],
+      "compiler_version" => manifest["compiler_version"]
     }
   end
 

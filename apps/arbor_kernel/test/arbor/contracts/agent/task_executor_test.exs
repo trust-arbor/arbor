@@ -55,6 +55,27 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
 
     @impl true
     def adopt_task(_agent_id, result, _request, _context), do: {:ok, result}
+
+    @impl true
+    def recover_task(_agent_id, _context), do: {:ok, %{}}
+
+    @impl true
+    def probe_recovery(_agent_id, _context) do
+      {:ok,
+       {:recoverable,
+        %{
+          "schema_version" => 1,
+          "task_id" => "task_1",
+          "run_id" => "task_1",
+          "agent_id" => "agent_1",
+          "execution_principal" => "agent_1",
+          "control_principal_id" => "caller_1",
+          "executor_kind" => "coding_change",
+          "graph_hash" => String.duplicate("a", 64),
+          "artifact_identity" => String.duplicate("c", 64),
+          "binding_digest" => String.duplicate("b", 64)
+        }}}
+    end
   end
 
   defmodule PendingApprovalExecutor do
@@ -79,6 +100,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert {:finalize_terminal_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:finalize_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:adopt_task, 4} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:recover_task, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:probe_recovery, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:run, 3} in TaskExecutor.behaviour_info(:callbacks)
     assert {:project_dispatch_readiness, 3} in TaskExecutor.behaviour_info(:callbacks)
     assert {:task_status, 2} in TaskExecutor.behaviour_info(:callbacks)
@@ -87,6 +110,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert {:finalize_terminal_task, 4} in TaskExecutor.behaviour_info(:callbacks)
     assert {:finalize_task, 4} in TaskExecutor.behaviour_info(:callbacks)
     assert {:adopt_task, 4} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:recover_task, 2} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:probe_recovery, 2} in TaskExecutor.behaviour_info(:callbacks)
 
     assert function_exported?(FullExecutor, :project_dispatch_readiness, 3)
     assert function_exported?(FullExecutor, :task_status, 2)
@@ -177,5 +202,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert moduledoc =~ "explicit runner overrides do not invoke this callback"
     assert moduledoc =~ "transfers responsibility"
     assert moduledoc =~ "successful `run/3` return"
+    assert moduledoc =~ "binding_digest"
+    assert moduledoc =~ "execution_principal"
+    assert moduledoc =~ "probe_recovery"
   end
 end

@@ -80,6 +80,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     compiler_version
   ))
   @task_terminal_filename "coding-task-terminal.json"
+  @run_binding_filename "coding-run-binding.json"
+  @engine_terminal_filename "coding-engine-terminal.json"
+  @adapter_input_filename "coding-adapter-input.json"
+  @terminal_decision_filename "coding-terminal-decision.json"
   @adoption_evidence_prefix "coding-adoption-evidence-"
   @reconciliation_directory "coding-reconciliation"
   @max_reconciliation_bytes 1_048_576
@@ -87,9 +91,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @max_terminal_task_id_bytes 512
   @max_compilation_artifact_bytes 4_194_304
   @max_compilation_seal_bytes 4_096
+  @max_run_binding_bytes 16_384
+  @max_engine_terminal_bytes 65_536
+  @max_adapter_input_bytes 1_048_576
+  @max_terminal_decision_bytes 16_384
+  @max_task_terminal_bytes 1_048_576
   @compilation_publication_barrier_key {__MODULE__, :compilation_publication_barrier}
   @static_receipt_filename "coding-cross-app-continuation-static-receipt.json"
   @static_receipt_publication_barrier_key {__MODULE__, :static_receipt_publication_barrier}
+  @bounded_read_pre_open_hook_key {__MODULE__, :bounded_read_pre_open_hook}
   @engine_static_receipt_directory "coding-cross-app-static-receipts"
   @engine_static_receipt_generation_limit 8
   @digest_filename_regex ~r/\A[0-9a-f]{64}\.json\z/
@@ -146,6 +156,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     WorkspaceReleaseDescriptor
   }
 
+  alias Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore
   alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
   alias Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCore
   alias Arbor.Orchestrator.CodingPlan.TranscriptStore
@@ -190,6 +201,182 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   @doc """
+  Publish the closed non-secret coding-run binding. First-writer exclusive.
+  """
+  @spec archive_run_binding(String.t(), map()) :: :ok | {:error, term()}
+  def archive_run_binding(root, binding) when is_map(binding) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- CodingRunRecoveryCore.closed_binding?(binding),
+         {:ok, encoded} <- encode_canonical_json(binding, :run_binding),
+         :ok <- validate_encoded_size(encoded, @max_run_binding_bytes),
+         path = Path.join(root, @run_binding_filename),
+         :ok <- validate_task_terminal_path(root, path) do
+      write_closed_artifact_once(path, encoded, root, :run_binding)
+    end
+  rescue
+    _ -> {:error, :run_binding_archive_error}
+  catch
+    _, _ -> {:error, :run_binding_archive_error}
+  end
+
+  def archive_run_binding(_root, _binding), do: {:error, :invalid_binding}
+
+  @doc """
+  Read a closed coding-run binding from an already-canonical task root.
+  """
+  @spec read_run_binding(String.t()) ::
+          {:ok, map()} | {:error, :not_found | :malformed | :unavailable}
+  def read_run_binding(root) when is_binary(root) do
+    read_closed_artifact(root, @run_binding_filename, &CodingRunRecoveryCore.closed_binding?/1)
+  end
+
+  def read_run_binding(_), do: {:error, :unavailable}
+
+  @doc """
+  Publish the closed Engine-terminal receipt. First-writer exclusive; equal
+  digest is idempotent, unequal digest is stale/duplicate.
+  """
+  @spec archive_engine_terminal(String.t(), map()) :: :ok | {:error, term()}
+  def archive_engine_terminal(root, receipt) when is_map(receipt) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- CodingRunRecoveryCore.closed_receipt?(receipt),
+         {:ok, encoded} <- encode_canonical_json(receipt, :engine_terminal),
+         :ok <- validate_encoded_size(encoded, @max_engine_terminal_bytes),
+         path = Path.join(root, @engine_terminal_filename),
+         :ok <- validate_task_terminal_path(root, path) do
+      write_closed_artifact_once(path, encoded, root, :engine_terminal)
+    end
+  rescue
+    _ -> {:error, :engine_terminal_archive_error}
+  catch
+    _, _ -> {:error, :engine_terminal_archive_error}
+  end
+
+  def archive_engine_terminal(_root, _receipt), do: {:error, :invalid_receipt}
+
+  @doc "Read a closed Engine-terminal receipt from a canonical task root."
+  @spec read_engine_terminal(String.t()) ::
+          {:ok, map()} | {:error, :not_found | :malformed | :unavailable}
+  def read_engine_terminal(root) when is_binary(root) do
+    read_closed_artifact(
+      root,
+      @engine_terminal_filename,
+      &CodingRunRecoveryCore.closed_receipt?/1
+    )
+  end
+
+  def read_engine_terminal(_), do: {:error, :unavailable}
+
+  @doc """
+  Publish the closed CandidateVerificationCore adapter-input four-tuple.
+  First-writer exclusive; equal bytes are idempotent.
+  """
+  @spec archive_adapter_input(String.t(), map()) :: :ok | {:error, term()}
+  def archive_adapter_input(root, adapter) when is_map(adapter) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- CodingRunRecoveryCore.closed_adapter_input?(adapter),
+         {:ok, encoded} <- encode_canonical_json(adapter, :adapter_input),
+         :ok <- validate_encoded_size(encoded, @max_adapter_input_bytes),
+         path = Path.join(root, @adapter_input_filename),
+         :ok <- validate_task_terminal_path(root, path) do
+      write_closed_artifact_once(path, encoded, root, :adapter_input)
+    end
+  rescue
+    _ -> {:error, :adapter_input_archive_error}
+  catch
+    _, _ -> {:error, :adapter_input_archive_error}
+  end
+
+  def archive_adapter_input(_root, _adapter), do: {:error, :invalid_adapter_input}
+
+  @doc "Read a closed adapter-input artifact from a canonical task root."
+  @spec read_adapter_input(String.t()) ::
+          {:ok, map()} | {:error, :not_found | :malformed | :unavailable}
+  def read_adapter_input(root) when is_binary(root) do
+    read_closed_artifact(
+      root,
+      @adapter_input_filename,
+      &CodingRunRecoveryCore.closed_adapter_input?/1
+    )
+  end
+
+  def read_adapter_input(_), do: {:error, :unavailable}
+
+  @doc """
+  Publish the closed terminal-decision descriptor. First-writer exclusive.
+  """
+  @spec archive_terminal_decision(String.t(), map()) :: :ok | {:error, term()}
+  def archive_terminal_decision(root, decision) when is_map(decision) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- CodingRunRecoveryCore.closed_decision?(decision),
+         {:ok, encoded} <- encode_canonical_json(decision, :terminal_decision),
+         :ok <- validate_encoded_size(encoded, @max_terminal_decision_bytes),
+         path = Path.join(root, @terminal_decision_filename),
+         :ok <- validate_task_terminal_path(root, path) do
+      write_closed_artifact_once(path, encoded, root, :terminal_decision)
+    end
+  rescue
+    _ -> {:error, :terminal_decision_archive_error}
+  catch
+    _, _ -> {:error, :terminal_decision_archive_error}
+  end
+
+  def archive_terminal_decision(_root, _decision), do: {:error, :invalid_decision}
+
+  @doc "Read a closed terminal-decision artifact from a canonical task root."
+  @spec read_terminal_decision(String.t()) ::
+          {:ok, map()} | {:error, :not_found | :malformed | :unavailable}
+  def read_terminal_decision(root) when is_binary(root) do
+    read_closed_artifact(
+      root,
+      @terminal_decision_filename,
+      &CodingRunRecoveryCore.closed_decision?/1
+    )
+  end
+
+  def read_terminal_decision(_), do: {:error, :unavailable}
+
+  @doc """
+  Read a matching `coding-task-terminal.json` archive from a canonical task root.
+  """
+  @spec read_task_terminal(String.t(), String.t()) ::
+          {:ok, map()} | {:error, :not_found | :malformed | :unavailable}
+  def read_task_terminal(root, task_id)
+      when is_binary(root) and is_binary(task_id) do
+    with {:ok, root} <- normalize_existing_root(root),
+         :ok <- validate_terminal_task_id(task_id),
+         path = Path.join(root, @task_terminal_filename),
+         :ok <- validate_task_terminal_path(root, path) do
+      case read_descriptor_bounded_file(path, @max_task_terminal_bytes) do
+        {:ok, encoded} ->
+          decode_task_terminal_archive(encoded, task_id)
+
+        {:error, :enoent} ->
+          {:error, :not_found}
+
+        {:error, :eio} ->
+          {:error, :unavailable}
+
+        {:error, :malformed} ->
+          {:error, :malformed}
+
+        {:error, _} ->
+          {:error, :unavailable}
+      end
+    else
+      {:error, :eio} -> {:error, :unavailable}
+      {:error, {:invalid_terminal_task_id, _}} -> {:error, :malformed}
+      {:error, _} -> {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    _, _ -> {:error, :unavailable}
+  end
+
+  def read_task_terminal(_, _), do: {:error, :unavailable}
+
+  @doc """
   Read the fixed compilation artifacts for one task-derived archive root.
 
   The task id is hashed before it is used as a path segment. Every artifact
@@ -197,7 +384,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   archived DOT bytes must match the manifest graph hash.
   """
   @spec read_task_compilation(String.t(), String.t()) ::
-          {:ok, map()} | {:error, :coding_compilation_provenance_unavailable}
+          {:ok, map()}
+          | {:error, :coding_compilation_provenance_unavailable | :eio | :unavailable}
   def read_task_compilation(base_root, task_id) do
     with :ok <- validate_terminal_task_id(task_id),
          {:ok, base_root} <- normalize_compilation_base(base_root),
@@ -242,9 +430,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          "manifest" => manifest,
          "plan_sha256" => sha256(plan_json),
          "pipeline_sha256" => sha256(dot_source),
-         "manifest_sha256" => sha256(manifest_json)
+         "manifest_sha256" => sha256(manifest_json),
+         "artifact_identity" => sha256(seal_json)
        }}
     else
+      {:error, :eio} -> {:error, :eio}
+      {:error, :unavailable} -> {:error, :unavailable}
       _ -> {:error, :coding_compilation_provenance_unavailable}
     end
   rescue
@@ -782,8 +973,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp encode_reconciliation_json(value) do
-    case Jason.encode(canonicalize_json(value), pretty: true) do
-      {:ok, encoded} -> {:ok, encoded}
+    with {:ok, canonical} <- CodingRunRecoveryCore.canonical_json(value),
+         {:ok, encoded} <- Jason.encode(canonical, pretty: true) do
+      {:ok, encoded}
+    else
       _ -> {:error, :invalid_reconciliation_manifest}
     end
   rescue
@@ -820,9 +1013,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   defp normalize_supplementary(_value), do: {:error, :invalid_supplementary_evidence}
 
   defp reconciliation_scope_digest(scope) do
-    case Jason.encode(canonicalize_json(scope)) do
-      {:ok, encoded} -> {:ok, sha256(encoded)}
+    with {:ok, canonical} <- CodingRunRecoveryCore.canonical_json(scope),
+         {:ok, encoded} <- Jason.encode(canonical) do
+      {:ok, sha256(encoded)}
+    else
       {:error, reason} -> {:error, {:invalid_reconciliation_scope, reason}}
+      _ -> {:error, :invalid_reconciliation_scope}
     end
   end
 
@@ -1005,6 +1201,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          true <- File.dir?(canonical) do
       {:ok, canonical}
     else
+      {:error, :eio} -> {:error, :eio}
       _ -> {:error, :invalid_compilation_base}
     end
   end
@@ -1021,6 +1218,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          true <- canonical == task_root and SafePath.within?(canonical, base_root) do
       {:ok, canonical}
     else
+      {:error, :eio} -> {:error, :eio}
       _ -> {:error, :invalid_compilation_task_root}
     end
   end
@@ -1058,16 +1256,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp read_compilation_file(path, task_root, max_bytes) do
-    with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} <- File.lstat(path),
-         true <- Bitwise.band(mode, 0o777) == 0o600,
-         true <- is_integer(size) and size > 0 and size <= max_bytes,
-         true <- Path.dirname(path) == task_root,
+    with true <- Path.dirname(path) == task_root,
          {:ok, canonical} <- SafePath.resolve_real(path),
          true <- canonical == path and SafePath.within?(canonical, task_root),
-         {:ok, content} <- File.read(canonical),
-         true <- byte_size(content) == size do
+         {:ok, content} <- read_descriptor_bounded_file(path, max_bytes) do
       {:ok, content}
     else
+      {:error, :eio} -> {:error, :eio}
+      {:error, :unavailable} -> {:error, :unavailable}
       _ -> {:error, :invalid_compilation_artifact}
     end
   end
@@ -1868,7 +2064,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
 
     with {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, bytes} <- File.read(path),
+         {:ok, bytes} <- read_descriptor_bounded_file(path, @max_terminal_evidence_bytes),
          true <- byte_size(bytes) == byte_size(expected_bytes),
          true <- sha256(bytes) == expected_digest,
          {:ok, descriptor} <-
@@ -1908,9 +2104,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
             {:error, :insecure_task_terminal_mode}
 
           true ->
-            case File.read(path) do
+            case read_descriptor_bounded_file(path, @max_task_terminal_bytes) do
               {:ok, ^content} -> :ok
               {:ok, _other} -> {:error, :task_terminal_conflict}
+              {:error, :malformed} -> {:error, :task_terminal_conflict}
               {:error, _reason} -> {:error, :task_terminal_unreadable}
             end
         end
@@ -1945,12 +2142,353 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
+  defp write_closed_artifact_once(path, content, root, kind) do
+    max_bytes = closed_artifact_max_bytes_for_kind(kind)
+
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        write_closed_artifact_new(path, content, root, kind)
+
+      {:ok, %File.Stat{type: :regular, mode: mode, size: size} = first} ->
+        cond do
+          Bitwise.band(mode, 0o777) != 0o600 ->
+            {:error, :insecure_mode}
+
+          not is_integer(size) or size < 0 or size > max_bytes ->
+            {:error, :malformed}
+
+          true ->
+            compare_closed_artifact_duplicate(path, content, first, max_bytes)
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :malformed}
+
+      {:ok, _} ->
+        {:error, :malformed}
+
+      {:error, :eio} ->
+        {:error, :unavailable}
+
+      {:error, _} ->
+        {:error, :unavailable}
+    end
+  end
+
+  defp compare_closed_artifact_duplicate(path, content, first, max_bytes) do
+    case read_descriptor_bounded_file(path, max_bytes) do
+      {:ok, encoded} ->
+        case File.lstat(path) do
+          {:ok, %File.Stat{type: :regular, mode: mode, size: size}} ->
+            cond do
+              Bitwise.band(mode, 0o777) != 0o600 ->
+                {:error, :insecure_mode}
+
+              size != first.size or Bitwise.band(first.mode, 0o777) != Bitwise.band(mode, 0o777) ->
+                {:error, :malformed}
+
+              byte_size(encoded) != size ->
+                {:error, :malformed}
+
+              encoded == content ->
+                :ok
+
+              true ->
+                {:error, :stale_or_duplicate_terminal}
+            end
+
+          {:ok, _} ->
+            {:error, :malformed}
+
+          {:error, :eio} ->
+            {:error, :unavailable}
+
+          {:error, _} ->
+            {:error, :unavailable}
+        end
+
+      {:error, :enoent} ->
+        {:error, :unavailable}
+
+      {:error, :eio} ->
+        {:error, :unavailable}
+
+      {:error, :malformed} ->
+        {:error, :malformed}
+
+      {:error, _} ->
+        {:error, :unavailable}
+    end
+  end
+
+  defp write_closed_artifact_new(path, content, root, kind) do
+    temporary_path = temporary_path(path)
+
+    try do
+      with :ok <- validate_task_terminal_path(root, path),
+           {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+           :ok <- write_secure_temp(temporary_path, content),
+           :ok <- File.ln(temporary_path, path) do
+        :ok
+      else
+        {:error, :eexist} -> write_closed_artifact_once(path, content, root, kind)
+        {:error, :eio} -> {:error, :unavailable}
+        {:error, _} -> {:error, :unavailable}
+        _ -> {:error, :unavailable}
+      end
+    after
+      File.rm(temporary_path)
+    end
+  end
+
+  defp read_closed_artifact(root, filename, validate_fun)
+       when is_binary(root) and is_binary(filename) and is_function(validate_fun, 1) do
+    with {:ok, root} <- normalize_existing_root(root),
+         path = Path.join(root, filename),
+         :ok <- validate_task_terminal_path(root, path),
+         max_bytes = closed_artifact_max_bytes(filename) do
+      case read_descriptor_bounded_file(path, max_bytes) do
+        {:ok, encoded} ->
+          case Jason.decode(encoded) do
+            {:ok, map} when is_map(map) and not is_struct(map) ->
+              case {CodingRunRecoveryCore.canonical_json(map), validate_fun.(map)} do
+                {{:ok, _}, :ok} -> {:ok, map}
+                _ -> {:error, :malformed}
+              end
+
+            _ ->
+              {:error, :malformed}
+          end
+
+        {:error, :enoent} ->
+          {:error, :not_found}
+
+        {:error, :eio} ->
+          {:error, :unavailable}
+
+        {:error, :malformed} ->
+          {:error, :malformed}
+
+        {:error, _} ->
+          {:error, :unavailable}
+      end
+    else
+      {:error, :eio} -> {:error, :unavailable}
+      {:error, _} -> {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    _, _ -> {:error, :unavailable}
+  end
+
+  defp closed_artifact_max_bytes(@run_binding_filename), do: @max_run_binding_bytes
+  defp closed_artifact_max_bytes(@engine_terminal_filename), do: @max_engine_terminal_bytes
+  defp closed_artifact_max_bytes(@adapter_input_filename), do: @max_adapter_input_bytes
+  defp closed_artifact_max_bytes(@terminal_decision_filename), do: @max_terminal_decision_bytes
+  defp closed_artifact_max_bytes(_), do: @max_engine_terminal_bytes
+
+  defp closed_artifact_max_bytes_for_kind(:run_binding), do: @max_run_binding_bytes
+  defp closed_artifact_max_bytes_for_kind(:engine_terminal), do: @max_engine_terminal_bytes
+  defp closed_artifact_max_bytes_for_kind(:adapter_input), do: @max_adapter_input_bytes
+  defp closed_artifact_max_bytes_for_kind(:terminal_decision), do: @max_terminal_decision_bytes
+  defp closed_artifact_max_bytes_for_kind(_), do: @max_engine_terminal_bytes
+
+  defp validate_encoded_size(encoded, max)
+       when is_binary(encoded) and is_integer(max) and max > 0 do
+    if byte_size(encoded) > 0 and byte_size(encoded) <= max,
+      do: :ok,
+      else: {:error, :malformed}
+  end
+
+  defp validate_encoded_size(_encoded, _max), do: {:error, :malformed}
+
+  @doc """
+  Read one regular mode-`0600` file with a kind-bounded max-plus-one double read.
+
+  Callers in `CodingTaskExecutor` must invoke this through
+  `Config.coding_plan_artifact_store/0`, never as a hardcoded cross-module
+  import of this function alone.
+  """
+  @spec read_descriptor_bounded_file(String.t(), pos_integer()) ::
+          {:ok, binary()} | {:error, :enoent | :eio | :malformed | :unavailable}
+  def read_descriptor_bounded_file(path, max_bytes)
+      when is_binary(path) and is_integer(max_bytes) and max_bytes > 0 do
+    case File.lstat(path, time: :posix) do
+      {:error, :enoent} ->
+        {:error, :enoent}
+
+      {:error, :eio} ->
+        {:error, :eio}
+
+      {:ok, %File.Stat{type: :regular, mode: mode} = first} ->
+        if Bitwise.band(mode, 0o777) == 0o600 do
+          case SafePath.resolve_real(path) do
+            {:ok, canonical} ->
+              maybe_bounded_read_pre_open_hook(path)
+              open_descriptor_double_read(path, canonical, first, max_bytes)
+
+            {:error, :eio} ->
+              {:error, :eio}
+
+            _ ->
+              {:error, :malformed}
+          end
+        else
+          {:error, :malformed}
+        end
+
+      {:ok, _} ->
+        {:error, :malformed}
+
+      {:error, _} ->
+        {:error, :unavailable}
+    end
+  end
+
+  defp open_descriptor_double_read(path, canonical, first, max_bytes) do
+    case File.open(path, [:read, :raw, :binary]) do
+      {:ok, io} ->
+        try do
+          with :ok <- require_descriptor_identity(io, first),
+               {:ok, first_bytes} <- read_max_plus_one(io, max_bytes),
+               :ok <- require_descriptor_identity(io, first, byte_size(first_bytes)),
+               :ok <- postcheck_path_inode(path, canonical, first, first_bytes),
+               :ok <- rewind_descriptor_fd(io),
+               {:ok, second_bytes} <- read_max_plus_one(io, max_bytes),
+               true <- first_bytes == second_bytes,
+               :ok <- require_descriptor_identity(io, first, byte_size(second_bytes)),
+               :ok <- postcheck_path_inode(path, canonical, first, second_bytes) do
+            {:ok, first_bytes}
+          else
+            false -> {:error, :malformed}
+            {:error, _} = error -> error
+            _ -> {:error, :malformed}
+          end
+        after
+          File.close(io)
+        end
+
+      {:error, :enoent} ->
+        {:error, :enoent}
+
+      {:error, :eio} ->
+        {:error, :eio}
+
+      {:error, _} ->
+        {:error, :unavailable}
+    end
+  end
+
+  defp maybe_bounded_read_pre_open_hook(path) when is_binary(path) do
+    case Process.get(@bounded_read_pre_open_hook_key) do
+      fun when is_function(fun, 1) ->
+        _ = fun.(path)
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp descriptor_file_stat(io) do
+    case :file.read_file_info(io, time: :posix) do
+      {:ok, info} -> {:ok, File.Stat.from_record(info)}
+      {:error, :eio} -> {:error, :eio}
+      {:error, _} -> {:error, :unavailable}
+    end
+  end
+
+  defp require_descriptor_identity(io, %File.Stat{} = first, expected_size \\ nil) do
+    with {:ok, %File.Stat{type: :regular, mode: mode} = stat} <- descriptor_file_stat(io),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         true <- same_file_identity?(stat, first),
+         true <- is_nil(expected_size) or stat.size == expected_size do
+      :ok
+    else
+      {:error, :eio} -> {:error, :eio}
+      {:error, _} = error -> error
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp same_file_identity?(%File.Stat{} = left, %File.Stat{} = right) do
+    left.inode == right.inode and left.major_device == right.major_device and
+      left.minor_device == right.minor_device
+  end
+
+  defp read_max_plus_one(io, max_bytes) do
+    case IO.binread(io, max_bytes + 1) do
+      :eof ->
+        {:error, :malformed}
+
+      {:error, :eio} ->
+        {:error, :eio}
+
+      {:error, _} ->
+        {:error, :unavailable}
+
+      bytes when is_binary(bytes) and byte_size(bytes) > max_bytes ->
+        {:error, :malformed}
+
+      bytes when is_binary(bytes) and byte_size(bytes) == 0 ->
+        {:error, :malformed}
+
+      bytes when is_binary(bytes) ->
+        {:ok, bytes}
+
+      _ ->
+        {:error, :unavailable}
+    end
+  end
+
+  defp rewind_descriptor_fd(io) do
+    case :file.position(io, :bof) do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, :unavailable}
+    end
+  end
+
+  defp postcheck_path_inode(path, canonical, %File.Stat{} = first, bytes)
+       when is_binary(path) and is_binary(canonical) and is_binary(bytes) do
+    with {:ok, ^canonical} <- SafePath.resolve_real(path),
+         {:ok, %File.Stat{type: :regular, mode: mode, size: size} = stat} <-
+           File.lstat(path, time: :posix),
+         true <- Bitwise.band(mode, 0o777) == 0o600,
+         true <- same_file_identity?(stat, first),
+         true <- size == byte_size(bytes) do
+      :ok
+    else
+      {:error, :eio} -> {:error, :eio}
+      _ -> {:error, :malformed}
+    end
+  end
+
+  defp decode_task_terminal_archive(encoded, task_id) when is_binary(encoded) do
+    with {:ok, body} <- Jason.decode(encoded),
+         true <- is_map(body) and not is_struct(body),
+         true <- body["schema_version"] == 1,
+         true <- body["task_id"] == task_id,
+         envelope when is_map(envelope) and not is_struct(envelope) <-
+           body["terminal_envelope"],
+         {:ok, _archive} <-
+           TaskTerminalArchiveCore.build(task_id, envelope, body["controls"] || []) do
+      {:ok, body}
+    else
+      _ -> {:error, :malformed}
+    end
+  rescue
+    _ -> {:error, :malformed}
+  catch
+    _, _ -> {:error, :malformed}
+  end
+
   defp verify_task_terminal(path, archive) do
     expected_descriptor = Map.put(archive.descriptor_fields, "path", path)
 
     with {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, bytes} <- File.read(path),
+         {:ok, bytes} <- read_descriptor_bounded_file(path, @max_task_terminal_bytes),
          true <- bytes === archive.encoded,
          {:ok, body} <- Jason.decode(bytes),
          true <- body === archive.body do
@@ -2075,38 +2613,34 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp encode_canonical_json(value, artifact) do
-    value
-    |> canonicalize_json()
-    |> Jason.encode(pretty: true)
-    |> case do
-      {:ok, encoded} -> {:ok, encoded}
-      {:error, reason} -> {:error, {:json_encode_failed, artifact, Exception.message(reason)}}
+    with {:ok, canonical} <- CodingRunRecoveryCore.canonical_json(value),
+         {:ok, encoded} <- Jason.encode(canonical, pretty: true) do
+      {:ok, encoded}
+    else
+      {:error, :invalid_json} ->
+        {:error, {:json_encode_failed, artifact, "invalid_json"}}
+
+      {:error, reason} ->
+        {:error, {:json_encode_failed, artifact, Exception.message(reason)}}
     end
   rescue
     error -> {:error, {:json_encode_failed, artifact, Exception.message(error)}}
   end
 
   defp encode_compact_canonical_json(value, artifact) do
-    value
-    |> canonicalize_json()
-    |> Jason.encode()
-    |> case do
-      {:ok, encoded} -> {:ok, encoded}
-      {:error, reason} -> {:error, {:json_encode_failed, artifact, Exception.message(reason)}}
+    with {:ok, canonical} <- CodingRunRecoveryCore.canonical_json(value),
+         {:ok, encoded} <- Jason.encode(canonical) do
+      {:ok, encoded}
+    else
+      {:error, :invalid_json} ->
+        {:error, {:json_encode_failed, artifact, "invalid_json"}}
+
+      {:error, reason} ->
+        {:error, {:json_encode_failed, artifact, Exception.message(reason)}}
     end
   rescue
     error -> {:error, {:json_encode_failed, artifact, Exception.message(error)}}
   end
-
-  defp canonicalize_json(map) when is_map(map) and not is_struct(map) do
-    map
-    |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map(fn {key, value} -> {key, canonicalize_json(value)} end)
-    |> Jason.OrderedObject.new()
-  end
-
-  defp canonicalize_json(list) when is_list(list), do: Enum.map(list, &canonicalize_json/1)
-  defp canonicalize_json(value), do: value
 
   defp create_root(root) do
     case File.mkdir_p(root) do
@@ -2221,15 +2755,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         :ok
 
       {:ok, %File.Stat{type: :regular}} ->
-        case File.read(path) do
-          {:ok, ^content} ->
+        case equal_compilation_bytes(path, content, @max_compilation_artifact_bytes) do
+          :ok ->
             :ok
 
-          {:ok, _different} ->
+          :conflict ->
             {:error, {:compilation_artifact_conflict, Path.basename(path)}}
 
-          {:error, reason} ->
-            {:error, {:compilation_artifact_unreadable, Path.basename(path), reason}}
+          :invalid ->
+            {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+
+          other ->
+            {:error, {:compilation_artifact_unreadable, Path.basename(path), other}}
         end
 
       {:ok, %File.Stat{type: :symlink}} ->
@@ -2289,27 +2826,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp verify_existing_compilation_seal(path, seal_json) do
-    case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular, mode: mode, size: size}}
-      when is_integer(size) and size > 0 and size <= @max_compilation_seal_bytes ->
-        if Bitwise.band(mode, 0o777) == 0o600 do
-          case File.read(path) do
-            {:ok, ^seal_json} -> :ok
-            {:ok, _different} -> {:error, :compilation_seal_conflict}
-            {:error, reason} -> {:error, {:compilation_seal_unreadable, reason}}
-          end
-        else
-          {:error, :invalid_compilation_seal}
-        end
-
-      {:ok, _other} ->
-        {:error, :invalid_compilation_seal}
-
-      {:error, :enoent} ->
-        {:error, :compilation_seal_missing}
-
-      {:error, reason} ->
-        {:error, {:compilation_seal_unavailable, reason}}
+    case equal_compilation_bytes(path, seal_json, @max_compilation_seal_bytes) do
+      :ok -> :ok
+      :conflict -> {:error, :compilation_seal_conflict}
+      :missing -> {:error, :compilation_seal_missing}
+      :invalid -> {:error, :invalid_compilation_seal}
+      :eio -> {:error, {:compilation_seal_unavailable, :eio}}
+      other -> {:error, {:compilation_seal_unreadable, other}}
     end
   end
 
@@ -2319,17 +2842,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         write_new_compilation_artifact(path, content)
 
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        case File.read(path) do
-          {:ok, ^content} ->
-            if Bitwise.band(mode, 0o777) == 0o600,
-              do: :ok,
-              else: repair_compilation_artifact_mode(path, content)
+        if Bitwise.band(mode, 0o777) == 0o600 do
+          case equal_compilation_bytes(path, content, @max_compilation_artifact_bytes) do
+            :ok ->
+              :ok
 
-          {:ok, _different} ->
-            {:error, {:compilation_artifact_conflict, Path.basename(path)}}
+            :conflict ->
+              {:error, {:compilation_artifact_conflict, Path.basename(path)}}
 
-          {:error, reason} ->
-            {:error, {:compilation_artifact_unreadable, Path.basename(path), reason}}
+            :invalid ->
+              {:error, {:invalid_compilation_artifact, Path.basename(path)}}
+
+            other ->
+              {:error, {:compilation_artifact_unreadable, Path.basename(path), other}}
+          end
+        else
+          repair_compilation_artifact_mode(path, content)
         end
 
       {:ok, %File.Stat{type: :symlink}} ->
@@ -2380,14 +2908,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     with :ok <- File.chmod(path, 0o600),
          {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, ^content} <- File.read(path) do
+         :ok <- equal_compilation_bytes(path, content, @max_compilation_artifact_bytes) do
       :ok
     else
       false ->
         {:error, {:invalid_compilation_artifact, Path.basename(path)}}
 
-      {:ok, _different} ->
+      :conflict ->
         {:error, {:compilation_artifact_conflict, Path.basename(path)}}
+
+      :invalid ->
+        {:error, {:invalid_compilation_artifact, Path.basename(path)}}
 
       {:error, reason} ->
         {:error, {:compilation_artifact_unavailable, Path.basename(path), reason}}
@@ -2396,6 +2927,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         {:error, {:invalid_compilation_artifact, Path.basename(path)}}
     end
   end
+
+  defp equal_compilation_bytes(path, expected, max_bytes)
+       when is_binary(path) and is_binary(expected) and is_integer(max_bytes) and max_bytes > 0 do
+    case read_descriptor_bounded_file(path, max_bytes) do
+      {:ok, ^expected} -> :ok
+      {:ok, _other} -> :conflict
+      {:error, :enoent} -> :missing
+      {:error, :eio} -> :eio
+      {:error, :malformed} -> :invalid
+      {:error, _} -> :unavailable
+    end
+  end
+
+  defp equal_compilation_bytes(_path, _expected, _max_bytes), do: :invalid
 
   # Tests use this timing-only process-local barrier to force publication races.
   # It cannot change bytes, identity checks, or publication outcomes.

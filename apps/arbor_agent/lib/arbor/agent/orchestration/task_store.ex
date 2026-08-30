@@ -163,7 +163,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @runtime_admission_registry Arbor.Agent.RuntimeAdmissionRegistry
 
   alias Arbor.Agent.Config
-  alias Arbor.Agent.Orchestration.{TaskArtifacts, TaskControlLease, TaskInventoryProjection}
+
+  alias Arbor.Agent.Orchestration.{
+    TaskArtifacts,
+    TaskControlLease,
+    TaskInventoryProjection,
+    TaskRunBindingCore
+  }
+
   alias Arbor.Agent.RuntimeAdmission.IntentCore
   alias Arbor.Agent.RuntimeAdmission.IntentOwner
   alias Arbor.Agent.RuntimeAdmission.OperationLauncher
@@ -275,7 +282,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       when is_binary(task_id) and is_binary(reservation_token) do
     GenServer.call(
       store_name(opts),
-      {:commit_recovery_marker, task_id, reservation_token},
+      {:commit_recovery_marker, task_id, reservation_token, normalize_opts(opts)},
       recovery_call_timeout(opts)
     )
   end
@@ -1147,7 +1154,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     state = ensure_recovery_shape(state)
     state = ensure_fence_shape(state)
     state = ensure_runtime_admission_shape(state)
-    state = begin_recovery_op(state, :replay_batch, nil, nil, nil)
+    state = %{state | recovery_replay_classified: MapSet.new()}
+    state = begin_recovery_op(state, :replay_batch, nil, nil, MapSet.new())
     state = maybe_begin_fence_seed(state)
     state = maybe_begin_runtime_admission_reconcile(state)
     {:noreply, state}
@@ -1169,7 +1177,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     if state.recovery_ready? do
       {:noreply, state}
     else
-      {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
+      {:noreply, begin_replay_batch(state)}
     end
   end
 
@@ -1264,36 +1272,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   def handle_call({:commit_recovery_marker, task_id, token}, from, state) do
-    state = ensure_recovery_shape(state)
-    {owner_pid, _} = from
+    handle_commit_recovery_marker(task_id, token, [], from, state)
+  end
 
-    cond do
-      state.recovery_durable? != true ->
-        {:reply, {:error, :recovery_durability_unavailable}, state}
+  def handle_call({:commit_recovery_marker, task_id, token, opts}, from, state)
+      when is_list(opts) do
+    handle_commit_recovery_marker(task_id, token, opts, from, state)
+  end
 
-      state.recovery_ready? != true ->
-        {:reply, {:error, :recovery_not_ready}, state}
-
-      true ->
-        case authorize_reservation(state, task_id, token, owner_pid) do
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-
-          {:ok, reservation} ->
-            case TaskControlLease.marker_new(task_id, DateTime.utc_now()) do
-              {:error, reason} ->
-                {:reply, {:error, reason}, state}
-
-              {:ok, marker} ->
-                state =
-                  begin_recovery_op(state, :marker_put, task_id, from, marker,
-                    expected_token_hash: reservation.token_hash
-                  )
-
-                {:noreply, state}
-            end
-        end
-    end
+  def handle_call({:commit_recovery_marker, task_id, token, _opts}, from, state) do
+    handle_commit_recovery_marker(task_id, token, [], from, state)
   end
 
   def handle_call(
@@ -2470,7 +2458,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     if state.recovery_ready? do
       {:noreply, state}
     else
-      {:noreply, begin_recovery_op(state, :replay_batch, nil, nil, nil)}
+      {:noreply, begin_replay_batch(state)}
     end
   end
 
@@ -2960,6 +2948,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       current_step: "done",
       waiting_on: nil,
       result: normalize_result(result),
+      completed_at: now
+    }
+  end
+
+  defp completion_fields({:error, :cancelled}, now) do
+    %{
+      state: :cancelled,
+      current_step: "cancelled",
+      waiting_on: nil,
+      error: :cancelled,
       completed_at: now
     }
   end
@@ -4052,6 +4050,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     |> Map.put_new(:recovery_admit_timeout_ms, @default_recovery_admit_timeout_ms)
     |> Map.put_new(:recovery_worker_timeout_ms, @default_recovery_worker_timeout_ms)
     |> Map.put_new(:recovery_replay_batch, @default_recovery_replay_batch)
+    |> Map.put_new(:recovery_replay_classified, MapSet.new())
     |> Map.put_new(:recovery_retry_base_ms, @default_recovery_retry_base_ms)
     |> Map.put_new(:recovery_retry_max_ms, @default_recovery_retry_max_ms)
     |> Map.put_new(:recovery_max_retries, @default_recovery_max_retries)
@@ -4479,61 +4478,51 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp execute_recovery_kind(
          :replay_batch,
          _task_id,
-         _payload,
+         payload,
          facade,
          store_name,
          security,
          batch
        ) do
+    classified = replay_classified_set(payload)
+
     case apply_recovery_list(facade, store_name) do
       {:ok, keys} when is_list(keys) ->
-        batch_keys = Enum.take(keys, batch)
+        pending = Enum.reject(keys, &MapSet.member?(classified, &1))
+        batch_keys = Enum.take(pending, batch)
 
-        results =
-          Enum.map(batch_keys, fn key ->
-            case apply_recovery_get(facade, store_name, key) do
-              {:ok, raw} ->
-                case TaskControlLease.marker_normalize(raw) do
-                  {:ok, marker} ->
-                    task_id = marker["task_id"]
-
-                    case execute_recovery_kind(
-                           :reconcile_task,
-                           task_id,
-                           nil,
-                           facade,
-                           store_name,
-                           security,
-                           batch
-                         ) do
-                      {:ok, _} -> {:ok, task_id}
-                      {:error, reason} -> {:error, {task_id, reason}}
-                    end
-
-                  {:error, reason} ->
-                    {:error, {key, reason}}
-                end
-
-              {:error, :not_found} ->
-                {:ok, key}
-
-              {:error, reason} ->
-                {:error, {key, sanitize_recovery_reason(reason)}}
-            end
+        {results, recoverable} =
+          Enum.map_reduce(batch_keys, [], fn key, acc ->
+            classify_replay_key(key, facade, store_name, security, batch, acc)
           end)
 
         failures = Enum.count(results, &match?({:error, _}, &1))
 
-        # Authoritative remainder: re-list after the batch. Ready only when an
-        # authoritative pass proves zero remaining markers (not merely a
-        # zero-failure truncated batch). Never estimate remainder on list failure.
+        processed =
+          results
+          |> Enum.flat_map(fn
+            {:ok, id} -> [id]
+            {:recoverable, _} -> []
+            {:unavailable, _} -> []
+            {:error, _} -> []
+          end)
+
         case apply_recovery_list(facade, store_name) do
           {:ok, after_keys} when is_list(after_keys) ->
+            next_classified =
+              classified
+              |> MapSet.union(MapSet.new(processed))
+
+            remaining =
+              Enum.count(after_keys, fn key -> not MapSet.member?(next_classified, key) end)
+
             {:ok,
              %{
                processed: length(batch_keys),
                failures: failures,
-               remaining: length(after_keys)
+               remaining: remaining,
+               classified: MapSet.to_list(next_classified),
+               recoverable: recoverable
              }}
 
           {:error, reason} ->
@@ -4557,6 +4546,333 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp execute_recovery_kind(_, _, _, _, _, _, _), do: {:error, :invalid_recovery_kind}
+
+  defp handle_commit_recovery_marker(task_id, token, opts, from, state) do
+    state = ensure_recovery_shape(state)
+    {owner_pid, _} = from
+
+    cond do
+      state.recovery_durable? != true ->
+        {:reply, {:error, :recovery_durability_unavailable}, state}
+
+      state.recovery_ready? != true ->
+        {:reply, {:error, :recovery_not_ready}, state}
+
+      true ->
+        case authorize_reservation(state, task_id, token, owner_pid) do
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+
+          {:ok, reservation} ->
+            case build_recovery_marker(task_id, opts) do
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+
+              {:ok, marker} ->
+                state =
+                  begin_recovery_op(state, :marker_put, task_id, from, marker,
+                    expected_token_hash: reservation.token_hash
+                  )
+
+                {:noreply, state}
+            end
+        end
+    end
+  end
+
+  defp build_recovery_marker(task_id, opts) when is_list(opts) do
+    now = DateTime.utc_now()
+    agent_id = Keyword.get(opts, :agent_id)
+    executor_kind = Keyword.get(opts, :executor_kind)
+    control_principal_id = Keyword.get(opts, :control_principal_id)
+    cleanup = Keyword.get(opts, :cleanup)
+
+    if is_binary(agent_id) and is_binary(executor_kind) and is_binary(control_principal_id) do
+      TaskControlLease.marker_new(task_id, now, %{
+        agent_id: agent_id,
+        executor_kind: executor_kind,
+        run_id: Keyword.get(opts, :run_id, task_id),
+        control_principal_id: control_principal_id,
+        cleanup: cleanup
+      })
+    else
+      TaskControlLease.marker_new(task_id, now)
+    end
+  end
+
+  defp classify_replay_key(key, facade, store_name, security, batch, recoverable) do
+    case apply_recovery_get(facade, store_name, key) do
+      {:ok, raw} ->
+        case TaskControlLease.marker_normalize(raw) do
+          {:ok, marker} ->
+            case TaskRunBindingCore.classify(marker) do
+              :v2_candidate ->
+                probe_v2_replay_marker(marker, facade, store_name, security, batch, recoverable)
+
+              :orphan ->
+                reconcile_replay_orphan(
+                  marker["task_id"],
+                  facade,
+                  store_name,
+                  security,
+                  batch,
+                  recoverable
+                )
+            end
+
+          {:error, _reason} ->
+            reconcile_replay_orphan(key, facade, store_name, security, batch, recoverable)
+        end
+
+      {:error, :not_found} ->
+        {{:ok, key}, recoverable}
+
+      {:error, reason} ->
+        {{:error, {key, sanitize_recovery_reason(reason)}}, recoverable}
+    end
+  end
+
+  defp probe_v2_replay_marker(marker, facade, store_name, security, batch, recoverable) do
+    task_id = marker["task_id"]
+    agent_id = marker["agent_id"]
+    kind = marker["executor_kind"]
+
+    with {:ok, module} <- Config.task_executor(kind),
+         true <- function_exported?(module, :probe_recovery, 2),
+         true <- function_exported?(module, :recover_task, 2) do
+      probe_context = %{
+        "task_id" => task_id,
+        "run_id" => marker["run_id"],
+        "executor_kind" => kind,
+        "control_principal_id" => marker["control_principal_id"]
+      }
+
+      case module.probe_recovery(agent_id, probe_context) do
+        {:ok, :orphan} ->
+          reconcile_replay_orphan(task_id, facade, store_name, security, batch, recoverable)
+
+        {:ok, {:recoverable, projection}} when is_map(projection) ->
+          case TaskRunBindingCore.join_probe(marker, projection) do
+            {:ok, _cas} ->
+              {{:recoverable, task_id}, [{marker, projection} | recoverable]}
+
+            {:error, :orphan} ->
+              reconcile_replay_orphan(task_id, facade, store_name, security, batch, recoverable)
+          end
+
+        {:error, :unavailable} ->
+          {{:unavailable, task_id}, recoverable}
+
+        {:error, _reason} ->
+          {{:unavailable, task_id}, recoverable}
+
+        _ ->
+          reconcile_replay_orphan(task_id, facade, store_name, security, batch, recoverable)
+      end
+    else
+      _ ->
+        reconcile_replay_orphan(task_id, facade, store_name, security, batch, recoverable)
+    end
+  rescue
+    _ -> {{:unavailable, marker["task_id"]}, recoverable}
+  catch
+    :exit, _ -> {{:unavailable, marker["task_id"]}, recoverable}
+    _, _ -> {{:unavailable, marker["task_id"]}, recoverable}
+  end
+
+  defp reconcile_replay_orphan(task_id, facade, store_name, security, batch, recoverable) do
+    result =
+      execute_recovery_kind(
+        :reconcile_task,
+        task_id,
+        nil,
+        facade,
+        store_name,
+        security,
+        batch
+      )
+
+    case result do
+      {:ok, _} -> {{:ok, task_id}, recoverable}
+      {:error, reason} -> {{:error, {task_id, reason}}, recoverable}
+    end
+  end
+
+  defp replay_classified_set(%MapSet{} = set), do: set
+
+  defp replay_classified_set(list) when is_list(list), do: MapSet.new(list)
+
+  defp replay_classified_set(_), do: MapSet.new()
+
+  defp begin_replay_batch(state) do
+    classified = Map.get(state, :recovery_replay_classified, MapSet.new())
+    begin_recovery_op(state, :replay_batch, nil, nil, classified)
+  end
+
+  defp admit_recoverable_markers(state, markers) when is_list(markers) do
+    Enum.reduce(Enum.reverse(markers), {state, []}, fn marker, {acc, admitted} ->
+      case admit_one_recoverable_marker(acc, marker) do
+        {:admitted, new_state, task_id} ->
+          {new_state, [task_id | admitted]}
+
+        {:unavailable, new_state} ->
+          {new_state, admitted}
+
+        new_state when is_map(new_state) ->
+          {new_state, admitted}
+      end
+    end)
+  end
+
+  defp admit_recoverable_markers(state, _), do: {state, []}
+
+  defp put_replay_classified(state, payload) do
+    classified = replay_classified_set(Map.get(payload, :classified, []))
+    %{state | recovery_replay_classified: classified}
+  end
+
+  defp admit_one_recoverable_marker(state, {marker, projection})
+       when is_map(marker) and is_map(projection) do
+    task_id = marker["task_id"]
+    agent_id = marker["agent_id"]
+
+    with {:ok, cas} <- TaskRunBindingCore.join_probe(marker, projection),
+         {:ok, module} <- Config.task_executor(marker["executor_kind"]),
+         true <- function_exported?(module, :recover_task, 2) do
+      case TaskRunBindingCore.admit_cas(Map.get(state.tasks, task_id), cas) do
+        {:spawn, ^cas} ->
+          spawn_recovered_task(state, marker, module, cas, agent_id)
+
+        decision ->
+          case TaskRunBindingCore.admission_action(decision) do
+            :keep ->
+              {:admitted, state, task_id}
+
+            :orphan ->
+              {:admitted, begin_recovery_op(state, :reconcile_task, task_id, nil, nil), task_id}
+
+            :unavailable ->
+              {:unavailable, state}
+
+            :spawn ->
+              {:unavailable, state}
+          end
+      end
+    else
+      _ -> {:unavailable, state}
+    end
+  end
+
+  defp admit_one_recoverable_marker(state, _), do: state
+
+  defp spawn_recovered_task(state, marker, module, cas, agent_id) do
+    task_id = marker["task_id"]
+    control_principal_id = marker["control_principal_id"]
+    security = Map.get(state, :task_control_security_module, Arbor.Security)
+
+    case reconstruct_control_lease(security, control_principal_id, task_id) do
+      {:error, :duplicate_capability_conflict} ->
+        {:unavailable, state}
+
+      {:error, _} ->
+        {:unavailable, state}
+
+      {:ok, lease} ->
+        spawn_recovered_task_with_lease(state, marker, module, cas, agent_id, task_id, lease)
+    end
+  end
+
+  defp spawn_recovered_task_with_lease(state, marker, module, cas, agent_id, task_id, lease) do
+    now = DateTime.utc_now()
+    context = recovered_task_context(task_id, marker)
+
+    task_ref =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        module.recover_task(agent_id, context)
+      end)
+
+    record = %{
+      task_id: task_id,
+      agent_id: agent_id,
+      task: %{"kind" => marker["executor_kind"]},
+      state: :running,
+      current_step: "running",
+      waiting_on: nil,
+      result: nil,
+      error: nil,
+      terminal_envelope: nil,
+      terminal_finalized: false,
+      pid: task_ref.pid,
+      ref: task_ref.ref,
+      started_at: now,
+      updated_at: now,
+      completed_at: nil,
+      metadata: %{},
+      executor: module,
+      context_mode: :json_clean,
+      context: context,
+      task_control_lease: lease,
+      recovery_marker?: true,
+      recovery_cas: cas,
+      adoption_destination_ref: nil,
+      adoption_last_error: nil,
+      approval_cleanup_descriptor: TaskRunBindingCore.cleanup_descriptor(marker),
+      controls: [],
+      control_retries: %{},
+      accepted_control_ids: MapSet.new(),
+      confirmation_retries: %{},
+      queued_confirmations: %{},
+      replay_counts: %{},
+      cancel_turn: Map.get(state, :cancel_turn)
+    }
+
+    new_state =
+      state
+      |> put_in([:tasks, task_id], record)
+      |> put_in([:refs, task_ref.ref], task_id)
+
+    {:admitted, new_state, task_id}
+  end
+
+  defp recovered_task_context(task_id, marker) when is_map(marker) do
+    case Map.get(marker, "control_principal_id") do
+      caller_id when is_binary(caller_id) and caller_id != "" ->
+        %{"task_id" => task_id, "caller_id" => caller_id}
+
+      _ ->
+        %{"task_id" => task_id}
+    end
+  end
+
+  defp recovered_task_context(task_id, _marker), do: %{"task_id" => task_id}
+
+  defp reconstruct_control_lease(security, control_principal_id, task_id)
+       when is_atom(security) and is_binary(control_principal_id) and is_binary(task_id) do
+    cond do
+      not (Code.ensure_loaded?(security) and function_exported?(security, :list_capabilities, 2)) ->
+        {:error, :control_inventory_unavailable}
+
+      true ->
+        case security.list_capabilities(control_principal_id, task_id: task_id) do
+          {:ok, caps} when is_list(caps) ->
+            TaskControlLease.from_listed_capabilities(task_id, caps)
+
+          {:error, _reason} ->
+            {:error, :control_inventory_unavailable}
+
+          _ ->
+            {:error, :control_inventory_unavailable}
+        end
+    end
+  rescue
+    _ -> {:error, :security_unavailable}
+  catch
+    :exit, _ -> {:error, :security_unavailable}
+    _, _ -> {:error, :security_unavailable}
+  end
+
+  defp reconstruct_control_lease(_security, _control_principal_id, _task_id),
+    do: {:error, :control_inventory_unavailable}
 
   defp apply_recovery_put(facade, store_name, key, value) do
     cond do
@@ -4845,23 +5161,19 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp apply_recovery_result(
          state,
          %{kind: :replay_batch},
-         {:ok, %{failures: 0, remaining: 0}}
+         {:ok, %{failures: 0, remaining: 0} = payload}
        ) do
-    # Authoritative empty remainder — only then mark ready. The production
-    # adapter attests node-restart durability before each authoritative list.
-    %{state | recovery_ready?: true}
+    finish_replay_batch(state, payload, 0, 0)
   end
 
   defp apply_recovery_result(
          state,
          %{kind: :replay_batch},
-         {:ok, %{failures: failures, remaining: remaining}}
+         {:ok, %{failures: failures, remaining: remaining} = payload}
        )
        when is_integer(failures) and is_integer(remaining) and
               (failures > 0 or remaining > 0) do
-    # More markers remain or batch had failures — stay not-ready and continue.
-    Process.send_after(self(), :retry_recovery_replay_msg, recovery_retry_delay(state, 0))
-    state
+    finish_replay_batch(state, payload, failures, remaining)
   end
 
   defp apply_recovery_result(state, %{kind: :replay_batch}, {:ok, %{failures: 0}}) do
@@ -4876,6 +5188,26 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp apply_recovery_result(state, _op, _result), do: state
+
+  defp finish_replay_batch(state, payload, failures, remaining)
+       when is_integer(failures) and is_integer(remaining) do
+    state = put_replay_classified(state, payload)
+    {state, admitted} = admit_recoverable_markers(state, Map.get(payload, :recoverable, []))
+
+    classified =
+      state.recovery_replay_classified
+      |> MapSet.union(MapSet.new(admitted))
+
+    state = %{state | recovery_replay_classified: classified}
+    effective_remaining = max(remaining - length(admitted), 0)
+
+    if failures == 0 and effective_remaining == 0 do
+      %{state | recovery_ready?: true}
+    else
+      Process.send_after(self(), :retry_recovery_replay_msg, recovery_retry_delay(state, 0))
+      state
+    end
+  end
 
   defp clear_recovery_pending(state, task_id) do
     case Map.get(Map.get(state, :recovery_pending, %{}), task_id) do

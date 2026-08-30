@@ -402,7 +402,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              "manifest" => candidate.manifest,
              "plan_sha256" => sha256(Jason.encode!(candidate.plan, pretty: true)),
              "pipeline_sha256" => sha256(candidate.dot_source),
-             "manifest_sha256" => sha256(Jason.encode!(candidate.manifest, pretty: true))
+             "manifest_sha256" => sha256(Jason.encode!(candidate.manifest, pretty: true)),
+             "artifact_identity" => sha256(File.read!(compilation_seal_path(root)))
            }
 
     bad_task_id = "task_bad_compilation_graph_hash"
@@ -3089,6 +3090,122 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
 
   defp read_artifacts(descriptor) do
     Map.new(artifact_paths(descriptor), fn {name, path} -> {name, File.read!(path)} end)
+  end
+
+  test "closed adapter-input duplicate reads accept equal replay and reject unequal, oversize, symlink, and insecure mode",
+       %{root: root} do
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+
+    adapter = %{
+      "schema_version" => 1,
+      "task_id" => "task_1",
+      "run_id" => "task_1",
+      "program" => %{"profile_id" => "default"},
+      "candidate_tree_oid" => String.duplicate("a", 40),
+      "action_result" => %{"passed" => true},
+      "observed_at" => "2026-07-22T12:00:00.000Z"
+    }
+
+    assert :ok = ArtifactStore.archive_adapter_input(root, adapter)
+    assert :ok = ArtifactStore.archive_adapter_input(root, adapter)
+
+    path = Path.join(Path.expand(root), "coding-adapter-input.json")
+    File.write!(path, Jason.encode!(Map.put(adapter, "observed_at", "other")))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :stale_or_duplicate_terminal} =
+             ArtifactStore.archive_adapter_input(root, adapter)
+
+    File.rm!(path)
+    File.write!(path, String.duplicate("x", 1_048_577))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :malformed} = ArtifactStore.archive_adapter_input(root, adapter)
+
+    File.rm!(path)
+    File.mkdir_p!(root)
+    link = Path.join(root, "coding-adapter-input.json")
+    target = Path.join(root, "target.json")
+    File.write!(target, "x")
+    File.ln_s!(target, link)
+
+    assert {:error, :malformed} = ArtifactStore.archive_adapter_input(root, adapter)
+
+    File.rm!(link)
+    assert :ok = ArtifactStore.archive_adapter_input(root, adapter)
+    File.chmod!(path, 0o644)
+
+    assert {:error, :insecure_mode} = ArtifactStore.archive_adapter_input(root, adapter)
+
+    File.chmod!(path, 0o600)
+    File.rm!(path)
+    File.write!(path, Jason.encode!(Map.put(adapter, "observed_at", "replaced")))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :stale_or_duplicate_terminal} =
+             ArtifactStore.archive_adapter_input(root, adapter)
+  end
+
+  test "closed binding/receipt/decision duplicate reads reject valid-JSON tamper and oversize", %{
+    root: root
+  } do
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+    hash = String.duplicate("a", 64)
+
+    binding = %{
+      "schema_version" => 1,
+      "task_id" => "task_1",
+      "run_id" => "task_1",
+      "agent_id" => "agent_1",
+      "execution_principal" => "agent_1",
+      "control_principal_id" => "caller_1",
+      "executor_kind" => "coding_change",
+      "graph_hash" => hash,
+      "compiler_version" => "1",
+      "artifact_identity" => String.duplicate("c", 64)
+    }
+
+    assert :ok = ArtifactStore.archive_run_binding(root, binding)
+    assert :ok = ArtifactStore.archive_run_binding(root, binding)
+
+    path = Path.join(Path.expand(root), "coding-run-binding.json")
+    File.write!(path, Jason.encode!(Map.put(binding, "agent_id", "agent_other")))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :stale_or_duplicate_terminal} =
+             ArtifactStore.archive_run_binding(root, binding)
+
+    File.rm!(path)
+    File.write!(path, String.duplicate("x", 65_537))
+    File.chmod!(path, 0o600)
+
+    assert {:error, :malformed} = ArtifactStore.archive_run_binding(root, binding)
+  end
+
+  @tag :security_regression
+  test "security regression: swap-before-open cannot pass path-only postchecks", %{root: root} do
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+    path = Path.join(Path.expand(root), "bounded-read.json")
+    original = :binary.copy("A", 64)
+    substitute = :binary.copy("B", 64)
+    File.write!(path, original)
+    File.chmod!(path, 0o600)
+    alternate = path <> ".alt"
+    File.write!(alternate, substitute)
+    File.chmod!(alternate, 0o600)
+
+    Process.put({ArtifactStore, :bounded_read_pre_open_hook}, fn hooked ->
+      if hooked == path do
+        File.rename!(path, path <> ".orig")
+        File.rename!(alternate, path)
+      end
+    end)
+
+    assert {:error, :malformed} = ArtifactStore.read_descriptor_bounded_file(path, 1024)
+    Process.delete({ArtifactStore, :bounded_read_pre_open_hook})
   end
 
   defp artifact_paths(descriptor) do

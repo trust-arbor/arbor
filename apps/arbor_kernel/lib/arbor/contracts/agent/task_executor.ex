@@ -161,6 +161,21 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Queued steering controls transfer responsibility to the executor; acceptance transfers responsibility
   until delivery is reconciled.
 
+  Configured executors may implement `recover_task/2` so TaskStore can resume a
+  task-backed Engine run after process or node restart. The context is the same
+  JSON-clean map as `run/3` (`task_id` required). Recovery authority is the
+  immutable authenticated plan, DOT, compile manifest, checkpoint, and task
+  artifacts — never the original public task payload. The durable binding keeps
+  the exact `execution_principal` separate from the caller-owned control
+  principal. Explicit runner overrides do not invoke this callback.
+
+  Configured executors that support recovery should also implement
+  `probe_recovery/2`. TaskStore calls it during marker replay, before admitting
+  a recovered runner, to authenticate binding and journal evidence and to
+  return a closed binding projection plus `binding_digest` for rehydrate CAS.
+  `{:ok, :orphan}` routes the marker through fail-closed revoke+delete.
+  `{:error, :unavailable}` is retryable and must not orphan the marker.
+
   ## Task kinds
 
   Plain string tasks and legacy maps with `input` / `prompt` / `message` /
@@ -402,11 +417,50 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
               execution_context()
             ) :: {:ok, result_payload()} | {:error, term()}
 
+  @doc """
+  Optionally resume a previously admitted configured task after store restart.
+
+  TaskStore calls this instead of `run/3` when a durable v2 recovery marker
+  proves a recoverable task-backed Engine run. The context is JSON-clean and
+  contains the exact `task_id`. Implementations must reacquire credentials
+  outside any checkpoint, inspect `final_outcome` after Engine transport
+  success, and return the same result shape as `run/3`.
+  """
+  @callback recover_task(agent_id(), execution_context()) :: result()
+
+  @typedoc """
+  Closed probe outcome for recovery admission.
+
+  The recoverable object is a closed JSON map with exact keys:
+  `schema_version`, `task_id`, `run_id`, `agent_id`, `execution_principal`,
+  `control_principal_id`, `executor_kind`, `graph_hash`, `artifact_identity`,
+  and `binding_digest`.
+  """
+  @type recovery_probe ::
+          {:ok, :orphan}
+          | {:ok, {:recoverable, json_map()}}
+          | {:error, :unavailable | term()}
+
+  @doc """
+  Optionally authenticate durable recovery evidence before TaskStore admits a
+  recovered runner.
+
+  Called from store-owned replay workers with the same JSON-clean context as
+  `recover_task/2`. Must not open a SigningAuthority. Return `{:ok, :orphan}`
+  for authoritative absent/malformed/mismatched bindings, or
+  `{:ok, {:recoverable, projection}}` when the exact bind holds. The projection
+  is the closed 10-key binding object including `binding_digest`. Transport
+  outages return `{:error, :unavailable}`.
+  """
+  @callback probe_recovery(agent_id(), execution_context()) :: recovery_probe()
+
   @optional_callbacks project_dispatch_readiness: 3,
                       task_status: 2,
                       cancel_task: 2,
                       steer_task: 3,
                       finalize_terminal_task: 4,
                       finalize_task: 4,
-                      adopt_task: 4
+                      adopt_task: 4,
+                      recover_task: 2,
+                      probe_recovery: 2
 end

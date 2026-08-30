@@ -589,6 +589,8 @@ config :arbor_orchestrator,
     {"openai_oauth", "gpt-5.6-sol"},
     {"xai_oauth", "grok-4.6"}
   ],
-  llm_provider_fallbacks: %{}
+  llm_provider_fallbacks: %{},
+  recovery_resume_options_resolver:
+    {Arbor.Orchestrator.CodingRunRecovery, :resolve_coordinator_options}
 
 import_config "#{config_env()}.exs"

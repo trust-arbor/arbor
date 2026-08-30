@@ -370,6 +370,44 @@ defmodule Arbor.Agent.Orchestration.TaskControlLeaseTest do
     assert {:error, _} = TaskControlLease.new(task_id, incomplete)
   end
 
+  test "from_listed_capabilities preserves a surviving subset and treats empty as no caps" do
+    task_id = "task_listed_1"
+    {:ok, read_uri} = TaskControlLease.uri(:task_read, task_id)
+    {:ok, cancel_uri} = TaskControlLease.uri(:task_cancel, task_id)
+
+    assert {:ok, nil} = TaskControlLease.from_listed_capabilities(task_id, [])
+
+    assert {:ok, lease} =
+             TaskControlLease.from_listed_capabilities(task_id, [
+               %{id: "cap_read", resource_uri: read_uri, task_id: task_id},
+               %{id: "cap_cancel", resource_uri: cancel_uri, task_id: task_id}
+             ])
+
+    assert lease["task_id"] == task_id
+    assert lease["capabilities"]["task_read"] == "cap_read"
+    assert lease["capabilities"]["task_cancel"] == "cap_cancel"
+    refute Map.has_key?(lease["capabilities"], "task_steer")
+  end
+
+  test "from_listed_capabilities keeps equal duplicate ids and rejects conflicting same-kind ids" do
+    task_id = "task_listed_dup"
+    {:ok, read_uri} = TaskControlLease.uri(:task_read, task_id)
+
+    assert {:ok, lease} =
+             TaskControlLease.from_listed_capabilities(task_id, [
+               %{id: "cap_read", resource_uri: read_uri, task_id: task_id},
+               %{id: "cap_read", resource_uri: read_uri, task_id: task_id}
+             ])
+
+    assert lease["capabilities"]["task_read"] == "cap_read"
+
+    assert {:error, :duplicate_capability_conflict} =
+             TaskControlLease.from_listed_capabilities(task_id, [
+               %{id: "cap_read_a", resource_uri: read_uri, task_id: task_id},
+               %{id: "cap_read_b", resource_uri: read_uri, task_id: task_id}
+             ])
+  end
+
   test "new/normalize reject duplicate atom+string kind aliases" do
     task_id = "task_alias_1"
 

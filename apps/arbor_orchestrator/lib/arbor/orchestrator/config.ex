@@ -303,6 +303,16 @@ defmodule Arbor.Orchestrator.Config do
     Application.get_env(@app, :coding_pipeline_runner, @default_coding_pipeline_runner)
   end
 
+  @doc """
+  Public facade used to resume an interrupted coding Engine run.
+
+  Defaults to `Arbor.Orchestrator`. Tests may inject a capturing resumer.
+  """
+  @spec coding_pipeline_resumer() :: module()
+  def coding_pipeline_resumer do
+    Application.get_env(@app, :coding_pipeline_resumer, @default_coding_pipeline_runner)
+  end
+
   @doc "Trusted action executor used by coding-candidate verification."
   @spec coding_candidate_actions_executor() :: module()
   def coding_candidate_actions_executor do
@@ -544,6 +554,18 @@ defmodule Arbor.Orchestrator.Config do
       :coding_readiness_security_module,
       @default_coding_readiness_security_module
     )
+  end
+
+  @doc """
+  MFA or 1-arity fun RecoveryCoordinator uses to resolve resume credentials.
+
+  Production wires `{Arbor.Orchestrator.CodingRunRecovery, :resolve_coordinator_options}`
+  which never opens a SigningAuthority. Missing config is fail-closed
+  `:authentication_unavailable`.
+  """
+  @spec recovery_resume_options_resolver() :: term()
+  def recovery_resume_options_resolver do
+    Application.get_env(@app, :recovery_resume_options_resolver)
   end
 
   @doc """

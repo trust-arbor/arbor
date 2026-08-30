@@ -99,14 +99,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     TaskTerminalArchiveCore,
     TerminalReclassifyCore,
     ValidationCapacityTerminal,
-    ValidationProgram
+    ValidationProgram,
+    CodingRunRecoveryCore
   }
+
+  alias Arbor.Orchestrator.CodingRunRecovery
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.RunLifecycle.Adapter, as: RunLifecycleAdapter
 
-  @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
+  @allowed_context_keys MapSet.new(
+                          ~w(task_id timeout caller_id metadata run_id executor_kind control_principal_id)
+                        )
 
   @allowed_control_keys MapSet.new(~w(
     control_id
@@ -280,6 +285,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                                    )
   @max_finalize_controls 100
   @max_finalize_task_id_bytes 512
+  @max_compilation_artifact_bytes 4_194_304
 
   @adoptable_statuses MapSet.new(~w(change_committed human_review_required pr_created))
   @adoption_request_keys MapSet.new(~w(destination_ref))
@@ -423,15 +429,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                ),
              # Startup URI registration is a snapshot; reconcile hot-loaded actions.
              :ok <- reconcile_action_uri_prefixes(),
+             :ok <-
+               publish_run_binding(
+                 logs_root,
+                 exec_ctx,
+                 agent_id,
+                 artifacts,
+                 compilation
+               ),
              {:ok, engine_result} <-
                invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
-             {:ok, result} <-
+             adaptation =
                adapt_result(
                  engine_result,
                  started_at,
                  Map.fetch!(canonical_plan.worker, "provider"),
                  Map.get(canonical_plan.worker, "model"),
                  %{task_id: exec_ctx.task_id, logs_root: logs_root}
+               ),
+             {:ok, result} <-
+               publish_pipeline_error_receipt(
+                 adaptation,
+                 logs_root,
+                 exec_ctx,
+                 agent_id,
+                 artifacts,
+                 compilation,
+                 engine_result
                ),
              release_artifacts = attach_workspace_release_artifact(artifacts, result),
              {:ok, public_artifacts} <-
@@ -440,6 +464,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                  logs_root,
                  exec_ctx.task_id,
                  engine_result
+               ),
+             :ok <-
+               publish_engine_terminal_receipt(
+                 logs_root,
+                 exec_ctx,
+                 agent_id,
+                 artifacts,
+                 compilation,
+                 engine_result,
+                 result
                ) do
           {:ok, Map.put(result, "artifacts", public_artifacts)}
         end
@@ -452,6 +486,84 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   def run(_agent_id, _task, _context), do: {:error, :invalid_agent_id}
+
+  @doc """
+  Resume a previously admitted coding task after TaskStore restart.
+
+  Reconstructs from sealed compilation, binding, checkpoint, and RunJournal.
+  Never treats the original public task payload as recovery authority.
+  """
+  @impl true
+  @spec recover_task(String.t(), map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def recover_task(agent_id, context) when is_binary(agent_id) do
+    started_at = System.monotonic_time(:millisecond)
+
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, exec_ctx} <- validate_context(context) do
+      do_recover_task(agent_id, exec_ctx, started_at)
+    end
+  end
+
+  def recover_task(_agent_id, _context), do: {:error, :invalid_agent_id}
+
+  @doc """
+  Authenticate durable recovery evidence without opening a SigningAuthority.
+
+  Returns `{:ok, {:recoverable, %{"binding_digest" => digest}}}` when the exact
+  bind holds, `{:ok, :orphan}` for authoritative absence/mismatch, and
+  `{:error, :unavailable}` for transport outages.
+  """
+  @impl true
+  @spec probe_recovery(String.t(), map() | keyword()) ::
+          {:ok, :orphan}
+          | {:ok, {:recoverable, map()}}
+          | {:error, :unavailable | term()}
+  def probe_recovery(agent_id, context) when is_binary(agent_id) do
+    with :ok <- validate_agent_id(agent_id),
+         {:ok, exec_ctx} <- validate_context(context),
+         {:ok, logs_root} <- locate_existing_task_logs_root(exec_ctx.task_id),
+         {:ok, compilation_bundle} <- read_recovery_compilation(logs_root, exec_ctx.task_id),
+         {:ok, binding} <- read_recovery_binding(logs_root),
+         {:ok, record} <- fetch_recovery_record(exec_ctx.task_id),
+         {:ok, facts} <- compilation_facts(compilation_bundle, logs_root),
+         :ok <- CodingRunRecoveryCore.admit(binding, record, facts, agent_id),
+         {:ok, projection} <- CodingRunRecoveryCore.probe_projection(binding) do
+      {:ok, {:recoverable, projection}}
+    else
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, :journal_unavailable} -> {:error, :unavailable}
+      {:error, :authentication_unavailable} -> {:error, :unavailable}
+      {:error, :control_inventory_unavailable} -> {:error, :unavailable}
+      {:error, :eio} -> {:error, :unavailable}
+      {:error, :store_unavailable} -> {:error, :unavailable}
+      {:error, {:store_unavailable, _}} -> {:error, :unavailable}
+      {:error, :invalid_agent_id} -> {:ok, :orphan}
+      {:error, :invalid_context} -> {:ok, :orphan}
+      {:error, :not_found} -> {:ok, :orphan}
+      {:error, :malformed} -> {:ok, :orphan}
+      {:error, :unprovable_recovery} -> {:ok, :orphan}
+      {:error, :binding_mismatch} -> {:ok, :orphan}
+      {:error, :invalid_binding} -> {:ok, :orphan}
+      {:error, _} -> {:ok, :orphan}
+      other -> classify_probe_other(other)
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+    _, _ -> {:error, :unavailable}
+  end
+
+  def probe_recovery(_agent_id, _context), do: {:ok, :orphan}
+
+  defp classify_probe_other({:error, reason}) do
+    case CodingRunRecoveryCore.classify_resume_error(reason) do
+      :retryable_unavailable -> {:error, :unavailable}
+      _ -> {:ok, :orphan}
+    end
+  end
+
+  defp classify_probe_other(_), do: {:ok, :orphan}
 
   @doc """
   Project JSON-clean progress for TaskStore from PipelineStatus.
@@ -564,6 +676,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- validate_finalize_controls(controls),
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          :ok <- validate_finalize_artifact_files(result, logs_root),
+         :ok <- reverify_finalize_compilation(result, logs_root, exec_ctx.task_id),
          {:ok, descriptor} <-
            archive_terminal_evidence(logs_root, exec_ctx.task_id, result, controls),
          {:ok, descriptor} <-
@@ -689,7 +802,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     do: {:error, :invalid_adoption_result}
 
   defp read_terminal_evidence_body(descriptor) do
-    with {:ok, bytes} <- File.read(descriptor["path"]),
+    with {:ok, bytes} <- read_bounded_terminal_evidence_file(descriptor["path"]),
          {:ok, body} when is_map(body) <- Jason.decode(bytes) do
       {:ok, body}
     else
@@ -1313,7 +1426,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          true <- descriptor === expected_descriptor,
          {:ok, %File.Stat{type: :regular, mode: mode}} <- File.lstat(expected_path),
          true <- Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, bytes} <- File.read(expected_path),
+         {:ok, bytes} <- read_bounded_task_terminal_file(expected_path),
          true <- bytes === archive.encoded do
       :ok
     else
@@ -1355,7 +1468,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp validate_terminal_evidence_file(descriptor) do
     with :ok <- validate_regular_terminal_file(descriptor["path"]),
-         {:ok, bytes} <- File.read(descriptor["path"]),
+         {:ok, bytes} <- read_bounded_terminal_evidence_file(descriptor["path"]),
          true <- byte_size(bytes) == descriptor["byte_size"],
          true <- sha256(bytes) == descriptor["sha256"] do
       :ok
@@ -1363,6 +1476,76 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       false -> {:error, :terminal_evidence_file_mismatch}
       {:error, reason} -> {:error, {:terminal_evidence_file_unavailable, reason}}
       _ -> {:error, :terminal_evidence_file_mismatch}
+    end
+  end
+
+  defp read_bounded_terminal_evidence_file(path) do
+    read_store_bounded_file(path, 1_048_576)
+  end
+
+  defp read_bounded_task_terminal_file(path) do
+    read_store_bounded_file(path, 1_048_576)
+  end
+
+  defp read_store_bounded_file(path, max_bytes) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      is_atom(store) and Code.ensure_loaded?(store) and
+          function_exported?(store, :read_descriptor_bounded_file, 2) ->
+        store.read_descriptor_bounded_file(path, max_bytes)
+
+      true ->
+        {:error, :coding_plan_artifact_store_unavailable}
+    end
+  end
+
+  defp reverify_finalize_compilation(result, logs_root, task_id) do
+    store = Config.coding_plan_artifact_store()
+    base = Path.dirname(logs_root)
+
+    cond do
+      not is_atom(store) or not Code.ensure_loaded?(store) ->
+        {:error, :unprovable_recovery}
+
+      not function_exported?(store, :read_task_compilation, 2) ->
+        {:error, :unprovable_recovery}
+
+      true ->
+        case store.read_task_compilation(base, task_id) do
+          {:ok, bundle} ->
+            compare_finalize_compilation(result, logs_root, bundle)
+
+          {:error, :unavailable} ->
+            {:error, :unavailable}
+
+          {:error, :eio} ->
+            {:error, :unavailable}
+
+          {:error, _} ->
+            {:error, :unprovable_recovery}
+        end
+    end
+  end
+
+  defp compare_finalize_compilation(result, logs_root, bundle) do
+    artifacts = Map.fetch!(result, "artifacts")
+
+    with {:ok, _plan, compilation} <- sealed_plan_and_compilation(bundle),
+         true <- artifacts["coding_plan_path"] == Path.join(logs_root, "coding-plan.json"),
+         true <- artifacts["coding_pipeline_path"] == Path.join(logs_root, "coding-pipeline.dot"),
+         true <-
+           artifacts["compile_manifest_path"] ==
+             Path.join(logs_root, "coding-compile-manifest.json"),
+         true <- artifacts["graph_hash"] == compilation.graph_hash,
+         true <- artifacts["compiler_version"] == compilation.compiler_version,
+         true <-
+           is_binary(bundle["artifact_identity"]) and byte_size(bundle["artifact_identity"]) == 64 do
+      :ok
+    else
+      false -> {:error, {:invalid_finalize_result, :compilation_descriptor}}
+      {:error, _} = error -> error
+      _ -> {:error, {:invalid_finalize_result, :compilation_descriptor}}
     end
   end
 
@@ -2360,12 +2543,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp validate_archived_contents(descriptor, plan, compilation) do
-    with {:ok, dot_source} <- File.read(descriptor["coding_pipeline_path"]),
+    with {:ok, dot_source} <-
+           read_store_bounded_file(
+             descriptor["coding_pipeline_path"],
+             @max_compilation_artifact_bytes
+           ),
          true <- dot_source == compilation.dot_source,
-         {:ok, plan_json} <- File.read(descriptor["coding_plan_path"]),
+         {:ok, plan_json} <-
+           read_store_bounded_file(
+             descriptor["coding_plan_path"],
+             @max_compilation_artifact_bytes
+           ),
          {:ok, archived_plan} <- Jason.decode(plan_json),
          true <- archived_plan == Plan.to_map(plan),
-         {:ok, manifest_json} <- File.read(descriptor["compile_manifest_path"]),
+         {:ok, manifest_json} <-
+           read_store_bounded_file(
+             descriptor["compile_manifest_path"],
+             @max_compilation_artifact_bytes
+           ),
          {:ok, archived_manifest} <- Jason.decode(manifest_json),
          true <- archived_manifest == compilation.manifest do
       :ok
@@ -2377,7 +2572,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp verify_execution_boundary(graph_path, %Plan{} = plan, %Compilation{} = compilation) do
     with :ok <- validate_prepared_execution_compilation(compilation, plan),
-         {:ok, dot_source} <- File.read(graph_path),
+         {:ok, dot_source} <-
+           read_store_bounded_file(graph_path, @max_compilation_artifact_bytes),
          true <- dot_source == compilation.dot_source,
          true <- sha256(dot_source) == compilation.graph_hash do
       verify_execution_boundary_from_compilation(plan, compilation)
@@ -2655,7 +2851,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          %SigningAuthority{} = authority,
          logs_root,
          pinned_action_bindings,
-         pinned_handler_bindings
+         pinned_handler_bindings,
+         mode \\ :run
        ) do
     task_id = exec_ctx.task_id
     caller_id = Map.get(exec_ctx, :caller_id)
@@ -2693,7 +2890,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
           run_id: task_id,
           pipeline_id: task_id,
           signing_authority: authority,
-          initial_values: initial_values,
           logs_root: logs_root,
           transcript_sink: {
             ArtifactStore,
@@ -2732,6 +2928,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
           resumable: true,
           cache: false
         ]
+
+      opts =
+        if mode == :resume do
+          opts
+        else
+          Keyword.put(opts, :initial_values, initial_values)
+        end
 
       # The authenticated caller remains distinct from the execution principal.
       # Engine middleware intersects both principals' scoped capabilities at
@@ -2885,6 +3088,1319 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     _, _ -> {:error, :action_uri_prefix_reconciliation_failed}
   end
 
+  defp do_recover_task(agent_id, exec_ctx, started_at, attempt \\ 0)
+
+  defp do_recover_task(agent_id, exec_ctx, started_at, attempt) do
+    task_id = exec_ctx.task_id
+
+    with {:ok, logs_root} <- prepare_task_logs_root(task_id),
+         {:ok, compilation_bundle} <- read_recovery_compilation(logs_root, task_id),
+         {:ok, plan, compilation} <- sealed_plan_and_compilation(compilation_bundle),
+         {:ok, binding} <- read_recovery_binding(logs_root),
+         {:ok, record} <- fetch_recovery_record(task_id),
+         {:ok, facts} <- compilation_facts(compilation_bundle, logs_root),
+         :ok <- CodingRunRecoveryCore.admit(binding, record, facts, agent_id),
+         {:ok, exec_ctx} <- exec_ctx_from_admitted_binding(exec_ctx, binding) do
+      recover_from_durable_state(
+        agent_id,
+        exec_ctx,
+        started_at,
+        logs_root,
+        compilation_bundle,
+        plan,
+        compilation,
+        binding,
+        record,
+        attempt
+      )
+    else
+      {:error, :journal_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :authentication_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :control_inventory_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :eio} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :store_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, {:store_unavailable, _}} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp recover_from_durable_state(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         attempt
+       ) do
+    case ArtifactStore.read_task_terminal(logs_root, exec_ctx.task_id) do
+      {:ok, archive} ->
+        case adapt_from_task_terminal(
+               archive,
+               exec_ctx.task_id,
+               logs_root,
+               compilation_bundle,
+               plan,
+               compilation,
+               binding,
+               record,
+               started_at
+             ) do
+          {:continue_receipt} ->
+            recover_from_engine_receipt(
+              agent_id,
+              exec_ctx,
+              started_at,
+              logs_root,
+              compilation_bundle,
+              plan,
+              compilation,
+              binding,
+              record,
+              attempt
+            )
+
+          other ->
+            other
+        end
+
+      {:error, :unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :malformed} ->
+        {:error, :unprovable_recovery}
+
+      {:error, :not_found} ->
+        recover_from_engine_receipt(
+          agent_id,
+          exec_ctx,
+          started_at,
+          logs_root,
+          compilation_bundle,
+          plan,
+          compilation,
+          binding,
+          record,
+          attempt
+        )
+    end
+  end
+
+  defp recover_from_engine_receipt(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         attempt
+       ) do
+    case ArtifactStore.read_engine_terminal(logs_root) do
+      {:ok, receipt} ->
+        adapt_from_receipt(
+          receipt,
+          compilation_bundle,
+          plan,
+          compilation,
+          binding,
+          record,
+          started_at,
+          logs_root,
+          exec_ctx.task_id
+        )
+
+      {:error, :unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :malformed} ->
+        {:error, :unprovable_recovery}
+
+      {:error, :not_found} ->
+        recover_without_receipt(
+          agent_id,
+          exec_ctx,
+          started_at,
+          logs_root,
+          compilation_bundle,
+          plan,
+          compilation,
+          binding,
+          record,
+          attempt
+        )
+    end
+  end
+
+  defp recover_without_receipt(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         attempt
+       ) do
+    status = record_status(record)
+
+    cond do
+      status == :running ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      status == :abandoned ->
+        {:error, :cancelled}
+
+      status in [:interrupted, :recovering] ->
+        resume_interrupted_coding_run(
+          agent_id,
+          exec_ctx,
+          started_at,
+          logs_root,
+          compilation_bundle,
+          plan,
+          compilation,
+          binding,
+          record,
+          attempt
+        )
+
+      status in [:completed, :failed, :not_found] ->
+        {:error, :unprovable_recovery}
+
+      true ->
+        {:error, :unprovable_recovery}
+    end
+  end
+
+  defp resume_interrupted_coding_run(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         attempt
+       ) do
+    case CodingRunRecovery.acquire_resume_authority(agent_id) do
+      {:ok, authority, security} ->
+        resume_with_authority(
+          agent_id,
+          exec_ctx,
+          started_at,
+          logs_root,
+          compilation_bundle,
+          plan,
+          compilation,
+          binding,
+          record,
+          authority,
+          security,
+          attempt
+        )
+
+      {:error, :authentication_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :broker_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :security_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :no_signing_key} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :principal_mismatch} ->
+        {:error, :principal_mismatch}
+
+      {:error, reason} ->
+        case CodingRunRecoveryCore.classify_resume_error(reason) do
+          :retryable_unavailable -> retry_recover(agent_id, exec_ctx, started_at, attempt)
+          _ -> {:error, reason}
+        end
+    end
+  end
+
+  defp resume_with_authority(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         authority,
+         security,
+         attempt
+       ) do
+    task_id = exec_ctx.task_id
+
+    result =
+      try do
+        with :ok <- validate_authority_principal(authority, agent_id),
+             {:ok, {pinned_action_bindings, pinned_handler_bindings, _compiled_graph}} <-
+               verify_execution_boundary(
+                 Path.join(logs_root, "coding-pipeline.dot"),
+                 plan,
+                 compilation
+               ),
+             {:ok, resume_opts} <-
+               build_engine_opts(
+                 agent_id,
+                 plan,
+                 compilation,
+                 exec_ctx,
+                 authority,
+                 logs_root,
+                 pinned_action_bindings,
+                 pinned_handler_bindings,
+                 :resume
+               ) do
+          resume_opts =
+            resume_opts
+            |> Keyword.put(:execution_principal, agent_id)
+            |> Keyword.put(:graph_hash, binding["graph_hash"])
+
+          case invoke_resumer(task_id, resume_opts) do
+            {:ok, run_result} ->
+              adaptation =
+                adapt_recovered_engine_result(
+                  run_result,
+                  started_at,
+                  plan,
+                  compilation,
+                  logs_root,
+                  task_id
+                )
+
+              with {:ok, adapted} <-
+                     publish_pipeline_error_receipt(
+                       adaptation,
+                       logs_root,
+                       exec_ctx,
+                       agent_id,
+                       compilation_bundle,
+                       compilation,
+                       run_result
+                     ),
+                   :ok <-
+                     publish_engine_terminal_receipt(
+                       logs_root,
+                       exec_ctx,
+                       agent_id,
+                       compilation_bundle,
+                       compilation,
+                       run_result,
+                       adapted
+                     ) do
+                {:ok, adapted}
+              end
+
+            {:error, {:invalid_status, :abandoned}} ->
+              {:error, :cancelled}
+
+            {:error, {:invalid_status, :running}} ->
+              {:error, :unavailable}
+
+            {:error, {:invalid_status, status}}
+            when status in [:completed, :failed] ->
+              case ArtifactStore.read_engine_terminal(logs_root) do
+                {:ok, receipt} ->
+                  adapt_from_receipt(
+                    receipt,
+                    compilation_bundle,
+                    plan,
+                    compilation,
+                    binding,
+                    record,
+                    started_at,
+                    logs_root,
+                    task_id
+                  )
+
+                {:error, :unavailable} ->
+                  {:error, :unavailable}
+
+                {:error, :not_found} ->
+                  {:error, :unprovable_recovery}
+
+                {:error, _} ->
+                  {:error, :unprovable_recovery}
+              end
+
+            {:error, reason} ->
+              classify_and_wrap_resume_error(reason)
+          end
+        end
+      rescue
+        exception ->
+          {:error, {:recovery_exception, Exception.message(exception)}}
+      catch
+        kind, reason ->
+          {:error, {:recovery_exception, {kind, reason}}}
+      end
+
+    combined =
+      CodingRunRecoveryCore.combine_close_result(
+        CodingRunRecovery.close_authority(security, authority),
+        result
+      )
+
+    case combined do
+      {:ok, adapted} ->
+        {:ok, adapted}
+
+      {:error, {:authority_close_failed, _, _}} = error ->
+        error
+
+      other ->
+        maybe_retry_recover(other, agent_id, exec_ctx, started_at, attempt)
+    end
+  end
+
+  defp maybe_retry_recover({:error, :unavailable}, agent_id, exec_ctx, started_at, attempt),
+    do: retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+  defp maybe_retry_recover(
+         {:error, :authentication_unavailable},
+         agent_id,
+         exec_ctx,
+         started_at,
+         attempt
+       ),
+       do: retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+  defp maybe_retry_recover(
+         {:error, :journal_unavailable},
+         agent_id,
+         exec_ctx,
+         started_at,
+         attempt
+       ),
+       do: retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+  defp maybe_retry_recover(
+         {:error, :control_inventory_unavailable},
+         agent_id,
+         exec_ctx,
+         started_at,
+         attempt
+       ),
+       do: retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+  defp maybe_retry_recover(other, _agent_id, _exec_ctx, _started_at, _attempt), do: other
+
+  defp retry_recover(agent_id, exec_ctx, started_at, attempt) do
+    delay = min(200 * Integer.pow(2, min(attempt, 8)), 5_000)
+
+    receive do
+    after
+      delay -> do_recover_task(agent_id, exec_ctx, started_at, attempt + 1)
+    end
+  end
+
+  defp classify_and_wrap_resume_error(reason) do
+    case CodingRunRecoveryCore.classify_resume_error(reason, secret_derived?: true) do
+      :retryable_unavailable -> {:error, :unavailable}
+      :denial_or_tamper -> {:error, reason}
+      :authoritative_absent -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp validate_authority_principal(%SigningAuthority{principal_id: principal}, agent_id)
+       when principal == agent_id,
+       do: :ok
+
+  defp validate_authority_principal(_, _), do: {:error, :principal_mismatch}
+
+  defp read_recovery_compilation(logs_root, task_id) do
+    store = Config.coding_plan_artifact_store()
+    base = Path.dirname(logs_root)
+
+    cond do
+      not is_atom(store) or not Code.ensure_loaded?(store) ->
+        {:error, :unprovable_recovery}
+
+      function_exported?(store, :read_task_compilation, 2) ->
+        case store.read_task_compilation(base, task_id) do
+          {:ok, bundle} ->
+            identity = Map.get(bundle, "artifact_identity")
+
+            if is_binary(identity) and identity != "" do
+              {:ok,
+               bundle
+               |> Map.put("coding_pipeline_path", Path.join(logs_root, "coding-pipeline.dot"))}
+            else
+              {:error, :unprovable_recovery}
+            end
+
+          {:error, :unavailable} ->
+            {:error, :unavailable}
+
+          {:error, :eio} ->
+            {:error, :unavailable}
+
+          {:error, _} ->
+            {:error, :unprovable_recovery}
+        end
+
+      true ->
+        {:error, :unprovable_recovery}
+    end
+  end
+
+  defp read_recovery_binding(logs_root) do
+    case ArtifactStore.read_run_binding(logs_root) do
+      {:ok, binding} -> {:ok, binding}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, :not_found} -> {:error, :unprovable_recovery}
+      {:error, :malformed} -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp read_recovery_engine_terminal(logs_root) do
+    case ArtifactStore.read_engine_terminal(logs_root) do
+      {:ok, receipt} -> {:ok, receipt}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, :not_found} -> {:error, :unprovable_recovery}
+      {:error, :malformed} -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp read_recovery_terminal_decision(logs_root) do
+    case ArtifactStore.read_terminal_decision(logs_root) do
+      {:ok, decision} -> {:ok, decision}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, :not_found} -> {:error, :unprovable_recovery}
+      {:error, :malformed} -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp maybe_read_adapter_input(logs_root, %{"validation_requirement" => "not_applicable"}) do
+    case ArtifactStore.read_adapter_input(logs_root) do
+      {:error, :not_found} -> {:ok, nil}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:ok, _} -> {:error, :unprovable_recovery}
+      {:error, :malformed} -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp maybe_read_adapter_input(logs_root, _decision) do
+    case ArtifactStore.read_adapter_input(logs_root) do
+      {:ok, adapter} -> {:ok, adapter}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, :not_found} -> {:error, :unprovable_recovery}
+      {:error, :malformed} -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp maybe_admit_adapter_input(%{"validation_requirement" => "not_applicable"}, nil), do: :ok
+
+  defp maybe_admit_adapter_input(decision, adapter) when is_map(adapter),
+    do: CodingRunRecoveryCore.admit_adapter_input(decision, adapter)
+
+  defp maybe_admit_adapter_input(_decision, _adapter), do: {:error, :unprovable_recovery}
+
+  defp fetch_recovery_record(task_id) do
+    module = Config.pipeline_status_module()
+
+    case module.get_record(task_id) do
+      %{run_id: _} = record ->
+        {:ok, record}
+
+      %{} = record ->
+        {:ok, record}
+
+      {:error, :journal_unavailable} ->
+        {:error, :journal_unavailable}
+
+      nil ->
+        {:ok, %{run_id: task_id, status: :not_found}}
+
+      {:error, _} ->
+        {:error, :journal_unavailable}
+    end
+  rescue
+    _ -> {:error, :journal_unavailable}
+  catch
+    :exit, _ -> {:error, :journal_unavailable}
+    _, _ -> {:error, :journal_unavailable}
+  end
+
+  defp record_status(record) when is_map(record) do
+    Map.get(record, :status, Map.get(record, "status", :not_found))
+  end
+
+  defp compilation_facts(bundle, _logs_root) do
+    manifest = Map.get(bundle, "manifest", %{})
+    identity = Map.get(bundle, "artifact_identity")
+
+    if is_binary(identity) and identity != "" do
+      {:ok,
+       %{
+         "graph_hash" => Map.get(manifest, "graph_hash") || Map.get(bundle, "pipeline_sha256"),
+         "compiler_version" => Map.get(manifest, "compiler_version"),
+         "artifact_identity" => identity
+       }}
+    else
+      {:error, :unprovable_recovery}
+    end
+  end
+
+  defp sealed_plan_and_compilation(bundle) when is_map(bundle) do
+    with {:ok, plan} <- Plan.new(Map.get(bundle, "plan")),
+         {:ok, canonical_plan, compilation} <- Readiness.prepare(plan),
+         archived_hash =
+           Map.get(bundle, "pipeline_sha256") || get_in(bundle, ["manifest", "graph_hash"]),
+         true <- compilation.graph_hash == archived_hash,
+         archived_compiler = get_in(bundle, ["manifest", "compiler_version"]),
+         true <- is_nil(archived_compiler) or compilation.compiler_version == archived_compiler do
+      {:ok, canonical_plan, compilation}
+    else
+      false -> {:error, :binding_mismatch}
+      {:error, _} = error -> error
+      _ -> {:error, :unprovable_recovery}
+    end
+  rescue
+    _ -> {:error, :unprovable_recovery}
+  catch
+    _, _ -> {:error, :unprovable_recovery}
+  end
+
+  defp sealed_plan_and_compilation(_), do: {:error, :unprovable_recovery}
+
+  defp exec_ctx_from_admitted_binding(exec_ctx, binding) when is_map(binding) do
+    case binding["control_principal_id"] do
+      id when is_binary(id) and id != "" ->
+        {:ok, Map.put(exec_ctx, :caller_id, id)}
+
+      _ ->
+        {:error, :missing_control_principal}
+    end
+  end
+
+  defp locate_existing_task_logs_root(task_id) do
+    digest =
+      :crypto.hash(:sha256, task_id)
+      |> Base.encode16(case: :lower)
+
+    with {:ok, base} <- locate_canonical_logs_base(),
+         {:ok, root} <- SafePath.safe_join(base, "task-" <> digest),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+         {:ok, canonical} <- SafePath.resolve_real(root),
+         true <- canonical == root,
+         true <- contained_in?(base, canonical) do
+      {:ok, canonical}
+    else
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :eio} -> {:error, :unavailable}
+      false -> {:error, :unprovable_recovery}
+      {:error, _} -> {:error, :unavailable}
+      _ -> {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    _, _ -> {:error, :unavailable}
+  end
+
+  defp locate_canonical_logs_base do
+    configured = Config.coding_pipeline_logs_root()
+
+    with :ok <- validate_logs_base_path(configured),
+         {:ok, canonical} <- SafePath.resolve_real(configured),
+         true <- File.dir?(canonical) do
+      {:ok, canonical}
+    else
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, :eio} -> {:error, :unavailable}
+      false -> {:error, :invalid_coding_pipeline_logs_root}
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  defp invoke_resumer(task_id, opts) do
+    resumer = Config.coding_pipeline_resumer()
+
+    cond do
+      not is_atom(resumer) ->
+        {:error, :coding_pipeline_resumer_unavailable}
+
+      not Code.ensure_loaded?(resumer) ->
+        {:error, :coding_pipeline_resumer_unavailable}
+
+      function_exported?(resumer, :resume, 2) ->
+        resumer.resume(task_id, opts)
+
+      true ->
+        {:error, :coding_pipeline_resumer_unavailable}
+    end
+  rescue
+    e -> {:error, {:pipeline_run_error, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:pipeline_run_exit, reason}}
+    kind, reason -> {:error, {:pipeline_run_throw, {kind, reason}}}
+  end
+
+  defp adapt_recovered_engine_result(
+         run_result,
+         started_at,
+         plan,
+         compilation,
+         logs_root,
+         task_id
+       ) do
+    provider = Map.get(plan.worker, "provider") || nested_plan_provider(%{})
+    model = Map.get(plan.worker, "model")
+
+    with :ok <- inspect_final_outcome(run_result),
+         {:ok, result} <-
+           adapt_result(
+             run_result,
+             started_at,
+             provider,
+             model,
+             %{task_id: task_id, logs_root: logs_root}
+           ),
+         {:ok, artifacts} <- recovered_compilation_artifacts(logs_root, plan, compilation),
+         release_artifacts = attach_workspace_release_artifact(artifacts, result),
+         {:ok, public_artifacts} <-
+           attach_transcript_artifact(release_artifacts, logs_root, task_id, run_result) do
+      {:ok, Map.put(result, "artifacts", public_artifacts)}
+    end
+  end
+
+  defp adapt_from_task_terminal(
+         archive,
+         task_id,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         started_at
+       )
+       when is_map(archive) do
+    envelope = Map.get(archive, "terminal_envelope")
+
+    with true <- is_map(envelope) and not is_struct(envelope),
+         true <- envelope["task_id"] in [nil, task_id],
+         evidence when is_map(evidence) <- Map.get(envelope, "evidence"),
+         state = envelope["terminal_state"] do
+      case {state, Map.get(evidence, "kind"), Map.get(evidence, "result")} do
+        {"done", "executor_result", result} when is_map(result) ->
+          admit_joined_executor_result(
+            result,
+            logs_root,
+            compilation_bundle,
+            plan,
+            compilation,
+            binding,
+            record,
+            started_at,
+            task_id
+          )
+
+        {"cancelled", _, _} ->
+          {:error, :cancelled}
+
+        {"failed", "pipeline_failure", result} when is_map(result) ->
+          {:error, {:pipeline_error, result}}
+
+        {"failed", _, result} when is_map(result) ->
+          {:error, {:pipeline_error, result}}
+
+        _ ->
+          {:error, :unprovable_recovery}
+      end
+    else
+      _ -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp admit_joined_executor_result(
+         result,
+         logs_root,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         started_at,
+         task_id
+       ) do
+    with {:ok, receipt} <- read_recovery_engine_terminal(logs_root),
+         {:ok, decision} <- read_recovery_terminal_decision(logs_root),
+         :ok <-
+           CodingRunRecoveryCore.admit_terminal_identity(binding, decision, receipt) do
+      case CodingRunRecoveryCore.admit_executor_result(receipt, decision, result) do
+        :ok ->
+          with {:ok, adapted} <-
+                 adapt_from_receipt(
+                   receipt,
+                   compilation_bundle,
+                   plan,
+                   compilation,
+                   binding,
+                   record,
+                   started_at,
+                   logs_root,
+                   task_id
+                 ),
+               true <- adapted["status"] == result["status"],
+               true <-
+                 (adapted["canonical_status"] || adapted["status"]) ==
+                   (result["canonical_status"] || result["status"]) do
+            {:ok, adapted}
+          else
+            false -> {:error, :unprovable_recovery}
+            {:error, _} = error -> error
+            _ -> {:error, :unprovable_recovery}
+          end
+
+        {:error, :binding_mismatch} ->
+          {:continue_receipt}
+      end
+    else
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, _} = error -> error
+      _ -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp adapt_from_receipt(
+         receipt,
+         compilation_bundle,
+         plan,
+         compilation,
+         binding,
+         record,
+         started_at,
+         logs_root,
+         task_id
+       ) do
+    facts = compilation_facts_from_plan(compilation_bundle, compilation, binding)
+
+    with :ok <- CodingRunRecoveryCore.admit_receipt(receipt, binding, record, facts),
+         {:ok, decision} <- read_recovery_terminal_decision(logs_root),
+         :ok <- CodingRunRecoveryCore.admit_terminal_identity(binding, decision, receipt),
+         true <- CodingRunRecoveryCore.admitted_final_outcome?(receipt["final_outcome_status"]),
+         {:ok, adapter} <- maybe_read_adapter_input(logs_root, decision),
+         :ok <- maybe_admit_adapter_input(decision, adapter),
+         provider =
+           plan.worker["provider"] ||
+             nested_plan_provider(Map.get(compilation_bundle, "plan", %{})),
+         model =
+           Map.get(plan.worker, "model") ||
+             nested_plan_model(Map.get(compilation_bundle, "plan", %{})),
+         {:ok, engine_result} <-
+           reconstruct_receipt_engine_result(receipt, adapter),
+         {:ok, result} <-
+           adapt_result(
+             engine_result,
+             started_at,
+             provider,
+             model,
+             %{task_id: task_id, logs_root: logs_root}
+           ),
+         {:ok, artifacts} <- recovered_compilation_artifacts(logs_root, plan, compilation),
+         release_artifacts = attach_workspace_release_artifact(artifacts, result),
+         {:ok, public_artifacts} <-
+           attach_transcript_artifact(
+             release_artifacts,
+             logs_root,
+             task_id,
+             engine_result
+           ) do
+      {:ok, Map.put(result, "artifacts", public_artifacts)}
+    else
+      false -> {:error, :missing_or_nonterminal_final_outcome}
+      {:error, :unavailable} -> {:error, :unavailable}
+      {:error, _} = error -> error
+      _ -> {:error, :unprovable_recovery}
+    end
+  end
+
+  defp compilation_facts_from_plan(bundle, %Compilation{} = compilation, binding) do
+    %{
+      "graph_hash" => compilation.graph_hash,
+      "compiler_version" => compilation.compiler_version,
+      "artifact_identity" => Map.get(bundle, "artifact_identity") || binding["artifact_identity"]
+    }
+  end
+
+  defp recovered_compilation_artifacts(
+         logs_root,
+         %Plan{} = plan,
+         %Compilation{} = compilation
+       ) do
+    descriptor = %{
+      "coding_plan_path" => Path.join(logs_root, "coding-plan.json"),
+      "coding_pipeline_path" => Path.join(logs_root, "coding-pipeline.dot"),
+      "compile_manifest_path" => Path.join(logs_root, "coding-compile-manifest.json"),
+      "graph_hash" => compilation.graph_hash,
+      "compiler_version" => compilation.compiler_version
+    }
+
+    validate_artifact_descriptor(descriptor, logs_root, plan, compilation)
+  end
+
+  defp reconstruct_receipt_engine_result(receipt, adapter) do
+    evidence =
+      receipt
+      |> receipt_as_evidence()
+      |> maybe_put_adapter_inputs(adapter)
+
+    {:ok,
+     %{
+       context: evidence,
+       final_outcome: %{status: receipt["final_outcome_status"]},
+       node_failure_reasons: receipt["node_failure_reasons"] || %{}
+     }}
+  end
+
+  defp maybe_put_adapter_inputs(evidence, nil), do: evidence
+
+  defp maybe_put_adapter_inputs(evidence, adapter) when is_map(adapter) do
+    evidence
+    |> Map.put("coding_plan_validation_program", adapter["program"])
+    |> Map.put("validation_candidate_tree_oid", adapter["candidate_tree_oid"])
+    |> Map.put("validation_observed_at", adapter["observed_at"])
+    |> Map.put("validation", adapter["action_result"])
+  end
+
+  defp inspect_final_outcome(%{final_outcome: %{status: status}}) do
+    if CodingRunRecoveryCore.admitted_final_outcome?(status),
+      do: :ok,
+      else: {:error, :missing_or_nonterminal_final_outcome}
+  end
+
+  defp inspect_final_outcome(%{final_outcome: nil}),
+    do: {:error, :missing_or_nonterminal_final_outcome}
+
+  defp inspect_final_outcome(_), do: {:error, :missing_or_nonterminal_final_outcome}
+
+  defp receipt_as_evidence(receipt) do
+    %{
+      "status" => receipt["coding_status"],
+      "error" => receipt["error"],
+      "worker_session_id" => receipt["worker_session_id"],
+      "worker_provider_session_id" => receipt["worker_provider_session_id"],
+      "worker.provider" => receipt["worker_provider"],
+      "worker_status.provider" => receipt["worker_provider"],
+      "worker_status.model" => receipt["confirmed_model"],
+      "worker.model" => receipt["confirmed_model"],
+      "worker_msg.delivery_status" => receipt["delivery_state"],
+      "worker_msg.stop_reason" => receipt["completion_state"],
+      "worker_msg.session_id" => receipt["worker_provider_session_id"],
+      "delivery_state" => receipt["delivery_state"],
+      "completion_state" => receipt["completion_state"],
+      "workspace_id" => receipt["workspace_id"],
+      "branch" => receipt["branch"],
+      "base_commit" => receipt["base_commit"],
+      "commit" => receipt["commit"],
+      "commit_hash" => receipt["commit_hash"],
+      "workspace_release_status" => receipt["workspace_release_status"]
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
+    |> Map.new()
+  end
+
+  defp nested_plan_provider(%{"worker" => %{"provider" => provider}}) when is_binary(provider),
+    do: provider
+
+  defp nested_plan_provider(_), do: "unknown"
+
+  defp nested_plan_model(%{"worker" => %{"model" => model}}) when is_binary(model), do: model
+  defp nested_plan_model(_), do: nil
+
+  defp publish_run_binding(logs_root, exec_ctx, agent_id, artifacts, compilation) do
+    with {:ok, control_principal_id} <- require_control_principal(exec_ctx),
+         {:ok, artifact_identity} <- compilation_artifact_identity(logs_root, exec_ctx.task_id) do
+      binding = %{
+        "schema_version" => 1,
+        "task_id" => exec_ctx.task_id,
+        "run_id" => exec_ctx.task_id,
+        "agent_id" => agent_id,
+        "execution_principal" => agent_id,
+        "control_principal_id" => control_principal_id,
+        "executor_kind" => "coding_change",
+        "graph_hash" => Map.get(artifacts, "graph_hash") || compilation.graph_hash,
+        "compiler_version" =>
+          Map.get(artifacts, "compiler_version") || compilation.compiler_version,
+        "artifact_identity" => artifact_identity
+      }
+
+      ArtifactStore.archive_run_binding(logs_root, binding)
+    end
+  end
+
+  defp require_control_principal(exec_ctx) do
+    case Map.get(exec_ctx, :caller_id) do
+      id when is_binary(id) and id != "" -> {:ok, id}
+      _ -> {:error, :missing_control_principal}
+    end
+  end
+
+  defp publish_pipeline_error_receipt(
+         {:error, {:pipeline_error, detail}} = pipeline_error,
+         logs_root,
+         exec_ctx,
+         agent_id,
+         artifacts,
+         compilation,
+         engine_result
+       )
+       when is_map(detail) do
+    with :ok <-
+           publish_engine_terminal_receipt(
+             logs_root,
+             exec_ctx,
+             agent_id,
+             artifacts,
+             compilation,
+             engine_result,
+             detail
+           ) do
+      pipeline_error
+    end
+  end
+
+  defp publish_pipeline_error_receipt(
+         adaptation,
+         _logs_root,
+         _exec_ctx,
+         _agent_id,
+         _artifacts,
+         _compilation,
+         _engine_result
+       ),
+       do: adaptation
+
+  defp publish_engine_terminal_receipt(
+         logs_root,
+         exec_ctx,
+         agent_id,
+         artifacts,
+         compilation,
+         engine_result,
+         adapted_result
+       ) do
+    context = engine_context(engine_result)
+    clean = json_clean_map(context)
+    outcome = Map.get(adapted_result, "outcome", %{})
+    graph_hash = Map.get(artifacts, "graph_hash") || Map.get(compilation, :graph_hash) || ""
+
+    coding_status =
+      context_get(clean, "status") || stringify_status(raw_producer_value(context, "status")) ||
+        ""
+
+    canonical_status =
+      context_get(clean, "canonical_status") ||
+        stringify_status(raw_producer_value(context, "canonical_status")) || coding_status
+
+    final_status = final_outcome_status(engine_result)
+    shell = %{task_id: exec_ctx.task_id, logs_root: logs_root}
+
+    evidence_state =
+      CodingRunRecoveryCore.producer_evidence_state(
+        raw_producer_value(context, "coding_plan_validation_program"),
+        raw_producer_value(context, "validation_candidate_tree_oid"),
+        raw_producer_value(context, "validation_observed_at"),
+        terminal_validation_evidence(context)
+      )
+
+    with {:ok, requirement} <-
+           CodingRunRecoveryCore.expected_requirement(canonical_status, evidence_state),
+         :ok <- admit_clean_producer_for_requirement(requirement, clean),
+         {:ok, control_principal_id} <- require_control_principal(exec_ctx),
+         {:ok, artifact_identity} <- compilation_artifact_identity(logs_root, exec_ctx.task_id),
+         {:ok, binding} <- read_recovery_binding(logs_root),
+         {:ok, binding_digest} <- CodingRunRecoveryCore.binding_digest(binding),
+         {:ok, adapter_fields} <-
+           publish_adapter_input_if_required(
+             logs_root,
+             exec_ctx.task_id,
+             requirement,
+             clean,
+             shell
+           ) do
+      decision_unsigned = %{
+        "schema_version" => 1,
+        "task_id" => exec_ctx.task_id,
+        "run_id" => exec_ctx.task_id,
+        "agent_id" => agent_id,
+        "execution_principal" => agent_id,
+        "control_principal_id" => control_principal_id,
+        "executor_kind" => "coding_change",
+        "graph_hash" => graph_hash,
+        "artifact_identity" => artifact_identity,
+        "canonical_status" => canonical_status,
+        "final_outcome_status" => final_status,
+        "validation_requirement" => requirement,
+        "program_digest" => adapter_fields.program_digest,
+        "candidate_tree_oid" => adapter_fields.candidate_tree_oid,
+        "observed_at" => adapter_fields.observed_at,
+        "adapter_input_digest" => adapter_fields.adapter_input_digest,
+        "binding_digest" => binding_digest,
+        "decision_digest" => String.duplicate("0", 64)
+      }
+
+      with {:ok, decision_digest} <- CodingRunRecoveryCore.decision_digest(decision_unsigned),
+           decision = Map.put(decision_unsigned, "decision_digest", decision_digest),
+           :ok <- ArtifactStore.archive_terminal_decision(logs_root, decision) do
+        receipt = %{
+          "schema_version" => 1,
+          "task_id" => exec_ctx.task_id,
+          "run_id" => exec_ctx.task_id,
+          "execution_principal" => agent_id,
+          "control_principal_id" => control_principal_id,
+          "graph_hash" => graph_hash,
+          "artifact_identity" => artifact_identity,
+          "idempotence_key" =>
+            CodingRunRecoveryCore.idempotence_key(
+              exec_ctx.task_id,
+              exec_ctx.task_id,
+              graph_hash,
+              artifact_identity,
+              canonical_status || ""
+            ),
+          "final_outcome_status" => final_status,
+          "coding_status" => coding_status,
+          "canonical_status" => canonical_status,
+          "error" => bounded_status_string(context_get(context, "error")),
+          "worker_provider" =>
+            bounded_status_string(
+              outcome["provider"] || context_get(context, "worker_provider") ||
+                context_get(context, "worker.provider")
+            ),
+          "requested_model" =>
+            bounded_status_string(
+              outcome["requested_model"] || context_get(context, "requested_model")
+            ),
+          "confirmed_model" =>
+            bounded_status_string(
+              outcome["confirmed_model"] || context_get(context, "worker_status.model") ||
+                context_get(context, "worker.model")
+            ),
+          "delivery_state" => bounded_status_string(outcome["delivery_state"]),
+          "completion_state" => bounded_status_string(outcome["completion_state"]),
+          "worker_session_id" =>
+            bounded_id_string(
+              outcome["worker_session_id"] || context_get(context, "worker_session_id")
+            ),
+          "worker_provider_session_id" =>
+            bounded_id_string(
+              outcome["provider_session_id"] ||
+                context_get(context, "worker_provider_session_id")
+            ),
+          "workspace_id" => bounded_id_string(context_get(context, "workspace_id")),
+          "branch" => bounded_status_string(context_get(context, "branch")),
+          "base_commit" => bounded_id_string(context_get(context, "base_commit")),
+          "commit" => bounded_id_string(context_get(context, "commit")),
+          "commit_hash" => bounded_id_string(context_get(context, "commit_hash")),
+          "workspace_release_status" =>
+            bounded_status_string(context_get(context, "workspace_release_status")),
+          "plan_digest" => Map.get(artifacts, "plan_sha256") || "",
+          "pipeline_digest" => Map.get(artifacts, "pipeline_sha256") || graph_hash,
+          "manifest_digest" => Map.get(artifacts, "manifest_sha256") || "",
+          "node_failure_reasons" => bounded_failure_reasons(engine_result),
+          "adapter_input_digest" => adapter_fields.adapter_input_digest,
+          "decision_digest" => decision_digest
+        }
+
+        receipt = put_blank_provider(receipt, compilation)
+        ArtifactStore.archive_engine_terminal(logs_root, receipt)
+      end
+    end
+  end
+
+  defp admit_clean_producer_for_requirement("not_applicable", _clean), do: :ok
+
+  defp admit_clean_producer_for_requirement("required", clean) when is_map(clean) do
+    case CodingRunRecoveryCore.producer_evidence_state(
+           Map.get(clean, "coding_plan_validation_program"),
+           Map.get(clean, "validation_candidate_tree_oid"),
+           Map.get(clean, "validation_observed_at"),
+           terminal_validation_evidence(clean)
+         ) do
+      :complete -> :ok
+      _ -> {:error, :partial_validation_evidence}
+    end
+  end
+
+  defp admit_clean_producer_for_requirement(_requirement, _clean),
+    do: {:error, :partial_validation_evidence}
+
+  defp publish_adapter_input_if_required(_logs_root, _task_id, "not_applicable", _clean, _shell) do
+    {:ok,
+     %{
+       program_digest: "",
+       candidate_tree_oid: "",
+       observed_at: "",
+       adapter_input_digest: ""
+     }}
+  end
+
+  defp publish_adapter_input_if_required(logs_root, task_id, "required", clean, shell) do
+    with {:ok, program} <- fetch_verification_evidence(clean, "coding_plan_validation_program"),
+         {:ok, candidate_tree_oid} <-
+           fetch_verification_evidence(clean, "validation_candidate_tree_oid"),
+         {:ok, observed_at} <- fetch_verification_evidence(clean, "validation_observed_at"),
+         action_result <-
+           attach_cross_app_static_receipt(terminal_validation_evidence(clean), shell),
+         true <- is_map(action_result) and not is_struct(action_result),
+         {:ok, program_digest} <- CodingRunRecoveryCore.program_digest(program),
+         adapter = %{
+           "schema_version" => 1,
+           "task_id" => task_id,
+           "run_id" => task_id,
+           "program" => program,
+           "candidate_tree_oid" => candidate_tree_oid,
+           "action_result" => action_result,
+           "observed_at" => observed_at
+         },
+         {:ok, adapter_digest} <- CodingRunRecoveryCore.adapter_input_digest(adapter),
+         :ok <- ArtifactStore.archive_adapter_input(logs_root, adapter),
+         {:ok, reread} <- ArtifactStore.read_adapter_input(logs_root),
+         {:ok, reread_digest} <- CodingRunRecoveryCore.adapter_input_digest(reread),
+         true <- reread_digest == adapter_digest do
+      {:ok,
+       %{
+         program_digest: program_digest,
+         candidate_tree_oid: candidate_tree_oid,
+         observed_at: observed_at,
+         adapter_input_digest: adapter_digest
+       }}
+    else
+      {:error, :unavailable} ->
+        {:error, :unavailable}
+
+      {:error, {:missing_verification_evidence, _} = reason} ->
+        {:error, {:invalid_terminal_evidence, reason}}
+
+      {:error, _} = error ->
+        error
+
+      false ->
+        {:error, :unprovable_recovery}
+
+      _ ->
+        {:error, :unprovable_recovery}
+    end
+  end
+
+  defp put_blank_provider(%{"worker_provider" => provider} = receipt, _compilation)
+       when is_binary(provider) and provider != "",
+       do: receipt
+
+  defp put_blank_provider(receipt, compilation) when is_map(compilation) do
+    provider =
+      compilation
+      |> Map.get(:initial_values, %{})
+      |> Map.get("worker.provider")
+
+    if is_binary(provider) and provider != "" do
+      Map.put(receipt, "worker_provider", bounded_status_string(provider))
+    else
+      Map.put(receipt, "worker_provider", "")
+    end
+  end
+
+  defp put_blank_provider(receipt, _), do: Map.put(receipt, "worker_provider", "")
+
+  defp engine_context(%{context: context}) when is_map(context), do: context
+  defp engine_context(%{"context" => context}) when is_map(context), do: context
+  defp engine_context(_), do: %{}
+
+  defp final_outcome_status(%{final_outcome: %{status: status}}) when is_atom(status),
+    do: Atom.to_string(status)
+
+  defp final_outcome_status(%{final_outcome: %{status: status}}) when is_binary(status),
+    do: status
+
+  defp final_outcome_status(_), do: ""
+
+  defp bounded_failure_reasons(%{node_failure_reasons: reasons})
+       when is_map(reasons) and not is_struct(reasons) do
+    reasons
+    |> Enum.take(500)
+    |> Enum.reduce(%{}, fn {node_id, reason}, acc ->
+      if is_binary(node_id) and byte_size(node_id) <= 256 and is_binary(reason) do
+        Map.put(acc, node_id, CodingRunRecoveryCore.utf8_truncate(reason, 512))
+      else
+        acc
+      end
+    end)
+  end
+
+  defp bounded_failure_reasons(_), do: %{}
+
+  defp bounded_status_string(value), do: CodingRunRecoveryCore.utf8_truncate(value, 256)
+
+  defp bounded_id_string(value), do: CodingRunRecoveryCore.utf8_truncate(value, 512)
+
+  defp compilation_artifact_identity(logs_root, task_id) do
+    store = Config.coding_plan_artifact_store()
+    base = Path.dirname(logs_root)
+
+    cond do
+      not is_atom(store) or not Code.ensure_loaded?(store) ->
+        {:error, :unprovable_recovery}
+
+      function_exported?(store, :read_task_compilation, 2) ->
+        case store.read_task_compilation(base, task_id) do
+          {:ok, %{"artifact_identity" => identity}}
+          when is_binary(identity) and identity != "" ->
+            {:ok, identity}
+
+          {:error, :unavailable} ->
+            {:error, :unavailable}
+
+          _ ->
+            {:error, :unprovable_recovery}
+        end
+
+      true ->
+        {:error, :unprovable_recovery}
+    end
+  end
+
   defp invoke_runner(graph_path, opts) do
     runner = Config.coding_pipeline_runner()
 
@@ -2962,7 +4478,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         "error" => "pipeline_timeout",
         "pipeline_timeout_ms" => timeout,
         "workspace_recovery" => workspace_recovery_locator(task_id, agent_id)
-      }
+      },
+      final_outcome: %{status: :fail}
     }
   end
 
@@ -3088,7 +4605,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp adapt_terminal_verification(raw_context, clean_context, status, legacy_status, shell) do
-    if terminal_validation_claimed?(raw_context, status) do
+    if terminal_validation_claimed?(raw_context, status) or
+         CodingRunRecoveryCore.validation_requirement(status) == "required" do
       {public_status, canonical_status} = terminal_status_pair(status, legacy_status)
 
       with {:ok, program} <-
@@ -3134,14 +4652,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # validation.result. Prefer the flat projection so CandidateVerificationCore can
   # drop the transport duplicate without re-decoding large stdout/stderr, then peel
   # the closed wrapper and require the exact compiler-pinned validator envelope.
-  defp terminal_validation_evidence(clean_context) do
-    case Map.get(clean_context, "validation") do
+  defp terminal_validation_evidence(context) when is_map(context) do
+    case raw_producer_value(context, "validation") do
       value when is_map(value) and not is_struct(value) ->
         value
 
       _other ->
-        extract_prefixed_map(clean_context, "validation.") ||
-          context_get(clean_context, "validation.result")
+        extract_prefixed_map(context, "validation.") ||
+          raw_producer_value(context, "validation.result")
     end
   end
 
@@ -4201,17 +5719,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     values =
       Enum.reduce(context, %{}, fn
         {key, value}, acc when is_binary(key) ->
-          if String.starts_with?(key, prefix) do
-            Map.put(acc, String.replace_prefix(key, prefix, ""), value)
-          else
-            acc
-          end
+          put_prefixed_entry(acc, key, prefix, value)
+
+        {key, value}, acc when is_atom(key) ->
+          put_prefixed_entry(acc, Atom.to_string(key), prefix, value)
 
         _, acc ->
           acc
       end)
 
     if map_size(values) == 0, do: nil, else: values
+  end
+
+  defp put_prefixed_entry(acc, key, prefix, value) do
+    if String.starts_with?(key, prefix) do
+      Map.put(acc, String.replace_prefix(key, prefix, ""), value)
+    else
+      acc
+    end
   end
 
   defp extract_pr_url(context) do
@@ -4385,6 +5910,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp context_get(map, key) when is_map(map) and is_binary(key) do
     Map.get(map, key)
   end
+
+  @raw_producer_atoms %{
+    "coding_plan_validation_program" => :coding_plan_validation_program,
+    "validation_candidate_tree_oid" => :validation_candidate_tree_oid,
+    "validation_observed_at" => :validation_observed_at,
+    "validation" => :validation,
+    "validation.result" => :"validation.result",
+    "status" => :status,
+    "canonical_status" => :canonical_status
+  }
+
+  defp raw_producer_value(map, key) when is_map(map) and is_binary(key) do
+    cond do
+      is_map_key(map, key) ->
+        Map.get(map, key)
+
+      true ->
+        case Map.get(@raw_producer_atoms, key) do
+          atom when is_atom(atom) and is_map_key(map, atom) -> Map.get(map, atom)
+          _ -> nil
+        end
+    end
+  end
+
+  defp raw_producer_value(_map, _key), do: nil
+
+  defp stringify_status(value) when is_binary(value), do: value
+  defp stringify_status(_value), do: nil
 
   # Clean engine context maps for TaskStore. Non-JSON leaves cause the entire
   # affected value to drop (never the atom/string "drop" inside lists/maps).

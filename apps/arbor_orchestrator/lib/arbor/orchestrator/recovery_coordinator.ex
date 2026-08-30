@@ -63,6 +63,7 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Checkpoint
   alias Arbor.Orchestrator.PipelineStatus
+  alias Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore
   alias Arbor.Orchestrator.RunLifecycle.LegacyJobAdapter
   alias Arbor.Orchestrator.RunLifecycle.Record
 
@@ -335,8 +336,17 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                    run_id: key,
                    source: claimed.source,
                    record: claimed.record,
-                   settled?: false
+                   settled?: false,
+                   signing_authority: claimed[:signing_authority],
+                   security_module: claimed[:security_module]
                  }), fails, settlements}
+
+              {:skip, :task_store_owned} ->
+                Logger.debug(
+                  "[RecoveryCoordinator] Skipping task-owned run #{key}; TaskStore owns resume"
+                )
+
+                {acc, fails, settlements}
 
               {:error, :authentication_unavailable} = err ->
                 Logger.warning(
@@ -353,8 +363,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                 failure = %{
                   run_id: key,
                   source: Map.get(candidate, :source, :current),
-                  reason: reason,
-                  settle_reason: settle_reason,
+                  reason: CodingRunRecoveryCore.bounded_close_cause(reason),
+                  settle_reason: CodingRunRecoveryCore.bounded_close_cause(settle_reason),
                   attempts: 1
                 }
 
@@ -392,8 +402,11 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         {:noreply, state}
 
       {%{run_id: pipeline_id} = meta, recovering} ->
+        close_result = close_meta_authority(meta)
+        combined = CodingRunRecoveryCore.combine_close_result(close_result, result)
+
         state =
-          case result do
+          case combined do
             {:ok, _} ->
               Logger.info("[RecoveryCoordinator] Recovered pipeline #{pipeline_id}")
               %{state | recovering: recovering, recovered: [pipeline_id | state.recovered]}
@@ -404,18 +417,15 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   inspect(reason)
               )
 
-              state_after =
-                apply_settlement(
-                  %{
-                    state
-                    | recovering: recovering,
-                      failed: remember_failure(state.failed, pipeline_id, reason)
-                  },
-                  meta,
-                  reason
-                )
-
-              state_after
+              apply_settlement(
+                %{
+                  state
+                  | recovering: recovering,
+                    failed: remember_failure(state.failed, pipeline_id, reason)
+                },
+                meta,
+                reason
+              )
           end
 
         if state.pending != [] do
@@ -432,9 +442,20 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         {:noreply, state}
 
       {%{run_id: pipeline_id} = meta, recovering} ->
+        close_result = close_meta_authority(meta)
+
+        crash_reason =
+          case CodingRunRecoveryCore.combine_close_result(
+                 close_result,
+                 {:error, {:crashed, classify_recovery_exit(reason)}}
+               ) do
+            {:error, combined} -> combined
+            _ -> {:crashed, classify_recovery_exit(reason)}
+          end
+
         Logger.warning(
           "[RecoveryCoordinator] Recovery task crashed for #{pipeline_id}: " <>
-            inspect(reason)
+            inspect(crash_reason)
         )
 
         state =
@@ -442,10 +463,10 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
             %{
               state
               | recovering: recovering,
-                failed: remember_failure(state.failed, pipeline_id, {:crashed, reason})
+                failed: remember_failure(state.failed, pipeline_id, crash_reason)
             },
             meta,
-            {:crashed, reason}
+            crash_reason
           )
 
         if state.pending != [] do
@@ -823,6 +844,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
     # Auth material before claim — never claim without resume credentials.
     case resolve_resume_options(candidate.record, state) do
+      {:skip, :task_store_owned} = skip ->
+        skip
+
       {:error, :authentication_unavailable} = err ->
         err
 
@@ -843,51 +867,41 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
                   Task.Supervisor.async_nolink(
                     Arbor.Orchestrator.Session.TaskSupervisor,
                     fn ->
-                      do_resume(claimed.record, checkpoint_source, resume_opts, recovery_root)
+                      do_resume(
+                        claimed.record,
+                        checkpoint_source,
+                        resume_opts,
+                        recovery_root,
+                        jopts
+                      )
                     end
                   )
 
-                {:ok, task.ref, claimed}
+                {:ok, task.ref,
+                 claimed
+                 |> Map.put(:signing_authority, Keyword.get(resume_opts, :signing_authority))
+                 |> Map.put(:security_module, Keyword.get(resume_opts, :security_module))}
               else
                 {:error, reason} ->
-                  settle_or_report(
-                    %{run_id: claimed.record.run_id, source: claimed.source},
-                    reason,
-                    jopts
-                  )
+                  close_resume_error(resume_opts, reason, claimed, jopts)
               end
             rescue
               e ->
                 reason = {:recovery_exception, Exception.message(e)}
-
-                settle_or_report(
-                  %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason,
-                  jopts
-                )
+                close_resume_error(resume_opts, reason, claimed, jopts)
             catch
               :throw, value ->
                 reason = {:recovery_throw, inspect(value, limit: 20, printable_limit: 200)}
-
-                settle_or_report(
-                  %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason,
-                  jopts
-                )
+                close_resume_error(resume_opts, reason, claimed, jopts)
 
               # Every post-claim exit settles — :normal/:shutdown/{:shutdown,_} included.
               :exit, exit_reason ->
                 reason = {:recovery_exit, classify_recovery_exit(exit_reason)}
-
-                settle_or_report(
-                  %{run_id: claimed.record.run_id, source: claimed.source},
-                  reason,
-                  jopts
-                )
+                close_resume_error(resume_opts, reason, claimed, jopts)
             end
 
           {:error, reason} ->
-            {:error, reason}
+            with_closed_resume_authority(resume_opts, {:error, reason})
         end
     end
   end
@@ -903,10 +917,24 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     else
       case invoke_resume_resolver(record, state.resume_options_resolver) do
         {:ok, opts} ->
-          with :ok <- ensure_auth_present(opts),
-               :ok <- ensure_principal_match(opts, stored_principal) do
-            {:ok, opts}
+          opts = capture_security_module(opts)
+
+          case ensure_auth_present(opts) do
+            :ok ->
+              case ensure_principal_match(opts, stored_principal) do
+                :ok ->
+                  {:ok, opts}
+
+                {:error, reason} ->
+                  with_closed_resume_authority(opts, {:error, reason})
+              end
+
+            {:error, reason} ->
+              with_closed_resume_authority(opts, {:error, reason})
           end
+
+        {:skip, :task_store_owned} = skip ->
+          skip
 
         {:error, _} = err ->
           err
@@ -944,6 +972,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp invoke_resume_resolver(_, _), do: {:error, :authentication_unavailable}
 
   defp normalize_resolver_result({:ok, opts}) when is_list(opts), do: {:ok, opts}
+
+  defp normalize_resolver_result({:skip, :task_store_owned}), do: {:skip, :task_store_owned}
 
   defp normalize_resolver_result({:error, :authentication_unavailable}),
     do: {:error, :authentication_unavailable}
@@ -1200,7 +1230,13 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
     end
   end
 
-  defp do_resume(%Record{} = entry, checkpoint_source, resume_opts, recovery_root_config) do
+  defp do_resume(
+         %Record{} = entry,
+         checkpoint_source,
+         resume_opts,
+         recovery_root_config,
+         journal_opts
+       ) do
     run_id = entry.run_id
 
     with {:ok, recovery_root} <- ensure_canonical_private_recovery_root(recovery_root_config),
@@ -1215,7 +1251,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         graph_hash: entry.graph_hash,
         dot_source_path: entry.dot_source_path,
         execution_principal: entry.execution_principal,
-        resume_from: resume_from
+        resume_from: resume_from,
+        journal_opts: journal_opts
       ]
 
       # Auth opts first; identity/path fields from the record win over resolver.
@@ -1608,7 +1645,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   # remain retriable via future discovery ticks.
   defp remember_failure(failed, key, reason)
        when is_list(failed) and is_binary(key) do
-    [{key, reason} | Enum.reject(failed, fn {k, _} -> k == key end)]
+    bounded = CodingRunRecoveryCore.bounded_close_cause(reason)
+
+    [{key, bounded} | Enum.reject(failed, fn {k, _} -> k == key end)]
     |> Enum.take(@max_failed_history)
   end
 
@@ -1724,8 +1763,8 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
         failure = %{
           run_id: meta.run_id,
           source: Map.get(meta, :source, :current),
-          reason: reason,
-          settle_reason: settle_reason,
+          reason: CodingRunRecoveryCore.bounded_close_cause(reason),
+          settle_reason: CodingRunRecoveryCore.bounded_close_cause(settle_reason),
           attempts: 1
         }
 
@@ -1862,6 +1901,71 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
   defp non_retryable_recovery_error?({:store_unavailable, _}), do: false
   defp non_retryable_recovery_error?({:durable_checkpoint, _}), do: false
   defp non_retryable_recovery_error?(_), do: false
+
+  defp close_resume_authority(opts) when is_list(opts) do
+    close_meta_authority(%{
+      signing_authority: Keyword.get(opts, :signing_authority),
+      security_module: Keyword.get(opts, :security_module)
+    })
+  end
+
+  defp close_resume_authority(_), do: :ok
+
+  defp with_closed_resume_authority(opts, result) do
+    CodingRunRecoveryCore.combine_close_result(close_resume_authority(opts), result)
+  end
+
+  defp close_resume_error(resume_opts, reason, claimed, jopts) do
+    close_result = close_resume_authority(resume_opts)
+
+    settle_reason =
+      case CodingRunRecoveryCore.combine_close_result(close_result, {:error, reason}) do
+        {:error, combined} -> combined
+        _ -> CodingRunRecoveryCore.bounded_close_cause(reason)
+      end
+
+    settle_or_report(
+      %{run_id: claimed.record.run_id, source: claimed.source},
+      settle_reason,
+      jopts
+    )
+  end
+
+  defp close_meta_authority(%{signing_authority: %SigningAuthority{} = authority} = meta) do
+    security = captured_security_module(meta)
+
+    if is_atom(security) and Code.ensure_loaded?(security) and
+         function_exported?(security, :close_signing_authority, 1) do
+      case security.close_signing_authority(authority) do
+        :ok -> :ok
+        {:error, _} = error -> error
+        other -> {:error, {:unexpected_close_result, other}}
+      end
+    else
+      {:error, :security_unavailable}
+    end
+  rescue
+    exception -> {:error, {:authority_close_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:authority_close_failed, {kind, reason}}}
+  end
+
+  defp close_meta_authority(_), do: :ok
+
+  defp capture_security_module(opts) when is_list(opts), do: opts
+
+  defp captured_security_module(%{security_module: security})
+       when is_atom(security) and not is_nil(security),
+       do: security
+
+  defp captured_security_module(opts) when is_list(opts) do
+    case Keyword.get(opts, :security_module) do
+      security when is_atom(security) and not is_nil(security) -> security
+      _ -> nil
+    end
+  end
+
+  defp captured_security_module(_), do: nil
 
   # Transient filesystem / mount I/O — leave interrupted for retry.
   defp filesystem_io_unavailable?(reason)
