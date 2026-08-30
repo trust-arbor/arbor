@@ -3398,10 +3398,11 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       resource = "arbor://fs/read/fence-json-restart"
       opts = det_grant_opts("fence-json-restart", principal, resource)
 
-      backend_dir = Path.join("var", "fence-json-restart-#{unique_integer()}")
-      tmp_dir = Path.expand(backend_dir, File.cwd!())
-      File.mkdir_p!(tmp_dir)
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      backend_dir =
+        Path.join(System.tmp_dir!(), "fence-json-restart-#{unique_integer()}")
+
+      File.mkdir_p!(backend_dir)
+      on_exit(fn -> File.rm_rf!(backend_dir) end)
 
       configure_isolated_json_store(backend_dir)
 

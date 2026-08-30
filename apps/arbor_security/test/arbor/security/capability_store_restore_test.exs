@@ -240,10 +240,10 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "malformed granted_at fails closed without registering" do
     dir = unique_dir("restore-malformed")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
+    File.mkdir_p!(Path.join(dir, "capabilities"))
 
     path =
-      Path.expand(Path.join([dir, "capabilities", "cap_bad.json"]), File.cwd!())
+      Path.join([dir, "capabilities", "cap_bad.json"])
 
     File.write!(
       path,
@@ -281,10 +281,10 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "malformed not_before fails closed without dropping future-use restriction or durable data" do
     dir = unique_dir("restore-malformed-not-before")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
+    File.mkdir_p!(Path.join(dir, "capabilities"))
 
     path =
-      Path.expand(Path.join([dir, "capabilities", "cap_nb_bad.json"]), File.cwd!())
+      Path.join([dir, "capabilities", "cap_nb_bad.json"])
 
     durable =
       %{
@@ -328,8 +328,8 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "security regression: malformed issuer_signature fails closed without dropping signature" do
     dir = unique_dir("restore-malformed-sig")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
-    path = Path.expand(Path.join([dir, "capabilities", "cap_sig_bad.json"]), File.cwd!())
+    File.mkdir_p!(Path.join(dir, "capabilities"))
+    path = Path.join([dir, "capabilities", "cap_sig_bad.json"])
 
     # Non-nil non-hex signature would be lossily decoded to nil by Serializer.
     durable = %{
@@ -371,8 +371,8 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "security regression: malformed delegation_chain fails closed without emptying chain" do
     dir = unique_dir("restore-malformed-chain")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
-    path = Path.expand(Path.join([dir, "capabilities", "cap_chain_bad.json"]), File.cwd!())
+    File.mkdir_p!(Path.join(dir, "capabilities"))
+    path = Path.join([dir, "capabilities", "cap_chain_bad.json"])
 
     # Non-list chain would be lossily coerced to [] by Serializer, stripping
     # delegation history and changing authorization shape after restart.
@@ -415,8 +415,8 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "security regression: non-map constraints fail closed (Serializer would error/lossy default)" do
     dir = unique_dir("restore-malformed-constraints")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
-    path = Path.expand(Path.join([dir, "capabilities", "cap_constraints_bad.json"]), File.cwd!())
+    File.mkdir_p!(Path.join(dir, "capabilities"))
+    path = Path.join([dir, "capabilities", "cap_constraints_bad.json"])
 
     durable = %{
       "data" => %{
@@ -495,8 +495,8 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   test "security regression: parent without chain fails closed (incoherent delegation)" do
     dir = unique_dir("restore-incoherent-chain")
-    File.mkdir_p!(Path.expand(Path.join(dir, "capabilities"), File.cwd!()))
-    path = Path.expand(Path.join([dir, "capabilities", "cap_incoherent.json"]), File.cwd!())
+    File.mkdir_p!(Path.join(dir, "capabilities"))
+    path = Path.join([dir, "capabilities", "cap_incoherent.json"])
 
     durable = %{
       "data" => %{
@@ -652,7 +652,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
   end
 
   defp seed_caps!(dir, caps) do
-    File.mkdir_p!(Path.expand(dir, File.cwd!()))
+    File.mkdir_p!(dir)
 
     Enum.each(caps, fn cap ->
       record = Record.new(cap.id, Serializer.serialize(cap))
@@ -705,7 +705,7 @@ defmodule Arbor.Security.CapabilityStoreRestoreTest do
 
   defp assert_migrated_durable_payload!(dir, key, legacy_bytes) do
     legacy = Jason.decode!(legacy_bytes)
-    legacy_path = Path.expand(Path.join([dir, "capabilities", key <> ".json"]), File.cwd!())
+    legacy_path = Path.join([dir, "capabilities", key <> ".json"])
 
     refute File.exists?(legacy_path)
 

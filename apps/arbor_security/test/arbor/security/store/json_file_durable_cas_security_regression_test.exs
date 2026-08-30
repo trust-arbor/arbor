@@ -79,7 +79,7 @@ defmodule Arbor.Security.Store.JSONFileDurableCasSecurityRegressionTest do
     key = "empty_id"
     assert :ok = JSONFile.put(key, Record.new(key, %{"accepted" => false}), opts)
 
-    real_base = Path.expand(dir, File.cwd!())
+    real_base = dir
     ns_digest = digest_hex(<<1, "capabilities">>)
     key_digest = digest_hex(<<2, key::binary>>)
     v2_path = Path.join([real_base, "ns_" <> ns_digest, key_digest <> ".json"])
@@ -110,11 +110,15 @@ defmodule Arbor.Security.Store.JSONFileDurableCasSecurityRegressionTest do
   end
 
   defp unique_dir(label) do
-    rel = Path.join("var", "#{label}-#{:erlang.unique_integer([:positive])}")
-    abs = Path.expand(rel, File.cwd!())
+    abs =
+      Path.join(
+        System.tmp_dir!(),
+        "#{label}-#{:erlang.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(abs)
     on_exit(fn -> File.rm_rf!(abs) end)
-    rel
+    abs
   end
 
   defp digest_hex(value) do

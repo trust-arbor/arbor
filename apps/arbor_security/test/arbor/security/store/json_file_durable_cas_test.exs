@@ -141,7 +141,7 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
     assert :ok = JSONFile.put(evil, Record.new(evil, %{"ok" => true}), opts)
     assert {:ok, %Record{data: %{"ok" => true}}} = JSONFile.get(evil, opts)
 
-    assert {:ok, real_base} = SafePath.resolve_real(Path.expand(dir, File.cwd!()))
+    real_base = resolve_base!(dir)
 
     ns_digest =
       :crypto.hash(:sha256, <<1, "capabilities">>) |> Base.encode16(case: :lower)
@@ -605,16 +605,19 @@ defmodule Arbor.Security.Store.JSONFileDurableCasTest do
   end
 
   defp unique_dir(label) do
-    rel = Path.join("var", "#{label}-#{:erlang.unique_integer([:positive])}")
-    abs = Path.expand(rel, File.cwd!())
+    abs =
+      Path.join(
+        System.tmp_dir!(),
+        "#{label}-#{:erlang.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(abs)
     on_exit(fn -> File.rm_rf!(abs) end)
-    rel
+    abs
   end
 
   defp resolve_base!(dir) do
-    expanded = Path.expand(dir, File.cwd!())
-    {:ok, real} = SafePath.resolve_real(expanded)
+    {:ok, real} = SafePath.resolve_real(dir)
     real
   end
 end

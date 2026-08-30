@@ -110,11 +110,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     principal_id = "agent_capability_store_persistence_regression"
     resource_uri = "arbor://fs/read/capability-store-persistence-regression"
 
-    backend_dir = Path.join("var", "capability-store-regression-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-regression")
 
     configure_isolated_json_store(backend_dir)
 
@@ -167,11 +163,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   test "security regression: failed replacement compensates durable state" do
     principal_id = "agent_capability_store_compensation_regression"
     resource_uri = "arbor://fs/read/capability-store-compensation-regression"
-    backend_dir = Path.join("var", "capability-store-compensation-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-compensation")
     on_exit(&DeleteFailingJSONFile.clear/0)
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
@@ -194,11 +186,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   test "security regression: same-id replacement compensation retains restored record" do
     principal_id = "agent_capability_store_same_id_regression"
     resource_uri = "arbor://fs/read/capability-store-same-id-regression"
-    backend_dir = Path.join("var", "capability-store-same-id-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-same-id")
     on_exit(&DeleteFailingJSONFile.clear/0)
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
@@ -220,11 +208,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   test "security regression: unknown replacement compensation never reports success" do
     principal_id = "agent_capability_store_unknown_outcome_regression"
     resource_uri = "arbor://fs/read/capability-store-unknown-outcome-regression"
-    backend_dir = Path.join("var", "capability-store-unknown-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-unknown")
     on_exit(&DeleteFailingJSONFile.clear/0)
 
     configure_isolated_json_store(backend_dir, DeleteFailingJSONFile)
@@ -247,11 +231,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   test "security regression: remote replacement revocation removes durable projection" do
     principal_id = "agent_capability_store_remote_revoke_regression"
     resource_uri = "arbor://fs/read/capability-store-remote-revoke-regression"
-    backend_dir = Path.join("var", "capability-store-remote-revoke-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-remote-revoke")
 
     configure_isolated_json_store(backend_dir)
 
@@ -293,10 +273,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
   @tag :fast
   test "security regression: delegated capability remains authorized after persistence restart" do
-    backend_dir = Path.join("var", "capability-store-delegation-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-delegation")
 
     configure_isolated_json_store(backend_dir)
 
@@ -331,10 +308,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   test "security regression: limited-use capability cannot regain uses after restart" do
     principal_id = "agent_capability_store_limited_restart"
     resource_uri = "arbor://fs/read/capability-store-limited-restart"
-    backend_dir = Path.join("var", "capability-store-limited-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-limited")
 
     configure_isolated_json_store(backend_dir)
 
@@ -354,10 +328,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
   @tag slow: true, timeout: 180_000
   test "security regression: authorize survives full AuthorityStore+CapabilityStore restart above 10_000 durable records" do
-    backend_dir = Path.join("var", "capability-store-hydrate-10k-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("capability-store-hydrate-10k")
     on_exit(&restore_security_children/0)
 
     target_principal = "agent_capability_store_hydrate_target"
@@ -424,10 +395,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     principal = "agent_ack_unsupported_backend"
     resource = "arbor://fs/read/ack-unsupported-backend"
 
-    backend_dir = Path.join("var", "ack-unsupported-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("ack-unsupported")
 
     configure_isolated_json_store(backend_dir, CasUnsupportedJSONFile)
 
@@ -485,10 +453,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       resource: resource
     ]
 
-    backend_dir = Path.join("var", "ack-jsonfile-public-#{unique_integer()}")
-    tmp_dir = Path.expand(backend_dir, File.cwd!())
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    backend_dir = unique_tmp_dir("ack-jsonfile-public")
 
     # Real default durable backend — not CASSandbox, ETS, or a CAS wrapper.
     configure_isolated_json_store(backend_dir)
@@ -631,6 +596,13 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
   defp absolute_test_root(dir) when is_binary(dir) do
     if Path.type(dir) == :absolute, do: dir, else: Path.expand(dir)
+  end
+
+  defp unique_tmp_dir(label) do
+    dir = Path.join(System.tmp_dir!(), "#{label}-#{unique_integer()}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+    dir
   end
 
   defp seed_durable_capabilities!(backend_dir, target_cap, total_count)
