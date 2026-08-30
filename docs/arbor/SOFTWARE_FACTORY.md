@@ -129,8 +129,10 @@ Follow this install literally on a native-arch Linux host. Written 2026-08-26.
 
 **First-time image pull**
 
-`mix arbor.baseline.build` uses `podman build --pull=never`. Pull the reviewed
-Debian base once:
+`mix arbor.baseline.build` uses `podman build --pull=never` and pre-flights the
+pinned `FROM` digest before starting the build. If that image is absent, the
+task fails closed with `base_image_missing` and names the exact `podman pull`
+command — it does not pull automatically. Pull the reviewed Debian base once:
 
 ```
 podman pull debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171

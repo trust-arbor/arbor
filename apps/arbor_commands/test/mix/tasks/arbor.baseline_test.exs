@@ -141,6 +141,8 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     File.chmod!(root, 0o700)
   end
 
+  @pinned_from "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171"
+
   test "build without an image_build override rejects an unadmitted backend by name (B2a)",
        %{root: root} do
     {repo, deps} = fixture_repo!(root)
@@ -166,6 +168,116 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
                smoke_test: fn _copy, _platform -> :ok end,
                shell: FakeShell
              )
+  end
+
+  test "podman non-zero exit carries a diagnostic the Mix task prints", %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    script = Path.join(root, "fake-podman")
+
+    File.write!(script, """
+    #!/bin/sh
+    echo "STEP 1/8: FROM #{@pinned_from}"
+    echo "Error: creating build container: initializing source docker://#{@pinned_from}: image not known"
+    exit 125
+    """)
+
+    File.chmod!(script, 0o755)
+    previous = Application.get_env(:arbor_commands, :baseline_image_executables)
+    Application.put_env(:arbor_commands, :baseline_image_executables, %{"podman" => script})
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:arbor_commands, :baseline_image_executables),
+        else: Application.put_env(:arbor_commands, :baseline_image_executables, previous)
+    end)
+
+    assert {:error, {:image_build_failed, diagnostic}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               image_exists: fn _ref -> true end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert diagnostic.reason == :base_image_missing
+    assert diagnostic.exit_status == 125
+    assert diagnostic.tail =~ "image not known"
+
+    assert Arbor.Commands.Baseline.BuildCore.image_build_failed?(
+             {:image_build_failed, diagnostic}
+           )
+
+    printed = Build.format_error({:image_build_failed, diagnostic})
+    assert printed =~ "image_build_failed"
+    assert printed =~ "base_image_missing"
+    assert printed =~ "image not known"
+  end
+
+  test "absent pinned FROM fails closed before any build and names the pull", %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:base_image_missing, @pinned_from}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               image_exists: fn ref ->
+                 send(self(), {:image_exists, ref})
+                 false
+               end,
+               image_cmd: fn _exe, args ->
+                 flunk("must not build when base image is missing, got #{inspect(args)}")
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert_received {:image_exists, @pinned_from}
+
+    printed = Build.format_error({:base_image_missing, @pinned_from})
+    assert printed =~ "base_image_missing"
+    assert printed =~ "podman pull #{@pinned_from}"
+  end
+
+  test "present pinned FROM proceeds to the image build", %{root: root} do
+    {repo, deps} = fixture_repo!(root)
+    write_pinned_containerfile!(repo)
+
+    assert {:error, {:image_build_failed, diagnostic}} =
+             Build.execute([],
+               arbor_home: root,
+               repo_root: repo,
+               deps_path: deps,
+               platform: "linux/amd64",
+               image_exists: fn ref ->
+                 send(self(), {:image_exists, ref})
+                 true
+               end,
+               image_cmd: fn exe, args ->
+                 send(self(), {:image_cmd, exe, args})
+                 {"Error: dockerfile parse error line 3: unknown instruction: BANANA\n", 1}
+               end,
+               deps_fetch: fn _ctx -> :ok end,
+               deps_compile: fn _ctx -> :ok end,
+               smoke_test: fn _copy, _platform -> :ok end,
+               shell: FakeShell
+             )
+
+    assert_received {:image_exists, @pinned_from}
+    assert_received {:image_cmd, _exe, ["build" | _rest]}
+    assert diagnostic.reason == :unknown
+    assert diagnostic.tail =~ "unknown instruction"
   end
 
   test "build does not overwrite active validation-runtime.json", %{root: root} do
@@ -708,6 +820,12 @@ defmodule Mix.Tasks.Arbor.BaselineTest do
     File.write!(Path.join(repo, "mix.lock"), "%{}\n")
     File.write!(Path.join(deps, "ok"), "ok\n")
     {repo, deps}
+  end
+
+  defp write_pinned_containerfile!(repo) do
+    dir = Path.join(repo, "images/validation-runtime")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "Containerfile"), "FROM #{@pinned_from}\n")
   end
 
   defp mix_layout_fixture!(root) do

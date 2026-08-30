@@ -367,4 +367,190 @@ defmodule Arbor.Commands.Baseline.BuildCore do
   end
 
   defp variant_digest(_variants, _platform), do: {:error, :variant_not_found}
+
+  # ── Build failure diagnostic + pinned FROM preflight ─────────────────────
+
+  @max_tail_lines 40
+  @max_tail_bytes 4096
+  @from_digest_re ~r/^FROM[ \t]+(\S+@sha256:[0-9a-f]{64})\s*$/m
+
+  @type failure_reason :: :base_image_missing | :platform_unsupported | :disk_full | :unknown
+
+  @type failure_diagnostic :: %{
+          reason: failure_reason(),
+          tail: String.t(),
+          executable: String.t(),
+          exit_status: integer() | nil
+        }
+
+  @doc """
+  Bounded, UTF-8-safe diagnostic from a backend build command.
+
+  Keeps the last 40 lines, at most 4 KiB, with control characters stripped
+  except newline. Classifies podman/buildah `--pull=never` missing-image
+  output as `:base_image_missing`.
+  """
+  @spec failure_diagnostic(term(), term(), term()) :: failure_diagnostic()
+  def failure_diagnostic(executable, exit_status, output) do
+    text = sanitize_output(output_text(output))
+
+    %{
+      reason: classify_reason(text),
+      tail: bounded_tail(text),
+      executable: stringify(executable),
+      exit_status: normalize_status(exit_status)
+    }
+  end
+
+  @doc "True for the bare atom and the diagnostic-bearing tuple."
+  @spec image_build_failed?(term()) :: boolean()
+  def image_build_failed?(:image_build_failed), do: true
+  def image_build_failed?({:image_build_failed, _diagnostic}), do: true
+  def image_build_failed?(_other), do: false
+
+  @doc "Parse the digest-form `FROM` reference from Containerfile text."
+  @spec pinned_from_reference(term()) :: {:ok, String.t()} | {:error, atom()}
+  def pinned_from_reference(text) when is_binary(text) do
+    case Regex.run(@from_digest_re, text, capture: :all_but_first) do
+      [ref] when is_binary(ref) and ref != "" -> {:ok, ref}
+      _other -> {:error, :missing_from_reference}
+    end
+  end
+
+  def pinned_from_reference(_text), do: {:error, :missing_from_reference}
+
+  @doc "Argv that asks the backend whether the pinned base image is local."
+  @spec image_exists_args(term(), term()) :: {:ok, [String.t()]} | {:error, atom()}
+  def image_exists_args("podman", ref) when is_binary(ref) and ref != "",
+    do: {:ok, ["image", "exists", ref]}
+
+  def image_exists_args("apple_container", ref) when is_binary(ref) and ref != "",
+    do: {:ok, ["image", "inspect", ref]}
+
+  def image_exists_args(_driver, _ref), do: {:error, :image_backend_unsupported}
+
+  @doc "Exact reviewed pull command for a missing pinned base image."
+  @spec pull_remedy(term()) :: String.t()
+  def pull_remedy(ref) when is_binary(ref) and ref != "", do: "podman pull " <> ref
+  def pull_remedy(_ref), do: "podman pull <pinned FROM reference>"
+
+  @doc "Operator-facing Mix error text. Convert step for build failures."
+  @spec format_failure(term()) :: String.t()
+  def format_failure({:image_build_failed, diagnostic}) when is_map(diagnostic) do
+    reason = Map.get(diagnostic, :reason) || Map.get(diagnostic, "reason") || :unknown
+    tail = Map.get(diagnostic, :tail) || Map.get(diagnostic, "tail") || ""
+
+    case String.trim(tail) do
+      "" -> "image_build_failed (#{reason})"
+      trimmed -> "image_build_failed (#{reason})\n#{trimmed}"
+    end
+  end
+
+  def format_failure({:base_image_missing, ref}) when is_binary(ref) do
+    "base_image_missing: #{ref}\nPull the reviewed pin first: #{pull_remedy(ref)}"
+  end
+
+  def format_failure(:image_build_failed), do: "image_build_failed"
+  def format_failure(reason) when is_atom(reason), do: Atom.to_string(reason)
+  def format_failure(reason), do: inspect(reason)
+
+  defp classify_reason(text) do
+    down = String.downcase(text)
+
+    cond do
+      base_image_missing?(down, text) -> :base_image_missing
+      platform_unsupported?(down) -> :platform_unsupported
+      disk_full?(down) -> :disk_full
+      true -> :unknown
+    end
+  end
+
+  defp base_image_missing?(down, original) do
+    String.contains?(down, "image not known") or
+      String.contains?(down, "no such image") or
+      (String.contains?(down, "creating build container") and
+         String.contains?(original, "@sha256:"))
+  end
+
+  defp platform_unsupported?(down) do
+    String.contains?(down, "no image found in manifest list") or
+      String.contains?(down, "no matching manifest") or
+      String.contains?(down, "does not match the detected host platform") or
+      String.contains?(down, "requested image's platform") or
+      String.contains?(down, "platform not supported") or
+      String.contains?(down, "unsupported platform") or
+      String.contains?(down, "exec format error")
+  end
+
+  defp disk_full?(down) do
+    String.contains?(down, "no space left on device") or
+      String.contains?(down, "enospc") or
+      String.contains?(down, "disk full") or
+      String.contains?(down, "not enough space")
+  end
+
+  defp output_text(output) when is_binary(output), do: output
+
+  defp output_text(output) when is_list(output) do
+    IO.iodata_to_binary(output)
+  rescue
+    ArgumentError -> ""
+  end
+
+  defp output_text(_other), do: ""
+
+  defp sanitize_output(text) when is_binary(text) do
+    text
+    |> utf8_safe()
+    |> String.replace(~r/[^\P{C}\n]/u, "")
+  end
+
+  defp sanitize_output(_other), do: ""
+
+  defp utf8_safe(bin) do
+    if String.valid?(bin) do
+      bin
+    else
+      case :unicode.characters_to_binary(bin, :latin1) do
+        out when is_binary(out) -> out
+        _other -> ""
+      end
+    end
+  end
+
+  defp bounded_tail(text) do
+    text
+    |> String.split("\n")
+    |> Enum.take(-@max_tail_lines)
+    |> Enum.join("\n")
+    |> take_last_utf8_bytes(@max_tail_bytes)
+  end
+
+  defp take_last_utf8_bytes(text, max) when byte_size(text) <= max, do: text
+
+  defp take_last_utf8_bytes(text, max) do
+    skip = byte_size(text) - max
+    <<_head::binary-size(skip), tail::binary>> = text
+    trim_leading_incomplete(tail)
+  end
+
+  defp trim_leading_incomplete(bin) do
+    cond do
+      bin == "" ->
+        ""
+
+      String.valid?(bin) ->
+        bin
+
+      true ->
+        <<_drop, rest::binary>> = bin
+        trim_leading_incomplete(rest)
+    end
+  end
+
+  defp stringify(value) when is_binary(value), do: value
+  defp stringify(_value), do: ""
+
+  defp normalize_status(status) when is_integer(status), do: status
+  defp normalize_status(_status), do: nil
 end

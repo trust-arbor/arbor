@@ -15,7 +15,10 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
   `container build` + `container image tag` on macOS (Apple Container, which
   publishes the `127.0.0.1:0/arbor/workload:baseline-<8hex>` alias the launcher
   admits). Executables come from `config :arbor_commands,
-  :baseline_image_executables`. Pull the reviewed Debian base once first
+  :baseline_image_executables`. The task pre-flights the pinned `FROM`
+  digest and fails closed with `base_image_missing` plus the exact
+  `podman pull <ref>` remedy when it is absent — it does not pull
+  automatically. Pull the reviewed Debian base once first
   (`podman pull` / `container image pull debian:bookworm-slim@sha256:…` —
   digest in `images/validation-runtime/Containerfile`);
   see `images/validation-runtime/README.md`.
@@ -26,6 +29,7 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
   @requirements ["compile"]
 
   alias Arbor.Commands.Baseline
+  alias Arbor.Commands.Baseline.BuildCore
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
 
   @impl Mix.Task
@@ -82,6 +86,6 @@ defmodule Mix.Tasks.Arbor.Baseline.Build do
     """
   end
 
-  defp format_error(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp format_error(reason), do: inspect(reason)
+  @doc false
+  def format_error(reason), do: BuildCore.format_failure(reason)
 end

@@ -24,6 +24,8 @@ defmodule Arbor.Commands.Baseline do
           | {:active_config_path, String.t()}
           | {:config_path, String.t()}
           | {:image_build, (map() -> {:ok, map()} | {:error, term()})}
+          | {:image_exists, (String.t() -> boolean())}
+          | {:image_cmd, (String.t(), [String.t()] -> {String.t(), non_neg_integer()})}
           | {:deps_fetch, (map() -> :ok | {:error, term()})}
           | {:deps_compile, (map() -> :ok | {:error, term()})}
           | {:smoke_test, (String.t(), String.t() -> :ok | {:error, term()})}
@@ -250,6 +252,8 @@ defmodule Arbor.Commands.Baseline do
              Keyword.get(opts, :active_config_path) ||
                Path.join(home, "validation-runtime.json"),
            image_build: Keyword.get(opts, :image_build),
+           image_exists: Keyword.get(opts, :image_exists),
+           image_cmd: Keyword.get(opts, :image_cmd),
            deps_fetch: Keyword.get(opts, :deps_fetch),
            deps_compile: Keyword.get(opts, :deps_compile),
            smoke_test: Keyword.get(opts, :smoke_test),
@@ -343,6 +347,7 @@ defmodule Arbor.Commands.Baseline do
     # `spawn_executable`, which does not resolve a relative `./bin/mix` against
     # `:cd` — on Linux it fails with :enoent before the child starts (V7,
     # 2026-08-26). Same absolute-wrapper contract as `Arbor.Actions.Mix`.
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.get"],
            cd: repo_root,
            env: staging_mix_env(deps_path),
@@ -382,6 +387,7 @@ defmodule Arbor.Commands.Baseline do
     # Take the tree digest after this so the unit can compile with --network none.
     File.mkdir_p!(staging_build_path(deps_path))
 
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
     case System.cmd(Path.join(repo_root, "bin/mix"), ["deps.compile"],
            cd: repo_root,
            env: staging_mix_env(deps_path),
@@ -471,12 +477,64 @@ defmodule Arbor.Commands.Baseline do
     probe = safe_shell_call(ctx.shell, :validation_runtime_probe)
 
     with {:ok, driver} <- BuildCore.image_backend(runtime, probe, :os.type()),
-         {:ok, executable} <- BuildCore.image_executable(driver, executables) do
+         {:ok, executable} <- BuildCore.image_executable(driver, executables),
+         :ok <- preflight_base_image(ctx, request, executable, driver) do
       case driver do
-        "podman" -> podman_build(request, executable)
-        "apple_container" -> apple_container_build(request, executable)
+        "podman" -> podman_build(request, executable, ctx)
+        "apple_container" -> apple_container_build(request, executable, ctx)
       end
     end
+  end
+
+  defp preflight_base_image(ctx, request, executable, driver) do
+    with {:ok, text} <- read_containerfile(request.containerfile),
+         {:ok, ref} <- BuildCore.pinned_from_reference(text),
+         {:ok, args} <- BuildCore.image_exists_args(driver, ref) do
+      if image_present?(ctx, executable, ref, args) do
+        :ok
+      else
+        {:error, {:base_image_missing, ref}}
+      end
+    end
+  end
+
+  defp read_containerfile(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok, text} -> {:ok, text}
+      {:error, _reason} -> {:error, :containerfile_unreadable}
+    end
+  end
+
+  defp read_containerfile(_path), do: {:error, :containerfile_unreadable}
+
+  defp image_present?(ctx, executable, ref, args) do
+    case ctx.image_exists do
+      fun when is_function(fun, 1) ->
+        fun.(ref) == true
+
+      _missing ->
+        case run_image_cmd(ctx, executable, args) do
+          {_output, 0} -> true
+          {_output, _status} -> false
+        end
+    end
+  rescue
+    _error -> false
+  end
+
+  defp run_image_cmd(ctx, executable, args) do
+    case Map.get(ctx, :image_cmd) do
+      fun when is_function(fun, 2) ->
+        fun.(executable, args)
+
+      _missing ->
+        # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
+        System.cmd(executable, args, stderr_to_stdout: true)
+    end
+  end
+
+  defp image_build_failed(executable, status, output) do
+    {:error, {:image_build_failed, BuildCore.failure_diagnostic(executable, status, output)}}
   end
 
   defp normalize_image_result({:ok, image}) when is_map(image) do
@@ -511,7 +569,7 @@ defmodule Arbor.Commands.Baseline do
   defp normalize_image_result({:error, reason}), do: {:error, reason}
   defp normalize_image_result(_other), do: {:error, :invalid_image_inspect}
 
-  defp podman_build(request, executable) do
+  defp podman_build(request, executable, ctx) do
     # `podman image inspect --latest` does not exist (the flag belongs to
     # `podman inspect` for containers); it failed every build with
     # `image_inspect_failed` on the first V7 run (2026-08-26). Capture the
@@ -545,12 +603,12 @@ defmodule Arbor.Commands.Baseline do
     ]
 
     try do
-      case System.cmd(executable, args, stderr_to_stdout: true) do
+      case run_image_cmd(ctx, executable, args) do
         {_output, 0} ->
-          inspect_built_image(iidfile, executable)
+          inspect_built_image(iidfile, executable, ctx)
 
-        {_output, _status} ->
-          {:error, :image_build_failed}
+        {output, status} ->
+          image_build_failed(executable, status, output)
       end
     after
       File.rm(iidfile)
@@ -591,7 +649,7 @@ defmodule Arbor.Commands.Baseline do
   # publish the non-routable local workload alias the launcher admits
   # (`127.0.0.1:0/arbor/workload:baseline-<8hex>`), then inspect the tag. The
   # image id is the manifest's config digest, read from the content store.
-  defp apple_container_build(request, executable) do
+  defp apple_container_build(request, executable, ctx) do
     with {:ok, tags} <- BuildCore.apple_container_tags(request.tree_digest) do
       args =
         [
@@ -616,19 +674,17 @@ defmodule Arbor.Commands.Baseline do
           request.context
         ]
 
-      with {_out, 0} <- System.cmd(executable, args, stderr_to_stdout: true),
+      with {_out, 0} <- run_image_cmd(ctx, executable, args),
            {_out, 0} <-
-             System.cmd(executable, ["image", "tag", tags.build, tags.alias],
-               stderr_to_stdout: true
-             ),
+             run_image_cmd(ctx, executable, ["image", "tag", tags.build, tags.alias]),
            {json, 0} <-
-             System.cmd(executable, ["image", "inspect", tags.build], stderr_to_stdout: true),
+             run_image_cmd(ctx, executable, ["image", "inspect", tags.build]),
            {:ok, manifest_json} <- apple_container_manifest(json, request.platform),
            {:ok, image} <- BuildCore.apple_container_image(json, manifest_json, request.platform) do
         {:ok, Map.put(image, :image, @provisioning_image_prefix <> image.index_digest)}
       else
         {:error, reason} -> {:error, reason}
-        {_output, _status} -> {:error, :image_build_failed}
+        {output, status} -> image_build_failed(executable, status, output)
       end
     end
   end
@@ -654,11 +710,10 @@ defmodule Arbor.Commands.Baseline do
     end
   end
 
-  defp inspect_built_image(iidfile, executable) do
+  defp inspect_built_image(iidfile, executable, ctx) do
     with {:ok, contents} <- File.read(iidfile),
          "sha256:" <> hex = image_id when byte_size(hex) == 64 <- String.trim(contents),
-         {json, 0} <-
-           System.cmd(executable, ["image", "inspect", image_id], stderr_to_stdout: true) do
+         {json, 0} <- run_image_cmd(ctx, executable, ["image", "inspect", image_id]) do
       parse_inspect(json, image_id)
     else
       _other -> {:error, :image_inspect_failed}
