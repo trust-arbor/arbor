@@ -26,12 +26,17 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       )
   """
 
+  alias Arbor.Consensus.ConsultationFinalizer
   alias Arbor.Consensus.ConsultationLog
+  alias Arbor.Consensus.ConsultSeatOwner
   alias Arbor.Consensus.ReviewerOutcomes
   alias Arbor.Contracts.Consensus.Proposal
   alias Arbor.Contracts.Security.SigningAuthority
 
   @default_timeout 300_000
+  # Post-deadline (or remaining-time-capped) budget for injected seat-owner
+  # stop/1. Cleanup must never block the original result/raise/throw/exit.
+  @seat_owner_cleanup_max_ms 5_000
   # :signing_authority keeps nested Engine runs in fixed-facade authority mode
   # when the parent action was authorized via SigningAuthority (never silent
   # legacy signer/authorizer). Opaque token only — no private keys.
@@ -87,7 +92,8 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     with {:ok, proposal} <- build_advisory_proposal(description, context) do
       perspectives = evaluator_module.perspectives()
 
-      # Create a shared consultation run so all perspectives log under one EvalRun
+      # Create a shared consultation run so all perspectives log under one
+      # EvalRun. Legacy contract: bare run id, or nil when unavailable.
       consultation_id = ConsultationLog.create_run(description, perspectives, opts)
 
       eval_opts =
@@ -116,6 +122,687 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       ConsultationLog.complete_run(consultation_id, results)
 
       {:ok, results}
+    end
+  end
+
+  @doc """
+  Ask an evaluator all its perspectives and return the ConsultationLog run id.
+
+  Unlike `ask/3`, this uses one consultation-wide wall-clock deadline:
+  remaining time is recomputed from the live clock immediately before
+  every blocking step. Seat tasks run under a per-consult
+  `Task.Supervisor` via `async_nolink`; the owner monitors the caller
+  and shuts the seats down if the caller dies.
+
+  Terminalization is owned by a supervised `ConsultationFinalizer`
+  started at run-creation time (unlinked from the caller). The caller's
+  success path and the finalizer share `ConsultationLog.finalize_run/2`
+  as the single CAS boundary.
+
+  ## Options
+
+  Same as `ask/3`, plus:
+
+  - `:consultation_log` — module with `new_run_id/0`, `create_bound_run/3`,
+    and `finalize_run/2`. Run-id reservation always goes through this module.
+  - `:deadline_unix_ms` — absolute Unix-ms deadline for the whole consult
+  - `:timeout` — here a consultation-wide budget used only to derive the
+    deadline when `:deadline_unix_ms` is absent (NOT the per-perspective
+    timeout it means on `ask/3`)
+  - `:seat_owner` — module owning the per-consult seat `Task.Supervisor`
+    lifecycle (`start/2`, `supervisor/2`, `stop/1`); injectable for tests.
+    Seat TASKS are always created and awaited by the consultation process
+    itself, never by a helper process.
+
+  Injected `start/2`, `supervisor/2`, and `stop/1` run through a bounded,
+  non-linking call. Remaining time is recomputed from the live clock
+  immediately before each. After the deadline, `stop/1` still gets a small
+  fixed cleanup budget (`#{@seat_owner_cleanup_max_ms}` ms); timeout or
+  crash of cleanup preserves the original result/error and force-kills the
+  owner pid.
+  """
+  @spec ask_logged(module(), String.t(), keyword()) ::
+          {:ok, %{evaluations: list(), run_id: String.t() | nil}} | {:error, term()}
+  def ask_logged(evaluator_module, description, opts \\ []) do
+    context = Keyword.get(opts, :context, %{})
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    deadline = resolve_deadline_unix_ms(opts, timeout)
+    log = Keyword.get(opts, :consultation_log, ConsultationLog)
+    state_key = {__MODULE__, :ask_logged, make_ref()}
+
+    Process.put(state_key, %{
+      run_id: nil,
+      seat_owner: nil,
+      seat_owner_mod: nil,
+      finalizer: nil
+    })
+
+    try do
+      do_logged_consult(
+        evaluator_module,
+        description,
+        context,
+        deadline,
+        log,
+        opts,
+        state_key
+      )
+    rescue
+      exception ->
+        terminalize_on_abnormal_exit(state_key, log, deadline, {:error, :consult_raised})
+        reraise exception, __STACKTRACE__
+    catch
+      kind, reason ->
+        terminalize_on_abnormal_exit(state_key, log, deadline, {:error, :consult_crashed})
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    else
+      {:ok, _result} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        # Single caller-side terminalization boundary: every non-success
+        # exit makes one bounded, idempotent finalize attempt on a created
+        # run. The supervised finalizer remains the backstop when this
+        # attempt cannot run or fails.
+        terminalize_on_abnormal_exit(state_key, log, deadline, error)
+        error
+    after
+      state = Process.get(state_key, %{})
+      stop_seat_owner(state[:seat_owner], state[:seat_owner_mod], deadline)
+      Process.delete(state_key)
+    end
+  end
+
+  # One bounded, idempotent finalize attempt on abnormal exit. The attempt
+  # is capped at a small fixed budget: a hung finalize must never delay
+  # the original raise/throw/error by the remaining consultation window —
+  # the supervised finalizer remains the durable backstop.
+  @abnormal_finalize_max_ms 1_000
+
+  defp terminalize_on_abnormal_exit(state_key, log, deadline, outcome) do
+    case Process.get(state_key, %{}) do
+      %{run_id: run_id} when is_binary(run_id) ->
+        _ =
+          bounded_call(fn -> log.finalize_run(run_id, outcome) end, deadline,
+            min_ms: 100,
+            max_ms: @abnormal_finalize_max_ms
+          )
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp do_logged_consult(
+         evaluator_module,
+         description,
+         context,
+         deadline,
+         log,
+         opts,
+         state_key
+       ) do
+    with :ok <- maybe_setup_research_agents(evaluator_module, opts, deadline),
+         :ok <- require_remaining_time(deadline),
+         {:ok, proposal} <- build_advisory_proposal(description, context),
+         :ok <- require_remaining_time(deadline),
+         {:ok, reserved_id} <- reserve_run_id(log, deadline),
+         {:ok, perspectives} <- fetch_evaluator_perspectives(evaluator_module, deadline) do
+      case start_owned_finalizer(reserved_id, deadline, log, opts, state_key) do
+        {:ok, _pid} ->
+          create_and_collect(
+            evaluator_module,
+            proposal,
+            description,
+            perspectives,
+            reserved_id,
+            deadline,
+            log,
+            opts,
+            state_key
+          )
+
+        {:error, {:finalizer_unavailable, reason}} ->
+          fallback_after_finalizer_start_failure(log, reserved_id, deadline, reason)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp create_and_collect(
+         evaluator_module,
+         proposal,
+         description,
+         perspectives,
+         reserved_id,
+         deadline,
+         log,
+         opts,
+         state_key
+       ) do
+    create_opts = Keyword.put(opts, :run_id, reserved_id)
+
+    case bounded_call(
+           fn -> log.create_bound_run(description, perspectives, create_opts) end,
+           deadline
+         ) do
+      {:ok, nil} ->
+        ConsultationFinalizer.Supervisor.stop_finalizer(Process.get(state_key, %{})[:finalizer])
+        put_consult_state(state_key, %{run_id: nil, finalizer: nil})
+
+        collect_logged_evaluations(
+          evaluator_module,
+          proposal,
+          perspectives,
+          nil,
+          deadline,
+          log,
+          opts,
+          state_key
+        )
+
+      {:ok, {:ok, ^reserved_id}} ->
+        if valid_opaque_run_id?(reserved_id) do
+          put_consult_state(state_key, %{run_id: reserved_id})
+
+          collect_logged_evaluations(
+            evaluator_module,
+            proposal,
+            perspectives,
+            reserved_id,
+            deadline,
+            log,
+            opts,
+            state_key
+          )
+        else
+          fail_create_handshake(state_key)
+        end
+
+      {:ok, _other} ->
+        fail_create_handshake(state_key)
+
+      {:error, :timeout} ->
+        # Indeterminate: the bounded create call timed out, but the insert
+        # may still have committed. Leave the prestarted finalizer alive so
+        # a late/just-committed `running` row is still terminalized.
+        {:error, :timeout}
+
+      {:error, reason} ->
+        # Indeterminate create failure (raise/exit inside the bounded call):
+        # the row may or may not exist. Leave the prestarted finalizer alive.
+        {:error, reason}
+    end
+  end
+
+  defp fail_create_handshake(state_key) do
+    ConsultationFinalizer.Supervisor.stop_finalizer(Process.get(state_key, %{})[:finalizer])
+    put_consult_state(state_key, %{finalizer: nil})
+    {:error, :consultation_create_failed}
+  end
+
+  defp reserve_run_id(log, deadline) do
+    case bounded_call(fn -> log.new_run_id() end, deadline) do
+      {:ok, reserved_id} ->
+        if valid_opaque_run_id?(reserved_id) do
+          {:ok, reserved_id}
+        else
+          {:error, :consultation_create_failed}
+        end
+
+      {:error, :timeout} ->
+        {:error, :timeout}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp valid_opaque_run_id?(id) when is_binary(id) do
+    id != "" and String.valid?(id) and not String.contains?(id, <<0>>)
+  end
+
+  defp valid_opaque_run_id?(_id), do: false
+
+  # Bounded, validated fetch of the evaluator's seat list. Runs under the
+  # live consultation deadline BEFORE the finalizer or any seat is started,
+  # and enforces a conservative cap so a misbehaving evaluator cannot spawn
+  # unbounded seat tasks.
+  @max_perspectives 32
+
+  defp fetch_evaluator_perspectives(evaluator_module, deadline) do
+    case bounded_call(fn -> evaluator_module.perspectives() end, deadline) do
+      {:ok, perspectives} -> validate_perspectives(perspectives)
+      {:error, :timeout} -> {:error, :timeout}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_perspectives(perspectives) when is_list(perspectives) do
+    valid_atoms? =
+      Enum.all?(perspectives, fn perspective ->
+        is_atom(perspective) and not is_nil(perspective) and not is_boolean(perspective)
+      end)
+
+    cond do
+      perspectives == [] -> {:error, :invalid_evaluator_perspectives}
+      length(perspectives) > @max_perspectives -> {:error, :invalid_evaluator_perspectives}
+      not valid_atoms? -> {:error, :invalid_evaluator_perspectives}
+      Enum.uniq(perspectives) != perspectives -> {:error, :invalid_evaluator_perspectives}
+      true -> {:ok, perspectives}
+    end
+  end
+
+  defp validate_perspectives(_perspectives), do: {:error, :invalid_evaluator_perspectives}
+
+  defp start_owned_finalizer(run_id, deadline, log, opts, state_key) when is_binary(run_id) do
+    grace_ms = Keyword.get(opts, :finalizer_grace_ms, ConsultationFinalizer.default_grace_ms())
+
+    persist_timeout_ms =
+      Keyword.get(opts, :persist_timeout_ms, ConsultationFinalizer.default_persist_timeout_ms())
+
+    supervisor = Keyword.get(opts, :finalizer_supervisor, ConsultationFinalizer.Supervisor)
+
+    start_opts = [
+      run_id: run_id,
+      deadline_unix_ms: deadline,
+      consultation_log: log,
+      grace_ms: grace_ms,
+      persist_timeout_ms: persist_timeout_ms
+    ]
+
+    case bounded_call(
+           fn -> ConsultationFinalizer.Supervisor.start_finalizer(supervisor, start_opts) end,
+           deadline
+         ) do
+      {:ok, {:ok, pid}} ->
+        put_consult_state(state_key, %{finalizer: pid, run_id: run_id})
+        {:ok, pid}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:finalizer_unavailable, reason}}
+
+      {:error, :timeout} ->
+        {:error, {:finalizer_unavailable, :timeout}}
+
+      {:error, reason} ->
+        {:error, {:finalizer_unavailable, reason}}
+    end
+  end
+
+  defp fallback_after_finalizer_start_failure(log, run_id, deadline, reason) do
+    _ =
+      bounded_call(
+        fn -> log.finalize_run(run_id, {:error, :finalizer_unavailable}) end,
+        deadline
+      )
+
+    {:error, {:finalizer_unavailable, reason}}
+  end
+
+  defp maybe_setup_research_agents(evaluator_module, opts, deadline) do
+    if Keyword.get(opts, :research, false) and
+         Code.ensure_loaded?(evaluator_module) and
+         function_exported?(evaluator_module, :ensure_all_council_agents, 1) do
+      case bounded_call(fn -> evaluator_module.ensure_all_council_agents(opts) end, deadline) do
+        {:ok, _} -> :ok
+        {:error, :timeout} -> {:error, :timeout}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp resolve_deadline_unix_ms(opts, timeout) do
+    case Keyword.get(opts, :deadline_unix_ms) do
+      deadline when is_integer(deadline) and deadline > 0 -> deadline
+      _ -> live_now_ms() + timeout
+    end
+  end
+
+  defp require_remaining_time(deadline) do
+    if remaining_ms(deadline) > 0, do: :ok, else: {:error, :timeout}
+  end
+
+  defp remaining_ms(deadline) do
+    max(deadline - live_now_ms(), 0)
+  end
+
+  defp live_now_ms, do: System.system_time(:millisecond)
+
+  defp collect_logged_evaluations(
+         evaluator_module,
+         proposal,
+         perspectives,
+         consultation_id,
+         deadline,
+         log,
+         opts,
+         state_key
+       ) do
+    owner_mod = Keyword.get(opts, :seat_owner, ConsultSeatOwner)
+
+    with :ok <- require_remaining_time(deadline),
+         {:ok, seat_owner} <- start_seat_owner(owner_mod, deadline, state_key),
+         {:ok, supervisor} <- fetch_seat_supervisor(owner_mod, seat_owner, deadline) do
+      eval_opts =
+        opts
+        |> Keyword.drop([
+          :context,
+          :consultation_log,
+          :deadline_unix_ms,
+          :now_ms,
+          :finalizer_grace_ms,
+          :finalizer_supervisor,
+          :persist_timeout_ms,
+          :run_id,
+          :seat_owner
+        ])
+        |> Keyword.put(:consultation_id, consultation_id)
+
+      result =
+        supervisor
+        |> spawn_seat_tasks(evaluator_module, proposal, perspectives, eval_opts, deadline)
+        |> await_logged_seats(consultation_id, deadline)
+
+      maybe_complete_run(log, consultation_id, result, deadline, state_key)
+    end
+  end
+
+  defp maybe_complete_run(_log, nil, {:ok, result}, _deadline, _state_key), do: {:ok, result}
+
+  defp maybe_complete_run(log, consultation_id, {:ok, result} = ok, deadline, state_key) do
+    case bounded_call(fn -> log.finalize_run(consultation_id, ok) end, deadline, min_ms: 1) do
+      {:ok, {:ok, :transitioned}} ->
+        ConsultationFinalizer.Supervisor.stop_finalizer(Process.get(state_key, %{})[:finalizer])
+        {:ok, result}
+
+      {:ok, {:ok, {:already_terminal, "completed"}}} ->
+        # Another completion of the same run won the CAS with the same
+        # outcome class; the stored run is completed.
+        ConsultationFinalizer.Supervisor.stop_finalizer(Process.get(state_key, %{})[:finalizer])
+        {:ok, result}
+
+      {:ok, {:ok, {:already_terminal, status}}} ->
+        # The supervised finalizer (or another writer) already terminalized
+        # this run as a timeout/failure. A timeout-finalized consultation is
+        # never returned as a successful approval. The row is terminal, so
+        # the finalizer has nothing left to do.
+        ConsultationFinalizer.Supervisor.stop_finalizer(Process.get(state_key, %{})[:finalizer])
+        {:error, {:consultation_completion, {:already_terminal, status}}}
+
+      {:ok, {:error, reason}} ->
+        # Leave the supervised finalizer running for best-effort terminalization.
+        {:error, {:consultation_completion, reason}}
+
+      {:ok, other} ->
+        {:error, {:consultation_completion, {:invalid_finalize, other}}}
+
+      {:error, :timeout} ->
+        {:error, {:consultation_completion, :timeout}}
+
+      {:error, reason} ->
+        {:error, {:consultation_completion, reason}}
+    end
+  end
+
+  defp maybe_complete_run(_log, _consultation_id, error, _deadline, _state_key), do: error
+
+  defp await_logged_seats(task_pairs, consultation_id, deadline) do
+    case remaining_ms(deadline) do
+      remaining when remaining <= 0 ->
+        shutdown_seat_tasks(task_pairs)
+        {:error, :timeout}
+
+      remaining ->
+        reduce_logged_seats(task_pairs, remaining, consultation_id)
+    end
+  end
+
+  defp reduce_logged_seats(task_pairs, remaining, consultation_id) do
+    tasks =
+      task_pairs
+      |> Enum.filter(&match?({_perspective, %Task{}}, &1))
+      |> Enum.map(&elem(&1, 1))
+
+    yielded_by_ref =
+      tasks
+      |> Task.yield_many(remaining)
+      |> Map.new(fn {task, result} -> {task.ref, result} end)
+
+    {results, timed_out?} =
+      Enum.map_reduce(task_pairs, false, fn
+        {perspective, :expired}, _timed_out? ->
+          {{perspective, {:error, :timeout}}, true}
+
+        {perspective, task}, timed_out? ->
+          classify_seat_yield(perspective, task, Map.get(yielded_by_ref, task.ref), timed_out?)
+      end)
+
+    results = Enum.sort_by(results, fn {perspective, _} -> perspective end)
+
+    if timed_out? do
+      {:error, :timeout}
+    else
+      {:ok, %{evaluations: results, run_id: consultation_id}}
+    end
+  end
+
+  defp classify_seat_yield(perspective, _task, {:ok, {:ok, evaluation}}, timed_out?) do
+    {{perspective, evaluation}, timed_out?}
+  end
+
+  defp classify_seat_yield(perspective, _task, {:ok, {:error, reason}}, timed_out?) do
+    {{perspective, {:error, reason}}, timed_out?}
+  end
+
+  defp classify_seat_yield(perspective, _task, {:ok, other}, timed_out?) do
+    {{perspective, {:error, other}}, timed_out?}
+  end
+
+  defp classify_seat_yield(perspective, task, nil, _timed_out?) do
+    _ = Task.shutdown(task, :brutal_kill)
+    {{perspective, {:error, :timeout}}, true}
+  end
+
+  defp classify_seat_yield(perspective, _task, {:exit, reason}, timed_out?) do
+    {{perspective, {:error, reason}}, timed_out?}
+  end
+
+  defp spawn_seat_tasks(supervisor, evaluator_module, proposal, perspectives, eval_opts, deadline) do
+    Enum.map(perspectives, fn perspective ->
+      case remaining_ms(deadline) do
+        remaining when remaining <= 0 ->
+          {perspective, :expired}
+
+        _remaining ->
+          task =
+            Task.Supervisor.async_nolink(supervisor, fn ->
+              evaluator_module.evaluate(proposal, perspective, eval_opts)
+            end)
+
+          {perspective, task}
+      end
+    end)
+  end
+
+  defp shutdown_seat_tasks(task_pairs) do
+    Enum.each(task_pairs, fn
+      {_perspective, %Task{} = task} -> Task.shutdown(task, :brutal_kill)
+      _ -> :ok
+    end)
+  end
+
+  # Seat-owner startup, supervisor acquisition, and cleanup are bounded
+  # isolated calls. Remaining time is recomputed from the live clock
+  # immediately before each. Task OWNERSHIP stays with the consultation
+  # process, which calls async_nolink directly and performs every yield
+  # and shutdown itself — no seat task is ever created by a helper process.
+  # start/2 and supervisor/2 propagate raise/throw/exit so caller-side
+  # terminalization still sees the original exit class.
+  defp start_seat_owner(owner_mod, deadline, state_key) do
+    case remaining_ms(deadline) do
+      remaining when remaining <= 0 ->
+        {:error, :timeout}
+
+      _remaining ->
+        caller = self()
+
+        case bounded_owner_call(
+               fn -> owner_mod.start(caller, remaining_ms(deadline)) end,
+               deadline,
+               :propagate
+             ) do
+          {:ok, {:ok, seat_owner}} ->
+            put_consult_state(state_key, %{seat_owner: seat_owner, seat_owner_mod: owner_mod})
+            {:ok, seat_owner}
+
+          {:ok, {:error, :timeout}} ->
+            {:error, :timeout}
+
+          {:ok, {:error, reason}} ->
+            {:error, {:seat_owner_unavailable, reason}}
+
+          {:ok, other} ->
+            {:error, {:seat_owner_unavailable, other}}
+
+          {:error, :timeout} ->
+            {:error, :timeout}
+
+          {:error, reason} ->
+            {:error, {:seat_owner_unavailable, reason}}
+        end
+    end
+  end
+
+  # The validated owner module is honored for the WHOLE lifecycle:
+  # supervisor acquisition and cleanup go through the same injected
+  # collaborator that performed startup, never a hardcoded module.
+  defp fetch_seat_supervisor(owner_mod, seat_owner, deadline) do
+    case remaining_ms(deadline) do
+      remaining when remaining <= 0 ->
+        {:error, :timeout}
+
+      _remaining ->
+        case bounded_owner_call(
+               fn -> owner_mod.supervisor(seat_owner, remaining_ms(deadline)) end,
+               deadline,
+               :propagate
+             ) do
+          {:ok, supervisor} -> {:ok, supervisor}
+          {:error, :timeout} -> {:error, :timeout}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp stop_seat_owner(pid, owner_mod, deadline) when is_pid(pid) do
+    owner = owner_mod || ConsultSeatOwner
+
+    case bounded_owner_call(fn -> owner.stop(pid) end, deadline, :cleanup) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        :ok
+    end
+  end
+
+  defp stop_seat_owner(_owner, _owner_mod, _deadline), do: :ok
+
+  # Non-linking boundary: a hanging or crashing collaborator cannot block
+  # or take down the consultation process. :propagate reconstructs the
+  # original raise/throw/exit in this process. :cleanup uses a small
+  # fixed cap (including after the deadline) and never raises.
+  defp bounded_owner_call(fun, deadline, :cleanup) do
+    bounded_call(fun, deadline,
+      min_ms: @seat_owner_cleanup_max_ms,
+      max_ms: @seat_owner_cleanup_max_ms
+    )
+  end
+
+  defp bounded_owner_call(fun, deadline, :propagate) do
+    remaining = remaining_ms(deadline)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      {pid, ref} = spawn_monitor(fn -> exit({:ok, fun.()}) end)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, {:ok, result}} ->
+          {:ok, result}
+
+        {:DOWN, ^ref, :process, ^pid, {exception, stacktrace}}
+        when is_exception(exception) and is_list(stacktrace) ->
+          reraise exception, stacktrace
+
+        {:DOWN, ^ref, :process, ^pid, {{:nocatch, reason}, stacktrace}}
+        when is_list(stacktrace) ->
+          throw(reason)
+
+        {:DOWN, ^ref, :process, ^pid, {:nocatch, reason}} ->
+          throw(reason)
+
+        {:DOWN, ^ref, :process, ^pid, reason} ->
+          exit(reason)
+      after
+        remaining ->
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^pid, _reason} -> {:error, :timeout}
+          after
+            100 -> {:error, :timeout}
+          end
+      end
+    end
+  end
+
+  defp put_consult_state(state_key, updates) do
+    current = Process.get(state_key, %{})
+    Process.put(state_key, Map.merge(current, updates))
+  end
+
+  defp bounded_call(fun, deadline, opts \\ []) do
+    remaining = remaining_ms(deadline)
+
+    wait_ms =
+      if remaining > 0 do
+        case Keyword.get(opts, :max_ms) do
+          max when is_integer(max) and max > 0 -> min(remaining, max)
+          _ -> remaining
+        end
+      else
+        Keyword.get(opts, :min_ms, 0)
+      end
+
+    if wait_ms <= 0 do
+      {:error, :timeout}
+    else
+      task =
+        Task.async(fn ->
+          try do
+            {:ok, fun.()}
+          rescue
+            exception -> {:error, {:bounded_call_failed, exception.__struct__}}
+          catch
+            kind, reason -> {:error, {:bounded_call_failed, {kind, reason}}}
+          end
+        end)
+
+      case Task.yield(task, wait_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:ok, result}} -> {:ok, result}
+        {:ok, {:error, _reason} = error} -> error
+        nil -> {:error, :timeout}
+        {:exit, _reason} -> {:error, :timeout}
+      end
     end
   end
 

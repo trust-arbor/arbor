@@ -521,6 +521,123 @@ defmodule Arbor.Consensus.TestHelpers do
     end
   end
 
+  defmodule HungAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :hung_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming, :security, :stability, :privacy, :adversarial]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    @impl true
+    def evaluate(_proposal, _perspective, _opts) do
+      Process.sleep(60_000)
+      {:error, :should_have_timed_out}
+    end
+  end
+
+  defmodule RaisingAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :raising_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming, :design_review]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    @impl true
+    def evaluate(_proposal, :brainstorming, _opts) do
+      raise "seat boom"
+    end
+
+    def evaluate(proposal, :design_review, opts) do
+      TestAdvisoryEvaluator.evaluate(proposal, :design_review, opts)
+    end
+  end
+
+  defmodule ExitingAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :exiting_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming, :design_review]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    @impl true
+    def evaluate(_proposal, :brainstorming, _opts) do
+      exit(:seat_exit)
+    end
+
+    def evaluate(proposal, :design_review, opts) do
+      TestAdvisoryEvaluator.evaluate(proposal, :design_review, opts)
+    end
+  end
+
+  defmodule OrphanProbeAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :orphan_probe_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    @impl true
+    def evaluate(_proposal, _perspective, _opts) do
+      dest =
+        case :persistent_term.get({__MODULE__, :test_pid}, :none) do
+          pid when is_pid(pid) -> pid
+          _ -> self()
+        end
+
+      send(dest, {:seat_started, self()})
+      Process.sleep(60_000)
+      {:error, :should_have_been_stopped}
+    end
+  end
+
+  defmodule SlowSetupAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    @impl true
+    def name, do: :slow_setup_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming]
+
+    @impl true
+    def strategy, do: :deterministic
+
+    def ensure_all_council_agents(_opts) do
+      Process.sleep(5_000)
+      :ok
+    end
+
+    @impl true
+    def evaluate(proposal, perspective, opts) do
+      TestAdvisoryEvaluator.evaluate(proposal, perspective, opts)
+    end
+  end
+
   # ============================================================================
   # Mock AI Module (for advisory LLM testing)
   # ============================================================================
@@ -634,5 +751,20 @@ defmodule Arbor.Consensus.TestHelpers do
   """
   def await_decision(coordinator, proposal_id, timeout \\ 10_000) do
     Coordinator.await(proposal_id, server: coordinator, timeout: timeout)
+  end
+
+  @doc """
+  Send a message to the test process even when invoked from a Task.
+
+  `Task.async/1` records the spawning process in `$callers`.
+  """
+  def notify_test(message) do
+    dest =
+      case Process.get(:"$callers") do
+        [pid | _] when is_pid(pid) -> pid
+        _ -> self()
+      end
+
+    send(dest, message)
   end
 end

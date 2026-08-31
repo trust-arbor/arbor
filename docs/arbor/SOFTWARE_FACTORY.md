@@ -546,6 +546,33 @@ minutes leaves room for validation, the commit gate, and council.
 High-risk classes need `checkpoint_policy: "design_required"` and a version
 2 plan. First run should stay `default` / `direct`.
 
+When a design checkpoint is required, `work_packet.design_gate` selects who
+must admit the captured design before implementation:
+
+| `design_gate` | Who admits the design |
+| --- | --- |
+| `"operator"` (default; also when the key is absent) | The existing operator checkpoint only |
+| `"council"` | Advisory council only (`approve` proceeds; `rework` returns to the design-rework path) |
+| `"council_then_operator"` | Advisory council first; an `approve` then reaches the existing operator checkpoint |
+
+The advisory council's default decision rule is: rework when any of
+security/stability/adversarial votes reject, when rejects are ≥ 3, or when
+fewer than 7 seats responded; approve otherwise. A responder is a seat that
+returned an admitted approve or rework verdict. Errors and abstains never
+count as approvals or as responders. "Cannot deny" means the admitted
+verdict vocabulary is only `approve` | `rework` — not that implementation
+is guaranteed to proceed (rework, timeout, and consult failure all stop
+progress). Direct plans ignore `design_gate`
+(including `"council"`) and compile identically to a packet without it.
+An absent or `"operator"` gate on `design_required` keeps the existing operator
+checkpoint path.
+
+`council` and `council_then_operator` add
+`arbor://action/coding/design_council_review` to the compiled graph's
+authority horizon. Grant that URI to the caller the same way as the other
+coding-action horizon members (`mix arbor.coding.grant`). Direct plans and
+`design_gate=operator` (or an absent gate) do not add it.
+
 The `security_regression` validation profile also requires a nonempty
 `plan.requested_paths` list. Every entry must be a repository-relative path
 ending in `_test.exs`; these are the exact candidate test files overlaid onto

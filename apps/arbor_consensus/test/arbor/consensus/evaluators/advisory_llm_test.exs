@@ -652,4 +652,99 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert eval.reasoning == "This is just plain text analysis without JSON."
     end
   end
+
+  describe "design-review evaluation protocol" do
+    test "requests a structured approve|rework verdict in the prompt" do
+      test_pid = self()
+
+      capture_fn = fn _system_prompt, user_prompt ->
+        send(test_pid, {:user_prompt, user_prompt})
+        {:ok, Jason.encode!(%{"verdict" => "approve", "concerns" => []})}
+      end
+
+      proposal = design_review_proposal("Should we extract a core?")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :security, llm_fn: capture_fn)
+
+      assert eval.vote == :approve
+      assert_receive {:user_prompt, user_prompt}
+      assert user_prompt =~ "Design-review verdict"
+      assert user_prompt =~ "approve"
+      assert user_prompt =~ "rework"
+    end
+
+    test "maps a rework verdict to reject with the named concerns" do
+      llm_fn = fn _system_prompt, _user_prompt ->
+        {:ok,
+         Jason.encode!(%{
+           "verdict" => "rework",
+           "concerns" => ["Name the missing capability bound"],
+           "analysis" => "The design omits the fs grant"
+         })}
+      end
+
+      proposal = design_review_proposal("Review the design")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+      assert eval.vote == :reject
+      assert "Name the missing capability bound" in eval.concerns
+      refute eval.vote == :approve
+    end
+
+    test "a missing verdict is rework with the parse problem, never approve" do
+      llm_fn = fn _system_prompt, _user_prompt ->
+        {:ok, Jason.encode!(%{"analysis" => "Looks fine", "concerns" => []})}
+      end
+
+      proposal = design_review_proposal("Missing verdict")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :stability, llm_fn: llm_fn)
+
+      assert eval.vote == :reject
+      assert Enum.any?(eval.concerns, &String.contains?(&1, "malformed design-review verdict"))
+    end
+
+    test "non-JSON design-review output is rework, never approve" do
+      llm_fn = fn _system_prompt, _user_prompt ->
+        {:ok, "I like this design."}
+      end
+
+      proposal = design_review_proposal("Prose only")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :adversarial, llm_fn: llm_fn)
+
+      assert eval.vote == :reject
+      assert Enum.any?(eval.concerns, &String.contains?(&1, "malformed design-review verdict"))
+    end
+
+    test "malformed concern payloads are seat errors, not reject/rework votes" do
+      proposal = design_review_proposal("Malformed concerns")
+
+      payloads = [
+        Jason.encode!(%{"verdict" => "approve", "concerns" => %{"x" => 1}}),
+        Jason.encode!(%{"verdict" => "approve", "concerns" => "not-a-list"}),
+        Jason.encode!(%{"verdict" => "rework", "concerns" => [1]}),
+        Jason.encode!(%{"verdict" => "approve", "concerns" => [%{"nested" => true}]})
+      ]
+
+      Enum.each(payloads, fn payload ->
+        llm_fn = fn _system_prompt, _user_prompt -> {:ok, payload} end
+
+        assert {:error, :malformed_evaluation} =
+                 AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+      end)
+    end
+  end
+
+  defp design_review_proposal(description) do
+    TestHelpers.build_proposal(%{
+      description: description,
+      context: %{"evaluation_protocol" => "design_review"}
+    })
+  end
 end

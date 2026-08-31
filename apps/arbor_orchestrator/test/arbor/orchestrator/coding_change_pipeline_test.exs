@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     coding_design_checkpoint_open
     coding_design_checkpoint_await
     coding_design_artifact_load
+    coding_design_council_review
     acp_start_session
     acp_send_message
     acp_session_status
@@ -183,6 +184,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         "coding_design_artifact_load" ->
           design_artifact_load_response(args, state)
+
+        "coding_design_council_review" ->
+          design_council_review_response(scenario, args)
 
         "acp_session_status" ->
           n = Map.get(counters, :status, 0)
@@ -456,6 +460,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     defp design_checkpoint_open_response(args) do
       attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
       run_deadline = Map.get(args, "run_deadline_unix_ms") || Map.get(args, :run_deadline_unix_ms)
+      run_id = Map.get(args, "design_council_run_id") || Map.get(args, :design_council_run_id)
 
       {:ok,
        %{
@@ -463,8 +468,47 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
          request_id: "irq_design_fixture_#{attempt}",
          operation_id: "op_design_fixture_#{attempt}",
          owner_deadline_unix_ms: run_deadline - 100,
-         evidence: %{}
+         evidence: maybe_put_council_run_id(%{}, run_id),
+         design_council_run_id: run_id
        }}
+    end
+
+    defp design_council_review_response(scenario, args) do
+      if Map.has_key?(args, "design") or Map.has_key?(args, :design) do
+        {:error, "worker-supplied design must not reach the council"}
+      else
+        attempt = Map.get(args, "design_attempt") || Map.get(args, :design_attempt)
+
+        case {scenario, attempt} do
+          {:design_council_failed, _} ->
+            {:error, "design council unavailable"}
+
+          {_scenario, attempt} ->
+            {outcome, note} =
+              case {scenario, attempt} do
+                {:design_council_rework, 1} ->
+                  {"rework", "Name the missing capability check."}
+
+                _ ->
+                  {"approve", ""}
+              end
+
+            {:ok,
+             %{
+               checkpoint_outcome: outcome,
+               note: note,
+               dispersion: %{
+                 "approve" => if(outcome == "approve", do: 13, else: 10),
+                 "reject" => if(outcome == "approve", do: 0, else: 3),
+                 "abstain" => 0,
+                 "error" => 0,
+                 "responded" => 13
+               },
+               design_council_run_id: "council_run_fixture",
+               evidence: %{"design_council_run_id" => "council_run_fixture"}
+             }}
+        end
+      end
     end
 
     defp design_artifact_capture_response(args, state) do
@@ -541,19 +585,34 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
             {"approve", ""}
         end
 
+      run_id = Map.get(args, "design_council_run_id") || Map.get(args, :design_council_run_id)
+
+      evidence =
+        maybe_put_council_run_id(
+          %{
+            "approved" => outcome == "approve",
+            "design_attempt" => attempt,
+            "request_id" => request_id,
+            "source" => "fixture-design-checkpoint"
+          },
+          run_id
+        )
+
       {:ok,
        %{
          checkpoint_outcome: outcome,
          request_id: request_id,
          note: note,
-         evidence: %{
-           "approved" => outcome == "approve",
-           "design_attempt" => attempt,
-           "request_id" => request_id,
-           "source" => "fixture-design-checkpoint"
-         }
+         evidence: evidence,
+         design_council_run_id: run_id
        }}
     end
+
+    defp maybe_put_council_run_id(evidence, run_id)
+         when is_binary(run_id) and run_id != "",
+         do: Map.put(evidence, "design_council_run_id", run_id)
+
+    defp maybe_put_council_run_id(evidence, _run_id), do: evidence
 
     defp implement_response(scenario, counters, state) do
       n = Map.get(counters, :implement, 0)
@@ -964,6 +1023,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :oversized_design_then_bounded_repair,
                :protocol_repair_then_design_rework,
                :design_streamed_duplicate_envelope,
+               :design_council_rework,
+               :design_council_failed,
                :cross_app_capacity_then_complete,
                :cross_app_capacity_then_domain_rework,
                :cross_app_capacity_then_tampered_resume,
@@ -1994,6 +2055,26 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     {result, calls, plan, compilation}
   end
 
+  defp run_compiled_v2_design_gate_fixture(scenario, design_gate) do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["focused tests pass"],
+      "non_goals" => ["unreviewed execution authority"],
+      "constraints" => ["touch only owned files"],
+      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+      "required_evidence" => ["focused test output"],
+      "checkpoint_policy" => "design_required",
+      "design_gate" => design_gate
+    }
+
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    run_compiled_v2_fixture(scenario, "design_required", %{
+      "work_packet" => packet,
+      "work_packet_digest" => digest
+    })
+  end
+
   defp v2_plan!(checkpoint_policy, overrides) do
     packet = %{
       "version" => 1,
@@ -2255,7 +2336,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     assert await_args["run_deadline_unix_ms"] == @fixture_run_deadline_unix_ms
     assert await_args["operation_id"] == "op_design_fixture_#{attempt}"
     assert await_args["owner_deadline_unix_ms"] == @fixture_run_deadline_unix_ms - 100
-    assert await_args["evidence"] == %{}
+
+    expected_evidence =
+      case open_args["design_council_run_id"] || await_args["design_council_run_id"] do
+        run_id when is_binary(run_id) and run_id != "" ->
+          %{"design_council_run_id" => run_id}
+
+        _ ->
+          %{}
+      end
+
+    assert await_args["evidence"] == expected_evidence
   end
 
   defp called?(calls, action_name), do: Enum.any?(calls, fn {n, _} -> n == action_name end)
@@ -2834,6 +2925,104 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       assert rework["prompt"] =~ "Structured validation feedback JSON"
       assert_single_worker_session(calls, 2)
+      assert_closed_and_released(calls)
+    end
+  end
+
+  describe "compiled CodingPlan v2 design_gate routing" do
+    test "design_gate=council approve loads the artifact without opening the operator checkpoint" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_design_gate_fixture(:design_approved, "council")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["accepted_design_council_run_id"] == "council_run_fixture"
+
+      assert result.context["accepted_design_evidence"]["design_council_run_id"] ==
+               "council_run_fixture"
+
+      assert length(action_calls(calls, "coding_design_council_review")) == 1
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_checkpoint_await") == []
+      assert length(action_calls(calls, "coding_design_artifact_load")) == 1
+      assert "load_design_artifact" in result.completed_nodes
+      assert "hoist_accepted_design_council_run_id" in result.completed_nodes
+      refute "open_design_checkpoint" in result.completed_nodes
+      assert_closed_and_released(calls)
+    end
+
+    test "design_gate=council rework spends the design budget with the council note" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_design_gate_fixture(:design_council_rework, "council")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["design_attempt"] == 2
+      assert result.context["design_rework_count"] == 1
+      assert result.context["approval_note"] == "Name the missing capability check."
+      assert result.context["rework_kind"] == "design_checkpoint"
+
+      assert [_first_prompt, rework_prompt, _implementation_prompt] = action_prompts(calls)
+      assert rework_prompt =~ "Name the missing capability check."
+
+      assert length(action_calls(calls, "coding_design_council_review")) == 2
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert "hoist_design_decision_note" in result.completed_nodes
+      assert_closed_and_released(calls)
+    end
+
+    test "design_gate=council_then_operator approve opens the operator checkpoint" do
+      assert {{:ok, result}, calls, plan, compilation} =
+               run_compiled_v2_design_gate_fixture(:design_approved, "council_then_operator")
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["accepted_design"] == fixture_design(1)
+      assert result.context["accepted_design_council_run_id"] == "council_run_fixture"
+
+      assert length(action_calls(calls, "coding_design_council_review")) == 1
+      [open_args] = action_calls(calls, "coding_design_checkpoint_open")
+      [await_args] = action_calls(calls, "coding_design_checkpoint_await")
+      assert_design_checkpoint_identity(open_args, await_args, plan, compilation, 1)
+      assert open_args["design_council_run_id"] == "council_run_fixture"
+      assert "open_design_checkpoint" in result.completed_nodes
+      assert "council_review_design" in result.completed_nodes
+      assert_closed_and_released(calls)
+    end
+
+    test "absent design_gate keeps today's operator-only checkpoint path" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(:design_approved, "design_required")
+
+      assert result.context["status"] == "change_committed"
+      assert action_calls(calls, "coding_design_council_review") == []
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      assert length(action_calls(calls, "coding_design_checkpoint_await")) == 1
+      refute "council_review_design" in result.completed_nodes
+      refute Map.has_key?(result.context, "coding_plan_design_gate")
+      assert_closed_and_released(calls)
+    end
+
+    test "design_gate=operator keeps today's operator-only checkpoint path" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_design_gate_fixture(:design_approved, "operator")
+
+      assert result.context["status"] == "change_committed"
+      assert action_calls(calls, "coding_design_council_review") == []
+      assert length(action_calls(calls, "coding_design_checkpoint_open")) == 1
+      refute "council_review_design" in result.completed_nodes
+      refute Map.has_key?(result.context, "coding_plan_design_gate")
+      assert_closed_and_released(calls)
+    end
+
+    test "council failure is an explicit error, not an approval" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_design_gate_fixture(:design_council_failed, "council")
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "design_council_failed"
+      assert "error_design_council_failed" in result.completed_nodes
+      assert action_calls(calls, "coding_design_checkpoint_open") == []
+      assert action_calls(calls, "coding_design_artifact_load") == []
+      refute called?(calls, "mix_compile")
       assert_closed_and_released(calls)
     end
   end

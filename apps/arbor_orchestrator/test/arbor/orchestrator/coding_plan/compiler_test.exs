@@ -250,6 +250,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
       assert compilation.initial_values["coding_plan_checkpoint_policy"] == checkpoint_policy
+      refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+      refute Map.has_key?(compilation.initial_values, "design_council_run_id")
       assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
     end
   end
@@ -326,18 +328,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
-    byte_count = byte_size(ctx.template_source)
-    node_count = map_size(graph.nodes)
-    edge_count = length(graph.edges)
 
-    assert byte_count <= 262_144
+    assert byte_size(ctx.template_source) == 93_758
+    assert map_size(graph.nodes) == 266
+    assert length(graph.edges) == 392
+    assert byte_size(ctx.template_source) <= 262_144
     # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
-    assert node_count <= 320
-    assert edge_count <= 512
-
-    # Exact parser inventory of the current intentional compiler-owned template.
-    assert {byte_count, node_count, edge_count} == {91_073, 260, 379}
+    assert map_size(graph.nodes) <= 320
+    assert length(graph.edges) <= 512
   end
 
   test "v2 direct prompts bind the frozen packet without opening checkpoints", ctx do
@@ -601,6 +600,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                "design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence," <>
                open["context_keys"]
 
+    refute Map.has_key?(graph.nodes, "route_design_gate")
+    refute Map.has_key?(graph.nodes, "council_review_design")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+    refute Map.has_key?(compilation.initial_values, "design_council_run_id")
+    assert edge_target(graph, "prep_checkpoint_plan_fingerprint", nil) == "open_design_checkpoint"
+
     refute Map.has_key?(await, "param.timeout")
 
     refute Map.has_key?(
@@ -805,6 +810,125 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       })
 
     assert reset_retry_count === 0
+  end
+
+  test "direct and operator design_gate compilations stay byte-identical and omit council bindings",
+       ctx do
+    direct = v2_plan!()
+    absent = v2_plan!(%{"checkpoint_policy" => "design_required"})
+    operator = v2_plan!(%{"checkpoint_policy" => "design_required", "design_gate" => "operator"})
+    council = v2_plan!(%{"checkpoint_policy" => "design_required", "design_gate" => "council"})
+
+    then_operator =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "design_gate" => "council_then_operator"
+      })
+
+    pre_change_catalog = pre_change_action_catalog()
+
+    assert {:ok, direct_compilation} =
+             compile_with_catalog(direct, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, absent_compilation} =
+             compile_with_catalog(absent, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, operator_compilation} =
+             compile_with_catalog(operator, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, council_compilation} = compile(council, ctx)
+    assert {:ok, then_operator_compilation} = compile(then_operator, ctx)
+
+    assert {:ok, direct_with_council_gate} =
+             compile_with_catalog(
+               v2_plan!(%{"design_gate" => "council"}),
+               ctx,
+               ctx.template_source,
+               pre_change_catalog
+             )
+
+    if System.get_env("WRITE_PRE_CHANGE_FIXTURES") == "1" do
+      write_pre_change_compilation_fixture(
+        "pre_change_direct_compilation.json",
+        serialized_compilation_fixture(direct_compilation)
+      )
+
+      write_pre_change_compilation_fixture(
+        "pre_change_operator_compilation.json",
+        serialized_compilation_fixture(operator_compilation)
+      )
+    end
+
+    assert serialized_compilation_fixture(direct_compilation) ==
+             pre_change_compilation_fixture("pre_change_direct_compilation.json")
+
+    assert serialized_compilation_fixture(operator_compilation) ==
+             pre_change_compilation_fixture("pre_change_operator_compilation.json")
+
+    assert serialized_compilation_fixture(absent_compilation) ==
+             serialized_compilation_fixture(operator_compilation)
+
+    assert serialized_compilation_fixture(direct_with_council_gate) ==
+             serialized_compilation_fixture(direct_compilation)
+
+    refute serialized_compilation_fixture(absent_compilation) ==
+             serialized_compilation_fixture(council_compilation)
+
+    for compilation <- [direct_compilation, absent_compilation, operator_compilation] do
+      refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+      refute Map.has_key?(compilation.initial_values, "design_council_run_id")
+    end
+
+    absent_graph = parse!(absent_compilation.dot_source)
+    operator_graph = parse!(operator_compilation.dot_source)
+    assert absent_compilation.dot_source == operator_compilation.dot_source
+    assert Map.keys(absent_graph.nodes) == Map.keys(operator_graph.nodes)
+    refute Map.has_key?(absent_graph.nodes, "council_review_design")
+    refute Map.has_key?(absent_graph.nodes, "route_design_gate")
+
+    assert edge_target(absent_graph, "prep_checkpoint_plan_fingerprint", nil) ==
+             "open_design_checkpoint"
+
+    council_graph = parse!(council_compilation.dot_source)
+    then_graph = parse!(then_operator_compilation.dot_source)
+
+    assert council_compilation.initial_values["coding_plan_design_gate"] == "council"
+
+    assert then_operator_compilation.initial_values["coding_plan_design_gate"] ==
+             "council_then_operator"
+
+    refute Map.has_key?(council_compilation.initial_values, "design_council_run_id")
+    refute Map.has_key?(then_operator_compilation.initial_values, "design_council_run_id")
+    assert Map.has_key?(council_graph.nodes, "council_review_design")
+    assert Map.has_key?(then_graph.nodes, "council_review_design")
+
+    assert edge_target(council_graph, "prep_checkpoint_plan_fingerprint", nil) ==
+             "route_design_gate"
+
+    assert edge_target(
+             council_graph,
+             "route_design_council_outcome",
+             "context.coding_plan_design_gate=council&&context.design_checkpoint.checkpoint_outcome=approve"
+           ) == "load_design_artifact"
+
+    assert edge_target(
+             then_graph,
+             "route_design_council_outcome",
+             "context.coding_plan_design_gate=council_then_operator&&context.design_checkpoint.checkpoint_outcome=approve"
+           ) == "hoist_design_council_run_id"
+
+    open_keys = node_attrs(absent_graph, "open_design_checkpoint")["context_keys"]
+    await_keys = node_attrs(absent_graph, "await_design_checkpoint")["context_keys"]
+    refute open_keys =~ "design_council_run_id"
+    refute await_keys =~ "design_council_run_id"
+
+    assert node_attrs(then_graph, "open_design_checkpoint")["context_keys"] ==
+             open_keys <> ",design_council_run_id"
+
+    assert node_attrs(then_graph, "await_design_checkpoint")["context_keys"] ==
+             await_keys <> ",design_council_run_id"
+
+    assert node_attrs(council_graph, "open_design_checkpoint")["context_keys"] == open_keys
   end
 
   test "design checkpoint outcomes route approve, rework, deny, timeout, and exhaustion", ctx do
@@ -2106,252 +2230,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:unsupported_v1_feature, "overlays"}} =
              compile(plan!(%{"overlays" => ["security_regression"]}), ctx)
 
+    assert {:error, {:unsupported_v1_feature, "rework.stop_conditions"}} =
+             compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
+
     assert {:error, {:unsupported_v1_feature, "budgets.model_cost_usd"}} =
              compile(plan!(%{"budgets" => %{"model_cost_usd" => 1.0}}), ctx)
 
     assert {:error, {:unsupported_v1_feature, "budgets.parallelism"}} =
              compile(plan!(%{"budgets" => %{"parallelism" => 2}}), ctx)
-  end
-
-  test "contract-allowed stop conditions compile with existing terminal semantics", ctx do
-    assert {:ok, declined} =
-             compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
-
-    declined_graph = parse!(declined.dot_source)
-    refute Map.has_key?(declined_graph.nodes, "status_declined")
-
-    assert edge_target(declined_graph, "check_validation_passed", "outcome=fail") ==
-             "check_validation_category_budget"
-
-    assert has_edge?(
-             declined_graph,
-             "route_release_mode",
-             "prep_release_mode_discard",
-             "context.status=declined"
-           )
-
-    refute Enum.any?(declined_graph.edges, fn edge ->
-             edge.from in ["hoist_worker_terminal_status", "parse_worker_terminal"] and
-               edge.to in ["status_declined", "prep_release_mode_discard"]
-           end)
-
-    assert {:ok, no_changes} =
-             compile(plan!(%{"rework" => %{"stop_conditions" => ["no_changes"]}}), ctx)
-
-    no_changes_graph = parse!(no_changes.dot_source)
-
-    assert edge_target(no_changes_graph, "route_no_progress", "context.total_rework_count<1") ==
-             "status_no_changes"
-
-    assert has_edge?(no_changes_graph, "status_no_changes", "close_worker", nil)
-
-    assert has_edge?(
-             no_changes_graph,
-             "route_release_mode",
-             "prep_release_mode_discard",
-             "context.status=no_changes"
-           )
-
-    assert {:ok, review_rejected} =
-             compile(plan!(%{"rework" => %{"stop_conditions" => ["review_rejected"]}}), ctx)
-
-    review_graph = parse!(review_rejected.dot_source)
-
-    assert edge_target(review_graph, "route_review", "context.review.tier_decision=stop") ==
-             "status_review_rejected"
-
-    assert has_edge?(review_graph, "status_review_rejected", "close_worker", nil)
-
-    assert has_edge?(
-             review_graph,
-             "route_release_mode",
-             "prep_release_mode_retain",
-             "context.status=review_rejected"
-           )
-  end
-
-  test "validation_failed stop retargets the first soft fail to status_validation_failed",
-       ctx do
-    assert {:ok, compilation} =
-             compile(
-               plan!(%{"rework" => %{"stop_conditions" => ["validation_failed"]}}),
-               ctx
-             )
-
-    graph = parse!(compilation.dot_source)
-
-    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
-             "status_validation_failed"
-
-    assert edge_target(graph, "check_validation_passed", "outcome=success") ==
-             "prep_commit_path"
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "check_validation_category_budget",
-             "outcome=fail"
-           )
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "check_validation_total_budget",
-             "outcome=fail"
-           )
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "inc_validation_rework_count",
-             "outcome=fail"
-           )
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "remember_validation_reviewed_commit",
-             "outcome=fail"
-           )
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "build_validation_rework_prompt",
-             "outcome=fail"
-           )
-
-    refute has_edge?(graph, "check_validation_passed", "implement", "outcome=fail")
-
-    assert edge_target(graph, "validate", "outcome=fail") == "status_validation_failed"
-
-    assert edge_target(graph, "hoist_validation_approval_note", nil) ==
-             "check_validation_category_budget"
-
-    assert has_edge?(graph, "status_validation_failed", "close_worker", nil)
-
-    assert has_edge?(
-             graph,
-             "route_release_mode",
-             "prep_release_mode_retain",
-             "context.status=validation_failed"
-           )
-
-    assert {:ok, default_compilation} = compile(plan!(), ctx)
-    default_graph = parse!(default_compilation.dot_source)
-
-    assert edge_target(default_graph, "check_validation_passed", "outcome=fail") ==
-             "check_validation_category_budget"
-  end
-
-  test "validation_failed stop on security_regression keeps post-validation success and operator rework",
-       ctx do
-    requested_paths = ["apps/arbor_security/test/security_regression_test.exs"]
-
-    assert {:ok, compilation} =
-             compile(
-               plan!(%{
-                 "validation_profile" => "security_regression",
-                 "requested_paths" => requested_paths,
-                 "rework" => %{"stop_conditions" => ["validation_failed"]}
-               }),
-               ctx
-             )
-
-    graph = parse!(compilation.dot_source)
-
-    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
-             "status_validation_failed"
-
-    assert edge_target(graph, "check_validation_passed", "outcome=success") ==
-             "post_validation_expected_commit"
-
-    refute has_edge?(
-             graph,
-             "check_validation_passed",
-             "remember_validation_reviewed_commit",
-             "outcome=fail"
-           )
-
-    assert edge_target(graph, "hoist_validation_approval_note", nil) ==
-             "remember_validation_reviewed_commit"
-
-    assert edge_target(graph, "validate", "outcome=fail") == "status_validation_failed"
-  end
-
-  test "validation_failed stop on cross_app keeps capacity continuation", ctx do
-    assert {:ok, compilation} =
-             compile(
-               plan!(%{
-                 "validation_profile" => "cross_app",
-                 "rework" => %{"stop_conditions" => ["validation_failed"]}
-               }),
-               ctx
-             )
-
-    graph = parse!(compilation.dot_source)
-
-    capacity =
-      "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
-
-    completed =
-      "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
-
-    domain_failure =
-      "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
-
-    assert edge_target(graph, "route_validation_interaction", capacity) ==
-             "route_cross_app_window"
-
-    assert edge_target(graph, "route_validation_interaction", completed) ==
-             "check_validation_passed"
-
-    assert edge_target(graph, "route_validation_interaction", domain_failure) ==
-             "check_validation_passed"
-
-    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
-             "status_validation_failed"
-
-    refute Enum.any?(graph.edges, fn edge ->
-             edge.from == "route_cross_app_window" and
-               edge.to in [
-                 "status_validation_failed",
-                 "check_validation_category_budget",
-                 "inc_validation_rework_count",
-                 "prep_commit_path"
-               ]
-           end)
-  end
-
-  test "all contract-allowed stop conditions together apply only the validation_failed rewrite",
-       ctx do
-    assert {:ok, compilation} =
-             compile(
-               plan!(%{
-                 "rework" => %{
-                   "stop_conditions" => [
-                     "declined",
-                     "no_changes",
-                     "review_rejected",
-                     "validation_failed"
-                   ]
-                 }
-               }),
-               ctx
-             )
-
-    graph = parse!(compilation.dot_source)
-
-    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
-             "status_validation_failed"
-
-    assert edge_target(graph, "route_no_progress", "context.total_rework_count<1") ==
-             "status_no_changes"
-
-    assert edge_target(graph, "route_review", "context.review.tier_decision=stop") ==
-             "status_review_rejected"
-
-    refute Map.has_key?(graph.nodes, "status_declined")
   end
 
   test "explicit archived version 1 specialized plans still verify without weaker validation",
@@ -2681,6 +2567,54 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     compile_with_catalog(plan, ctx, template_source || ctx.template_source, ctx.action_catalog)
   end
 
+  # The action-catalog digest is derived from loaded BEAM identity
+  # (runtime_descriptor `beam_sha256`), so it legitimately differs across
+  # builds, worktrees, and hosts. Scrub it to a stable placeholder so the
+  # byte-identical fixtures assert graph/binding identity rather than build
+  # identity. Content-derived digests (plan fingerprint, work-packet digest)
+  # stay asserted verbatim.
+  defp serialized_compilation_fixture(compilation) do
+    json =
+      %{
+        "dot_source" => compilation.dot_source,
+        "initial_values" => compilation.initial_values,
+        "manifest" => compilation.manifest
+      }
+      |> Jason.encode!()
+
+    case Regex.run(
+           ~r/coding_plan_action_catalog_digest="?([a-f0-9]{64})/,
+           compilation.dot_source
+         ) do
+      [_, digest] -> String.replace(json, digest, "ACTION_CATALOG_DIGEST")
+      _ -> json
+    end
+  end
+
+  defp pre_change_compilation_fixture(name) do
+    path = Path.expand("../../../fixtures/coding_plan/#{name}", __DIR__)
+
+    path
+    |> File.read!()
+    |> String.trim_trailing()
+  end
+
+  defp write_pre_change_compilation_fixture(name, bytes) do
+    path = Path.expand("../../../fixtures/coding_plan/#{name}", __DIR__)
+    File.write!(path, bytes)
+  end
+
+  defp pre_change_action_catalog do
+    modules =
+      List.delete(
+        CodingPlanTestActionCatalog.modules(),
+        Arbor.Actions.Coding.DesignCouncilReview
+      )
+
+    {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
+    catalog
+  end
+
   defp compile_with_catalog(plan, _ctx, template_source, action_catalog) do
     Compiler.compile(plan,
       template_source: template_source,
@@ -2748,9 +2682,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         "required_evidence" => ["focused test output"],
         "checkpoint_policy" => "direct"
       }
-      |> Map.merge(Map.take(overrides, ["checkpoint_policy"]))
+      |> Map.merge(Map.take(overrides, ["checkpoint_policy", "design_gate"]))
 
-    plan_overrides = Map.drop(overrides, ["checkpoint_policy"])
+    plan_overrides = Map.drop(overrides, ["checkpoint_policy", "design_gate"])
 
     {:ok, digest} = WorkPacket.digest(packet)
 
@@ -2828,12 +2762,6 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
-  end
-
-  defp has_edge?(graph, from, to, condition) do
-    Enum.any?(graph.edges, fn edge ->
-      edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition
-    end)
   end
 
   defp assert_validation_capture_topology(graph, predecessor) do

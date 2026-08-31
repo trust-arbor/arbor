@@ -267,7 +267,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "binding" => true
   }
 
-  @optional_reviewed_actions ["git_pr"]
+  @optional_reviewed_actions Enum.sort(["coding_design_council_review", "git_pr"])
 
   @mandatory_gate_nodes Enum.sort(~w[
                           capture_validation_workspace
@@ -339,11 +339,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                   "required_dominator_sets" => []
                                 },
                                 %{
-                                  "node_id" => "load_design_artifact",
-                                  "action" => "coding_design_artifact_load",
-                                  "required_dominators" => ["await_design_checkpoint"],
+                                  "node_id" => "council_review_design",
+                                  "action" => "coding_design_council_review",
+                                  "required_dominators" => ["capture_design_artifact"],
                                   "review_required_dominators" => [],
                                   "required_dominator_sets" => []
+                                },
+                                %{
+                                  "node_id" => "load_design_artifact",
+                                  "action" => "coding_design_artifact_load",
+                                  "required_dominators" => [],
+                                  "review_required_dominators" => [],
+                                  "required_dominator_sets" => [
+                                    ["await_design_checkpoint", "council_review_design"]
+                                  ]
                                 },
                                 %{
                                   "node_id" => "close_worker",
