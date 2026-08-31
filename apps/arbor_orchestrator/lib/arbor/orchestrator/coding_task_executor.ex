@@ -4181,18 +4181,22 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     final_status = final_outcome_status(engine_result)
     shell = %{task_id: exec_ctx.task_id, logs_root: logs_root}
+    # Raw Engine field: do not sanitize missing/malformed into [] via
+    # completed_node_ids/1, which would forge pre-validation provenance.
+    completed_nodes = engine_result_field(engine_result, :completed_nodes, "completed_nodes")
 
     evidence_state =
       CodingRunRecoveryCore.producer_evidence_state(
         raw_producer_value(context, "coding_plan_validation_program"),
         raw_producer_value(context, "validation_candidate_tree_oid"),
         raw_producer_value(context, "validation_observed_at"),
-        terminal_validation_evidence(context)
+        terminal_validation_evidence(context),
+        completed_nodes
       )
 
     with {:ok, requirement} <-
            CodingRunRecoveryCore.expected_requirement(canonical_status, evidence_state),
-         :ok <- admit_clean_producer_for_requirement(requirement, clean),
+         :ok <- admit_clean_producer_for_requirement(requirement, clean, completed_nodes),
          {:ok, control_principal_id} <- require_control_principal(exec_ctx),
          {:ok, artifact_identity} <- compilation_artifact_identity(logs_root, exec_ctx.task_id),
          {:ok, binding} <- read_recovery_binding(logs_root),
@@ -4295,21 +4299,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp admit_clean_producer_for_requirement("not_applicable", _clean), do: :ok
+  defp admit_clean_producer_for_requirement("not_applicable", _clean, _completed_nodes), do: :ok
 
-  defp admit_clean_producer_for_requirement("required", clean) when is_map(clean) do
+  defp admit_clean_producer_for_requirement("required", clean, completed_nodes)
+       when is_map(clean) do
     case CodingRunRecoveryCore.producer_evidence_state(
            Map.get(clean, "coding_plan_validation_program"),
            Map.get(clean, "validation_candidate_tree_oid"),
            Map.get(clean, "validation_observed_at"),
-           terminal_validation_evidence(clean)
+           terminal_validation_evidence(clean),
+           completed_nodes
          ) do
       :complete -> :ok
       _ -> {:error, :partial_validation_evidence}
     end
   end
 
-  defp admit_clean_producer_for_requirement(_requirement, _clean),
+  defp admit_clean_producer_for_requirement(_requirement, _clean, _completed_nodes),
     do: {:error, :partial_validation_evidence}
 
   defp publish_adapter_input_if_required(_logs_root, _task_id, "not_applicable", _clean, _shell) do

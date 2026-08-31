@@ -124,6 +124,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
   @adapter_input_domain "arbor.coding.terminal.adapter_input.v1"
   @decision_domain "arbor.coding.terminal.decision.v1"
   @program_domain "arbor.coding.terminal.program.v1"
+  # Profiles pin "validation_gate" => "validate".
+  @validation_gate "validate"
 
   @max_id_bytes 512
   @max_status_bytes 256
@@ -445,12 +447,41 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
 
   @spec producer_evidence_state(term(), term(), term(), term()) :: :none | :complete | :partial
   def producer_evidence_state(program, tree_oid, observed_at, action_result) do
-    classify_slots([
-      producer_slot(program, &producer_program?/1),
+    classify_producer_slots(program, tree_oid, observed_at, action_result)
+  end
+
+  @doc """
+  Stage-aware producer classification using Engine-owned `completed_nodes`.
+
+  A valid compile-seeded program is compile-time metadata, not runtime
+  evidence, only when a proper list of binary node ids lacks `validate`
+  and the three runtime slots are absent. Missing, non-list, improper, or
+  malformed provenance keeps the four-slot classifier.
+  """
+  @spec producer_evidence_state(term(), term(), term(), term(), term()) ::
+          :none | :complete | :partial
+  def producer_evidence_state(program, tree_oid, observed_at, action_result, completed_nodes) do
+    program_slot = producer_slot(program, &producer_program?/1)
+
+    runtime_slots = [
       producer_slot(tree_oid, &producer_oid?/1),
       producer_slot(observed_at, &producer_observed?/1),
       producer_slot(action_result, &producer_result?/1)
-    ])
+    ]
+
+    four_tuple = classify_slots([program_slot | runtime_slots])
+
+    case validation_executed?(completed_nodes) do
+      false ->
+        cond do
+          Enum.any?(runtime_slots, &(&1 != :absent)) -> four_tuple
+          program_slot == :valid -> :none
+          true -> four_tuple
+        end
+
+      _executed_or_unknown ->
+        four_tuple
+    end
   end
 
   @spec combine_close_result(term(), term()) :: term()
@@ -1095,6 +1126,27 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
       true -> :partial
     end
   end
+
+  defp classify_producer_slots(program, tree_oid, observed_at, action_result) do
+    classify_slots([
+      producer_slot(program, &producer_program?/1),
+      producer_slot(tree_oid, &producer_oid?/1),
+      producer_slot(observed_at, &producer_observed?/1),
+      producer_slot(action_result, &producer_result?/1)
+    ])
+  end
+
+  defp validation_executed?(nodes) when is_list(nodes), do: scan_completed_nodes(nodes, false)
+  defp validation_executed?(_nodes), do: :unknown
+
+  defp scan_completed_nodes([], found_validate), do: found_validate
+
+  defp scan_completed_nodes([head | rest], found)
+       when is_binary(head) and is_list(rest) do
+    scan_completed_nodes(rest, found or head == @validation_gate)
+  end
+
+  defp scan_completed_nodes(_malformed, _found), do: :unknown
 
   defp digest_slot(""), do: :absent
 

@@ -4969,6 +4969,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
     end
 
+    defp run_program_only_terminal(status, error, completed_nodes) do
+      task_id = unique_run_task_id()
+
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
+        program =
+          opts
+          |> Keyword.fetch!(:initial_values)
+          |> Map.fetch!("coding_plan_validation_program")
+
+        engine_result = %{
+          run_id: Keyword.fetch!(opts, :run_id),
+          context:
+            Map.merge(completed_turn_context(), %{
+              "status" => status,
+              "error" => error,
+              "coding_plan_validation_program" => program,
+              "branch" => "arbor/coding-agent/test",
+              "workspace_id" => "ws_1"
+            }),
+          final_outcome: %{status: :success},
+          taint: %{},
+          node_durations: %{}
+        }
+
+        engine_result =
+          case completed_nodes do
+            :omit -> engine_result
+            nodes -> Map.put(engine_result, :completed_nodes, nodes)
+          end
+
+        {:ok, engine_result}
+      end)
+
+      result =
+        CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
+
+      {result, task_id}
+    end
+
     defp run_with_g2_cross_app_verification(opts \\ []) do
       task_id = "task_g2_#{System.unique_integer([:positive, :monotonic])}"
       {envelope, receipt, digest} = g2_completed_envelope(task_id)
@@ -5532,6 +5571,90 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["canonical_status"] == "rework_exhausted"
       assert result["outcome"]["code"] == "rework_exhausted"
       assert result["verification_report"]["status"] == "blocked"
+    end
+
+    # Live canary task_ebd77d40c44361fc0e355357437b765e: design checkpoint
+    # exhausted rework before validate. Compile-seeded
+    # coding_plan_validation_program plus empty runtime slots was classified
+    # as :partial_validation_evidence, so publication failed and TaskStore
+    # exposed only task_runner_failed.
+    test "pre-validation rework exhaustion and denial publish with a compile-seeded program" do
+      design_nodes = [
+        "await_design_checkpoint",
+        "route_design_checkpoint_outcome",
+        "check_design_rework_total_budget",
+        "mark_design_rework_exhausted_error",
+        "status_rework_exhausted"
+      ]
+
+      denial_nodes = [
+        "await_design_checkpoint",
+        "route_design_checkpoint_outcome",
+        "mark_approval_denied_error",
+        "status_approval_denied"
+      ]
+
+      terminals = [
+        {"rework_exhausted", "design_checkpoint_rework_exhausted", design_nodes},
+        {"approval_denied", "approval_denied", denial_nodes}
+      ]
+
+      for {status, error, completed_nodes} <- terminals do
+        {run_result, task_id} =
+          run_program_only_terminal(status, error, completed_nodes)
+
+        assert {:ok, result} = run_result
+        assert result["status"] == status
+        assert result["canonical_status"] == status
+        assert result["error"] == error
+        assert result["outcome"]["code"] == status
+        refute Map.has_key?(result, "verification_report")
+
+        root = task_terminal_root(task_id)
+        assert {:error, :not_found} = ArtifactStore.read_adapter_input(root)
+        assert {:ok, decision} = ArtifactStore.read_terminal_decision(root)
+        assert decision["validation_requirement"] == "not_applicable"
+        assert decision["program_digest"] == ""
+        assert decision["adapter_input_digest"] == ""
+        assert decision["candidate_tree_oid"] == ""
+        assert decision["observed_at"] == ""
+      end
+    end
+
+    test "program-only evidence stays incomplete when validate completed" do
+      {run_result, _task_id} =
+        run_program_only_terminal(
+          "rework_exhausted",
+          "design_checkpoint_rework_exhausted",
+          [
+            "await_design_checkpoint",
+            "mark_design_rework_exhausted_error",
+            "status_rework_exhausted",
+            "validate"
+          ]
+        )
+
+      assert {:error, :partial_validation_evidence} = run_result
+    end
+
+    test "program-only evidence stays incomplete when completed_nodes provenance is unknown" do
+      for provenance <- [
+            :omit,
+            nil,
+            :not_a_list,
+            %{"not" => "a list"},
+            [:validate],
+            ["status_rework_exhausted" | :tail]
+          ] do
+        {run_result, _task_id} =
+          run_program_only_terminal(
+            "rework_exhausted",
+            "design_checkpoint_rework_exhausted",
+            provenance
+          )
+
+        assert {:error, :partial_validation_evidence} = run_result
+      end
     end
 
     test "adapts default, cross-app, and security validation through the compiler program" do

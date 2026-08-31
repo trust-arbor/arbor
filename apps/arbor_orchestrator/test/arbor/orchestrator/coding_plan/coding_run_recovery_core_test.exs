@@ -233,6 +233,115 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
              )
   end
 
+  test "producer_evidence_state/5 treats a compile-seeded program as absent until validate completes" do
+    program = %{"profile_id" => "default"}
+    tree = String.duplicate("a", 40)
+    observed = "2026-07-22T12:00:00.000Z"
+    result = %{"passed" => true}
+
+    design_nodes = [
+      "await_design_checkpoint",
+      "check_design_rework_total_budget",
+      "mark_design_rework_exhausted_error",
+      "status_rework_exhausted"
+    ]
+
+    assert :none =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               nil,
+               nil,
+               nil,
+               design_nodes
+             )
+
+    assert :none =
+             CodingRunRecoveryCore.producer_evidence_state(program, "", "", nil, [])
+
+    assert {:ok, "not_applicable"} =
+             CodingRunRecoveryCore.expected_requirement("rework_exhausted", :none)
+
+    assert {:ok, "not_applicable"} =
+             CodingRunRecoveryCore.expected_requirement("approval_denied", :none)
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               nil,
+               nil,
+               nil,
+               design_nodes ++ ["validate"]
+             )
+
+    assert {:error, :partial_validation_evidence} =
+             CodingRunRecoveryCore.expected_requirement("rework_exhausted", :partial)
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(program, tree, nil, nil, design_nodes)
+
+    assert :complete =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               tree,
+               observed,
+               result,
+               []
+             )
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(self(), nil, nil, nil, design_nodes)
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(
+               %{profile_id: "default"},
+               nil,
+               nil,
+               nil,
+               []
+             )
+
+    assert :partial = CodingRunRecoveryCore.producer_evidence_state(program, nil, nil, nil)
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(program, nil, nil, nil, nil)
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               nil,
+               nil,
+               nil,
+               :not_a_list
+             )
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               nil,
+               nil,
+               nil,
+               ["status_rework_exhausted" | :tail]
+             )
+
+    assert :partial =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               nil,
+               nil,
+               nil,
+               ["status_rework_exhausted", :validate]
+             )
+
+    assert :complete =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               tree,
+               observed,
+               result,
+               nil
+             )
+  end
+
   test "tri-state: reviewed none is not_applicable; complete is required; partial fails closed" do
     binding = valid_binding()
     {:ok, binding_digest} = CodingRunRecoveryCore.binding_digest(binding)
