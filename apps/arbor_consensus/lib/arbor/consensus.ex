@@ -46,6 +46,22 @@ defmodule Arbor.Consensus do
   alias Arbor.Consensus.{ConsultationLog, Coordinator, EventStore, ReviewerOutcomes}
   alias Arbor.Consensus.Evaluators.Consult
 
+  # Conservative upper bound for the post-deadline persist-retry window.
+  # Default grace is 5s; anything larger than 30s is rejected at the facade.
+  @max_finalizer_grace_ms 30_000
+  # Conservative upper bound for one persist attempt. Must not exceed the
+  # default finalizer persist budget so a hung first attempt cannot retain
+  # a finalizer task arbitrarily long.
+  @max_persist_timeout_ms 5_000
+
+  @doc "Conservative upper bound for `:finalizer_grace_ms` (milliseconds)."
+  @spec max_finalizer_grace_ms() :: pos_integer()
+  def max_finalizer_grace_ms, do: @max_finalizer_grace_ms
+
+  @doc "Conservative upper bound for `:persist_timeout_ms` (milliseconds)."
+  @spec max_persist_timeout_ms() :: pos_integer()
+  def max_persist_timeout_ms, do: @max_persist_timeout_ms
+
   @doc false
   defdelegate sanitize_reviewer_outcomes(outcomes), to: ReviewerOutcomes, as: :sanitize
 
@@ -298,6 +314,158 @@ defmodule Arbor.Consensus do
     evaluator = Keyword.get(opts, :evaluator, Arbor.Consensus.Evaluators.AdvisoryLLM)
     Consult.decide(evaluator, description, opts)
   end
+
+  @doc """
+  Consult the advisory council and return evaluations plus the ConsultationLog run id.
+
+  This is the facade entry for design-time advisory review. It uses the 13
+  `AdvisoryLLM` perspectives (distinct from the binding code-review council).
+  Inject `:evaluator` to override the seat module in tests. Inject
+  `:consultation_log` to control the persistence boundary.
+
+  Pass `:deadline_unix_ms` for one consultation-wide absolute wall-clock
+  deadline. Remaining time is recomputed from a live clock immediately
+  before every blocking step. A supervised temporary finalizer, started
+  before the `running` row is exposed, best-effort CAS-terminalizes the
+  ConsultationLog run after that deadline plus a small grace. Retries
+  continue until deadline plus grace and log loudly on exhaustion. A
+  stored row may remain `running` only if persistence is unavailable for
+  that whole window. Invalid options return
+  `{:error, {:invalid_option, key}}` and never raise. `:evaluator` must
+  be a loadable module that exports the required evaluator callbacks
+  `name/0`, `perspectives/0`, and `evaluate/3`. `strategy/0` is optional.
+  `:consultation_log` must be a loadable module that exports `new_run_id/0`,
+  `create_bound_run/3`, and `finalize_run/2`. Normal completion succeeds
+  only when the stored run is proven `completed`; a run the timeout
+  finalizer already terminalized as failed is returned as an error, never
+  as a successful consultation. `:finalizer_grace_ms` must be a
+  non-negative integer no greater than `#{@max_finalizer_grace_ms}` ms
+  (conservative upper bound so a hung persist retry cannot outlive the
+  consult by an arbitrary amount). `:persist_timeout_ms` must be a
+  positive integer no greater than `#{@max_persist_timeout_ms}` ms (the
+  default persist-attempt budget). An oversized value is rejected; the
+  finalizer also clamps any received value to this cap so a hung first
+  persist attempt cannot retain a task arbitrarily long. A zero grace is
+  accepted; the finalizer still performs one bounded terminalization
+  attempt at the deadline.
+
+  Returns `{:ok, %{evaluations: list(), run_id: String.t() | nil}}` or
+  `{:error, reason}`. A timeout or consult failure is an error, never an
+  approval. A nil `run_id` means persistence was unavailable; callers that
+  require an evidence id must fail closed.
+  """
+  @spec consult(String.t(), keyword()) ::
+          {:ok, %{evaluations: list(), run_id: String.t() | nil}} | {:error, term()}
+  def consult(description, opts \\ [])
+
+  def consult(description, opts) when is_binary(description) and is_list(opts) do
+    case validate_consult_opts(opts) do
+      :ok ->
+        evaluator = Keyword.get(opts, :evaluator, Arbor.Consensus.Evaluators.AdvisoryLLM)
+        Consult.ask_logged(evaluator, description, opts)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  def consult(_description, _opts), do: {:error, :invalid_consult_input}
+
+  defp validate_consult_opts(opts) do
+    if Keyword.keyword?(opts) do
+      Enum.reduce_while(opts, :ok, fn {key, value}, :ok ->
+        case validate_consult_option(key, value) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    else
+      {:error, {:invalid_option, :opts}}
+    end
+  end
+
+  defp validate_consult_option(:evaluator, module) when is_atom(module) do
+    if evaluator_module?(module) do
+      :ok
+    else
+      {:error, {:invalid_option, :evaluator}}
+    end
+  end
+
+  defp validate_consult_option(:consultation_log, module)
+       when is_atom(module) and not is_nil(module) do
+    if consultation_log_module?(module) do
+      :ok
+    else
+      {:error, {:invalid_option, :consultation_log}}
+    end
+  end
+
+  defp validate_consult_option(:seat_owner, module)
+       when is_atom(module) and not is_nil(module) do
+    if seat_owner_module?(module) do
+      :ok
+    else
+      {:error, {:invalid_option, :seat_owner}}
+    end
+  end
+
+  defp validate_consult_option(:finalizer_grace_ms, grace)
+       when is_integer(grace) and grace >= 0 and grace <= @max_finalizer_grace_ms,
+       do: :ok
+
+  defp validate_consult_option(:deadline_unix_ms, deadline)
+       when is_integer(deadline) and deadline > 0,
+       do: :ok
+
+  defp validate_consult_option(:timeout, timeout) when is_integer(timeout) and timeout > 0,
+    do: :ok
+
+  defp validate_consult_option(:context, context) when is_map(context), do: :ok
+  defp validate_consult_option(:research, research) when is_boolean(research), do: :ok
+  defp validate_consult_option(:ai_module, module) when is_atom(module), do: :ok
+  defp validate_consult_option(:provider_model, model) when is_binary(model), do: :ok
+
+  defp validate_consult_option(:finalizer_supervisor, name)
+       when is_atom(name) and not is_nil(name),
+       do: :ok
+
+  defp validate_consult_option(:persist_timeout_ms, timeout)
+       when is_integer(timeout) and timeout > 0 and timeout <= @max_persist_timeout_ms,
+       do: :ok
+
+  defp validate_consult_option(key, _value) when is_atom(key) do
+    {:error, {:invalid_option, key}}
+  end
+
+  defp validate_consult_option(key, _value), do: {:error, {:invalid_option, key}}
+
+  defp evaluator_module?(module) when is_atom(module) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :evaluate, 3) and
+      function_exported?(module, :perspectives, 0) and
+      function_exported?(module, :name, 0)
+  end
+
+  defp evaluator_module?(_module), do: false
+
+  defp consultation_log_module?(module) when is_atom(module) and not is_nil(module) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :new_run_id, 0) and
+      function_exported?(module, :create_bound_run, 3) and
+      function_exported?(module, :finalize_run, 2)
+  end
+
+  defp consultation_log_module?(_module), do: false
+
+  defp seat_owner_module?(module) when is_atom(module) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :start, 2) and
+      function_exported?(module, :supervisor, 2) and
+      function_exported?(module, :stop, 1)
+  end
+
+  defp seat_owner_module?(_module), do: false
 
   # ============================================================================
   # Consultations (Advisory Council)

@@ -2,7 +2,16 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Consensus.Evaluators.Consult
-  alias Arbor.Consensus.TestHelpers.{FailingAdvisoryEvaluator, TestAdvisoryEvaluator}
+
+  alias Arbor.Consensus.TestHelpers.{
+    ExitingAdvisoryEvaluator,
+    FailingAdvisoryEvaluator,
+    HungAdvisoryEvaluator,
+    OrphanProbeAdvisoryEvaluator,
+    RaisingAdvisoryEvaluator,
+    SlowSetupAdvisoryEvaluator,
+    TestAdvisoryEvaluator
+  }
 
   # Mirrors production Engine.Context: get/3 only, no fetch/2. Values live in an
   # internal map so Map.has_key?/2 on the struct itself cannot detect presence.
@@ -60,6 +69,558 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       {:ok, results} = Consult.ask(FailingAdvisoryEvaluator, "This will fail")
 
       assert [{:brainstorming, {:error, :intentional_failure}}] = results
+    end
+  end
+
+  describe "ask_logged/3" do
+    defmodule RecordingLog do
+      alias Arbor.Consensus.TestHelpers
+
+      def new_run_id, do: "run_logged_#{System.unique_integer([:positive])}"
+
+      def create_bound_run(question, perspectives, opts) do
+        TestHelpers.notify_test({:create_run, question, perspectives, opts})
+        {:ok, Keyword.get(opts, :run_id, "run_logged_1")}
+      end
+
+      def complete_run(run_id, results) do
+        TestHelpers.notify_test({:complete_run, run_id, results})
+        :ok
+      end
+
+      def finalize_run(run_id, outcome) do
+        TestHelpers.notify_test({:finalize_run, run_id, outcome})
+        {:ok, :transitioned}
+      end
+    end
+
+    defmodule NilRunLog do
+      def new_run_id, do: "nil_run_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, _opts), do: nil
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule OnceLog do
+      alias Arbor.Consensus.TestHelpers
+
+      def new_run_id, do: "run_once_#{System.unique_integer([:positive])}"
+
+      def create_bound_run(_question, _perspectives, opts) do
+        id = Keyword.get(opts, :run_id, "run_once")
+        notify({:created, id})
+        {:ok, id}
+      end
+
+      def complete_run(run_id, results) do
+        notify({:complete_run, run_id, results})
+        :ok
+      end
+
+      def finalize_run(run_id, outcome) do
+        notify({:finalized, run_id, outcome})
+        {:ok, :transitioned}
+      end
+
+      defp notify(message) do
+        case :persistent_term.get({__MODULE__, :test_pid}, :none) do
+          pid when is_pid(pid) -> send(pid, message)
+          _ -> TestHelpers.notify_test(message)
+        end
+      end
+    end
+
+    defmodule SlowCreateLog do
+      def new_run_id, do: "run_slow_create_#{System.unique_integer([:positive])}"
+
+      def create_bound_run(_question, _perspectives, opts) do
+        Process.sleep(5_000)
+        {:ok, Keyword.get(opts, :run_id, "run_slow_create")}
+      end
+
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule SetupThenCreateLog do
+      def new_run_id, do: "run_setup_#{System.unique_integer([:positive])}"
+
+      def create_bound_run(_question, _perspectives, opts) do
+        Process.sleep(150)
+        {:ok, Keyword.get(opts, :run_id, "run_setup")}
+      end
+
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule HangFinalizeLog do
+      def new_run_id, do: "hang_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+
+      def finalize_run(_run_id, _outcome) do
+        Process.sleep(60_000)
+        {:ok, :transitioned}
+      end
+    end
+
+    defmodule SlowReserveLog do
+      def new_run_id do
+        Process.sleep(5_000)
+        "run_slow_reserve_#{System.unique_integer([:positive])}"
+      end
+
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule MismatchedIdLog do
+      def new_run_id, do: "reserved_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, _opts), do: {:ok, "other_run_id"}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule BareIdLog do
+      def new_run_id, do: "bare_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: Keyword.get(opts, :run_id)
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule ProtocolErrorCompleteLog do
+      def new_run_id, do: "proto_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, _outcome), do: :ok
+    end
+
+    defmodule TimeoutWonCompleteLog do
+      def new_run_id, do: "twon_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, {:ok, _}), do: {:ok, {:already_terminal, "failed"}}
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule CompletedWonCompleteLog do
+      def new_run_id, do: "cwon_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, {:ok, _}), do: {:ok, {:already_terminal, "completed"}}
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule PersistErrorCompleteLog do
+      def new_run_id, do: "perr_#{System.unique_integer([:positive])}"
+      def create_bound_run(_question, _perspectives, opts), do: {:ok, Keyword.get(opts, :run_id)}
+      def complete_run(_run_id, _results), do: :ok
+      def finalize_run(_run_id, {:ok, _}), do: {:error, {:persistence, :boom}}
+      def finalize_run(_run_id, _outcome), do: {:ok, :transitioned}
+    end
+
+    defmodule DupPerspectivesEvaluator do
+      def name, do: :dup_perspectives
+      def perspectives, do: [:security, :security]
+      def evaluate(_proposal, _perspective, _opts), do: {:error, :never_called}
+    end
+
+    defmodule OversizedPerspectivesEvaluator do
+      def name, do: :oversized_perspectives
+      def perspectives, do: Enum.map(1..40, &:"seat_#{&1}")
+      def evaluate(_proposal, _perspective, _opts), do: {:error, :never_called}
+    end
+
+    defmodule RaisingSeatOwner do
+      def start(_caller, _timeout), do: raise("seat owner boom")
+      def supervisor(owner, timeout), do: GenServer.call(owner, :supervisor, timeout)
+      def stop(_owner), do: :ok
+    end
+
+    defmodule ThrowingSeatOwner do
+      def start(_caller, _timeout), do: throw(:seat_owner_throw)
+      def supervisor(owner, timeout), do: GenServer.call(owner, :supervisor, timeout)
+      def stop(_owner), do: :ok
+    end
+
+    defmodule ExitingSeatOwner do
+      def start(_caller, _timeout), do: exit(:seat_owner_exit)
+      def supervisor(owner, timeout), do: GenServer.call(owner, :supervisor, timeout)
+      def stop(_owner), do: :ok
+    end
+
+    defmodule SlowInitSeatOwner do
+      use GenServer
+
+      def start(caller, timeout), do: GenServer.start(__MODULE__, caller, timeout: timeout)
+      def supervisor(owner, timeout), do: GenServer.call(owner, :supervisor, timeout)
+      def stop(_owner), do: :ok
+
+      @impl true
+      def init(_caller) do
+        Process.sleep(60_000)
+        {:ok, %{}}
+      end
+    end
+
+    test "returns evaluations plus the ConsultationLog run id" do
+      assert {:ok, %{evaluations: results, run_id: run_id} = result} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Should we extract a core?",
+                 consultation_log: RecordingLog
+               )
+
+      assert is_binary(run_id)
+      assert String.starts_with?(run_id, "run_logged_")
+      assert length(results) == 2
+
+      assert_received {:create_run, "Should we extract a core?", [:brainstorming, :design_review],
+                       opts}
+
+      assert Keyword.get(opts, :run_id) == run_id
+      assert_received {:finalize_run, ^run_id, {:ok, ^result}}
+      refute_received {:complete_run, _, _}
+    end
+
+    test "preserves a nil ConsultationLog run id for the caller to fail closed" do
+      assert {:ok, %{evaluations: results, run_id: nil}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Persistence unavailable",
+                 consultation_log: NilRunLog
+               )
+
+      assert length(results) == 2
+    end
+
+    test "one consultation-wide deadline bounds several hung seats" do
+      started = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(HungAdvisoryEvaluator, "Hung seats must share one deadline",
+                 timeout: 200,
+                 consultation_log: NilRunLog
+               )
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed < 800
+    end
+
+    test "pre-yield setup consumes time but the consult still ends by the absolute deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 300
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(HungAdvisoryEvaluator, "Setup time shares the same deadline",
+                 deadline_unix_ms: deadline,
+                 consultation_log: SetupThenCreateLog
+               )
+
+      elapsed = System.system_time(:millisecond) - started
+      assert elapsed >= 140
+      assert elapsed < 420
+    end
+
+    test "research-mode setup that sleeps still ends by the original deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 250
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(
+                 SlowSetupAdvisoryEvaluator,
+                 "Research setup shares the deadline",
+                 research: true,
+                 deadline_unix_ms: deadline,
+                 consultation_log: NilRunLog
+               )
+
+      elapsed = System.system_time(:millisecond) - started
+      assert elapsed < 500
+    end
+
+    test "a slow ConsultationLog create times out by the original absolute deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 200
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Slow create must time out",
+                 deadline_unix_ms: deadline,
+                 consultation_log: SlowCreateLog
+               )
+
+      elapsed = System.system_time(:millisecond) - started
+      assert elapsed < 600
+    end
+
+    test "a timed-out consultation terminalizes its persisted run exactly once" do
+      :persistent_term.put({OnceLog, :test_pid}, self())
+      on_exit(fn -> :persistent_term.erase({OnceLog, :test_pid}) end)
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(HungAdvisoryEvaluator, "Timeout must finalize once",
+                 timeout: 200,
+                 finalizer_grace_ms: 30,
+                 consultation_log: OnceLog
+               )
+
+      assert_received {:created, run_id}
+      assert is_binary(run_id)
+
+      # Both the caller-side terminalization boundary and the supervised
+      # finalizer may attempt the finalize; the CAS makes the terminal
+      # TRANSITION exactly-once (proven by the persistence-backed
+      # regressions). Here: every attempt targets the same run with the
+      # timeout outcome, at most two attempts, and never a completion.
+      assert_receive {:finalized, ^run_id, {:error, :timeout}}, 1_000
+
+      receive do
+        {:finalized, ^run_id, {:error, :timeout}} -> :ok
+      after
+        200 -> :ok
+      end
+
+      refute_received {:finalized, _, _}
+      refute_received {:complete_run, _, _}
+    end
+
+    test "finalizer start failure is bounded and does not hide the original error" do
+      started = System.system_time(:millisecond)
+      deadline = started + 200
+
+      assert {:error, {:finalizer_unavailable, :supervisor_unavailable}} =
+               Consult.ask_logged(
+                 TestAdvisoryEvaluator,
+                 "Start failure must stay bounded",
+                 deadline_unix_ms: deadline,
+                 consultation_log: HangFinalizeLog,
+                 finalizer_supervisor: :no_such_consultation_finalizer
+               )
+
+      elapsed = System.system_time(:millisecond) - started
+      assert elapsed < 600
+      refute_received {:create_run, _, _, _}
+    end
+
+    test "caller death shuts down the per-consult seat supervisor and seats" do
+      :persistent_term.put({OrphanProbeAdvisoryEvaluator, :test_pid}, self())
+      on_exit(fn -> :persistent_term.erase({OrphanProbeAdvisoryEvaluator, :test_pid}) end)
+
+      caller =
+        spawn(fn ->
+          Consult.ask_logged(OrphanProbeAdvisoryEvaluator, "Caller death must stop seats",
+            timeout: 30_000,
+            consultation_log: NilRunLog
+          )
+        end)
+
+      assert_receive {:seat_started, seat}, 1_000
+      assert Process.alive?(seat)
+      ref = Process.monitor(seat)
+      Process.exit(caller, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^seat, _reason}, 1_000
+    end
+
+    test "run-id reservation that sleeps still ends by the original deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 200
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Slow reserve must time out",
+                 deadline_unix_ms: deadline,
+                 consultation_log: SlowReserveLog
+               )
+
+      elapsed = System.system_time(:millisecond) - started
+      assert elapsed < 600
+    end
+
+    test "create_run must return exactly the reserved id or fail closed" do
+      assert {:error, :consultation_create_failed} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Mismatched create id",
+                 consultation_log: MismatchedIdLog
+               )
+
+      assert {:error, :consultation_create_failed} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Bare create id",
+                 consultation_log: BareIdLog
+               )
+    end
+
+    test "a bare :ok completion taxonomy is a consultation error, not success" do
+      assert {:error, {:consultation_completion, {:invalid_finalize, :ok}}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Bare ok is not success",
+                 consultation_log: ProtocolErrorCompleteLog
+               )
+    end
+
+    test "security regression: a timeout-finalized run is never returned as a successful approval" do
+      assert {:error, {:consultation_completion, {:already_terminal, "failed"}}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Timeout finalization won",
+                 consultation_log: TimeoutWonCompleteLog
+               )
+    end
+
+    test "an already-completed run is still a successful consultation" do
+      assert {:ok, %{evaluations: _}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Completed finalization won",
+                 consultation_log: CompletedWonCompleteLog
+               )
+    end
+
+    test "handshake failure stops the prestarted finalizer" do
+      name = :"handshake_fin_sup_#{System.unique_integer([:positive])}"
+
+      supervisor =
+        start_supervised!({Arbor.Consensus.ConsultationFinalizer.Supervisor, name: name})
+
+      assert {:error, :consultation_create_failed} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Mismatched create id cleans up",
+                 consultation_log: MismatchedIdLog,
+                 finalizer_supervisor: name
+               )
+
+      assert %{workers: 0} = DynamicSupervisor.count_children(supervisor)
+
+      assert {:error, :consultation_create_failed} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Bare create id cleans up",
+                 consultation_log: BareIdLog,
+                 finalizer_supervisor: name
+               )
+
+      assert %{workers: 0} = DynamicSupervisor.count_children(supervisor)
+    end
+
+    test "completion persistence error surfaces and leaves the finalizer alive" do
+      name = :"perr_fin_sup_#{System.unique_integer([:positive])}"
+
+      supervisor =
+        start_supervised!({Arbor.Consensus.ConsultationFinalizer.Supervisor, name: name})
+
+      assert {:error, {:consultation_completion, {:persistence, :boom}}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Persistence error keeps finalizer",
+                 deadline_unix_ms: System.system_time(:millisecond) + 30_000,
+                 consultation_log: PersistErrorCompleteLog,
+                 finalizer_supervisor: name
+               )
+
+      assert %{workers: 1} = DynamicSupervisor.count_children(supervisor)
+    end
+
+    test "an indeterminate create timeout leaves the prestarted finalizer alive" do
+      name = :"slow_fin_sup_#{System.unique_integer([:positive])}"
+
+      supervisor =
+        start_supervised!({Arbor.Consensus.ConsultationFinalizer.Supervisor, name: name})
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Indeterminate create keeps finalizer",
+                 deadline_unix_ms: System.system_time(:millisecond) + 200,
+                 consultation_log: SlowCreateLog,
+                 finalizer_supervisor: name
+               )
+
+      assert %{workers: 1} = DynamicSupervisor.count_children(supervisor)
+    end
+
+    test "invalid evaluator perspectives fail closed before any seat starts" do
+      assert {:error, :invalid_evaluator_perspectives} =
+               Consult.ask_logged(DupPerspectivesEvaluator, "Duplicate perspectives",
+                 consultation_log: NilRunLog
+               )
+
+      assert {:error, :invalid_evaluator_perspectives} =
+               Consult.ask_logged(OversizedPerspectivesEvaluator, "Too many perspectives",
+                 consultation_log: NilRunLog
+               )
+    end
+
+    test "security regression: caller-side terminalization runs for raise, throw, and exit after run creation" do
+      :persistent_term.put({OnceLog, :test_pid}, self())
+      on_exit(fn -> :persistent_term.erase({OnceLog, :test_pid}) end)
+
+      assert_raise RuntimeError, "seat owner boom", fn ->
+        Consult.ask_logged(TestAdvisoryEvaluator, "Raise after create",
+          consultation_log: OnceLog,
+          seat_owner: RaisingSeatOwner
+        )
+      end
+
+      assert_received {:created, raised_run}
+      assert_receive {:finalized, ^raised_run, {:error, :consult_raised}}, 1_000
+
+      assert catch_throw(
+               Consult.ask_logged(TestAdvisoryEvaluator, "Throw after create",
+                 consultation_log: OnceLog,
+                 seat_owner: ThrowingSeatOwner
+               )
+             ) == :seat_owner_throw
+
+      assert_received {:created, thrown_run}
+      assert_receive {:finalized, ^thrown_run, {:error, :consult_crashed}}, 1_000
+
+      assert catch_exit(
+               Consult.ask_logged(TestAdvisoryEvaluator, "Exit after create",
+                 consultation_log: OnceLog,
+                 seat_owner: ExitingSeatOwner
+               )
+             ) == :seat_owner_exit
+
+      assert_received {:created, exited_run}
+      assert_receive {:finalized, ^exited_run, {:error, :consult_crashed}}, 1_000
+    end
+
+    test "security regression: a hung caller-side finalization attempt stays bounded" do
+      started = System.system_time(:millisecond)
+
+      # HangFinalizeLog creates the run, then its finalize_run/2 sleeps
+      # forever. The abnormal-exit terminalization attempt must be capped
+      # at its small fixed budget — never the remaining consultation
+      # window — and the original raise must be preserved.
+      assert_raise RuntimeError, "seat owner boom", fn ->
+        Consult.ask_logged(TestAdvisoryEvaluator, "Hung finalize after raise",
+          consultation_log: HangFinalizeLog,
+          seat_owner: RaisingSeatOwner
+        )
+      end
+
+      assert System.system_time(:millisecond) - started < 2_500
+    end
+
+    test "a hung seat-owner start still ends by the absolute deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 250
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Slow seat owner start",
+                 deadline_unix_ms: deadline,
+                 consultation_log: NilRunLog,
+                 seat_owner: SlowInitSeatOwner
+               )
+
+      assert System.system_time(:millisecond) - started < 800
+    end
+
+    test "a raising seat is isolated as an error evaluation" do
+      assert {:ok, %{evaluations: results}} =
+               Consult.ask_logged(RaisingAdvisoryEvaluator, "One seat raises",
+                 consultation_log: NilRunLog
+               )
+
+      assert [
+               {:brainstorming, {:error, {%RuntimeError{message: "seat boom"}, _}}},
+               {:design_review, eval}
+             ] = results
+
+      assert eval.perspective == :design_review
+    end
+
+    test "an exiting seat is isolated as an error evaluation" do
+      assert {:ok, %{evaluations: results}} =
+               Consult.ask_logged(ExitingAdvisoryEvaluator, "One seat exits",
+                 consultation_log: NilRunLog
+               )
+
+      assert [{:brainstorming, {:error, :seat_exit}}, {:design_review, eval}] = results
+      assert eval.perspective == :design_review
     end
   end
 

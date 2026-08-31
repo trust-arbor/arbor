@@ -114,7 +114,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
-    checkpoint_policy: "coding_plan_checkpoint_policy"
+    checkpoint_policy: "coding_plan_checkpoint_policy",
+    design_gate: "coding_plan_design_gate"
   }
 
   @type compile_error :: term()
@@ -850,9 +851,145 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              graph,
              "open_design_checkpoint",
              "coding_design_checkpoint_open"
-           ) do
-      activate_design_checkpoint(graph, plan, policy)
+           ),
+         {:ok, graph} <- activate_design_checkpoint(graph, plan, policy) do
+      apply_design_gate(graph, plan, policy)
     end
+  end
+
+  @council_gate_nodes ~w(
+    route_design_gate
+    council_review_design
+    route_design_council_outcome
+    hoist_design_council_run_id
+    error_design_council_failed
+    error_design_council_outcome_invalid
+  )
+
+  defp apply_design_gate(graph, plan, "design_required") do
+    case design_gate(plan) do
+      gate when gate in ["council", "council_then_operator"] ->
+        activate_council_gate(graph, gate)
+
+      _operator ->
+        strip_council_gate(graph)
+    end
+  end
+
+  defp apply_design_gate(graph, _plan, _direct), do: strip_council_gate(graph)
+
+  defp design_gate(%Plan{version: 2, work_packet: packet}) when is_map(packet) do
+    case Map.get(packet, "design_gate") || Map.get(packet, :design_gate) do
+      gate when gate in ["council", "council_then_operator"] -> gate
+      _ -> "operator"
+    end
+  end
+
+  defp design_gate(_plan), do: "operator"
+
+  # design_gate is meaningful only with design_required. Direct plans ignore
+  # the packet field so preflight expects today's operator-less topology.
+  defp effective_design_gate(plan) do
+    case checkpoint_policy(plan) do
+      "design_required" -> design_gate(plan)
+      _direct -> "operator"
+    end
+  end
+
+  defp strip_council_gate(%Graph{} = graph) do
+    present = Enum.filter(@council_gate_nodes, &Map.has_key?(graph.nodes, &1))
+    drop = MapSet.new(present)
+
+    {:ok,
+     %{
+       graph
+       | nodes: Map.drop(graph.nodes, present),
+         edges:
+           Enum.reject(graph.edges, fn edge ->
+             MapSet.member?(drop, edge.from) or MapSet.member?(drop, edge.to)
+           end),
+         adjacency: %{},
+         reverse_adjacency: %{}
+     }}
+  end
+
+  defp activate_council_gate(graph, gate) do
+    missing = Enum.reject(@council_gate_nodes, &Map.has_key?(graph.nodes, &1))
+
+    if missing != [] do
+      {:error, {:missing_council_gate_nodes, missing}}
+    else
+      with {:ok, graph} <-
+             update_node(graph, "council_review_design", fn attrs ->
+               with :ok <- require_action_attrs(attrs, "coding_design_council_review") do
+                 {:ok,
+                  attrs
+                  |> Map.put(
+                    "param.timeout",
+                    Arbor.Actions.coding_design_checkpoint_max_timeout_ms()
+                  )
+                  |> Map.put("max_retries", "0")}
+               end
+             end),
+           :ok <-
+             require_action_node(
+               graph,
+               "council_review_design",
+               "coding_design_council_review"
+             ),
+           {:ok, graph} <-
+             rewrite_unconditional_edge(
+               graph,
+               "prep_checkpoint_plan_fingerprint",
+               "open_design_checkpoint",
+               "route_design_gate"
+             ),
+           {:ok, graph} <- remove_council_dormant_seed_edges(graph) do
+        maybe_bind_council_run_id_on_checkpoint(graph, gate)
+      end
+    end
+  end
+
+  defp remove_council_dormant_seed_edges(%Graph{} = graph) do
+    {:ok,
+     %{
+       graph
+       | edges:
+           Enum.reject(graph.edges, fn edge ->
+             edge.from == "start" and edge.to == "route_design_gate" and
+               Map.get(edge.attrs, "condition") == "0=1"
+           end)
+     }}
+  end
+
+  defp maybe_bind_council_run_id_on_checkpoint(graph, "council_then_operator") do
+    with {:ok, graph} <-
+           append_context_key(graph, "open_design_checkpoint", "design_council_run_id") do
+      append_context_key(graph, "await_design_checkpoint", "design_council_run_id")
+    end
+  end
+
+  defp maybe_bind_council_run_id_on_checkpoint(graph, _council_only), do: {:ok, graph}
+
+  defp append_context_key(graph, node_id, key) do
+    update_node(graph, node_id, fn attrs ->
+      case Map.get(attrs, "context_keys") do
+        keys when is_binary(keys) ->
+          present? =
+            keys
+            |> String.split(",", trim: true)
+            |> Enum.member?(key)
+
+          if present? do
+            {:ok, attrs}
+          else
+            {:ok, Map.put(attrs, "context_keys", keys <> "," <> key)}
+          end
+
+        _ ->
+          {:error, :invalid_context_keys}
+      end
+    end)
   end
 
   defp activate_design_checkpoint(graph, %Plan{version: 2}, "direct"),
@@ -2233,12 +2370,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put_test_paths(plan)
   end
 
+  # LOCKSTEP: Compilation.maybe_put_initial_work_packet/3 deliberately
+  # recomputes this same materialization (including the design_gate
+  # condition) as an independent cross-check of compiler output. Change
+  # the two functions together or the verifier will reject compilations.
   defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
-    Map.merge(values, %{
-      @initial_context_keys.work_packet => plan.work_packet,
-      @initial_context_keys.work_packet_json => work_packet_json,
-      @initial_context_keys.checkpoint_policy => Map.fetch!(plan.work_packet, "checkpoint_policy")
-    })
+    values =
+      Map.merge(values, %{
+        @initial_context_keys.work_packet => plan.work_packet,
+        @initial_context_keys.work_packet_json => work_packet_json,
+        @initial_context_keys.checkpoint_policy =>
+          Map.fetch!(plan.work_packet, "checkpoint_policy")
+      })
+
+    case {checkpoint_policy(plan), design_gate(plan)} do
+      {"design_required", gate} when gate in ["council", "council_then_operator"] ->
+        Map.put(values, @initial_context_keys.design_gate, gate)
+
+      _ ->
+        Map.delete(values, @initial_context_keys.design_gate)
+    end
   end
 
   defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
@@ -2246,6 +2397,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> Map.delete(@initial_context_keys.work_packet)
     |> Map.delete(@initial_context_keys.work_packet_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
+    |> Map.delete(@initial_context_keys.design_gate)
   end
 
   defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),
@@ -2296,6 +2448,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          worker_permission_mode: plan.worker["permission_mode"],
          worker_model: plan.worker["model"],
          checkpoint_policy: checkpoint_policy(plan),
+         design_gate: effective_design_gate(plan),
          checkpoint_work_packet_json: work_packet_json,
          rework_max_cycles: plan.rework["max_cycles"],
          validation_timeout_ms: validation_timeout_ms,

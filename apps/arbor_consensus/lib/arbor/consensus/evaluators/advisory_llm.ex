@@ -57,8 +57,12 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   All perspectives support `reference_docs` in proposal context — pass file paths
   and the CLI agent will be instructed to read them for grounding.
 
-  The vote field is always `:approve` (irrelevant for advisory use) —
-  the value is in the `reasoning` field which contains structured analysis.
+  The vote field is `:approve` for ordinary advisory analysis — the value
+  is in the `reasoning` field. When `proposal.context` carries
+  `evaluation_protocol: "design_review"` (or `:design_review`), each seat
+  must emit a structured verdict (`approve` | `rework`) plus concrete
+  concerns. A missing or malformed verdict is mapped to `:reject` with the
+  parse problem as the concern — never `:approve`.
   """
 
   @behaviour Arbor.Contracts.Consensus.Evaluator
@@ -380,13 +384,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         Search the codebase for relevant code, check the Historian for past decisions,
         and search the web if external context would help. Cite specific files and evidence.
 
-        Respond with valid JSON only:
-        {
-          "analysis": "your detailed analysis from this perspective",
-          "considerations": ["key points to think about"],
-          "alternatives": ["other approaches worth considering"],
-          "recommendation": "what this perspective suggests"
-        }
+        #{research_response_schema(proposal)}
         """
 
         start_time = System.monotonic_time(:millisecond)
@@ -980,6 +978,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         formatted -> "\n### Context\n#{PromptSanitizer.wrap(formatted, nonce)}\n"
       end
 
+    protocol_section = design_review_response_section(proposal)
+
     new_code = Map.get(proposal.context, :new_code)
     code_diff = Map.get(proposal.context, :code_diff)
 
@@ -1001,7 +1001,51 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
     #{doc_section}#{if new_code, do: "### Proposed Code\n```elixir\n#{PromptSanitizer.wrap(new_code, nonce)}\n```\n", else: ""}
     #{if code_diff, do: "### Code Diff\n```\n#{PromptSanitizer.wrap(code_diff, nonce)}\n```\n", else: ""}
+    #{protocol_section}
     """
+  end
+
+  defp design_review_response_section(proposal) do
+    if design_review_protocol?(proposal) do
+      """
+      ### Design-review verdict
+      Reply with JSON only:
+      {"verdict": "approve" | "rework", "concerns": ["concrete missing requirement", ...]}
+      Rework must name concrete missing requirements. Do not deny the task.
+      """
+    else
+      ""
+    end
+  end
+
+  defp research_response_schema(proposal) do
+    if design_review_protocol?(proposal) do
+      """
+      Respond with valid JSON only:
+      {
+        "verdict": "approve" or "rework",
+        "concerns": ["concrete missing requirement"],
+        "analysis": "your detailed analysis from this perspective"
+      }
+      Rework must name concrete missing requirements. Do not deny the task.
+      """
+    else
+      """
+      Respond with valid JSON only:
+      {
+        "analysis": "your detailed analysis from this perspective",
+        "considerations": ["key points to think about"],
+        "alternatives": ["other approaches worth considering"],
+        "recommendation": "what this perspective suggests"
+      }
+      """
+    end
+  end
+
+  defp design_review_protocol?(proposal) do
+    context = Map.get(proposal, :context) || %{}
+    protocol = Map.get(context, :evaluation_protocol) || Map.get(context, "evaluation_protocol")
+    protocol in [:design_review, "design_review"]
   end
 
   defp format_doc_paths([]), do: ""
@@ -1032,7 +1076,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   defp format_context(context) do
     context
-    |> Enum.reject(fn {k, _v} -> k == :reference_docs end)
+    |> Enum.reject(fn {k, _v} ->
+      k in [:reference_docs, "reference_docs", :evaluation_protocol, "evaluation_protocol"]
+    end)
     |> Enum.map_join("\n", fn {k, v} -> "- **#{k}:** #{inspect(v)}" end)
   end
 
@@ -1041,16 +1087,21 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # ============================================================================
 
   defp build_advisory_evaluation(response_text, proposal, perspective, evaluator_id) do
-    reasoning = parse_advisory_response(response_text)
+    {vote, concerns, reasoning} =
+      if design_review_protocol?(proposal) do
+        parse_design_review_response(response_text)
+      else
+        {:approve, [], parse_advisory_response(response_text)}
+      end
 
     case Evaluation.new(%{
            proposal_id: proposal.id,
            evaluator_id: evaluator_id,
            perspective: perspective,
-           vote: :approve,
+           vote: vote,
            reasoning: reasoning,
            confidence: 0.8,
-           concerns: [],
+           concerns: concerns,
            recommendations: [],
            risk_score: 0.0,
            benefit_score: 0.0
@@ -1061,6 +1112,84 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
       {:error, _} = error ->
         error
     end
+  end
+
+  @malformed_design_review_verdict "malformed design-review verdict"
+
+  defp parse_design_review_response(text) when is_binary(text) do
+    case Jason.decode(text) do
+      {:ok, json} when is_map(json) ->
+        admit_design_review_json(json, text)
+
+      _other ->
+        malformed_design_review("#{@malformed_design_review_verdict}: response is not JSON", text)
+    end
+  end
+
+  defp parse_design_review_response(_text) do
+    malformed_design_review("#{@malformed_design_review_verdict}: response is not text", "")
+  end
+
+  defp admit_design_review_json(json, text) do
+    case {normalize_design_review_verdict(json), normalize_design_review_concerns(json)} do
+      {{:ok, :approve}, {:ok, concerns}} ->
+        {:approve, concerns, parse_advisory_response(text)}
+
+      {{:ok, :rework}, {:ok, concerns}} ->
+        {:reject, concerns, parse_advisory_response(text)}
+
+      {{:ok, _verdict}, :error} ->
+        malformed_design_review(
+          "#{@malformed_design_review_verdict}: concerns are not text",
+          text
+        )
+
+      {:error, _} ->
+        malformed_design_review(
+          "#{@malformed_design_review_verdict}: missing or invalid verdict",
+          text
+        )
+    end
+  end
+
+  defp normalize_design_review_verdict(json) when is_map(json) do
+    verdict = Map.get(json, "verdict") || Map.get(json, :verdict)
+
+    case verdict do
+      value when value in ["approve", :approve] -> {:ok, :approve}
+      value when value in ["rework", :rework] -> {:ok, :rework}
+      _other -> :error
+    end
+  end
+
+  defp normalize_design_review_concerns(json) when is_map(json) do
+    concerns = Map.get(json, "concerns") || Map.get(json, :concerns) || []
+
+    cond do
+      concerns == [] ->
+        {:ok, []}
+
+      is_list(concerns) ->
+        Enum.reduce_while(concerns, {:ok, []}, fn item, {:ok, acc} ->
+          if is_binary(item) and String.valid?(item) do
+            {:cont, {:ok, [String.trim(item) | acc]}}
+          else
+            {:halt, :error}
+          end
+        end)
+        |> case do
+          {:ok, acc} -> {:ok, Enum.reverse(Enum.reject(acc, &(&1 == "")))}
+          :error -> :error
+        end
+
+      true ->
+        :error
+    end
+  end
+
+  defp malformed_design_review(problem, text) do
+    reasoning = if is_binary(text) and String.valid?(text) and text != "", do: text, else: problem
+    {:reject, [problem], reasoning}
   end
 
   defp parse_advisory_response(text) do
@@ -1076,6 +1205,9 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         parts
         |> Enum.reject(&is_nil/1)
         |> Enum.join("\n\n")
+
+      {:ok, _other} ->
+        text
 
       {:error, _} ->
         # LLM didn't return valid JSON — use raw text

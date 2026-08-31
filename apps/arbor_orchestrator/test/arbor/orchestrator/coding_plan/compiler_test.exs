@@ -250,6 +250,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
       assert compilation.initial_values["coding_plan_checkpoint_policy"] == checkpoint_policy
+      refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+      refute Map.has_key?(compilation.initial_values, "design_council_run_id")
       assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
     end
   end
@@ -327,9 +329,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 90_794
-    assert map_size(graph.nodes) == 259
-    assert length(graph.edges) == 378
+    assert byte_size(ctx.template_source) == 93_758
+    assert map_size(graph.nodes) == 266
+    assert length(graph.edges) == 392
     assert byte_size(ctx.template_source) <= 262_144
     # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
@@ -598,6 +600,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                "design_checkpoint_open.owner_deadline_unix_ms,design_checkpoint_open.evidence," <>
                open["context_keys"]
 
+    refute Map.has_key?(graph.nodes, "route_design_gate")
+    refute Map.has_key?(graph.nodes, "council_review_design")
+    refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+    refute Map.has_key?(compilation.initial_values, "design_council_run_id")
+    assert edge_target(graph, "prep_checkpoint_plan_fingerprint", nil) == "open_design_checkpoint"
+
     refute Map.has_key?(await, "param.timeout")
 
     refute Map.has_key?(
@@ -802,6 +810,125 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       })
 
     assert reset_retry_count === 0
+  end
+
+  test "direct and operator design_gate compilations stay byte-identical and omit council bindings",
+       ctx do
+    direct = v2_plan!()
+    absent = v2_plan!(%{"checkpoint_policy" => "design_required"})
+    operator = v2_plan!(%{"checkpoint_policy" => "design_required", "design_gate" => "operator"})
+    council = v2_plan!(%{"checkpoint_policy" => "design_required", "design_gate" => "council"})
+
+    then_operator =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "design_gate" => "council_then_operator"
+      })
+
+    pre_change_catalog = pre_change_action_catalog()
+
+    assert {:ok, direct_compilation} =
+             compile_with_catalog(direct, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, absent_compilation} =
+             compile_with_catalog(absent, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, operator_compilation} =
+             compile_with_catalog(operator, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, council_compilation} = compile(council, ctx)
+    assert {:ok, then_operator_compilation} = compile(then_operator, ctx)
+
+    assert {:ok, direct_with_council_gate} =
+             compile_with_catalog(
+               v2_plan!(%{"design_gate" => "council"}),
+               ctx,
+               ctx.template_source,
+               pre_change_catalog
+             )
+
+    if System.get_env("WRITE_PRE_CHANGE_FIXTURES") == "1" do
+      write_pre_change_compilation_fixture(
+        "pre_change_direct_compilation.json",
+        serialized_compilation_fixture(direct_compilation)
+      )
+
+      write_pre_change_compilation_fixture(
+        "pre_change_operator_compilation.json",
+        serialized_compilation_fixture(operator_compilation)
+      )
+    end
+
+    assert serialized_compilation_fixture(direct_compilation) ==
+             pre_change_compilation_fixture("pre_change_direct_compilation.json")
+
+    assert serialized_compilation_fixture(operator_compilation) ==
+             pre_change_compilation_fixture("pre_change_operator_compilation.json")
+
+    assert serialized_compilation_fixture(absent_compilation) ==
+             serialized_compilation_fixture(operator_compilation)
+
+    assert serialized_compilation_fixture(direct_with_council_gate) ==
+             serialized_compilation_fixture(direct_compilation)
+
+    refute serialized_compilation_fixture(absent_compilation) ==
+             serialized_compilation_fixture(council_compilation)
+
+    for compilation <- [direct_compilation, absent_compilation, operator_compilation] do
+      refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
+      refute Map.has_key?(compilation.initial_values, "design_council_run_id")
+    end
+
+    absent_graph = parse!(absent_compilation.dot_source)
+    operator_graph = parse!(operator_compilation.dot_source)
+    assert absent_compilation.dot_source == operator_compilation.dot_source
+    assert Map.keys(absent_graph.nodes) == Map.keys(operator_graph.nodes)
+    refute Map.has_key?(absent_graph.nodes, "council_review_design")
+    refute Map.has_key?(absent_graph.nodes, "route_design_gate")
+
+    assert edge_target(absent_graph, "prep_checkpoint_plan_fingerprint", nil) ==
+             "open_design_checkpoint"
+
+    council_graph = parse!(council_compilation.dot_source)
+    then_graph = parse!(then_operator_compilation.dot_source)
+
+    assert council_compilation.initial_values["coding_plan_design_gate"] == "council"
+
+    assert then_operator_compilation.initial_values["coding_plan_design_gate"] ==
+             "council_then_operator"
+
+    refute Map.has_key?(council_compilation.initial_values, "design_council_run_id")
+    refute Map.has_key?(then_operator_compilation.initial_values, "design_council_run_id")
+    assert Map.has_key?(council_graph.nodes, "council_review_design")
+    assert Map.has_key?(then_graph.nodes, "council_review_design")
+
+    assert edge_target(council_graph, "prep_checkpoint_plan_fingerprint", nil) ==
+             "route_design_gate"
+
+    assert edge_target(
+             council_graph,
+             "route_design_council_outcome",
+             "context.coding_plan_design_gate=council&&context.design_checkpoint.checkpoint_outcome=approve"
+           ) == "load_design_artifact"
+
+    assert edge_target(
+             then_graph,
+             "route_design_council_outcome",
+             "context.coding_plan_design_gate=council_then_operator&&context.design_checkpoint.checkpoint_outcome=approve"
+           ) == "hoist_design_council_run_id"
+
+    open_keys = node_attrs(absent_graph, "open_design_checkpoint")["context_keys"]
+    await_keys = node_attrs(absent_graph, "await_design_checkpoint")["context_keys"]
+    refute open_keys =~ "design_council_run_id"
+    refute await_keys =~ "design_council_run_id"
+
+    assert node_attrs(then_graph, "open_design_checkpoint")["context_keys"] ==
+             open_keys <> ",design_council_run_id"
+
+    assert node_attrs(then_graph, "await_design_checkpoint")["context_keys"] ==
+             await_keys <> ",design_council_run_id"
+
+    assert node_attrs(council_graph, "open_design_checkpoint")["context_keys"] == open_keys
   end
 
   test "design checkpoint outcomes route approve, rework, deny, timeout, and exhaustion", ctx do
@@ -2440,6 +2567,54 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     compile_with_catalog(plan, ctx, template_source || ctx.template_source, ctx.action_catalog)
   end
 
+  # The action-catalog digest is derived from loaded BEAM identity
+  # (runtime_descriptor `beam_sha256`), so it legitimately differs across
+  # builds, worktrees, and hosts. Scrub it to a stable placeholder so the
+  # byte-identical fixtures assert graph/binding identity rather than build
+  # identity. Content-derived digests (plan fingerprint, work-packet digest)
+  # stay asserted verbatim.
+  defp serialized_compilation_fixture(compilation) do
+    json =
+      %{
+        "dot_source" => compilation.dot_source,
+        "initial_values" => compilation.initial_values,
+        "manifest" => compilation.manifest
+      }
+      |> Jason.encode!()
+
+    case Regex.run(
+           ~r/coding_plan_action_catalog_digest="?([a-f0-9]{64})/,
+           compilation.dot_source
+         ) do
+      [_, digest] -> String.replace(json, digest, "ACTION_CATALOG_DIGEST")
+      _ -> json
+    end
+  end
+
+  defp pre_change_compilation_fixture(name) do
+    path = Path.expand("../../../fixtures/coding_plan/#{name}", __DIR__)
+
+    path
+    |> File.read!()
+    |> String.trim_trailing()
+  end
+
+  defp write_pre_change_compilation_fixture(name, bytes) do
+    path = Path.expand("../../../fixtures/coding_plan/#{name}", __DIR__)
+    File.write!(path, bytes)
+  end
+
+  defp pre_change_action_catalog do
+    modules =
+      List.delete(
+        CodingPlanTestActionCatalog.modules(),
+        Arbor.Actions.Coding.DesignCouncilReview
+      )
+
+    {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
+    catalog
+  end
+
   defp compile_with_catalog(plan, _ctx, template_source, action_catalog) do
     Compiler.compile(plan,
       template_source: template_source,
@@ -2507,9 +2682,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         "required_evidence" => ["focused test output"],
         "checkpoint_policy" => "direct"
       }
-      |> Map.merge(Map.take(overrides, ["checkpoint_policy"]))
+      |> Map.merge(Map.take(overrides, ["checkpoint_policy", "design_gate"]))
 
-    plan_overrides = Map.drop(overrides, ["checkpoint_policy"])
+    plan_overrides = Map.drop(overrides, ["checkpoint_policy", "design_gate"])
 
     {:ok, digest} = WorkPacket.digest(packet)
 

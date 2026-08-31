@@ -121,12 +121,22 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
   def build_binding(_params, _context), do: {:error, :invalid_design_checkpoint_input}
 
   @doc false
-  def build_common_binding(params, context) when is_map(params) and is_map(context) do
+  def bind_work_packet(params, context) when is_map(params) and is_map(context) do
     with {:ok, work_packet_input} <- required(params, context, :work_packet, :work_packet),
          {:ok, packet} <- normalize_work_packet(work_packet_input),
          :ok <- require_design_policy(packet),
-         {:ok, supplied_packet_digest} <- packet_digest_input(params, context),
-         {:ok, packet_digest} <- validate_packet_digest(packet, supplied_packet_digest),
+         {:ok, supplied_packet_digest} <- admitted_packet_digest(params, context),
+         {:ok, packet_digest} <- validate_packet_digest(packet, supplied_packet_digest) do
+      {:ok, %{packet: packet, packet_digest: packet_digest}}
+    end
+  end
+
+  def bind_work_packet(_params, _context), do: {:error, :invalid_design_checkpoint_input}
+
+  @doc false
+  def build_common_binding(params, context) when is_map(params) and is_map(context) do
+    with {:ok, %{packet: packet, packet_digest: packet_digest}} <-
+           bind_work_packet(params, context),
          {:ok, task_id} <- required_identifier(params, context, :task_id),
          {:ok, task} <- required_task(params, context),
          {:ok, plan_fingerprint} <- plan_fingerprint_input(params, context),
@@ -637,13 +647,59 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
-  defp packet_digest_input(params, context) do
-    case value(params, context, :packet_digest) || value(params, context, :work_packet_digest) ||
-           value(context, %{}, :coding_plan_work_packet_digest) do
-      nil -> {:error, {:design_checkpoint_field_required, "packet_digest"}}
-      digest -> {:ok, digest}
+  defp admitted_packet_digest(params, context) do
+    claims =
+      digest_alias_keys()
+      |> Enum.flat_map(fn key -> digest_claims(params, key) ++ digest_claims(context, key) end)
+
+    values =
+      Enum.reduce_while(claims, {:ok, []}, fn
+        :conflict, _acc -> {:halt, :conflict}
+        {:ok, value}, {:ok, acc} -> {:cont, {:ok, [value | acc]}}
+      end)
+
+    case values do
+      :conflict ->
+        {:error, :work_packet_digest_conflict}
+
+      {:ok, []} ->
+        {:error, {:design_checkpoint_field_required, "packet_digest"}}
+
+      {:ok, submitted} ->
+        case Enum.uniq(submitted) do
+          [digest] -> {:ok, digest}
+          _conflict -> {:error, :work_packet_digest_conflict}
+        end
     end
   end
+
+  defp digest_alias_keys,
+    do: [:packet_digest, :work_packet_digest, :coding_plan_work_packet_digest]
+
+  defp digest_claims(source, key) when is_map(source) and is_atom(key) do
+    string_key = Atom.to_string(key)
+    atom? = Map.has_key?(source, key)
+    string? = Map.has_key?(source, string_key)
+
+    cond do
+      atom? and string? ->
+        atom_value = Map.get(source, key)
+        string_value = Map.get(source, string_key)
+
+        if atom_value === string_value, do: [{:ok, atom_value}], else: [:conflict]
+
+      atom? ->
+        [{:ok, Map.get(source, key)}]
+
+      string? ->
+        [{:ok, Map.get(source, string_key)}]
+
+      true ->
+        []
+    end
+  end
+
+  defp digest_claims(_source, _key), do: []
 
   defp required_task(params, context) do
     case value(params, context, :task) do
@@ -760,7 +816,8 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
-  defp validate_identifier(value, key) when is_binary(value) do
+  @doc false
+  def validate_identifier(value, key) when is_binary(value) and is_atom(key) do
     if byte_size(value) > 0 and byte_size(value) <= @max_identifier_bytes and
          String.valid?(value) and value == String.trim(value) and
          not String.contains?(value, <<0>>) and not has_ascii_control?(value) do
@@ -770,7 +827,7 @@ defmodule Arbor.Actions.Coding.DesignCheckpoint do
     end
   end
 
-  defp validate_identifier(_value, key),
+  def validate_identifier(_value, key) when is_atom(key),
     do: {:error, {:design_checkpoint_identifier_invalid, Atom.to_string(key)}}
 
   defp required_attempt(params, context) do

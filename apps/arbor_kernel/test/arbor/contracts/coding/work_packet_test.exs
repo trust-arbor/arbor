@@ -17,7 +17,14 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
   test "constructs the versioned canonical packet and exposes schema metadata" do
     assert WorkPacket.schema_version() == 1
     assert WorkPacket.checkpoint_policies() == ["direct", "design_required"]
-    assert WorkPacket.enums() == %{"checkpoint_policy" => ["direct", "design_required"]}
+    assert WorkPacket.design_gates() == ["operator", "council", "council_then_operator"]
+    assert WorkPacket.default_design_gate() == "operator"
+
+    assert WorkPacket.enums() == %{
+             "checkpoint_policy" => ["direct", "design_required"],
+             "design_gate" => ["operator", "council", "council_then_operator"]
+           }
+
     assert WorkPacket.schema().version == 1
     assert WorkPacket.max_packet_bytes() == 256_000
 
@@ -160,7 +167,7 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
     assert {:error, {:invalid_object, :object_too_large}} = WorkPacket.new(far_oversized)
 
     assert {:error, {:invalid_object, :object_too_large}} =
-             WorkPacket.new([success_criteria: ["one"]] ++ List.duplicate({:version, 1}, 7))
+             WorkPacket.new([success_criteria: ["one"]] ++ List.duplicate({:version, 1}, 8))
 
     assert {:error, {:invalid_object, :improper_list}} =
              WorkPacket.new([{:success_criteria, ["one"]} | :improper])
@@ -177,6 +184,40 @@ defmodule Arbor.Contracts.Coding.WorkPacketTest do
 
     for policy <- ["ask", :automatic, nil, 1, %{mode: "direct"}] do
       refute WorkPacket.valid?(Map.put(@valid, "checkpoint_policy", policy))
+    end
+  end
+
+  test "omits default design_gate from canonical JSON and accepts the closed enum" do
+    assert {:ok, default_packet} = WorkPacket.new(@valid)
+    assert default_packet.design_gate == "operator"
+    refute Map.has_key?(WorkPacket.to_map(default_packet), "design_gate")
+
+    assert {:ok, explicit_operator} =
+             WorkPacket.new(Map.put(@valid, "design_gate", "operator"))
+
+    assert WorkPacket.to_map(explicit_operator) == WorkPacket.to_map(default_packet)
+
+    assert {:ok, ignored_on_direct} =
+             WorkPacket.new(Map.put(@valid, "design_gate", :council))
+
+    assert ignored_on_direct.design_gate == "council"
+    refute Map.has_key?(WorkPacket.to_map(ignored_on_direct), "design_gate")
+    assert WorkPacket.to_map(ignored_on_direct) == WorkPacket.to_map(default_packet)
+    assert {:ok, ignored_digest} = WorkPacket.digest(ignored_on_direct)
+    assert {:ok, default_digest} = WorkPacket.digest(default_packet)
+    assert ignored_digest == default_digest
+
+    design_required = Map.put(@valid, "checkpoint_policy", "design_required")
+
+    assert {:ok, council} = WorkPacket.new(Map.put(design_required, "design_gate", :council))
+    assert council.design_gate == "council"
+    assert WorkPacket.to_map(council)["design_gate"] == "council"
+
+    assert {:ok, council_bytes} = WorkPacket.canonical_bytes(council)
+    assert council_bytes =~ ~s("design_gate":"council")
+
+    for gate <- ["ask", :automatic, nil, 1, %{mode: "council"}] do
+      refute WorkPacket.valid?(Map.put(@valid, "design_gate", gate))
     end
   end
 

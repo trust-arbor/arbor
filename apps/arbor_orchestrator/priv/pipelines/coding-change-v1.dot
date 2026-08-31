@@ -2286,6 +2286,7 @@ digraph CodingChangeV1 {
   start -> clear_cross_app_progress [condition="0=1"]
   start -> clear_cross_app_progress_binding [condition="0=1"]
   start -> error_cross_app_window_invalid [condition="0=1"]
+  start -> route_design_gate [condition="0=1"]
 
   // Dormant security-regression edges retain default behavior until the
   // compiler connects the reviewed profile-specific entry points.
@@ -2587,4 +2588,67 @@ digraph CodingChangeV1 {
   prep_release_mode_remove -> publish_workspace
   prep_release_mode_discard -> release_workspace
   publish_workspace -> done
+
+  // Advisory design-council gate. Dormant until the compiler rewires
+  // prep_checkpoint_plan_fingerprint -> route_design_gate for design_gate
+  // council*. Operator and direct compilations strip these nodes.
+  route_design_gate [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  council_review_design [
+    type="exec",
+    target="action",
+    action="coding_design_council_review",
+    context_keys="work_packet,packet_digest,session.task_id,task,design_artifact,design_digest,design_attempt,session.run_deadline_unix_ms",
+    param.timeout=3600000,
+    timeout_budget.deadline_key="session.run_deadline_unix_ms",
+    timeout_budget.cap_key="coding_budget.interaction_wait_ms",
+    timeout_budget.reserve_key="coding_budget.worker_completion_reserve_ms",
+    timeout_budget.param="timeout",
+    output_prefix="design_checkpoint",
+    max_retries="0"
+  ]
+
+  route_design_council_outcome [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  hoist_design_council_run_id [
+    type="transform",
+    transform="identity",
+    source_key="design_checkpoint.design_council_run_id",
+    output_key="design_council_run_id"
+  ]
+
+  error_design_council_failed [
+    type="transform",
+    transform="constant",
+    expression="design_council_failed",
+    output_key="error"
+  ]
+
+  error_design_council_outcome_invalid [
+    type="transform",
+    transform="constant",
+    expression="design_council_outcome_invalid",
+    output_key="error"
+  ]
+
+  route_design_gate -> council_review_design [condition="context.coding_plan_design_gate=council"]
+  route_design_gate -> council_review_design [condition="context.coding_plan_design_gate=council_then_operator"]
+  route_design_gate -> open_design_checkpoint
+  council_review_design -> error_design_council_failed [condition="outcome=fail"]
+  council_review_design -> route_design_council_outcome [condition="outcome=success"]
+  route_design_council_outcome -> load_design_artifact [condition="context.coding_plan_design_gate=council&&context.design_checkpoint.checkpoint_outcome=approve"]
+  route_design_council_outcome -> hoist_design_council_run_id [condition="context.coding_plan_design_gate=council_then_operator&&context.design_checkpoint.checkpoint_outcome=approve"]
+  route_design_council_outcome -> hoist_design_decision_note [condition="context.design_checkpoint.checkpoint_outcome=rework"]
+  route_design_council_outcome -> error_design_council_outcome_invalid
+  hoist_design_council_run_id -> open_design_checkpoint
+  error_design_council_failed -> status_pipeline_error_then_close
+  error_design_council_outcome_invalid -> status_pipeline_error_then_close
 }
