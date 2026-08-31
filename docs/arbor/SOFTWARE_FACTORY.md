@@ -573,8 +573,11 @@ digest
 
 Optionally compile the exact plan with
 `Arbor.Orchestrator.CodingPlan.Compiler.compile/1` before dispatch.
-`Plan.new/1` only checks the interchange contract; the compiler can still
-reject features such as nonempty `rework.stop_conditions`.
+`Plan.new/1` only checks the interchange contract; the compiler wires
+contract-allowed `rework.stop_conditions` (notably `validation_failed`
+retargets the first soft validation failure to `status_validation_failed`
+without a repair turn) and still rejects overlays, `budgets.model_cost_usd`,
+and `budgets.parallelism != 1`.
 
 Local static check:
 

@@ -88,6 +88,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
   @cross_app_domain_failure_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
   @cross_app_legacy_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff"
+  @rework_stop_conditions ~w(declined no_changes review_rejected validation_failed)
   @forbidden_cross_app_param_prefixes [
     "param.cross_app_progress",
     "param.cross_app_progress_binding",
@@ -202,6 +203,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       continuity parameters to that exact normalized plan.
     * `:rework_max_cycles` — required integer from `0` through `2`, bound to the
       normalized plan. Every shared-total rework gate must use this threshold.
+    * `:rework_stop_conditions` — required canonical list from the normalized
+      plan (`declined`, `no_changes`, `review_rejected`, `validation_failed`).
+      Empty is the default topology. `validation_failed` must retarget
+      `check_validation_passed` `outcome=fail` to `status_validation_failed`.
     * `:validation_timeout_ms` — required positive integer derived from the
       normalized plan and reviewed profile per-operation ceiling. Validation
       nodes must bind this exact value.
@@ -232,6 +237,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, worker_continuity} <- normalize_worker_continuity(opts),
          {:ok, checkpoint} <- normalize_design_checkpoint(opts),
          {:ok, rework_max_cycles} <- normalize_rework_max_cycles(opts),
+         {:ok, rework_stop_conditions} <- normalize_rework_stop_conditions(opts),
          {:ok, validation_timeout_ms} <- normalize_validation_timeout_ms(opts),
          {:ok, validation_test_stage_timeout_ms} <-
            normalize_validation_test_stage_timeout_ms(opts),
@@ -264,8 +270,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           review_profile,
           validation_timeout_ms,
           validation_test_stage_timeout_ms,
-          validation_stage_timeout_ms
+          validation_stage_timeout_ms,
+          rework_stop_conditions
         )
+        |> check_validation_stop_topology(graph, policy, rework_stop_conditions)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
 
@@ -916,6 +924,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
       {:ok, other} ->
         {:error, {:invalid_semantic_policy, {:invalid_rework_max_cycles, other}}}
+    end
+  end
+
+  defp normalize_rework_stop_conditions(opts) do
+    case Keyword.fetch(opts, :rework_stop_conditions) do
+      :error ->
+        {:error, {:invalid_semantic_policy, :missing_rework_stop_conditions}}
+
+      {:ok, conditions} when is_list(conditions) ->
+        valid? =
+          Enum.all?(conditions, &(is_binary(&1) and &1 in @rework_stop_conditions)) and
+            conditions == Enum.sort(Enum.uniq(conditions))
+
+        if valid? do
+          {:ok, conditions}
+        else
+          {:error, {:invalid_semantic_policy, {:invalid_rework_stop_conditions, conditions}}}
+        end
+
+      {:ok, other} ->
+        {:error, {:invalid_semantic_policy, {:invalid_rework_stop_conditions, other}}}
     end
   end
 
@@ -3977,7 +4006,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review,
          validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         _validation_stage_timeout_ms
+         _validation_stage_timeout_ms,
+         _stop_conditions
        ) do
     errors
     |> check_validation_parameters(
@@ -4004,7 +4034,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review,
          validation_timeout_ms,
          validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         _stop_conditions
        )
        when is_integer(validation_test_stage_timeout_ms) and
               validation_test_stage_timeout_ms > 0 and
@@ -4037,7 +4068,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review,
          _validation_timeout_ms,
          validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         _stop_conditions
        ) do
     [
       error("validation_parameter_violation", "validate", %{
@@ -4060,7 +4092,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          review_profile,
          validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         stop_conditions
        )
        when is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
     errors
@@ -4072,7 +4105,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       validation_stage_timeout_ms
     )
     |> check_security_protected_writers(graph)
-    |> check_security_topology(graph, review_profile)
+    |> check_security_topology(graph, review_profile, stop_conditions)
     |> reject_cross_app_loop_nodes(graph)
     |> reject_caller_cross_app_params(graph)
   end
@@ -4084,7 +4117,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review_profile,
          _validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         _stop_conditions
        ) do
     [
       error("security_validator_parameter_violation", "validate", %{
@@ -4103,7 +4137,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review,
          validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         _stop_conditions
        )
        when is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
     errors
@@ -4131,7 +4166,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review,
          _validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms
+         validation_stage_timeout_ms,
+         _stop_conditions
        ) do
     [
       error("validation_parameter_violation", "validate", %{
@@ -4150,7 +4186,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          _review_profile,
          _validation_timeout_ms,
          _validation_test_stage_timeout_ms,
-         _validation_stage_timeout_ms
+         _validation_stage_timeout_ms,
+         _stop_conditions
        ),
        do: errors
 
@@ -4641,7 +4678,106 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> Enum.sort()
   end
 
-  defp check_security_topology(errors, graph, review_profile) do
+  defp check_validation_stop_topology(errors, graph, policy, stop_conditions) do
+    expected = [
+      {"check_validation_passed", validation_result_gate_outgoing(policy, stop_conditions)},
+      {"hoist_validation_approval_note", operator_validation_rework_outgoing(policy)},
+      {"validate", hard_validation_failure_outgoing()}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_validation_stop_outgoing(
+        acc,
+        graph,
+        node_id,
+        outgoing,
+        stop_conditions,
+        policy
+      )
+    end)
+  end
+
+  defp validation_result_gate_outgoing(policy, stop_conditions) do
+    success_to =
+      if policy["validation_profile"] == "security_regression" do
+        "post_validation_expected_commit"
+      else
+        "prep_commit_path"
+      end
+
+    fail_to =
+      cond do
+        "validation_failed" in stop_conditions ->
+          "status_validation_failed"
+
+        policy["validation_profile"] == "security_regression" ->
+          "remember_validation_reviewed_commit"
+
+        true ->
+          "check_validation_category_budget"
+      end
+
+    [
+      {fail_to, "outcome=fail"},
+      {success_to, "outcome=success"}
+    ]
+  end
+
+  defp operator_validation_rework_outgoing(policy) do
+    target =
+      if policy["validation_profile"] == "security_regression" do
+        "remember_validation_reviewed_commit"
+      else
+        "check_validation_category_budget"
+      end
+
+    [{target, nil}]
+  end
+
+  defp hard_validation_failure_outgoing do
+    [
+      {"status_validation_failed", "outcome=fail"},
+      {"route_validation_interaction", "outcome=success"}
+    ]
+  end
+
+  defp require_exact_validation_stop_outgoing(
+         errors,
+         graph,
+         node_id,
+         expected,
+         stop_conditions,
+         policy
+       ) do
+    actual =
+      graph.edges
+      |> Enum.flat_map(fn edge ->
+        if edge.from == node_id do
+          [{edge.to, Map.get(edge.attrs, "condition")}]
+        else
+          []
+        end
+      end)
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("validation_stop_topology_mismatch", node_id, %{
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1),
+          "stop_conditions" => stop_conditions,
+          "validation_profile" => policy["validation_profile"]
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp check_security_topology(errors, graph, review_profile, stop_conditions) do
     validated_review_edges =
       case review_profile do
         "human_required" ->
@@ -4745,10 +4881,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_validation_approval_note_denied", [{"status_validation_failed", nil}]},
       {"error_validation_interaction_invalid", [{"status_pipeline_error_then_close", nil}]},
       {"check_validation_passed",
-       [
-         {"remember_validation_reviewed_commit", "outcome=fail"},
-         {"post_validation_expected_commit", "outcome=success"}
-       ]},
+       validation_result_gate_outgoing(
+         %{"validation_profile" => "security_regression"},
+         stop_conditions
+       )},
       {"remember_validation_reviewed_commit", [{"check_validation_category_budget", nil}]},
       {"post_validation_expected_commit", [{"post_validation_committed_change", nil}]},
       {"post_validation_committed_change",

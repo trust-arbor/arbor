@@ -461,6 +461,58 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule SemanticOptionsDriftCompiler do
+    @moduledoc false
+
+    alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
+    alias Arbor.Orchestrator.Dot.Parser
+    alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      # Emit the default fail-to-rework topology despite rework.stop_conditions.
+      dot_source =
+        String.replace(
+          compilation.dot_source,
+          ~s(check_validation_passed -> status_validation_failed [condition="outcome=fail"]),
+          ~s(check_validation_passed -> check_validation_category_budget [condition="outcome=fail"])
+        )
+
+      true = dot_source != compilation.dot_source
+      graph_hash = sha256(dot_source)
+      {:ok, graph} = Parser.parse(dot_source)
+      {:ok, compiled_graph} = IRCompiler.compile(graph)
+      {:ok, catalog} = ActionCatalog.snapshot()
+
+      {:ok, {execution_manifest, execution_manifest_digest}} =
+        ExecutionManifest.build(compiled_graph, catalog, graph_hash)
+
+      manifest =
+        compilation.manifest
+        |> Map.put("graph_hash", graph_hash)
+        |> Map.put("execution_manifest", execution_manifest)
+        |> Map.put("execution_manifest_digest", execution_manifest_digest)
+
+      {:ok,
+       %{
+         compilation
+         | dot_source: dot_source,
+           graph_hash: graph_hash,
+           execution_manifest: execution_manifest,
+           execution_manifest_digest: execution_manifest_digest,
+           manifest: manifest
+       }}
+    end
+
+    defp sha256(value) do
+      value
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+    end
+  end
+
   defmodule RedirectingInitialValuesCompiler do
     @moduledoc false
 
@@ -1149,6 +1201,87 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defp restore(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
   defp restore(key, value), do: Application.put_env(:arbor_orchestrator, key, value)
+
+  defp with_compiler_semantic_preflight_trace(fun) do
+    parent = self()
+
+    tracer =
+      spawn_link(fn ->
+        compiler_semantic_preflight_tracer_loop(parent, [])
+      end)
+
+    Code.ensure_loaded!(Arbor.Orchestrator.CodingPlan.Compiler)
+
+    :erlang.trace_pattern(
+      {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, 3},
+      true,
+      [:local]
+    )
+
+    :erlang.trace_pattern(
+      {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, 4},
+      true,
+      [:local]
+    )
+
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      result = fun.()
+      send(tracer, {:drain, self()})
+
+      receive do
+        {:compiler_semantic_preflight_calls, calls} -> {calls, result}
+      after
+        5_000 -> flunk("timed out waiting for compiler semantic-preflight tracer")
+      end
+    after
+      :erlang.trace(self(), false, [:call])
+
+      :erlang.trace_pattern(
+        {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, 3},
+        false,
+        [:local]
+      )
+
+      :erlang.trace_pattern(
+        {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, 4},
+        false,
+        [:local]
+      )
+    end
+  end
+
+  defp compiler_semantic_preflight_tracer_loop(parent, acc) do
+    receive do
+      {:trace, _pid, :call,
+       {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, args}} ->
+        compiler_semantic_preflight_tracer_loop(parent, [length(args) | acc])
+
+      {:drain, tracee} ->
+        delivery_ref = :erlang.trace_delivered(tracee)
+        drain_compiler_semantic_preflight_tracer(parent, acc, tracee, delivery_ref)
+    end
+  end
+
+  defp drain_compiler_semantic_preflight_tracer(parent, acc, tracee, delivery_ref) do
+    receive do
+      {:trace, _pid, :call,
+       {Arbor.Orchestrator.CodingPlan.Compiler, :semantic_preflight_options, args}} ->
+        drain_compiler_semantic_preflight_tracer(
+          parent,
+          [length(args) | acc],
+          tracee,
+          delivery_ref
+        )
+
+      {:trace_delivered, ^tracee, ^delivery_ref} ->
+        send(parent, {:compiler_semantic_preflight_calls, Enum.reverse(acc)})
+    after
+      1_000 ->
+        send(parent, {:compiler_semantic_preflight_calls, Enum.reverse(acc)})
+    end
+  end
 
   defp valid_task(overrides \\ %{}) do
     Map.merge(
@@ -4511,6 +4644,39 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Enum.any?(errors, fn error ->
                error["code"] == "dominance_violation" and
                  error["detail"]["kind"] == "validation"
+             end)
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: compiler-side semantic-option drift is rejected before runner" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        SemanticOptionsDriftCompiler
+      )
+
+      task =
+        valid_direct_task(%{
+          "rework" => %{"stop_conditions" => ["validation_failed"]}
+        })
+
+      {calls, result} =
+        with_compiler_semantic_preflight_trace(fn ->
+          CodingTaskExecutor.run("agent_1", task, valid_context())
+        end)
+
+      # Compiler.compile projects once. A second call would mean the execution
+      # boundary still delegates to Compiler.semantic_preflight_options/4.
+      assert length(calls) == 1
+
+      assert {:error, {:coding_execution_preflight_failed, {:semantic_preflight_failed, errors}}} =
+               result
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "validation_stop_topology_mismatch" and
+                 error["node_id"] == "check_validation_passed"
              end)
 
       refute_receive {:coding_executor_captured_run, _path, _opts}

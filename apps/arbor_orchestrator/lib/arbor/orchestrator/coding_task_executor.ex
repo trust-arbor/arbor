@@ -2757,6 +2757,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          checkpoint_policy: checkpoint_policy,
          checkpoint_work_packet_json: checkpoint_work_packet_json,
          rework_max_cycles: plan.rework["max_cycles"],
+         rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
          validation_stage_timeout_ms: validation_stage_timeout_ms

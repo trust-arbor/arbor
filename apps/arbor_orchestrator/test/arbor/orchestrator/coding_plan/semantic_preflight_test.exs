@@ -270,11 +270,285 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                rework_max_cycles: "2"
              )
 
-    assert {:error, {:invalid_semantic_policy, :missing_validation_timeout_ms}} =
+    assert {:error, {:invalid_semantic_policy, :missing_rework_stop_conditions}} =
              SemanticPreflight.validate(graph, profile["semantic_policy"],
                review_profile: "binding",
                rework_max_cycles: 2
              )
+
+    assert {:error,
+            {:invalid_semantic_policy, {:invalid_rework_stop_conditions, "validation_failed"}}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 2,
+               rework_stop_conditions: "validation_failed"
+             )
+
+    assert {:error,
+            {:invalid_semantic_policy, {:invalid_rework_stop_conditions, ["run_arbitrary_dot"]}}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 2,
+               rework_stop_conditions: ["run_arbitrary_dot"]
+             )
+
+    assert {:error, {:invalid_semantic_policy, :missing_validation_timeout_ms}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_max_cycles: 2,
+               rework_stop_conditions: []
+             )
+  end
+
+  test "undeclared validation_failed terminal edge fails closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    tampered =
+      replace_edge_target(
+        graph,
+        "check_validation_passed",
+        "check_validation_category_budget",
+        "outcome=fail",
+        "status_validation_failed"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(tampered, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "validation_stop_topology_mismatch" and
+               error["node_id"] == "check_validation_passed"
+           end)
+  end
+
+  test "validate and operator-rework stop mismatches are not result-gate diagnostics", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    validate_tamper =
+      replace_edge_target(
+        graph,
+        "validate",
+        "status_validation_failed",
+        "outcome=fail",
+        "check_validation_category_budget"
+      )
+
+    assert {:error, {:semantic_preflight_failed, validate_errors}} =
+             preflight(validate_tamper, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(validate_errors, fn error ->
+             error["code"] == "validation_stop_topology_mismatch" and
+               error["node_id"] == "validate"
+           end)
+
+    refute Enum.any?(validate_errors, fn error ->
+             error["code"] == "validation_result_gate_topology_mismatch" and
+               error["node_id"] == "validate"
+           end)
+
+    hoist_tamper =
+      replace_edge_target(
+        graph,
+        "hoist_validation_approval_note",
+        "check_validation_category_budget",
+        nil,
+        "status_validation_failed"
+      )
+
+    assert {:error, {:semantic_preflight_failed, hoist_errors}} =
+             preflight(hoist_tamper, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(hoist_errors, fn error ->
+             error["code"] == "validation_stop_topology_mismatch" and
+               error["node_id"] == "hoist_validation_approval_note"
+           end)
+
+    refute Enum.any?(hoist_errors, fn error ->
+             error["code"] == "validation_result_gate_topology_mismatch" and
+               error["node_id"] == "hoist_validation_approval_note"
+           end)
+  end
+
+  test "declared validation_failed graph that still enters rework fails closed", ctx do
+    plan = plan!(%{"rework" => %{"stop_conditions" => ["validation_failed"]}})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    assert :ok =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    tampered =
+      replace_edge_target(
+        graph,
+        "check_validation_passed",
+        "status_validation_failed",
+        "outcome=fail",
+        "check_validation_category_budget"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(tampered, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "validation_stop_topology_mismatch" and
+               error["node_id"] == "check_validation_passed"
+           end)
+  end
+
+  test "security_regression stop topology distinguishes success and fail targets", ctx do
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    undeclared_plan = security_plan!()
+    assert {:ok, undeclared_compilation} = compile(undeclared_plan, ctx)
+    undeclared_graph = compiled_graph!(undeclared_compilation.dot_source)
+
+    assert :ok =
+             preflight(undeclared_graph, profile["semantic_policy"], review_profile: "binding")
+
+    undeclared_tamper =
+      replace_edge_target(
+        undeclared_graph,
+        "check_validation_passed",
+        "remember_validation_reviewed_commit",
+        "outcome=fail",
+        "status_validation_failed"
+      )
+
+    assert {:error, {:semantic_preflight_failed, undeclared_errors}} =
+             preflight(undeclared_tamper, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(undeclared_errors, fn error ->
+             error["code"] in [
+               "validation_stop_topology_mismatch",
+               "security_topology_mismatch"
+             ] and error["node_id"] == "check_validation_passed"
+           end)
+
+    success_tamper =
+      replace_edge_target(
+        undeclared_graph,
+        "check_validation_passed",
+        "post_validation_expected_commit",
+        "outcome=success",
+        "prep_commit_path"
+      )
+
+    assert {:error, {:semantic_preflight_failed, success_errors}} =
+             preflight(success_tamper, profile["semantic_policy"], review_profile: "binding")
+
+    assert Enum.any?(success_errors, fn error ->
+             error["code"] in [
+               "validation_stop_topology_mismatch",
+               "security_topology_mismatch"
+             ] and error["node_id"] == "check_validation_passed"
+           end)
+
+    declared_plan =
+      security_plan!(%{"rework" => %{"stop_conditions" => ["validation_failed"]}})
+
+    assert {:ok, declared_compilation} = compile(declared_plan, ctx)
+    declared_graph = compiled_graph!(declared_compilation.dot_source)
+
+    assert :ok =
+             preflight(declared_graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    declared_tamper =
+      replace_edge_target(
+        declared_graph,
+        "check_validation_passed",
+        "status_validation_failed",
+        "outcome=fail",
+        "remember_validation_reviewed_commit"
+      )
+
+    assert {:error, {:semantic_preflight_failed, declared_errors}} =
+             preflight(declared_tamper, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    assert Enum.any?(declared_errors, fn error ->
+             error["code"] in [
+               "validation_stop_topology_mismatch",
+               "security_topology_mismatch"
+             ] and error["node_id"] == "check_validation_passed"
+           end)
+
+    default_plan = plan!()
+    assert {:ok, default_compilation} = compile(default_plan, ctx)
+    default_graph = compiled_graph!(default_compilation.dot_source)
+    assert {:ok, default_profile} = Profiles.fetch_executable("default")
+
+    ordinary_success_tamper =
+      replace_edge_target(
+        default_graph,
+        "check_validation_passed",
+        "prep_commit_path",
+        "outcome=success",
+        "check_validation_category_budget"
+      )
+
+    assert {:error, {:semantic_preflight_failed, ordinary_errors}} =
+             preflight(ordinary_success_tamper, default_profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(ordinary_errors, fn error ->
+             error["code"] == "validation_stop_topology_mismatch" and
+               error["node_id"] == "check_validation_passed"
+           end)
+  end
+
+  test "cross_app capacity continuation is not a validation_failed stop or rework", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "rework" => %{"stop_conditions" => ["validation_failed"]}
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    assert :ok =
+             preflight(graph, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    capacity =
+      "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+
+    tampered =
+      replace_edge_target(
+        graph,
+        "route_validation_interaction",
+        "route_cross_app_window",
+        capacity,
+        "status_validation_failed"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(tampered, profile["semantic_policy"],
+               review_profile: "binding",
+               rework_stop_conditions: ["validation_failed"]
+             )
+
+    assert Enum.any?(errors, &(&1["code"] == "cross_app_topology_mismatch"))
   end
 
   test "design-required graph passes exact checkpoint preflight", ctx do
@@ -2779,6 +3053,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              SemanticPreflight.validate(graph, profile["semantic_policy"],
                review_profile: "binding",
                rework_max_cycles: 2,
+               rework_stop_conditions: [],
                validation_timeout_ms: 900_000
              )
 
@@ -2970,6 +3245,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       policy,
       opts
       |> Keyword.put_new(:rework_max_cycles, 2)
+      |> Keyword.put_new(:rework_stop_conditions, [])
       |> Keyword.put_new_lazy(:validation_timeout_ms, fn -> validation_timeout_ms(policy) end)
       |> Keyword.put_new_lazy(:validation_test_stage_timeout_ms, fn ->
         validation_static_timeout_ms(policy, "test_stage_timeout")

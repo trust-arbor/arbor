@@ -424,9 +424,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       plan.overlays != [] ->
         {:error, {:unsupported_v1_feature, "overlays"}}
 
-      plan.rework["stop_conditions"] != [] ->
-        {:error, {:unsupported_v1_feature, "rework.stop_conditions"}}
-
       not is_nil(plan.budgets["model_cost_usd"]) ->
         {:error, {:unsupported_v1_feature, "budgets.model_cost_usd"}}
 
@@ -477,6 +474,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_design_checkpoint(graph, plan, work_packet_json),
          {:ok, graph} <- rewrite_validation(graph, validation_program),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
+         {:ok, graph} <- rewrite_validation_stop_conditions(graph, plan),
          {:ok, graph} <- rewrite_design_rework_prompts(graph, plan),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
@@ -717,6 +715,31 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              ) do
         drop_cross_app_dormant_nodes(graph)
       end
+    end
+  end
+
+  # Soft validation failure only. Hard validate outcome=fail and operator
+  # interaction_outcome=rework keep their existing targets. Runs after profile
+  # flow so security_regression has already moved the fail edge to
+  # remember_validation_reviewed_commit.
+  defp rewrite_validation_stop_conditions(graph, %Plan{} = plan) do
+    if "validation_failed" in plan.rework["stop_conditions"] do
+      current_fail_to =
+        case plan.validation_profile do
+          "security_regression" -> "remember_validation_reviewed_commit"
+          _other -> "check_validation_category_budget"
+        end
+
+      rewrite_edge(
+        graph,
+        "check_validation_passed",
+        current_fail_to,
+        "outcome=fail",
+        "status_validation_failed",
+        "outcome=fail"
+      )
+    else
+      {:ok, graph}
     end
   end
 
@@ -2298,6 +2321,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          checkpoint_policy: checkpoint_policy(plan),
          checkpoint_work_packet_json: work_packet_json,
          rework_max_cycles: plan.rework["max_cycles"],
+         rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
          validation_stage_timeout_ms: validation_stage_timeout_ms

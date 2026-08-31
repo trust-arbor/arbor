@@ -2106,14 +2106,252 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:unsupported_v1_feature, "overlays"}} =
              compile(plan!(%{"overlays" => ["security_regression"]}), ctx)
 
-    assert {:error, {:unsupported_v1_feature, "rework.stop_conditions"}} =
-             compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
-
     assert {:error, {:unsupported_v1_feature, "budgets.model_cost_usd"}} =
              compile(plan!(%{"budgets" => %{"model_cost_usd" => 1.0}}), ctx)
 
     assert {:error, {:unsupported_v1_feature, "budgets.parallelism"}} =
              compile(plan!(%{"budgets" => %{"parallelism" => 2}}), ctx)
+  end
+
+  test "contract-allowed stop conditions compile with existing terminal semantics", ctx do
+    assert {:ok, declined} =
+             compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
+
+    declined_graph = parse!(declined.dot_source)
+    refute Map.has_key?(declined_graph.nodes, "status_declined")
+
+    assert edge_target(declined_graph, "check_validation_passed", "outcome=fail") ==
+             "check_validation_category_budget"
+
+    assert has_edge?(
+             declined_graph,
+             "route_release_mode",
+             "prep_release_mode_discard",
+             "context.status=declined"
+           )
+
+    refute Enum.any?(declined_graph.edges, fn edge ->
+             edge.from in ["hoist_worker_terminal_status", "parse_worker_terminal"] and
+               edge.to in ["status_declined", "prep_release_mode_discard"]
+           end)
+
+    assert {:ok, no_changes} =
+             compile(plan!(%{"rework" => %{"stop_conditions" => ["no_changes"]}}), ctx)
+
+    no_changes_graph = parse!(no_changes.dot_source)
+
+    assert edge_target(no_changes_graph, "route_no_progress", "context.total_rework_count<1") ==
+             "status_no_changes"
+
+    assert has_edge?(no_changes_graph, "status_no_changes", "close_worker", nil)
+
+    assert has_edge?(
+             no_changes_graph,
+             "route_release_mode",
+             "prep_release_mode_discard",
+             "context.status=no_changes"
+           )
+
+    assert {:ok, review_rejected} =
+             compile(plan!(%{"rework" => %{"stop_conditions" => ["review_rejected"]}}), ctx)
+
+    review_graph = parse!(review_rejected.dot_source)
+
+    assert edge_target(review_graph, "route_review", "context.review.tier_decision=stop") ==
+             "status_review_rejected"
+
+    assert has_edge?(review_graph, "status_review_rejected", "close_worker", nil)
+
+    assert has_edge?(
+             review_graph,
+             "route_release_mode",
+             "prep_release_mode_retain",
+             "context.status=review_rejected"
+           )
+  end
+
+  test "validation_failed stop retargets the first soft fail to status_validation_failed",
+       ctx do
+    assert {:ok, compilation} =
+             compile(
+               plan!(%{"rework" => %{"stop_conditions" => ["validation_failed"]}}),
+               ctx
+             )
+
+    graph = parse!(compilation.dot_source)
+
+    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
+             "status_validation_failed"
+
+    assert edge_target(graph, "check_validation_passed", "outcome=success") ==
+             "prep_commit_path"
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "check_validation_category_budget",
+             "outcome=fail"
+           )
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "check_validation_total_budget",
+             "outcome=fail"
+           )
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "inc_validation_rework_count",
+             "outcome=fail"
+           )
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "remember_validation_reviewed_commit",
+             "outcome=fail"
+           )
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "build_validation_rework_prompt",
+             "outcome=fail"
+           )
+
+    refute has_edge?(graph, "check_validation_passed", "implement", "outcome=fail")
+
+    assert edge_target(graph, "validate", "outcome=fail") == "status_validation_failed"
+
+    assert edge_target(graph, "hoist_validation_approval_note", nil) ==
+             "check_validation_category_budget"
+
+    assert has_edge?(graph, "status_validation_failed", "close_worker", nil)
+
+    assert has_edge?(
+             graph,
+             "route_release_mode",
+             "prep_release_mode_retain",
+             "context.status=validation_failed"
+           )
+
+    assert {:ok, default_compilation} = compile(plan!(), ctx)
+    default_graph = parse!(default_compilation.dot_source)
+
+    assert edge_target(default_graph, "check_validation_passed", "outcome=fail") ==
+             "check_validation_category_budget"
+  end
+
+  test "validation_failed stop on security_regression keeps post-validation success and operator rework",
+       ctx do
+    requested_paths = ["apps/arbor_security/test/security_regression_test.exs"]
+
+    assert {:ok, compilation} =
+             compile(
+               plan!(%{
+                 "validation_profile" => "security_regression",
+                 "requested_paths" => requested_paths,
+                 "rework" => %{"stop_conditions" => ["validation_failed"]}
+               }),
+               ctx
+             )
+
+    graph = parse!(compilation.dot_source)
+
+    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
+             "status_validation_failed"
+
+    assert edge_target(graph, "check_validation_passed", "outcome=success") ==
+             "post_validation_expected_commit"
+
+    refute has_edge?(
+             graph,
+             "check_validation_passed",
+             "remember_validation_reviewed_commit",
+             "outcome=fail"
+           )
+
+    assert edge_target(graph, "hoist_validation_approval_note", nil) ==
+             "remember_validation_reviewed_commit"
+
+    assert edge_target(graph, "validate", "outcome=fail") == "status_validation_failed"
+  end
+
+  test "validation_failed stop on cross_app keeps capacity continuation", ctx do
+    assert {:ok, compilation} =
+             compile(
+               plan!(%{
+                 "validation_profile" => "cross_app",
+                 "rework" => %{"stop_conditions" => ["validation_failed"]}
+               }),
+               ctx
+             )
+
+    graph = parse!(compilation.dot_source)
+
+    capacity =
+      "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
+
+    completed =
+      "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
+
+    domain_failure =
+      "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
+
+    assert edge_target(graph, "route_validation_interaction", capacity) ==
+             "route_cross_app_window"
+
+    assert edge_target(graph, "route_validation_interaction", completed) ==
+             "check_validation_passed"
+
+    assert edge_target(graph, "route_validation_interaction", domain_failure) ==
+             "check_validation_passed"
+
+    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
+             "status_validation_failed"
+
+    refute Enum.any?(graph.edges, fn edge ->
+             edge.from == "route_cross_app_window" and
+               edge.to in [
+                 "status_validation_failed",
+                 "check_validation_category_budget",
+                 "inc_validation_rework_count",
+                 "prep_commit_path"
+               ]
+           end)
+  end
+
+  test "all contract-allowed stop conditions together apply only the validation_failed rewrite",
+       ctx do
+    assert {:ok, compilation} =
+             compile(
+               plan!(%{
+                 "rework" => %{
+                   "stop_conditions" => [
+                     "declined",
+                     "no_changes",
+                     "review_rejected",
+                     "validation_failed"
+                   ]
+                 }
+               }),
+               ctx
+             )
+
+    graph = parse!(compilation.dot_source)
+
+    assert edge_target(graph, "check_validation_passed", "outcome=fail") ==
+             "status_validation_failed"
+
+    assert edge_target(graph, "route_no_progress", "context.total_rework_count<1") ==
+             "status_no_changes"
+
+    assert edge_target(graph, "route_review", "context.review.tier_decision=stop") ==
+             "status_review_rejected"
+
+    refute Map.has_key?(graph.nodes, "status_declined")
   end
 
   test "explicit archived version 1 specialized plans still verify without weaker validation",
@@ -2590,6 +2828,12 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
+  end
+
+  defp has_edge?(graph, from, to, condition) do
+    Enum.any?(graph.edges, fn edge ->
+      edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition
+    end)
   end
 
   defp assert_validation_capture_topology(graph, predecessor) do
