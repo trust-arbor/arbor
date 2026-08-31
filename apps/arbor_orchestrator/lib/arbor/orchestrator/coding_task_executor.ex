@@ -2756,6 +2756,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          worker_model: plan.worker["model"],
          checkpoint_policy: checkpoint_policy,
          checkpoint_work_packet_json: checkpoint_work_packet_json,
+         design_gate: execution_boundary_design_gate(plan, checkpoint_policy),
          rework_max_cycles: plan.rework["max_cycles"],
          rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,
@@ -2774,6 +2775,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp execution_boundary_checkpoint_binding(%Plan{}), do: {:ok, {"direct", "{}"}}
+
+  defp execution_boundary_design_gate(
+         %Plan{version: 2, work_packet: work_packet},
+         "design_required"
+       )
+       when is_map(work_packet) do
+    case Map.get(work_packet, "design_gate") || Map.get(work_packet, :design_gate) do
+      gate when gate in ["council", "council_then_operator"] -> gate
+      _operator -> "operator"
+    end
+  end
+
+  defp execution_boundary_design_gate(_plan, _checkpoint_policy), do: "operator"
 
   defp validate_prepared_execution_compilation(compilation, plan) do
     case Compilation.validate(compilation, plan) do

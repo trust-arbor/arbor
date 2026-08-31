@@ -3103,6 +3103,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
+    test "execution boundary preserves council design gate semantics" do
+      packet = %{
+        "version" => 1,
+        "success_criteria" => ["focused tests pass"],
+        "non_goals" => ["expand execution authority"],
+        "constraints" => ["preserve existing behavior"],
+        "architecture_refs" => ["apps/arbor_orchestrator"],
+        "required_evidence" => ["full executor test"],
+        "checkpoint_policy" => "design_required",
+        "design_gate" => "council_then_operator"
+      }
+
+      {:ok, packet_digest} = WorkPacket.digest(packet)
+
+      task =
+        valid_direct_task(%{
+          "version" => 2,
+          "worker" => %{
+            "provider" => "grok",
+            "model" => "grok-4.6",
+            "permission_mode" => "deny"
+          },
+          "work_packet" => packet,
+          "work_packet_digest" => packet_digest
+        })
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_council_design_gate",
+                 task,
+                 valid_context(%{"task_id" => "task_council_design_gate"})
+               )
+
+      {_path, opts} = last_run()
+
+      assert opts[:initial_values]["coding_plan_design_gate"] ==
+               "council_then_operator"
+    end
+
     test "invalid high-risk checkpoint policy returns a bounded typed admission failure" do
       task =
         valid_v2_direct_task(%{
