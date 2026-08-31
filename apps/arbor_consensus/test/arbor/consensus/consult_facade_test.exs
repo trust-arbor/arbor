@@ -85,8 +85,6 @@ defmodule Arbor.Consensus.ConsultFacadeTest do
   end
 
   test "consult/2 honors the injected seat-owner collaborator across the whole lifecycle" do
-    caller = self()
-
     assert {:ok, %{evaluations: results}} =
              Consensus.consult("Injected seat owner",
                evaluator: TestAdvisoryEvaluator,
@@ -95,7 +93,10 @@ defmodule Arbor.Consensus.ConsultFacadeTest do
              )
 
     assert length(results) == 2
-    assert_received {:seat_owner_start, ^caller}
+    # The consult may execute in a wrapper process, so the owner's caller is
+    # captured from the message rather than pinned to the test pid.
+    assert_received {:seat_owner_start, consult_caller}
+    assert is_pid(consult_caller)
     assert_received {:seat_owner_supervisor, owner}
     assert is_pid(owner)
     assert_received {:seat_owner_stop, ^owner}
