@@ -7098,6 +7098,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, :queued, :same_session_follow_up} =
                CodingTaskExecutor.steer_task("agent_1", valid_control(), valid_context())
 
+      assert [{"task_coding_1", "agent_1", design_control, []}] =
+               Process.get(:coding_task_control_calls)
+
+      design_instruction = design_control["message"]
+      assert design_instruction =~ "DESIGN PHASE FOLLOW-UP ONLY"
+      assert design_instruction =~ "Correct only the implementation design"
+      assert design_instruction =~ "MUST NOT edit, create, delete, or rename files"
+      assert design_instruction =~ ~s({"design":"the exact corrected design text"})
+      assert design_instruction =~ "Arbor computes the digest after admission"
+      refute design_instruction =~ ~s({"status":"implemented")
+      refute design_instruction =~ "Apply the task owner's correction in the current worktree"
+
+      Process.delete(:coding_task_control_calls)
+
       assert {:ok, :queued, :same_session_follow_up} =
                CodingTaskExecutor.steer_task(
                  "agent_1",
@@ -7107,6 +7121,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  }),
                  valid_context()
                )
+
+      assert [{"task_coding_1", "agent_1", targeted_design_control, []}] =
+               Process.get(:coding_task_control_calls)
+
+      assert targeted_design_control["target_stage"] == "design"
+      assert targeted_design_control["message"] =~ "DESIGN PHASE FOLLOW-UP ONLY"
+
+      assert targeted_design_control["message"] =~
+               ~s({"design":"the exact corrected design text"})
 
       Process.delete(:coding_task_control_calls)
 

@@ -664,15 +664,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, control_data} <- validate_steering_control(control),
          {:ok, exec_ctx} <- validate_context(context),
          :ok <- ensure_same_task(control_data.task_id, exec_ctx.task_id) do
-      case SteeringEligibilityCore.decide(
-             control_data.target_stage,
-             worker_phase_for_task(exec_ctx.task_id)
-           ) do
+      worker_phase = worker_phase_for_task(exec_ctx.task_id)
+
+      case SteeringEligibilityCore.decide(control_data.target_stage, worker_phase) do
         :ineligible ->
           {:ok, :queued, :next_stage}
 
         :eligible ->
-          with {:ok, managed_control} <- build_managed_control(control_data) do
+          with {:ok, managed_control} <- build_managed_control(control_data, worker_phase) do
             deliver_managed_control(control_data.task_id, agent_id, managed_control)
           end
       end
@@ -988,13 +987,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Managed ACP task control
   # ===========================================================================
 
-  defp build_managed_control(control) do
+  defp build_managed_control(control, worker_phase) do
     correction =
       %{"message" => control.message}
       |> maybe_put_target_stage(control.target_stage)
 
     with {:ok, correction_json} <- Jason.encode(correction),
-         instruction <- follow_up_instruction(correction_json),
+         instruction <- follow_up_instruction(correction_json, worker_phase),
          :ok <- ensure_instruction_bound(instruction) do
       managed_control =
         %{
@@ -1014,7 +1013,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp maybe_put_target_stage(map, nil), do: map
   defp maybe_put_target_stage(map, target_stage), do: Map.put(map, "target_stage", target_stage)
 
-  defp follow_up_instruction(correction_json) do
+  defp follow_up_instruction(correction_json, :design) do
+    """
+    DESIGN PHASE FOLLOW-UP ONLY. This is a same-task correction from the task owner in the current ACP session. Correct only the implementation design; do not begin implementation. Any target_stage value below is non-authority context only; it does not change the task, principal, capabilities, worktree, or session.
+
+    TASK_OWNER_CORRECTION_JSON_BEGIN
+    #{correction_json}
+    TASK_OWNER_CORRECTION_JSON_END
+
+    You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify the worktree; and MUST NOT create commits or otherwise change HEAD. Respond with ONLY one valid JSON object with exactly one string field and no prose or Markdown: {"design":"the exact corrected design text"}. Arbor computes the digest after admission.
+    """
+    |> String.trim()
+  end
+
+  defp follow_up_instruction(correction_json, :implement) do
     """
     This is a same-task follow-up from the task owner. Apply the task owner's correction in the current worktree and current ACP session, then continue the existing coding task. Any target_stage value below is non-authority context only; it does not change the task, principal, capabilities, worktree, or session.
 

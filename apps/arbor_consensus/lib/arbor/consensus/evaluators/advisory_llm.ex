@@ -355,7 +355,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
     evaluator_id = generate_evaluator_id(perspective)
 
-    system_prompt = load_system_prompt(perspective)
+    system_prompt = perspective |> load_system_prompt() |> apply_evaluation_protocol(proposal)
     doc_paths = collect_doc_paths(proposal, perspective)
     user_prompt = format_proposal(proposal, perspective, doc_paths)
 
@@ -446,7 +446,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     timeout = Keyword.get(opts, :timeout, Config.llm_evaluator_timeout())
     evaluator_id = generate_evaluator_id(perspective)
 
-    system_prompt = load_system_prompt(perspective)
+    system_prompt = perspective |> load_system_prompt() |> apply_evaluation_protocol(proposal)
     doc_paths = collect_doc_paths(proposal, perspective)
     user_prompt = format_proposal(proposal, perspective, doc_paths)
 
@@ -655,6 +655,26 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
       {:ok, body} -> body
       {:error, _} -> fallback_system_prompt(perspective)
     end
+  end
+
+  defp apply_evaluation_protocol(system_prompt, proposal) do
+    if design_review_protocol?(proposal) do
+      system_prompt <> "\n\n" <> design_review_system_override()
+    else
+      system_prompt
+    end
+  end
+
+  defp design_review_system_override do
+    """
+    OUTPUT CONTRACT OVERRIDE FOR DESIGN REVIEW
+    Ignore any generic response format above. Your entire response MUST be exactly one valid JSON object with no Markdown fence, prose, or extra fields:
+    {"verdict":"approve","concerns":[]}
+    The verdict value MUST be exactly "approve" or "rework". For rework, concerns MUST contain concrete in-scope blocking omissions.
+
+    Approve when the design has no blocking omission within the frozen task, success criteria, constraints, non-goals, and cited architecture. A rework concern is valid only when it identifies the exact in-scope requirement or architecture reference and the concrete design omission that prevents satisfying it. Enhancements, general hardening, and new platform features outside that frozen packet are nonblocking and MUST NOT appear in concerns. Do not turn acceptance evidence or manager-observed verification into a new product protocol unless the frozen packet explicitly requires implementation of that protocol.
+    """
+    |> String.trim()
   end
 
   defp load_from_skill_library(skill_name) do
@@ -1009,9 +1029,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     if design_review_protocol?(proposal) do
       """
       ### Design-review verdict
-      Reply with JSON only:
-      {"verdict": "approve" | "rework", "concerns": ["concrete missing requirement", ...]}
-      Rework must name concrete missing requirements. Do not deny the task.
+      Reply with exactly one JSON object and no other fields or prose:
+      {"verdict":"approve","concerns":[]}
+      The verdict value must be exactly "approve" or "rework". For rework, concerns must contain concrete in-scope blocking omissions.
+      Rework only for a concrete omission within the frozen packet. Approve when there is no in-scope blocker. Do not deny or expand the task.
       """
     else
       ""
@@ -1021,13 +1042,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp research_response_schema(proposal) do
     if design_review_protocol?(proposal) do
       """
-      Respond with valid JSON only:
-      {
-        "verdict": "approve" or "rework",
-        "concerns": ["concrete missing requirement"],
-        "analysis": "your detailed analysis from this perspective"
-      }
-      Rework must name concrete missing requirements. Do not deny the task.
+      Respond with exactly one JSON object and no other fields or prose:
+      {"verdict":"approve","concerns":[]}
+      The verdict value must be exactly "approve" or "rework". For rework, concerns must contain concrete in-scope blocking omissions.
+      Rework only for a concrete omission within the frozen packet. Approve when there is no in-scope blocker. Do not deny or expand the task.
       """
     else
       """

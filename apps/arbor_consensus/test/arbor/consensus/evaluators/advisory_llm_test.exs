@@ -657,8 +657,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
     test "requests a structured approve|rework verdict in the prompt" do
       test_pid = self()
 
-      capture_fn = fn _system_prompt, user_prompt ->
-        send(test_pid, {:user_prompt, user_prompt})
+      capture_fn = fn system_prompt, user_prompt ->
+        send(test_pid, {:prompts, system_prompt, user_prompt})
         {:ok, Jason.encode!(%{"verdict" => "approve", "concerns" => []})}
       end
 
@@ -668,10 +668,18 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                AdvisoryLLM.evaluate(proposal, :security, llm_fn: capture_fn)
 
       assert eval.vote == :approve
-      assert_receive {:user_prompt, user_prompt}
+      assert_receive {:prompts, system_prompt, user_prompt}
+      assert system_prompt =~ "OUTPUT CONTRACT OVERRIDE FOR DESIGN REVIEW"
+      assert system_prompt =~ "Ignore any generic response format above"
+      assert system_prompt =~ ~s({"verdict":"approve","concerns":[]})
+      assert system_prompt =~ ~s(verdict value MUST be exactly "approve" or "rework")
+      assert system_prompt =~ "frozen task, success criteria, constraints, non-goals"
+      assert system_prompt =~ "new platform features outside that frozen packet are nonblocking"
+      assert system_prompt =~ "manager-observed verification"
       assert user_prompt =~ "Design-review verdict"
       assert user_prompt =~ "approve"
       assert user_prompt =~ "rework"
+      assert user_prompt =~ "Do not deny or expand the task"
     end
 
     test "maps a rework verdict to reject with the named concerns" do

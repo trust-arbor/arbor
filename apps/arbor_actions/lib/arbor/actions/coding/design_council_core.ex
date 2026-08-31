@@ -22,7 +22,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
 
   @question_preamble """
   Advisory design review. Each seat must answer approve or rework.
-  Rework answers must name concrete missing requirements. This council cannot deny the task.
+  Judge only the frozen task, success criteria, constraints, non-goals, architecture refs, and design below.
+  Rework only for a concrete in-scope requirement or cited architecture rule the design omits; name both the requirement and omission.
+  Enhancements, general hardening, and new platform features outside this packet are nonblocking and must not be raised as rework concerns.
+  Acceptance evidence and manager-observed verification do not imply a new product protocol unless the packet explicitly requires one.
+  Approve when no in-scope blocker remains. This council cannot deny or expand the task.
   """
 
   @section_labels %{

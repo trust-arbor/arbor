@@ -135,6 +135,10 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     }
 
     assert {:ok, question} = DesignCouncilCore.build_question(packet, task, design)
+    assert question =~ "Judge only the frozen task, success criteria, constraints, non-goals"
+    assert question =~ "new platform features outside this packet are nonblocking"
+    assert question =~ "manager-observed verification"
+    assert question =~ "cannot deny or expand the task"
     assert question =~ "Task:"
     assert question =~ "Success criteria:"
     assert question =~ "Constraints:"
