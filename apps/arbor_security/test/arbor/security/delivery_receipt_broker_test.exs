@@ -27,9 +27,7 @@ defmodule Arbor.Security.DeliveryReceiptBrokerTest do
         clock: fn -> Clock.now(clock) end
       )
 
-    on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-    end)
+    on_exit(fn -> stop_broker(pid) end)
 
     {:ok, broker: name, pid: pid, clock: clock}
   end
@@ -171,14 +169,10 @@ defmodule Arbor.Security.DeliveryReceiptBrokerTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
 
     # Fresh process, empty map
-    {:ok, _pid2} = DeliveryReceiptBroker.start_link(name: name, ttl_ms: 30_000, max_entries: 16)
+    {:ok, pid2} = DeliveryReceiptBroker.start_link(name: name, ttl_ms: 30_000, max_entries: 16)
+    true = Process.unlink(pid2)
 
-    on_exit(fn ->
-      case Process.whereis(name) do
-        pid when is_pid(pid) -> GenServer.stop(pid, :normal, 1_000)
-        _ -> :ok
-      end
-    end)
+    on_exit(fn -> stop_broker(pid2) end)
 
     assert {:error, :invalid_receipt} =
              DeliveryReceiptBroker.consume(name, token, "arbor://r/1", :chat)
@@ -205,5 +199,11 @@ defmodule Arbor.Security.DeliveryReceiptBrokerTest do
                "arbor://r/1",
                :chat
              )
+  end
+
+  defp stop_broker(pid) do
+    GenServer.stop(pid, :normal, 1_000)
+  catch
+    :exit, {:noproc, _} -> :ok
   end
 end
