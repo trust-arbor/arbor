@@ -21,6 +21,15 @@ defmodule Arbor.Agent.SeedTest do
   @agent_id "test_seed_agent"
   @memory_store :arbor_memory_durable
 
+  setup do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    root = Path.join(System.tmp_dir!(), "seed-" <> token)
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{tmp_dir: root}
+  end
+
   defmodule CaptureFailingBackend do
     @moduledoc false
     @behaviour Arbor.Contracts.Persistence.Store
@@ -875,7 +884,6 @@ defmodule Arbor.Agent.SeedTest do
   # ============================================================================
 
   describe "save_to_file/2 and load_from_file/1" do
-    @tag :tmp_dir
     test "roundtrip to file preserves state", %{tmp_dir: dir} do
       seed =
         Seed.new(@agent_id,

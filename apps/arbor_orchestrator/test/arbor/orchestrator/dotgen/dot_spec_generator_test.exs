@@ -4,6 +4,15 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGeneratorTest do
 
   alias Arbor.Orchestrator.Dotgen.DotSpecGenerator
 
+  setup do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    root = Path.join(System.tmp_dir!(), "dot-spec-" <> token)
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{tmp_dir: root}
+  end
+
   @simple_pipeline """
   digraph SimplePipeline {
     graph [goal="Process a file and validate output"]
@@ -103,7 +112,6 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGeneratorTest do
   end
 
   describe "generate_from_file/1" do
-    @tag :tmp_dir
     test "reads and generates from file", %{tmp_dir: tmp_dir} do
       path = Path.join(tmp_dir, "test.dot")
       File.write!(path, @simple_pipeline)
@@ -119,7 +127,6 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGeneratorTest do
   end
 
   describe "generate_from_files/2" do
-    @tag :tmp_dir
     test "combines specs from multiple files", %{tmp_dir: tmp_dir} do
       path1 = Path.join(tmp_dir, "simple.dot")
       path2 = Path.join(tmp_dir, "branch.dot")
@@ -134,7 +141,6 @@ defmodule Arbor.Orchestrator.Dotgen.DotSpecGeneratorTest do
       assert combined =~ "BranchPipeline"
     end
 
-    @tag :tmp_dir
     test "returns error when any file fails", %{tmp_dir: tmp_dir} do
       path1 = Path.join(tmp_dir, "good.dot")
       File.write!(path1, @simple_pipeline)

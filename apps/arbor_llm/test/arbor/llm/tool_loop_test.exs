@@ -17,6 +17,15 @@ defmodule Arbor.LLM.ToolLoopTest do
   alias Arbor.LLM.ToolLoop
   @moduletag :fast
 
+  setup do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    root = Path.join(System.tmp_dir!(), "tool-loop-" <> token)
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{tmp_dir: root}
+  end
+
   # --- Mock tool executor ---
 
   defmodule MockTools do
@@ -599,7 +608,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       refute instruction =~ "Do NOT output any tool calls or JSON"
     end
 
-    @tag :tmp_dir
     test "security regression: tool results reuse the caller's prompt-fence nonce", %{
       tmp_dir: tmp_dir
     } do
@@ -620,7 +628,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       refute result.content =~ ~r/<data_(?!0123456789abcdef)[0-9a-f]{16}>/
     end
 
-    @tag :tmp_dir
     test "tool_find_tools result merges the discovered tool into the callable set (discover->invoke regression)",
          %{tmp_dir: tmp_dir} do
       :persistent_term.put({DiscoveryAdapter, :pid}, self())
@@ -675,7 +682,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.finish_reason == :max_turns
     end
 
-    @tag :tmp_dir
     test "single tool call round trip", %{tmp_dir: tmp_dir} do
       # Create the file the mock will try to read
       File.write!(Path.join(tmp_dir, "hello.txt"), "world")
@@ -695,7 +701,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.finish_reason == :stop
     end
 
-    @tag :tmp_dir
     test "multi-turn write then read", %{tmp_dir: tmp_dir} do
       client = build_client(MultiToolAdapter)
 
@@ -713,7 +718,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert File.read!(Path.join(tmp_dir, "output.txt")) == "hello world"
     end
 
-    @tag :tmp_dir
     test "max_turns prevents infinite loops", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "x.txt"), "data")
 
@@ -761,7 +765,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.finish_reason == :max_turns
     end
 
-    @tag :tmp_dir
     test "a mid-turn message is folded in as steering at the iteration boundary", %{
       tmp_dir: tmp_dir
     } do
@@ -806,7 +809,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.tool_rounds == 1
     end
 
-    @tag :tmp_dir
     test "accumulates usage across turns", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "data")
 
@@ -822,7 +824,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.usage.total_tokens == 23
     end
 
-    @tag :tmp_dir
     test "merges usage when :cost is a nested map (regression: :badarith on 0 + cost_map)",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "data")
@@ -847,7 +848,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.usage.cost.total > 2.0e-6
     end
 
-    @tag :tmp_dir
     test "retries text-only when the model finishes empty after a tool round (regression)",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "data")
@@ -865,7 +865,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.content == "Final answer"
     end
 
-    @tag :tmp_dir
     test "retries text-only when the model finishes with WHITESPACE after a tool round (Bug A regression)",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "data")
@@ -883,7 +882,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.content == "Final answer"
     end
 
-    @tag :tmp_dir
     test "streaming path (complete_streaming) preserves tool args + fires deltas (regression)",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "world")
@@ -907,7 +905,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.tool_rounds == 2
     end
 
-    @tag :tmp_dir
     test "on_tool_call callback fires", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "hello.txt"), "data")
 
@@ -1115,7 +1112,6 @@ defmodule Arbor.LLM.ToolLoopTest do
                )
     end
 
-    @tag :tmp_dir
     test "max_turns inspection rounds may be followed by one reserved terminal submission", %{
       tmp_dir: tmp_dir
     } do
@@ -1140,7 +1136,6 @@ defmodule Arbor.LLM.ToolLoopTest do
              }
     end
 
-    @tag :tmp_dir
     test "reserved post-max_turns request exposes only terminal tools with forced tool_choice",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
@@ -1176,7 +1171,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert Enum.any?(messages, &(&1.role == :user and &1.content =~ "exhausted"))
     end
 
-    @tag :tmp_dir
     test "terminal reservation after max_turns is exactly once and fails closed without submission",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
@@ -1214,7 +1208,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       refute_receive {:llm_call, _}
     end
 
-    @tag :tmp_dir
     test "reserved terminal-only request rejects fabricated non-terminal call before execution",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
@@ -1256,7 +1249,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       refute_receive {:reserved_tool_executed, _name}
     end
 
-    @tag :tmp_dir
     test "reserved terminal-only request reports mixed and multiple terminal call shapes",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "snapshot.txt"), "review evidence")
@@ -1296,7 +1288,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       end)
     end
 
-    @tag :tmp_dir
     test "reserved rejection telemetry bounds tool names and excludes arguments", %{
       tmp_dir: tmp_dir
     } do
@@ -1367,7 +1358,6 @@ defmodule Arbor.LLM.ToolLoopTest do
       refute_receive {:reserved_tool_executed, _name}
     end
 
-    @tag :tmp_dir
     test "max_turns without terminal_tools still uses free-form wrap-up (non-terminal unchanged)",
          %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "x.txt"), "data")

@@ -5,6 +5,15 @@ defmodule Arbor.Common.SafePathTest do
 
   @moduletag :fast
 
+  setup do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    root = Path.join(System.tmp_dir!(), "safe-path-" <> token)
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{tmp_dir: root}
+  end
+
   describe "validate/1" do
     test "accepts normal paths" do
       assert :ok = SafePath.validate("file.txt")
@@ -260,7 +269,6 @@ defmodule Arbor.Common.SafePathTest do
   end
 
   describe "resolve_real/1" do
-    @tag :tmp_dir
     test "resolves existing paths", %{tmp_dir: tmp_dir} do
       # Create a test file
       test_file = Path.join(tmp_dir, "test.txt")
@@ -274,7 +282,6 @@ defmodule Arbor.Common.SafePathTest do
       assert {:error, :not_found} = SafePath.resolve_real("/definitely/does/not/exist/12345")
     end
 
-    @tag :tmp_dir
     test "follows symlinks", %{tmp_dir: tmp_dir} do
       # Create a file and a symlink to it
       real_file = Path.join(tmp_dir, "real.txt")
@@ -394,7 +401,6 @@ defmodule Arbor.Common.SafePathTest do
   # ==========================================================================
 
   describe "resolve_real edge cases" do
-    @tag :tmp_dir
     test "resolves symlink chains", %{tmp_dir: tmp_dir} do
       real_file = Path.join(tmp_dir, "real.txt")
       link1 = Path.join(tmp_dir, "link1.txt")
@@ -408,7 +414,6 @@ defmodule Arbor.Common.SafePathTest do
       assert String.ends_with?(resolved, "real.txt")
     end
 
-    @tag :tmp_dir
     test "resolves relative symlinks", %{tmp_dir: tmp_dir} do
       subdir = Path.join(tmp_dir, "subdir")
       File.mkdir_p!(subdir)

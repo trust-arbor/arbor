@@ -4,6 +4,15 @@ defmodule Arbor.Orchestrator.Authoring.TemplateRegistryTest do
 
   alias Arbor.Orchestrator.Authoring.TemplateRegistry
 
+  setup do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    root = Path.join(System.tmp_dir!(), "template-registry-" <> token)
+    File.mkdir!(root)
+    File.chmod!(root, 0o700)
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{tmp_dir: root}
+  end
+
   describe "list/0" do
     test "returns a list" do
       result = TemplateRegistry.list()
@@ -40,7 +49,6 @@ defmodule Arbor.Orchestrator.Authoring.TemplateRegistryTest do
   end
 
   describe "with temporary templates" do
-    @tag :tmp_dir
     test "list discovers .dot files", %{tmp_dir: tmp_dir} do
       # Create test templates
       dot_content = """
