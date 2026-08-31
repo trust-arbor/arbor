@@ -1386,6 +1386,16 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     |> put_design_artifact_source(opts, optional?: false)
   end
 
+  defp maybe_put_design_artifact_boundary(
+         context,
+         Arbor.Actions.Coding.DesignCouncilReview,
+         opts
+       ) do
+    context
+    |> put_design_artifact_boundary_error(opts)
+    |> put_design_artifact_source(opts, optional?: false)
+  end
+
   defp maybe_put_design_artifact_boundary(context, _action_module, _opts), do: context
 
   defp maybe_put_cross_app_static_receipt_boundary(

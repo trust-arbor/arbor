@@ -538,7 +538,7 @@ not opt into legacy behavior. Minimally required plan fields:
 | `task` | Non-blank work description |
 | `repo_root` | Absolute repository path inside configured workspace roots |
 | `worker.provider` | Worker provider id (for example `codex`) |
-| `work_packet` | Canonical bounded work intent; high-risk classes require `checkpoint_policy: "design_required"` |
+| `work_packet` | Canonical bounded work intent; high-risk classes require `checkpoint_policy: "design_required"`. Optional `design_gate` selects who admits that design: `"operator"` (default — the existing operator checkpoint only), `"council"` (advisory council only), or `"council_then_operator"` (advisory council, then the existing operator checkpoint). An absent key is `"operator"`. |
 | `work_packet_digest` | Exact `sha256:` digest of the canonical packet |
 | `requested_paths` | Required and nonempty for `security_regression`; repository-relative `_test.exs` files used for exact-parent overlay verification |
 

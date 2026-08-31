@@ -6,6 +6,7 @@ children = [
   Arbor.Consensus.EventStore,
   {Registry, keys: :unique, name: Arbor.Consensus.EvaluatorAgent.Registry},
   Arbor.Consensus.EvaluatorAgent.Supervisor,
+  Arbor.Consensus.ConsultationFinalizer.Supervisor,
   Arbor.Consensus.Coordinator
 ]
 
