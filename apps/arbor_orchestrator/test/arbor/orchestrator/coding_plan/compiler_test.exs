@@ -2230,8 +2230,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:unsupported_v1_feature, "overlays"}} =
              compile(plan!(%{"overlays" => ["security_regression"]}), ctx)
 
-    assert {:error, {:unsupported_v1_feature, "rework.stop_conditions"}} =
-             compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
+    # rework.stop_conditions became a supported v1 feature (36d3c7da5).
+    assert {:ok, _} = compile(plan!(%{"rework" => %{"stop_conditions" => ["declined"]}}), ctx)
 
     assert {:error, {:unsupported_v1_feature, "budgets.model_cost_usd"}} =
              compile(plan!(%{"budgets" => %{"model_cost_usd" => 1.0}}), ctx)
@@ -2586,7 +2586,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
            ~r/coding_plan_action_catalog_digest="?([a-f0-9]{64})/,
            compilation.dot_source
          ) do
-      [_, digest] -> String.replace(json, digest, "ACTION_CATALOG_DIGEST")
+      [_, digest] ->
+        json
+        |> String.replace(digest, "ACTION_CATALOG_DIGEST")
+        |> String.replace("=\\\"ACTION_CATALOG_DIGEST\\\"", "=ACTION_CATALOG_DIGEST")
       _ -> json
     end
   end
