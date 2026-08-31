@@ -2574,22 +2574,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   # identity. Content-derived digests (plan fingerprint, work-packet digest)
   # stay asserted verbatim.
   defp serialized_compilation_fixture(compilation) do
-    # Per-action beam_sha256 values in the execution manifest are loaded-BEAM
-    # identity and differ across builds/hosts, exactly like the catalog
-    # digest. Normalize them so the fixtures assert graph/binding identity
-    # and stay host-portable.
+    # Build-identity channels are normalized so the fixtures assert
+    # graph/binding identity and stay host-portable: the catalog digest,
+    # per-action/handler beam_sha256, compiled_graph_hash, and bare
+    # manifest graph_hash all differ across builds and hosts.
     compilation
     |> serialized_compilation_fixture_raw()
     |> then(&Regex.replace(~r/"beam_sha256":"[a-f0-9]{64}"/, &1, ~s("beam_sha256":"BEAM_SHA256")))
     |> then(
-      # compiled_graph_hash covers the execution manifest, so it inherits
-      # BEAM identity transitively — third build-identity channel.
       &Regex.replace(
         ~r/"compiled_graph_hash":"[a-f0-9]{64}"/,
         &1,
         ~s("compiled_graph_hash":"COMPILED_GRAPH_HASH")
       )
     )
+    |> then(&Regex.replace(~r/"graph_hash":"[a-f0-9]{64}"/, &1, ~s("graph_hash":"GRAPH_HASH")))
   end
 
   defp serialized_compilation_fixture_raw(compilation) do
