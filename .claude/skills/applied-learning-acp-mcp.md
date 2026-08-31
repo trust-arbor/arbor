@@ -295,7 +295,13 @@ turn and identical test bytes that fail the follow-up's immediate parent. Its
 `requested_paths` are exact regression-test selectors, not a write-scope list;
 supplying production paths is rejected as `invalid_security_regression_paths`
 (found 2026-08-23 after a B2C3 correction was first over-classified, then correctly
-redispatched without salvaging its task-owned dirty design worktree).
+redispatched without salvaging its task-owned dirty design worktree). A task class also
+selects executable proof, not just a conceptual label: `contract_change` requires a
+recognized contract surface, so an internal Orchestrator terminal-publication fix belongs
+under `default` even when its prose discusses evidence contracts. If the selected validator
+reports that its required surface is absent, cancel before rework; that is a dispatch
+classification defect, not an instruction to fabricate an unrelated surface (found
+2026-08-31 in `task_f3f37143f3fe6646d7be9a7c4eab1dd2`).
 
 <!-- applied-learning: structured-coding-dispatch-requires-the-task-kind-envelope -->
 <a id="applied-learning-structured-coding-dispatch-requires-the-task-kind-envelope"></a>
