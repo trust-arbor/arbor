@@ -61,6 +61,8 @@ required_capabilities:
   resource: "arbor://orchestrator/execute"
 - description: "Open and await the pipeline-internal durable design checkpoint"
   resource: "arbor://action/coding/design_checkpoint/**"
+- description: "Run the pipeline-internal advisory design council gate"
+  resource: "arbor://action/coding/design_council_review"
 - description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
   resource: "arbor://action/coding/reviewed_commit"
 - description: "Run the pipeline-internal reviewed validation gate while the exact nested validator remains approval-gated"
@@ -111,6 +113,7 @@ trust_preset:
     "arbor://action/session_goals/prune_stale_intents": auto
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/design_checkpoint": auto
+    "arbor://action/coding/design_council_review": auto
     "arbor://action/coding/reviewed_commit": auto
     "arbor://action/coding/reviewed_validation": auto
     "arbor://action/coding/worker_terminal/parse": auto

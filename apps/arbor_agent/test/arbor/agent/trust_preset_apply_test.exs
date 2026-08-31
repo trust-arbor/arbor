@@ -211,6 +211,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       auto_uris = [
         "arbor://action/coding/design_checkpoint/open",
         "arbor://action/coding/design_checkpoint/await",
+        "arbor://action/coding/design_council_review",
         "arbor://action/coding/workspace/acquire",
         "arbor://action/coding/workspace/inspect",
         "arbor://action/coding/workspace/committed_change",
@@ -260,6 +261,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       uris = Enum.map(caps, & &1.resource_uri)
       assert "arbor://action/coding/design_checkpoint/**" in uris
+      assert "arbor://action/coding/design_council_review" in uris
       assert "arbor://action/coding/dependency_baseline/check" in uris
 
       refute Enum.any?(

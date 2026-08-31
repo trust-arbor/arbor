@@ -329,6 +329,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/coding/review_tree/search" in resources
       assert "arbor://action/coding/review/submit" in resources
       assert "arbor://action/coding/design_checkpoint/**" in resources
+      assert "arbor://action/coding/design_council_review" in resources
       assert "arbor://action/coding/reviewed_commit" in resources
       assert "arbor://action/coding/reviewed_validation" in resources
       assert "arbor://action/coding/worker_terminal/parse" in resources
@@ -365,6 +366,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
       assert preset["rules"]["arbor://action/coding/design_checkpoint"] == "auto"
+      assert preset["rules"]["arbor://action/coding/design_council_review"] == "auto"
       assert preset["rules"]["arbor://action/coding/reviewed_commit"] == "auto"
       assert preset["rules"]["arbor://action/coding/reviewed_validation"] == "auto"
       assert preset["rules"]["arbor://action/coding/worker_terminal/parse"] == "auto"

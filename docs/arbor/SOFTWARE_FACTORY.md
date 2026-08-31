@@ -569,8 +569,11 @@ checkpoint path.
 
 `council` and `council_then_operator` add
 `arbor://action/coding/design_council_review` to the compiled graph's
-authority horizon. Grant that URI to the caller the same way as the other
-coding-action horizon members (`mix arbor.coding.grant`). Direct plans and
+authority horizon. The built-in coding-agent template grants this
+pipeline-internal action to the execution principal with `auto` trust. Existing
+long-lived coding agents must reconcile that template authority (or receive the
+same capability and trust rule directly); granting it only to the authenticated
+MCP caller does not satisfy the execution-principal horizon. Direct plans and
 `design_gate=operator` (or an absent gate) do not add it.
 
 The `security_regression` validation profile also requires a nonempty
