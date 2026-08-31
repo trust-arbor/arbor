@@ -167,7 +167,7 @@ mode `0400`. Override the path with `ARBOR_VALIDATION_RUNTIME_CONFIG_PATH`.
 `runtime_probe_failed` and names the `podman` driver; it is not hidden behind
 `validation_capacity`.
 
-**Time (measured 2026-08-27 on 10.42.42.42, native, fresh HOME, run 11w)**
+**Time (measured 2026-08-27 on a Linux VM, native, fresh HOME, run 11w)**
 
 - First `./bin/mix arbor.baseline.build` ≈13 min (image + `deps.compile` +
   persist compiled `_build`).
@@ -303,12 +303,23 @@ horizon = report["planes"]["executor"]["details"]["projection"]["authority_horiz
 # means the report is malformed — grant nothing from it.
 alias Arbor.Contracts.Security.CapabilityUri
 
-uris =
+# The horizon enumerates TWO principal roles: the authenticated_caller (your
+# key-file identity) and the execution_principal (the coordinator that runs
+# the task). Each missing URI must be granted to the principal whose finding
+# named it — a caller-only grant leaves the coordinator blocked at preflight.
+role_to_principal = %{
+  "authenticated_caller" => caller,
+  "execution_principal" => target
+}
+
+grants =
   for finding <- horizon["findings"],
-      finding["principal_role"] == "authenticated_caller",
+      principal = role_to_principal[finding["principal_role"]],
       finding["classification"] == "missing",
       uri <- List.wrap(finding["resource_uris"]),
-      do: uri
+      do: {principal, uri}
+
+uris = Enum.map(grants, fn {_principal, uri} -> uri end)
 
 admitted =
   Enum.map(uris, fn uri ->
@@ -324,16 +335,46 @@ admitted =
   end)
 
 case Enum.find(admitted, &match?({:error, _}, &1)) do
-  nil -> for {:ok, uri} <- admitted, do: {:ok, _} = Arbor.Security.grant(principal: caller, resource: uri)
+  nil ->
+    admitted_uris = for {:ok, uri} <- admitted, do: uri
+
+    for {principal, uri} <- grants, uri in admitted_uris do
+      {:ok, _} = Arbor.Security.grant(principal: principal, resource: uri)
+    end
+
   {:error, reason} -> raise "malformed readiness report, granting nothing: #{inspect(reason)}"
 end
 ```
 
 The coordinator also needs the template capabilities; `mix arbor.agent start
-coding_agent` requests them at creation. If readiness later reports
-`authority_horizon_missing`, grant the named URI to the **caller** (horizon
-is a caller check) and confirm the coordinator still holds the matching
-execution grant. The Mix task is that caller-grant loop.
+coding_agent` requests them at creation.
+
+**The horizon checks BOTH principals, but `mix arbor.coding.grant` closes only
+the caller's gaps** (2026-08-31, first design-gated dispatch on a fresh factory host). The task grants
+to the key-file caller and skips `execution_principal` findings entirely, so it
+can print `converged` while dispatch still fails preflight with
+`authority_horizon_missing` / `principal_role=execution_principal` — typically
+when a new pipeline version introduces a new action URI (e.g.
+`arbor://action/coding/design_council_review`) the coordinator has never held.
+When you see that signature, grant the named URI to the **coordinator** by
+hand on the live node:
+
+```bash
+./bin/mix arbor.rpc 'Arbor.Security.grant(principal: "agent_<coordinator>", resource: "arbor://action/coding/<new_uri>")'
+```
+
+A capability alone may still not be enough: `ApprovalGuard` consults the
+coordinator's **trust profile** separately, and a URI with no rule falls to the
+baseline (`:block` for egress-classed actions — the run dies at the action with
+`Policy denied` in the node log even though the capability signed fine). Mirror
+the sibling rule's mode (coding URIs use `:auto`; bare prefix, never `/**`):
+
+```bash
+./bin/mix arbor.rpc 'Arbor.Trust.Store.update_profile("agent_<coordinator>", &Arbor.Trust.Authority.set_rule(&1, "arbor://action/coding/<new_uri>", :auto))'
+```
+
+Verify both layers with `Arbor.Trust.explain/2` and a fresh readiness probe.
+See `.claude/skills/agent-security-gates.md` for the full gate checklist.
 
 ### Grok worker OAuth
 
@@ -492,6 +533,21 @@ Two remote-operation traps (2026-08-29):
   client shows as `ssh: Connection refused` for about a minute. Poll no
   faster than once a second, or multiplex (`ControlMaster auto` in
   `~/.ssh/config`) so polling reuses one connection.
+
+Three more onboarding traps for a fresh factory host (2026-08-31):
+
+- **Council seats need provider credentials on the factory host.** The binding
+  review and design councils call frontier providers directly from the host's
+  node; a host whose `.env` lacks the provider keys fails the run at the
+  council (`design_council_failed`) after the worker turn has already been
+  paid for. Copy the provider key set and `ARBOR_COUNCIL_PERSPECTIVE_MODELS`
+  into the host's `.env` — machine-to-machine, never through a pasteboard or
+  chat transcript — and **restart the node**; `.env` is read only at boot.
+- **New pipeline URIs need capability + trust rule on the coordinator** —
+  see the authority-horizon section above for both one-liners.
+- **A restarted node keeps DB-backed state** (trust profile rules survive),
+  but re-run the readiness probe after any restart and re-grant whatever the
+  execution principal is missing before dispatching.
 
 Use a tiny, reversible packet. The point is to prove admission, worker
 launch, validation, and review — not to land a feature.
