@@ -6,6 +6,7 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
   @moduletag :security
 
   alias Arbor.Actions.Security.{DetectorSpec, DetectorTemplate, DetectorTestTemplate}
+  alias Arbor.Actions.TestSupport.GeneratedExUnitRunner
   alias Arbor.Contracts.Security.Finding
 
   # Build an S1 spec + its detector source (the fail-open authz shape).
@@ -63,16 +64,6 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
     )
   end
 
-  # Compile a generated ExUnit test source. The generated module `use ExUnit.Case`,
-  # so it auto-registers and ExUnit re-runs it at this suite's end — which is a
-  # FEATURE: it proves end-to-end that the generated test's own positive/FP
-  # assertions pass against the real detector. (Every excerpt fed here is
-  # therefore chosen to make the generated test legitimately pass.)
-  defp compile_generated(source) do
-    [{mod, _bin} | _] = Code.compile_string(source)
-    mod
-  end
-
   describe "S1 generated test compiles + asserts correctly" do
     test "positive test flags a confirmed sibling; FP test stays quiet on a refuted excerpt" do
       spec = s1_spec()
@@ -110,9 +101,9 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
             "Arbor.Eval.Checks.Synthesized.Det1_#{System.unique_integer([:positive])}"
         )
 
-      # The generated source compiles, and its own assertions hold: run it.
-      mod = compile_generated(source)
-      assert {:module, ^mod} = Code.ensure_compiled(mod)
+      # Registration after the parent suite starts is racy and may silently skip
+      # these tests. A fresh VM proves the generated suite actually runs.
+      assert %{total: 2, failures: 0} = GeneratedExUnitRunner.run!(source)
 
       # Behaviorally exercise the embedded detector via the same idiom the
       # generated test uses (parse the inert excerpt → run/1).
@@ -142,7 +133,7 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
 
       # Compiles even with no siblings; the positive uses the spec fallback.
       assert is_binary(source)
-      _mod = compile_generated(source)
+      assert %{total: 1, failures: 0} = GeneratedExUnitRunner.run!(source)
     end
   end
 
@@ -208,7 +199,7 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
              |> String.split("Code.compile_string")
              |> length() == 2
 
-      _mod = compile_generated(source)
+      assert %{total: 2, failures: 0} = GeneratedExUnitRunner.run!(source)
     end
   end
 
@@ -266,8 +257,8 @@ defmodule Arbor.Actions.Security.DetectorTestTemplateTest do
       refute String.contains?(source, "log(\"" <> interp_open <> "File.write!")
       assert String.contains?(source, "\\" <> interp_open <> "File.write!")
 
-      # Compiling the generated source MUST NOT execute the payload.
-      _mod = compile_generated(source)
+      # Running the generated suite MUST NOT execute the compile-time payload.
+      assert %{total: 1, failures: 0} = GeneratedExUnitRunner.run!(source)
 
       refute File.exists?(sentinel),
              "INJECTION: the interpolation payload executed at compile time — hardening failed"

@@ -6,6 +6,7 @@ defmodule Arbor.Actions.Security.DetectorSynthesisLoopTest do
   @moduletag :security
 
   alias Arbor.Actions.Security.{DetectorProposal, DetectorSynthesisLoop}
+  alias Arbor.Actions.TestSupport.GeneratedExUnitRunner
   alias Arbor.Contracts.Security.Finding
 
   # A fixture tree: the seed file (fail-open authorize) + two SIBLING files with
@@ -113,9 +114,14 @@ defmodule Arbor.Actions.Security.DetectorSynthesisLoopTest do
                  String.replace(proposal.module_source, proposal.module_name, mod_name)
                )
 
-      # test_source compiles.
+      # Run the generated suite in a fresh VM so its ExUnit cases register before
+      # execution starts and its assertions are part of the evidence.
       tname = "Arbor.Eval.Checks.Synthesized.LoopTest_#{System.unique_integer([:positive])}"
-      assert [{_, _} | _] = Code.compile_string(rename_test_module(proposal.test_source, tname))
+
+      assert %{total: 1, failures: 0} =
+               proposal.test_source
+               |> rename_test_module(tname)
+               |> GeneratedExUnitRunner.run!()
     end
 
     test "mixed verdicts above floor → admitted, FP hits captured" do
