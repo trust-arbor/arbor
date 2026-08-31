@@ -333,7 +333,7 @@
     {
       "source_ordinal": 28,
       "slug": "hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
-      "title": "Hysun's estimates run 2\u20134x conservative; the real constraint is decision bandwidth, not implementation speed.",
+      "title": "Hysun's estimates run 2–4x conservative; the real constraint is decision bandwidth, not implementation speed.",
       "topic": "testing-live-runtime",
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
@@ -362,7 +362,7 @@
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-don-t-prematurely-cap-max-tokens",
       "source_date": "2026-07-01",
-      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` \u2192 `session.max_tokens`); prefer leaving it unset over guessing a low number.",
+      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` → `session.max_tokens`); prefer leaving it unset over guessing a low number.",
       "content_sha256": "3dbb4dbbc6bba30169343fa26a1772fe2f11eddfa848e9869dfb011e62b9dc3a",
       "always_loaded": true
     },
@@ -861,7 +861,7 @@
     {
       "source_ordinal": 72,
       "slug": "trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
-      "title": "Trust-policy rules match by URI PREFIX, not glob \u2014 never write `/",
+      "title": "Trust-policy rules match by URI PREFIX, not glob — never write `/",
       "topic": "security-gates",
       "destination": ".claude/skills/agent-security-gates.md",
       "anchor": "applied-learning-trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
@@ -8422,7 +8422,7 @@
       "source_date": "2026-08-25",
       "source_incident": "found 2026-08-25 auditing the memory tool surface",
       "always_loaded": false,
-      "content_sha256": "bb9dc6e826d5cc19de1174024b734555cddcd3d805719369ce5d804eea804961"
+      "content_sha256": "d251cf8e418784ee9d087e868dccba716eaf3ae4a10d7afa5329174e01036013"
     },
     {
       "source_ordinal": 684,
