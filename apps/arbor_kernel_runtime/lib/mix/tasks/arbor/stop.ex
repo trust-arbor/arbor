@@ -141,7 +141,11 @@ defmodule Mix.Tasks.Arbor.Stop do
   # tracking state — SIGTERM is not guaranteed to be immediate (or heeded
   # at all), so cleaning up unconditionally right after sending it could
   # discard the only record of a daemon that's still alive.
-  @force_stop_confirm_timeout_ms 5_000
+  # SIGTERM starts a fresh graceful OTP shutdown. A loaded 25-app node can
+  # legitimately spend four seconds in ssl_connection_sup alone, so the old
+  # five-second bound produced false negatives while the BEAM was still
+  # converging normally. Keep the wait bounded and preserve tracking on expiry.
+  @force_stop_confirm_timeout_ms 15_000
 
   # Reverifies `pid`'s identity as `expected_node` immediately before ever
   # signaling it (via the shared `Config.signal_if_verified/3` boundary,
