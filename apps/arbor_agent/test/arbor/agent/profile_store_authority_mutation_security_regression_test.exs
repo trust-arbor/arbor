@@ -354,6 +354,21 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
   @store_name :arbor_agent_profiles
 
   setup do
+    legacy_dir =
+      Path.join(
+        Path.expand(System.tmp_dir!()),
+        "arbor_profile_authority_mutation_test_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(legacy_dir)
+    previous_legacy_dir = Application.fetch_env(:arbor_agent, :legacy_agents_dir)
+    Application.put_env(:arbor_agent, :legacy_agents_dir, legacy_dir)
+
+    on_exit(fn ->
+      restore_fetched_env(:arbor_agent, :legacy_agents_dir, previous_legacy_dir)
+      File.rm_rf!(legacy_dir)
+    end)
+
     NodeRestartCAS.clear_flags()
     :ok
   end
@@ -368,8 +383,6 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
   # and the candidate branch of the marquee); gated so they are not compiled
   # (and thus not reported unused) on builds lacking the mutation API.
   if @mutation_available do
-    @legacy_dir ".arbor/agents"
-
     defp start_node_restart_store do
       NodeRestartCAS.clear_flags()
       start_supervised!(NodeRestartCAS)
@@ -466,8 +479,9 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
     end
 
     defp legacy_path(agent_id) do
-      File.mkdir_p!(@legacy_dir)
-      Path.join(@legacy_dir, "#{agent_id}.agent.json")
+      legacy_dir = Application.fetch_env!(:arbor_agent, :legacy_agents_dir)
+      File.mkdir_p!(legacy_dir)
+      Path.join(legacy_dir, "#{agent_id}.agent.json")
     end
 
     defp write_legacy_json(agent_id, data) do
@@ -1186,4 +1200,9 @@ defmodule Arbor.Agent.ProfileStoreAuthorityMutationSecurityRegressionTest do
       end
     end
   end
+
+  defp restore_fetched_env(app, key, :error), do: Application.delete_env(app, key)
+
+  defp restore_fetched_env(app, key, {:ok, value}),
+    do: Application.put_env(app, key, value)
 end
