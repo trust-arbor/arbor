@@ -37,21 +37,29 @@ defmodule Arbor.Consensus.ConsultFacadeTest do
 
   defmodule RecordingSeatOwner do
     alias Arbor.Consensus.ConsultSeatOwner
-    alias Arbor.Consensus.TestHelpers
 
+    # Lifecycle callbacks may run inside bounded wrapper processes without a
+    # $callers chain, so deliver to an explicitly registered test pid.
     def start(caller, timeout) do
-      TestHelpers.notify_test({:seat_owner_start, caller})
+      notify({:seat_owner_start, caller})
       ConsultSeatOwner.start(caller, timeout)
     end
 
     def supervisor(owner, timeout) do
-      TestHelpers.notify_test({:seat_owner_supervisor, owner})
+      notify({:seat_owner_supervisor, owner})
       ConsultSeatOwner.supervisor(owner, timeout)
     end
 
     def stop(owner) do
-      TestHelpers.notify_test({:seat_owner_stop, owner})
+      notify({:seat_owner_stop, owner})
       ConsultSeatOwner.stop(owner)
+    end
+
+    defp notify(message) do
+      case :persistent_term.get({__MODULE__, :test_pid}, :none) do
+        pid when is_pid(pid) -> send(pid, message)
+        _ -> :ok
+      end
     end
   end
 
@@ -85,6 +93,9 @@ defmodule Arbor.Consensus.ConsultFacadeTest do
   end
 
   test "consult/2 honors the injected seat-owner collaborator across the whole lifecycle" do
+    :persistent_term.put({RecordingSeatOwner, :test_pid}, self())
+    on_exit(fn -> :persistent_term.erase({RecordingSeatOwner, :test_pid}) end)
+
     assert {:ok, %{evaluations: results}} =
              Consensus.consult("Injected seat owner",
                evaluator: TestAdvisoryEvaluator,
