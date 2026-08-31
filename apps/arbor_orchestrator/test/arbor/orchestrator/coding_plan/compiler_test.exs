@@ -2589,6 +2589,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
     )
     |> then(&Regex.replace(~r/"graph_hash":"[a-f0-9]{64}"/, &1, ~s("graph_hash":"GRAPH_HASH")))
+    |> then(
+      &Regex.replace(
+        ~r/"execution_manifest_digest":"[a-f0-9]{64}"/,
+        &1,
+        ~s("execution_manifest_digest":"EXECUTION_MANIFEST_DIGEST")
+      )
+    )
   end
 
   defp serialized_compilation_fixture_raw(compilation) do
