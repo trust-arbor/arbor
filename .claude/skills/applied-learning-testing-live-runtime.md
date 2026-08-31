@@ -196,6 +196,7 @@ routing; mutation tests must remove or bypass each increment and fail before exe
 <!-- applied-learning: a-shared-deadline-must-be-checked-after-every-child-invocation-including-the-last-one -->
 <a id="applied-learning-a-shared-deadline-must-be-checked-after-every-child-invocation-including-the-last-one"></a>
 **A shared deadline must be checked after every child invocation, including the last one.** Passing the remaining budget into a subprocess is not sufficient if the runner can return a nominal success after that budget; a loop that returns `:complete` when no children remain can then accept an overrun. Measure from before runner setup and reject any result observed after the absolute monotonic deadline, even when it came from the final child (found 2026-07-11 reviewing per-app cross-app validation).
+Tests that assert an exact launched budget at a deadline boundary must inject the same monotonic clock seam; real scheduling time can legitimately reduce the remaining budget by 1 ms and make an equality assertion flaky (reconfirmed 2026-08-27 during P1B-2A contained validation).
 
 <!-- applied-learning: process-output-is-arbitrary-bytes-until-proven-otherwise -->
 <a id="applied-learning-process-output-is-arbitrary-bytes-until-proven-otherwise"></a>

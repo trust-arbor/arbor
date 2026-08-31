@@ -23,6 +23,17 @@ provider extensions.
 
 ## Retained Applied Learning
 
+<!-- applied-learning: do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests -->
+<a id="applied-learning-do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests"></a>
+**Do not chain process-owned workspace leases across standalone MCP requests.**
+`coding_workspace_acquire` called through top-level `arbor_run` has no durable
+task ID, so the lease is owned by the HTTP request process; owner-death cleanup
+runs when that request ends and an immediate `mix_test` call by the same signed
+principal returns `:not_found`. Use one durable coding task to own
+acquire/use/release until Arbor exposes a principal-bound resumable lease or an
+async validation task. Never make opaque `workspace_id` alone sufficient to
+recover authority (found 2026-08-27 while proving the P1B-2A toolchain test fix).
+
 <!-- applied-learning: bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title -->
 <a id="applied-learning-bind-opaque-acp-tool-identities-to-the-code-owned-provider-never-the-display-title"></a>
 **Bind opaque ACP tool identities to the code-owned provider, never the display
@@ -1197,3 +1208,17 @@ the candidate, classify the run as infrastructure drift, and rerun review agains
 stable runtime; never weaken subset enforcement or request implementation rework
 without a semantic verdict (found 2026-08-24 when Packet B crossed a live
 `LlmHandler` upgrade).
+
+<!-- applied-learning: stage-targeted-controls-require-owner-enforced-delivery-eligibility -->
+<a id="applied-learning-stage-targeted-controls-require-owner-enforced-delivery-eligibility"></a>
+**Stage-targeted controls require owner-enforced delivery eligibility.** Persisting
+`target_stage` or including it in a follow-up prompt does not delay delivery. The
+task owner must compare the target with the graph's bounded semantic worker phase
+before submitting the control to the ACP session, then retain the same control ID
+and immutable payload in FIFO order until eligible. In particular, never let an
+implementation control become the next same-session prompt while a mandatory
+read-only design turn is still settling; the worker can correctly edit and still
+trip `design_turn_modified_workspace`. Until the barrier is deployed, wait for the
+explicit design checkpoint before steering implementation (found 2026-08-30 after
+the same race recurred during CrossApp G3C2 task
+`task_6d868b681794b63c997dafafd71ed1d5`).

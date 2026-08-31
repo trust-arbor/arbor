@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 699,
+  "entry_count": 704,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -1995,7 +1995,7 @@
       "anchor": "applied-learning-a-shared-deadline-must-be-checked-after-every-child-invocation-including-the-last-one",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 reviewing per-app cross-app validation).",
-      "content_sha256": "dc36848b6880e4340ba5bcc00c0e2c4b097fb6fe6737ac84cc1aae550f420108",
+      "content_sha256": "ecd0b3d412367b710bf0ed559c8c62cf6e61a25d94972fb2d35b1c8a72b51608",
       "always_loaded": false
     },
     {
@@ -8422,7 +8422,7 @@
       "source_date": "2026-08-25",
       "source_incident": "found 2026-08-25 auditing the memory tool surface",
       "always_loaded": false,
-      "content_sha256": "bb9dc6e826d5cc19de1174024b734555cddcd3d805719369ce5d804eea804961"
+      "content_sha256": "77703564955261c4240481a58a435a78084f0bbac7b801d9fbba98430c1b6fca"
     },
     {
       "source_ordinal": 684,
@@ -8631,8 +8631,73 @@
       "source_incident": "found 2026-08-27 during P1B-2A validation",
       "always_loaded": false,
       "content_sha256": "6ade713c04eca76b8827902a40bb77d11893ae25be1d79831003b0a5620372d5"
+    },
+    {
+      "source_ordinal": 700,
+      "source_kind": "post-migration",
+      "slug": "do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests",
+      "title": "Do not chain process-owned workspace leases across standalone MCP requests.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-do-not-chain-process-owned-workspace-leases-across-standalone-mcp-requests",
+      "source_date": "2026-08-27",
+      "source_incident": "found 2026-08-27 while proving the P1B-2A toolchain test fix",
+      "always_loaded": false,
+      "content_sha256": "c10ff96d0262546770cc3887c201857e4f1ceb43f5689fbc0bdf3a7dd99ea6bc"
+    },
+    {
+      "source_ordinal": 701,
+      "source_kind": "post-migration",
+      "slug": "validation-readiness-must-exercise-the-final-admission-boundary",
+      "title": "Validation readiness must exercise the final admission boundary.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-validation-readiness-must-exercise-the-final-admission-boundary",
+      "source_date": "2026-08-28",
+      "source_incident": "found 2026-08-28 when Apple control-plane status was pinned while CrossApp workload image policy was unavailable",
+      "always_loaded": false,
+      "content_sha256": "418feacd59579528032546a5963f18d25c77fc2877b883880079d9e71040c2a8"
+    },
+    {
+      "source_ordinal": 702,
+      "source_kind": "post-migration",
+      "slug": "image-policy-stores-provisioning-references-not-derived-execution-aliases",
+      "title": "Image policy stores provisioning references, not derived execution aliases.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-image-policy-stores-provisioning-references-not-derived-execution-aliases",
+      "source_date": "2026-08-28",
+      "source_incident": "found 2026-08-28 when baseline promotion installed a 127.0.0.1:0 workload alias as image_policy.image",
+      "always_loaded": false,
+      "content_sha256": "6328a5567b9530b6811e4fdeeba357456acfa689ac1c7ad860d52ea43c022613"
+    },
+    {
+      "source_ordinal": 703,
+      "source_kind": "post-migration",
+      "slug": "propagate-nested-readiness-deadlines-to-spawn-capable-probes",
+      "title": "Propagate nested readiness deadlines to spawn-capable probes.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-propagate-nested-readiness-deadlines-to-spawn-capable-probes",
+      "source_date": "2026-08-28",
+      "source_incident": "found 2026-08-28 when full Apple Container admission took 26 seconds and coding readiness killed it at 20 and then 25 seconds",
+      "always_loaded": false,
+      "content_sha256": "c7c448b3df842e08b3e21b249cd21e1cd71d39d9debfdff2c34c0d540a021608"
+    },
+    {
+      "source_ordinal": 704,
+      "source_kind": "post-migration",
+      "slug": "stage-targeted-controls-require-owner-enforced-delivery-eligibility",
+      "title": "Stage-targeted controls require owner-enforced delivery eligibility.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-stage-targeted-controls-require-owner-enforced-delivery-eligibility",
+      "source_date": "2026-08-30",
+      "source_incident": "found 2026-08-30 after the same race recurred during CrossApp G3C2 task task_6d868b681794b63c997dafafd71ed1d5",
+      "always_loaded": false,
+      "content_sha256": "9af336970c74e1515d06c0d8d5ba9ccbf33854a185c44e4a3f259ea00ee0da93"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 238
+  "post_migration_entry_count": 243
 }

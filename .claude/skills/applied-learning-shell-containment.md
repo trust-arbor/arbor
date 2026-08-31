@@ -344,3 +344,36 @@ child argv structurally instead of interpolating shell text, and let attach
 commands reuse the protected source without echoing its value. A secret being
 operator-controlled does not make argv exposure or shell interpolation safe
 (found 2026-08-02 while validating managed lifecycle identity).
+
+<!-- applied-learning: validation-readiness-must-exercise-the-final-admission-boundary -->
+<a id="applied-learning-validation-readiness-must-exercise-the-final-admission-boundary"></a>
+**Validation readiness must exercise the final admission boundary.** A healthy
+container control plane proves only that its service and executable are
+available; it does not prove that image policy and workload admission will
+succeed. Invoke the same bounded admission probe required by the operation and
+accept only its fully pinned result. Unsupported, unavailable, malformed, and
+raced status must fail closed rather than letting expensive work discover the
+problem later (found 2026-08-28 when Apple control-plane status was pinned while
+CrossApp workload image policy was unavailable).
+
+<!-- applied-learning: image-policy-stores-provisioning-references-not-derived-execution-aliases -->
+<a id="applied-learning-image-policy-stores-provisioning-references-not-derived-execution-aliases"></a>
+**Image policy stores provisioning references, not derived execution aliases.**
+Keep the operator-reviewed external digest-pinned image reference as policy,
+then derive the non-connectable local execution alias only after verified
+provisioning inside the runtime authority. Promotion prepare and activation
+must reject local aliases in the policy source; writing derived state back into
+policy conflates trust planes and makes a valid provisioned image inadmissible
+(found 2026-08-28 when baseline promotion installed a `127.0.0.1:0` workload
+alias as `image_policy.image`).
+
+<!-- applied-learning: propagate-nested-readiness-deadlines-to-spawn-capable-probes -->
+<a id="applied-learning-propagate-nested-readiness-deadlines-to-spawn-capable-probes"></a>
+**Propagate nested readiness deadlines to spawn-capable probes.** A readiness
+callback cannot safely invoke a probe with a 300-second default underneath a
+20-second callback and 30-second transport. Give the full probe an explicit
+readiness-owned subdeadline, leave bounded headroom for the enclosing
+projection, and keep the transport strictly larger so each layer returns its
+own timeout and contains its children (found 2026-08-28 when full Apple
+Container admission took 26 seconds and coding readiness killed it at 20 and
+then 25 seconds).

@@ -826,3 +826,27 @@ verification).
 <!-- applied-learning: a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action -->
 <a id="applied-learning-a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action"></a>
 **A tool's capability URI must reflect its maximum effect, not its default action.** `memory_review_queue` defaults to `action: "list"` but also accepts `approve`/`reject`/`approve_all`, and the approve path calls `Arbor.Memory.accept_proposal/2`, which CREATES a knowledge node. It was mapped to `arbor://memory/read`, so a read-only capability could mutate the graph through it (found 2026-08-25 auditing the memory tool surface). Any action-dispatching tool — one with an `action:`/`mode:`/`op:` parameter — has to be gated on the most powerful branch it can reach, because the capability is checked once at the tool boundary and never re-checked per branch. Two corollaries: when auditing a URI map, read each action's BRANCHES rather than its name or description; and this is a standing argument against merging read and write tools to slim a tool surface, since the merged tool must then carry the write capability for everyone who only wanted to list.
+## Gate: cluster signed-request replay protection vs flappy dist peers (2026-08-30)
+
+- **Symptom:** the whole software factory 401s (`cluster_replay_protection_unavailable —
+  this node is connected to a peer …`) whenever the brax3 phone
+  (`beamapp@…`, hidden, bare OTP) is attached to the cluster. Codex hit it
+  operating the local factory.
+- **Mechanism:** `Arbor.Security.Identity.ReplayPeers` probes every
+  *connected* node (hidden included, deliberately) with
+  `:application.which_applications` (2 s timeout) and **fails closed**: only
+  an affirmative "not running `:arbor_security`" makes a peer `:foreign`,
+  and that verdict expires every 30 s and must be re-earned. An Android
+  phone in Doze answers late or not at all → `:replay_peer` → every
+  `SignedRequest` on the node is refused until a probe succeeds. The gate
+  is correct (a wedged peer is indistinguishable from a replay target);
+  the phone is simply the worst-case probe subject.
+- **Action:** (1) don't leave the phone dist-connected to a factory node —
+  the brax3 comms adapter should `Node.connect → erpc → disconnect` in a
+  short window, or live on a non-factory node; (2) the knobs
+  (`:foreign_ttl_ms`, probe timeout) exist as start opts but are not wired
+  to config — a longer foreign TTL (minutes) with revalidation shrinks the
+  flap window while staying fail-closed; (3) the designed successor is
+  per-nonce ownership / trust zones
+  (`trust-zone-segmentation-architecture.md`). Never trust-list a node by
+  hand — the module deliberately has no seam for that.
