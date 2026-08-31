@@ -743,6 +743,10 @@ defmodule Arbor.Consensus.Evaluators.Consult do
         when is_exception(exception) and is_list(stacktrace) ->
           reraise exception, stacktrace
 
+        {:DOWN, ^ref, :process, ^pid, {{:nocatch, reason}, stacktrace}}
+        when is_list(stacktrace) ->
+          throw(reason)
+
         {:DOWN, ^ref, :process, ^pid, {:nocatch, reason}} ->
           throw(reason)
 

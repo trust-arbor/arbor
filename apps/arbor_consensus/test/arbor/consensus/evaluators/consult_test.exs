@@ -293,6 +293,22 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       def stop(_owner), do: Process.sleep(:infinity)
     end
 
+    defmodule RaisingStopSeatOwner do
+      def start(caller, timeout) do
+        result = Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
+
+        case result do
+          {:ok, pid} -> send(caller, {:raising_stop_owner, pid})
+          _ -> :ok
+        end
+
+        result
+      end
+
+      def supervisor(owner, timeout), do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+      def stop(_owner), do: raise("stop boom")
+    end
+
     defmodule HangingStopRaisingSupervisorOwner do
       def start(caller, timeout) do
         result = Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
@@ -699,6 +715,18 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       assert_received {:hanging_stop_owner, owner}
       refute Process.alive?(owner)
       assert System.system_time(:millisecond) - started < 6_500
+    end
+
+    test "an injected stop/1 that raises preserves the original success and terminates the owner" do
+      assert {:ok, %{evaluations: results}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Raising stop preserves success",
+                 consultation_log: NilRunLog,
+                 seat_owner: RaisingStopSeatOwner
+               )
+
+      assert length(results) == 2
+      assert_received {:raising_stop_owner, owner}
+      refute Process.alive?(owner)
     end
 
     test "an injected stop/1 that sleeps still preserves raise and stays within the cleanup cap" do
