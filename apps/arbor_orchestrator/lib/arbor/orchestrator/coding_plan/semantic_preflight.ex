@@ -25,7 +25,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           | :invalid_graph
 
   @max_source_bytes 262_144
-  @max_graph_nodes 256
+  @max_graph_nodes 320
+  @optional_design_council_node "council_review_design"
   @max_graph_edges 512
   @max_node_id_bytes 512
   @max_attribute_container_bytes 131_072
@@ -887,6 +888,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp normalize_design_checkpoint(opts) do
     policy = Keyword.get(opts, :checkpoint_policy, "direct")
+    design_gate = Keyword.get(opts, :design_gate, "operator")
 
     packet_json =
       case Keyword.fetch(opts, :checkpoint_work_packet_json) do
@@ -902,6 +904,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       policy not in ["direct", "design_required"] ->
         {:error, {:invalid_semantic_policy, {:invalid_checkpoint_policy, policy}}}
 
+      design_gate not in ["operator", "council", "council_then_operator"] ->
+        {:error, {:invalid_semantic_policy, {:invalid_design_gate, design_gate}}}
+
       not is_binary(packet_json) or not String.valid?(packet_json) ->
         {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
 
@@ -910,7 +915,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
 
       true ->
-        {:ok, %{policy: policy, work_packet_json: packet_json}}
+        effective_gate = if policy == "direct", do: "operator", else: design_gate
+        {:ok, %{policy: policy, work_packet_json: packet_json, design_gate: effective_gate}}
     end
   end
 
@@ -1112,15 +1118,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       Enum.reduce(placements, errors, fn placement, acc ->
         node_id = placement["node_id"]
 
-        if MapSet.member?(present_ids, node_id) do
-          acc
-        else
-          [
-            error("action_placement_missing_node", node_id, %{
-              "action" => placement["action"]
-            })
-            | acc
-          ]
+        cond do
+          MapSet.member?(present_ids, node_id) ->
+            acc
+
+          node_id == @optional_design_council_node ->
+            acc
+
+          true ->
+            [
+              error("action_placement_missing_node", node_id, %{
+                "action" => placement["action"]
+              })
+              | acc
+            ]
         end
       end)
     end
@@ -2314,6 +2325,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     immutable =
       ~w(
         coding_plan_checkpoint_policy
+        coding_plan_design_gate
         coding_plan_fingerprint
         coding_plan_version
         coding_plan_work_packet
@@ -2377,6 +2389,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     expected = [
       {"open_design_checkpoint", "coding_budget.interaction_wait_ms",
        "coding_budget.worker_completion_reserve_ms", "timeout"},
+      {"council_review_design", "coding_budget.interaction_wait_ms",
+       "coding_budget.worker_completion_reserve_ms", "timeout"},
       {"validate", "coding_budget.validation_ms",
        "coding_budget.validation_completion_reserve_ms", validation_param},
       {"commit_change", "coding_budget.interaction_wait_ms",
@@ -2421,6 +2435,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "coding_plan_fingerprint,workspace_id,worker_session_id," <>
         "worker_provider_session_id,design_attempt,design_artifact,design_digest," <>
         "session.run_deadline_unix_ms"
+
+    context_keys =
+      if checkpoint.design_gate == "council_then_operator" do
+        context_keys <> ",design_council_run_id"
+      else
+        context_keys
+      end
 
     expected_nodes = [
       {"init_design_defaults",
@@ -2654,6 +2675,42 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        }}
     ]
 
+    expected_nodes =
+      if checkpoint.design_gate in ["council", "council_then_operator"] do
+        expected_nodes ++
+          [
+            {"route_design_gate",
+             %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+            {"council_review_design",
+             %{
+               "type" => "exec",
+               "target" => "action",
+               "action" => "coding_design_council_review",
+               "context_keys" =>
+                 "work_packet,packet_digest,session.task_id,task,design_artifact,design_digest," <>
+                   "design_attempt,session.run_deadline_unix_ms",
+               "param.timeout" => Arbor.Actions.coding_design_checkpoint_max_timeout_ms(),
+               "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
+               "timeout_budget.cap_key" => "coding_budget.interaction_wait_ms",
+               "timeout_budget.reserve_key" => "coding_budget.worker_completion_reserve_ms",
+               "timeout_budget.param" => "timeout",
+               "output_prefix" => "design_checkpoint",
+               "max_retries" => "0"
+             }},
+            {"route_design_council_outcome",
+             %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
+            {"hoist_design_council_run_id",
+             %{
+               "type" => "transform",
+               "transform" => "identity",
+               "source_key" => "design_checkpoint.design_council_run_id",
+               "output_key" => "design_council_run_id"
+             }}
+          ]
+      else
+        expected_nodes
+      end
+
     errors =
       Enum.reduce(expected_nodes, errors, fn {node_id, expected}, acc ->
         require_design_checkpoint_node_attrs(acc, graph, node_id, expected)
@@ -2663,7 +2720,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> check_design_checkpoint_writers(graph)
     |> check_worker_phase_derivation_nodes(graph)
     |> check_design_checkpoint_prompts(graph, checkpoint)
-    |> check_design_checkpoint_topology(graph, checkpoint.policy, rework_max_cycles)
+    |> check_design_checkpoint_topology(graph, checkpoint, rework_max_cycles)
   end
 
   defp check_worker_phase_derivation_nodes(errors, graph) do
@@ -2692,7 +2749,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             "coding_design_artifact_capture",
             "coding_design_artifact_load",
             "coding_design_checkpoint_open",
-            "coding_design_checkpoint_await"
+            "coding_design_checkpoint_await",
+            "coding_design_council_review"
           ]
 
         actual = if exact_action?, do: node.attrs, else: Map.take(node.attrs, Map.keys(expected))
@@ -2957,7 +3015,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  defp check_design_checkpoint_topology(errors, graph, policy, rework_max_cycles) do
+  defp check_design_checkpoint_topology(errors, graph, checkpoint, rework_max_cycles) do
+    policy = checkpoint.policy
+    design_gate = Map.get(checkpoint, :design_gate, "operator")
+
+    prep_target =
+      if design_gate in ["council", "council_then_operator"] do
+        "route_design_gate"
+      else
+        "open_design_checkpoint"
+      end
+
     common = [
       {"init_design_defaults", [{"init_design_rework_count", nil}]},
       {"init_design_rework_count", [{"init_design_attempt", nil}]},
@@ -3014,7 +3082,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_design_artifact", [{"prep_checkpoint_work_packet", nil}]},
       {"prep_checkpoint_work_packet", [{"prep_checkpoint_packet_digest", nil}]},
       {"prep_checkpoint_packet_digest", [{"prep_checkpoint_plan_fingerprint", nil}]},
-      {"prep_checkpoint_plan_fingerprint", [{"open_design_checkpoint", nil}]},
+      {"prep_checkpoint_plan_fingerprint", [{prep_target, nil}]},
       {"open_design_checkpoint",
        [
          {"error_design_checkpoint_open_failed", "outcome=fail"},
@@ -3072,6 +3140,39 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"mark_design_rework_iteration", [{"build_design_rework_prompt", nil}]},
       {"build_design_rework_prompt", [{"capture_pre_turn_workspace", nil}]}
     ]
+
+    common =
+      if design_gate in ["council", "council_then_operator"] do
+        common ++
+          [
+            {"route_design_gate",
+             [
+               {"council_review_design", "context.coding_plan_design_gate=council"},
+               {"council_review_design", "context.coding_plan_design_gate=council_then_operator"},
+               {"open_design_checkpoint", nil}
+             ]},
+            {"council_review_design",
+             [
+               {"error_design_council_failed", "outcome=fail"},
+               {"route_design_council_outcome", "outcome=success"}
+             ]},
+            {"route_design_council_outcome",
+             [
+               {"load_design_artifact",
+                "context.coding_plan_design_gate=council&&context.design_checkpoint.checkpoint_outcome=approve"},
+               {"hoist_design_council_run_id",
+                "context.coding_plan_design_gate=council_then_operator&&context.design_checkpoint.checkpoint_outcome=approve"},
+               {"hoist_design_decision_note",
+                "context.design_checkpoint.checkpoint_outcome=rework"},
+               {"error_design_council_outcome_invalid", nil}
+             ]},
+            {"hoist_design_council_run_id", [{"open_design_checkpoint", nil}]},
+            {"error_design_council_failed", [{"status_pipeline_error_then_close", nil}]},
+            {"error_design_council_outcome_invalid", [{"status_pipeline_error_then_close", nil}]}
+          ]
+      else
+        common
+      end
 
     errors =
       Enum.reduce(common, errors, fn {node_id, expected}, acc ->
@@ -3136,7 +3237,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       ]
     )
     |> check_design_seed_edges(graph, seed_count)
-    |> check_design_approval_dominance(graph, policy)
+    |> check_design_approval_dominance(graph, policy, design_gate)
   end
 
   defp require_design_exact_outgoing(errors, graph, node_id, expected) do
@@ -3215,9 +3316,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_design_approval_dominance(errors, _graph, "direct"), do: errors
+  defp check_design_approval_dominance(errors, _graph, "direct", _design_gate), do: errors
 
-  defp check_design_approval_dominance(errors, graph, "design_required") do
+  defp check_design_approval_dominance(errors, graph, "design_required", design_gate) do
     case Graph.find_start_node(graph) do
       nil ->
         errors
@@ -3241,13 +3342,28 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           dominators,
           "design_checkpoint_open_await_boundary"
         )
-        |> require_dominates(
-          "await_design_checkpoint",
-          "mark_implementation_phase",
-          reachable,
-          dominators,
-          "design_checkpoint_approval_gate"
-        )
+        |> then(fn errors ->
+          if design_gate in ["council", "council_then_operator"] do
+            require_placement_set_dominates(
+              errors,
+              graph,
+              start.id,
+              ["await_design_checkpoint", "council_review_design"],
+              "mark_implementation_phase",
+              reachable,
+              "design_checkpoint_approval_gate"
+            )
+          else
+            require_dominates(
+              errors,
+              "await_design_checkpoint",
+              "mark_implementation_phase",
+              reachable,
+              dominators,
+              "design_checkpoint_approval_gate"
+            )
+          end
+        end)
         |> require_dominates(
           "load_design_artifact",
           "mark_implementation_phase",
@@ -5019,15 +5135,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       node_id = placement["node_id"]
 
       acc =
-        if MapSet.member?(reachable, node_id) do
-          acc
-        else
-          [
-            error("unreachable_action_placement", node_id, %{
-              "action" => placement["action"]
-            })
-            | acc
-          ]
+        cond do
+          MapSet.member?(reachable, node_id) ->
+            acc
+
+          node_id == @optional_design_council_node and not Map.has_key?(graph.nodes, node_id) ->
+            acc
+
+          true ->
+            [
+              error("unreachable_action_placement", node_id, %{
+                "action" => placement["action"]
+              })
+              | acc
+            ]
         end
 
       dominator_list =

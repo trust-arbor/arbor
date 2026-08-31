@@ -5,12 +5,40 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   A work packet records intent and review requirements only. It carries no
   capabilities, paths outside the repository, executable terms, or other
   authority. Authority is derived independently by the executor.
+
+  ## Design gate
+
+  `design_gate` is meaningful only with `checkpoint_policy=design_required`.
+  It selects who must admit the captured design before implementation:
+
+    * `"operator"` (default) — the existing operator checkpoint only
+    * `"council"` — advisory council only (approve proceeds; rework returns
+      to the design-rework path)
+    * `"council_then_operator"` — advisory council first; an approve then
+      reaches the existing operator checkpoint
+
+  The default is omitted from canonical JSON so existing packet digests stay
+  identical. An absent key is `"operator"`. On `checkpoint_policy=direct`
+  the field is accepted but ignored: it is omitted from canonical JSON so a
+  direct packet carrying `design_gate=council` is byte-identical to one
+  without it.
+
+  Default advisory decision rule (overridable via action params): rework
+  when any of security/stability/adversarial votes reject, when rejects
+  are ≥ 3, or when fewer than 7 seats responded; approve otherwise. A
+  responder is a seat that returned an admitted approve or rework verdict.
+  Errors and abstains never count as approvals or as responders. "Cannot
+  deny" names the admitted verdict vocabulary (`approve` | `rework`) — it
+  is not a guarantee that implementation proceeds (rework, timeout, and
+  consult failure all stop progress).
   """
 
   use TypedStruct
 
   @schema_version 1
   @checkpoint_policies ~w(direct design_required)
+  @design_gates ~w(operator council council_then_operator)
+  @default_design_gate "operator"
   @fields [
     :version,
     :success_criteria,
@@ -18,7 +46,8 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
     :constraints,
     :architecture_refs,
     :required_evidence,
-    :checkpoint_policy
+    :checkpoint_policy,
+    :design_gate
   ]
   @field_names Enum.map(@fields, &Atom.to_string/1)
   # Future nested objects must add their path and fixed field order here.
@@ -46,10 +75,10 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
       max_architecture_ref_bytes: @max_architecture_ref_bytes,
       max_packet_bytes: @max_packet_bytes
     },
-    enums: %{checkpoint_policy: @checkpoint_policies}
+    enums: %{checkpoint_policy: @checkpoint_policies, design_gate: @design_gates}
   }
 
-  @enums %{"checkpoint_policy" => @checkpoint_policies}
+  @enums %{"checkpoint_policy" => @checkpoint_policies, "design_gate" => @design_gates}
 
   typedstruct enforce: true do
     @typedoc "A bounded, authority-free coding work packet."
@@ -61,6 +90,7 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
     field(:architecture_refs, [String.t()], default: [])
     field(:required_evidence, [String.t()], default: [])
     field(:checkpoint_policy, String.t(), default: "direct")
+    field(:design_gate, String.t(), default: @default_design_gate)
   end
 
   @doc "Return the accepted packet schema version."
@@ -78,6 +108,14 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   @doc "Return the accepted checkpoint policies."
   @spec checkpoint_policies() :: [String.t()]
   def checkpoint_policies, do: @checkpoint_policies
+
+  @doc "Return the accepted design gates."
+  @spec design_gates() :: [String.t()]
+  def design_gates, do: @design_gates
+
+  @doc "Return the default design gate (omitted from canonical JSON)."
+  @spec default_design_gate() :: String.t()
+  def default_design_gate, do: @default_design_gate
 
   @doc "Return the maximum number of fields in the packet object."
   @spec max_fields() :: pos_integer()
@@ -118,6 +156,12 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
              Map.get(attrs, :checkpoint_policy, "direct"),
              @checkpoint_policies,
              "checkpoint_policy"
+           ),
+         {:ok, design_gate} <-
+           normalize_enum(
+             Map.get(attrs, :design_gate, @default_design_gate),
+             @design_gates,
+             "design_gate"
            ) do
       packet = %__MODULE__{
         version: version,
@@ -126,7 +170,8 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
         constraints: constraints,
         architecture_refs: architecture_refs,
         required_evidence: required_evidence,
-        checkpoint_policy: checkpoint_policy
+        checkpoint_policy: checkpoint_policy,
+        design_gate: design_gate
       }
 
       if packet_size_ok?(packet), do: {:ok, packet}, else: too_large()
@@ -140,7 +185,7 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   @doc "Return the canonical string-keyed JSON representation."
   @spec to_map(t()) :: %{required(String.t()) => term()}
   def to_map(%__MODULE__{} = packet) do
-    %{
+    base = %{
       "version" => packet.version,
       "success_criteria" => packet.success_criteria,
       "non_goals" => packet.non_goals,
@@ -149,6 +194,16 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
       "required_evidence" => packet.required_evidence,
       "checkpoint_policy" => packet.checkpoint_policy
     }
+
+    # Default design_gate is omitted so existing packets stay byte-for-byte
+    # identical. Direct plans ignore the field entirely — only a non-default
+    # gate on a design_required packet appears in the canonical JSON.
+    if packet.checkpoint_policy == "design_required" and
+         packet.design_gate != @default_design_gate do
+      Map.put(base, "design_gate", packet.design_gate)
+    else
+      base
+    end
   end
 
   def to_map(_packet), do: {:error, {:invalid_work_packet, :struct_required}}
@@ -459,19 +514,32 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   end
 
   defp canonical_packet(packet) do
-    packet
-    |> to_map()
+    values = to_map(packet)
+
+    values
     |> canonical_json_object([])
   end
 
   defp canonical_json_object(values, path) do
-    @canonical_object_fields
-    |> Map.fetch!(path)
+    path
+    |> canonical_object_fields(values)
     |> Enum.map(fn field ->
       {field, canonical_json_value(Map.fetch!(values, field), path ++ [field])}
     end)
     |> Jason.OrderedObject.new()
   end
+
+  defp canonical_object_fields([], values) do
+    fields = Map.fetch!(@canonical_object_fields, [])
+
+    if Map.has_key?(values, "design_gate") do
+      fields
+    else
+      Enum.reject(fields, &(&1 == "design_gate"))
+    end
+  end
+
+  defp canonical_object_fields(path, _values), do: Map.fetch!(@canonical_object_fields, path)
 
   defp canonical_json_value(map, path) when is_map(map) and not is_struct(map),
     do: canonical_json_object(map, path)

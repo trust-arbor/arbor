@@ -18,9 +18,15 @@ defmodule Arbor.Consensus.ConsultationLog do
 
   ## Graceful Degradation
 
-  Calls `Arbor.Persistence` directly (declared dep). When Postgres isn't
-  running, results are silently dropped (logged at debug level). This ensures
-  consultations never fail due to persistence issues.
+  `create_run/3`, `create_bound_run/3`, and `log_single/5` may degrade when
+  Postgres is unavailable: they return `nil` / `:ok` and drop the write
+  (logged at debug). Callers that require a ConsultationLog run id must fail
+  closed on `nil`.
+
+  `finalize_run/2` never maps a missing row or a persistence/CAS failure to
+  success. It returns `{:error, :not_found}` or
+  `{:error, {:persistence, reason}}`. A stored row may remain `running` only
+  if persistence stays unavailable for the whole finalizer window.
   """
 
   require Logger
@@ -28,6 +34,26 @@ defmodule Arbor.Consensus.ConsultationLog do
   alias Arbor.Persistence
 
   @domain "advisory_consultation"
+
+  @type finalize_result ::
+          {:ok, :transitioned}
+          | {:ok, {:already_terminal, String.t()}}
+          | {:error, :not_found}
+          | {:error, {:persistence, term()}}
+
+  @doc "Mint an opaque ConsultationLog run id without persisting a row."
+  @callback new_run_id() :: String.t()
+
+  @doc "Create a running EvalRun bound to the reserved `:run_id`."
+  @callback create_bound_run(String.t(), [atom()], keyword()) :: {:ok, String.t()} | nil
+
+  @doc """
+  Idempotently terminalize a persisted consultation run.
+
+  Returns the exact finalizer taxonomy. Never maps a missing row or a
+  persistence/CAS failure to success.
+  """
+  @callback finalize_run(String.t() | nil, term()) :: finalize_result()
 
   # ============================================================================
   # Public API
@@ -70,16 +96,45 @@ defmodule Arbor.Consensus.ConsultationLog do
     :ok
   end
 
-  @doc """
-  Create an EvalRun upfront for a batch consultation.
+  @doc "Mint a ConsultationLog run id without persisting a row."
+  @spec new_run_id() :: String.t()
+  def new_run_id, do: generate_id()
 
-  Returns a run ID that should be passed as `:consultation_id` in eval opts
-  so all perspective results log under the same run.
+  @doc """
+  Create an EvalRun upfront for a batch consultation (legacy shape).
+
+  Returns the created run id (pass it as `:consultation_id` in eval opts so
+  all perspective results log under the same run), or `nil` when persistence
+  is unavailable or the insert fails. This preserves the long-standing
+  binary-or-nil contract. The logged consult path uses `create_bound_run/3`,
+  which returns a tagged tuple bound to the reserved id.
   """
   @spec create_run(String.t(), [atom()], keyword()) :: String.t() | nil
   def create_run(question, perspectives, opts \\ []) do
+    case create_bound_run(question, perspectives, opts) do
+      {:ok, run_id} -> run_id
+      nil -> nil
+    end
+  end
+
+  @doc """
+  Create a running EvalRun bound to a reserved run id.
+
+  Uses `:run_id` from `opts` when present (normally minted by `new_run_id/0`;
+  a fresh id is generated otherwise) and returns `{:ok, run_id}` carrying
+  exactly the id of the created row, or `nil` when persistence is unavailable
+  or the insert fails (graceful degradation — callers that require the row
+  must fail closed on `nil`).
+  """
+  @spec create_bound_run(String.t(), [atom()], keyword()) :: {:ok, String.t()} | nil
+  def create_bound_run(question, perspectives, opts \\ []) do
     if available?() do
-      run_id = generate_id()
+      run_id =
+        case Keyword.get(opts, :run_id) do
+          id when is_binary(id) and id != "" -> id
+          _ -> generate_id()
+        end
+
       context = Keyword.get(opts, :context, %{})
       reference_docs = get_in(context, [:reference_docs]) || []
 
@@ -104,7 +159,7 @@ defmodule Arbor.Consensus.ConsultationLog do
       }
 
       case Persistence.insert_eval_run(run_attrs) do
-        {:ok, _} -> run_id
+        {:ok, _} -> {:ok, run_id}
         {:error, _} -> nil
       end
     end
@@ -112,19 +167,66 @@ defmodule Arbor.Consensus.ConsultationLog do
 
   @doc """
   Mark a consultation run as completed and update sample count.
+
+  Prefer `finalize_run/2` on the logged consult path so every exit
+  terminalizes the run. This wrapper keeps the legacy `Consult.ask/3` shape.
   """
   @spec complete_run(String.t() | nil, [{atom(), term()}]) :: :ok
-  def complete_run(nil, _results), do: :ok
-
   def complete_run(run_id, results) do
-    if available?() do
-      successful = Enum.count(results, fn {_, eval} -> is_map(eval) end)
-
-      Persistence.update_eval_run(run_id, %{status: "completed", sample_count: successful})
-    end
-
+    _ = finalize_run(run_id, {:ok, results})
     :ok
   end
+
+  @doc """
+  Idempotently terminalize a persisted consultation run.
+
+  This is the single terminalization boundary. Both the consult's normal
+  completion path (`running -> completed`) and the supervised timeout
+  finalizer (`running -> failed` for a timeout outcome) call this
+  function. The persist is a compare-and-set against `running`.
+
+  Returns exactly:
+
+  - `{:ok, :transitioned}` — this call won the `running` CAS
+  - `{:ok, {:already_terminal, status}}` — a row exists and is already
+    terminal; `status` is the stored terminal status (`"completed"` or
+    `"failed"`), so callers can distinguish a completed run from one the
+    timeout finalizer terminalized as failed
+  - `{:error, :not_found}` — no row with that id (including a nil id)
+  - `{:error, {:persistence, reason}}` — persistence is unavailable or the
+    CAS/persist failed
+
+  A missing row or persistence/CAS failure is never mapped to success.
+  Terminalization itself is bounded, supervised, best-effort CAS: the
+  finalizer retries until deadline plus grace and logs loudly on
+  exhaustion. A row may remain `running` only if persistence is
+  unavailable for that whole window. This function does not itself
+  schedule that finalizer.
+  """
+  @spec finalize_run(String.t() | nil, term()) :: finalize_result()
+  def finalize_run(nil, _outcome), do: {:error, :not_found}
+
+  def finalize_run(run_id, outcome) when is_binary(run_id) do
+    if available?() do
+      {status, sample_count} = terminal_status(outcome)
+
+      case Persistence.compare_and_set_eval_run_status(run_id, "running", %{
+             status: status,
+             sample_count: sample_count
+           }) do
+        {:ok, :transitioned} -> {:ok, :transitioned}
+        {:ok, {:already_terminal, status}} -> {:ok, {:already_terminal, status}}
+        {:error, :not_found} -> {:error, :not_found}
+        {:error, {:persistence, _reason}} = error -> error
+        {:error, reason} -> {:error, {:persistence, reason}}
+        other -> {:error, {:persistence, other}}
+      end
+    else
+      {:error, {:persistence, :unavailable}}
+    end
+  end
+
+  def finalize_run(_run_id, _outcome), do: {:error, :not_found}
 
   @doc """
   Log a batch of perspective results from a full consultation.
@@ -254,6 +356,17 @@ defmodule Arbor.Consensus.ConsultationLog do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp terminal_status({:ok, results}) when is_list(results) do
+    {"completed", Enum.count(results, fn {_, eval} -> is_map(eval) end)}
+  end
+
+  defp terminal_status({:ok, %{evaluations: results}}) when is_list(results) do
+    {"completed", Enum.count(results, fn {_, eval} -> is_map(eval) end)}
+  end
+
+  defp terminal_status({:ok, _other}), do: {"completed", 0}
+  defp terminal_status(_outcome), do: {"failed", 0}
 
   defp result_to_jsonl(run, result) do
     %{

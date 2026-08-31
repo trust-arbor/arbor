@@ -27,7 +27,8 @@ defmodule Arbor.Consensus.ConsultationLogTest do
     test "returns nil when persistence is unavailable" do
       # When Repo isn't started, create_run returns nil gracefully
       result = ConsultationLog.create_run("test question", [:security, :vision])
-      # Result is either a run_id string or nil depending on Postgres availability
+      # Result is a run-id string or nil depending on Postgres availability
+      # ({:ok, run_id} is create_bound_run/3's shape, not create_run/3's)
       assert is_nil(result) or is_binary(result)
     end
 
@@ -55,6 +56,36 @@ defmodule Arbor.Consensus.ConsultationLogTest do
     end
   end
 
+  describe "finalize_run/2" do
+    test "handles nil run_id as not_found, never success" do
+      assert {:error, :not_found} = ConsultationLog.finalize_run(nil, {:ok, []})
+      assert {:error, :not_found} = ConsultationLog.finalize_run(nil, {:error, :timeout})
+    end
+
+    test "never maps a missing row or unavailable persistence to success" do
+      first = ConsultationLog.finalize_run("some-run-id", {:ok, []})
+      second = ConsultationLog.finalize_run("some-run-id", {:ok, []})
+      timeout = ConsultationLog.finalize_run("some-run-id", {:error, :timeout})
+
+      Enum.each([first, second, timeout], fn result ->
+        assert result in [{:error, :not_found}, {:error, {:persistence, :unavailable}}] or
+                 match?({:error, {:persistence, _}}, result)
+      end)
+    end
+
+    test "accepts success, timeout, and aborted outcomes without mapping them to success when no row exists" do
+      for {run_id, outcome} <- [
+            {"run-ok", {:ok, [{:security, mock_eval()}]}},
+            {"run-timeout", {:error, :timeout}},
+            {"run-aborted", {:error, :consultation_aborted}}
+          ] do
+        result = ConsultationLog.finalize_run(run_id, outcome)
+
+        assert result == {:error, :not_found} or match?({:error, {:persistence, _}}, result)
+      end
+    end
+  end
+
   describe "list_consultations/1" do
     test "returns error when persistence unavailable" do
       # Depends on whether Repo is running in test env
@@ -72,7 +103,9 @@ defmodule Arbor.Consensus.ConsultationLogTest do
 
   describe "export_jsonl/2" do
     test "returns error when no data available" do
-      path = Path.join(System.tmp_dir!(), "test_export_#{System.unique_integer([:positive])}.jsonl")
+      path =
+        Path.join(System.tmp_dir!(), "test_export_#{System.unique_integer([:positive])}.jsonl")
+
       on_exit(fn -> File.rm(path) end)
 
       result = ConsultationLog.export_jsonl(path)

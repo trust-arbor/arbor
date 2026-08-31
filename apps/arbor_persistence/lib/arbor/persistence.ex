@@ -565,6 +565,74 @@ defmodule Arbor.Persistence do
     end
   end
 
+  @doc """
+  Compare-and-set an eval run status (Postgres only).
+
+  Updates only when the stored status still equals `expected_status`.
+  Returns the ConsultationLog finalizer taxonomy and never maps a missing
+  row or a persistence/CAS failure to success:
+
+  - `{:ok, :transitioned}` — this call won the `expected_status` CAS
+  - `{:ok, {:already_terminal, status}}` — a row exists but is no longer
+    `expected_status`; `status` is the row's current stored status
+  - `{:error, :not_found}` — no row with that id
+  - `{:error, {:persistence, reason}}` — dump, query, or other persist failure
+  """
+  @spec compare_and_set_eval_run_status(String.t(), String.t(), map()) ::
+          {:ok, :transitioned}
+          | {:ok, {:already_terminal, String.t()}}
+          | {:error, :not_found}
+          | {:error, {:persistence, term()}}
+  def compare_and_set_eval_run_status(run_id, expected_status, attrs)
+      when is_binary(run_id) and is_binary(expected_status) and is_map(attrs) do
+    import Ecto.Query
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    updates =
+      attrs
+      |> Map.take([:status, :sample_count, :error, :duration_ms, :metadata])
+      |> Map.put(:updated_at, now)
+      |> Map.to_list()
+
+    try do
+      {count, _} =
+        from(r in EvalRun, where: r.id == ^run_id and r.status == ^expected_status)
+        |> Repo.update_all(set: updates)
+
+      case count do
+        1 ->
+          {:ok, :transitioned}
+
+        0 ->
+          classify_eval_run_cas_miss(run_id, expected_status)
+
+        other ->
+          {:error, {:persistence, {:unexpected_cas_count, other}}}
+      end
+    rescue
+      exception -> {:error, {:persistence, exception}}
+    catch
+      kind, reason -> {:error, {:persistence, {kind, reason}}}
+    end
+  end
+
+  def compare_and_set_eval_run_status(_run_id, _expected_status, _attrs),
+    do: {:error, {:persistence, :invalid_eval_run_cas}}
+
+  defp classify_eval_run_cas_miss(run_id, expected_status) do
+    case Repo.get(EvalRun, run_id) do
+      nil ->
+        {:error, :not_found}
+
+      %EvalRun{status: ^expected_status} ->
+        {:error, {:persistence, :cas_miss_with_expected_status}}
+
+      %EvalRun{status: status} ->
+        {:ok, {:already_terminal, status}}
+    end
+  end
+
   @doc "Insert a single eval result (Postgres only)."
   @spec insert_eval_result(map()) :: {:ok, EvalResult.t()} | {:error, Ecto.Changeset.t()}
   def insert_eval_result(attrs) do

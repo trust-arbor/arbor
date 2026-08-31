@@ -2490,6 +2490,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.DesignCheckpoint.Open,
         Arbor.Actions.Coding.DesignCheckpoint.Await,
         Arbor.Actions.Coding.DesignCheckpoint.Load,
+        Arbor.Actions.Coding.DesignCouncilReview,
         Arbor.Actions.Coding.WorkerTerminalParse,
         Arbor.Actions.Coding.ReviewedCommit,
         Arbor.Actions.Coding.ReviewedValidation,
@@ -3736,6 +3737,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.DesignCheckpoint.Await =>
       "arbor://action/coding/design_checkpoint/await",
     Arbor.Actions.Coding.DesignCheckpoint.Load => "arbor://action/coding/design_checkpoint/load",
+    Arbor.Actions.Coding.DesignCouncilReview => "arbor://action/coding/design_council_review",
     Arbor.Actions.Coding.WorkerTerminalParse => "arbor://action/coding/worker_terminal/parse",
     Arbor.Actions.Coding.ReviewedCommit => "arbor://action/coding/reviewed_commit",
     Arbor.Actions.Coding.ReviewedValidation => "arbor://action/coding/reviewed_validation",

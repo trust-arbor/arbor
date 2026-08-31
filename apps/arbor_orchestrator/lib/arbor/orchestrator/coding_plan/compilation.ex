@@ -14,7 +14,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
-    checkpoint_policy: "coding_plan_checkpoint_policy"
+    checkpoint_policy: "coding_plan_checkpoint_policy",
+    design_gate: "coding_plan_design_gate"
   }
   @max_version_bytes 128
 
@@ -313,12 +314,27 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   defp maybe_put_initial_work_packet_digest(values, _plan),
     do: Map.delete(values, @work_packet_graph_metadata_key)
 
+  # LOCKSTEP: Compiler.maybe_put_initial_work_packet/3 is the producer of
+  # this same materialization (including the design_gate condition); this
+  # copy is the independent verifier-side recomputation. Change the two
+  # functions together or verification will reject valid compilations.
   defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
-    Map.merge(values, %{
-      @initial_context_keys.work_packet => plan.work_packet,
-      @initial_context_keys.work_packet_json => work_packet_json,
-      @initial_context_keys.checkpoint_policy => Map.fetch!(plan.work_packet, "checkpoint_policy")
-    })
+    values =
+      Map.merge(values, %{
+        @initial_context_keys.work_packet => plan.work_packet,
+        @initial_context_keys.work_packet_json => work_packet_json,
+        @initial_context_keys.checkpoint_policy =>
+          Map.fetch!(plan.work_packet, "checkpoint_policy")
+      })
+
+    case {Map.get(plan.work_packet, "checkpoint_policy"),
+          Map.get(plan.work_packet, "design_gate")} do
+      {"design_required", gate} when gate in ["council", "council_then_operator"] ->
+        Map.put(values, @initial_context_keys.design_gate, gate)
+
+      _ ->
+        Map.delete(values, @initial_context_keys.design_gate)
+    end
   end
 
   defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
@@ -326,6 +342,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     |> Map.delete(@initial_context_keys.work_packet)
     |> Map.delete(@initial_context_keys.work_packet_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
+    |> Map.delete(@initial_context_keys.design_gate)
   end
 
   defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}) do

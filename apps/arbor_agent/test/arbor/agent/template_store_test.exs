@@ -563,6 +563,12 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert data["domain_context"] =~ "A separate caller-bound executor"
       assert data["domain_context"] =~ "`work_packet_digest`"
       assert data["domain_context"] =~ "`design_required`"
+      assert data["domain_context"] =~ "`work_packet.design_gate`"
+      assert data["domain_context"] =~ ~s("operator")
+      assert data["domain_context"] =~ ~s("council")
+      assert data["domain_context"] =~ ~s("council_then_operator")
+      assert data["domain_context"] =~ "An absent key is"
+      assert data["domain_context"] =~ "applies only to `design_required`"
       assert data["domain_context"] =~ "has no hashing tool"
       assert data["domain_context"] =~ "always leaves `work_packet_digest` null"
       assert data["domain_context"] =~ "The raw proposal is not an"

@@ -2297,7 +2297,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
     oversized_nodes =
-      Enum.reduce(map_size(graph.nodes)..256, graph, fn index, acc ->
+      Enum.reduce(map_size(graph.nodes)..320, graph, fn index, acc ->
         add_cloned_node(acc, "mark_operator_rework_kind", "limit_node_#{index}")
       end)
 
