@@ -101,7 +101,7 @@ defmodule Arbor.Security.Application do
       # Classifies connected nodes for the signed-request replay gate. Before
       # NonceCache's consumers so the gate reads a live table; absent, every
       # peer counts as a replay peer (fail closed).
-      {Arbor.Security.Identity.ReplayPeers, []},
+      {Arbor.Security.Identity.ReplayPeers, Arbor.Security.Config.replay_peers_start_opts()},
       {Arbor.Security.SystemAuthority, []},
       # The StateOwner/Broker pair is ordered for rest_for_one recovery. The
       # owner precedes the broker so owner loss restarts both and no broker can

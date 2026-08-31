@@ -354,6 +354,21 @@ defmodule Arbor.Security.DistributedTest do
         assert {:error, :cluster_replay_protection_unavailable} =
                  Security.verify_signed_request_authenticity(clustered_signed)
 
+        # The refusal must reach the security events journal. The facade used
+        # to consult the gate itself before Verifier.verify/1 and bail early,
+        # so gate refusals were never recorded.
+        assert Enum.any?(
+                 Arbor.Security.TestSupport.RecordingEventLogAdapter.invocations(),
+                 fn
+                   {:persist_security_event, :identity_verification_failed, data} ->
+                     data.agent_id == identity.agent_id and
+                       data.reason == inspect(:cluster_replay_protection_unavailable)
+
+                   _other ->
+                     false
+                 end
+               )
+
         {:ok, clustered_signed_verifier} =
           SignedRequest.sign("clustered-verifier", identity.agent_id, identity.private_key)
 

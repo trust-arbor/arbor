@@ -110,6 +110,121 @@ defmodule Arbor.Security.Identity.ReplayPeersTest do
     assert ReplayPeers.classification(peer_node) == :replay_peer
   end
 
+  test "recovery: a transient probe failure heals after the replay TTL" do
+    test_process = self()
+
+    probe_fun = fn node, generation ->
+      send(test_process, {:probe_started, self(), node, generation})
+
+      receive do
+        {:complete_probe, ^generation, classification} -> classification
+      after
+        5_000 -> :replay_peer
+      end
+    end
+
+    {peer, peer_node} = start_foreign_peer("replay_healing")
+    on_exit(fn -> safely_stop_peer(peer) end)
+
+    tracker =
+      restart_replay_peers(
+        probe_fun: probe_fun,
+        replay_peer_ttl_ms: 200,
+        foreign_ttl_ms: 60_000
+      )
+
+    on_exit(fn -> TestBootstrap.restore_supervised_tree!() end)
+
+    # The peer was already connected, so init probes it. Fail that probe the
+    # way a Doze/timeout does: the worker reports :replay_peer.
+    assert_receive {:probe_started, first_worker, ^peer_node, first_generation}, 1_000
+    send(first_worker, {:complete_probe, first_generation, :replay_peer})
+
+    await(fn -> not Map.has_key?(:sys.get_state(tracker).inflight, peer_node) end)
+    assert ReplayPeers.classification(peer_node) == :replay_peer
+    assert ReplayPeers.peers_present?()
+
+    # A fresh (within-TTL) fail-closed verdict is served from cache: the
+    # reads above must NOT have scheduled another probe of the peer.
+    refute_receive {:probe_started, _worker, ^peer_node, _generation}, 50
+
+    # Let the fail-closed verdict expire. Expiry must not open the gate on
+    # its own — the next read still refuses, but schedules a fresh probe.
+    Process.sleep(250)
+    assert ReplayPeers.classification(peer_node) == :replay_peer
+
+    assert_receive {:probe_started, second_worker, ^peer_node, second_generation}, 1_000
+
+    # While the healing probe is in flight, every read keeps failing closed
+    # and none of them block on the possibly-still-unresponsive peer. The
+    # expired row must still be present — deleting it would send readers
+    # into the blocking await instead of the instant fail-closed answer.
+    assert [{^peer_node, :replay_peer, _connection_id, _expires_at}] =
+             :ets.lookup(:arbor_security_replay_peers, peer_node)
+
+    assert ReplayPeers.classification(peer_node) == :replay_peer
+    assert ReplayPeers.peers_present?()
+
+    # The peer recovered: the probe now gets a positive answer, and the node
+    # is downgraded without its dist connection ever having dropped.
+    send(second_worker, {:complete_probe, second_generation, :foreign})
+    await(fn -> ReplayPeers.classification(peer_node) == :foreign end)
+    refute ReplayPeers.peers_present?()
+  end
+
+  test "recovery: expiry keeps refusing while the peer stays unresponsive" do
+    test_process = self()
+
+    probe_fun = fn node, generation ->
+      send(test_process, {:probe_started, self(), node, generation})
+
+      receive do
+        {:complete_probe, ^generation, classification} -> classification
+      after
+        5_000 -> :replay_peer
+      end
+    end
+
+    {peer, peer_node} = start_foreign_peer("replay_still_down")
+    on_exit(fn -> safely_stop_peer(peer) end)
+
+    tracker =
+      restart_replay_peers(
+        probe_fun: probe_fun,
+        replay_peer_ttl_ms: 100,
+        foreign_ttl_ms: 60_000
+      )
+
+    on_exit(fn -> TestBootstrap.restore_supervised_tree!() end)
+
+    assert_receive {:probe_started, first_worker, ^peer_node, first_generation}, 1_000
+    send(first_worker, {:complete_probe, first_generation, :replay_peer})
+    await(fn -> not Map.has_key?(:sys.get_state(tracker).inflight, peer_node) end)
+
+    # Two full expiry cycles against a peer that keeps failing its probes:
+    # the gate must refuse at every point in the cycle.
+    for _cycle <- 1..2 do
+      Process.sleep(150)
+      assert ReplayPeers.classification(peer_node) == :replay_peer
+      assert ReplayPeers.peers_present?()
+
+      assert_receive {:probe_started, worker, ^peer_node, generation}, 1_000
+      assert ReplayPeers.peers_present?()
+
+      send(worker, {:complete_probe, generation, :replay_peer})
+      await(fn -> not Map.has_key?(:sys.get_state(tracker).inflight, peer_node) end)
+      assert ReplayPeers.classification(peer_node) == :replay_peer
+    end
+  end
+
+  test "probe timeout is configurable and publishes the derived await cap" do
+    restart_replay_peers(probe_timeout_ms: 1_234)
+    on_exit(fn -> TestBootstrap.restore_supervised_tree!() end)
+
+    assert [{:__replay_peers_config__, 1_734}] =
+             :ets.lookup(:arbor_security_replay_peers, :__replay_peers_config__)
+  end
+
   defp restart_replay_peers(opts) do
     supervisor = Arbor.Security.Supervisor
 

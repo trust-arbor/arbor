@@ -2610,8 +2610,11 @@ defmodule Arbor.Security do
 
   @impl Arbor.Contracts.API.Identity
   def verify_signed_request_authenticity(request) do
-    with :ok <- Config.admit_cluster_signed_request_replay_protection(),
-         {:ok, canonical} <- canonicalize_signed_request(request) do
+    # The cluster replay gate is NOT consulted here: Verifier.verify/1 already
+    # gates as its first step. Gating twice doubled the ReplayPeers reads per
+    # verification, and the early bail skipped record_verification_failure, so
+    # gate refusals never reached the security events journal.
+    with {:ok, canonical} <- canonicalize_signed_request(request) do
       case Verifier.verify(canonical) do
         {:ok, agent_id} = success ->
           record_verification_success(canonical, agent_id)

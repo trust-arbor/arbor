@@ -8422,7 +8422,7 @@
       "source_date": "2026-08-25",
       "source_incident": "found 2026-08-25 auditing the memory tool surface",
       "always_loaded": false,
-      "content_sha256": "77703564955261c4240481a58a435a78084f0bbac7b801d9fbba98430c1b6fca"
+      "content_sha256": "bb9dc6e826d5cc19de1174024b734555cddcd3d805719369ce5d804eea804961"
     },
     {
       "source_ordinal": 684,

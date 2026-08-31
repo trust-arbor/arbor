@@ -743,6 +743,29 @@ defmodule Arbor.Security.Config do
     end
   end
 
+  @doc """
+  Operator-configured start options for `Arbor.Security.Identity.ReplayPeers`.
+
+      config :arbor_security, :replay_peers,
+        foreign_ttl_ms: 300_000,
+        replay_peer_ttl_ms: 30_000,
+        probe_timeout_ms: 5_000
+
+  Only timing knobs pass through — there is deliberately no allowlist or
+  per-node exemption here. `:replay_peer_ttl_ms` and `:probe_timeout_ms`
+  preserve fail-closed semantics outright. `:foreign_ttl_ms` is the one
+  permissive knob: it bounds how long a peer that *starts*
+  `:arbor_security` on an existing connection can retain its stale
+  `:foreign` verdict, so raising it trades that replay-exposure window for
+  a slower probe cadence. See the ReplayPeers moduledoc for details.
+  """
+  @spec replay_peers_start_opts() :: keyword()
+  def replay_peers_start_opts do
+    @app
+    |> Application.get_env(:replay_peers, [])
+    |> Keyword.take([:foreign_ttl_ms, :replay_peer_ttl_ms, :probe_timeout_ms])
+  end
+
   if Mix.env() == :test do
     @doc false
     @spec inject_test_cluster_peers_present(boolean()) :: :ok
