@@ -497,9 +497,10 @@ defmodule Arbor.Agent.RuntimeQuiescence do
   end
 
   # Execute a potentially blocking collaborator call in an owned proxy bounded by
-  # an absolute deadline. The proxy has its own kill timer, so it cannot outlive a
-  # caller that exits while waiting. A process alias drops any late reply after the
-  # deadline; raises/exits and late completions all fail closed.
+  # an absolute deadline. The proxy has its own tagged deadline timer, so it cannot
+  # outlive a caller that exits while waiting and deadline termination stays
+  # distinguishable from an early runner failure. A process alias drops any late
+  # reply after the deadline; raises/exits and late completions all fail closed.
   defp run_until(deadline, fun) when is_function(fun, 0) do
     now = System.monotonic_time(:millisecond)
 
@@ -508,11 +509,14 @@ defmodule Arbor.Agent.RuntimeQuiescence do
     else
       reply_alias = :erlang.alias()
       reply_ref = make_ref()
+      deadline_ref = make_ref()
 
       {runner, mon} =
         spawn_monitor(fn ->
           remaining = max(0, deadline - System.monotonic_time(:millisecond))
-          {:ok, timer} = :timer.kill_after(remaining, self())
+
+          {:ok, timer} =
+            :timer.exit_after(remaining, self(), {:run_until_deadline, deadline_ref})
 
           result =
             try do
@@ -536,6 +540,10 @@ defmodule Arbor.Agent.RuntimeQuiescence do
           if completed_at < deadline and System.monotonic_time(:millisecond) < deadline,
             do: result,
             else: {:error, :deadline_exceeded}
+
+        {:DOWN, ^mon, :process, ^runner, {:run_until_deadline, ^deadline_ref}} ->
+          :erlang.unalias(reply_alias)
+          {:error, :deadline_exceeded}
 
         {:DOWN, ^mon, :process, ^runner, _reason} ->
           :erlang.unalias(reply_alias)

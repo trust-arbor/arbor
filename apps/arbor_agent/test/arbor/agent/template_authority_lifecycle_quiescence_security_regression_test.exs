@@ -228,6 +228,7 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
          fail_after_stop: Keyword.get(opts, :fail_after_stop, false),
          delay_on: Keyword.get(opts, :delay_on),
          delay_after_stop: Keyword.get(opts, :delay_after_stop, false),
+         delay_observer: Keyword.get(opts, :delay_observer),
          delay_ms: Keyword.get(opts, :delay_ms, 0)
        }}
     end
@@ -252,6 +253,10 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
       stopped? = :ets.lookup(:c2b_calls, :stop_owner) != []
 
       if (s.delay_on == n or (s.delay_after_stop and stopped?)) and s.delay_ms > 0 do
+        if is_pid(s.delay_observer) do
+          send(s.delay_observer, {:verify_delay_started, self(), n})
+        end
+
         Process.sleep(s.delay_ms)
       end
 
@@ -1018,12 +1023,15 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
       assert [{:stop_owner, ^pid}] = :ets.lookup(:c2b_calls, :stop_owner)
     end
 
-    test "security regression: delayed drain fence read cannot exceed the stop deadline" do
+    test "security regression: drain deadline termination is never misclassified as fence loss" do
       # Delay only after the exact-owner stop worker records completion. This is
       # the semantic drain boundary and does not depend on verification call order.
+      # Suspending the caller after that read starts guarantees the runner's
+      # deadline DOWN is queued before the caller can select its receive timeout.
       det =
         start_supervised!(
-          {DeterministicFenceStore, name: unique(:det), delay_after_stop: true, delay_ms: 350},
+          {DeterministicFenceStore,
+           name: unique(:det), delay_after_stop: true, delay_observer: self(), delay_ms: 350},
           id: unique(:det_id)
         )
 
@@ -1040,8 +1048,8 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
       :ok = DeterministicFenceStore.set_fence(det, id, "op1")
       :ets.insert(:c2b_calls, {:stop_mode, :noop})
 
-      {us, result} =
-        :timer.tc(fn ->
+      task =
+        Task.async(fn ->
           RuntimeQuiescence.quiesce(id, "op1",
             task_store: det,
             manager: FakeManager,
@@ -1052,8 +1060,16 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
           )
         end)
 
-      assert {:error, :drain_timeout} = result
-      assert us < 300_000
+      assert_receive {:verify_delay_started, _store_pid, _call}, 500
+      assert true = :erlang.suspend_process(task.pid)
+
+      try do
+        Process.sleep(220)
+      after
+        assert true = :erlang.resume_process(task.pid)
+      end
+
+      assert {:error, :drain_timeout} = Task.await(task, 500)
       assert Process.alive?(pid)
       assert [{:stop_owner, ^pid}] = :ets.lookup(:c2b_calls, :stop_owner)
     end
