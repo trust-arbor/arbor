@@ -2581,6 +2581,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     compilation
     |> serialized_compilation_fixture_raw()
     |> then(&Regex.replace(~r/"beam_sha256":"[a-f0-9]{64}"/, &1, ~s("beam_sha256":"BEAM_SHA256")))
+    |> then(
+      # compiled_graph_hash covers the execution manifest, so it inherits
+      # BEAM identity transitively — third build-identity channel.
+      &Regex.replace(
+        ~r/"compiled_graph_hash":"[a-f0-9]{64}"/,
+        &1,
+        ~s("compiled_graph_hash":"COMPILED_GRAPH_HASH")
+      )
+    )
   end
 
   defp serialized_compilation_fixture_raw(compilation) do
