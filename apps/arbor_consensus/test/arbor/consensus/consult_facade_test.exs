@@ -101,6 +101,38 @@ defmodule Arbor.Consensus.ConsultFacadeTest do
     assert_received {:seat_owner_stop, ^owner}
   end
 
+  defmodule HangingStopSeatOwner do
+    def start(caller, timeout) do
+      result = Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
+
+      case result do
+        {:ok, pid} -> send(caller, {:hanging_stop_owner, pid})
+        _ -> :ok
+      end
+
+      result
+    end
+
+    def supervisor(owner, timeout), do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+    def stop(_owner), do: Process.sleep(:infinity)
+  end
+
+  test "consult/2 returns within the wall-clock bound when injected stop/1 sleeps indefinitely" do
+    started = System.system_time(:millisecond)
+
+    assert {:ok, %{evaluations: results}} =
+             Consensus.consult("Hanging stop must not block consult",
+               evaluator: TestAdvisoryEvaluator,
+               consultation_log: NilRunLog,
+               seat_owner: HangingStopSeatOwner
+             )
+
+    assert length(results) == 2
+    assert_received {:hanging_stop_owner, owner}
+    refute Process.alive?(owner)
+    assert System.system_time(:millisecond) - started < 6_500
+  end
+
   test "legacy ask/3 still returns only evaluations" do
     assert {:ok, results} = Consult.ask(TestAdvisoryEvaluator, "Legacy shape")
     assert is_list(results)

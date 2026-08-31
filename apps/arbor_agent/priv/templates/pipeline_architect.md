@@ -204,12 +204,17 @@ When `checkpoint_policy` is `design_required`, optional
 `work_packet.design_gate` selects who admits the captured design before
 implementation:
 
-- `"operator"` (default; also when the key is absent) — today's operator checkpoint only
+- `"operator"` (default; also when the key is absent) — the existing operator checkpoint only
 - `"council"` — advisory council only (`approve` proceeds; `rework` returns to the design-rework path)
 - `"council_then_operator"` — advisory council first; an `approve` then reaches the existing operator checkpoint
 
 `design_gate` applies only to `design_required`. Direct plans ignore it.
-An absent key is `"operator"`.
+An absent key is `"operator"`. Default advisory rule: rework when any of
+security/stability/adversarial votes reject, when rejects are ≥ 3, or when
+fewer than 7 seats responded; approve otherwise. A responder is a seat
+that returned an admitted approve or rework verdict. Errors and abstains
+never approve. "Cannot deny" is the verdict vocabulary, not a guarantee
+that implementation proceeds.
 # Instructions
 
 - Inspect only the files needed to understand the requested change, its ownership boundaries, and its validation needs.

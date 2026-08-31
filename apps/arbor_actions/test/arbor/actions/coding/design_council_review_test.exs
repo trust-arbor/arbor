@@ -311,6 +311,73 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "end-to-end AdvisoryLLM malformed concerns are action seat errors, not rework votes",
+       ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    payloads = [
+      Jason.encode!(%{"verdict" => "approve", "concerns" => %{"x" => 1}}),
+      Jason.encode!(%{"verdict" => "approve", "concerns" => "not-a-list"}),
+      Jason.encode!(%{"verdict" => "rework", "concerns" => [1]}),
+      Jason.encode!(%{"verdict" => "approve", "concerns" => [%{"nested" => true}]})
+    ]
+
+    Enum.with_index(payloads, 1)
+    |> Enum.each(fn {payload, index} ->
+      llm_fn = fn _system_prompt, _user_prompt -> {:ok, payload} end
+
+      seat =
+        Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+      evaluations =
+        Enum.map(unanimous_approve(), fn
+          {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+          other -> other
+        end)
+
+      Process.put(
+        :consult_result,
+        {:ok, %{evaluations: evaluations, run_id: "run_e2e_malformed_#{index}"}}
+      )
+
+      assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+      assert result["dispersion"]["error"] == 1
+      assert result["dispersion"]["reject"] == 0
+      assert result["checkpoint_outcome"] == "approve"
+    end)
+
+    # Tuple and invalid-UTF-8 cannot survive Jason.decode; they still
+    # fail closed at action admission as seat errors, not rework votes.
+    Enum.with_index(
+      [
+        put_vote(unanimous_approve(), :security, :approve, {"tuple", "payload"}),
+        put_vote(unanimous_approve(), :security, :approve, [<<0xFF, 0xFE>>])
+      ],
+      5
+    )
+    |> Enum.each(fn {evaluations, index} ->
+      Process.put(
+        :consult_result,
+        {:ok, %{evaluations: evaluations, run_id: "run_e2e_malformed_#{index}"}}
+      )
+
+      assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+      assert result["dispersion"]["error"] == 1
+      assert result["dispersion"]["reject"] == 0
+      assert result["checkpoint_outcome"] == "approve"
+    end)
+  after
+    Process.delete(:consult_result)
+  end
+
   test "malformed concerns in reasoning-only evaluations are seat errors, not rework votes",
        ctx do
     payloads = [
@@ -486,6 +553,9 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     |> Enum.drop(length(perspectives()) - count)
     |> Enum.map(fn perspective -> {perspective, {:error, :seat_unavailable}} end)
   end
+
+  defp seat_as_consult_term({:error, reason}), do: {:error, reason}
+  defp seat_as_consult_term({:ok, eval}), do: eval
 
   defp put_vote(evaluations, perspective, vote, concerns) do
     Enum.map(evaluations, fn

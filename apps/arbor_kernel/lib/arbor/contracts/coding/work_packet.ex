@@ -22,6 +22,15 @@ defmodule Arbor.Contracts.Coding.WorkPacket do
   the field is accepted but ignored: it is omitted from canonical JSON so a
   direct packet carrying `design_gate=council` is byte-identical to one
   without it.
+
+  Default advisory decision rule (overridable via action params): rework
+  when any of security/stability/adversarial votes reject, when rejects
+  are ≥ 3, or when fewer than 7 seats responded; approve otherwise. A
+  responder is a seat that returned an admitted approve or rework verdict.
+  Errors and abstains never count as approvals or as responders. "Cannot
+  deny" names the admitted verdict vocabulary (`approve` | `rework`) — it
+  is not a guarantee that implementation proceeds (rework, timeout, and
+  consult failure all stop progress).
   """
 
   use TypedStruct

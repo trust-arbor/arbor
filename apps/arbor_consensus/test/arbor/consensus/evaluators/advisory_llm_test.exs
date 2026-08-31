@@ -721,6 +721,24 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert eval.vote == :reject
       assert Enum.any?(eval.concerns, &String.contains?(&1, "malformed design-review verdict"))
     end
+
+    test "malformed concern payloads are seat errors, not reject/rework votes" do
+      proposal = design_review_proposal("Malformed concerns")
+
+      payloads = [
+        Jason.encode!(%{"verdict" => "approve", "concerns" => %{"x" => 1}}),
+        Jason.encode!(%{"verdict" => "approve", "concerns" => "not-a-list"}),
+        Jason.encode!(%{"verdict" => "rework", "concerns" => [1]}),
+        Jason.encode!(%{"verdict" => "approve", "concerns" => [%{"nested" => true}]})
+      ]
+
+      Enum.each(payloads, fn payload ->
+        llm_fn = fn _system_prompt, _user_prompt -> {:ok, payload} end
+
+        assert {:error, :malformed_evaluation} =
+                 AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+      end)
+    end
   end
 
   defp design_review_proposal(description) do

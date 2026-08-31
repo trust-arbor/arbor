@@ -265,6 +265,50 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       end
     end
 
+    defmodule HangingStartSeatOwner do
+      def start(_caller, _timeout), do: Process.sleep(:infinity)
+      def supervisor(_owner, _timeout), do: :unused
+      def stop(_owner), do: :ok
+    end
+
+    defmodule HangingSupervisorSeatOwner do
+      def start(caller, timeout), do: Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
+      def supervisor(_owner, _timeout), do: Process.sleep(:infinity)
+      def stop(owner), do: Arbor.Consensus.ConsultSeatOwner.stop(owner)
+    end
+
+    defmodule HangingStopSeatOwner do
+      def start(caller, timeout) do
+        result = Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
+
+        case result do
+          {:ok, pid} -> send(caller, {:hanging_stop_owner, pid})
+          _ -> :ok
+        end
+
+        result
+      end
+
+      def supervisor(owner, timeout), do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+      def stop(_owner), do: Process.sleep(:infinity)
+    end
+
+    defmodule HangingStopRaisingSupervisorOwner do
+      def start(caller, timeout) do
+        result = Arbor.Consensus.ConsultSeatOwner.start(caller, timeout)
+
+        case result do
+          {:ok, pid} -> send(caller, {:hanging_stop_owner, pid})
+          _ -> :ok
+        end
+
+        result
+      end
+
+      def supervisor(_owner, _timeout), do: raise("supervisor boom")
+      def stop(_owner), do: Process.sleep(:infinity)
+    end
+
     test "returns evaluations plus the ConsultationLog run id" do
       assert {:ok, %{evaluations: results, run_id: run_id} = result} =
                Consult.ask_logged(TestAdvisoryEvaluator, "Should we extract a core?",
@@ -597,6 +641,79 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
                )
 
       assert System.system_time(:millisecond) - started < 800
+    end
+
+    test "an injected start/2 body that sleeps still ends by the absolute deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 250
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Hanging start body",
+                 deadline_unix_ms: deadline,
+                 consultation_log: NilRunLog,
+                 seat_owner: HangingStartSeatOwner
+               )
+
+      assert System.system_time(:millisecond) - started < 800
+    end
+
+    test "an injected supervisor/2 body that sleeps still ends by the absolute deadline" do
+      started = System.system_time(:millisecond)
+      deadline = started + 250
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Hanging supervisor body",
+                 deadline_unix_ms: deadline,
+                 consultation_log: NilRunLog,
+                 seat_owner: HangingSupervisorSeatOwner
+               )
+
+      assert System.system_time(:millisecond) - started < 800
+    end
+
+    test "an injected stop/1 that sleeps still returns the original success within the cleanup cap" do
+      started = System.system_time(:millisecond)
+
+      assert {:ok, %{evaluations: results}} =
+               Consult.ask_logged(TestAdvisoryEvaluator, "Hanging stop preserves success",
+                 consultation_log: NilRunLog,
+                 seat_owner: HangingStopSeatOwner
+               )
+
+      assert length(results) == 2
+      assert_received {:hanging_stop_owner, owner}
+      refute Process.alive?(owner)
+      assert System.system_time(:millisecond) - started < 6_500
+    end
+
+    test "an injected stop/1 that sleeps still returns the original timeout within the cleanup cap" do
+      started = System.system_time(:millisecond)
+
+      assert {:error, :timeout} =
+               Consult.ask_logged(HungAdvisoryEvaluator, "Hanging stop preserves timeout",
+                 timeout: 200,
+                 consultation_log: NilRunLog,
+                 seat_owner: HangingStopSeatOwner
+               )
+
+      assert_received {:hanging_stop_owner, owner}
+      refute Process.alive?(owner)
+      assert System.system_time(:millisecond) - started < 6_500
+    end
+
+    test "an injected stop/1 that sleeps still preserves raise and stays within the cleanup cap" do
+      started = System.system_time(:millisecond)
+
+      assert_raise RuntimeError, "supervisor boom", fn ->
+        Consult.ask_logged(TestAdvisoryEvaluator, "Hanging stop preserves raise",
+          consultation_log: NilRunLog,
+          seat_owner: HangingStopRaisingSupervisorOwner
+        )
+      end
+
+      assert_received {:hanging_stop_owner, owner}
+      refute Process.alive?(owner)
+      assert System.system_time(:millisecond) - started < 6_500
     end
 
     test "a raising seat is isolated as an error evaluation" do

@@ -506,11 +506,18 @@ must admit the captured design before implementation:
 
 | `design_gate` | Who admits the design |
 | --- | --- |
-| `"operator"` (default; also when the key is absent) | Today's operator checkpoint only |
+| `"operator"` (default; also when the key is absent) | The existing operator checkpoint only |
 | `"council"` | Advisory council only (`approve` proceeds; `rework` returns to the design-rework path) |
 | `"council_then_operator"` | Advisory council first; an `approve` then reaches the existing operator checkpoint |
 
-The advisory council cannot deny a task. Direct plans ignore `design_gate`
+The advisory council's default decision rule is: rework when any of
+security/stability/adversarial votes reject, when rejects are ≥ 3, or when
+fewer than 7 seats responded; approve otherwise. A responder is a seat that
+returned an admitted approve or rework verdict. Errors and abstains never
+count as approvals or as responders. "Cannot deny" means the admitted
+verdict vocabulary is only `approve` | `rework` — not that implementation
+is guaranteed to proceed (rework, timeout, and consult failure all stop
+progress). Direct plans ignore `design_gate`
 (including `"council"`) and compile identically to a packet without it.
 An absent or `"operator"` gate on `design_required` keeps the existing operator
 checkpoint path.

@@ -1087,30 +1087,36 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # ============================================================================
 
   defp build_advisory_evaluation(response_text, proposal, perspective, evaluator_id) do
-    {vote, concerns, reasoning} =
+    parsed =
       if design_review_protocol?(proposal) do
         parse_design_review_response(response_text)
       else
         {:approve, [], parse_advisory_response(response_text)}
       end
 
-    case Evaluation.new(%{
-           proposal_id: proposal.id,
-           evaluator_id: evaluator_id,
-           perspective: perspective,
-           vote: vote,
-           reasoning: reasoning,
-           confidence: 0.8,
-           concerns: concerns,
-           recommendations: [],
-           risk_score: 0.0,
-           benefit_score: 0.0
-         }) do
-      {:ok, evaluation} ->
-        {:ok, Evaluation.seal(evaluation)}
+    case parsed do
+      :malformed_concerns ->
+        {:error, :malformed_evaluation}
 
-      {:error, _} = error ->
-        error
+      {vote, concerns, reasoning} ->
+        case Evaluation.new(%{
+               proposal_id: proposal.id,
+               evaluator_id: evaluator_id,
+               perspective: perspective,
+               vote: vote,
+               reasoning: reasoning,
+               confidence: 0.8,
+               concerns: concerns,
+               recommendations: [],
+               risk_score: 0.0,
+               benefit_score: 0.0
+             }) do
+          {:ok, evaluation} ->
+            {:ok, Evaluation.seal(evaluation)}
+
+          {:error, _} = error ->
+            error
+        end
     end
   end
 
@@ -1139,10 +1145,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         {:reject, concerns, parse_advisory_response(text)}
 
       {{:ok, _verdict}, :error} ->
-        malformed_design_review(
-          "#{@malformed_design_review_verdict}: concerns are not text",
-          text
-        )
+        :malformed_concerns
 
       {:error, _} ->
         malformed_design_review(

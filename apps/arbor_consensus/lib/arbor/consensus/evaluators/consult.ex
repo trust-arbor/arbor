@@ -34,6 +34,9 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   alias Arbor.Contracts.Security.SigningAuthority
 
   @default_timeout 300_000
+  # Post-deadline (or remaining-time-capped) budget for injected seat-owner
+  # stop/1. Cleanup must never block the original result/raise/throw/exit.
+  @seat_owner_cleanup_max_ms 5_000
   # :signing_authority keeps nested Engine runs in fixed-facade authority mode
   # when the parent action was authorized via SigningAuthority (never silent
   # legacy signer/authorizer). Opaque token only — no private keys.
@@ -150,6 +153,13 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     lifecycle (`start/2`, `supervisor/2`, `stop/1`); injectable for tests.
     Seat TASKS are always created and awaited by the consultation process
     itself, never by a helper process.
+
+  Injected `start/2`, `supervisor/2`, and `stop/1` run through a bounded,
+  non-linking call. Remaining time is recomputed from the live clock
+  immediately before each. After the deadline, `stop/1` still gets a small
+  fixed cleanup budget (`#{@seat_owner_cleanup_max_ms}` ms); timeout or
+  crash of cleanup preserves the original result/error and force-kills the
+  owner pid.
   """
   @spec ask_logged(module(), String.t(), keyword()) ::
           {:ok, %{evaluations: list(), run_id: String.t() | nil}} | {:error, term()}
@@ -198,7 +208,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
         error
     after
       state = Process.get(state_key, %{})
-      stop_seat_owner(state[:seat_owner], state[:seat_owner_mod])
+      stop_seat_owner(state[:seat_owner], state[:seat_owner_mod], deadline)
       Process.delete(state_key)
     end
   end
@@ -628,31 +638,44 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end)
   end
 
-  # Seat-owner startup and supervisor acquisition are bounded by the live
-  # consultation deadline: the owner GenServer starts with an init timeout
-  # (a hung init is killed by GenServer.start), and the supervisor fetch is
-  # a bounded call. Task OWNERSHIP stays with the consultation process,
-  # which calls async_nolink directly and performs every yield and
-  # shutdown itself — no seat task is ever created by a helper process.
+  # Seat-owner startup, supervisor acquisition, and cleanup are bounded
+  # isolated calls. Remaining time is recomputed from the live clock
+  # immediately before each. Task OWNERSHIP stays with the consultation
+  # process, which calls async_nolink directly and performs every yield
+  # and shutdown itself — no seat task is ever created by a helper process.
+  # start/2 and supervisor/2 propagate raise/throw/exit so caller-side
+  # terminalization still sees the original exit class.
   defp start_seat_owner(owner_mod, deadline, state_key) do
     case remaining_ms(deadline) do
       remaining when remaining <= 0 ->
         {:error, :timeout}
 
-      remaining ->
-        case owner_mod.start(self(), remaining) do
-          {:ok, seat_owner} ->
+      _remaining ->
+        caller = self()
+
+        case bounded_owner_call(
+               fn -> owner_mod.start(caller, remaining_ms(deadline)) end,
+               deadline,
+               :propagate
+             ) do
+          {:ok, {:ok, seat_owner}} ->
             put_consult_state(state_key, %{seat_owner: seat_owner, seat_owner_mod: owner_mod})
             {:ok, seat_owner}
+
+          {:ok, {:error, :timeout}} ->
+            {:error, :timeout}
+
+          {:ok, {:error, reason}} ->
+            {:error, {:seat_owner_unavailable, reason}}
+
+          {:ok, other} ->
+            {:error, {:seat_owner_unavailable, other}}
 
           {:error, :timeout} ->
             {:error, :timeout}
 
           {:error, reason} ->
             {:error, {:seat_owner_unavailable, reason}}
-
-          other ->
-            {:error, {:seat_owner_unavailable, other}}
         end
     end
   end
@@ -665,23 +688,78 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       remaining when remaining <= 0 ->
         {:error, :timeout}
 
-      remaining ->
-        try do
-          {:ok, owner_mod.supervisor(seat_owner, remaining)}
-        catch
-          :exit, _reason -> {:error, :timeout}
+      _remaining ->
+        case bounded_owner_call(
+               fn -> owner_mod.supervisor(seat_owner, remaining_ms(deadline)) end,
+               deadline,
+               :propagate
+             ) do
+          {:ok, supervisor} -> {:ok, supervisor}
+          {:error, :timeout} -> {:error, :timeout}
+          {:error, reason} -> {:error, reason}
         end
     end
   end
 
-  defp stop_seat_owner(pid, owner_mod) when is_pid(pid) do
-    (owner_mod || ConsultSeatOwner).stop(pid)
-    :ok
-  catch
-    _kind, _reason -> :ok
+  defp stop_seat_owner(pid, owner_mod, deadline) when is_pid(pid) do
+    owner = owner_mod || ConsultSeatOwner
+
+    case bounded_owner_call(fn -> owner.stop(pid) end, deadline, :cleanup) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        :ok
+    end
   end
 
-  defp stop_seat_owner(_owner, _owner_mod), do: :ok
+  defp stop_seat_owner(_owner, _owner_mod, _deadline), do: :ok
+
+  # Non-linking boundary: a hanging or crashing collaborator cannot block
+  # or take down the consultation process. :propagate reconstructs the
+  # original raise/throw/exit in this process. :cleanup uses a small
+  # fixed cap (including after the deadline) and never raises.
+  defp bounded_owner_call(fun, deadline, :cleanup) do
+    bounded_call(fun, deadline,
+      min_ms: @seat_owner_cleanup_max_ms,
+      max_ms: @seat_owner_cleanup_max_ms
+    )
+  end
+
+  defp bounded_owner_call(fun, deadline, :propagate) do
+    remaining = remaining_ms(deadline)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      {pid, ref} = spawn_monitor(fn -> exit({:ok, fun.()}) end)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, {:ok, result}} ->
+          {:ok, result}
+
+        {:DOWN, ^ref, :process, ^pid, {exception, stacktrace}}
+        when is_exception(exception) and is_list(stacktrace) ->
+          reraise exception, stacktrace
+
+        {:DOWN, ^ref, :process, ^pid, {:nocatch, reason}} ->
+          throw(reason)
+
+        {:DOWN, ^ref, :process, ^pid, reason} ->
+          exit(reason)
+      after
+        remaining ->
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^pid, _reason} -> {:error, :timeout}
+          after
+            100 -> {:error, :timeout}
+          end
+      end
+    end
+  end
 
   defp put_consult_state(state_key, updates) do
     current = Process.get(state_key, %{})
