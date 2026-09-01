@@ -195,6 +195,47 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
 
     absent = Map.delete(raw, "outcome")
     assert TaskArtifacts.normalize(absent).result_type == :value
+
+    {:ok, committed} = TaskOutcome.from_code("change_committed")
+
+    assert TaskArtifacts.normalize(%{
+             "status" => "change_committed",
+             "canonical_status" => "change_committed",
+             "outcome" => TaskOutcome.to_map(committed)
+           }).result_type == :value
+
+    for contradictory <- [
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "design_rework_exhausted",
+            "outcome" => TaskOutcome.to_map(mismatched_outcome)
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "no_changes",
+            "outcome" => outcome
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "no_changes",
+            "outcome" => TaskOutcome.to_map(mismatched_outcome)
+          },
+          %{
+            "status" => "no_changes",
+            "canonical_status" => "design_rework_exhausted",
+            "outcome" => outcome
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "change_committed",
+            "outcome" => TaskOutcome.to_map(committed)
+          }
+        ] do
+      assert TaskArtifacts.normalize(contradictory).result_type == :value
+    end
+
+    without_canonical = Map.delete(raw, "canonical_status")
+    assert TaskArtifacts.normalize(without_canonical).result_type == :coding_change
   end
 
   test "accepts rework_exhausted as a coding status" do
