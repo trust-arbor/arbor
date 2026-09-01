@@ -6,8 +6,10 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   require Logger
 
   alias Arbor.Actions.Coding.BlobManifest
+  alias Arbor.Actions.Coding.GitBlobOid
   alias Arbor.Actions.Coding.SnapshotDestVerify
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Git
   alias Arbor.Actions.Mix, as: MixAction
 
   @supervisor Arbor.Actions.Coding.ValidationResourceSupervisor
@@ -68,6 +70,10 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
     do: call(owner, {:create_committable_candidate, meta})
 
   @doc false
+  def create_object_backed_candidate(owner, meta) when is_map(meta),
+    do: call(owner, {:create_object_backed_candidate, meta})
+
+  @doc false
   def recapture_committable_candidate(owner, expected_oid, opts \\ [])
 
   def recapture_committable_candidate(owner, expected_oid, opts) when is_list(opts),
@@ -119,6 +125,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
       root_identity: nil,
       candidate_path: Keyword.fetch!(opts, :candidate_path),
       candidate_commit: Keyword.get(opts, :candidate_commit),
+      candidate_source: Keyword.get(opts, :candidate_source, :ordinary_workspace),
       candidate_identity: nil,
       base_path: Keyword.fetch!(opts, :base_path),
       base_identity: nil,
@@ -169,6 +176,22 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
       {:ok, tree_oid, next} -> {:reply, {:ok, tree_oid}, next}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call(
+        {:create_object_backed_candidate, meta},
+        _from,
+        %{candidate_source: :object_backed_private_snapshot} = state
+      )
+      when is_map(meta) do
+    case materialize_object_backed_candidate(state, meta) do
+      {:ok, tree_oid, binding, next} -> {:reply, {:ok, tree_oid, binding}, next}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:create_object_backed_candidate, _meta}, _from, state) do
+    {:reply, {:error, :invalid_validation_resource_request}, state}
   end
 
   def handle_call({:recapture_committable_candidate, expected_oid, opts}, _from, state)
@@ -604,6 +627,214 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
     end
   end
 
+  defp materialize_object_backed_candidate(state, meta) when is_map(meta) do
+    expected = Map.get(meta, :expected_tree_oid) || Map.get(meta, "expected_tree_oid")
+    format = Map.get(meta, :object_format) || Map.get(meta, "object_format")
+    admitted = Map.get(meta, :blob_manifest) || Map.get(meta, "blob_manifest")
+    dest = state.candidate_path
+    objects = Path.join(state.root_path, "candidate-objects")
+    index = Path.join(state.root_path, "candidate.index")
+    opts = object_backed_dest_opts(meta)
+    budget = dest_budget(opts)
+
+    with true <- format in [:sha1, :sha256],
+         true <- is_binary(expected) and expected != "",
+         {:ok, entries} <- BlobManifest.canonical_entries(admitted),
+         :ok <- reject_snapshot_entry_count(entries, budget.max_entries),
+         :ok <- reject_snapshot_depth(entries, budget.max_depth),
+         :ok <- init_owner_git_format(objects, format),
+         :ok <-
+           stage_object_backed_entries(
+             state.repo_path,
+             objects,
+             index,
+             entries,
+             format,
+             budget.max_bytes
+           ),
+         {:ok, tree_oid} <- write_owner_tree(objects, index),
+         :ok <- match_expected_tree(tree_oid, expected),
+         :ok <- File.mkdir_p(dest),
+         :ok <- checkout_held_tree(objects, index, dest) do
+      next = %{
+        state
+        | snapshot_objects: objects,
+          snapshot_index: index,
+          snapshot_tree_oid: tree_oid,
+          snapshot_dest: dest,
+          snapshot_head: nil
+      }
+
+      case recapture_held_tree(next, tree_oid, opts) do
+        {:ok, binding} -> {:ok, tree_oid, binding, next}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      false -> {:error, :invalid_committable_snapshot}
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :committable_snapshot_failed}
+    end
+  end
+
+  defp object_backed_dest_opts(meta) when is_map(meta) do
+    [
+      max_entries: Map.get(meta, :max_entries) || Map.get(meta, "max_entries"),
+      max_bytes: Map.get(meta, :max_bytes) || Map.get(meta, "max_bytes"),
+      max_depth: Map.get(meta, :max_depth) || Map.get(meta, "max_depth")
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp reject_snapshot_entry_count(entries, max_entries)
+       when is_list(entries) and is_integer(max_entries) and max_entries >= 0 do
+    if length(entries) > max_entries,
+      do: {:error, :snapshot_budget_exceeded},
+      else: :ok
+  end
+
+  defp reject_snapshot_entry_count(_entries, _max_entries),
+    do: {:error, :snapshot_budget_exceeded}
+
+  defp reject_snapshot_depth(entries, max_depth)
+       when is_list(entries) and is_integer(max_depth) and max_depth >= 0 do
+    too_deep? =
+      Enum.any?(entries, fn entry ->
+        length(String.split(entry.path, "/", trim: false)) > max_depth
+      end)
+
+    if too_deep?, do: {:error, :snapshot_budget_exceeded}, else: :ok
+  end
+
+  defp reject_snapshot_depth(_entries, _max_depth), do: {:error, :snapshot_budget_exceeded}
+
+  defp init_owner_git_format(objects, format) when format in [:sha1, :sha256] do
+    case File.mkdir_p(objects) do
+      :ok ->
+        init_owner_git_with_format(objects, format)
+
+      {:error, reason} ->
+        {:error, {:snapshot_git_init_failed, reason}}
+    end
+  end
+
+  defp init_owner_git_with_format(objects, :sha256) do
+    case git(["--git-dir", objects, "init", "--bare", "--object-format=sha256"]) do
+      {:ok, _} -> :ok
+      {:error, _reason} -> {:error, :sha256_object_format_unsupported}
+    end
+  end
+
+  defp init_owner_git_with_format(objects, :sha1) do
+    case git(["--git-dir", objects, "init", "--bare", "--object-format=sha1"]) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _reason} ->
+        _ = File.rm_rf(objects)
+        init_owner_git(objects)
+    end
+  end
+
+  defp stage_object_backed_entries(repo_path, objects, index, entries, format, max_bytes) do
+    _ = File.rm(index)
+
+    Enum.reduce_while(entries, {:ok, max_bytes}, fn entry, {:ok, remaining} ->
+      stage_object_backed_entry(repo_path, objects, index, entry, format, remaining)
+    end)
+    |> case do
+      {:ok, _remaining} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp stage_object_backed_entry(repo_path, objects, index, entry, format, remaining)
+       when is_integer(remaining) and remaining >= 0 do
+    case Git.blob_byte_size(repo_path, entry.oid) do
+      {:ok, size} when size == 0 ->
+        write_object_backed_blob(objects, index, entry, "", remaining)
+
+      {:ok, size} when size > remaining ->
+        {:halt, {:error, :snapshot_budget_exceeded}}
+
+      {:ok, _size} ->
+        case Git.read_bounded_blob_by_oid(repo_path, entry.oid, remaining) do
+          {:ok, bytes} ->
+            case GitBlobOid.hash_bytes(bytes, format) do
+              {:ok, hashed} when hashed == entry.oid ->
+                write_object_backed_blob(
+                  objects,
+                  index,
+                  entry,
+                  bytes,
+                  remaining - byte_size(bytes)
+                )
+
+              {:ok, _other} ->
+                {:halt, {:error, :admitted_tree_mismatch}}
+
+              {:error, _reason} ->
+                {:halt, {:error, :admitted_tree_mismatch}}
+            end
+
+          {:error, {:git_blob_read_failed, :output_truncated}} ->
+            {:halt, {:error, :snapshot_budget_exceeded}}
+
+          {:error, _reason} ->
+            {:halt, {:error, :snapshot_blob_read_failed}}
+        end
+
+      {:error, _reason} ->
+        {:halt, {:error, :snapshot_blob_read_failed}}
+    end
+  end
+
+  defp stage_object_backed_entry(_repo_path, _objects, _index, _entry, _format, _remaining),
+    do: {:halt, {:error, :snapshot_budget_exceeded}}
+
+  defp write_object_backed_blob(objects, index, entry, bytes, remaining)
+       when is_integer(remaining) and remaining >= 0 do
+    case GitBlobOid.hash_bytes(bytes, infer_hash_format(entry.oid)) do
+      {:ok, hashed} when hashed != entry.oid ->
+        {:halt, {:error, :admitted_tree_mismatch}}
+
+      {:ok, _hashed} ->
+        case git(
+               ["--git-dir", objects, "hash-object", "-w", "--stdin", "--no-filters"],
+               [],
+               stdin: bytes
+             ) do
+          {:ok, hashed} ->
+            if String.trim(hashed) == entry.oid do
+              case git(
+                     [
+                       "--git-dir",
+                       objects,
+                       "update-index",
+                       "--add",
+                       "--cacheinfo",
+                       "#{entry.mode},#{entry.oid},#{entry.path}"
+                     ],
+                     [{"GIT_INDEX_FILE", index}]
+                   ) do
+                {:ok, _} -> {:cont, {:ok, remaining}}
+                {:error, reason} -> {:halt, {:error, reason}}
+              end
+            else
+              {:halt, {:error, :admitted_tree_mismatch}}
+            end
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+
+      {:error, _reason} ->
+        {:halt, {:error, :admitted_tree_mismatch}}
+    end
+  end
+
+  defp infer_hash_format(oid) when is_binary(oid) and byte_size(oid) == 64, do: :sha256
+  defp infer_hash_format(_oid), do: :sha1
+
   defp materialize_committable_candidate(state, meta) do
     source = Map.get(meta, :source_worktree) || Map.get(meta, "source_worktree")
     expected = Map.get(meta, :expected_tree_oid) || Map.get(meta, "expected_tree_oid")
@@ -861,13 +1092,17 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   defp git(args, env, opts)
        when is_list(args) and is_list(env) and is_list(opts) do
     bump_git_invocations()
-    env_map = Map.new(env, fn {k, v} -> {to_string(k), to_string(v)} end)
+
+    env_map =
+      env
+      |> Map.new(fn {k, v} -> {to_string(k), to_string(v)} end)
+      |> Map.put("GIT_NO_REPLACE_OBJECTS", "1")
 
     shell_opts =
       [env: env_map, timeout: 30_000, sandbox: :none]
       |> maybe_put_git_stdin(Keyword.get(opts, :stdin))
 
-    case Arbor.Shell.execute_direct("git", args, shell_opts) do
+    case Arbor.Shell.execute_direct("git", ["--no-replace-objects" | args], shell_opts) do
       {:ok, %{exit_code: 0, stdout: stdout}} ->
         output = stdout || ""
 

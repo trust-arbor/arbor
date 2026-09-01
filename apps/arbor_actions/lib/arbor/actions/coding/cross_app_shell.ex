@@ -47,6 +47,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   alias Arbor.Actions.Coding.CrossApp.StaticReceiptBoundary
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Git
   alias Arbor.Actions.Mix, as: MixAction
   alias Arbor.Contracts.Coding.ValidationCapacityHandoff
 
@@ -292,6 +293,89 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   def resolve_selection(_, _), do: {:error, :invalid_resolve_selection_input}
+
+  @doc false
+  @spec resolve_commit_selection(String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_commit_selection(repo_path, base_commit, source_commit)
+      when is_binary(repo_path) and is_binary(base_commit) and is_binary(source_commit) do
+    with :ok <- validate_full_commit_oid(base_commit),
+         :ok <- validate_full_commit_oid(source_commit),
+         true <- byte_size(base_commit) == byte_size(source_commit),
+         {:ok, base_listing} <- Git.ls_tree_z(repo_path, base_commit),
+         {:ok, cand_listing} <- Git.ls_tree_z(repo_path, source_commit),
+         {:ok, base_manifest} <- BlobManifest.parse_ls_tree_z(base_listing),
+         {:ok, candidate_manifest} <- BlobManifest.parse_ls_tree_z(cand_listing),
+         {:ok, changed_files} <- Core.diff_blob_manifests(base_manifest, candidate_manifest),
+         {:ok, candidate_tree_oid} <- Git.commit_tree_oid(repo_path, source_commit),
+         {:ok, base_sources} <- mix_exs_from_commit(repo_path, base_commit, base_manifest),
+         {:ok, cand_sources} <- mix_exs_from_commit(repo_path, source_commit, candidate_manifest),
+         {:ok, base_defs} <- Parser.parse_many(base_sources),
+         {:ok, cand_defs} <- Parser.parse_many(cand_sources),
+         {:ok, base_graph} <- Core.build_graph(base_defs),
+         {:ok, cand_graph} <- Core.build_graph(cand_defs),
+         {:ok, selection} <- Core.select_revisions(changed_files, base_graph, cand_graph) do
+      {:ok,
+       %{
+         selection: selection,
+         candidate_tree_oid: candidate_tree_oid,
+         candidate_blob_manifest: candidate_manifest,
+         candidate_app_mix_exs: cand_sources
+       }}
+    else
+      false -> {:error, :mixed_object_format}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def resolve_commit_selection(_, _, _), do: {:error, :invalid_resolve_selection_input}
+
+  defp mix_exs_from_commit(repo_path, commit, manifest) when is_list(manifest) do
+    paths =
+      manifest
+      |> Enum.map(& &1.path)
+      |> Enum.filter(&commit_mix_exs_path?/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    if length(paths) > Core.max_apps() do
+      {:error, :too_many_mix_exs_files}
+    else
+      Enum.reduce_while(paths, {:ok, []}, fn rel, {:ok, acc} ->
+        case app_dir_for_mix_exs(rel) do
+          {:ok, dir} ->
+            case Git.read_bounded_blob_at_commit(
+                   repo_path,
+                   commit,
+                   rel,
+                   @base_mix_exs_max_file_bytes
+                 ) do
+              {:ok, source} ->
+                {:cont, {:ok, [{dir, source} | acc]}}
+
+              {:error, reason} ->
+                {:halt, {:error, {:base_mix_exs_read_failed, rel, reason}}}
+            end
+
+          :error ->
+            {:halt, {:error, {:invalid_mix_exs_path, rel}}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  defp mix_exs_from_commit(_repo_path, _commit, _manifest),
+    do: {:error, :invalid_blob_manifest}
+
+  defp commit_mix_exs_path?(path) when is_binary(path) do
+    match?({:ok, _}, app_dir_for_mix_exs(path))
+  end
+
+  defp commit_mix_exs_path?(_), do: false
 
   # Test-only seam (Application env `:cross_app_after_committable_snapshot`).
   # Production default is nil. Tests may install a 1-arity fun
@@ -2580,7 +2664,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   defp git(path, args) do
-    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+    case System.cmd("git", ["--no-replace-objects", "-C", path | args],
+           env: [{"GIT_NO_REPLACE_OBJECTS", "1"}],
+           stderr_to_stdout: true
+         ) do
       {output, 0} -> {:ok, output}
       {output, _code} -> {:error, String.trim(output)}
     end

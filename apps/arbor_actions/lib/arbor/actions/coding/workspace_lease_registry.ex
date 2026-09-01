@@ -545,6 +545,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc false
+  @spec materialize_object_backed_snapshot(String.t(), map(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def materialize_object_backed_snapshot(resource_id, meta, opts \\ %{})
+      when is_binary(resource_id) and is_map(meta) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:materialize_object_backed_snapshot, resource_id, meta, caller}, server_opts)
+  end
+
+  @doc false
   @spec create_validation_snapshot(String.t(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
   def create_validation_snapshot(resource_id, opts \\ %{}) when is_binary(resource_id) do
@@ -852,6 +861,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  # Admission-only shape: exact lease comparison needs source-owned lineage.
+  # General callers must continue to receive the redacted public_view/1.
+  defp lineage_admission_view(lease) when is_map(lease) do
+    lease
+    |> public_view()
+    |> Map.put(:task_id, Map.get(lease, :task_id))
+    |> Map.put(:principal_id, Map.get(lease, :principal_id))
+  end
+
   defp creation_blocker_view(blocker) do
     %{
       workspace_id: blocker.workspace_id,
@@ -1074,7 +1092,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     case fetch_lineage_authorized(state, workspace_id, caller) do
       {:ok, lease} ->
-        {:reply, {:ok, public_view(lease)}, state}
+        {:reply, {:ok, lineage_admission_view(lease)}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -1255,11 +1273,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     observe_validation_acquire()
     caller = %{caller | owner_pid: from_pid}
 
-    with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
-         :ok <- ensure_no_validation_resource(state, workspace_id) do
-      perform_validation_resource_acquire(state, lease, from_pid, caller)
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    cond do
+      Map.get(caller, :committable_snapshot) == true and
+          Map.get(caller, :object_backed_snapshot) == true ->
+        {:reply, {:error, :invalid_validation_resource_request}, state}
+
+      true ->
+        with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
+             :ok <- ensure_no_validation_resource(state, workspace_id) do
+          perform_validation_resource_acquire(state, lease, from_pid, caller)
+        else
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  def handle_call(
+        {:materialize_object_backed_snapshot, resource_id, meta, caller},
+        {from_pid, _tag},
+        state
+      )
+      when is_map(meta) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_validation_resource(state, resource_id, caller) do
+      {:ok, %{candidate_source: :object_backed_private_snapshot} = resource} ->
+        materialize_object_backed_resource(state, resource, meta)
+
+      {:ok, _resource} ->
+        {:reply, {:error, :invalid_validation_resource_request}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -1980,6 +2025,29 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp materialize_object_backed_resource(state, resource, meta) do
+    owner = Map.get(resource, :resource_owner_pid)
+
+    if is_pid(owner) do
+      case ValidationResourceOwner.create_object_backed_candidate(owner, meta) do
+        {:ok, tree_oid, binding} ->
+          next = %{
+            resource
+            | expected_tree_oid: tree_oid,
+              expected_head: nil
+          }
+
+          {:reply, {:ok, Map.put(binding, :tree_oid, tree_oid)},
+           put_validation_resource(state, next)}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :admitted_tree_mismatch}, state}
+    end
+  end
+
   defp call(message, opts) do
     server = Keyword.get(opts, :server, @registry_name)
 
@@ -2047,10 +2115,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        ) do
     owner_ref = Process.monitor(owner_pid)
     materializer = state.linux_dependency_baseline_materializer
-    committable_snapshot? = Map.get(caller, :committable_snapshot) == true
-    root_commit = if committable_snapshot?, do: :committable_snapshot, else: candidate_commit
+    candidate_source = candidate_source(candidate_commit, caller)
+    root_commit = candidate_root_commit(candidate_source, candidate_commit)
 
-    case create_validation_root(state, lease, root_commit, materializer) do
+    case create_validation_root(state, lease, root_commit, candidate_source, materializer) do
       {:ok, resource_id, root_path, root_cleanup_identity, resource_owner_pid} ->
         resource =
           new_validation_resource(
@@ -2063,7 +2131,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             resource_owner_pid,
             candidate_commit,
             cleanup_failures,
-            committable_snapshot?
+            candidate_source
           )
 
         case setup_validation_resource(
@@ -2138,7 +2206,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             root_cleanup_identity,
             resource_owner_pid,
             candidate_commit,
-            0
+            0,
+            candidate_source
           )
 
         resource = %{resource | setup_status: :setup_failed}
@@ -2151,6 +2220,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         {:error, reason}
     end
   end
+
+  defp candidate_source(_candidate_commit, %{object_backed_snapshot: true}),
+    do: :object_backed_private_snapshot
+
+  defp candidate_source(_candidate_commit, %{committable_snapshot: true}),
+    do: :committable_private_snapshot
+
+  defp candidate_source(candidate_commit, _caller) when is_binary(candidate_commit),
+    do: :detached_immutable_snapshot
+
+  defp candidate_source(_candidate_commit, _caller), do: :ordinary_workspace
+
+  defp candidate_root_commit(:object_backed_private_snapshot, _candidate_commit),
+    do: :object_backed_snapshot
+
+  defp candidate_root_commit(:committable_private_snapshot, _candidate_commit),
+    do: :committable_snapshot
+
+  defp candidate_root_commit(_candidate_source, candidate_commit), do: candidate_commit
 
   defp handle_dependency_cleanup_required(
          state,
@@ -2218,7 +2306,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          resource_owner_pid,
          candidate_commit,
          cleanup_failures,
-         committable_snapshot? \\ false
+         candidate_source
        ) do
     resource_owner_ref = Process.monitor(resource_owner_pid)
     candidate_runtime = Path.join(root_path, "candidate-runtime")
@@ -2243,13 +2331,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       owner_pid: owner_pid,
       owner_ref: owner_ref,
       repo_path: lease.repo_path,
-      candidate_path:
-        if(is_binary(candidate_commit) or committable_snapshot?,
-          do: Path.join(root_path, "candidate"),
-          else: lease.worktree_path
-        ),
+      candidate_path: candidate_path(candidate_source, root_path, lease.worktree_path),
       candidate_commit: candidate_commit,
-      source_projection: if(committable_snapshot?, do: :read_only, else: :read_write),
+      candidate_source: candidate_source,
+      source_projection: candidate_source_projection(candidate_source),
       expected_tree_oid: nil,
       expected_head: nil,
       candidate_cleanup_identity: nil,
@@ -2301,6 +2386,20 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       cleanup_failures_remaining: cleanup_failures
     }
   end
+
+  defp candidate_path(:ordinary_workspace, _root_path, worktree_path), do: worktree_path
+
+  defp candidate_path(_candidate_source, root_path, _worktree_path),
+    do: Path.join(root_path, "candidate")
+
+  defp candidate_source_projection(candidate_source)
+       when candidate_source in [
+              :committable_private_snapshot,
+              :object_backed_private_snapshot
+            ],
+       do: :read_only
+
+  defp candidate_source_projection(_candidate_source), do: :read_write
 
   # Absolute monotonic deadline default when caller omits one (relative budget).
   @default_dependency_lease_deadline_ms 120_000
@@ -2484,6 +2583,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          lease,
          caller
        ) do
+    if Map.get(resource, :candidate_source) == :object_backed_private_snapshot do
+      {:ok, resource}
+    else
+      maybe_materialize_worktree_committable_snapshot(resource, lease, caller)
+    end
+  end
+
+  defp maybe_materialize_committable_snapshot(resource, _lease, _caller), do: {:ok, resource}
+
+  defp maybe_materialize_worktree_committable_snapshot(resource, lease, caller) do
     expected = Map.get(caller, :expected_tree_oid)
     head = Map.get(caller, :expected_head)
 
@@ -2512,8 +2621,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error, :admitted_tree_mismatch}
     end
   end
-
-  defp maybe_materialize_committable_snapshot(resource, _lease, _caller), do: {:ok, resource}
 
   defp create_candidate_snapshot_from_resource(%{candidate_commit: nil} = resource),
     do: {:ok, resource}
@@ -3455,12 +3562,33 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp create_validation_root(state, lease, candidate_commit, materializer, attempts \\ 4)
+  defp create_validation_root(
+         state,
+         lease,
+         candidate_commit,
+         candidate_source,
+         materializer,
+         attempts \\ 4
+       )
 
-  defp create_validation_root(_state, _lease, _candidate_commit, _materializer, 0),
-    do: {:error, :validation_resource_collision}
+  defp create_validation_root(
+         _state,
+         _lease,
+         _candidate_commit,
+         _candidate_source,
+         _materializer,
+         0
+       ),
+       do: {:error, :validation_resource_collision}
 
-  defp create_validation_root(state, lease, candidate_commit, materializer, attempts) do
+  defp create_validation_root(
+         state,
+         lease,
+         candidate_commit,
+         candidate_source,
+         materializer,
+         attempts
+       ) do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
     workspace_hash = sha256(lease.workspace_id) |> binary_part(0, 12)
     resource_id = "validation_" <> token
@@ -3472,10 +3600,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           "arbor-validation-#{workspace_hash}-#{token}"
         )
 
-      candidate_path =
-        if is_binary(candidate_commit) or candidate_commit == :committable_snapshot,
-          do: Path.join(root_path, "candidate"),
-          else: lease.worktree_path
+      candidate_path = candidate_path(candidate_source, root_path, lease.worktree_path)
 
       owner_opts = [
         registry_pid: self(),
@@ -3483,6 +3608,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         root_path: root_path,
         candidate_path: candidate_path,
         candidate_commit: if(is_binary(candidate_commit), do: candidate_commit, else: nil),
+        candidate_source: candidate_source,
         base_path: Path.join(root_path, "base"),
         materializer: materializer,
         cleanup_retry_limit:
@@ -3501,7 +3627,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           {:ok, resource_id, root_path, root_cleanup_identity, resource_owner_pid}
 
         {:error, :root_exists} ->
-          create_validation_root(state, lease, candidate_commit, materializer, attempts - 1)
+          create_validation_root(
+            state,
+            lease,
+            candidate_commit,
+            candidate_source,
+            materializer,
+            attempts - 1
+          )
 
         {:error, {:cleanup_retained, resource_owner_pid, root_cleanup_identity}} ->
           {:error,
@@ -4174,6 +4307,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       candidate_commit: normalize_candidate_commit(Keyword.get(opts, :candidate_commit)),
       repo_path: normalize_id(Keyword.get(opts, :repo_path)),
       committable_snapshot: Keyword.get(opts, :committable_snapshot) == true,
+      object_backed_snapshot: Keyword.get(opts, :object_backed_snapshot) == true,
       expected_tree_oid: Keyword.get(opts, :expected_tree_oid),
       expected_head: Keyword.get(opts, :expected_head),
       blob_manifest: Keyword.get(opts, :blob_manifest),
@@ -4226,6 +4360,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       committable_snapshot:
         Map.get(opts, :committable_snapshot) == true ||
           Map.get(opts, "committable_snapshot") == true,
+      object_backed_snapshot:
+        Map.get(opts, :object_backed_snapshot) == true ||
+          Map.get(opts, "object_backed_snapshot") == true,
       expected_tree_oid: Map.get(opts, :expected_tree_oid) || Map.get(opts, "expected_tree_oid"),
       expected_head: Map.get(opts, :expected_head) || Map.get(opts, "expected_head"),
       blob_manifest: Map.get(opts, :blob_manifest) || Map.get(opts, "blob_manifest"),

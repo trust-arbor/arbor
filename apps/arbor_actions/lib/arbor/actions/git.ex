@@ -46,6 +46,9 @@ defmodule Arbor.Actions.Git do
   @git_deadline_key {__MODULE__, :command_deadline_ms}
   @default_git_timeout_ms 30_000
   @max_blob_path_bytes 1024
+  # BlobManifest.max_entries (50_000) * worst-case
+  # "100644 blob <64-hex>\t<1024-byte path>\0"
+  @ls_tree_z_max_bytes 50_000 * 1_104
   @adoption_range_limit 256
   @adoption_patch_bytes_limit 4 * 1024 * 1024
   @adoption_patch_evidence_bytes_limit 32 * 1024 * 1024
@@ -163,6 +166,7 @@ defmodule Arbor.Actions.Git do
                "GIT_OBJECT_DIRECTORY" => false,
                "GIT_PAGER" => "cat",
                "GIT_QUARANTINE_PATH" => false,
+               "GIT_NO_REPLACE_OBJECTS" => "1",
                "GIT_REPLACE_REF_BASE" => false,
                "GIT_SHALLOW_FILE" => false,
                "GIT_SSH" => false,
@@ -263,6 +267,204 @@ defmodule Arbor.Actions.Git do
 
   def read_bounded_blob_at_commit(_path, _commit, _relative_path, _max_bytes),
     do: {:error, :invalid_git_blob_read}
+
+  @doc false
+  @spec ls_tree_z(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
+  def ls_tree_z(repository_root, full_commit_oid)
+      when is_binary(repository_root) and is_binary(full_commit_oid) do
+    with :ok <- validate_full_oid(full_commit_oid),
+         {:ok, result} <-
+           execute_with_options(
+             repository_root,
+             ["ls-tree", "-r", "-z", full_commit_oid],
+             @ls_tree_z_max_bytes
+           ) do
+      result
+      |> overlay_git_evidence_map(:ls_tree)
+      |> accept_raw_git_stdout(:ls_tree_failed)
+    end
+  end
+
+  def ls_tree_z(_repository_root, _full_commit_oid), do: {:error, :invalid_git_oid}
+
+  @doc false
+  @spec commit_tree_oid(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def commit_tree_oid(repository_root, full_commit_oid)
+      when is_binary(repository_root) and is_binary(full_commit_oid) do
+    with :ok <- validate_full_oid(full_commit_oid),
+         {:ok, result} <-
+           execute(repository_root, ["rev-parse", "--verify", full_commit_oid <> "^{tree}"]) do
+      result = overlay_git_evidence_map(result, :commit_tree_oid)
+
+      case accept_trimmed_git_stdout(result, :commit_tree_oid_failed) do
+        {:ok, tree} ->
+          case validate_full_oid(tree) do
+            :ok -> {:ok, tree}
+            {:error, _reason} -> {:error, :commit_tree_oid_failed}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  def commit_tree_oid(_repository_root, _full_commit_oid), do: {:error, :invalid_git_oid}
+
+  @doc false
+  @spec commit_descendant?(String.t(), String.t(), String.t()) ::
+          {:ok, boolean()} | {:error, term()}
+  def commit_descendant?(repository_root, ancestor_oid, descendant_oid)
+      when is_binary(repository_root) and is_binary(ancestor_oid) and is_binary(descendant_oid) do
+    with :ok <- validate_full_oid(ancestor_oid),
+         :ok <- validate_full_oid(descendant_oid) do
+      case execute(repository_root, ["merge-base", "--is-ancestor", ancestor_oid, descendant_oid]) do
+        {:ok, result} ->
+          classify_ancestor_result(overlay_git_evidence_map(result, :ancestor))
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  def commit_descendant?(_repository_root, _ancestor_oid, _descendant_oid),
+    do: {:error, :invalid_git_oid}
+
+  @doc false
+  @spec object_type(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def object_type(repository_root, full_oid)
+      when is_binary(repository_root) and is_binary(full_oid) do
+    with :ok <- validate_full_oid(full_oid),
+         {:ok, result} <- execute(repository_root, ["cat-file", "-t", full_oid]),
+         {:ok, type} <-
+           result
+           |> overlay_git_evidence_map(:cat_file_type)
+           |> accept_trimmed_git_stdout(:source_commit_missing) do
+      {:ok, type}
+    else
+      _other -> {:error, :source_commit_missing}
+    end
+  end
+
+  def object_type(_repository_root, _full_oid), do: {:error, :source_commit_missing}
+
+  @doc false
+  @spec blob_byte_size(String.t(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def blob_byte_size(repository_root, blob_oid)
+      when is_binary(repository_root) and is_binary(blob_oid) do
+    with :ok <- validate_full_oid(blob_oid),
+         {:ok, result} <- execute(repository_root, ["cat-file", "-s", blob_oid]),
+         {:ok, text} <-
+           result
+           |> overlay_git_evidence_map(:blob_size)
+           |> accept_trimmed_git_stdout(:snapshot_blob_read_failed) do
+      case Integer.parse(text) do
+        {size, ""} when size >= 0 -> {:ok, size}
+        _other -> {:error, :snapshot_blob_read_failed}
+      end
+    else
+      {:error, :invalid_git_oid} -> {:error, :snapshot_blob_read_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def blob_byte_size(_repository_root, _blob_oid), do: {:error, :snapshot_blob_read_failed}
+
+  @doc false
+  @spec read_bounded_blob_by_oid(String.t(), String.t(), pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_bounded_blob_by_oid(repository_root, blob_oid, max_bytes)
+      when is_binary(repository_root) and is_binary(blob_oid) and is_integer(max_bytes) and
+             max_bytes > 0 do
+    with :ok <- validate_full_oid(blob_oid) do
+      case execute_with_options(repository_root, ["cat-file", "blob", blob_oid], max_bytes) do
+        {:ok, %{exit_code: 0, output_truncated: false, output_limit_exceeded: false} = result} ->
+          {:ok, result.stdout || ""}
+
+        {:ok, %{exit_code: 0}} ->
+          {:error, {:git_blob_read_failed, :output_truncated}}
+
+        {:ok, result} ->
+          {:error, {:git_blob_read_failed, result.exit_code}}
+
+        {:error, reason} ->
+          {:error, {:git_blob_read_failed, reason}}
+      end
+    end
+  end
+
+  def read_bounded_blob_by_oid(_repository_root, _blob_oid, _max_bytes),
+    do: {:error, :invalid_git_blob_read}
+
+  defp classify_ancestor_result(result) when is_map(result) do
+    cond do
+      git_evidence_truncated?(result) ->
+        {:error, :git_ancestor_output_truncated}
+
+      result.exit_code == 0 ->
+        if git_evidence_empty_io?(result),
+          do: {:ok, true},
+          else: {:error, :git_ancestor_dirty_success}
+
+      result.exit_code == 1 ->
+        if git_evidence_empty_io?(result),
+          do: {:ok, false},
+          else: {:error, :git_ancestor_dirty_failure}
+
+      true ->
+        {:error, {:git_command_failed, Map.get(result, :exit_code)}}
+    end
+  end
+
+  defp classify_ancestor_result(_result), do: {:error, :invalid_git_oid}
+
+  defp accept_raw_git_stdout(result, tag) when is_map(result) do
+    cond do
+      git_evidence_truncated?(result) ->
+        {:error, :ls_tree_output_truncated}
+
+      result.exit_code == 0 and String.trim(result[:stderr] || "") == "" ->
+        {:ok, result[:stdout] || ""}
+
+      result.exit_code == 0 ->
+        {:error, {:git_evidence_oid_warning, String.trim(result[:stderr] || "")}}
+
+      true ->
+        {:error, {tag, Map.get(result, :exit_code)}}
+    end
+  end
+
+  defp accept_raw_git_stdout(_result, tag), do: {:error, tag}
+
+  defp accept_trimmed_git_stdout(result, tag) do
+    case accept_raw_git_stdout(result, tag) do
+      {:ok, stdout} -> {:ok, String.trim(stdout)}
+      {:error, :ls_tree_output_truncated} -> {:error, {tag, :output_truncated}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp git_evidence_truncated?(result) when is_map(result) do
+    Map.get(result, :output_truncated, false) == true or
+      Map.get(result, :output_limit_exceeded, false) == true
+  end
+
+  defp git_evidence_empty_io?(result) when is_map(result) do
+    String.trim(Map.get(result, :stdout) || "") == "" and
+      String.trim(Map.get(result, :stderr) || "") == ""
+  end
+
+  if Mix.env() == :test do
+    defp overlay_git_evidence_map(result, tag) when is_map(result) do
+      case Process.delete({__MODULE__, {:git_evidence, tag}}) do
+        overlay when is_map(overlay) -> Map.merge(result, overlay)
+        _other -> result
+      end
+    end
+  else
+    defp overlay_git_evidence_map(result, _tag), do: result
+  end
 
   defp validate_commit_oid(commit) do
     case validate_full_oid(commit) do
@@ -1566,6 +1768,59 @@ defmodule Arbor.Actions.Git do
       ),
       do: {:error, :invalid_git_evidence_archive}
 
+  @doc false
+  @spec pin_task_workspace_commit(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, %{hidden_ref: String.t()}} | {:error, term()}
+  def pin_task_workspace_commit(repository_root, task_id, workspace_id, source_commit_oid)
+      when is_binary(repository_root) and is_binary(task_id) and is_binary(workspace_id) and
+             is_binary(source_commit_oid) do
+    with :ok <- validate_full_oid(source_commit_oid),
+         :ok <- validate_identity_id(task_id, @max_task_id_bytes),
+         :ok <- validate_identity_id(workspace_id, @max_workspace_id_bytes),
+         {:ok, canonical_repo} <- authorized_root(repository_root),
+         :ok <- verify_commit_oid(canonical_repo, source_commit_oid),
+         hidden_ref = evidence_ref_for(task_id, workspace_id),
+         :ok <- validate_evidence_ref_name(hidden_ref),
+         {:ok, pin_state} <- read_branch_ref_observation(canonical_repo, hidden_ref) do
+      pin_task_workspace_evidence(canonical_repo, source_commit_oid, hidden_ref, pin_state)
+    end
+  end
+
+  def pin_task_workspace_commit(_repository_root, _task_id, _workspace_id, _source_commit_oid),
+    do: {:error, :invalid_git_evidence_archive}
+
+  defp pin_task_workspace_evidence(repository_root, source_commit_oid, hidden_ref, pin_state) do
+    case pin_state do
+      {:present, ^source_commit_oid} ->
+        {:ok, %{hidden_ref: hidden_ref}}
+
+      {:present, _other_oid} ->
+        {:error, :evidence_ref_oid_mismatch}
+
+      :absent ->
+        with :ok <- run_pre_pin_cas_test_hook(repository_root, hidden_ref, source_commit_oid),
+             :ok <- create_evidence_ref_cas(repository_root, hidden_ref, source_commit_oid),
+             :ok <- verify_evidence_ref(repository_root, hidden_ref, source_commit_oid) do
+          {:ok, %{hidden_ref: hidden_ref}}
+        end
+    end
+  end
+
+  if Mix.env() == :test do
+    defp run_pre_pin_cas_test_hook(repository_root, hidden_ref, source_commit_oid) do
+      case Process.delete({__MODULE__, :pre_pin_cas_hook}) do
+        callback when is_function(callback, 3) ->
+          callback.(repository_root, hidden_ref, source_commit_oid)
+          :ok
+
+        _other ->
+          :ok
+      end
+    end
+  else
+    defp run_pre_pin_cas_test_hook(_repository_root, _hidden_ref, _source_commit_oid), do: :ok
+  end
+
   # Validate an identity-bound ID against its distinct durable-lifecycle byte
   # limit. The raw opaque bytes are preserved for digest derivation (no
   # trimming/normalization of the value itself); only nonblank/UTF-8/NUL and
@@ -1631,23 +1886,27 @@ defmodule Arbor.Actions.Git do
   # acceptance signal; any warning, different type, or nonzero exit fails closed.
   defp verify_commit_oid(repository_root, oid) do
     case execute(repository_root, ["cat-file", "-t", oid]) do
-      {:ok, %{exit_code: 0, stdout: stdout, stderr: stderr}} ->
-        trimmed_stderr = String.trim(stderr)
-        trimmed_stdout = String.trim(stdout)
+      {:ok, result} ->
+        result = overlay_git_evidence_map(result, :cat_file_type)
+        trimmed_stderr = String.trim(Map.get(result, :stderr) || "")
+        trimmed_stdout = String.trim(Map.get(result, :stdout) || "")
 
         cond do
-          trimmed_stderr != "" ->
+          git_evidence_truncated?(result) ->
+            {:error, {:git_evidence_oid_lookup_failed, :output_truncated}}
+
+          Map.get(result, :exit_code) == 0 and trimmed_stderr != "" ->
             {:error, {:git_evidence_oid_warning, trimmed_stderr}}
 
-          trimmed_stdout != "commit" ->
+          Map.get(result, :exit_code) == 0 and trimmed_stdout != "commit" ->
             {:error, {:git_evidence_oid_not_commit, trimmed_stdout}}
 
-          true ->
+          Map.get(result, :exit_code) == 0 ->
             :ok
-        end
 
-      {:ok, result} ->
-        {:error, {:git_evidence_oid_lookup_failed, Map.get(result, :exit_code)}}
+          true ->
+            {:error, {:git_evidence_oid_lookup_failed, Map.get(result, :exit_code)}}
+        end
 
       {:error, reason} ->
         {:error, reason}

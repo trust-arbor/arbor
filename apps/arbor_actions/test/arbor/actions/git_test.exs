@@ -41,6 +41,10 @@ defmodule Arbor.Actions.GitTest do
       assert env["GIT_AUTHOR_EMAIL"] == "factory@arbor.invalid"
     end
 
+    test "the hermetic env disables replacement objects" do
+      assert Git.hermetic_git_env()["GIT_NO_REPLACE_OBJECTS"] == "1"
+    end
+
     test "security regression: commits without any git identity on the host, naming the principal as author",
          %{repo_path: repo_path} do
       # No repo-local identity; the hermetic env already hides global/system
@@ -763,6 +767,68 @@ defmodule Arbor.Actions.GitTest do
       lstat_identity: worktree_lstat_identity(worktree_path),
       worktree_registration: registration
     }
+  end
+
+  describe "G5B2A commit helpers and pin_task_workspace_commit" do
+    test "ls_tree_z, commit_tree_oid, commit_descendant?, and pin are replacement-safe", %{
+      repo_path: repo_path
+    } do
+      head = git_rev_parse(repo_path, "HEAD")
+      tree = git_rev_parse(repo_path, "HEAD^{tree}")
+
+      assert {:ok, listing} = Git.ls_tree_z(repo_path, head)
+      assert is_binary(listing)
+      assert {:ok, ^tree} = Git.commit_tree_oid(repo_path, head)
+      assert {:ok, true} = Git.commit_descendant?(repo_path, head, head)
+
+      File.write!(Path.join(repo_path, "child.txt"), "child\n")
+      {_, 0} = System.cmd("git", ["add", "child.txt"], cd: repo_path)
+      {_, 0} = System.cmd("git", ["commit", "-m", "child"], cd: repo_path)
+      child = git_rev_parse(repo_path, "HEAD")
+      assert {:ok, true} = Git.commit_descendant?(repo_path, head, child)
+
+      blob = git_rev_parse(repo_path, "HEAD:README.md")
+      {:ok, bytes} = Git.read_bounded_blob_by_oid(repo_path, blob, 1_048_576)
+      assert is_binary(bytes)
+      assert bytes =~ "Test Repository"
+
+      assert {:ok, %{hidden_ref: hidden}} =
+               Git.pin_task_workspace_commit(repo_path, "task-pin", "ws-pin", child)
+
+      assert String.starts_with?(hidden, "refs/arbor/evidence/")
+
+      assert {:ok, %{hidden_ref: ^hidden}} =
+               Git.pin_task_workspace_commit(repo_path, "task-pin", "ws-pin", child)
+
+      assert {:error, :evidence_ref_oid_mismatch} =
+               Git.pin_task_workspace_commit(repo_path, "task-pin", "ws-pin", head)
+    end
+
+    test "commit_descendant? rejects dirty exit-1 output", %{repo_path: repo_path} do
+      head = git_rev_parse(repo_path, "HEAD")
+      Process.put({Git, {:git_evidence, :ancestor}}, %{exit_code: 1, stdout: "dirty", stderr: ""})
+
+      assert {:error, :git_ancestor_dirty_failure} =
+               Git.commit_descendant?(repo_path, head, head)
+    end
+
+    test "ls_tree_z rejects truncated and output-limit-exceeded listings", %{repo_path: repo_path} do
+      head = git_rev_parse(repo_path, "HEAD")
+
+      Process.put(
+        {Git, {:git_evidence, :ls_tree}},
+        %{output_truncated: true, output_limit_exceeded: false}
+      )
+
+      assert {:error, :ls_tree_output_truncated} = Git.ls_tree_z(repo_path, head)
+
+      Process.put(
+        {Git, {:git_evidence, :ls_tree}},
+        %{output_truncated: false, output_limit_exceeded: true}
+      )
+
+      assert {:error, :ls_tree_output_truncated} = Git.ls_tree_z(repo_path, head)
+    end
   end
 
   describe "archive_branch_evidence_ref" do
