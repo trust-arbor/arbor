@@ -25,7 +25,7 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
   @c_include Path.expand("../../../c_src", __DIR__)
 
   setup_all do
-    %{harness: compile_harness!()}
+    %{harness: &harness!/0}
   end
 
   setup do
@@ -62,6 +62,7 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
   end
 
   test "security regression: race harness contains hook control strings", %{harness: harness} do
+    harness = harness.()
     {strings, 0} = System.cmd("strings", [harness], stderr_to_stdout: true)
     assert strings =~ "g5b1-hook-"
     assert strings =~ "g5b1-race"
@@ -748,7 +749,20 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
     out
   end
 
+  defp harness! do
+    case Process.get({__MODULE__, :harness}) do
+      nil ->
+        harness = compile_harness!()
+        Process.put({__MODULE__, :harness}, harness)
+        harness
+
+      harness ->
+        harness
+    end
+  end
+
   defp run_harness(harness, hook, plan) do
+    harness = harness.()
     input_dir = exclusive_dir!("g5b1-harness-input")
     input_path = Path.join(input_dir, "stdin")
     File.write!(input_path, plan.payload, [:binary])
