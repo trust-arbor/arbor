@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Commands.CodingGrantCore
   alias Mix.Tasks.Arbor.Coding.Grant
 
   @moduletag :fast
@@ -21,11 +22,11 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   test "mix help arbor.coding.grant states dry-run semantics exactly" do
     doc = Mix.Task.moduledoc(Mix.Tasks.Arbor.Coding.Grant)
 
-    assert doc =~ "until readiness names nothing"
+    assert doc =~ "until no role has missing findings"
     assert doc =~ "maximum number of readiness rounds"
     assert doc =~ "every round invokes readiness"
     assert doc =~ "emits the full list of"
-    assert doc =~ "caller URIs named that round (no dedupe)"
+    assert doc =~ "missing URIs named that round (no dedupe)"
     assert doc =~ "never emits a grant"
     assert doc =~ "halts converged only when a report names nothing"
     assert doc =~ "unconverged at max-rounds"
@@ -81,8 +82,9 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     assert result.status == :unconverged
     assert result.rounds == 2
     assert result.rounds <= 2
-    assert result.remaining == [@uri_a, @uri_b]
-    assert result.granted == [@uri_a, @uri_b]
+    assert Enum.map(result.remaining, & &1.uri) == [@uri_a, @uri_b]
+    assert Enum.map(result.granted, & &1.uri) == [@uri_a, @uri_b]
+    assert result.granted == [caller_target(@uri_a), caller_target(@uri_b)]
 
     rpcs = collect_rpcs([])
 
@@ -125,7 +127,12 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     assert result.status == :unconverged
     assert result.rounds == 2
     assert result.granted == []
-    assert result.remaining == [@uri_a, @uri_a, @uri_b]
+
+    assert result.remaining == [
+             caller_target(@uri_a),
+             caller_target(@uri_a),
+             caller_target(@uri_b)
+           ]
 
     rpcs = collect_rpcs([])
     assert Enum.all?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :coding_dispatch_readiness end)
@@ -187,7 +194,8 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
              Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
 
     assert result.status == :converged
-    assert result.granted == [@uri_a]
+    assert Enum.map(result.granted, & &1.uri) == [@uri_a]
+    assert result.granted == [caller_target(@uri_a)]
 
     assert_received :discovered_dist
     assert_received :discovered_running
@@ -237,7 +245,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
     assert {:error, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
     assert result.status == :malformed_report
-    assert result.granted == [@uri_a]
+    assert result.granted == [caller_target(@uri_a)]
     assert result.rounds == 2
     assert result.failed == []
 
@@ -253,6 +261,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
     report =
       %{
+        "caller_id" => @caller,
         "planes" => %{
           "executor" => %{
             "details" => %{
@@ -266,7 +275,10 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
                     },
                     "not-a-map"
                   ],
-                  "required_resources" => []
+                  "required_resources" => [],
+                  "principals" => [
+                    %{"role" => "authenticated_caller", "principal_id" => @caller}
+                  ]
                 }
               }
             }
@@ -308,6 +320,108 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
              )
   end
 
+  test "per-role summary grants execution-principal URIs to the coordinator" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    readiness_n = :atomics.new(1, [])
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case function do
+          :coding_dispatch_readiness ->
+            n = :atomics.add_get(readiness_n, 1, 1)
+
+            if n == 1 do
+              {:ok, exec_missing_report(exec_uri, @agent_id)}
+            else
+              {:ok, exec_missing_report_empty(@agent_id)}
+            end
+
+          :grant ->
+            {:ok, %{id: "cap_exec"}}
+        end
+      end)
+
+    args = ["--plan", path, "--agent-id", @agent_id]
+    assert {:ok, result} = Grant.execute(args, opts)
+    assert result.status == :converged
+    assert result.granted == [exec_target(exec_uri, @agent_id)]
+
+    rpcs = collect_rpcs([])
+
+    assert Enum.any?(rpcs, fn
+             {_n, Arbor.Security, :grant, [[principal: @agent_id, resource: ^exec_uri]], 15_000} ->
+               true
+
+             _other ->
+               false
+           end)
+
+    refute Enum.any?(rpcs, fn
+             {_n, Arbor.Security, :grant, [[principal: @caller, resource: ^exec_uri]], _t} ->
+               true
+
+             _other ->
+               false
+           end)
+
+    shown = CodingGrantCore.show(result)
+    assert shown =~ "execution_principal"
+    assert shown =~ @agent_id
+    assert shown =~ exec_uri
+
+    run_n = :atomics.new(1, [])
+
+    run_opts =
+      runtime_opts(fn _node, _mod, function, _args, _timeout ->
+        case function do
+          :coding_dispatch_readiness ->
+            n = :atomics.add_get(run_n, 1, 1)
+
+            if n == 1 do
+              {:ok, exec_missing_report(exec_uri, @agent_id)}
+            else
+              {:ok, exec_missing_report_empty(@agent_id)}
+            end
+
+          :grant ->
+            {:ok, %{id: "cap_exec"}}
+        end
+      end)
+
+    assert :ok = Grant.run(args, run_opts)
+    assert_received {:mix_shell, :info, [output]}
+    assert output =~ "execution_principal"
+    assert output =~ @agent_id
+    assert output =~ exec_uri
+  end
+
+  test "refuses to grant a URI to a principal the CLI invocation did not name" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    other = "agent_other_named"
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn _node, _mod, function, _args, _timeout ->
+        case function do
+          :coding_dispatch_readiness -> {:ok, exec_missing_report(exec_uri, other)}
+          :grant -> flunk("must not grant to an unnamed principal")
+        end
+      end)
+
+    assert {:error, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
+    assert result.status == :grant_failed
+    assert result.failed == [{exec_target(exec_uri, other), :unnamed_principal}]
+    assert result.granted == []
+  end
+
   defp runtime_opts(rpc) do
     [
       caller_resolver: fn _cli -> {:ok, @caller} end,
@@ -318,8 +432,18 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     ]
   end
 
+  defp caller_target(uri, principal_id \\ @caller) do
+    %{principal_role: "authenticated_caller", principal_id: principal_id, uri: uri}
+  end
+
+  defp exec_target(uri, principal_id) do
+    %{principal_role: "execution_principal", principal_id: principal_id, uri: uri}
+  end
+
   defp missing_report(uris) do
     %{
+      "caller_id" => @caller,
+      "agent_id" => @agent_id,
       "planes" => %{
         "executor" => %{
           "details" => %{
@@ -332,7 +456,69 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
                     "resource_uris" => uris
                   }
                 ],
-                "required_resources" => []
+                "required_resources" => [],
+                "principals" => [
+                  %{"role" => "authenticated_caller", "principal_id" => @caller},
+                  %{"role" => "execution_principal", "principal_id" => @agent_id}
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  end
+
+  defp exec_missing_report(uri, coordinator_id) do
+    %{
+      "caller_id" => @caller,
+      "agent_id" => coordinator_id,
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => %{
+              "authority_horizon" => %{
+                "findings" => [
+                  %{
+                    "principal_role" => "execution_principal",
+                    "classification" => "missing",
+                    "total_count" => 1,
+                    "resource_uris" => [uri],
+                    "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
+                  }
+                ],
+                "required_resources" => %{
+                  "total_count" => 1,
+                  "resource_uris" => [uri],
+                  "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
+                },
+                "principals" => [
+                  %{"role" => "execution_principal", "principal_id" => coordinator_id},
+                  %{"role" => "authenticated_caller", "principal_id" => @caller}
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  end
+
+  defp exec_missing_report_empty(coordinator_id) do
+    %{
+      "caller_id" => @caller,
+      "agent_id" => coordinator_id,
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => %{
+              "authority_horizon" => %{
+                "findings" => [],
+                "required_resources" => [],
+                "principals" => [
+                  %{"role" => "execution_principal", "principal_id" => coordinator_id},
+                  %{"role" => "authenticated_caller", "principal_id" => @caller}
+                ]
               }
             }
           }

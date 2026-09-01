@@ -1,12 +1,13 @@
 defmodule Mix.Tasks.Arbor.Coding.Grant do
-  @shortdoc "Grant caller capability URIs named by coding dispatch readiness"
+  @shortdoc "Grant authority-horizon capability URIs named by coding dispatch readiness"
   @moduledoc """
   Closes the authority-horizon grant loop operators otherwise run by hand.
 
   Runs coding dispatch readiness for the plan against the coordinator, grants
-  the capability URIs readiness names as missing for the key-file caller
-  through `Arbor.Security.grant/1`, and repeats until readiness names nothing
-  or the configured maximum number of readiness rounds is reached.
+  each capability URI readiness names as missing to the principal that finding
+  names (key-file caller or `--agent-id` coordinator) through
+  `Arbor.Security.grant/1`, and repeats until no role has missing findings or
+  the configured maximum number of readiness rounds is reached.
 
       mix arbor.coding.grant --plan path/to/plan.json --agent-id agent_<coordinator>
       mix arbor.coding.grant --plan path/to/plan.json --agent-id agent_<coordinator> \
@@ -21,11 +22,12 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     * `--key-file` — caller key file (default `~/.arbor/identity.key`)
     * `--max-rounds` — readiness invocations allowed (default 5, valid 1..20)
     * `--dry-run` — every round invokes readiness and emits the full list of
-      caller URIs named that round (no dedupe). Dry-run never emits a grant.
+      missing URIs named that round (no dedupe). Dry-run never emits a grant.
       It halts converged only when a report names nothing; otherwise it ends
       unconverged at max-rounds.
 
-  Grants use the key-file principal as grantee. Wildcard and root URIs are
+  Each grant uses the principal the finding names. A URI is never granted to a
+  principal the readiness report did not name. Wildcard and root URIs are
   refused. A malformed or truncated readiness report fails closed: no sibling
   URI is granted. Any non-converged halt exits non-zero.
   """
@@ -248,10 +250,17 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     interpret(state, effect, ctx)
   end
 
-  defp interpret(state, {:grant, uri}, ctx) do
-    result = invoke_grant(ctx, uri)
-    {state, effect} = CodingGrantCore.step(state, {:grant_result, uri, result})
-    interpret(state, effect, ctx)
+  defp interpret(state, {:grant, %{principal_id: id, uri: uri} = target}, ctx) do
+    case allowed_grantee?(ctx, target) do
+      {:ok, ^id} ->
+        result = invoke_grant(ctx, id, uri)
+        {state, effect} = CodingGrantCore.step(state, {:grant_result, target, result})
+        interpret(state, effect, ctx)
+
+      {:error, reason} ->
+        {state, effect} = CodingGrantCore.step(state, {:grant_result, target, {:error, reason}})
+        interpret(state, effect, ctx)
+    end
   end
 
   defp interpret(state, {:emit, text}, ctx) do
@@ -282,12 +291,24 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     end
   end
 
-  defp invoke_grant(ctx, uri) do
+  defp allowed_grantee?(ctx, %{principal_role: "authenticated_caller", principal_id: id})
+       when is_binary(id) and id != "" do
+    if id == ctx.caller_id, do: {:ok, id}, else: {:error, :unnamed_principal}
+  end
+
+  defp allowed_grantee?(ctx, %{principal_role: "execution_principal", principal_id: id})
+       when is_binary(id) and id != "" do
+    if id == ctx.agent_id, do: {:ok, id}, else: {:error, :unnamed_principal}
+  end
+
+  defp allowed_grantee?(_ctx, _target), do: {:error, :unnamed_principal}
+
+  defp invoke_grant(ctx, principal, uri) do
     case rpc(
            ctx,
            Arbor.Security,
            :grant,
-           [[principal: ctx.caller_id, resource: uri]],
+           [[principal: principal, resource: uri]],
            @grant_rpc_timeout_ms
          ) do
       {:ok, _capability} -> :ok
