@@ -284,14 +284,16 @@ defmodule Arbor.Contracts.Coding.CandidateMaterialization do
 
   defp admit_path(path, field) when is_binary(path) do
     cond do
+      # O(1) byte-size ceiling before UTF-8 scanning so attacker-sized
+      # binaries fail as :path_too_long without an encoding walk.
+      byte_size(path) > @max_path_bytes ->
+        {:error, {:invalid_field, field, :path_too_long}}
+
       not String.valid?(path) ->
         {:error, {:invalid_field, field, :invalid_utf8}}
 
       path == "" ->
         {:error, {:invalid_field, field, :empty_path}}
-
-      byte_size(path) > @max_path_bytes ->
-        {:error, {:invalid_field, field, :path_too_long}}
 
       :binary.match(path, <<0>>) != :nomatch ->
         {:error, {:invalid_field, field, :nul_byte}}

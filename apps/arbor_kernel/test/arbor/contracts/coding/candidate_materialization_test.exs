@@ -41,6 +41,18 @@ defmodule Arbor.Contracts.Coding.CandidateMaterializationTest do
 
   defp segment_path(count), do: Enum.join(List.duplicate("s", count), "/")
 
+  defp oversized_descriptor_paths(count) do
+    max_component = CandidateMaterialization.max_component_bytes()
+    pad_width = 4
+    first_pad = String.duplicate("a", max_component - pad_width)
+    rest = String.duplicate("a", max_component)
+
+    Enum.map(1..count, fn index ->
+      first = String.pad_leading(Integer.to_string(index), pad_width, "0") <> first_pad
+      Enum.join([first, rest, rest, rest], "/")
+    end)
+  end
+
   test "exposes frozen bounds and admitted modes" do
     assert CandidateMaterialization.max_entries() == 2048
     assert CandidateMaterialization.max_path_bytes() == 1024
@@ -270,6 +282,21 @@ defmodule Arbor.Contracts.Coding.CandidateMaterializationTest do
     end
   end
 
+  test "rejects oversized malformed paths as path_too_long before UTF-8 scanning" do
+    oversized = :binary.copy(<<0xFF>>, CandidateMaterialization.max_path_bytes() + 1)
+    at_ceiling = :binary.copy(<<0xFF>>, CandidateMaterialization.max_path_bytes())
+    tiny = <<0xFF>>
+
+    assert {:error, {:invalid_field, "entries[0].path", :path_too_long}} =
+             CandidateMaterialization.new(valid_attrs(%{"entries" => [valid_entry(oversized)]}))
+
+    assert {:error, {:invalid_field, "entries[0].path", :invalid_utf8}} =
+             CandidateMaterialization.new(valid_attrs(%{"entries" => [valid_entry(at_ceiling)]}))
+
+    assert {:error, {:invalid_field, "entries[0].path", :invalid_utf8}} =
+             CandidateMaterialization.new(valid_attrs(%{"entries" => [valid_entry(tiny)]}))
+  end
+
   test "admits .github and foo.git filenames that are not .git segments" do
     attrs =
       valid_attrs(%{
@@ -321,11 +348,42 @@ defmodule Arbor.Contracts.Coding.CandidateMaterializationTest do
   end
 
   test "rejects canonical descriptor bytes above 1 MiB" do
-    entries =
-      Enum.map(1..1200, fn index ->
-        suffix = String.pad_leading(Integer.to_string(index), 4, "0")
-        valid_entry(suffix <> "/" <> String.duplicate("a", 900))
+    paths = oversized_descriptor_paths(1024)
+    entries = Enum.map(paths, &valid_entry/1)
+
+    assert length(paths) <= CandidateMaterialization.max_entries()
+    assert paths == Enum.uniq(paths)
+    assert paths == Enum.sort(paths)
+
+    for path <- paths do
+      assert byte_size(path) <= CandidateMaterialization.max_path_bytes()
+      segments = String.split(path, "/")
+      assert length(segments) <= CandidateMaterialization.max_path_depth()
+
+      assert Enum.all?(
+               segments,
+               &(byte_size(&1) <= CandidateMaterialization.max_component_bytes())
+             )
+    end
+
+    encoded_entries =
+      Enum.map(paths, fn path ->
+        Jason.OrderedObject.new([
+          {"path", path},
+          {"blob_oid", @oid40_c},
+          {"mode", 100_644}
+        ])
       end)
+
+    ordered =
+      Jason.OrderedObject.new([
+        {"source_commit_oid", @oid40_a},
+        {"expected_tree_oid", @oid40_b},
+        {"entries", encoded_entries}
+      ])
+
+    assert {:ok, bytes} = Jason.encode(ordered)
+    assert byte_size(bytes) > CandidateMaterialization.max_encoded_bytes()
 
     assert {:error, {:invalid_candidate_materialization, :too_large}} =
              CandidateMaterialization.new(valid_attrs(%{"entries" => entries}))
