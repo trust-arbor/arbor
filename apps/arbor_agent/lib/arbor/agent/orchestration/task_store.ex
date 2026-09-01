@@ -41,8 +41,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   cherry-pick, or otherwise integrate the candidate. TaskStore serializes
   adoption admission and commit, but runs the potentially slow callback under
   the task supervisor so status and result reads remain available. Adoption is
-  eligible only for successful terminal JSON-clean tasks; callback errors leave
-  the prior result unchanged so callers can retry.
+  eligible for configured JSON-clean tasks that are terminal `:done`, including
+  registry-adoptable `requires_input` outcomes such as
+  `human_review_required`; callback errors leave the prior result unchanged so
+  callers can retry.
 
   ## Target dispatch fencing
 

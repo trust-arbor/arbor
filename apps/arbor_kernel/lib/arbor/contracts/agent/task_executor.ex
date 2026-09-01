@@ -410,14 +410,16 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
             ) :: :ok | {:error, term()}
 
   @doc """
-  Optionally finalize a successful configured executor result.
+  Optionally finalize a configured executor result for terminal evidence retention.
 
-  TaskStore calls this only for a successful configured executor return, after
-  terminal steering reconciliation. The callback is time-bounded separately
-  from status and cancellation callbacks. An implementing executor uses it for
-  mandatory terminal artifact retention and must preserve and return a
-  JSON-clean result payload. An error, exit, or timeout makes the outer task
-  fail. Explicit runner overrides do not invoke this callback.
+  TaskStore calls this after terminal steering reconciliation for `:done`
+  JSON-clean configured returns selected by the dual-finalizer rules above,
+  including registry-adoptable `requires_input` outcomes such as
+  `human_review_required`. The callback is time-bounded separately from status
+  and cancellation callbacks. An implementing executor uses it for mandatory
+  terminal artifact retention and must preserve and return a JSON-clean result
+  payload. An error, exit, or timeout makes the outer task fail. Explicit runner
+  overrides do not invoke this callback.
   """
   @callback finalize_task(
               agent_id(),
@@ -427,14 +429,14 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
             ) :: {:ok, result_payload()} | {:error, term()}
 
   @doc """
-  Optionally adopt a successful terminal task into a destination reference.
+  Optionally adopt an eligible terminal task into a destination reference.
 
-  TaskStore invokes this only for successful configured JSON-clean tasks, after
-  terminalization and any configured `finalize_task/4` callback. The adoption
-  request is a closed JSON object containing `destination_ref`. The callback
-  must return the complete updated JSON-clean executor result; partial patches,
-  structs, and non-JSON values are invalid. Explicit runner overrides do not
-  invoke this callback.
+  TaskStore invokes this after a configured JSON-clean task is terminal `:done`,
+  including registry-adoptable `requires_input` results, and after any selected
+  `finalize_task/4` callback. The adoption request is a closed JSON object
+  containing `destination_ref`. The callback must return the complete updated
+  JSON-clean executor result; partial patches, structs, and non-JSON values are
+  invalid. Explicit runner overrides do not invoke this callback.
   """
   @callback adopt_task(
               agent_id(),

@@ -219,5 +219,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
         ] do
       assert collapsed =~ phrase
     end
+
+    refute collapsed =~ "only for a successful configured executor return"
+    refute collapsed =~ "only for successful configured JSON-clean tasks"
   end
 end
