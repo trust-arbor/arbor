@@ -436,6 +436,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     destructive work. Reused/pre-existing branches and uncertain provenance fail
     closed by preserving the ref.
 
+  Publish modes clean validation resources, attestations, and review snapshots
+  only after exact archival or immutable verification succeeds.
+
   Idempotent: releasing an unknown/already-released id returns success.
   """
   @spec release(String.t(), release_mode() | String.t(), map() | keyword()) ::
@@ -1199,20 +1202,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
           case maybe_preflight_publish(lease, release_mode) do
             :ok ->
-              case cleanup_workspace_validation_resources(state, lease.workspace_id) do
-                {:ok, state} ->
-                  state =
-                    state
-                    |> maybe_cleanup_workspace_attestations(lease.workspace_id, release_mode)
-                    |> cleanup_workspace_review_snapshots(lease.workspace_id)
-
-                  case do_release(state, lease, release_mode) do
-                    {:ok, result, state} -> {:reply, {:ok, result}, state}
-                    {:error, reason, state} -> {:reply, {:error, reason}, state}
-                  end
-
-                {:error, state} ->
-                  {:reply, {:error, :validation_resource_cleanup_failed}, state}
+              case complete_authorized_release(state, lease, release_mode) do
+                {:ok, result, state} -> {:reply, {:ok, result}, state}
+                {:error, reason, state} -> {:reply, {:error, reason}, state}
               end
 
             {:error, reason} ->
@@ -4078,16 +4070,6 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp maybe_cleanup_workspace_attestations(state, _workspace_id, :retain), do: state
 
-  defp maybe_cleanup_workspace_attestations(state, _workspace_id, {:publish, _commit, :retain}),
-    do: state
-
-  defp maybe_cleanup_workspace_attestations(
-         state,
-         _workspace_id,
-         {:publish, _commit, :retain, _source}
-       ),
-       do: state
-
   defp maybe_cleanup_workspace_attestations(state, workspace_id, _mode),
     do: cleanup_workspace_attestations(state, workspace_id)
 
@@ -6712,34 +6694,64 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp do_release(state, lease, :discard), do: do_release_discard(state, lease)
 
-  # A reviewable candidate becomes durable evidence before its worktree is
-  # released. workspace_branch archives from the task branch at the candidate
-  # OID. immutable_object verifies the pre-pinned evidence ref while the
-  # worktree/branch remain at the acquired base, then releases.
-  defp do_release(state, lease, {:publish, candidate_commit, target_mode})
-       when target_mode in [:remove, :retain] and is_binary(candidate_commit) do
-    do_release(state, lease, {:publish, candidate_commit, target_mode, :workspace_branch})
-  end
-
-  defp do_release(state, lease, {:publish, candidate_commit, target_mode, source})
-       when target_mode in [:remove, :retain] and is_binary(candidate_commit) and
+  # Single post-preflight publication path: persist exact evidence, then
+  # destructive validation/review cleanup, then remove/retain. Preflight may
+  # observe; archival or immutable verification must succeed first.
+  defp complete_authorized_release(
+         state,
+         lease,
+         {:publish, candidate_commit, target_mode, source}
+       )
+       when is_binary(candidate_commit) and target_mode in [:remove, :retain] and
               source in [:workspace_branch, :immutable_object] do
-    case CandidateSourceCore.publish_evidence_mode(source) do
-      :archive_from_branch ->
-        publish_archive_then_release(state, lease, candidate_commit, target_mode)
+    case persist_publish_evidence(state, lease, candidate_commit, source) do
+      {:ok, hidden_ref} ->
+        case cleanup_after_publish_evidence(state, lease.workspace_id, target_mode) do
+          {:ok, state} ->
+            finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref)
 
-      :verify_existing ->
-        publish_verify_then_release(state, lease, candidate_commit, target_mode)
+          {:error, state} ->
+            {:error, :validation_resource_cleanup_failed, state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
     end
   end
 
-  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode}),
-    do: {:error, :invalid_publish_release, state}
+  defp complete_authorized_release(
+         state,
+         _lease,
+         {:publish, _candidate_commit, _target_mode, _source}
+       ),
+       do: {:error, :invalid_publish_release, state}
 
-  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode, _source}),
-    do: {:error, :invalid_publish_release, state}
+  defp complete_authorized_release(state, lease, mode) do
+    case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+      {:ok, state} ->
+        state =
+          state
+          |> maybe_cleanup_workspace_attestations(lease.workspace_id, mode)
+          |> cleanup_workspace_review_snapshots(lease.workspace_id)
 
-  defp publish_archive_then_release(state, lease, candidate_commit, target_mode) do
+        do_release(state, lease, mode)
+
+      {:error, state} ->
+        {:error, :validation_resource_cleanup_failed, state}
+    end
+  end
+
+  defp persist_publish_evidence(state, lease, candidate_commit, source) do
+    case CandidateSourceCore.publish_evidence_mode(source) do
+      :archive_from_branch ->
+        persist_workspace_branch_archive(state, lease, candidate_commit)
+
+      :verify_existing ->
+        persist_immutable_publish_evidence(lease, candidate_commit)
+    end
+  end
+
+  defp persist_workspace_branch_archive(state, lease, candidate_commit) do
     case require_branch_at_candidate(lease, candidate_commit) do
       :ok ->
         archive_input = %{
@@ -6751,25 +6763,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         }
 
         case invoke_retained_archive(state.retained_archive, archive_input) do
-          {:ok, %{hidden_ref: hidden_ref}} ->
-            finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref)
-
-          {:error, reason} ->
-            {:error, {:candidate_archive_failed, reason}, state}
+          {:ok, %{hidden_ref: hidden_ref}} -> {:ok, hidden_ref}
+          {:error, reason} -> {:error, {:candidate_archive_failed, reason}}
         end
 
       {:error, reason} ->
-        {:error, {:candidate_archive_failed, reason}, state}
+        {:error, {:candidate_archive_failed, reason}}
     end
   end
 
-  defp publish_verify_then_release(state, lease, candidate_commit, target_mode) do
+  defp persist_immutable_publish_evidence(lease, candidate_commit) do
     case verify_immutable_publish(lease, candidate_commit) do
-      {:ok, hidden_ref} ->
-        finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref)
+      {:ok, hidden_ref} -> {:ok, hidden_ref}
+      {:error, reason} -> {:error, wrap_immutable_publish_error(reason)}
+    end
+  end
 
-      {:error, reason} ->
-        {:error, wrap_immutable_publish_error(reason), state}
+  defp cleanup_after_publish_evidence(state, workspace_id, target_mode) do
+    case cleanup_workspace_validation_resources(state, workspace_id) do
+      {:ok, state} ->
+        {:ok,
+         state
+         |> maybe_cleanup_workspace_attestations(workspace_id, target_mode)
+         |> cleanup_workspace_review_snapshots(workspace_id)}
+
+      {:error, state} ->
+        {:error, state}
     end
   end
 
@@ -6807,16 +6826,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp maybe_preflight_publish(lease, {:publish, candidate_commit, _target_mode, source}) do
+  defp maybe_preflight_publish(lease, {:publish, candidate_commit, target_mode, source})
+       when is_binary(candidate_commit) and target_mode in [:remove, :retain] and
+              source in [:workspace_branch, :immutable_object] do
     case CandidateSourceCore.publish_evidence_mode(source) do
       :archive_from_branch ->
         preflight_workspace_branch_publish(lease, candidate_commit)
 
-      :verify_existing when is_binary(candidate_commit) ->
-        preflight_immutable_publish(lease, candidate_commit)
-
       :verify_existing ->
-        {:error, :invalid_publish_release}
+        preflight_immutable_publish(lease, candidate_commit)
     end
   end
 

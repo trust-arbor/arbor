@@ -173,6 +173,106 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
     assert evidence_refs(repo) == evidence_before
   end
 
+  @tag :security_regression
+  test "security regression: branch mutation between preflight and archive fails closed and preserves review snapshot",
+       %{tmp_dir: tmp_dir} do
+    unique = System.unique_integer([:positive])
+    repo = create_git_repo(Path.join(tmp_dir, "race_repo_#{unique}"))
+    branch = "test/publish-race-#{unique}"
+    task_id = "task_publish_race_#{unique}"
+    principal_id = "agent_publish"
+
+    archive = fn input ->
+      parent = git!(input.repo_path, ["rev-parse", "#{input.settlement_tip}^"])
+
+      git!(input.repo_path, ["update-ref", "refs/heads/#{input.branch}", parent])
+
+      Git.archive_branch_evidence_ref(
+        input.repo_path,
+        input.branch,
+        input.task_id,
+        input.workspace_id,
+        input.settlement_tip
+      )
+    end
+
+    server = start_publish_registry(retained_archive: archive)
+
+    assert {:ok, lease} =
+             WorkspaceLeaseRegistry.acquire(
+               %{
+                 repo_path: repo,
+                 branch: branch,
+                 worktree_base_dir: Path.join(tmp_dir, "race_worktrees_#{unique}"),
+                 task_id: task_id,
+                 principal_id: principal_id
+               },
+               server: server
+             )
+
+    candidate_path = Path.join(lease.worktree_path, "candidate.txt")
+    File.write!(candidate_path, "candidate\n")
+    git!(lease.worktree_path, ["add", "candidate.txt"])
+    git!(lease.worktree_path, ["commit", "-m", "candidate"])
+    candidate = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+    parent = git!(repo, ["rev-parse", "#{candidate}^"])
+    evidence_before = evidence_refs(repo)
+
+    auth = %{
+      task_id: task_id,
+      principal_id: principal_id,
+      server: server
+    }
+
+    assert {:ok, snap} =
+             WorkspaceLeaseRegistry.open_review_snapshot(
+               lease.workspace_id,
+               candidate,
+               auth
+             )
+
+    assert git!(lease.worktree_path, ["symbolic-ref", "HEAD"]) == "refs/heads/#{branch}"
+
+    assert {:error, {:candidate_archive_failed, :branch_ref_oid_mismatch}} =
+             WorkspaceLeaseRegistry.release(
+               lease.workspace_id,
+               :publish,
+               Map.put(auth, :candidate_commit, candidate)
+             )
+
+    assert git!(repo, ["rev-parse", "refs/heads/#{branch}"]) == parent
+    assert git!(lease.worktree_path, ["symbolic-ref", "HEAD"]) == "refs/heads/#{branch}"
+    assert git!(lease.worktree_path, ["rev-parse", "HEAD"]) == parent
+    assert git!(lease.worktree_path, ["rev-parse", "HEAD"]) != candidate
+
+    assert git!(lease.worktree_path, ["rev-parse", "HEAD"]) ==
+             git!(repo, ["rev-parse", "refs/heads/#{branch}"])
+
+    assert File.dir?(lease.worktree_path)
+    assert File.read!(candidate_path) == "candidate\n"
+    assert git!(repo, ["cat-file", "-t", candidate]) == "commit"
+
+    assert {:ok, still} = WorkspaceLeaseRegistry.inspect_lease(lease.workspace_id, auth)
+    assert still.active == true
+
+    assert {:ok, resolved} =
+             WorkspaceLeaseRegistry.resolve_review_snapshot(
+               snap.review_snapshot_id,
+               auth
+             )
+
+    assert resolved.review_snapshot_id == snap.review_snapshot_id
+    assert evidence_refs(repo) == evidence_before
+
+    assert {:error, _reason} =
+             Git.verify_archived_evidence_ref(
+               repo,
+               task_id,
+               lease.workspace_id,
+               candidate
+             )
+  end
+
   test "publish_retain archives the candidate and keeps the owned worktree", %{
     tmp_dir: tmp_dir
   } do
@@ -619,6 +719,24 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
 
   defp evidence_refs(repo) do
     git!(repo, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/arbor/evidence"])
+  end
+
+  defp start_publish_registry(opts) do
+    server = :"ws_publish_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {WorkspaceLeaseRegistry,
+       [
+         name: server,
+         retention_journal: :disabled,
+         linux_dependency_baseline_materializer:
+           Arbor.Actions.TestLinuxBaselineMaterializer,
+         retained_archive: Keyword.fetch!(opts, :retained_archive)
+       ]},
+      id: server
+    )
+
+    server
   end
 
   defp git_index!(repo, index, args) do
