@@ -34,6 +34,7 @@
 #endif
 
 #include "arbor_shell_archive_stat.h"
+#include "arbor_shell_handle_relative_inode.h"
 
 extern char **environ;
 
@@ -3078,5 +3079,8 @@ int main(int argc, char **argv) {
     return run_trusted_build_post_phase_quarantine_cookie(argc, argv);
   }
   if (argc >= 2 && strcmp(argv[1], "kill") == 0) return run_kill(argc, argv);
+  if (argc >= 2 && strcmp(argv[1], "handle-relative-inode") == 0) {
+    return arbor_shell_handle_relative_inode_main(argc, argv);
+  }
   return 2;
 }

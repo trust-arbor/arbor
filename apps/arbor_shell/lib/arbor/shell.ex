@@ -64,6 +64,7 @@ defmodule Arbor.Shell do
     ExecutionRegistry,
     ExecutionWorker,
     Executor,
+    HandleRelativeInode,
     LinuxDependencyBaselineAuthority,
     LinuxDependencyBaselineBuilder,
     LinuxDependencyBaselineFilesystem,
@@ -138,6 +139,11 @@ defmodule Arbor.Shell do
   end
 
   def read_verified_regular_file(_path, _max_bytes), do: {:error, :invalid_regular_file}
+
+  @doc false
+  @spec apply_handle_relative_inode(term()) ::
+          {:ok, map()} | {:error, atom()} | {:error, {:retained_ambiguity, atom(), map()}}
+  def apply_handle_relative_inode(request), do: HandleRelativeInode.apply(request)
 
   @doc false
   def __test_set_linux_dependency_baseline_before_open_hook__(fun)
