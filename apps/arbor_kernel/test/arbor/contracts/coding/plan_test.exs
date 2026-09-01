@@ -56,6 +56,18 @@ defmodule Arbor.Contracts.Coding.PlanTest do
     "checkpoint_policy" => "direct"
   }
 
+  @oid40_a String.duplicate("a", 40)
+  @oid40_b String.duplicate("b", 40)
+  @oid40_c String.duplicate("c", 40)
+
+  @candidate_materialization %{
+    "source_commit_oid" => @oid40_a,
+    "expected_tree_oid" => @oid40_b,
+    "entries" => [
+      %{"path" => "mix.exs", "blob_oid" => @oid40_c, "mode" => 100_644}
+    ]
+  }
+
   @top_keys ~w(
     base_ref
     budgets
@@ -495,6 +507,114 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert Jason.decode!(json) == canonical
       assert {:ok, reparsed} = Plan.new(Jason.decode!(json))
       assert Plan.to_map(reparsed) == canonical
+    end
+  end
+
+  describe "version 2 candidate materialization" do
+    test "pins descriptor-free v1 and v2 to_map and fingerprint input" do
+      assert {:ok, v1_plan} = Plan.new(@minimal_attrs)
+      assert Plan.to_map(v1_plan) == @v1_fixture
+      refute Map.has_key?(Plan.to_map(v1_plan), "candidate_materialization")
+
+      assert {:ok, v2_plan} = Plan.new(v2_attrs())
+      expected = v2_map_fixture()
+      assert Plan.to_map(v2_plan) == expected
+      refute Map.has_key?(expected, "candidate_materialization")
+
+      assert Map.keys(Plan.to_map(v2_plan)) |> Enum.sort() ==
+               (@top_keys ++ ["work_packet", "work_packet_digest"]) |> Enum.sort()
+
+      assert fingerprint_json(Plan.to_map(v2_plan)) == fingerprint_json(expected)
+    end
+
+    test "admits the nested descriptor only on v2 design_required plans" do
+      attrs =
+        Map.put(
+          v2_attrs("default", "design_required"),
+          :candidate_materialization,
+          @candidate_materialization
+        )
+
+      assert {:ok, plan} = Plan.new(attrs)
+      assert plan.candidate_materialization == @candidate_materialization
+      assert Plan.to_map(plan)["candidate_materialization"] == @candidate_materialization
+
+      canonical = Plan.to_map(plan)
+      assert {:ok, json} = Jason.encode(canonical)
+      assert Jason.decode!(json) == canonical
+      assert {:ok, reparsed} = Plan.new(Jason.decode!(json))
+      assert Plan.to_map(reparsed) == canonical
+    end
+
+    test "rejects the field on explicit v1 and direct-checkpoint v2 plans" do
+      assert {:error,
+              {:invalid_field, "candidate_materialization", {:unsupported_for_version, 1}}} =
+               Plan.new(
+                 Map.put(@minimal_attrs, :candidate_materialization, @candidate_materialization)
+               )
+
+      assert {:error,
+              {:invalid_field, "candidate_materialization",
+               {:unsupported_for_checkpoint_policy, "direct"}}} =
+               Plan.new(
+                 Map.put(v2_attrs(), :candidate_materialization, @candidate_materialization)
+               )
+
+      assert {:error,
+              {:invalid_field, "candidate_materialization",
+               {:unsupported_for_checkpoint_policy, "direct"}}} =
+               Plan.new(Map.put(v2_attrs(), :candidate_materialization, %{"unexpected" => 1}))
+    end
+
+    test "propagates malformed nested descriptor fields with a candidate_materialization prefix" do
+      design_attrs = v2_attrs("default", "design_required")
+
+      unknown = Map.put(@candidate_materialization, "unexpected", 1)
+
+      assert {:error, {:unknown_fields, ["candidate_materialization.unexpected"]}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, unknown))
+
+      aliased =
+        Map.put(@candidate_materialization, :source_commit_oid, @oid40_a)
+
+      assert {:error, {:duplicate_fields, ["candidate_materialization.source_commit_oid"]}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, aliased))
+
+      bad_path =
+        put_in(@candidate_materialization, ["entries", Access.at(0), "path"], "../escape.ex")
+
+      assert {:error,
+              {:invalid_field, "candidate_materialization.entries[0].path", :dotdot_segment}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, bad_path))
+
+      bad_oid =
+        put_in(@candidate_materialization, ["entries", Access.at(0), "blob_oid"], "not-hex")
+
+      assert {:error,
+              {:invalid_field, "candidate_materialization.entries[0].blob_oid", :invalid_oid}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, bad_oid))
+
+      bad_mode =
+        put_in(@candidate_materialization, ["entries", Access.at(0), "mode"], 120_000)
+
+      assert {:error, {:invalid_field, "candidate_materialization.entries[0].mode", :unsupported}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, bad_mode))
+
+      extra_entry =
+        update_in(@candidate_materialization, ["entries", Access.at(0)], &Map.put(&1, "stage", 0))
+
+      assert {:error, {:unknown_fields, ["candidate_materialization.entries[0].stage"]}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, extra_entry))
+
+      assert {:error,
+              {:invalid_field, "candidate_materialization", {:invalid_object, :object_required}}} =
+               Plan.new(Map.put(design_attrs, :candidate_materialization, nil))
+    end
+
+    test "omits the field when a design_required plan does not supply it" do
+      assert {:ok, plan} = Plan.new(v2_attrs("contract_change", "design_required"))
+      refute Map.has_key?(Plan.to_map(plan), "candidate_materialization")
+      assert plan.candidate_materialization == nil
     end
   end
 
@@ -999,4 +1119,33 @@ defmodule Arbor.Contracts.Coding.PlanTest do
     |> Map.put(:work_packet, packet)
     |> Map.put(:work_packet_digest, digest)
   end
+
+  defp v2_map_fixture(task_class \\ "default", checkpoint_policy \\ "direct") do
+    packet = Map.put(@work_packet, "checkpoint_policy", checkpoint_policy)
+    {:ok, digest} = WorkPacket.digest(packet)
+
+    @v1_fixture
+    |> Map.put("version", 2)
+    |> Map.put("task_class", task_class)
+    |> Map.put("work_packet", packet)
+    |> Map.put("work_packet_digest", digest)
+  end
+
+  defp fingerprint_json(value) do
+    value
+    |> canonicalize_fingerprint()
+    |> Jason.encode!()
+  end
+
+  defp canonicalize_fingerprint(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {key, value} -> {key, canonicalize_fingerprint(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize_fingerprint(list) when is_list(list),
+    do: Enum.map(list, &canonicalize_fingerprint/1)
+
+  defp canonicalize_fingerprint(value), do: value
 end

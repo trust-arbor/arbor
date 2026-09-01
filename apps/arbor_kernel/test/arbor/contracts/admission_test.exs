@@ -3,7 +3,8 @@ defmodule Arbor.Contracts.AdmissionTest do
   Fast admission proofs for AC-1, AC-2, AC-3, AC-6, and AC-11.
 
   Grandfather inventory is the dated 2026-08-10 CENSUS.md A/A2/B/D sections
-  (exact 61 paths) with canonical row justifications from the AC-02 packet.
+  plus CandidateMaterialization and ValidationProgram (exact 63 paths) with
+  canonical row justifications from the AC-02 packet.
   """
   use ExUnit.Case, async: true
 
@@ -17,7 +18,7 @@ defmodule Arbor.Contracts.AdmissionTest do
 
   # ---------------------------------------------------------------------------
   # Canonical dated CENSUS grandfather map (2026-08-10)
-  # 21 A + 10 A2 + 7 B + 23 D = 61. Paths app-relative under lib/arbor/contracts/.
+  # 21 A + 10 A2 + 7 B + 25 D = 63. Paths app-relative under lib/arbor/contracts/.
   # ---------------------------------------------------------------------------
 
   # Tier A (21)
@@ -71,8 +72,10 @@ defmodule Arbor.Contracts.AdmissionTest do
     {"lib/arbor/contracts/security/sanitizer.ex", "AC-09 review"}
   ]
 
-  # Tier D (23)
+  # Tier D (25)
   @tier_d [
+    {"lib/arbor/contracts/coding/candidate_materialization.ex", "AC-12 pending"},
+    {"lib/arbor/contracts/coding/validation_program.ex", "AC-12 pending"},
     {"lib/arbor/contracts/checkpoint.ex", "AC-10 blocked on runtime census"},
     {"lib/arbor/contracts/signal/event.ex", "AC-10 blocked on runtime census"},
     {"lib/arbor/contracts/error.ex", "AC-10 blocked on runtime census"},
@@ -141,12 +144,12 @@ defmodule Arbor.Contracts.AdmissionTest do
     {:ok, live: report, by_path: Map.new(report.entries, &{&1.path, &1})}
   end
 
-  test "grandfather inventory is exact 61 CENSUS A/A2/B/D paths with dispositions" do
+  test "grandfather inventory is exact 63 CENSUS A/A2/B/D paths with dispositions" do
     assert length(@tier_a) == 21
     assert length(@tier_a2) == 10
     assert length(@tier_b) == 7
-    assert length(@tier_d) == 23
-    assert map_size(@grandfathered) == 61
+    assert length(@tier_d) == 25
+    assert map_size(@grandfathered) == 63
     assert Census.default_grandfathered() == @grandfathered
     assert @mode == :warn
 
@@ -156,7 +159,7 @@ defmodule Arbor.Contracts.AdmissionTest do
       |> Enum.sort()
 
     assert Map.keys(@grandfathered) |> Enum.sort() == expected
-    assert length(Enum.uniq(expected)) == 61
+    assert length(Enum.uniq(expected)) == 63
     assert Enum.all?(expected, &String.starts_with?(&1, "lib/arbor/contracts/"))
 
     # Canonical disposition strings from the dated census rows.
@@ -188,6 +191,13 @@ defmodule Arbor.Contracts.AdmissionTest do
              "AC-12 pending"
 
     assert @grandfathered["lib/arbor/contracts/coding/source_inventory.ex"] == "AC-12 pending"
+
+    assert @grandfathered["lib/arbor/contracts/coding/candidate_materialization.ex"] ==
+             "AC-12 pending"
+
+    assert @grandfathered["lib/arbor/contracts/coding/validation_program.ex"] ==
+             "AC-12 pending"
+
     assert @grandfathered["lib/arbor/contracts/handler/scoped_context.ex"] == "AC-12 pending"
   end
 
@@ -864,6 +874,29 @@ defmodule Arbor.Contracts.AdmissionTest do
       assert "arbor_actions" in e.external_consumers
       assert e.tier == :a2
       assert "test/arbor/contracts/dependency_hierarchy_test.exs" in e.internal_consumers
+    end
+
+    @tag spec: "AC-1,AC-2,AC-6"
+    test "live: coding/candidate_materialization is grandfathered tier d with no external consumers",
+         %{
+           by_path: by_path
+         } do
+      e = by_path["lib/arbor/contracts/coding/candidate_materialization.ex"]
+      assert e
+      assert e.tier == :d
+      assert e.external_consumers == []
+      assert "lib/arbor/contracts/coding/plan.ex" in e.internal_consumers
+
+      assert @grandfathered["lib/arbor/contracts/coding/candidate_materialization.ex"] ==
+               "AC-12 pending"
+
+      program = by_path["lib/arbor/contracts/coding/validation_program.ex"]
+      assert program
+      assert program.tier == :d
+      assert program.external_consumers == []
+
+      assert @grandfathered["lib/arbor/contracts/coding/validation_program.ex"] ==
+               "AC-12 pending"
     end
 
     @tag spec: "AC-2,AC-3,AC-11"

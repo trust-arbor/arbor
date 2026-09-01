@@ -37,7 +37,7 @@ defmodule Arbor.Contracts.Coding.Plan do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Coding.WorkPacket
+  alias Arbor.Contracts.Coding.{CandidateMaterialization, WorkPacket}
 
   @schema_version 1
   @latest_schema_version 2
@@ -84,7 +84,8 @@ defmodule Arbor.Contracts.Coding.Plan do
     :output,
     :requested_paths,
     :work_packet,
-    :work_packet_digest
+    :work_packet_digest,
+    :candidate_materialization
   ]
   @workspace_fields [:mode, :branch_name, :worktree_base_dir]
   @worker_fields [
@@ -149,6 +150,7 @@ defmodule Arbor.Contracts.Coding.Plan do
     field(:requested_paths, [String.t()], default: [])
     field(:work_packet, work_packet() | nil, default: nil)
     field(:work_packet_digest, String.t() | nil, default: nil)
+    field(:candidate_materialization, map() | nil, default: nil)
   end
 
   @doc "Return the legacy schema version retained for compatibility."
@@ -202,6 +204,8 @@ defmodule Arbor.Contracts.Coding.Plan do
            normalize_version(Map.get(attrs, :version, @latest_schema_version)),
          {:ok, {work_packet, work_packet_digest}} <-
            normalize_work_packet_fields(attrs, version),
+         {:ok, candidate_materialization} <-
+           normalize_candidate_materialization(attrs, version, work_packet),
          {:ok, task} <- fetch_nonblank_string(attrs, :task, []),
          {:ok, repo_root} <- fetch_nonblank_string(attrs, :repo_root, []),
          {:ok, base_ref} <-
@@ -247,7 +251,8 @@ defmodule Arbor.Contracts.Coding.Plan do
          output: output,
          requested_paths: requested_paths,
          work_packet: work_packet,
-         work_packet_digest: work_packet_digest
+         work_packet_digest: work_packet_digest,
+         candidate_materialization: candidate_materialization
        }}
     end
   rescue
@@ -276,15 +281,23 @@ defmodule Arbor.Contracts.Coding.Plan do
       "requested_paths" => plan.requested_paths
     }
 
-    if plan.version == @latest_schema_version do
-      Map.merge(base, %{
-        "work_packet" => plan.work_packet,
-        "work_packet_digest" => plan.work_packet_digest
-      })
-    else
-      base
-    end
+    v2 =
+      if plan.version == @latest_schema_version do
+        Map.merge(base, %{
+          "work_packet" => plan.work_packet,
+          "work_packet_digest" => plan.work_packet_digest
+        })
+      else
+        base
+      end
+
+    maybe_put_candidate_materialization(v2, plan.candidate_materialization)
   end
+
+  defp maybe_put_candidate_materialization(map, nil), do: map
+
+  defp maybe_put_candidate_materialization(map, candidate_materialization),
+    do: Map.put(map, "candidate_materialization", candidate_materialization)
 
   defp normalize_version(value) when value in @supported_schema_versions, do: {:ok, value}
 
@@ -343,6 +356,51 @@ defmodule Arbor.Contracts.Coding.Plan do
     do: {:invalid_field, "work_packet." <> field, reason}
 
   defp prefix_work_packet_error(reason), do: reason
+
+  defp normalize_candidate_materialization(attrs, @schema_version, _packet) do
+    if Map.has_key?(attrs, :candidate_materialization) do
+      {:error,
+       {:invalid_field, "candidate_materialization", {:unsupported_for_version, @schema_version}}}
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp normalize_candidate_materialization(attrs, @latest_schema_version, packet) do
+    case Map.fetch(attrs, :candidate_materialization) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        policy = packet["checkpoint_policy"]
+
+        if policy == "design_required" do
+          case CandidateMaterialization.new(value) do
+            {:ok, descriptor} -> {:ok, CandidateMaterialization.to_map(descriptor)}
+            {:error, reason} -> {:error, prefix_candidate_materialization_error(reason)}
+          end
+        else
+          {:error,
+           {:invalid_field, "candidate_materialization",
+            {:unsupported_for_checkpoint_policy, policy}}}
+        end
+    end
+  end
+
+  defp prefix_candidate_materialization_error({:missing_field, field}),
+    do: {:missing_field, "candidate_materialization." <> field}
+
+  defp prefix_candidate_materialization_error({:unknown_fields, fields}),
+    do: {:unknown_fields, Enum.map(fields, &("candidate_materialization." <> &1))}
+
+  defp prefix_candidate_materialization_error({:duplicate_fields, fields}),
+    do: {:duplicate_fields, Enum.map(fields, &("candidate_materialization." <> &1))}
+
+  defp prefix_candidate_materialization_error({:invalid_field, field, reason}),
+    do: {:invalid_field, "candidate_materialization." <> field, reason}
+
+  defp prefix_candidate_materialization_error(reason),
+    do: {:invalid_field, "candidate_materialization", reason}
 
   defp validate_work_packet_digest(supplied_digest, expected_digest)
        when is_binary(supplied_digest) and supplied_digest === expected_digest,
