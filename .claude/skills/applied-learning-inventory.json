@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 704,
+  "entry_count": 706,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8696,8 +8696,34 @@
       "source_incident": "found 2026-08-30 after the same race recurred during CrossApp G3C2 task task_6d868b681794b63c997dafafd71ed1d5",
       "always_loaded": false,
       "content_sha256": "9af336970c74e1515d06c0d8d5ba9ccbf33854a185c44e4a3f259ea00ee0da93"
+    },
+    {
+      "source_ordinal": 705,
+      "source_kind": "post-migration",
+      "slug": "bound-design-retries-independently-and-carry-continuity-in-the-packet",
+      "title": "Bound design retries independently and carry continuity in the packet.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-bound-design-retries-independently-and-carry-continuity-in-the-packet",
+      "source_date": "2026-08-31",
+      "source_incident": "found 2026-08-31 after a CrossApp materialization retry went silent under an inherited one-hour timeout and its predecessor's Grok session could not be loaded",
+      "always_loaded": false,
+      "content_sha256": "c5d4e187bfc6c1f202465e5f3f5b0820c46255786c87682f4794cc7f2d943d59"
+    },
+    {
+      "source_ordinal": 706,
+      "source_kind": "post-migration",
+      "slug": "preflight-the-exact-council-question-and-read-the-full-consultation",
+      "title": "Preflight the exact council question and read the full consultation.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-preflight-the-exact-council-question-and-read-the-full-consultation",
+      "source_date": "2026-08-31",
+      "source_incident": "found 2026-08-31 when candidate materialization failed before any seat on a 4,096-byte aggregate overflow and later notes clipped crash-attribution findings",
+      "always_loaded": false,
+      "content_sha256": "7f5cba3192a53b1e19f5fa8b92996b4dc75a872f6faa0753938a99d800d6c935"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 243
+  "post_migration_entry_count": 245
 }

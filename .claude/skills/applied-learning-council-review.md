@@ -158,3 +158,16 @@ evidence. Before launching, require inherited authority or an exact active
 task/workspace lease; after lease teardown, recover the immutable commit through a
 new authorized review owner rather than invoking the action with an empty context
 (found 2026-08-20 while recovering P1C-B1 after its outer coding task failed).
+
+<!-- applied-learning: preflight-the-exact-council-question-and-read-the-full-consultation -->
+<a id="applied-learning-preflight-the-exact-council-question-and-read-the-full-consultation"></a>
+**Preflight the exact council question and read the full consultation.** A generic
+WorkPacket can admit many individually bounded entries whose formatted aggregate
+exceeds a stricter council section limit. Readiness or compilation must call the
+same pure formatter/limit check used by the council before acquiring a workspace.
+After review, treat the persisted consultation results as the authority: bounded
+checkpoint notes may clip each concern and can hide the condition that actually
+blocks implementation. Vote totals and summaries are navigation aids, not complete
+review evidence (found 2026-08-31 when candidate materialization failed before any
+seat on a 4,096-byte aggregate overflow, and later council notes clipped the two
+crash-attribution findings).

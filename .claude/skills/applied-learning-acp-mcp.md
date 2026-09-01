@@ -1228,3 +1228,16 @@ trip `design_turn_modified_workspace`. Until the barrier is deployed, wait for t
 explicit design checkpoint before steering implementation (found 2026-08-30 after
 the same race recurred during CrossApp G3C2 task
 `task_6d868b681794b63c997dafafd71ed1d5`).
+
+<!-- applied-learning: bound-design-retries-independently-and-carry-continuity-in-the-packet -->
+<a id="applied-learning-bound-design-retries-independently-and-carry-continuity-in-the-packet"></a>
+**Bound design retries independently and carry continuity in the packet.** A
+multi-hour validation plan may legitimately need a long execution window, but a
+read-only design turn should use its own short inactivity timeout. Do not blindly
+inherit the execution profile's budget: a silent model can otherwise occupy the
+task for an hour without producing an artifact. Provider-session resume is also
+runtime-local; when the old isolated ACP session store is gone, opening a fresh
+transport cannot restore its conversation. Freeze every accepted decision and open
+finding into the canonical packet so a fresh session can continue honestly (found
+2026-08-31 after a CrossApp materialization retry went silent under an inherited
+one-hour timeout and its predecessor's Grok session could not be loaded).
