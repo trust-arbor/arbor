@@ -171,3 +171,13 @@ blocks implementation. Vote totals and summaries are navigation aids, not comple
 review evidence (found 2026-08-31 when candidate materialization failed before any
 seat on a 4,096-byte aggregate overflow, and later council notes clipped the two
 crash-attribution findings).
+
+<!-- applied-learning: design-council-veto-seat-error-is-unavailability-not-rework -->
+<a id="applied-learning-design-council-veto-seat-error-is-unavailability-not-rework"></a>
+**A design-council veto seat classified as error is provider unavailability, not
+design rework.** `DesignCouncilCore.decide/1` must return
+`{:error, :design_council_veto_unavailable}` rather than
+`checkpoint_outcome=rework`, so the coding graph's `outcome=fail` path runs and
+does not consume design-rework budget. Out-of-protocol design-review verdicts
+including `:abstain` stay admitted rework and are never reclassified as provider
+failure (found 2026-08-31).

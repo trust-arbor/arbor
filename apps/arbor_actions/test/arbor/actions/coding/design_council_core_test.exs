@@ -107,10 +107,10 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     assert Enum.all?(lines, &(byte_size(&1) <= 400))
   end
 
-  test "malformed concern terms are errors, never raised or inspected" do
+  test "malformed concern terms on non-veto seats are errors, never raised or inspected" do
     evaluations = [
-      {:security, %{vote: :approve, concerns: [%{nested: :map}]}},
-      {:stability, %{vote: :approve, concerns: [{:tuple, :term}]}},
+      {:brainstorming, %{vote: :approve, concerns: [%{nested: :map}]}},
+      {:user_experience, %{vote: :approve, concerns: [{:tuple, :term}]}},
       {:privacy, %{vote: :approve, concerns: [<<0xFF, 0xFE>>]}},
       {:capability, %{vote: :approve, concerns: ["valid concern"]}}
     ]
@@ -120,6 +120,62 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     assert decided["dispersion"]["error"] == 3
     assert decided["dispersion"]["approve"] == 1
     assert decided["checkpoint_outcome"] == "rework"
+  end
+
+  test "malformed concern terms on a veto seat fail closed as veto unavailable" do
+    evaluations =
+      unanimous(:approve)
+      |> put_vote(:security, :approve, [%{nested: :map}])
+
+    assert {:error, :design_council_veto_unavailable} = decide(evaluations)
+  end
+
+  test "each default veto provider error fails closed instead of approving" do
+    for perspective <- [:adversarial, :security, :stability] do
+      evaluations = put_error(unanimous(:approve), perspective, :api_error)
+      assert {:error, :design_council_veto_unavailable} = decide(evaluations)
+    end
+  end
+
+  test "a non-veto provider error still approves when responder quorum holds" do
+    evaluations = put_error(unanimous(:approve), :brainstorming, :api_error)
+    assert {:ok, decided} = decide(evaluations)
+    assert decided["checkpoint_outcome"] == "approve"
+    assert decided["dispersion"]["error"] == 1
+    assert decided["dispersion"]["approve"] == 12
+    assert decided["dispersion"]["responded"] == 12
+  end
+
+  test "a veto-seat error wins over a reject-threshold rework" do
+    evaluations =
+      unanimous(:approve)
+      |> put_error(:security, :api_error)
+      |> put_vote(:privacy, :reject, ["Name the privacy bound"])
+      |> put_vote(:capability, :reject, ["Name the missing grant"])
+      |> put_vote(:vision, :reject, ["Name the missing success criterion"])
+
+    assert {:error, :design_council_veto_unavailable} = decide(evaluations)
+  end
+
+  test "custom veto_perspectives treat only the configured seat error as unavailable" do
+    privacy_error = put_error(unanimous(:approve), :privacy, :api_error)
+    security_error = put_error(unanimous(:approve), :security, :api_error)
+
+    assert {:error, :design_council_veto_unavailable} =
+             decide(privacy_error, %{"veto_perspectives" => ["privacy"]})
+
+    assert {:ok, decided} = decide(security_error, %{"veto_perspectives" => ["privacy"]})
+    assert decided["checkpoint_outcome"] == "approve"
+    assert decided["dispersion"]["error"] == 1
+    assert decided["dispersion"]["reject"] == 0
+  end
+
+  test "a security rework vote still yields rework, not veto unavailability" do
+    evaluations = put_vote(unanimous(:approve), :security, :rework, ["Missing capability check"])
+    assert {:ok, decided} = decide(evaluations)
+    assert decided["checkpoint_outcome"] == "rework"
+    assert decided["note"] == "Missing capability check"
+    assert decided["dispersion"]["reject"] == 1
   end
 
   test "near-limit valid packet keeps the design and every section label" do
@@ -191,8 +247,10 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     end
   end
 
-  defp decide(evaluations) do
-    with {:ok, state} <- DesignCouncilCore.new(%{"evaluations" => evaluations}) do
+  defp decide(evaluations, extra \\ %{}) do
+    params = Map.merge(%{"evaluations" => evaluations}, extra)
+
+    with {:ok, state} <- DesignCouncilCore.new(params) do
       DesignCouncilCore.decide(state)
     end
   end
@@ -206,6 +264,13 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
   defp put_vote(evaluations, perspective, vote, concerns) do
     Enum.map(evaluations, fn
       {^perspective, eval} -> {perspective, Map.merge(eval, %{vote: vote, concerns: concerns})}
+      other -> other
+    end)
+  end
+
+  defp put_error(evaluations, perspective, reason) do
+    Enum.map(evaluations, fn
+      {^perspective, _eval} -> {perspective, {:error, reason}}
       other -> other
     end)
   end

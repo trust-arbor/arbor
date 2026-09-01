@@ -6,7 +6,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
   artifact by digest — worker-supplied `design` context is ignored. Consult
   goes through the public `Arbor.Consensus` facade (injectable for tests).
   Failure, timeout, or a missing ConsultationLog run id is an explicit error,
-  never an approval.
+  never an approval. A configured veto perspective classified as a seat
+  error fails with `:design_council_veto_unavailable` rather than
+  `checkpoint_outcome=rework`. Admitted design-review votes are only
+  approve and rework; out-of-protocol verdicts including `:abstain` remain
+  fail-closed rework.
   """
 
   use Jido.Action,
@@ -429,6 +433,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
   defp project_error(:design_council_timeout), do: :design_council_timeout
   defp project_error(:design_council_deadline_elapsed), do: :design_council_deadline_elapsed
   defp project_error(:design_council_run_id_required), do: :design_council_run_id_required
+
+  defp project_error(:design_council_veto_unavailable) do
+    Logger.warning("design_council_review: veto perspective unavailable")
+    :design_council_veto_unavailable
+  end
 
   defp project_error({:design_council_consult_failed, reason}) do
     # Preserve the inner consult failure in the log before collapsing to the

@@ -253,8 +253,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
   end
 
   test "custom min_responders is enforced at the exact boundary through run/2", ctx do
-    four = responders(4) ++ non_responders(9)
-    five = responders(5) ++ non_responders(8)
+    four = min_responder_evaluations(4)
+    five = min_responder_evaluations(5)
 
     Process.put(:consult_result, {:ok, %{evaluations: four, run_id: "run_min_4"}})
 
@@ -314,6 +314,27 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "out-of-protocol abstain on a veto seat is fail-closed rework, not veto unavailable",
+       ctx do
+    evaluations = put_vote(unanimous_approve(), :security, :abstain, [])
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_veto_abstain"}}
+    )
+
+    assert {:ok, reworked} = DesignCouncilReview.run(ctx.params, ctx.context)
+    assert reworked["checkpoint_outcome"] == "rework"
+    assert reworked["dispersion"]["error"] == 0
+    assert reworked["dispersion"]["abstain"] == 0
+    assert reworked["dispersion"]["reject"] == 1
+
+    assert reworked["note"] =~
+             "out-of-protocol design-review verdict :abstain: only approve|rework are admitted"
+  after
+    Process.delete(:consult_result)
+  end
+
   test "a malformed concern payload is a seat error, not a rework responder", ctx do
     malformed =
       unanimous_approve()
@@ -325,6 +346,20 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     assert result["dispersion"]["error"] == 1
     assert result["dispersion"]["reject"] == 0
     assert result["checkpoint_outcome"] == "approve"
+  after
+    Process.delete(:consult_result)
+  end
+
+  test "a malformed concern payload on a default veto seat is veto unavailable", ctx do
+    malformed = put_vote(unanimous_approve(), :security, :approve, [123])
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: malformed, run_id: "run_veto_malformed_payload"}}
+    )
+
+    assert {:error, :design_council_veto_unavailable} =
+             DesignCouncilReview.run(ctx.params, ctx.context)
   after
     Process.delete(:consult_result)
   end
@@ -358,12 +393,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
       {:ok, %{evaluations: evaluations, run_id: "run_e2e_provider_error"}}
     )
 
-    assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
-    assert result["checkpoint_outcome"] == "approve"
-    assert result["dispersion"]["error"] == 1
-    assert result["dispersion"]["reject"] == 0
-    assert result["dispersion"]["approve"] == 12
-    assert result["dispersion"]["responded"] == 12
+    assert {:error, :design_council_veto_unavailable} =
+             DesignCouncilReview.run(ctx.params, ctx.context)
   after
     Process.delete(:consult_result)
   end
@@ -411,6 +442,47 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "end-to-end AdvisoryLLM model-authored abstain on a veto seat remains rework", ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    llm_fn = fn _system_prompt, _user_prompt ->
+      {:ok, Jason.encode!(%{"verdict" => "abstain", "concerns" => []})}
+    end
+
+    seat =
+      Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+    assert {:ok, eval} = seat
+    assert eval.vote == :reject
+
+    evaluations =
+      Enum.map(unanimous_approve(), fn
+        {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+        other -> other
+      end)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_e2e_veto_model_abstain"}}
+    )
+
+    assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+    assert result["checkpoint_outcome"] == "rework"
+    assert result["dispersion"]["error"] == 0
+    assert result["dispersion"]["abstain"] == 0
+    assert result["dispersion"]["reject"] == 1
+  after
+    Process.delete(:consult_result)
+  end
+
   test "end-to-end AdvisoryLLM malformed concerns are action seat errors, not rework votes",
        ctx do
     {:ok, proposal} =
@@ -435,11 +507,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
       llm_fn = fn _system_prompt, _user_prompt -> {:ok, payload} end
 
       seat =
-        Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+        Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: llm_fn)
 
       evaluations =
         Enum.map(unanimous_approve(), fn
-          {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+          {:brainstorming, _eval} -> {:brainstorming, seat_as_consult_term(seat)}
           other -> other
         end)
 
@@ -458,8 +530,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     # fail closed at action admission as seat errors, not rework votes.
     Enum.with_index(
       [
-        put_vote(unanimous_approve(), :security, :approve, {"tuple", "payload"}),
-        put_vote(unanimous_approve(), :security, :approve, [<<0xFF, 0xFE>>])
+        put_vote(unanimous_approve(), :brainstorming, :approve, {"tuple", "payload"}),
+        put_vote(unanimous_approve(), :brainstorming, :approve, [<<0xFF, 0xFE>>])
       ],
       5
     )
@@ -478,6 +550,41 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "end-to-end AdvisoryLLM malformed concerns on a veto seat are veto unavailable", ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    llm_fn = fn _system_prompt, _user_prompt ->
+      {:ok, Jason.encode!(%{"verdict" => "approve", "concerns" => %{"x" => 1}})}
+    end
+
+    seat =
+      Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+    evaluations =
+      Enum.map(unanimous_approve(), fn
+        {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+        other -> other
+      end)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_e2e_veto_malformed"}}
+    )
+
+    assert {:error, :design_council_veto_unavailable} =
+             DesignCouncilReview.run(ctx.params, ctx.context)
+  after
+    Process.delete(:consult_result)
+  end
+
   test "malformed concerns in reasoning-only evaluations are seat errors, not rework votes",
        ctx do
     payloads = [
@@ -490,7 +597,7 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
 
     Enum.with_index(payloads, 1)
     |> Enum.each(fn {payload, index} ->
-      evaluations = reasoning_only_security(unanimous_approve(), payload)
+      evaluations = reasoning_only(unanimous_approve(), :brainstorming, payload)
       run_id = "run_reasoning_malformed_#{index}"
       Process.put(:consult_result, {:ok, %{evaluations: evaluations, run_id: run_id}})
 
@@ -636,22 +743,33 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     end)
   end
 
-  defp responders(count) do
-    perspectives()
-    |> Enum.take(count)
-    |> Enum.map(fn perspective ->
-      {perspective, %{perspective: perspective, vote: :approve, concerns: []}}
-    end)
+  @default_veto_perspectives [:adversarial, :security, :stability]
+
+  # Keep every default veto seat as a protocol responder so min-responders
+  # coverage is not swallowed by veto-unavailable. Errors are only placed
+  # on remaining non-veto seats.
+  defp min_responder_evaluations(responder_count) do
+    veto_approves =
+      Enum.map(@default_veto_perspectives, fn perspective ->
+        {perspective, %{perspective: perspective, vote: :approve, concerns: []}}
+      end)
+
+    extra_needed = responder_count - length(@default_veto_perspectives)
+    {extra, remaining} = Enum.split(non_veto_perspectives(), extra_needed)
+
+    extra_approves =
+      Enum.map(extra, fn perspective ->
+        {perspective, %{perspective: perspective, vote: :approve, concerns: []}}
+      end)
+
+    errors =
+      Enum.map(remaining, fn perspective -> {perspective, {:error, :seat_unavailable}} end)
+
+    veto_approves ++ extra_approves ++ errors
   end
 
-  # Non-responders are seat-level ERRORS (the evaluator failed), not
-  # structured abstain verdicts: a seat that answers "abstain" is out of
-  # protocol and converts to rework at admission, so only errors remain
-  # outside the responded count.
-  defp non_responders(count) do
-    perspectives()
-    |> Enum.drop(length(perspectives()) - count)
-    |> Enum.map(fn perspective -> {perspective, {:error, :seat_unavailable}} end)
+  defp non_veto_perspectives do
+    perspectives() -- @default_veto_perspectives
   end
 
   defp seat_as_consult_term({:error, reason}), do: {:error, reason}
@@ -671,10 +789,10 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     end)
   end
 
-  defp reasoning_only_security(evaluations, reasoning) do
+  defp reasoning_only(evaluations, perspective, reasoning) do
     Enum.map(evaluations, fn
-      {:security, eval} ->
-        {:security, eval |> Map.drop([:vote, "vote"]) |> Map.put(:reasoning, reasoning)}
+      {^perspective, eval} ->
+        {perspective, eval |> Map.drop([:vote, "vote"]) |> Map.put(:reasoning, reasoning)}
 
       other ->
         other

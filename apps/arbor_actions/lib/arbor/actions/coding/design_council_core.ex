@@ -2,10 +2,15 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
   @moduledoc """
   Pure decision logic for the advisory design-council gate.
 
-  Turns seat evaluations into `checkpoint_outcome` (`"approve"` | `"rework"`),
-  a bounded consolidated `note`, and `dispersion` counts. Errors and abstains
-  never count as approvals. The question builder uses explicit per-section
-  byte budgets and never tail-clips; overflow fails closed.
+  Turns admitted seat evaluations into `checkpoint_outcome` (`"approve"` |
+  `"rework"`), a bounded consolidated `note`, and `dispersion` counts.
+  Admitted design-review votes are only approve and rework. Errors and
+  leftover abstain tokens never count as approvals. A configured veto
+  perspective classified as an error fails with
+  `:design_council_veto_unavailable` instead of a checkpoint outcome, so a
+  provider outage does not become design rework. The question builder uses
+  explicit per-section byte budgets and never tail-clips; overflow fails
+  closed.
   """
 
   alias Arbor.Contracts.Coding.DesignArtifactDescriptor
@@ -58,15 +63,20 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
   def decide(%{"evaluations" => evaluations, "rule" => rule}) do
     classified = Enum.map(evaluations, &classify/1)
     dispersion = count_dispersion(classified)
-    outcome = outcome(classified, rule, dispersion)
-    note = consolidate_note(classified, outcome)
 
-    {:ok,
-     %{
-       "checkpoint_outcome" => outcome,
-       "note" => note,
-       "dispersion" => dispersion
-     }}
+    if veto_unavailable?(classified, rule) do
+      {:error, :design_council_veto_unavailable}
+    else
+      outcome = outcome(classified, rule, dispersion)
+      note = consolidate_note(classified, outcome)
+
+      {:ok,
+       %{
+         "checkpoint_outcome" => outcome,
+         "note" => note,
+         "dispersion" => dispersion
+       }}
+    end
   end
 
   def decide(_state), do: {:error, :invalid_design_council_state}
@@ -256,6 +266,13 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
       "error" => error,
       "responded" => approve + reject
     }
+  end
+
+  defp veto_unavailable?(classified, rule) do
+    Enum.any?(classified, fn evaluation ->
+      evaluation["kind"] == "error" and
+        evaluation["perspective"] in rule["veto_perspectives"]
+    end)
   end
 
   defp outcome(classified, rule, dispersion) do

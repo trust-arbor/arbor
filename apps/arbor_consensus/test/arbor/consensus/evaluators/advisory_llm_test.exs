@@ -2,6 +2,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Consensus.Evaluators.AdvisoryLLM
+  alias Arbor.Consensus.Evaluators.Consult
   alias Arbor.Consensus.TestHelpers
   alias Arbor.Contracts.Consensus.Proposal
 
@@ -40,14 +41,18 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
   }
 
   @model_config_keys [:council_model, :perspective_models_json, :perspective_models]
+  # Clear the host-route probe so portable-default assertions see compiled
+  # seats. Fallback policy is covered by AdvisoryLLMHostFallbackTest.
+  @route_probe_key :provider_route_mfa
+  @isolated_config_keys [@route_probe_key | @model_config_keys]
 
   setup do
     previous =
-      Map.new(@model_config_keys, fn key ->
+      Map.new(@isolated_config_keys, fn key ->
         {key, Application.fetch_env(:arbor_consensus, key)}
       end)
 
-    Enum.each(@model_config_keys, &Application.delete_env(:arbor_consensus, &1))
+    Enum.each(@isolated_config_keys, &Application.delete_env(:arbor_consensus, &1))
 
     on_exit(fn ->
       Enum.each(previous, fn
@@ -149,6 +154,24 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       end
     end
 
+    defmodule AskLoggedRecordingLog do
+      def new_run_id, do: "run_ask_logged_#{System.unique_integer([:positive])}"
+
+      def create_bound_run(_question, _perspectives, opts) do
+        {:ok, Keyword.get(opts, :run_id, "run_ask_logged")}
+      end
+
+      def finalize_run(run_id, outcome) do
+        send(self(), {:finalize_run, run_id, outcome})
+        {:ok, :transitioned}
+      end
+
+      def log_single(question, perspective, eval, llm_meta, opts) do
+        send(self(), {:log_single, question, perspective, eval, llm_meta, opts})
+        :ok
+      end
+    end
+
     test "returns {:error, reason} when the one-shot transport errors" do
       proposal = TestHelpers.build_proposal(%{description: "Test error handling"})
 
@@ -229,6 +252,36 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
                  consultation_id: "run_log_boom",
                  consultation_log: RaisingConsultationLog
                )
+    end
+
+    test "one-shot provider errors remain exact {:error, reason} through Consult.ask_logged" do
+      assert {:ok, %{evaluations: results, run_id: run_id}} =
+               Consult.ask_logged(AdvisoryLLM, "Provider failed",
+                 llm_fn: error_llm_fn(),
+                 consultation_log: AskLoggedRecordingLog,
+                 timeout: 5_000
+               )
+
+      assert is_binary(run_id)
+      assert length(results) == length(AdvisoryLLM.perspectives())
+
+      Enum.each(results, fn {perspective, result} ->
+        assert perspective in AdvisoryLLM.perspectives()
+        assert result == {:error, :api_error}
+      end)
+
+      assert {:error, :api_error} =
+               AdvisoryLLM.evaluate(TestHelpers.build_proposal(%{description: "Provider failed"}),
+                 :brainstorming,
+                 llm_fn: error_llm_fn(),
+                 consultation_id: run_id,
+                 consultation_log: AskLoggedRecordingLog
+               )
+
+      assert_received {:log_single, "Provider failed", :brainstorming, eval, _llm_meta, opts}
+      assert eval.vote == :abstain
+      assert eval.sealed == true
+      assert Keyword.get(opts, :run_id) == run_id
     end
 
     test "includes context in evaluation" do
