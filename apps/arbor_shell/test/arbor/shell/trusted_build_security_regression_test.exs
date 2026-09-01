@@ -19,11 +19,12 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
 
     marker = Path.join(System.tmp_dir!(), "arbor-tb-fork-#{System.unique_integer([:positive])}")
     File.rm(marker)
+    fork_probe = ~S'(: > "$1") & child=$!; [ -n "$child" ] || exit 97; wait "$child"'
 
     assert {:ok, result} =
              Shell.execute_direct(
-               "python3",
-               ["-c", "import os; os.fork(); open(#{inspect(marker)}, 'w').close()"],
+               "sh",
+               ["-c", fork_probe, "arbor-fork-probe", marker],
                sandbox: :none,
                timeout: 5_000,
                launcher_command: "trusted-build",
