@@ -17,6 +17,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #ifdef __APPLE__
@@ -494,7 +497,17 @@ static int g5b1_noreplace_move(int src_parent, const char *src_name, int dst_par
 #ifdef __APPLE__
   return renameatx_np(src_parent, src_name, dst_parent, dst_name, RENAME_EXCL);
 #elif defined(__linux__)
-  return renameat2(src_parent, src_name, dst_parent, dst_name, RENAME_NOREPLACE);
+#ifdef SYS_renameat2
+  return (int)syscall(SYS_renameat2, src_parent, src_name, dst_parent, dst_name,
+                      RENAME_NOREPLACE);
+#else
+  (void)src_parent;
+  (void)src_name;
+  (void)dst_parent;
+  (void)dst_name;
+  errno = ENOSYS;
+  return -1;
+#endif
 #else
   (void)src_parent;
   (void)src_name;
