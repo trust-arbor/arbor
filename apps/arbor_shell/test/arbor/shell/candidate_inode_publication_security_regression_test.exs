@@ -295,6 +295,67 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
     assert source =~ "{:unix, :linux}"
   end
 
+  test "security regression: line protocol delimiters are rejected by both boundaries", %{
+    root: root,
+    harness: harness
+  } do
+    if unix_inode_host?() do
+      Enum.each([{"lf", "\n"}, {"cr", "\r"}], fn {label, delimiter} ->
+        observed_name = "observed-#{label}#{delimiter}leaf"
+        observed_path = Path.join(root, observed_name)
+        File.write!(observed_path, "body")
+        File.chmod!(observed_path, 0o600)
+
+        assert {:error, :invalid_path} =
+                 HandleRelativeInodeCore.admit(observe_live(root, observed_name))
+
+        assert {:error, :invalid_path} =
+                 HandleRelativeInodeCore.admit(
+                   stage_req(root, "staged-#{label}#{delimiter}leaf", 0o600, "body")
+                 )
+
+        assert {:error, :invalid_path} =
+                 HandleRelativeInodeCore.admit(
+                   observe_req(root <> delimiter <> "root", "leaf", [])
+                 )
+
+        safe_observed = "safe-observed-#{label}"
+        safe_observed_path = Path.join(root, safe_observed)
+        File.write!(safe_observed_path, "body")
+        File.chmod!(safe_observed_path, 0o600)
+        {:ok, observe_plan} = HandleRelativeInodeCore.admit(observe_live(root, safe_observed))
+
+        observe_argv =
+          observe_plan.argv
+          |> List.replace_at(4, observed_name)
+          |> List.replace_at(6, pack_native_node(node_id(observed_path)))
+
+        {observe_output, observe_status} =
+          run_harness(harness, "g5b1-hook-none", %{observe_plan | argv: observe_argv})
+
+        assert observe_status == 64
+        refute observe_output =~ "g5b1-1"
+
+        unsafe_stage = "staged-native-#{label}#{delimiter}leaf"
+
+        {:ok, stage_plan} =
+          HandleRelativeInodeCore.admit(stage_req(root, "safe-stage-#{label}", 0o600, "body"))
+
+        stage_argv =
+          stage_plan.argv
+          |> List.replace_at(4, unsafe_stage)
+          |> List.replace_at(6, unsafe_stage)
+
+        {stage_output, stage_status} =
+          run_harness(harness, "g5b1-hook-none", %{stage_plan | argv: stage_argv})
+
+        assert stage_status == 64
+        refute stage_output =~ "g5b1-1"
+        refute File.exists?(Path.join(root, unsafe_stage))
+      end)
+    end
+  end
+
   test "security regression: destination no-replace never replaces", %{root: root} do
     if unix_inode_host?() do
       mkdir_tree!(root, ["src"])
@@ -410,6 +471,58 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
         {:error, reason} ->
           assert reason in [:eacces, :enotsup, :eperm, :einval]
       end
+    end
+  end
+
+  test "security regression: hardlinks introduced before final proofs never report success", %{
+    root: root,
+    harness: harness
+  } do
+    if unix_inode_host?() do
+      observed = Path.join(root, "observed-late-link")
+      File.write!(observed, "observed")
+      File.chmod!(observed, 0o600)
+
+      {:ok, observe_plan} =
+        HandleRelativeInodeCore.admit(observe_live(root, "observed-late-link"))
+
+      {observe_output, observe_status} =
+        run_harness(harness, "g5b1-hook-observe-hardlink", observe_plan)
+
+      assert observe_status == 67
+      refute observe_output =~ "g5b1-1"
+      assert File.exists?(observed <> ".g5b1-hardlink")
+
+      {:ok, stage_plan} =
+        HandleRelativeInodeCore.admit(stage_req(root, "staged-late-link", 0o600, "staged"))
+
+      {stage_output, stage_status} =
+        run_harness(harness, "g5b1-hook-stage-hardlink", stage_plan)
+
+      assert stage_status == 75
+      assert stage_output =~ "stage_name_race"
+      refute stage_output =~ "g5b1-1"
+      assert File.exists?(Path.join(root, "staged-late-link"))
+      assert File.exists?(Path.join(root, "staged-late-link.g5b1-hardlink"))
+
+      source = Path.join(root, "move-source")
+      File.write!(source, "move")
+      File.chmod!(source, 0o600)
+
+      {:ok, relocate_plan} =
+        HandleRelativeInodeCore.admit(
+          relocate_req(root, "move-source", "moved-late-link", node_id(source))
+        )
+
+      {relocate_output, relocate_status} =
+        run_harness(harness, "g5b1-hook-relocate-hardlink", relocate_plan)
+
+      assert relocate_status == 75
+      assert relocate_output =~ "destination_race"
+      refute relocate_output =~ "g5b1-1"
+      refute File.exists?(source)
+      assert File.exists?(Path.join(root, "moved-late-link"))
+      assert File.exists?(Path.join(root, "moved-late-link.g5b1-hardlink"))
     end
   end
 
@@ -682,6 +795,23 @@ defmodule Arbor.Shell.CandidateInodePublicationSecurityRegressionTest do
   end
 
   defp root_id(path), do: Map.put(node_id(path), :path, path)
+
+  defp pack_native_node(node) do
+    Enum.join(
+      [
+        Atom.to_string(node.type),
+        Integer.to_string(node.mode),
+        Integer.to_string(node.uid),
+        Integer.to_string(node.gid),
+        Integer.to_string(node.size),
+        Integer.to_string(node.nlink),
+        Integer.to_string(node.device),
+        Integer.to_string(node.minor_device),
+        Integer.to_string(node.inode)
+      ],
+      ":"
+    )
+  end
 
   defp ancestors_of(root, rel) do
     comps = String.split(rel, "/")

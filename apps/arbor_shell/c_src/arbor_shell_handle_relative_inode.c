@@ -190,7 +190,8 @@ static int g5b1_parse_id(const char *text, g5b1_id *id) {
 static int g5b1_type_of(const struct stat *st) {
   if (S_ISLNK(st->st_mode)) return G5B1_SYMLINK;
   if (S_ISREG(st->st_mode)) {
-    if (st->st_nlink != 1) return G5B1_HARDLINK;
+    if (st->st_nlink > 1) return G5B1_HARDLINK;
+    if (st->st_nlink == 0) return G5B1_IDENTITY;
     return 0;
   }
   if (S_ISDIR(st->st_mode)) return 0;
@@ -242,6 +243,7 @@ static int g5b1_valid_comp(const char *comp, size_t len) {
   if (len == 0U || len > G5B1_MAX_COMP) return -1;
   if (len == 1U && comp[0] == '.') return -1;
   if (len == 2U && comp[0] == '.' && comp[1] == '.') return -1;
+  if (memchr(comp, '\n', len) != NULL || memchr(comp, '\r', len) != NULL) return -1;
   return 0;
 }
 
@@ -445,13 +447,23 @@ static int g5b1_name_matches_held(int parent_fd, const char *name, const struct 
   return g5b1_same_stat(held, &named);
 }
 
+static int g5b1_prove_bound_leaf(const struct stat *st, const g5b1_id *id) {
+  int typed = g5b1_type_of(st);
+  if (typed != 0) return typed;
+  if (id->type == G5B1_TYPE_REG && st->st_uid != geteuid()) return G5B1_NOT_EXCLUSIVE;
+  if (id->type == G5B1_TYPE_DIR && g5b1_dir_exclusive(st) != 0) {
+    return G5B1_NOT_EXCLUSIVE;
+  }
+  return g5b1_match_id(st, id) == 0 ? 0 : G5B1_IDENTITY;
+}
+
 static int g5b1_open_leaf(int parent_fd, const char *name, const g5b1_id *id, int *leaf_fd,
                           struct stat *held) {
   struct stat fd_st;
   struct stat name_st;
   int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
   int fd;
-  int typed;
+  int proved;
 
   if (id->type == G5B1_TYPE_DIR) flags |= O_DIRECTORY;
   fd = openat(parent_fd, name, flags);
@@ -461,20 +473,12 @@ static int g5b1_open_leaf(int parent_fd, const char *name, const g5b1_id *id, in
     close(fd);
     return G5B1_IO;
   }
-  typed = g5b1_type_of(&fd_st);
-  if (typed != 0) {
+  proved = g5b1_prove_bound_leaf(&fd_st, id);
+  if (proved != 0) {
     close(fd);
-    return typed;
+    return proved;
   }
-  if (id->type == G5B1_TYPE_REG && fd_st.st_uid != geteuid()) {
-    close(fd);
-    return G5B1_NOT_EXCLUSIVE;
-  }
-  if (id->type == G5B1_TYPE_DIR && g5b1_dir_exclusive(&fd_st) != 0) {
-    close(fd);
-    return G5B1_NOT_EXCLUSIVE;
-  }
-  if (g5b1_match_id(&fd_st, id) != 0 || !g5b1_same_stat(&fd_st, &name_st)) {
+  if (!g5b1_same_stat(&fd_st, &name_st)) {
     close(fd);
     return G5B1_IDENTITY;
   }
@@ -540,6 +544,8 @@ static int g5b1_observe(g5b1_fds *fds, const char *root, const char *rel, const 
       g5b1_refresh(fds->leaf_fd, &leaf_st) != 0) {
     return G5B1_IO;
   }
+  rc = g5b1_prove_bound_leaf(&leaf_st, leaf_id);
+  if (rc != 0) return rc;
   if (fstatat(fds->src_parent, leaf_name, &named, AT_SYMLINK_NOFOLLOW) != 0 ||
       !g5b1_same_stat(&leaf_st, &named)) {
     return G5B1_IDENTITY;
@@ -648,6 +654,12 @@ static int g5b1_stage(g5b1_fds *fds, const char *root, const char *rel, const ch
       !g5b1_same_stat(&created, &named)) {
     return g5b1_emit_retained(fds, "stage_name_race");
   }
+  typed = g5b1_type_of(&created);
+  if (typed != 0 || !S_ISREG(created.st_mode) || created.st_uid != geteuid() ||
+      created.st_nlink != 1 || (created.st_mode & 0777) != (mode & 0777) ||
+      (uint64_t)created.st_size != payload_size) {
+    return g5b1_emit_retained(fds, "stage_name_race");
+  }
 
   if (g5b1_refresh(fds->root_fd, &root_st) != 0 ||
       g5b1_refresh(fds->src_parent, &parent_st) != 0) {
@@ -742,6 +754,8 @@ static int g5b1_relocate(g5b1_fds *fds, const char *root, const char *src_rel,
       dest_leaf_st.st_dev != held.st_dev || dest_leaf_st.st_ino != held.st_ino) {
     return g5b1_emit_retained(fds, "destination_race");
   }
+  rc = g5b1_prove_bound_leaf(&dest_leaf_st, src_leaf);
+  if (rc != 0) return g5b1_emit_retained(fds, "destination_race");
 
   errno = 0;
   source_absent = fstatat(fds->src_parent, src_name, &source_named, AT_SYMLINK_NOFOLLOW);
@@ -754,6 +768,12 @@ static int g5b1_relocate(g5b1_fds *fds, const char *root, const char *src_rel,
       g5b1_refresh(fds->src_parent, &src_parent_st) != 0 ||
       g5b1_refresh(fds->leaf_fd, &dest_leaf_st) != 0) {
     return g5b1_emit_retained(fds, "post_state_unproved");
+  }
+  rc = g5b1_prove_bound_leaf(&dest_leaf_st, src_leaf);
+  if (rc != 0 ||
+      fstatat(fds->dst_parent, dst_name, &dest_named, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !g5b1_same_stat(&dest_leaf_st, &dest_named)) {
+    return g5b1_emit_retained(fds, "destination_race");
   }
   if (g5b1_parent_rel(src_rel, src_parent_rel, sizeof(src_parent_rel)) != 0 ||
       g5b1_parent_rel(dst_rel, dst_parent_rel, sizeof(dst_parent_rel)) != 0 ||

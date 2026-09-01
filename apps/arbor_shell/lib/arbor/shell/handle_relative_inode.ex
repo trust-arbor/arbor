@@ -4,6 +4,21 @@ defmodule Arbor.Shell.HandleRelativeInode do
   alias Arbor.Shell.HandleRelativeInodeCore
 
   @chunk 8_192
+  # Native launcher exit-status ABI; keep synchronized with the C G5B1_* definitions.
+  @status_invalid 64
+  @status_not_found 65
+  @status_symlink 66
+  @status_hardlink 67
+  @status_invalid_type 68
+  @status_identity 69
+  @status_io 70
+  @status_output 71
+  @status_dest_exists 72
+  @status_cross_device 73
+  @status_not_exclusive 74
+  @status_retained 75
+  @status_unsupported 76
+  @status_launcher_unavailable 126
   @native_retained %{
     "source_race" => :source_race,
     "destination_race" => :destination_race,
@@ -179,30 +194,39 @@ defmodule Arbor.Shell.HandleRelativeInode do
 
   defp decode(%{mutating?: false}, status, _output), do: {:error, observe_exit(status)}
 
-  defp decode(%{mutating?: true}, 64, _output), do: {:error, :invalid_request}
-  defp decode(%{mutating?: true}, 65, _output), do: {:error, :not_found}
-  defp decode(%{mutating?: true}, 66, _output), do: {:error, :symlink_rejected}
-  defp decode(%{mutating?: true}, 67, _output), do: {:error, :hardlink_rejected}
-  defp decode(%{mutating?: true}, 68, _output), do: {:error, :invalid_type}
-  defp decode(%{mutating?: true}, 69, _output), do: {:error, :identity_mismatch}
-  defp decode(%{mutating?: true}, 72, _output), do: {:error, :destination_exists}
-  defp decode(%{mutating?: true}, 73, _output), do: {:error, :cross_device}
-  defp decode(%{mutating?: true}, 74, _output), do: {:error, :directory_not_exclusive}
-  defp decode(%{mutating?: true}, 76, _output), do: {:error, :unsupported_platform}
+  defp decode(%{mutating?: true}, @status_invalid, _output), do: {:error, :invalid_request}
+  defp decode(%{mutating?: true}, @status_not_found, _output), do: {:error, :not_found}
+  defp decode(%{mutating?: true}, @status_symlink, _output), do: {:error, :symlink_rejected}
+  defp decode(%{mutating?: true}, @status_hardlink, _output), do: {:error, :hardlink_rejected}
+  defp decode(%{mutating?: true}, @status_invalid_type, _output), do: {:error, :invalid_type}
+  defp decode(%{mutating?: true}, @status_identity, _output), do: {:error, :identity_mismatch}
 
-  defp decode(%{mutating?: true, names: names}, 75, output) do
+  defp decode(%{mutating?: true}, @status_dest_exists, _output),
+    do: {:error, :destination_exists}
+
+  defp decode(%{mutating?: true}, @status_cross_device, _output), do: {:error, :cross_device}
+
+  defp decode(%{mutating?: true}, @status_not_exclusive, _output),
+    do: {:error, :directory_not_exclusive}
+
+  defp decode(%{mutating?: true}, @status_unsupported, _output),
+    do: {:error, :unsupported_platform}
+
+  defp decode(%{mutating?: true, names: names}, @status_retained, output) do
     case parse_retained(output) do
       {:ok, reason} -> retained(reason, names)
       :error -> retained(:output_unparseable, names)
     end
   end
 
-  defp decode(%{mutating?: true, names: names}, 70, _output), do: retained(:io_failed, names)
+  defp decode(%{mutating?: true, names: names}, @status_io, _output),
+    do: retained(:io_failed, names)
 
-  defp decode(%{mutating?: true, names: names}, 71, _output),
+  defp decode(%{mutating?: true, names: names}, @status_output, _output),
     do: retained(:output_unparseable, names)
 
-  defp decode(%{mutating?: true, names: names}, 126, _output), do: retained(:port_death, names)
+  defp decode(%{mutating?: true, names: names}, @status_launcher_unavailable, _output),
+    do: retained(:port_death, names)
 
   defp decode(%{mutating?: true, names: names}, _status, _output),
     do: retained(:post_state_unproved, names)
@@ -210,20 +234,20 @@ defmodule Arbor.Shell.HandleRelativeInode do
   defp finish_decode(%{mutating?: true, names: names}, reason), do: retained(reason, names)
   defp finish_decode(_plan, reason), do: {:error, reason}
 
-  defp observe_exit(64), do: :invalid_request
-  defp observe_exit(65), do: :not_found
-  defp observe_exit(66), do: :symlink_rejected
-  defp observe_exit(67), do: :hardlink_rejected
-  defp observe_exit(68), do: :invalid_type
-  defp observe_exit(69), do: :identity_mismatch
-  defp observe_exit(70), do: :io_failed
-  defp observe_exit(71), do: :output_unparseable
-  defp observe_exit(74), do: :directory_not_exclusive
-  defp observe_exit(72), do: :io_failed
-  defp observe_exit(73), do: :io_failed
-  defp observe_exit(75), do: :io_failed
-  defp observe_exit(76), do: :unsupported_platform
-  defp observe_exit(126), do: :launcher_unavailable
+  defp observe_exit(@status_invalid), do: :invalid_request
+  defp observe_exit(@status_not_found), do: :not_found
+  defp observe_exit(@status_symlink), do: :symlink_rejected
+  defp observe_exit(@status_hardlink), do: :hardlink_rejected
+  defp observe_exit(@status_invalid_type), do: :invalid_type
+  defp observe_exit(@status_identity), do: :identity_mismatch
+  defp observe_exit(@status_io), do: :io_failed
+  defp observe_exit(@status_output), do: :output_unparseable
+  defp observe_exit(@status_not_exclusive), do: :directory_not_exclusive
+  defp observe_exit(@status_dest_exists), do: :io_failed
+  defp observe_exit(@status_cross_device), do: :io_failed
+  defp observe_exit(@status_retained), do: :io_failed
+  defp observe_exit(@status_unsupported), do: :unsupported_platform
+  defp observe_exit(@status_launcher_unavailable), do: :launcher_unavailable
   defp observe_exit(_status), do: :io_failed
 
   defp parse_success(<<>>, _op), do: {:error, :output_empty}

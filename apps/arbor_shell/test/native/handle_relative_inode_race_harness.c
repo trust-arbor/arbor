@@ -68,6 +68,15 @@ static void swap_rel(const char *rel) {
   }
 }
 
+static void hardlink_rel(const char *rel) {
+  char path[8192];
+  char hardlink_path[8192];
+  join_root(path, sizeof(path), rel);
+  snprintf(hardlink_path, sizeof(hardlink_path), "%s.g5b1-hardlink", path);
+  (void)unlink(hardlink_path);
+  (void)link(path, hardlink_path);
+}
+
 int arbor_shell_inode_test_hook(const char *point) {
   const char *rel;
 
@@ -83,6 +92,11 @@ int arbor_shell_inode_test_hook(const char *point) {
   if (strcmp(g_hook, "g5b1-hook-observe-swap") == 0 &&
       strcmp(point, "g5b1-hook-after-source-open") == 0) {
     swap_rel(g_src_rel);
+    return 0;
+  }
+  if (strcmp(g_hook, "g5b1-hook-observe-hardlink") == 0 &&
+      strcmp(point, "g5b1-hook-after-source-open") == 0) {
+    hardlink_rel(g_src_rel);
     return 0;
   }
   if (strcmp(g_hook, "g5b1-hook-after-root-bind") == 0 &&
@@ -115,6 +129,16 @@ int arbor_shell_inode_test_hook(const char *point) {
   if (strcmp(g_hook, "g5b1-hook-after-create") == 0 &&
       strcmp(point, "g5b1-hook-after-create") == 0) {
     swap_rel(g_stage_rel);
+    return 0;
+  }
+  if (strcmp(g_hook, "g5b1-hook-stage-hardlink") == 0 &&
+      strcmp(point, "g5b1-hook-before-stage-proof") == 0) {
+    hardlink_rel(g_stage_rel);
+    return 0;
+  }
+  if (strcmp(g_hook, "g5b1-hook-relocate-hardlink") == 0 &&
+      strcmp(point, "g5b1-hook-before-dest-proof") == 0) {
+    hardlink_rel(g_dst_rel);
     return 0;
   }
   if (strcmp(g_hook, "g5b1-hook-fsync-parent-fail") == 0 &&

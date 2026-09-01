@@ -228,7 +228,8 @@ defmodule Arbor.Shell.HandleRelativeInodeCore do
 
   defp valid_component?(comp)
        when is_binary(comp) and byte_size(comp) >= 1 and byte_size(comp) <= @max_component_bytes do
-    comp != "." and comp != ".." and :binary.match(comp, <<0>>) == :nomatch
+    comp != "." and comp != ".." and :binary.match(comp, <<0>>) == :nomatch and
+      :binary.match(comp, "\n") == :nomatch and :binary.match(comp, "\r") == :nomatch
   end
 
   defp valid_component?(_comp), do: false
