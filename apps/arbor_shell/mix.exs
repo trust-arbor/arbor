@@ -112,6 +112,7 @@ defmodule Mix.Tasks.Compile.ArborShellLauncher do
         "-Wall",
         "-Wextra",
         "-Werror",
+        "-D_GNU_SOURCE",
         "-D_POSIX_C_SOURCE=200809L",
         "-I",
         Path.join(__DIR__, "c_src")
