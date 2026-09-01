@@ -243,7 +243,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
       "await_design_checkpoint",
       "check_design_rework_total_budget",
       "mark_design_rework_exhausted_error",
-      "status_rework_exhausted"
+      "status_design_rework_exhausted"
     ]
 
     assert :none =
@@ -320,7 +320,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
                nil,
                nil,
                nil,
-               ["status_rework_exhausted" | :tail]
+               ["status_design_rework_exhausted" | :tail]
              )
 
     assert :partial =
@@ -329,7 +329,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
                nil,
                nil,
                nil,
-               ["status_rework_exhausted", :validate]
+               ["status_design_rework_exhausted", :validate]
              )
 
     assert :complete =
@@ -422,6 +422,127 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
 
     assert {:ok, "not_applicable"} =
              CodingRunRecoveryCore.expected_requirement("pipeline_error", :partial)
+  end
+
+  test "recorded 2026-08-31 design-phase exhaustion is not_applicable under partial evidence" do
+    # Fleet-dispatch runs 3/5/6 (task_ea60ada4, task_5f0f0a65, task_1d6c22a6):
+    # the design checkpoint exhausted rework before any validate node. A
+    # design-only terminal has a program digest and empty validation slots, so
+    # evidence_state is :partial by construction. On the parent this returned
+    # {:error, :partial_validation_evidence} because the :partial clause ran
+    # before status consultation.
+    recorded_nodes = [
+      "await_design_checkpoint",
+      "check_design_rework_total_budget",
+      "mark_design_rework_exhausted_error",
+      "status_design_rework_exhausted"
+    ]
+
+    program = %{"profile_id" => "default"}
+    hex = String.duplicate("a", 64)
+
+    assert :none =
+             CodingRunRecoveryCore.producer_evidence_state(
+               program,
+               "",
+               "",
+               nil,
+               recorded_nodes
+             )
+
+    assert {:ok, "not_applicable"} =
+             CodingRunRecoveryCore.expected_requirement("design_rework_exhausted", :partial)
+
+    assert {:ok, "not_applicable"} =
+             CodingRunRecoveryCore.expected_requirement("design_rework_exhausted", :none)
+
+    assert {:ok, "not_applicable"} =
+             CodingRunRecoveryCore.expected_requirement("design_rework_exhausted", :complete)
+
+    binding = valid_binding()
+    {:ok, binding_digest} = CodingRunRecoveryCore.binding_digest(binding)
+
+    decision = %{
+      "schema_version" => 1,
+      "task_id" => binding["task_id"],
+      "run_id" => binding["run_id"],
+      "agent_id" => binding["agent_id"],
+      "execution_principal" => binding["execution_principal"],
+      "control_principal_id" => binding["control_principal_id"],
+      "executor_kind" => binding["executor_kind"],
+      "graph_hash" => binding["graph_hash"],
+      "artifact_identity" => binding["artifact_identity"],
+      "canonical_status" => "design_rework_exhausted",
+      "final_outcome_status" => "success",
+      "validation_requirement" => "not_applicable",
+      "program_digest" => hex,
+      "candidate_tree_oid" => "",
+      "observed_at" => "",
+      "adapter_input_digest" => "",
+      "binding_digest" => binding_digest,
+      "decision_digest" => String.duplicate("0", 64)
+    }
+
+    {:ok, digest} = CodingRunRecoveryCore.decision_digest(decision)
+    decision = Map.put(decision, "decision_digest", digest)
+    assert :partial = CodingRunRecoveryCore.evidence_state(decision)
+    assert :ok = CodingRunRecoveryCore.closed_decision?(decision)
+  end
+
+  test "expected_requirement pins the validation matrix including design-phase status" do
+    required = ~w(
+      change_committed
+      pr_created
+      validation_failed
+      validation_capacity_exceeded
+    )
+
+    reviewed = ~w(
+      human_review_required
+      review_failed
+      review_unavailable
+      review_rejected
+      review_requires_rework
+      rework_exhausted
+      approval_denied
+    )
+
+    for status <- required, evidence <- [:none, :complete, :partial] do
+      expected =
+        case evidence do
+          :none -> {:error, :missing_validation_evidence}
+          :complete -> {:ok, "required"}
+          :partial -> {:error, :partial_validation_evidence}
+        end
+
+      assert CodingRunRecoveryCore.expected_requirement(status, evidence) == expected
+    end
+
+    for status <- reviewed, evidence <- [:none, :complete, :partial] do
+      expected =
+        case evidence do
+          :none -> {:ok, "not_applicable"}
+          :complete -> {:ok, "required"}
+          :partial -> {:error, :partial_validation_evidence}
+        end
+
+      assert CodingRunRecoveryCore.expected_requirement(status, evidence) == expected
+    end
+
+    for status <- ["pipeline_error", "design_rework_exhausted", "design_checkpoint_timeout"],
+        evidence <- [:none, :complete, :partial] do
+      assert CodingRunRecoveryCore.expected_requirement(status, evidence) ==
+               {:ok, "not_applicable"}
+    end
+
+    assert CodingRunRecoveryCore.expected_requirement("declined", :none) ==
+             {:ok, "not_applicable"}
+
+    assert CodingRunRecoveryCore.expected_requirement("declined", :complete) ==
+             {:error, :invalid_decision}
+
+    assert CodingRunRecoveryCore.expected_requirement("declined", :partial) ==
+             {:error, :partial_validation_evidence}
   end
 
   test "combine_close_result never embeds a resume value or authority" do

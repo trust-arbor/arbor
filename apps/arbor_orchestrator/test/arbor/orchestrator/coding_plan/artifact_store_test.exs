@@ -964,7 +964,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
           "rework_exhausted",
           terminal_outcome("rework_exhausted", "failed", "review", "runtime", "new_session")
         )
-        |> Map.put("error", "operator_approval_rework_exhausted")
+        |> Map.put("error", "operator_approval_rework_exhausted"),
+      design_rework_exhausted:
+        terminal_result_for(
+          root,
+          "design_rework_exhausted",
+          "design_rework_exhausted",
+          terminal_outcome("design_rework_exhausted", "failed", "design", "policy", "none")
+        )
+        |> Map.put("error", "design_checkpoint_rework_exhausted")
     ]
 
     for {name, result} <- non_validation_terminals do

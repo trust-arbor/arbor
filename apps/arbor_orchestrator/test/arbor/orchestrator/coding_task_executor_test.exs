@@ -5585,7 +5585,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "route_design_checkpoint_outcome",
         "check_design_rework_total_budget",
         "mark_design_rework_exhausted_error",
-        "status_rework_exhausted"
+        "status_design_rework_exhausted"
       ]
 
       denial_nodes = [
@@ -5596,7 +5596,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       ]
 
       terminals = [
-        {"rework_exhausted", "design_checkpoint_rework_exhausted", design_nodes},
+        {"design_rework_exhausted", "design_checkpoint_rework_exhausted", design_nodes},
         {"approval_denied", "approval_denied", denial_nodes}
       ]
 

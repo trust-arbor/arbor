@@ -983,6 +983,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert edge_target(graph, "mark_implementation_phase", nil) == "build_implement_prompt"
     assert edge_target(graph, "build_implement_prompt", nil) == "capture_pre_turn_workspace"
     assert edge_target(graph, "build_design_rework_prompt", nil) == "capture_pre_turn_workspace"
+
+    assert edge_target(graph, "mark_design_rework_exhausted_error", nil) ==
+             "status_design_rework_exhausted"
+
+    assert graph.nodes["status_design_rework_exhausted"]
+
+    assert node_attrs(graph, "status_design_rework_exhausted")["expression"] ==
+             "design_rework_exhausted"
+
+    assert node_attrs(graph, "status_design_rework_exhausted")["output_key"] == "status"
+    assert graph.nodes["status_rework_exhausted"]
   end
 
   test "version 2 compilation rejects missing or tampered packet bindings", ctx do

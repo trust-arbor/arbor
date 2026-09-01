@@ -2513,6 +2513,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # No production prefer_rework_exhausted switch
       refute Map.has_key?(graph.nodes, "status_review_requires_rework")
       assert graph.nodes["status_rework_exhausted"]
+      assert graph.nodes["status_design_rework_exhausted"]
       assert graph.nodes["legacy_status_review_requires_rework"]
       refute Map.has_key?(graph.nodes, "legacy_status_operator_approval_rework")
 
@@ -2778,7 +2779,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                    max_steps: 300
                  )
 
-        assert result.context["status"] == "rework_exhausted"
+        assert result.context["status"] == "design_rework_exhausted"
         assert result.context["error"] == "design_checkpoint_rework_exhausted"
         assert result.context["design_attempt"] == max_cycles + 1
         assert to_string(result.context["design_rework_count"]) == Integer.to_string(max_cycles)

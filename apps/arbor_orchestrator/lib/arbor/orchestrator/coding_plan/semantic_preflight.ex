@@ -1244,6 +1244,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"prep_release_mode_retain", "context.status=review_failed"},
       {"prep_release_mode_retain", "context.status=review_rejected"},
       {"prep_release_mode_retain", "context.status=rework_exhausted"},
+      {"prep_release_mode_retain", "context.status=design_rework_exhausted"},
       {"prep_release_mode_retain", "context.status=validation_failed"},
       {"prep_release_mode_retain", "context.status=validation_capacity_exceeded"},
       {"prep_release_mode_retain", nil},
@@ -1693,7 +1694,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           (edge.to == @rework_exhaustion_status and edge.from == @rework_exhaustion_marker) or
           (edge.to == "status_approval_denied" and
              edge.from == "mark_approval_denied_error") or
-          (edge.to == "status_rework_exhausted" and
+          (edge.to == "status_design_rework_exhausted" and
              edge.from == "mark_design_rework_exhausted_error")
 
       if allowed? do
@@ -3132,7 +3133,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "context.design_rework_count>=#{rework_max_cycles}"},
          {"inc_design_rework_count", "context.design_rework_count<#{rework_max_cycles}"}
        ]},
-      {"mark_design_rework_exhausted_error", [{"status_rework_exhausted", nil}]},
+      {"mark_design_rework_exhausted_error", [{"status_design_rework_exhausted", nil}]},
       {"inc_design_rework_count", [{"inc_design_attempt", nil}]},
       {"inc_design_attempt", [{"reset_design_envelope_retry_count", nil}]},
       {"reset_design_envelope_retry_count", [{"mark_design_rework_kind", nil}]},

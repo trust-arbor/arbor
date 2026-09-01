@@ -194,6 +194,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_success_workspace_retention
                     reset_design_envelope_retry_count
                     status_approval_denied
+                    status_design_rework_exhausted
                     await_design_checkpoint
                     build_design_envelope_repair_prompt
                     build_design_prompt
@@ -1476,7 +1477,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ["inc_design_attempt", "reset_design_envelope_retry_count", nil],
     ["inc_design_envelope_retry_count", "build_design_envelope_repair_prompt", nil],
     ["inc_design_rework_count", "inc_design_attempt", nil],
-    ["mark_design_rework_exhausted_error", "status_rework_exhausted", nil],
+    ["mark_design_rework_exhausted_error", "status_design_rework_exhausted", nil],
     ["mark_design_rework_iteration", "build_design_rework_prompt", nil],
     ["mark_design_rework_kind", "mark_design_rework_iteration", nil],
     ["parse_design_response", "check_design_envelope_retry_budget", "outcome=fail"],

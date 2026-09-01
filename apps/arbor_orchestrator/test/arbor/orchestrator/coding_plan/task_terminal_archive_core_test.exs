@@ -7,6 +7,38 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
   @moduletag :fast
   @task_id "task_terminal_core"
 
+  test "archives design_rework_exhausted as a done executor_result policy terminal" do
+    {:ok, outcome} = TaskOutcome.from_code("design_rework_exhausted")
+    outcome = TaskOutcome.to_map(outcome)
+
+    assert {:ok, envelope} =
+             TaskTerminalEnvelope.preserve(
+               outcome,
+               "done",
+               %{
+                 "kind" => "executor_result",
+                 "result" => %{
+                   "task_id" => @task_id,
+                   "status" => "design_rework_exhausted",
+                   "approval_note" => "Name the missing capability check."
+                 }
+               }
+             )
+
+    refute Map.has_key?(envelope, "prior_outcome")
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"]["code"] == "design_rework_exhausted"
+    assert envelope["outcome"]["disposition"] == "failed"
+    assert envelope["outcome"]["phase"] == "design"
+    assert envelope["outcome"]["origin"] == "policy"
+    assert envelope["outcome"]["retry"] == "none"
+
+    assert {:ok, archive} = TaskTerminalArchiveCore.build(@task_id, envelope, [])
+    assert archive.body["terminal_envelope"] === envelope
+    assert archive.descriptor_fields["outcome_code"] == "design_rework_exhausted"
+    assert archive.descriptor_fields["terminal_state"] == "done"
+  end
+
   test "builds deterministic exact archives for every TaskStore terminal kind" do
     terminals = [
       terminal!("no_changes", "done", %{

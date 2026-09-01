@@ -1993,6 +1993,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
     refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
     assert graph.nodes["status_approval_denied"]
+    assert graph.nodes["status_design_rework_exhausted"]
+
+    assert graph.nodes["status_design_rework_exhausted"].attrs["expression"] ==
+             "design_rework_exhausted"
+
+    assert graph.nodes["status_design_rework_exhausted"].attrs["output_key"] == "status"
+    assert graph.nodes["status_design_rework_exhausted"].attrs["transform"] == "constant"
     assert graph.nodes["check_operator_rework_category_budget"]
     assert graph.nodes["check_operator_rework_total_budget"]
 

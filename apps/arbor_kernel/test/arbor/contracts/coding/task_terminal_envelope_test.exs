@@ -33,6 +33,41 @@ defmodule Arbor.Contracts.Coding.TaskTerminalEnvelopeTest do
     assert {:ok, _json} = Jason.encode(envelope)
   end
 
+  test "accepts design_rework_exhausted as a policy executor_result terminal" do
+    assert {:ok, envelope} =
+             TaskTerminalEnvelope.from_code(
+               "design_rework_exhausted",
+               "done",
+               %{
+                 "kind" => "executor_result",
+                 "result" => %{"approval_note" => "Name the missing capability check."}
+               }
+             )
+
+    assert envelope["outcome"]["code"] == "design_rework_exhausted"
+    assert envelope["outcome"]["disposition"] == "failed"
+    assert envelope["outcome"]["phase"] == "design"
+    assert envelope["outcome"]["origin"] == "policy"
+    assert envelope["outcome"]["retry"] == "none"
+    refute envelope["outcome"]["code"] == "task_runner_failed"
+    assert envelope["evidence"]["kind"] == "executor_result"
+
+    {:ok, outcome} = TaskOutcome.from_code("design_rework_exhausted")
+
+    assert {:ok, preserved} =
+             TaskTerminalEnvelope.preserve(
+               TaskOutcome.to_map(outcome),
+               "done",
+               %{
+                 "kind" => "executor_result",
+                 "result" => %{"approval_note" => "Name the missing capability check."}
+               }
+             )
+
+    assert preserved["outcome"] == envelope["outcome"]
+    assert {:ok, ^preserved} = TaskTerminalEnvelope.normalize(preserved)
+  end
+
   test "preserves only exact registered outcomes" do
     {:ok, outcome} = TaskOutcome.from_code("worker_turn_no_progress")
     outcome = TaskOutcome.to_map(outcome)

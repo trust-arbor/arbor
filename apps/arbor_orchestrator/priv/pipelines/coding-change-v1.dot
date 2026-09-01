@@ -1729,6 +1729,13 @@ digraph CodingChangeV1 {
     output_key="status"
   ]
 
+  status_design_rework_exhausted [
+    type="transform",
+    transform="constant",
+    expression="design_rework_exhausted",
+    output_key="status"
+  ]
+
   status_approval_denied [
     type="transform",
     transform="constant",
@@ -2260,7 +2267,8 @@ digraph CodingChangeV1 {
 
   check_design_rework_total_budget -> mark_design_rework_exhausted_error [condition="context.design_rework_count>=2"]
   check_design_rework_total_budget -> inc_design_rework_count [condition="context.design_rework_count<2"]
-  mark_design_rework_exhausted_error -> status_rework_exhausted
+  mark_design_rework_exhausted_error -> status_design_rework_exhausted
+  status_design_rework_exhausted -> close_worker
   inc_design_rework_count -> inc_design_attempt
   inc_design_attempt -> reset_design_envelope_retry_count
   reset_design_envelope_retry_count -> mark_design_rework_kind
@@ -2562,6 +2570,7 @@ digraph CodingChangeV1 {
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_failed"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_capacity_exceeded"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=rework_exhausted"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=design_rework_exhausted"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=approval_denied"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=review_rejected"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=review_failed"]
