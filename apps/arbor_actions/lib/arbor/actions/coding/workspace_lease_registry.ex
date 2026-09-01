@@ -129,6 +129,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   alias Arbor.Actions.Coding.WorkspaceReconciliationProjection
   alias Arbor.Actions.Coding.ReviewAttestationSuccessorCore
+  alias Arbor.Actions.Coding.CandidateSourceCore
   alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore, as: BranchLifecycle
   alias Arbor.Actions.Coding.WorkspaceLifecycleStatusCore, as: LifecycleStatus
   alias Arbor.Actions.Coding.WorkspaceRetentionJournalCore, as: RetentionJournal
@@ -440,8 +441,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   @spec release(String.t(), release_mode() | String.t(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
   def release(workspace_id, mode, opts \\ %{}) when is_binary(workspace_id) do
-    with {:ok, mode_atom} <- normalize_mode(mode) do
+    with {:ok, mode_atom} <- normalize_mode(mode),
+         {:ok, source} <- CandidateSourceCore.admit(opts) do
       {server_opts, caller} = split_caller_opts(opts)
+      caller = Map.put(caller, :candidate_source, source)
       call({:release, workspace_id, mode_atom, caller}, server_opts)
     end
   end
@@ -746,18 +749,24 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   Open a commit-bound review snapshot for an active workspace lease.
 
   Requires the same authority as lease inspect/release (live owner process, or
-  matching non-empty `task_id` **and** `principal_id`). The worktree must be
-  clean and its HEAD must equal `candidate_commit` exactly (full object hash).
-  The lease `base_commit` is bound as the snapshot base. Records exact
-  candidate/base commit and tree OIDs. Returns a JSON-clean map including an
-  opaque `review_snapshot_id` that is never authority by itself.
+  matching non-empty `task_id` **and** `principal_id`). Optional
+  `candidate_source` is admitted from the raw opts before any key collapse:
+  absent or `workspace_branch` requires a clean worktree whose HEAD equals
+  `candidate_commit`; `immutable_object` requires a clean worktree still at
+  the acquired `base_commit` plus a pre-pinned task/workspace evidence ref at
+  `candidate_commit`. The lease `base_commit` is bound as the snapshot base.
+  Records exact candidate/base commit and tree OIDs. Returns a JSON-clean map
+  including an opaque `review_snapshot_id` that is never authority by itself.
   """
   @spec open_review_snapshot(String.t(), String.t(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
   def open_review_snapshot(workspace_id, candidate_commit, opts \\ %{})
       when is_binary(workspace_id) and is_binary(candidate_commit) do
-    {server_opts, caller} = split_caller_opts(opts)
-    call({:open_review_snapshot, workspace_id, candidate_commit, caller}, server_opts)
+    with {:ok, source} <- CandidateSourceCore.admit(opts) do
+      {server_opts, caller} = split_caller_opts(opts)
+      caller = Map.put(caller, :candidate_source, source)
+      call({:open_review_snapshot, workspace_id, candidate_commit, caller}, server_opts)
+    end
   end
 
   @doc """
@@ -1186,22 +1195,28 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       {:ok, lease} ->
         if authorized?(lease, caller) do
-          case cleanup_workspace_validation_resources(state, lease.workspace_id) do
-            {:ok, state} ->
-              release_mode = publish_release_mode(mode, caller)
+          release_mode = publish_release_mode(mode, caller)
 
-              state =
-                state
-                |> maybe_cleanup_workspace_attestations(lease.workspace_id, release_mode)
-                |> cleanup_workspace_review_snapshots(lease.workspace_id)
+          case maybe_preflight_publish(lease, release_mode) do
+            :ok ->
+              case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+                {:ok, state} ->
+                  state =
+                    state
+                    |> maybe_cleanup_workspace_attestations(lease.workspace_id, release_mode)
+                    |> cleanup_workspace_review_snapshots(lease.workspace_id)
 
-              case do_release(state, lease, release_mode) do
-                {:ok, result, state} -> {:reply, {:ok, result}, state}
-                {:error, reason, state} -> {:reply, {:error, reason}, state}
+                  case do_release(state, lease, release_mode) do
+                    {:ok, result, state} -> {:reply, {:ok, result}, state}
+                    {:error, reason, state} -> {:reply, {:error, reason}, state}
+                  end
+
+                {:error, state} ->
+                  {:reply, {:error, :validation_resource_cleanup_failed}, state}
               end
 
-            {:error, state} ->
-              {:reply, {:error, :validation_resource_cleanup_failed}, state}
+            {:error, reason} ->
+              {:reply, {:error, reason}, state}
           end
         else
           {:reply, {:error, :not_authorized}, state}
@@ -4066,6 +4081,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp maybe_cleanup_workspace_attestations(state, _workspace_id, {:publish, _commit, :retain}),
     do: state
 
+  defp maybe_cleanup_workspace_attestations(
+         state,
+         _workspace_id,
+         {:publish, _commit, :retain, _source}
+       ),
+       do: state
+
   defp maybe_cleanup_workspace_attestations(state, workspace_id, _mode),
     do: cleanup_workspace_attestations(state, workspace_id)
 
@@ -4134,6 +4156,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp perform_open_review_snapshot(state, workspace_id, candidate_commit, caller) do
     state = ensure_review_snapshot_state(state)
+    source = review_source(caller)
 
     with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
          true <- lease.active == true || {:error, :not_found},
@@ -4142,9 +4165,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
          inspection <- Workspace.inspect_worktree(lease.worktree_path, lease.base_commit),
          :ok <- require_existing_worktree(inspection),
          :ok <- require_clean_worktree(inspection),
-         :ok <- require_head_equals_candidate(inspection, candidate_commit),
-         {:ok, candidate_tree_oid} <- git_tree_oid(lease.repo_path, candidate_commit),
-         {:ok, base_tree_oid} <- git_tree_oid(lease.repo_path, lease.base_commit) do
+         expected_head <-
+           CandidateSourceCore.review_expected_head(source, lease.base_commit, candidate_commit),
+         :ok <- require_head_equals_candidate(inspection, expected_head),
+         {:ok, candidate_tree_oid, base_tree_oid} <-
+           review_tree_oids(source, lease, candidate_commit) do
       snapshot = %{
         review_snapshot_id: generate_review_snapshot_id(),
         workspace_id: lease.workspace_id,
@@ -4154,7 +4179,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         candidate_commit: candidate_commit,
         base_commit: lease.base_commit,
         candidate_tree_oid: candidate_tree_oid,
-        base_tree_oid: base_tree_oid
+        base_tree_oid: base_tree_oid,
+        candidate_source: source
       }
 
       state = put_review_snapshot(state, snapshot)
@@ -4257,6 +4283,46 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp require_head_equals_candidate(_, _), do: {:error, :missing_commit_hash}
+
+  defp review_source(%{candidate_source: source})
+       when source in [:workspace_branch, :immutable_object],
+       do: source
+
+  defp review_source(_caller), do: :workspace_branch
+
+  defp review_tree_oids(source, lease, candidate_commit) do
+    if CandidateSourceCore.review_requires_pinned_evidence?(source) do
+      immutable_review_tree_oids(lease, candidate_commit)
+    else
+      with {:ok, candidate_tree_oid} <- git_tree_oid(lease.repo_path, candidate_commit),
+           {:ok, base_tree_oid} <- git_tree_oid(lease.repo_path, lease.base_commit) do
+        {:ok, candidate_tree_oid, base_tree_oid}
+      end
+    end
+  end
+
+  defp immutable_review_tree_oids(lease, candidate_commit) do
+    with :ok <- require_lease_evidence_identity(lease),
+         {:ok, _proof} <-
+           Git.verify_archived_evidence_ref(
+             lease.repo_path,
+             lease.task_id,
+             lease.workspace_id,
+             candidate_commit
+           ),
+         {:ok, candidate_tree_oid} <- Git.commit_tree_oid(lease.repo_path, candidate_commit),
+         {:ok, base_tree_oid} <- Git.commit_tree_oid(lease.repo_path, lease.base_commit) do
+      {:ok, candidate_tree_oid, base_tree_oid}
+    end
+  end
+
+  defp require_lease_evidence_identity(%{task_id: task_id, workspace_id: workspace_id})
+       when is_binary(task_id) and task_id != "" and is_binary(workspace_id) and
+              workspace_id != "" do
+    :ok
+  end
+
+  defp require_lease_evidence_identity(_lease), do: {:error, :invalid_task_principal}
 
   defp git_tree_oid(repo_path, commit) do
     case System.cmd(
@@ -6647,34 +6713,49 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   defp do_release(state, lease, :discard), do: do_release_discard(state, lease)
 
   # A reviewable candidate becomes durable evidence before its worktree is
-  # released. The expected commit comes from the pinned graph's reviewed
-  # candidate context; archive_branch_evidence_ref/5 rechecks that the local
-  # branch still points at that exact OID before creating the hidden ref. A
-  # successful archive is idempotent, so retry cannot rebind evidence to a
-  # replacement branch tip.
+  # released. workspace_branch archives from the task branch at the candidate
+  # OID. immutable_object verifies the pre-pinned evidence ref while the
+  # worktree/branch remain at the acquired base, then releases.
   defp do_release(state, lease, {:publish, candidate_commit, target_mode})
        when target_mode in [:remove, :retain] and is_binary(candidate_commit) do
-    archive_input = %{
-      repo_path: lease.repo_path,
-      branch: lease.branch,
-      task_id: lease.task_id,
-      workspace_id: lease.workspace_id,
-      settlement_tip: candidate_commit
-    }
+    do_release(state, lease, {:publish, candidate_commit, target_mode, :workspace_branch})
+  end
 
-    case invoke_retained_archive(state.retained_archive, archive_input) do
-      {:ok, %{hidden_ref: hidden_ref}} ->
-        case do_release(state, lease, target_mode) do
-          {:ok, result, next_state} ->
-            result =
-              result
-              |> Map.put(:published_commit, candidate_commit)
-              |> Map.put(:evidence_ref, hidden_ref)
+  defp do_release(state, lease, {:publish, candidate_commit, target_mode, source})
+       when target_mode in [:remove, :retain] and is_binary(candidate_commit) and
+              source in [:workspace_branch, :immutable_object] do
+    case CandidateSourceCore.publish_evidence_mode(source) do
+      :archive_from_branch ->
+        publish_archive_then_release(state, lease, candidate_commit, target_mode)
 
-            {:ok, result, next_state}
+      :verify_existing ->
+        publish_verify_then_release(state, lease, candidate_commit, target_mode)
+    end
+  end
 
-          {:error, reason, next_state} ->
-            {:error, reason, next_state}
+  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode}),
+    do: {:error, :invalid_publish_release, state}
+
+  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode, _source}),
+    do: {:error, :invalid_publish_release, state}
+
+  defp publish_archive_then_release(state, lease, candidate_commit, target_mode) do
+    case require_branch_at_candidate(lease, candidate_commit) do
+      :ok ->
+        archive_input = %{
+          repo_path: lease.repo_path,
+          branch: lease.branch,
+          task_id: lease.task_id,
+          workspace_id: lease.workspace_id,
+          settlement_tip: candidate_commit
+        }
+
+        case invoke_retained_archive(state.retained_archive, archive_input) do
+          {:ok, %{hidden_ref: hidden_ref}} ->
+            finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref)
+
+          {:error, reason} ->
+            {:error, {:candidate_archive_failed, reason}, state}
         end
 
       {:error, reason} ->
@@ -6682,8 +6763,117 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
-  defp do_release(state, _lease, {:publish, _candidate_commit, _target_mode}),
-    do: {:error, :invalid_publish_release, state}
+  defp publish_verify_then_release(state, lease, candidate_commit, target_mode) do
+    case verify_immutable_publish(lease, candidate_commit) do
+      {:ok, hidden_ref} ->
+        finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref)
+
+      {:error, reason} ->
+        {:error, wrap_immutable_publish_error(reason), state}
+    end
+  end
+
+  defp finish_publish_release(state, lease, target_mode, candidate_commit, hidden_ref) do
+    case do_release(state, lease, target_mode) do
+      {:ok, result, next_state} ->
+        result =
+          result
+          |> Map.put(:published_commit, candidate_commit)
+          |> Map.put(:evidence_ref, hidden_ref)
+
+        {:ok, result, next_state}
+
+      {:error, reason, next_state} ->
+        {:error, reason, next_state}
+    end
+  end
+
+  defp verify_immutable_publish(lease, candidate_commit) do
+    inspection = Workspace.inspect_worktree(lease.worktree_path, lease.base_commit)
+
+    with :ok <- require_existing_worktree(inspection),
+         :ok <- require_clean_worktree(inspection),
+         :ok <- require_head_equals_candidate(inspection, lease.base_commit),
+         :ok <- require_branch_at_base(lease),
+         :ok <- require_lease_evidence_identity(lease),
+         {:ok, %{hidden_ref: hidden_ref}} <-
+           Git.verify_archived_evidence_ref(
+             lease.repo_path,
+             lease.task_id,
+             lease.workspace_id,
+             candidate_commit
+           ) do
+      {:ok, hidden_ref}
+    end
+  end
+
+  defp maybe_preflight_publish(lease, {:publish, candidate_commit, _target_mode, source}) do
+    case CandidateSourceCore.publish_evidence_mode(source) do
+      :archive_from_branch ->
+        preflight_workspace_branch_publish(lease, candidate_commit)
+
+      :verify_existing when is_binary(candidate_commit) ->
+        preflight_immutable_publish(lease, candidate_commit)
+
+      :verify_existing ->
+        {:error, :invalid_publish_release}
+    end
+  end
+
+  defp maybe_preflight_publish(_lease, _mode), do: :ok
+
+  defp preflight_workspace_branch_publish(lease, candidate_commit) do
+    case require_branch_at_candidate(lease, candidate_commit) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:candidate_archive_failed, reason}}
+    end
+  end
+
+  defp preflight_immutable_publish(lease, candidate_commit) do
+    case verify_immutable_publish(lease, candidate_commit) do
+      {:ok, _hidden_ref} -> :ok
+      {:error, reason} -> {:error, wrap_immutable_publish_error(reason)}
+    end
+  end
+
+  defp wrap_immutable_publish_error(reason)
+       when reason in [
+              :dirty_workspace,
+              :head_commit_mismatch,
+              :worktree_missing,
+              :branch_ref_oid_mismatch,
+              :branch_ref_absent
+            ],
+       do: reason
+
+  defp wrap_immutable_publish_error(reason), do: {:candidate_evidence_unverified, reason}
+
+  defp require_branch_at_base(lease) do
+    require_branch_oid(lease, lease.base_commit)
+  end
+
+  defp require_branch_at_candidate(lease, candidate_commit) do
+    require_branch_oid(lease, candidate_commit)
+  end
+
+  defp require_branch_oid(lease, expected_oid) when is_binary(expected_oid) do
+    expected = expected_oid |> String.trim() |> String.downcase()
+
+    case Git.observe_branch_ref(lease.repo_path, lease.branch) do
+      {:ok, {:present, oid}} when is_binary(oid) ->
+        if String.downcase(String.trim(oid)) == expected,
+          do: :ok,
+          else: {:error, :branch_ref_oid_mismatch}
+
+      {:ok, :absent} ->
+        {:error, :branch_ref_absent}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp require_branch_oid(_lease, _expected_oid), do: {:error, :branch_ref_oid_mismatch}
 
   # Discard: journal intent before any destructive work, remove owned worktree,
   # then retire the branch only when provenance is :created and tip still equals
@@ -9095,13 +9285,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:error,
        "release mode must be \"retain\", \"remove\", \"discard\", \"publish\", or \"publish_retain\", got: #{inspect(other)}"}
 
-  defp publish_release_mode(:publish, %{candidate_commit: candidate_commit}),
-    do: {:publish, candidate_commit, :remove}
+  defp publish_release_mode(:publish, %{candidate_commit: candidate_commit} = caller),
+    do: {:publish, candidate_commit, :remove, publish_source(caller)}
 
-  defp publish_release_mode(:publish_retain, %{candidate_commit: candidate_commit}),
-    do: {:publish, candidate_commit, :retain}
+  defp publish_release_mode(:publish_retain, %{candidate_commit: candidate_commit} = caller),
+    do: {:publish, candidate_commit, :retain, publish_source(caller)}
 
   defp publish_release_mode(mode, _caller), do: mode
+
+  defp publish_source(%{candidate_source: source})
+       when source in [:workspace_branch, :immutable_object],
+       do: source
+
+  defp publish_source(_caller), do: :workspace_branch
 
   defp normalize_candidate_commit(commit) when is_binary(commit) do
     commit = commit |> String.trim() |> String.downcase()

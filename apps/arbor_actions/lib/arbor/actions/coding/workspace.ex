@@ -1732,7 +1732,10 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   defp git(path, args) do
-    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+    case System.cmd("git", ["--no-replace-objects", "-C", path | args],
+           stderr_to_stdout: true,
+           env: [{"GIT_NO_REPLACE_OBJECTS", "1"}]
+         ) do
       {output, 0} -> {:ok, output}
       {output, _code} -> {:error, String.trim(output)}
     end
@@ -2173,10 +2176,16 @@ defmodule Arbor.Actions.Coding.Workspace do
         repo_path: [
           type: :string,
           doc: "Repository root used to verify an idempotent publish replay"
+        ],
+        candidate_source: [
+          type: :string,
+          doc:
+            "Closed candidate source: omit or \"workspace_branch\" for branch-backed publish; \"immutable_object\" verifies a pre-pinned evidence ref"
         ]
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
@@ -2197,7 +2206,8 @@ defmodule Arbor.Actions.Coding.Workspace do
         workspace_id: :control,
         mode: :control,
         commit_hash: :control,
-        repo_path: :control
+        repo_path: :control,
+        candidate_source: :control
       }
     end
 
@@ -2212,21 +2222,36 @@ defmodule Arbor.Actions.Coding.Workspace do
 
       Actions.emit_started(__MODULE__, %{workspace_id: workspace_id, mode: mode})
 
-      case WorkspaceLeaseRegistry.release(workspace_id, mode, %{
-             task_id: Workspace.context_task_id(context),
-             principal_id: Workspace.context_principal_id(context),
-             candidate_commit: candidate_commit,
-             repo_path: repo_path
-           }) do
-        {:ok, result} ->
-          case format_release_result(result) do
-            {:ok, result} ->
-              Actions.emit_completed(__MODULE__, %{
-                workspace_id: workspace_id,
-                status: result[:status] || result["status"]
-              })
+      case CandidateSourceCore.admit(params) do
+        {:ok, source} ->
+          release_opts = %{
+            task_id: Workspace.context_task_id(context),
+            principal_id: Workspace.context_principal_id(context),
+            candidate_commit: candidate_commit,
+            repo_path: repo_path
+          }
 
-              {:ok, result}
+          release_opts =
+            case source do
+              :immutable_object -> Map.put(release_opts, :candidate_source, "immutable_object")
+              :workspace_branch -> release_opts
+            end
+
+          case WorkspaceLeaseRegistry.release(workspace_id, mode, release_opts) do
+            {:ok, result} ->
+              case format_release_result(result) do
+                {:ok, result} ->
+                  Actions.emit_completed(__MODULE__, %{
+                    workspace_id: workspace_id,
+                    status: result[:status] || result["status"]
+                  })
+
+                  {:ok, result}
+
+                {:error, reason} ->
+                  Actions.emit_failed(__MODULE__, reason)
+                  {:error, reason}
+              end
 
             {:error, reason} ->
               Actions.emit_failed(__MODULE__, reason)

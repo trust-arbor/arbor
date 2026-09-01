@@ -1,6 +1,7 @@
 defmodule Arbor.Actions.Coding.Adoption do
   @moduledoc false
 
+  alias Arbor.Actions.Coding.CandidateSourceCore
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
 
@@ -59,18 +60,49 @@ defmodule Arbor.Actions.Coding.Adoption do
 
   def settle(_candidate, _proof, _opts), do: {:error, :invalid_adoption_request}
 
-  defp validate_candidate(candidate) do
-    with {:ok, candidate} <- json_string_map(candidate),
-         true <- MapSet.equal?(Map.keys(candidate) |> MapSet.new(), @candidate_keys),
+  defp validate_candidate(candidate) when is_map(candidate) do
+    with {:ok, source} <- CandidateSourceCore.admit(candidate),
+         {:ok, candidate} <- json_string_map(candidate),
+         :ok <- require_candidate_key_set(candidate),
          :ok <- require_nonblank_fields(candidate),
          true <- Regex.match?(@oid_regex, candidate["base_commit"]),
          true <- Regex.match?(@oid_regex, candidate["candidate_commit"]),
          true <- byte_size(candidate["base_commit"]) == byte_size(candidate["candidate_commit"]),
          true <- candidate["branch_provenance"] in ["created", "reused", "unknown"],
          true <- String.starts_with?(candidate["evidence_ref"], "refs/arbor/evidence/") do
-      {:ok, candidate}
+      {:ok, Map.put(candidate, "candidate_source", source_string(source))}
     else
+      {:error, :ambiguous_candidate_source} = error -> error
+      {:error, :invalid_candidate_source} = error -> error
       _other -> {:error, :invalid_adoption_candidate}
+    end
+  end
+
+  defp validate_candidate(_candidate), do: {:error, :invalid_adoption_candidate}
+
+  defp require_candidate_key_set(candidate) do
+    keys = candidate |> Map.keys() |> MapSet.new()
+
+    cond do
+      MapSet.equal?(keys, @candidate_keys) ->
+        :ok
+
+      MapSet.equal?(keys, MapSet.put(@candidate_keys, "candidate_source")) and
+          candidate["candidate_source"] in ["workspace_branch", "immutable_object"] ->
+        :ok
+
+      true ->
+        {:error, :invalid_adoption_candidate}
+    end
+  end
+
+  defp source_string(:immutable_object), do: "immutable_object"
+  defp source_string(:workspace_branch), do: "workspace_branch"
+
+  defp candidate_source(candidate) do
+    case Map.get(candidate, "candidate_source") do
+      "immutable_object" -> :immutable_object
+      _other -> :workspace_branch
     end
   end
 
@@ -118,13 +150,52 @@ defmodule Arbor.Actions.Coding.Adoption do
     do: {:error, :invalid_adoption_destination}
 
   defp archive_candidate(candidate) do
-    Git.archive_branch_evidence_ref(
-      candidate["repo_path"],
-      candidate["branch"],
-      candidate["task_id"],
-      candidate["workspace_id"],
-      candidate["candidate_commit"]
-    )
+    case CandidateSourceCore.adoption_evidence_mode(candidate_source(candidate)) do
+      :verify_existing ->
+        Git.verify_archived_evidence_ref(
+          candidate["repo_path"],
+          candidate["task_id"],
+          candidate["workspace_id"],
+          candidate["candidate_commit"]
+        )
+
+      :archive_from_branch ->
+        with :ok <- reject_workspace_branch_base_shape(candidate) do
+          Git.archive_branch_evidence_ref(
+            candidate["repo_path"],
+            candidate["branch"],
+            candidate["task_id"],
+            candidate["workspace_id"],
+            candidate["candidate_commit"]
+          )
+        end
+    end
+  end
+
+  # Omitted/workspace_branch must not treat a still-at-base branch plus a
+  # pre-pinned candidate evidence ref as idempotent archive replay.
+  defp reject_workspace_branch_base_shape(candidate) do
+    source = candidate_source(candidate)
+
+    case Git.observe_branch_ref(candidate["repo_path"], candidate["branch"]) do
+      {:ok, {:present, branch_oid}} ->
+        if CandidateSourceCore.workspace_branch_still_at_impossible_base?(
+             source,
+             branch_oid,
+             candidate["base_commit"],
+             candidate["candidate_commit"]
+           ) do
+          {:error, :branch_ref_oid_mismatch}
+        else
+          :ok
+        end
+
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp require_expected_evidence_ref(candidate, hidden_ref) do
@@ -148,9 +219,31 @@ defmodule Arbor.Actions.Coding.Adoption do
     WorkspaceLeaseRegistry.release(candidate["workspace_id"], :remove, release_opts)
   end
 
-  defp settle_candidate_branch(%{"branch_provenance" => "created"} = candidate) do
-    expected_commit = candidate["candidate_commit"]
+  defp settle_candidate_branch(candidate) do
+    source = candidate_source(candidate)
+    provenance = candidate["branch_provenance"]
 
+    case CandidateSourceCore.branch_retirement_expected_oid(
+           source,
+           provenance,
+           candidate["base_commit"],
+           candidate["candidate_commit"]
+         ) do
+      {:compare_delete, expected_commit} ->
+        retire_created_branch(candidate, expected_commit)
+
+      :preserve ->
+        reason =
+          case provenance do
+            "reused" -> "reused_branch"
+            _ -> "unknown_branch_provenance"
+          end
+
+        {:ok, %{"branch_retired" => false, "branch_preserved_reason" => reason}}
+    end
+  end
+
+  defp retire_created_branch(candidate, expected_commit) do
     case Git.observe_branch_ref(candidate["repo_path"], candidate["branch"]) do
       {:ok, :absent} ->
         {:ok, %{"branch_retired" => true}}
@@ -159,7 +252,7 @@ defmodule Arbor.Actions.Coding.Adoption do
         case Git.delete_branch_ref(
                candidate["repo_path"],
                candidate["branch"],
-               candidate["candidate_commit"]
+               expected_commit
              ) do
           :ok -> {:ok, %{"branch_retired" => true}}
           {:error, reason} -> {:error, {:adoption_branch_retire_failed, reason}}
@@ -175,16 +268,6 @@ defmodule Arbor.Actions.Coding.Adoption do
       {:error, reason} ->
         {:error, {:adoption_branch_observation_failed, reason}}
     end
-  end
-
-  defp settle_candidate_branch(candidate) do
-    reason =
-      case candidate["branch_provenance"] do
-        "reused" -> "reused_branch"
-        _ -> "unknown_branch_provenance"
-      end
-
-    {:ok, %{"branch_retired" => false, "branch_preserved_reason" => reason}}
   end
 
   defp json_string_map(value) do

@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
   alias Arbor.Actions.Coding.ReviewTree
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Git
 
   @moduletag :fast
   @owner_operation_timeout 10_000
@@ -1149,6 +1150,476 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
     end
   end
 
+  describe "immutable_object review snapshots" do
+    @tag :security_regression
+    test "security regression: public immutable open succeeds at base with pre-pinned evidence",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fixture = build_immutable_review_fixture(tmp_dir)
+      before = worktree_identity(fixture.lease.worktree_path)
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 Map.put(fixture.context, :candidate_source, "immutable_object")
+               )
+
+      assert Workspace.json_clean?(snap)
+      refute Map.has_key?(snap, :candidate_source)
+      refute Map.has_key?(snap, "candidate_source")
+      refute Map.has_key?(snap, :repo_path)
+      refute Map.has_key?(snap, :resource_id)
+      assert snap.candidate_commit == fixture.candidate_commit
+      assert snap.base_commit == fixture.base_commit
+      assert snap.candidate_tree_oid == fixture.candidate_tree_oid
+      assert snap.base_tree_oid == fixture.base_tree_oid
+
+      assert {:ok, candidate_read} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "candidate",
+                   path: "lib/changed.ex"
+                 },
+                 fixture.context
+               )
+
+      assert candidate_read.content == "defmodule Changed do\n  def v, do: :candidate\nend\n"
+
+      assert {:ok, base_read} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "base",
+                   path: "lib/changed.ex"
+                 },
+                 fixture.context
+               )
+
+      assert base_read.content == "defmodule Changed do\n  def v, do: :base\nend\n"
+      assert worktree_identity(fixture.lease.worktree_path) == before
+      assert git!(fixture.lease.worktree_path, ["rev-parse", "HEAD"]) == fixture.base_commit
+      assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.lease.branch}"]) ==
+               fixture.base_commit
+    end
+
+    test "later opposite-mode open does not reuse an existing snapshot", %{tmp_dir: tmp_dir} do
+      fixture = build_immutable_review_fixture(tmp_dir)
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 Map.put(fixture.context, :candidate_source, "immutable_object")
+               )
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 fixture.context
+               )
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 Map.put(fixture.context, :candidate_source, "workspace_branch")
+               )
+
+      assert {:ok, resolved} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(
+                 snap.review_snapshot_id,
+                 fixture.context
+               )
+
+      assert resolved.review_snapshot_id == snap.review_snapshot_id
+
+      branch_fixture = build_review_fixture(tmp_dir, prefix: "opp_branch")
+
+      assert {:ok, branch_snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 branch_fixture.lease.workspace_id,
+                 branch_fixture.candidate_commit,
+                 branch_fixture.context
+               )
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 branch_fixture.lease.workspace_id,
+                 branch_fixture.candidate_commit,
+                 Map.put(branch_fixture.context, :candidate_source, "immutable_object")
+               )
+
+      assert {:ok, still} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(
+                 branch_snap.review_snapshot_id,
+                 branch_fixture.context
+               )
+
+      assert still.review_snapshot_id == branch_snap.review_snapshot_id
+    end
+
+    test "security regression: immutable open fails closed without mutation", %{tmp_dir: tmp_dir} do
+      fixture = build_immutable_review_fixture(tmp_dir)
+      opts = Map.put(fixture.context, :candidate_source, "immutable_object")
+      worktree = fixture.lease.worktree_path
+      before = worktree_identity(worktree)
+      evidence_before = git!(fixture.repo, ["rev-parse", fixture.evidence_ref])
+
+      unpinned = build_immutable_review_fixture(tmp_dir, prefix: "absent_ev", pin?: false)
+
+      assert {:error, :evidence_ref_lost_after_create} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 unpinned.lease.workspace_id,
+                 unpinned.candidate_commit,
+                 Map.put(unpinned.context, :candidate_source, "immutable_object")
+               )
+
+      other = build_immutable_review_fixture(tmp_dir, prefix: "mismatch_ev", pin?: false)
+
+      assert {:ok, %{hidden_ref: _}} =
+               Git.pin_task_workspace_commit(
+                 other.repo,
+                 other.task_id,
+                 other.lease.workspace_id,
+                 other.base_commit
+               )
+
+      assert {:error, :evidence_ref_oid_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 other.lease.workspace_id,
+                 other.candidate_commit,
+                 Map.put(other.context, :candidate_source, "immutable_object")
+               )
+
+      File.write!(Path.join(worktree, "dirty.txt"), "x\n")
+
+      assert {:error, :dirty_workspace} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 opts
+               )
+
+      File.rm!(Path.join(worktree, "dirty.txt"))
+      assert worktree_identity(worktree) == before
+
+      indexed = build_immutable_review_fixture(tmp_dir, prefix: "index_mod")
+      File.write!(Path.join(indexed.lease.worktree_path, "lib/changed.ex"), "staged\n")
+      git!(indexed.lease.worktree_path, ["add", "lib/changed.ex"])
+
+      assert {:error, :dirty_workspace} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 indexed.lease.workspace_id,
+                 indexed.candidate_commit,
+                 Map.put(indexed.context, :candidate_source, "immutable_object")
+               )
+
+      moved = build_immutable_review_fixture(tmp_dir, prefix: "moved_head")
+      git!(moved.lease.worktree_path, ["commit", "--allow-empty", "-m", "move head"])
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 moved.lease.workspace_id,
+                 moved.candidate_commit,
+                 Map.put(moved.context, :candidate_source, "immutable_object")
+               )
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 "ws_missing_immutable_review",
+                 fixture.candidate_commit,
+                 opts
+               )
+
+      missing = String.duplicate("b", 40)
+
+      assert {:error, _} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 missing,
+                 opts
+               )
+
+      assert {:error, :invalid_candidate_source} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 Map.put(fixture.context, :candidate_source, "immutable")
+               )
+
+      mixed =
+        fixture.context
+        |> Map.put(:candidate_source, "immutable_object")
+        |> Map.put("candidate_source", "immutable_object")
+
+      assert {:error, :ambiguous_candidate_source} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 mixed
+               )
+
+      branch_fixture = build_review_fixture(tmp_dir, prefix: "imm_at_candidate")
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 branch_fixture.lease.workspace_id,
+                 branch_fixture.candidate_commit,
+                 Map.put(branch_fixture.context, :candidate_source, "immutable_object")
+               )
+
+      base_only = build_immutable_review_fixture(tmp_dir, prefix: "branch_at_base")
+
+      assert {:error, :head_commit_mismatch} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 base_only.lease.workspace_id,
+                 base_only.candidate_commit,
+                 base_only.context
+               )
+
+      retained = build_immutable_review_fixture(tmp_dir, prefix: "retained")
+
+      assert {:ok, _} =
+               Workspace.Release.run(
+                 %{workspace_id: retained.lease.workspace_id, mode: "retain"},
+                 retained.context
+               )
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 retained.lease.workspace_id,
+                 retained.candidate_commit,
+                 Map.put(retained.context, :candidate_source, "immutable_object")
+               )
+
+      assert git!(fixture.repo, ["rev-parse", fixture.evidence_ref]) == evidence_before
+      assert worktree_identity(worktree) == before
+    end
+
+    @tag :security_regression
+    test "security regression: immutable review tree OIDs ignore refs/replace", %{
+      tmp_dir: tmp_dir
+    } do
+      fixture = build_immutable_review_fixture(tmp_dir, prefix: "imm_replace")
+      opts = Map.put(fixture.context, :candidate_source, "immutable_object")
+      real_candidate_tree = fixture.candidate_tree_oid
+      real_base_tree = fixture.base_tree_oid
+
+      {decoy_candidate, decoy_candidate_tree} =
+        object_commit(
+          fixture.repo,
+          fixture.base_commit,
+          "lib/replaced-candidate.ex",
+          "replaced-candidate\n",
+          tmp_dir
+        )
+
+      {decoy_base, decoy_base_tree} =
+        object_commit(
+          fixture.repo,
+          fixture.base_commit,
+          "lib/replaced-base.ex",
+          "replaced-base\n",
+          tmp_dir
+        )
+
+      refute decoy_candidate_tree == real_candidate_tree
+      refute decoy_base_tree == real_base_tree
+      refute decoy_candidate == fixture.candidate_commit
+      refute decoy_base == fixture.base_commit
+
+      {_, 0} =
+        System.cmd(
+          "git",
+          ["-C", fixture.repo, "replace", fixture.candidate_commit, decoy_candidate],
+          stderr_to_stdout: true
+        )
+
+      {_, 0} =
+        System.cmd(
+          "git",
+          ["-C", fixture.repo, "replace", fixture.base_commit, decoy_base],
+          stderr_to_stdout: true
+        )
+
+      assert replace_aware_tree_oid(fixture.repo, fixture.candidate_commit) == decoy_candidate_tree
+      assert replace_aware_tree_oid(fixture.repo, fixture.base_commit) == decoy_base_tree
+
+      before = worktree_identity(fixture.lease.worktree_path)
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 opts
+               )
+
+      assert snap.candidate_tree_oid == real_candidate_tree
+      assert snap.base_tree_oid == real_base_tree
+      refute snap.candidate_tree_oid == decoy_candidate_tree
+      refute snap.base_tree_oid == decoy_base_tree
+
+      inspection =
+        Workspace.inspect_worktree(fixture.lease.worktree_path, fixture.base_commit)
+
+      assert inspection.dirty == false
+      assert inspection.head_commit == fixture.base_commit
+
+      assert {:ok, candidate_read} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "candidate",
+                   path: "lib/changed.ex"
+                 },
+                 fixture.context
+               )
+
+      assert candidate_read.content == "defmodule Changed do\n  def v, do: :candidate\nend\n"
+
+      assert {:ok, base_read} =
+               ReviewTree.Read.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "base",
+                   path: "lib/changed.ex"
+                 },
+                 fixture.context
+               )
+
+      assert base_read.content == "defmodule Changed do\n  def v, do: :base\nend\n"
+      assert worktree_identity(fixture.lease.worktree_path) == before
+    end
+
+    @tag :security_regression
+    test "security regression: public open_review_snapshot/3 denies wrong-task without mutation",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fixture = build_immutable_review_fixture(tmp_dir, prefix: "imm_wrong_task")
+      opts = Map.put(fixture.context, :candidate_source, "immutable_object")
+      before = worktree_identity(fixture.lease.worktree_path)
+      evidence_before = git!(fixture.repo, ["rev-parse", fixture.evidence_ref])
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 opts
+               )
+
+      wrong_task =
+        Task.async(fn ->
+          WorkspaceLeaseRegistry.open_review_snapshot(
+            fixture.lease.workspace_id,
+            fixture.candidate_commit,
+            opts
+            |> Map.put(:task_id, "task_wrong_#{System.unique_integer([:positive])}")
+          )
+        end)
+
+      assert {:error, :not_authorized} = Task.await(wrong_task, @owner_operation_timeout)
+
+      assert {:ok, resolved} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(
+                 snap.review_snapshot_id,
+                 fixture.context
+               )
+
+      assert resolved.review_snapshot_id == snap.review_snapshot_id
+      assert worktree_identity(fixture.lease.worktree_path) == before
+      assert git!(fixture.repo, ["rev-parse", fixture.evidence_ref]) == evidence_before
+
+      assert {:ok, later} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 opts
+               )
+
+      assert later.review_snapshot_id != snap.review_snapshot_id
+      assert worktree_identity(fixture.lease.worktree_path) == before
+    end
+
+    @tag :security_regression
+    test "security regression: public open_review_snapshot/3 denies cross-workspace without mutation",
+         %{
+           tmp_dir: tmp_dir
+         } do
+      fixture_a = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_a")
+      fixture_b = build_immutable_review_fixture(tmp_dir, prefix: "imm_xw_b")
+      opts_a = Map.put(fixture_a.context, :candidate_source, "immutable_object")
+      opts_b = Map.put(fixture_b.context, :candidate_source, "immutable_object")
+      before_a = worktree_identity(fixture_a.lease.worktree_path)
+      before_b = worktree_identity(fixture_b.lease.worktree_path)
+      evidence_a = git!(fixture_a.repo, ["rev-parse", fixture_a.evidence_ref])
+      evidence_b = git!(fixture_b.repo, ["rev-parse", fixture_b.evidence_ref])
+
+      assert {:ok, snap_a} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture_a.lease.workspace_id,
+                 fixture_a.candidate_commit,
+                 opts_a
+               )
+
+      cross_a =
+        Task.async(fn ->
+          WorkspaceLeaseRegistry.open_review_snapshot(
+            fixture_a.lease.workspace_id,
+            fixture_a.candidate_commit,
+            opts_b
+          )
+        end)
+
+      cross_b =
+        Task.async(fn ->
+          WorkspaceLeaseRegistry.open_review_snapshot(
+            fixture_b.lease.workspace_id,
+            fixture_b.candidate_commit,
+            opts_a
+          )
+        end)
+
+      assert {:error, :not_authorized} = Task.await(cross_a, @owner_operation_timeout)
+      assert {:error, :not_authorized} = Task.await(cross_b, @owner_operation_timeout)
+
+      assert {:ok, resolved} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(
+                 snap_a.review_snapshot_id,
+                 fixture_a.context
+               )
+
+      assert resolved.review_snapshot_id == snap_a.review_snapshot_id
+      assert worktree_identity(fixture_a.lease.worktree_path) == before_a
+      assert worktree_identity(fixture_b.lease.worktree_path) == before_b
+      assert git!(fixture_a.repo, ["rev-parse", fixture_a.evidence_ref]) == evidence_a
+      assert git!(fixture_b.repo, ["rev-parse", fixture_b.evidence_ref]) == evidence_b
+
+      assert {:ok, later_a} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture_a.lease.workspace_id,
+                 fixture_a.candidate_commit,
+                 opts_a
+               )
+
+      assert {:ok, snap_b} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture_b.lease.workspace_id,
+                 fixture_b.candidate_commit,
+                 opts_b
+               )
+
+      assert later_a.review_snapshot_id != snap_a.review_snapshot_id
+      assert is_binary(snap_b.review_snapshot_id)
+      assert worktree_identity(fixture_a.lease.worktree_path) == before_a
+      assert worktree_identity(fixture_b.lease.worktree_path) == before_b
+    end
+  end
+
   # -- fixtures -------------------------------------------------------
 
   defp build_review_fixture(tmp_dir, opts \\ []) do
@@ -1251,6 +1722,136 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
 
   defp git!(path, args) do
     {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
+    String.trim(output)
+  end
+
+  defp build_immutable_review_fixture(tmp_dir, opts \\ []) do
+    prefix = Keyword.get(opts, :prefix, "imm_review")
+    pin? = Keyword.get(opts, :pin?, true)
+
+    repo =
+      create_git_repo(Path.join(tmp_dir, "#{prefix}_repo_#{System.unique_integer([:positive])}"))
+
+    File.mkdir_p!(Path.join(repo, "lib"))
+
+    File.write!(Path.join(repo, "lib/related.ex"), """
+    defmodule Related do
+      def token, do: :RELATED_TOKEN_ALPHA
+    end
+    """)
+
+    File.write!(Path.join(repo, "lib/changed.ex"), """
+    defmodule Changed do
+      def v, do: :base
+    end
+    """)
+
+    git!(repo, ["add", "lib/related.ex", "lib/changed.ex"])
+    git!(repo, ["commit", "-m", "base tree"])
+    base_commit = git!(repo, ["rev-parse", "HEAD"])
+    base_tree_oid = git!(repo, ["rev-parse", "#{base_commit}^{tree}"])
+
+    task_id = "task_#{prefix}_#{System.unique_integer([:positive])}"
+    principal_id = "agent_#{prefix}_#{System.unique_integer([:positive])}"
+    context = %{task_id: task_id, agent_id: principal_id}
+
+    assert {:ok, lease} =
+             Workspace.Acquire.run(
+               %{
+                 repo_path: repo,
+                 branch_name: "test/#{prefix}-#{System.unique_integer([:positive])}",
+                 worktree_base_dir: Path.join(tmp_dir, "#{prefix}_worktrees"),
+                 base_ref: base_commit
+               },
+               context
+             )
+
+    {candidate_commit, candidate_tree_oid} =
+      object_commit(
+        repo,
+        base_commit,
+        "lib/changed.ex",
+        "defmodule Changed do\n  def v, do: :candidate\nend\n",
+        tmp_dir
+      )
+
+    evidence_ref =
+      if pin? do
+        assert {:ok, %{hidden_ref: hidden_ref}} =
+                 Git.pin_task_workspace_commit(
+                   repo,
+                   task_id,
+                   lease.workspace_id,
+                   candidate_commit
+                 )
+
+        hidden_ref
+      else
+        nil
+      end
+
+    %{
+      repo: repo,
+      lease: lease,
+      context: context,
+      task_id: task_id,
+      principal_id: principal_id,
+      base_commit: base_commit,
+      base_tree_oid: base_tree_oid,
+      candidate_commit: candidate_commit,
+      candidate_tree_oid: candidate_tree_oid,
+      evidence_ref: evidence_ref
+    }
+  end
+
+  defp object_commit(repo, parent, path, content, tmp_dir) do
+    blob_file = Path.join(tmp_dir, "blob-#{System.unique_integer([:positive])}")
+    File.write!(blob_file, content)
+    blob = git!(repo, ["hash-object", "-w", blob_file])
+    index = Path.join(tmp_dir, "index-#{System.unique_integer([:positive])}")
+    git_index!(repo, index, ["read-tree", parent])
+
+    git_index!(repo, index, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      "100644,#{blob},#{path}"
+    ])
+
+    tree = git_index!(repo, index, ["write-tree"])
+    File.rm(index)
+    commit = git!(repo, ["commit-tree", tree, "-p", parent, "-m", "object candidate"])
+    {commit, tree}
+  end
+
+  defp git_index!(repo, index, args) do
+    {output, 0} =
+      System.cmd("git", ["-C", repo | args],
+        stderr_to_stdout: true,
+        env: [{"GIT_INDEX_FILE", index}]
+      )
+
+    String.trim(output)
+  end
+
+  defp worktree_identity(worktree) do
+    %{
+      head: git!(worktree, ["rev-parse", "HEAD"]),
+      branch: git!(worktree, ["rev-parse", "--abbrev-ref", "HEAD"]),
+      status: git!(worktree, ["status", "--porcelain", "-z"]),
+      index: git!(worktree, ["write-tree"])
+    }
+  end
+
+  defp replace_aware_tree_oid(repo, commit) do
+    {output, 0} =
+      System.cmd(
+        "git",
+        ["-C", repo, "rev-parse", "--verify", "#{commit}^{tree}"],
+        stderr_to_stdout: true,
+        env: [{"GIT_NO_REPLACE_OBJECTS", nil}]
+      )
+
     String.trim(output)
   end
 end
