@@ -505,6 +505,16 @@ node (found 2026-07-20 while launching the Phase 6 r10 benchmark).
 <a id="applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle"></a>
 **Aggregate tests must own dependency availability and globally named process lifecycle.** Umbrella order can leave an optional service running even when an app-local run exercises its unavailable fallback, and a linked named process can outlive one test long enough to race the next setup. Inject the intended available or unavailable dependency explicitly, restore global config from an `async: false` module, and start test-owned named processes under `start_supervised!/1` so teardown is synchronous. Never use the accidental absence of a globally registered service as a fixture (found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).
 
+<!-- applied-learning: restart-recovery-regressions-must-pass-cold-and-standalone -->
+<a id="applied-learning-restart-recovery-regressions-must-pass-cold-and-standalone"></a>
+**Restart-recovery regressions must pass cold and standalone.** A larger suite can leave
+Application env, compiled modules, or service processes warm enough to hide a cold-start
+timeout or schema-replay defect. Run the exact restart case by itself as well as in its
+owning file, and overlay that same test on the immediate parent for the failure proof.
+Compiler fakes must consume the same configured template source as production; a fake
+that bypasses it does not prove graph-upgrade recovery (found 2026-09-01 while repairing
+settled coding-task rehydration after the design-council graph upgrade).
+
 <!-- applied-learning: optional-deadline-controls-must-preserve-legacy-clock-sampling-order -->
 <a id="applied-learning-optional-deadline-controls-must-preserve-legacy-clock-sampling-order"></a>
 **Optional deadline controls must preserve legacy clock sampling order.** Adding an

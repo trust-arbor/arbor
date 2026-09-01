@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 711,
+  "entry_count": 712,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8787,8 +8787,21 @@
       "source_incident": "found 2026-09-01 during G5B1 exact-two-revision verification",
       "always_loaded": false,
       "content_sha256": "3dd52a778b9a3d0401f59998db1e5be092e2d38dcc00f77481e7bb5bed25734f"
+    },
+    {
+      "source_ordinal": 712,
+      "source_kind": "post-migration",
+      "slug": "restart-recovery-regressions-must-pass-cold-and-standalone",
+      "title": "Restart-recovery regressions must pass cold and standalone.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-restart-recovery-regressions-must-pass-cold-and-standalone",
+      "source_date": "2026-09-01",
+      "source_incident": "found 2026-09-01 while repairing settled coding-task rehydration after the design-council graph upgrade",
+      "always_loaded": false,
+      "content_sha256": "65f6842d7fc66eb65882d2f2adf327e241e2a212355127c1a491e75e4a0183df"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 250
+  "post_migration_entry_count": 251
 }
