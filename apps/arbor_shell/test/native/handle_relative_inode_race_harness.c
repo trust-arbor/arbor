@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -38,6 +39,17 @@ static void first_comp(const char *rel, char *out, size_t n) {
   out[len] = '\0';
 }
 
+static int append_suffix(char *out, size_t n, const char *path,
+                         const char *suffix) {
+  size_t path_len = strlen(path);
+  size_t suffix_len = strlen(suffix);
+
+  if (path_len >= n || suffix_len >= n - path_len) return -1;
+  memcpy(out, path, path_len);
+  memcpy(out + path_len, suffix, suffix_len + 1U);
+  return 0;
+}
+
 static void replace_first_ancestor(const char *rel) {
   char name[256];
   char path[8192];
@@ -45,7 +57,7 @@ static void replace_first_ancestor(const char *rel) {
   first_comp(rel, name, sizeof(name));
   if (name[0] == '\0') return;
   join_root(path, sizeof(path), name);
-  snprintf(bak, sizeof(bak), "%s.g5b1-replaced", path);
+  if (append_suffix(bak, sizeof(bak), path, ".g5b1-replaced") != 0) return;
   (void)rename(path, bak);
   (void)mkdir(path, 0755);
 }
@@ -72,7 +84,9 @@ static void hardlink_rel(const char *rel) {
   char path[8192];
   char hardlink_path[8192];
   join_root(path, sizeof(path), rel);
-  snprintf(hardlink_path, sizeof(hardlink_path), "%s.g5b1-hardlink", path);
+  if (append_suffix(hardlink_path, sizeof(hardlink_path), path,
+                    ".g5b1-hardlink") != 0)
+    return;
   (void)unlink(hardlink_path);
   (void)link(path, hardlink_path);
 }
