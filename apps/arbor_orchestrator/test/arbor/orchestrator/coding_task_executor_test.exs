@@ -7538,6 +7538,229 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   describe "finalize_task" do
+    @tag :security_regression
+    test "security regression: admitted-terminal finalize fails closed on mismatched agent_id instead of live compile" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      root = task_terminal_root("task_coding_1")
+      terminal_path = Path.join(root, "coding-task-terminal.json")
+      evidence_path = Path.join(root, "coding-terminal-evidence.json")
+      terminal_bytes = File.read!(terminal_path)
+      evidence_bytes = File.read!(evidence_path)
+
+      recovered = Map.update!(finalized, "artifacts", &Map.delete(&1, "task_evidence"))
+
+      assert {:ok, _again} =
+               CodingTaskExecutor.finalize_task("agent_1", recovered, [], valid_context())
+
+      assert {:error, :unprovable_recovery} =
+               CodingTaskExecutor.finalize_task("agent_other", recovered, [], valid_context())
+
+      assert File.read!(terminal_path) == terminal_bytes
+      assert File.read!(evidence_path) == evidence_bytes
+    end
+
+    @tag :security_regression
+    test "security regression: malformed first-writer terminal fails closed at finalize without live compile" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      root = task_terminal_root("task_coding_1")
+      terminal_path = Path.join(root, "coding-task-terminal.json")
+      evidence_path = Path.join(root, "coding-terminal-evidence.json")
+      evidence_bytes = File.read!(evidence_path)
+
+      File.rm!(terminal_path)
+      File.write!(terminal_path, "{not-json")
+      File.chmod!(terminal_path, 0o600)
+
+      recovered = Map.update!(finalized, "artifacts", &Map.delete(&1, "task_evidence"))
+
+      assert {:error, :unprovable_recovery} =
+               CodingTaskExecutor.finalize_task("agent_1", recovered, [], valid_context())
+
+      assert File.read!(terminal_path) == "{not-json"
+      assert File.read!(evidence_path) == evidence_bytes
+    end
+
+    @tag :security_regression
+    test "security regression: unavailable durable record during admitted-terminal finalize stays unavailable" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      Process.put(:coding_journal_unavailable, true)
+      on_exit(fn -> Process.delete(:coding_journal_unavailable) end)
+
+      recovered = Map.update!(finalized, "artifacts", &Map.delete(&1, "task_evidence"))
+
+      assert {:error, :unavailable} =
+               CodingTaskExecutor.finalize_task("agent_1", recovered, [], valid_context())
+    end
+
+    @tag :security_regression
+    test "security regression: cancelled first-writer archive is not finalize bypass-eligible" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.from_code("task_cancelled", "cancelled", %{
+          "kind" => "task_cancelled"
+        })
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 [],
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      recovered = Map.update!(finalized, "artifacts", &Map.delete(&1, "task_evidence"))
+
+      assert {:error, :unprovable_recovery} =
+               CodingTaskExecutor.finalize_task("agent_1", recovered, [], valid_context())
+    end
+
+    @tag :security_regression
+    test "security regression: incoming finalize result must match admitted archive result to bypass" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      recovered =
+        finalized
+        |> Map.update!("artifacts", &Map.delete(&1, "task_evidence"))
+        |> Map.put("commit_hash", "ffffffffffffffff")
+
+      assert {:error, :unprovable_recovery} =
+               CodingTaskExecutor.finalize_task("agent_1", recovered, [], valid_context())
+    end
+
+    @tag :security_regression
+    test "security regression: integer/float alias cannot receive admitted-terminal compile bypass" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      seed_matching_record!("task_coding_1", "agent_1")
+
+      recovered = Map.update!(finalized, "artifacts", &Map.delete(&1, "task_evidence"))
+      wall_clock_ms = get_in(recovered, ["metrics", "wall_clock_ms"])
+      assert is_integer(wall_clock_ms)
+      float_ms = wall_clock_ms * 1.0
+      assert wall_clock_ms == float_ms
+      refute wall_clock_ms === float_ms
+
+      aliased = put_in(recovered, ["metrics", "wall_clock_ms"], float_ms)
+
+      assert {:error, :unprovable_recovery} =
+               CodingTaskExecutor.finalize_task("agent_1", aliased, [], valid_context())
+    end
+
     test "rejects a caller-forged inconsistent outcome" do
       root = prepare_finalize_artifacts()
       forged = Map.put(finalize_result(root), "outcome", terminal_outcome("validation_failed"))

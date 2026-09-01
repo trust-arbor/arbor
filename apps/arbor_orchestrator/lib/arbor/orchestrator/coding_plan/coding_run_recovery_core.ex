@@ -137,6 +137,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
 
   @type error_class :: :retryable_unavailable | :authoritative_absent | :denial_or_tamper
 
+  @type terminal_class :: :ok | :not_found | :malformed | :unavailable
+  @type join_class :: :admitted | :continue_receipt | :fail_closed | :unavailable
+
+  @type compilation_policy ::
+          :bypass_for_admitted_terminal
+          | :require_current_compilation
+          | :fail_closed
+          | :unavailable
+
   @spec admit(map(), map(), map(), String.t()) :: :ok | {:error, :binding_mismatch}
   def admit(binding, record, compilation, agent_id)
       when is_map(binding) and is_map(record) and is_map(compilation) and is_binary(agent_id) do
@@ -947,6 +956,26 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
   def classify_durable_read(nil), do: :not_found
   def classify_durable_read({:error, _}), do: :unavailable
   def classify_durable_read(_), do: :unavailable
+
+  @doc """
+  Decide whether recovery/finalize may skip live graph compilation.
+
+  Live `Readiness.prepare/2` is bypassed only for a present first-writer
+  terminal whose binding, decision, receipt, and executor-result joins
+  already succeeded. Absent terminals keep current interrupted-run
+  compilation checks. Malformed terminals fail closed and must not fall
+  through to live compile or receipt reconstruction.
+  """
+  @spec current_compilation_policy(terminal_class() | term(), join_class() | term()) ::
+          compilation_policy()
+  def current_compilation_policy(:ok, :admitted), do: :bypass_for_admitted_terminal
+  def current_compilation_policy(:ok, :continue_receipt), do: :require_current_compilation
+  def current_compilation_policy(:ok, :fail_closed), do: :fail_closed
+  def current_compilation_policy(:ok, :unavailable), do: :unavailable
+  def current_compilation_policy(:not_found, _join), do: :require_current_compilation
+  def current_compilation_policy(:malformed, _join), do: :fail_closed
+  def current_compilation_policy(:unavailable, _join), do: :unavailable
+  def current_compilation_policy(_terminal, _join), do: :fail_closed
 
   defp denial_or_tamper?(:principal_mismatch, _), do: true
   defp denial_or_tamper?({:principal_mismatch, _}, _), do: true

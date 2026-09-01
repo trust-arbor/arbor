@@ -21,6 +21,35 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
 
     assert CodingRunRecoveryCore.classify_resume_error(:principal_mismatch) == :denial_or_tamper
     assert CodingRunRecoveryCore.classify_resume_error(:graph_changed) == :denial_or_tamper
+    assert CodingRunRecoveryCore.classify_resume_error(:binding_mismatch) == :denial_or_tamper
+  end
+
+  test "current_compilation_policy bypasses live compile only for an admitted terminal" do
+    assert :bypass_for_admitted_terminal ==
+             CodingRunRecoveryCore.current_compilation_policy(:ok, :admitted)
+
+    assert :require_current_compilation ==
+             CodingRunRecoveryCore.current_compilation_policy(:ok, :continue_receipt)
+
+    assert :fail_closed ==
+             CodingRunRecoveryCore.current_compilation_policy(:ok, :fail_closed)
+
+    assert :unavailable ==
+             CodingRunRecoveryCore.current_compilation_policy(:ok, :unavailable)
+
+    for join <- [:admitted, :continue_receipt, :fail_closed, :unavailable, :other] do
+      assert :require_current_compilation ==
+               CodingRunRecoveryCore.current_compilation_policy(:not_found, join)
+
+      assert :fail_closed ==
+               CodingRunRecoveryCore.current_compilation_policy(:malformed, join)
+
+      assert :unavailable ==
+               CodingRunRecoveryCore.current_compilation_policy(:unavailable, join)
+    end
+
+    assert :fail_closed ==
+             CodingRunRecoveryCore.current_compilation_policy(:unknown, :admitted)
   end
 
   test "HMAC without a derived secret is not treated as startup unavailability once classified denial" do

@@ -676,6 +676,205 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
              )
   end
 
+  test "security regression: settled coding task rehydrates exact terminal after coding graph upgrade",
+       %{
+         repo: repo,
+         agent: agent,
+         caller: caller,
+         tmp: tmp
+       } do
+    previous_executors = Application.get_env(:arbor_agent, :task_executors)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AuthenticExecutor
+    })
+
+    Application.put_env(:arbor_orchestrator, :g3b_runner_hold, self())
+
+    on_exit(fn ->
+      restore(:arbor_agent, :task_executors, previous_executors)
+      Application.delete_env(:arbor_orchestrator, :g3b_runner_hold)
+    end)
+
+    supervisor = start_supervised!({Task.Supervisor, name: unique(:sup_graph_ab)})
+    store_a = start_recovery_store(supervisor, :store_graph_a, true)
+
+    {task_id, control} =
+      complete_settled_coding_task(store_a, agent, caller, repo)
+
+    root = task_root(task_id)
+    terminal_path = Path.join(root, "coding-task-terminal.json")
+    evidence_path = Path.join(root, "coding-terminal-evidence.json")
+    terminal_bytes = File.read!(terminal_path)
+    evidence_bytes = File.read!(evidence_path)
+    terminal_sha = sha256(terminal_bytes)
+    evidence_sha = sha256(evidence_bytes)
+
+    archived = Jason.decode!(terminal_bytes)
+    assert archived["terminal_envelope"]["outcome"]["code"] == "change_committed"
+    assert archived["controls"] != []
+    assert hd(archived["controls"])["control_id"] == control["control_id"]
+    assert hd(archived["controls"])["status"] == "delivered"
+
+    {:ok, original} = TaskStore.result(task_id, name: store_a)
+    assert original.result_type == :coding_change
+    assert original.raw["status"] == "change_committed"
+    refute get_in(original.raw, ["outcome", "code"]) == "task_finalization_failed"
+
+    {:ok, task_read_uri} = TaskControlLease.uri(:task_read, task_id)
+    {:ok, task_adopt_uri} = TaskControlLease.uri(:task_adopt, task_id)
+
+    assert wait_until(fn ->
+             task_id
+             |> TrackingSecurity.caps_for()
+             |> Enum.map(& &1.resource_uri)
+             |> MapSet.new() == MapSet.new([task_read_uri, task_adopt_uri])
+           end)
+
+    assert {:ok, _marker} =
+             TaskControlRecoveryMemory.buffered_store_authoritative_get(
+               :arbor_agent_task_control_recovery,
+               task_id
+             )
+
+    install_diverging_coding_graph!(tmp, root)
+
+    true = Process.exit(store_a, :kill)
+    Process.sleep(30)
+
+    store_b = start_recovery_store(supervisor, :store_graph_b, false)
+
+    unless wait_until(fn -> TaskStore.recovery_ready?(name: store_b) end, 1_000) do
+      flunk("graph-upgrade store B never became recovery-ready")
+    end
+
+    assert wait_for_done(store_b, task_id)
+
+    assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store_b)
+    assert {:ok, completed} = TaskStore.result(task_id, name: store_b)
+    assert completed.result_type == :coding_change
+    assert completed.raw === original.raw
+    refute get_in(completed.raw, ["outcome", "code"]) == "task_finalization_failed"
+
+    assert File.read!(terminal_path) == terminal_bytes
+    assert File.read!(evidence_path) == evidence_bytes
+    assert sha256(File.read!(terminal_path)) == terminal_sha
+    assert sha256(File.read!(evidence_path)) == evidence_sha
+
+    recovered_archive = Jason.decode!(File.read!(terminal_path))
+    assert hd(recovered_archive["controls"])["control_id"] == control["control_id"]
+    assert hd(recovered_archive["controls"])["status"] == "delivered"
+
+    assert wait_until(fn ->
+             task_id
+             |> TrackingSecurity.caps_for()
+             |> Enum.map(& &1.resource_uri)
+             |> MapSet.new() == MapSet.new([task_read_uri, task_adopt_uri])
+           end)
+
+    refute task_id in TrackingSecurity.revokes_by_task()
+
+    assert {:ok, _marker} =
+             TaskControlRecoveryMemory.buffered_store_authoritative_get(
+               :arbor_agent_task_control_recovery,
+               task_id
+             )
+  end
+
+  test "security regression: interrupted coding recovery still requires current graph after upgrade",
+       %{
+         repo: repo,
+         agent: agent,
+         caller: caller,
+         tmp: tmp
+       } do
+    previous_executors = Application.get_env(:arbor_agent, :task_executors)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => AuthenticExecutor
+    })
+
+    Application.put_env(:arbor_orchestrator, :g3b_runner_hold, self())
+
+    on_exit(fn ->
+      restore(:arbor_agent, :task_executors, previous_executors)
+      Application.delete_env(:arbor_orchestrator, :g3b_runner_hold)
+    end)
+
+    supervisor = start_supervised!({Task.Supervisor, name: unique(:sup_graph_int)})
+    store_a = start_recovery_store(supervisor, :store_graph_int_a, true)
+
+    {task_id, runner_pid} =
+      start_held_coding_task(store_a, agent, caller, repo)
+
+    root = task_root(task_id)
+    terminal_path = Path.join(root, "coding-task-terminal.json")
+    refute File.exists?(terminal_path)
+
+    {:ok, binding} = ArtifactStore.read_run_binding(root)
+
+    PipelineStatusETS.put_record(task_id, %{
+      run_id: task_id,
+      execution_principal: agent,
+      graph_hash: binding["graph_hash"],
+      status: :interrupted
+    })
+
+    assert {:ok, _marker} =
+             TaskControlRecoveryMemory.buffered_store_authoritative_get(
+               :arbor_agent_task_control_recovery,
+               task_id
+             )
+
+    true = Process.exit(store_a, :kill)
+    true = Process.exit(runner_pid, :kill)
+    Process.sleep(30)
+    refute File.exists?(terminal_path)
+
+    install_diverging_coding_graph!(tmp, root)
+
+    store_b = start_recovery_store(supervisor, :store_graph_int_b, false)
+
+    unless wait_until(fn -> TaskStore.recovery_ready?(name: store_b) end, 1_000) do
+      flunk("interrupted graph-upgrade store B never became recovery-ready")
+    end
+
+    unless wait_until(
+             fn ->
+               case TaskStore.status(task_id, name: store_b) do
+                 {:ok, %{state: state}} when state in [:failed, :cancelled] -> true
+                 {:ok, %{state: :done}} -> true
+                 _other -> false
+               end
+             end,
+             1_000
+           ) do
+      flunk(
+        "timeout waiting for fail-closed interrupted recovery; " <>
+          "status=#{inspect(TaskStore.status(task_id, name: store_b))}; " <>
+          "result=#{inspect(TaskStore.result(task_id, name: store_b))}"
+      )
+    end
+
+    assert {:ok, %{state: state}} = TaskStore.status(task_id, name: store_b)
+    refute state == :done
+
+    case TaskStore.result(task_id, name: store_b) do
+      {:ok, completed} ->
+        refute_settled_change_committed(completed)
+        refute_forged_success_finalization(completed)
+
+      {:error, _reason} ->
+        :ok
+    end
+
+    if File.exists?(terminal_path) do
+      body = Jason.decode!(File.read!(terminal_path))
+      refute get_in(body, ["terminal_envelope", "outcome", "code"]) == "change_committed"
+      refute get_in(body, ["terminal_envelope", "terminal_state"]) == "done"
+    end
+  end
+
   test "identity-mismatched first-writer task terminal fails closed across TaskStore restart", %{
     repo: repo,
     agent: agent,
@@ -827,6 +1026,33 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
   end
 
   defp complete_settled_coding_task(store, agent, caller, repo) do
+    {task_id, runner_pid} = start_held_coding_task(store, agent, caller, repo)
+
+    assert {:ok, control} =
+             TaskStore.steer(task_id, "apply the correction",
+               name: store,
+               sender_id: caller
+             )
+
+    assert control["status"] == "delivered"
+
+    send(runner_pid, :g3b_runner_release)
+    assert wait_for_done(store, task_id)
+
+    root = task_root(task_id)
+    {:ok, binding} = ArtifactStore.read_run_binding(root)
+
+    PipelineStatusETS.put_record(task_id, %{
+      run_id: task_id,
+      execution_principal: agent,
+      graph_hash: binding["graph_hash"],
+      status: :completed
+    })
+
+    {task_id, control}
+  end
+
+  defp start_held_coding_task(store, agent, caller, repo) do
     task = %{
       "kind" => "coding_change",
       "task" => "add a feature",
@@ -866,28 +1092,41 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
              match?({:ok, %{state: :running}}, TaskStore.status(task_id, name: store))
            end)
 
-    assert {:ok, control} =
-             TaskStore.steer(task_id, "apply the correction",
-               name: store,
-               sender_id: caller
-             )
+    {task_id, runner_pid}
+  end
 
-    assert control["status"] == "delivered"
-
-    send(runner_pid, :g3b_runner_release)
-    assert wait_for_done(store, task_id)
-
-    root = task_root(task_id)
+  defp install_diverging_coding_graph!(tmp, root) do
     {:ok, binding} = ArtifactStore.read_run_binding(root)
+    original_graph_hash = binding["graph_hash"]
+    assert is_binary(original_graph_hash)
 
-    PipelineStatusETS.put_record(task_id, %{
-      run_id: task_id,
-      execution_principal: agent,
-      graph_hash: binding["graph_hash"],
-      status: :completed
-    })
+    plan_path = Path.join(root, "coding-plan.json")
+    archived_plan = Jason.decode!(File.read!(plan_path))
 
-    {task_id, control}
+    source = Arbor.Orchestrator.Config.coding_pipeline_path()
+    original = File.read!(source)
+    upgraded_path = Path.join(tmp, "coding-change-upgraded.dot")
+
+    upgraded =
+      String.replace(
+        original,
+        ~s(label="Coding Change v1"),
+        ~s(label="Coding Change v1 upgrade"),
+        global: false
+      )
+
+    refute upgraded == original
+    File.write!(upgraded_path, upgraded)
+    File.chmod!(upgraded_path, 0o600)
+    Application.put_env(:arbor_orchestrator, :coding_pipeline_path, upgraded_path)
+
+    {:ok, _canonical, live} =
+      Arbor.Orchestrator.CodingPlan.Readiness.prepare(archived_plan,
+        template_path: upgraded_path
+      )
+
+    assert live.graph_hash != original_graph_hash
+    upgraded_path
   end
 
   defp grant_full_lease(caller, task_id) do
@@ -939,6 +1178,22 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     end
 
     true
+  end
+
+  defp refute_forged_success_finalization(result) when is_map(result) do
+    payload =
+      cond do
+        is_map_key(result, :raw) -> Map.get(result, :raw)
+        is_map_key(result, "raw") -> Map.get(result, "raw")
+        true -> result
+      end
+
+    payload = if is_map(payload), do: payload, else: %{}
+    code = get_in(payload, ["outcome", "code"]) || get_in(result, ["outcome", "code"])
+    evidence_status = get_in(payload, ["evidence", "result", "status"])
+
+    refute(code == "task_finalization_failed" and evidence_status == "change_committed")
+    refute code == "change_committed"
   end
 
   defp refute_settled_change_committed(result) when is_map(result) do

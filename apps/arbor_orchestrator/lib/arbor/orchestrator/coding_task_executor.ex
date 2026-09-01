@@ -494,6 +494,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   Reconstructs from sealed compilation, binding, checkpoint, and RunJournal.
   Never treats the original public task payload as recovery authority.
+
+  An admitted first-writer `coding-task-terminal.json` rehydrates from the
+  archived marker, binding, durable record, compilation, terminal decision,
+  and Engine receipt joins. That path does not recompile the live coding
+  template. Genuinely interrupted recovery without an admitted terminal still
+  binds the current graph and compiler via `Readiness.prepare/2`.
   """
   @impl true
   @spec recover_task(String.t(), map() | keyword()) :: {:ok, map()} | {:error, term()}
@@ -690,7 +696,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- validate_finalize_controls(controls),
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          :ok <- validate_finalize_artifact_files(result, logs_root),
-         :ok <- reverify_finalize_compilation(result, logs_root, exec_ctx.task_id),
+         :ok <- reverify_finalize_compilation(result, logs_root, exec_ctx.task_id, agent_id),
          {:ok, descriptor} <-
            archive_terminal_evidence(logs_root, exec_ctx.task_id, result, controls),
          {:ok, descriptor} <-
@@ -1567,7 +1573,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp reverify_finalize_compilation(result, logs_root, task_id) do
+  defp reverify_finalize_compilation(result, logs_root, task_id, agent_id) do
     store = Config.coding_plan_artifact_store()
     base = Path.dirname(logs_root)
 
@@ -1581,7 +1587,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       true ->
         case store.read_task_compilation(base, task_id) do
           {:ok, bundle} ->
-            compare_finalize_compilation(result, logs_root, bundle)
+            compare_finalize_compilation(result, logs_root, bundle, task_id, agent_id)
 
           {:error, :unavailable} ->
             {:error, :unavailable}
@@ -1595,7 +1601,151 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp compare_finalize_compilation(result, logs_root, bundle) do
+  defp compare_finalize_compilation(result, logs_root, bundle, task_id, agent_id) do
+    policy = finalize_compilation_policy(result, logs_root, bundle, task_id, agent_id)
+
+    case policy do
+      :bypass_for_admitted_terminal ->
+        compare_archived_finalize_compilation(result, logs_root, bundle)
+
+      :require_current_compilation ->
+        compare_live_finalize_compilation(result, logs_root, bundle)
+
+      :fail_closed ->
+        {:error, :unprovable_recovery}
+
+      :unavailable ->
+        {:error, :unavailable}
+
+      _other ->
+        {:error, :unprovable_recovery}
+    end
+  end
+
+  defp finalize_compilation_policy(result, logs_root, bundle, task_id, agent_id) do
+    terminal_read =
+      if is_binary(task_id) and task_id != "" do
+        ArtifactStore.read_task_terminal(logs_root, task_id)
+      else
+        {:error, :malformed}
+      end
+
+    terminal_class = CodingRunRecoveryCore.classify_durable_read(terminal_read)
+
+    case terminal_class do
+      :not_found ->
+        :require_current_compilation
+
+      :malformed ->
+        :fail_closed
+
+      :unavailable ->
+        :unavailable
+
+      :ok ->
+        present_terminal_finalize_policy(
+          result,
+          logs_root,
+          bundle,
+          task_id,
+          agent_id,
+          terminal_read
+        )
+
+      _other ->
+        :fail_closed
+    end
+  end
+
+  defp present_terminal_finalize_policy(
+         result,
+         logs_root,
+         bundle,
+         task_id,
+         agent_id,
+         terminal_read
+       ) do
+    with true <- is_binary(agent_id) and agent_id != "",
+         {:ok, binding} <- read_recovery_binding(logs_root),
+         {:ok, record} <- fetch_recovery_record(task_id),
+         {:ok, facts} <- compilation_facts(bundle, logs_root),
+         :ok <- CodingRunRecoveryCore.admit(binding, record, facts, agent_id) do
+      join_class = finalize_join_class(result, logs_root, binding, task_id, terminal_read)
+      CodingRunRecoveryCore.current_compilation_policy(:ok, join_class)
+    else
+      false ->
+        :fail_closed
+
+      {:error, reason} ->
+        case CodingRunRecoveryCore.classify_resume_error(reason) do
+          :retryable_unavailable -> :unavailable
+          _ -> :fail_closed
+        end
+
+      _other ->
+        :fail_closed
+    end
+  end
+
+  defp finalize_join_class(result, logs_root, binding, task_id, {:ok, archive})
+       when is_map(archive) do
+    case adapt_from_task_terminal(
+           archive,
+           task_id,
+           logs_root,
+           %{},
+           nil,
+           nil,
+           binding,
+           nil,
+           nil
+         ) do
+      {:ok, archived_result} when is_map(archived_result) ->
+        if drop_host_task_evidence(result) === archived_result do
+          :admitted
+        else
+          :fail_closed
+        end
+
+      {:continue_receipt} ->
+        :continue_receipt
+
+      {:error, reason} ->
+        case CodingRunRecoveryCore.classify_resume_error(reason) do
+          :retryable_unavailable -> :unavailable
+          _ -> :fail_closed
+        end
+
+      _other ->
+        :fail_closed
+    end
+  end
+
+  defp finalize_join_class(_result, _logs_root, _binding, _task_id, _terminal_read),
+    do: :fail_closed
+
+  defp compare_archived_finalize_compilation(result, logs_root, bundle) do
+    artifacts = Map.fetch!(result, "artifacts")
+
+    with {:ok, facts} <- compilation_facts(bundle, logs_root),
+         true <- artifacts["coding_plan_path"] == Path.join(logs_root, "coding-plan.json"),
+         true <- artifacts["coding_pipeline_path"] == Path.join(logs_root, "coding-pipeline.dot"),
+         true <-
+           artifacts["compile_manifest_path"] ==
+             Path.join(logs_root, "coding-compile-manifest.json"),
+         true <- artifacts["graph_hash"] == facts["graph_hash"],
+         true <- artifacts["compiler_version"] == facts["compiler_version"],
+         true <-
+           is_binary(bundle["artifact_identity"]) and byte_size(bundle["artifact_identity"]) == 64 do
+      :ok
+    else
+      false -> {:error, {:invalid_finalize_result, :compilation_descriptor}}
+      {:error, _} = error -> error
+      _ -> {:error, {:invalid_finalize_result, :compilation_descriptor}}
+    end
+  end
+
+  defp compare_live_finalize_compilation(result, logs_root, bundle) do
     artifacts = Map.fetch!(result, "artifacts")
 
     with {:ok, _plan, compilation} <- sealed_plan_and_compilation(bundle),
@@ -3177,7 +3327,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     with {:ok, logs_root} <- prepare_task_logs_root(task_id),
          {:ok, compilation_bundle} <- read_recovery_compilation(logs_root, task_id),
-         {:ok, plan, compilation} <- sealed_plan_and_compilation(compilation_bundle),
          {:ok, binding} <- read_recovery_binding(logs_root),
          {:ok, record} <- fetch_recovery_record(task_id),
          {:ok, facts} <- compilation_facts(compilation_bundle, logs_root),
@@ -3189,8 +3338,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         started_at,
         logs_root,
         compilation_bundle,
-        plan,
-        compilation,
         binding,
         record,
         attempt
@@ -3228,50 +3375,88 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          started_at,
          logs_root,
          compilation_bundle,
-         plan,
-         compilation,
          binding,
          record,
          attempt
        ) do
-    case ArtifactStore.read_task_terminal(logs_root, exec_ctx.task_id) do
-      {:ok, archive} ->
-        case adapt_from_task_terminal(
-               archive,
-               exec_ctx.task_id,
-               logs_root,
-               compilation_bundle,
-               plan,
-               compilation,
-               binding,
-               record,
-               started_at
-             ) do
-          {:continue_receipt} ->
-            recover_from_engine_receipt(
-              agent_id,
-              exec_ctx,
-              started_at,
+    task_id = exec_ctx.task_id
+    terminal_read = ArtifactStore.read_task_terminal(logs_root, task_id)
+    terminal_class = CodingRunRecoveryCore.classify_durable_read(terminal_read)
+
+    {join_class, terminal_outcome} =
+      case terminal_read do
+        {:ok, archive} ->
+          outcome =
+            adapt_from_task_terminal(
+              archive,
+              task_id,
               logs_root,
               compilation_bundle,
-              plan,
-              compilation,
+              nil,
+              nil,
               binding,
               record,
-              attempt
+              started_at
             )
 
-          other ->
-            other
-        end
+          {join_class_from_terminal_outcome(outcome), outcome}
 
-      {:error, :unavailable} ->
+        other ->
+          {:fail_closed, other}
+      end
+
+    case CodingRunRecoveryCore.current_compilation_policy(terminal_class, join_class) do
+      :bypass_for_admitted_terminal ->
+        terminal_outcome
+
+      :require_current_compilation ->
+        recover_with_current_compilation(
+          agent_id,
+          exec_ctx,
+          started_at,
+          logs_root,
+          compilation_bundle,
+          binding,
+          record,
+          attempt
+        )
+
+      :fail_closed ->
+        fail_closed_terminal_recovery(terminal_outcome)
+
+      :unavailable ->
         retry_recover(agent_id, exec_ctx, started_at, attempt)
+    end
+  end
 
-      {:error, :malformed} ->
-        {:error, :unprovable_recovery}
+  defp join_class_from_terminal_outcome({:ok, result}) when is_map(result), do: :admitted
+  defp join_class_from_terminal_outcome({:continue_receipt}), do: :continue_receipt
 
-      {:error, :not_found} ->
+  defp join_class_from_terminal_outcome({:error, reason}) do
+    case CodingRunRecoveryCore.classify_resume_error(reason) do
+      :retryable_unavailable -> :unavailable
+      _ -> :fail_closed
+    end
+  end
+
+  defp join_class_from_terminal_outcome(_), do: :fail_closed
+
+  defp fail_closed_terminal_recovery({:error, :malformed}), do: {:error, :unprovable_recovery}
+  defp fail_closed_terminal_recovery({:error, _} = error), do: error
+  defp fail_closed_terminal_recovery(_), do: {:error, :unprovable_recovery}
+
+  defp recover_with_current_compilation(
+         agent_id,
+         exec_ctx,
+         started_at,
+         logs_root,
+         compilation_bundle,
+         binding,
+         record,
+         attempt
+       ) do
+    case sealed_plan_and_compilation(compilation_bundle) do
+      {:ok, plan, compilation} ->
         recover_from_engine_receipt(
           agent_id,
           exec_ctx,
@@ -3284,6 +3469,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
           record,
           attempt
         )
+
+      {:error, :journal_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :authentication_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :control_inventory_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :eio} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, :store_unavailable} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, {:store_unavailable, _}} ->
+        retry_recover(agent_id, exec_ctx, started_at, attempt)
+
+      {:error, _} = error ->
+        error
     end
   end
 
