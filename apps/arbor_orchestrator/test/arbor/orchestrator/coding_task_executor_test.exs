@@ -6768,7 +6768,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
             "committed_change_materialization_failed",
             "council_review_failed",
             "review_tier_invalid_or_missing",
-            "draft_pr_failed"
+            "draft_pr_failed",
+            "cross_app_window_invalid",
+            "validation_interaction_invalid",
+            "design_council_failed",
+            "design_council_outcome_invalid"
           ] do
         assert {:error, {:pipeline_error, detail}} =
                  run_with_context(%{"status" => "pipeline_error", "error" => code})
@@ -6776,6 +6780,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         assert detail["error"] == code
         assert detail["outcome"]["code"] == code
       end
+    end
+
+    test "design council failure exposes the bounded action failure" do
+      failure =
+        "Action coding_design_council_review failed: :design_council_timeout"
+
+      assert {:error, {:pipeline_error, detail}} =
+               run_with_engine_result(
+                 %{
+                   "status" => "pipeline_error",
+                   "error" => "design_council_failed",
+                   "workspace_id" => "ws_design"
+                 },
+                 %{node_failure_reasons: %{"council_review_design" => failure}}
+               )
+
+      assert detail["outcome"]["code"] == "design_council_failed"
+      assert detail["failure_reason"] == failure
     end
 
     test "pipeline_error projects the stable worker provider account exhaustion reason" do

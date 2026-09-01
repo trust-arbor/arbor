@@ -87,6 +87,7 @@ defmodule Arbor.Orchestrator.CodingPlan.TaskTerminalArchiveCoreTest do
     # deliberately preserves the exact registered outcome carried by detail.
     for code <- [
           "worker_turn_no_progress",
+          "design_council_failed",
           "validation_capacity_exceeded",
           "review_rejected",
           "no_changes"

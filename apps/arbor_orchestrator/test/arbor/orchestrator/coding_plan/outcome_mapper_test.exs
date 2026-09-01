@@ -4,6 +4,8 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapperTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.CodingPlan.OutcomeMapper
+  alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.Graph
 
   test "exhaustively maps every compatibility terminal" do
     for status <- OutcomeMapper.terminal_statuses() do
@@ -23,12 +25,26 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapperTest do
   end
 
   test "pipeline registry matches the independent DOT constant-error registry" do
+    {:ok, graph} = dot_path() |> File.read!() |> Parser.parse()
+
     dot_codes =
       dot_constant_outputs("error", failed_node_section()) ++
+        directly_routed_pipeline_error_codes(graph) ++
         (dot_constant_outputs("status", File.read!(dot_path()))
          |> Enum.filter(&(&1 == "pipeline_error")))
 
     assert MapSet.new(OutcomeMapper.pipeline_error_codes()) == MapSet.new(dot_codes)
+  end
+
+  test "every constant error routed directly to pipeline_error is registered" do
+    {:ok, graph} = dot_path() |> File.read!() |> Parser.parse()
+
+    graph
+    |> directly_routed_pipeline_error_codes()
+    |> Enum.each(fn code ->
+      assert OutcomeMapper.pipeline_error_code?(code),
+             "DOT pipeline error #{inspect(code)} is absent from TaskOutcomeRegistry"
+    end)
   end
 
   test "every DOT constant status is a compatibility terminal or pipeline_error" do
@@ -166,6 +182,35 @@ defmodule Arbor.Orchestrator.CodingPlan.OutcomeMapperTest do
     |> Enum.map(fn block ->
       [_, expression] = Regex.run(~r/expression="([^"]+)"/, block)
       expression
+    end)
+  end
+
+  defp directly_routed_pipeline_error_codes(graph) do
+    graph.nodes
+    |> Enum.flat_map(fn {node_id, node} ->
+      attrs = node.attrs
+
+      if attrs["transform"] == "constant" and attrs["output_key"] == "error" and
+           directly_routes_to_pipeline_error?(graph, node_id) do
+        [attrs["expression"]]
+      else
+        []
+      end
+    end)
+    |> Enum.sort()
+  end
+
+  defp directly_routes_to_pipeline_error?(graph, node_id) do
+    Enum.any?(Graph.outgoing_edges(graph, node_id), fn edge ->
+      case Map.fetch(graph.nodes, edge.to) do
+        {:ok, target} ->
+          target.attrs["transform"] == "constant" and
+            target.attrs["output_key"] == "status" and
+            target.attrs["expression"] == "pipeline_error"
+
+        :error ->
+          false
+      end
     end)
   end
 end

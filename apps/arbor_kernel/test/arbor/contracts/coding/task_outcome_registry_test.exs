@@ -43,6 +43,8 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              worker_stop_reason_not_end_turn
              worker_turn_no_progress
              workspace_missing
+             cross_app_window_invalid
+             validation_interaction_invalid
              design_turn_modified_workspace
              design_response_invalid
              design_checkpoint_open_failed
@@ -51,6 +53,8 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              design_checkpoint_outcome_invalid
              design_worker_phase_invalid
              design_checkpoint_rework_exhausted
+             design_council_failed
+             design_council_outcome_invalid
            )
   end
 

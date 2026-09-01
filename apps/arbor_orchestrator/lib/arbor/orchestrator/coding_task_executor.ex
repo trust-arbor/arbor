@@ -185,7 +185,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     "worker_stale_close_failed" => "implement",
     "worker_recovery_reopen_failed" => "implement",
     "worker_recovery_continuity_invalid" => "implement",
-    "worker_recovery_summary_failed" => "implement"
+    "worker_recovery_summary_failed" => "implement",
+    "design_council_failed" => "council_review_design"
   }
 
   @generic_pipeline_failure_nodes ~w(

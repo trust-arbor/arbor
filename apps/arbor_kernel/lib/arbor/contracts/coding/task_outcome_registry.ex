@@ -71,6 +71,8 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     worker_stop_reason_not_end_turn
     worker_turn_no_progress
     workspace_missing
+    cross_app_window_invalid
+    validation_interaction_invalid
     design_turn_modified_workspace
     design_response_invalid
     design_checkpoint_open_failed
@@ -79,6 +81,8 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     design_checkpoint_outcome_invalid
     design_worker_phase_invalid
     design_checkpoint_rework_exhausted
+    design_council_failed
+    design_council_outcome_invalid
   )
 
   @transcript_terminal_statuses ~w(
@@ -267,6 +271,18 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       origin: "arbor",
       retry: "after_external_change"
     },
+    "cross_app_window_invalid" => %{
+      disposition: "failed",
+      phase: "validation",
+      origin: "runtime",
+      retry: "none"
+    },
+    "validation_interaction_invalid" => %{
+      disposition: "failed",
+      phase: "validation",
+      origin: "runtime",
+      retry: "none"
+    },
     "design_turn_modified_workspace" => %{
       disposition: "failed",
       phase: "design",
@@ -314,6 +330,18 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       phase: "design",
       origin: "runtime",
       retry: "new_session"
+    },
+    "design_council_failed" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "reviewer",
+      retry: "after_external_change"
+    },
+    "design_council_outcome_invalid" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "runtime",
+      retry: "none"
     }
   }
 
