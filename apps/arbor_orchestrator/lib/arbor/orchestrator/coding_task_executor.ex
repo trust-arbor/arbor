@@ -707,7 +707,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            ),
          :ok <- admit_finalize_result_shape(result_shape, compilation_policy),
          {:ok, descriptor} <-
-           archive_terminal_evidence(logs_root, exec_ctx.task_id, result, controls),
+           finalize_terminal_evidence(
+             compilation_policy,
+             logs_root,
+             exec_ctx.task_id,
+             original_result,
+             result,
+             controls
+           ),
          {:ok, descriptor} <-
            validate_terminal_evidence_descriptor(descriptor, logs_root, exec_ctx.task_id) do
       artifacts = Map.fetch!(result, "artifacts")
@@ -1500,6 +1507,52 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       true ->
         invoke_terminal_evidence_store(store, root, task_id, result, controls)
+    end
+  end
+
+  defp finalize_terminal_evidence(
+         :current_compilation,
+         root,
+         task_id,
+         _original_result,
+         result,
+         controls
+       ),
+       do: archive_terminal_evidence(root, task_id, result, controls)
+
+  defp finalize_terminal_evidence(
+         :admitted_terminal,
+         root,
+         task_id,
+         original_result,
+         _result,
+         _controls
+       ),
+       do: admitted_terminal_evidence_descriptor(root, task_id, original_result)
+
+  defp finalize_terminal_evidence(
+         _compilation_policy,
+         _root,
+         _task_id,
+         _original_result,
+         _result,
+         _controls
+       ),
+       do: {:error, :unprovable_recovery}
+
+  defp admitted_terminal_evidence_descriptor(root, task_id, original_result) do
+    with {:ok, archive} <- ArtifactStore.read_task_terminal(root, task_id),
+         archived_result when is_map(archived_result) and not is_struct(archived_result) <-
+           get_in(archive, ["terminal_envelope", "evidence", "result"]),
+         true <- drop_host_task_evidence(archived_result) === original_result,
+         artifacts when is_map(artifacts) and not is_struct(artifacts) <-
+           Map.get(archived_result, "artifacts"),
+         descriptor when is_map(descriptor) and not is_struct(descriptor) <-
+           Map.get(artifacts, "task_evidence") do
+      {:ok, descriptor}
+    else
+      {:error, :unavailable} -> {:error, :unavailable}
+      _other -> {:error, :unprovable_recovery}
     end
   end
 

@@ -2498,13 +2498,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         update_in(
           archive,
           ["terminal_envelope", "evidence", "result"],
-          &Map.drop(&1, ["status", "outcome"])
+          &Map.drop(&1, ["status", "outcome", "validation", "verification_report"])
         )
 
       historical_envelope = historical_archive["terminal_envelope"]
       historical_result = get_in(historical_envelope, ["evidence", "result"])
       refute Map.has_key?(historical_result, "status")
       refute Map.has_key?(historical_result, "outcome")
+      refute Map.has_key?(historical_result, "validation")
+      refute Map.has_key?(historical_result, "verification_report")
       assert historical_result["canonical_status"] == "change_committed"
 
       {:ok, canonical_archive} = CodingRunRecoveryCore.canonical_json(historical_archive)
@@ -2519,6 +2521,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
       refute Map.has_key?(recovered, "status")
       refute Map.has_key?(recovered, "outcome")
+      refute Map.has_key?(recovered, "validation")
+      refute Map.has_key?(recovered, "verification_report")
       assert recovered["canonical_status"] == "change_committed"
       refute Map.has_key?(recovered["artifacts"], "task_evidence")
 
@@ -2530,7 +2534,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context()
                )
 
-      assert refinialized === finalized
+      expected_refinalized =
+        historical_result
+        |> Map.put("status", historical_result["canonical_status"])
+        |> Map.put("outcome", historical_envelope["outcome"])
+
+      assert refinialized === expected_refinalized
 
       {:ok, replay_envelope} =
         TaskTerminalEnvelope.preserve(

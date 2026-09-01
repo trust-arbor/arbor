@@ -729,7 +729,8 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert archived_result["canonical_status"] == "change_committed"
     assert archived_result["outcome"] == archived["terminal_envelope"]["outcome"]
 
-    historical_result = Map.drop(archived_result, ["status", "outcome"])
+    historical_result =
+      Map.drop(archived_result, ["status", "outcome", "validation", "verification_report"])
 
     historical_archive =
       put_in(archived, ["terminal_envelope", "evidence", "result"], historical_result)
@@ -746,9 +747,13 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert original.raw["status"] == "change_committed"
     refute get_in(original.raw, ["outcome", "code"]) == "task_finalization_failed"
 
-    historical_raw = Map.drop(original.raw, ["status", "outcome"])
+    historical_raw =
+      Map.drop(original.raw, ["status", "outcome", "validation", "verification_report"])
+
     refute Map.has_key?(historical_raw, "status")
     refute Map.has_key?(historical_raw, "outcome")
+    refute Map.has_key?(historical_raw, "validation")
+    refute Map.has_key?(historical_raw, "verification_report")
     assert historical_raw["canonical_status"] == "change_committed"
 
     {:ok, task_read_uri} = TaskControlLease.uri(:task_read, task_id)
@@ -783,7 +788,13 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store_b)
     assert {:ok, completed} = TaskStore.result(task_id, name: store_b)
     assert completed.result_type == :coding_change
-    assert completed.raw === original.raw
+
+    expected_completed_raw =
+      historical_raw
+      |> Map.put("status", historical_raw["canonical_status"])
+      |> Map.put("outcome", archived["terminal_envelope"]["outcome"])
+
+    assert completed.raw === expected_completed_raw
     refute get_in(completed.raw, ["outcome", "code"]) == "task_finalization_failed"
 
     assert File.read!(terminal_path) == terminal_bytes
