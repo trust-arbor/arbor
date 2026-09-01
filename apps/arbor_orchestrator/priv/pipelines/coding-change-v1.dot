@@ -71,12 +71,16 @@
 // post-implementation budget, validation admits one initiated repair, council
 // review admits up to two, and operator approval admits one. At max_cycles=2,
 // a run can therefore admit two design and two post-implementation repairs.
-// Review-budget exhaustion emits status=rework_exhausted (canonical). A
-// legacy_status=review_requires_rework field is also set for Phase 2 adapters.
-// Operator denial of the commit gate emits status=approval_denied (not
-// pipeline_error). Operator rework steers the same worker through another
-// implement/validate/commit cycle; exhausted operator rework uses
-// rework_exhausted with error=operator_approval_rework_exhausted.
+// Design-checkpoint rework-budget exhaustion emits
+// status=design_rework_exhausted (policy terminal; retry none) with
+// error=design_checkpoint_rework_exhausted. Post-implementation review or
+// operator budget exhaustion emits status=rework_exhausted (canonical). A
+// legacy_status=review_requires_rework field is also set for Phase 2 adapters
+// on that post-implementation path only. Operator denial of the commit gate
+// emits status=approval_denied (not pipeline_error). Operator rework steers
+// the same worker through another implement/validate/commit cycle; exhausted
+// operator rework uses rework_exhausted with
+// error=operator_approval_rework_exhausted.
 
 digraph CodingChangeV1 {
   graph [

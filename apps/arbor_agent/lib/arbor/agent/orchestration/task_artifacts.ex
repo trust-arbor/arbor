@@ -289,7 +289,21 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       (Enum.any?(
          [:branch, :commit, :worktree_path, :validation, :review],
          &present?(value(map, &1))
-       ) or valid_coding_artifacts?(artifacts) or pipeline_error?(map, status))
+       ) or valid_coding_artifacts?(artifacts) or pipeline_error?(map, status) or
+         registered_coding_outcome_pair?(map, status))
+  end
+
+  defp registered_coding_outcome_pair?(map, status) do
+    case coding_outcome(map) do
+      {:ok, outcome} ->
+        code = outcome["code"]
+
+        TaskOutcomeRegistry.coding_result_status?(code) and
+          code in [status, value(map, :canonical_status)]
+
+      _ ->
+        false
+    end
   end
 
   defp pipeline_error?(map, "pipeline_error") do

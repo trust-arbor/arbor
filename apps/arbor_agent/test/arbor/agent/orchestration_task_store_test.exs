@@ -1779,7 +1779,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   } do
     store = start_all_terminal_store(supervisor)
     outcome = registered_outcome("design_rework_exhausted")
-    approval_note = "Name the missing capability check."
+    # Same note the compiled design_rework_always fixture hoists via
+    # hoist_design_decision_note, then CodingTaskExecutor copies into the payload.
+    approval_note = "Clarify the focused test coverage."
 
     assert {:ok, task_id} =
              TaskStore.dispatch(
@@ -1794,6 +1796,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     result = %{
       "status" => "design_rework_exhausted",
       "canonical_status" => "design_rework_exhausted",
+      "error" => "design_checkpoint_rework_exhausted",
       "approval_note" => approval_note,
       "outcome" => outcome
     }
@@ -1820,6 +1823,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert {:ok, completed} = TaskStore.result(task_id, name: store)
       assert completed.result_type == :coding_change
       assert completed.payload.outcome == outcome
+      assert completed.payload.report.approval_note == approval_note
+      assert completed.payload.report.status == "design_rework_exhausted"
       assert completed.raw == result
       assert completed.raw["approval_note"] == approval_note
     end)

@@ -2781,6 +2781,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         assert result.context["status"] == "design_rework_exhausted"
         assert result.context["error"] == "design_checkpoint_rework_exhausted"
+        assert result.context["approval_note"] == "Clarify the focused test coverage."
+        assert "hoist_design_decision_note" in result.completed_nodes
         assert result.context["design_attempt"] == max_cycles + 1
         assert to_string(result.context["design_rework_count"]) == Integer.to_string(max_cycles)
         assert result.context["total_rework_count"] == "0"
