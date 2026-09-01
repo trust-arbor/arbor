@@ -125,7 +125,17 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
 
   defmodule FakeCompiler do
     @moduledoc false
-    def compile(plan, opts), do: Arbor.Orchestrator.CodingPlan.Compiler.compile(plan, opts)
+
+    def compile(plan, opts) do
+      opts =
+        if Keyword.has_key?(opts, :template_path) or Keyword.has_key?(opts, :template_source) do
+          opts
+        else
+          Keyword.put(opts, :template_path, Arbor.Orchestrator.Config.coding_pipeline_path())
+        end
+
+      Arbor.Orchestrator.CodingPlan.Compiler.compile(plan, opts)
+    end
   end
 
   defmodule FakeSecurity do
@@ -1150,6 +1160,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
          name: name,
          task_supervisor: supervisor,
          cleanup_supervisor: supervisor,
+         executor_finalization_timeout_ms: 10_000,
          recovery_force_ready: force_ready?,
          task_control_recovery_facade: TaskControlRecoveryMemory,
          task_control_security_module: TrackingSecurity},
