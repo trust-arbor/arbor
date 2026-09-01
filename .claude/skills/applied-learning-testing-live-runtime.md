@@ -987,3 +987,12 @@ digest-pinned (found 2026-08-26, V7-17 / run 11o; supersedes V7-15).
 <!-- applied-learning: mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes -->
 <a id="applied-learning-mix-listeners-are-required-for-safe-phoenix-reloads-in-long-lived-dev-runtimes"></a>
 **Register `Phoenix.CodeReloader` as a Mix listener in long-lived dev runtimes.** Tidewave calls `Phoenix.CodeReloader.reload/2` before each live eval even when the endpoint plug's `code_reloader` config is false. Without root `listeners: [Phoenix.CodeReloader]`, externally compiled umbrella apps take Phoenix's fallback `:code.purge/1` path, which can kill durable factory processes still referencing old code and surface only `:task_owner_died`. Keep the listener in the umbrella `mix.exs`; after adding it, restart the server before trusting live eval (found 2026-08-27 during P1B-2A validation).
+
+<!-- applied-learning: security-regression-parent-overlays-must-reach-a-test-body -->
+<a id="applied-learning-security-regression-parent-overlays-must-reach-a-test-body"></a>
+**Security-regression parent overlays must reach an ExUnit test body.** Candidate-only work in
+`setup` or `setup_all` can turn the intended parent failure into `setup_failed`, which is
+non-accepting infrastructure evidence rather than proof that the bug existed. Put candidate-only
+compile or API work behind a delayed factory invoked from the test process, keep a behavioral
+assertion against the missing or fixed public API, and require candidate success plus ordinary
+parent test failure (found 2026-09-01 during G5B1 exact-two-revision verification).

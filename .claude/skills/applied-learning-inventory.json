@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 706,
+  "entry_count": 711,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8722,8 +8722,73 @@
       "source_incident": "found 2026-08-31 when candidate materialization failed before any seat on a 4,096-byte aggregate overflow and later notes clipped crash-attribution findings",
       "always_loaded": false,
       "content_sha256": "7f5cba3192a53b1e19f5fa8b92996b4dc75a872f6faa0753938a99d800d6c935"
+    },
+    {
+      "source_ordinal": 707,
+      "source_kind": "post-migration",
+      "slug": "design-council-veto-seat-error-is-unavailability-not-rework",
+      "title": "A design-council veto seat classified as error is provider unavailability, not design rework.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-design-council-veto-seat-error-is-unavailability-not-rework",
+      "source_date": "2026-08-31",
+      "source_incident": "found 2026-08-31",
+      "always_loaded": false,
+      "content_sha256": "1eb66dbf0430f04f2f89d04ce2d973a197b3d0a321daae4305380cf8f657e7b6"
+    },
+    {
+      "source_ordinal": 708,
+      "source_kind": "post-migration",
+      "slug": "final-publication-proofs-must-reassert-frozen-security-invariants",
+      "title": "Final publication proofs must reassert frozen security invariants.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-final-publication-proofs-must-reassert-frozen-security-invariants",
+      "source_date": "2026-09-01",
+      "source_incident": "found 2026-09-01 during G5B1 candidate publication review",
+      "always_loaded": false,
+      "content_sha256": "53b65027e5b3d0af9f1f17ab80242631bd16419f0c73d8d66fa085322896dbe1"
+    },
+    {
+      "source_ordinal": 709,
+      "source_kind": "post-migration",
+      "slug": "line-oriented-native-protocols-must-reject-delimiter-bytes-at-both-boundaries",
+      "title": "Line-oriented native protocols must reject delimiter bytes at both boundaries.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-line-oriented-native-protocols-must-reject-delimiter-bytes-at-both-boundaries",
+      "source_date": "2026-09-01",
+      "source_incident": "found 2026-09-01 during G5B1 candidate publication review",
+      "always_loaded": false,
+      "content_sha256": "9741bafda51aba480d7ead0685916d9e88f83758eb96e3c018f0343f8c2fd3bb"
+    },
+    {
+      "source_ordinal": 710,
+      "source_kind": "post-migration",
+      "slug": "native-security-harnesses-must-compile-in-every-validation-guest",
+      "title": "Native security harnesses must compile in every authoritative validation guest.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-native-security-harnesses-must-compile-in-every-validation-guest",
+      "source_date": "2026-09-01",
+      "source_incident": "found 2026-09-01 when G5B1 passed on macOS but the authoritative Alpine guest exposed harness, musl, and fixture assumptions",
+      "always_loaded": false,
+      "content_sha256": "4690399d425491fd195466e8a21268099c8c778fe79a95357075a1c6f9bec07e"
+    },
+    {
+      "source_ordinal": 711,
+      "source_kind": "post-migration",
+      "slug": "security-regression-parent-overlays-must-reach-a-test-body",
+      "title": "Security-regression parent overlays must reach an ExUnit test body.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-security-regression-parent-overlays-must-reach-a-test-body",
+      "source_date": "2026-09-01",
+      "source_incident": "found 2026-09-01 during G5B1 exact-two-revision verification",
+      "always_loaded": false,
+      "content_sha256": "3dd52a778b9a3d0401f59998db1e5be092e2d38dcc00f77481e7bb5bed25734f"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 245
+  "post_migration_entry_count": 250
 }

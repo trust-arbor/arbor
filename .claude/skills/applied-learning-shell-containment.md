@@ -377,3 +377,41 @@ projection, and keep the transport strictly larger so each layer returns its
 own timeout and contains its children (found 2026-08-28 when full Apple
 Container admission took 26 seconds and coding readiness killed it at 20 and
 then 25 seconds).
+
+<!-- applied-learning: final-publication-proofs-must-reassert-frozen-security-invariants -->
+<a id="applied-learning-final-publication-proofs-must-reassert-frozen-security-invariants"></a>
+**Final publication proofs must reassert frozen security invariants.** Proving
+that a held descriptor and its current pathname have equal `stat` fields does
+not prove that either still satisfies the admitted state: both observations can
+agree after a racer adds a hardlink or changes ownership or mode. Immediately
+before reporting success, independently revalidate type, effective-user
+ownership where required, link count, expected mode/size, and every frozen
+identity field; a mutating operation that cannot prove them returns retained
+ambiguity. Add a hook after initial bind/create and before each final proof so a
+late hardlink demonstrably cannot report success (found 2026-09-01 during G5B1
+candidate publication review).
+
+<!-- applied-learning: line-oriented-native-protocols-must-reject-delimiter-bytes-at-both-boundaries -->
+<a id="applied-learning-line-oriented-native-protocols-must-reject-delimiter-bytes-at-both-boundaries"></a>
+**Line-oriented native protocols must reject delimiter bytes at both
+boundaries.** Structured argv can safely carry a filename containing LF or CR,
+but a newline-delimited result cannot represent that path without corrupting
+field framing. Reject every protocol delimiter in the trusted-language
+admission core and again in the native parser, and behaviorally test both a
+read-only and mutating operation by bypassing the first boundary (found
+2026-09-01 during G5B1 candidate publication review).
+
+<!-- applied-learning: native-security-harnesses-must-compile-in-every-validation-guest -->
+<a id="applied-learning-native-security-harnesses-must-compile-in-every-validation-guest"></a>
+**Native security harnesses must compile in every authoritative validation
+guest.** Host success does not prove a strict C harness is portable: transitive
+system-header includes, libc syscall wrappers, utilities, and compiler warning
+sets differ across macOS and Linux. Validate against the digest-pinned guest,
+not a convenient local tag; include every standard declaration explicitly;
+when musl omits `renameat2`, use the declared `SYS_renameat2` ABI and fail closed
+on `ENOSYS`; avoid path construction rejected by `-Werror`; and compile both the
+harness and production source with the guest's strict flags. Tests must use
+image-owned portable fixtures rather than assuming Python or procps, and must
+exercise the exact effective selected set rather than only the requested subset
+(found 2026-09-01 when G5B1 passed on macOS but the authoritative Alpine guest
+exposed harness, musl, and fixture assumptions).
