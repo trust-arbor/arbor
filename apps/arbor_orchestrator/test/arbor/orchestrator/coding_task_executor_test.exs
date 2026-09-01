@@ -1900,7 +1900,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     }
   end
 
-  defp finalized_adoption_fixture do
+  defp finalized_adoption_fixture(status \\ "change_committed") do
     ensure_shell_execution_registry!()
     repo = configured_repo_path()
     git!(repo, ["config", "user.email", "test@example.com"])
@@ -1945,6 +1945,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "published_commit" => candidate_commit,
         "workspace_release_status" => "removed"
       })
+      |> adoption_fixture_status(status)
 
     assert {:ok, finalized} =
              CodingTaskExecutor.finalize_task("agent_1", result, [], valid_context())
@@ -7850,6 +7851,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defp adoption_fixture_status(result, "change_committed"), do: result
+
+  defp adoption_fixture_status(result, status) do
+    result
+    |> Map.put("status", status)
+    |> Map.put("canonical_status", status)
+    |> Map.put("outcome", terminal_outcome(status))
+  end
+
   defp terminal_outcome(status) do
     {:ok, outcome} =
       Arbor.Orchestrator.CodingPlan.OutcomeMapper.map_terminal(status, %{
@@ -7906,6 +7916,97 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  %{"destination_ref" => fixture.destination_ref},
                  valid_context()
                )
+    end
+
+    test "human_review_required with complete candidate evidence is post-terminal adoptable" do
+      fixture = finalized_adoption_fixture("human_review_required")
+      git!(fixture.repo, ["merge", "--ff-only", fixture.branch])
+      descriptor = fixture.finalized["artifacts"]["task_evidence"]
+
+      assert {:ok, adopted} =
+               CodingTaskExecutor.adopt_task(
+                 "agent_1",
+                 fixture.finalized,
+                 %{"destination_ref" => fixture.destination_ref},
+                 valid_context()
+               )
+
+      assert adopted["outcome"]["code"] == "human_review_required"
+      assert adopted["outcome"]["disposition"] == "requires_input"
+      assert adopted["artifacts"]["task_evidence"] == descriptor
+      assert adopted["adoption"]["status"] == "adopted"
+    end
+
+    test "human_review_required without immutable candidate evidence fails closed" do
+      fixture = finalized_adoption_fixture("human_review_required")
+
+      stripped =
+        update_in(fixture.finalized, ["artifacts"], &Map.delete(&1, "task_evidence"))
+
+      assert {:error, :missing_adoption_candidate_evidence} =
+               CodingTaskExecutor.adopt_task(
+                 "agent_1",
+                 stripped,
+                 %{"destination_ref" => fixture.destination_ref},
+                 valid_context()
+               )
+    end
+
+    test "only registry-adoptable statuses can reach candidate adoption" do
+      fixture = finalized_adoption_fixture()
+
+      for status <- ~w(validation_capacity_exceeded no_changes review_requires_rework) do
+        result =
+          fixture.finalized
+          |> Map.put("status", status)
+          |> Map.put("canonical_status", status)
+          |> Map.put("outcome", terminal_outcome(status))
+
+        assert {:error, :coding_task_not_adoptable} =
+                 CodingTaskExecutor.adopt_task(
+                   "agent_1",
+                   result,
+                   %{"destination_ref" => fixture.destination_ref},
+                   valid_context()
+                 )
+      end
+    end
+
+    test "malformed, unknown, or mismatched outcomes never select adoptable admission" do
+      fixture = finalized_adoption_fixture("human_review_required")
+      request = %{"destination_ref" => fixture.destination_ref}
+
+      missing = Map.delete(fixture.finalized, "outcome")
+
+      unknown =
+        Map.put(fixture.finalized, "outcome", %{
+          "version" => 1,
+          "disposition" => "requires_input",
+          "code" => "not_a_registered_code",
+          "phase" => "review",
+          "origin" => "reviewer",
+          "retry" => "none"
+        })
+
+      mismatched = put_in(fixture.finalized, ["outcome", "disposition"], "succeeded")
+
+      for result <- [missing, unknown, mismatched] do
+        assert result["status"] == "human_review_required"
+        assert is_map(get_in(result, ["artifacts", "task_evidence"]))
+
+        assert {:error, :coding_task_not_adoptable} =
+                 CodingTaskExecutor.adopt_task("agent_1", result, request, valid_context())
+      end
+    end
+
+    test "production executor has no private duplicate adoptable-status set" do
+      source =
+        File.read!(
+          Path.expand("../../../lib/arbor/orchestrator/coding_task_executor.ex", __DIR__)
+        )
+
+      refute source =~ "@adoptable_statuses"
+      refute source =~ "MapSet.new(~w(change_committed human_review_required pr_created))"
     end
   end
 

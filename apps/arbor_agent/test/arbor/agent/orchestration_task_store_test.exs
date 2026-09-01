@@ -2255,6 +2255,72 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
   end
 
+  test "security regression: human_review_required retains immutable task_evidence for post-terminal adoption",
+       %{supervisor: supervisor} do
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_human_review_required"
+    outcome = registered_outcome("human_review_required")
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "retain human review evidence"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    original_result = %{
+      "status" => "human_review_required",
+      "canonical_status" => "human_review_required",
+      "branch" => "test/human-review",
+      "outcome" => outcome,
+      "artifacts" => coding_artifacts()
+    }
+
+    send(runner_pid, {:finish, {:ok, original_result}})
+
+    assert_receive {:dual_finalize_task_called, "agent_1", ^original_result, [], ^context}
+
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+    finalized_result = envelope["evidence"]["result"]
+    descriptor = get_in(finalized_result, ["artifacts", "task_evidence"])
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert envelope["outcome"]["code"] == "human_review_required"
+    assert envelope["outcome"]["disposition"] == "requires_input"
+    refute envelope["outcome"]["disposition"] == "succeeded"
+    refute envelope["outcome"]["code"] == "task_finalization_failed"
+    assert finalized_result["finalized"] == true
+    assert descriptor["task_id"] == task_id
+    assert descriptor["sha256"] == String.duplicate("a", 64)
+
+    assert_eventually(fn ->
+      assert {:ok, completed} = TaskStore.result(task_id, name: store)
+      assert completed.raw == finalized_result
+      assert completed.payload.outcome == outcome
+      assert completed.payload.artifacts["task_evidence"] == descriptor
+
+      assert {:ok, %{state: :done, outcome: status_outcome}} =
+               TaskStore.status(task_id, name: store)
+
+      assert status_outcome == envelope["outcome"]
+    end)
+
+    assert {:ok, adopted} = TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
+    assert adopted.raw["adopted"] == "refs/heads/reviewed"
+    assert get_in(adopted.raw, ["artifacts", "task_evidence"]) == descriptor
+
+    assert_receive {:dual_adopt_called, "agent_1", adopt_input,
+                    %{"destination_ref" => "refs/heads/reviewed"}, ^context}
+
+    assert get_in(adopt_input, ["artifacts", "task_evidence"]) == descriptor
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+    refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
+  end
+
   test "dual finalizers preserve registered non-success without legacy success finalization", %{
     supervisor: supervisor
   } do
@@ -2304,6 +2370,108 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
 
     refute_receive {:dual_finalize_terminal_called, _, _, _, _}, 100
+  end
+
+  test "dual finalizers select adoptable ordering from the validated outcome code, not status", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_store_test_finalize, {:error, :success_only})
+    store = start_dual_finalizing_store(supervisor)
+    task_id = "task_dual_status_does_not_select_adoptable"
+    outcome = registered_outcome("validation_capacity_exceeded")
+
+    assert {:ok, ^task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "status is not the selector"},
+               name: store,
+               task_id: task_id
+             )
+
+    assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, context}
+
+    result = %{
+      "status" => "human_review_required",
+      "canonical_status" => "human_review_required",
+      "branch" => "test/status-is-not-code",
+      "outcome" => outcome,
+      "artifacts" => coding_artifacts()
+    }
+
+    send(runner_pid, {:finish, {:ok, result}})
+
+    assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], ^context}
+    refute_receive {:dual_finalize_task_called, _, _, _, _}, 100
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert envelope["evidence"]["result"] == result
+    refute Map.has_key?(envelope, "prior_outcome")
+    refute envelope["outcome"]["code"] == "task_finalization_failed"
+  end
+
+  test "dual finalizers keep fail-closed generic path for malformed, unknown, and mismatched outcomes",
+       %{supervisor: supervisor} do
+    store = start_dual_finalizing_store(supervisor)
+
+    forged = registered_outcome("human_review_required") |> Map.put("disposition", "failed")
+
+    unknown = %{
+      "version" => 1,
+      "disposition" => "requires_input",
+      "code" => "not_a_registered_code",
+      "phase" => "review",
+      "origin" => "reviewer",
+      "retry" => "none"
+    }
+
+    cases = [
+      {"missing", %{"status" => "human_review_required", "artifacts" => coding_artifacts()}},
+      {"unknown",
+       %{
+         "status" => "human_review_required",
+         "outcome" => unknown,
+         "artifacts" => coding_artifacts()
+       }},
+      {"forged",
+       %{
+         "status" => "human_review_required",
+         "outcome" => forged,
+         "artifacts" => coding_artifacts()
+       }}
+    ]
+
+    for {suffix, result} <- cases do
+      task_id = "task_dual_invalid_adoptable_#{suffix}"
+
+      assert {:ok, ^task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => suffix},
+                 name: store,
+                 task_id: task_id
+               )
+
+      assert_receive {:dual_executor_started, runner_pid, "agent_1", _task, _context}
+      send(runner_pid, {:finish, {:ok, result}})
+
+      assert_receive {:dual_finalize_task_called, "agent_1", ^result, [], _}
+      assert_receive {:dual_finalize_terminal_called, "agent_1", envelope, [], _}
+      assert envelope["outcome"]["code"] == "invalid_terminal_evidence"
+      assert envelope["terminal_state"] == "failed"
+
+      assert_eventually(fn ->
+        assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+
+        assert {:ok, %{state: :failed, outcome: status_outcome}} =
+                 TaskStore.status(task_id, name: store)
+
+        assert status_outcome == envelope["outcome"]
+      end)
+
+      assert {:error, {:task_not_adoptable, :failed}} =
+               TaskStore.adopt(task_id, "refs/heads/reviewed", name: store)
+    end
   end
 
   test "dual finalizers retain legacy behavior for generic success without TaskOutcome", %{

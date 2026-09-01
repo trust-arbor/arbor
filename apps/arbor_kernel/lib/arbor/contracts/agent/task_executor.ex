@@ -140,22 +140,47 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Executors without `finalize_terminal_task/4` retain the existing compatibility
   behavior below.
 
-  When an executor implements both finalizers for a successful task, TaskStore
-  invokes `finalize_task/4` first and constructs the terminal envelope from that
-  callback's finalized result. This preserves retained task-evidence descriptors
-  required by adoption. If the success finalizer fails, TaskStore invokes
-  `finalize_terminal_task/4` once with a failed `task_finalization_failed`
-  envelope. Failure and cancellation paths invoke only the all-terminal callback.
+  When an executor implements both finalizers, TaskStore selects the order from
+  the exact validated TaskOutcome code after terminal steering reconciliation,
+  and only for JSON-clean records that are not already `terminal_finalized`:
+
+  - If `TaskOutcome.validate_registered/1` succeeds and
+    `TaskOutcomeRegistry.adoptable_terminal_status?/1` is true for that code,
+    TaskStore invokes `finalize_task/4` first and constructs the all-terminal
+    envelope from that finalized JSON-clean result, even when disposition is
+    `requires_input`. This preserves retained task-evidence descriptors required
+    by adoption.
+  - Else if the runner result is a registered non-success outcome (validated,
+    disposition other than `succeeded`, not adoptable), including
+    `validation_capacity_exceeded`, TaskStore invokes only
+    `finalize_terminal_task/4` with the original runner result and never calls
+    the legacy result finalizer.
+  - Else if both callbacks exist, TaskStore keeps generic dual-finalizer compatibility:
+    `finalize_task/4` then the all-terminal envelope. This covers `no_changes`,
+    generic `{:ok, result}` without a TaskOutcome, and
+    malformed, unknown, or semantically mismatched outcomes.
+  - If `finalize_task/4` fails, TaskStore invokes `finalize_terminal_task/4`
+    once with a failed `task_finalization_failed` envelope, retaining the prior
+    outcome and bounded original evidence. Failure and cancellation paths invoke
+    only the all-terminal callback. Explicit runner overrides invoke neither
+    callback.
+
+  `adopt_task/4` remains TaskStore-eligible for terminal `:done` JSON-clean
+  configured tasks. Registry adoptability is an executor admission fact, not a
+  TaskStore gate.
 
   Configured executors may implement `finalize_task/4` for mandatory terminal artifact retention.
-  TaskStore calls it only after a successful configured
-  executor return and terminal steering reconciliation. It is time-bounded
+  TaskStore calls it after terminal steering reconciliation for a `:done`
+  JSON-clean configured executor return, including registry-adoptable
+  `requires_input` outcomes such as `human_review_required`. It is time-bounded
   separately from status and cancellation; an error, exit, or timeout fails
   the outer task. The callback must preserve and return a JSON-clean result,
   and explicit runner overrides do not invoke this callback.
 
   Configured executors may also implement `adopt_task/4` for post-terminal task adoption.
-  TaskStore invokes it only after a successful configured task is terminal. The adoption request is
+  TaskStore invokes it after a configured JSON-clean task is terminal `:done`,
+  including registry-adoptable `requires_input` results; it does not require a
+  `succeeded` disposition. The adoption request is
   a closed JSON object containing `destination_ref`; the callback must return the complete updated
   JSON-clean executor result. Explicit runner overrides do not invoke this callback.
   Queued steering controls transfer responsibility to the executor; acceptance transfers responsibility

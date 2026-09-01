@@ -31,7 +31,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   `executor_callback_timeout_ms/0`); hung callbacks are killed and status falls
   back to the stored view while cancel continues with the turn bridge + hard kill.
   An opted-in `finalize_task/4` callback is different: TaskStore calls it after
-  terminal steering reconciliation but before publishing success, and failure or
+  terminal steering reconciliation but before constructing the all-terminal
+  envelope for registry-adoptable registered results, including `requires_input`,
+  and before publishing other successful configured results. Failure or
   timeout fails the outer task so required evidence is never silently omitted.
 
   A configured executor may also implement `adopt_task/4`. This is a
@@ -181,6 +183,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     AdmissionFailure,
     ReadinessReport,
     TaskOutcome,
+    TaskOutcomeRegistry,
     TaskTerminalEnvelope
   }
 
@@ -12088,9 +12091,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp maybe_reconcile_terminal_controls(record), do: record
 
   # Configured executors may make terminal evidence retention mandatory. The
-  # callback sees the exact successful executor result plus controls only after
-  # their terminal states are reconciled. Explicit runner overrides never cross
-  # this library boundary.
+  # callback sees the exact executor result plus controls only after their
+  # terminal states are reconciled. Registry-adoptable registered outcomes,
+  # including `requires_input`, use the legacy result finalizer before the
+  # all-terminal envelope. Explicit runner overrides never cross this library
+  # boundary.
   defp maybe_finalize_task_result(
          %{context_mode: :json_clean} = record,
          runner_result,
@@ -12101,6 +12106,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     cond do
       Map.get(record, :terminal_finalized, false) ->
         record
+
+      record.state == :done and legacy_finalizer?(module) and all_terminal_finalizer?(module) and
+          adoptable_registered_outcome?(runner_result) ->
+        finalize_legacy_then_all_terminal(record, runner_result, state, module)
 
       record.state == :done and legacy_finalizer?(module) and all_terminal_finalizer?(module) and
           registered_non_success_outcome?(runner_result) ->
@@ -12142,6 +12151,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp legacy_finalizer?(module) do
     is_atom(module) and Code.ensure_loaded?(module) and
       function_exported?(module, :finalize_task, 4)
+  end
+
+  defp adoptable_registered_outcome?(runner_result) do
+    with {:ok, outcome} <- TaskArtifacts.extract_outcome(runner_result),
+         {:ok, registered} <- TaskOutcome.validate_registered(outcome) do
+      TaskOutcomeRegistry.adoptable_terminal_status?(registered.code)
+    else
+      _failure -> false
+    end
   end
 
   defp registered_non_success_outcome?(runner_result) do

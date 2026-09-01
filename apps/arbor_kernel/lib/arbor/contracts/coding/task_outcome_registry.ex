@@ -4,7 +4,10 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
 
   Ordered compatibility lists are part of the public migration surface. The
   outcome specs are the single source of truth for disposition, phase, origin,
-  and retry semantics.
+  and retry semantics. The adoptable terminal-status list is the single source
+  of truth for which registered coding terminal statuses are post-terminal
+  adoptable. Adoptability is passive and authority-free: it is vocabulary only
+  and grants no capability, identity, callback, or instruction to adopt.
   """
 
   @terminal_statuses ~w(
@@ -22,6 +25,12 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     rework_exhausted
     validation_capacity_exceeded
     validation_failed
+  )
+
+  @adoptable_terminal_statuses ~w(
+    change_committed
+    human_review_required
+    pr_created
   )
 
   # Coding parity still accepts the legacy report status `cancelled`. The
@@ -371,6 +380,14 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   @spec terminal_statuses() :: [String.t()]
   def terminal_statuses, do: @terminal_statuses
 
+  @doc """
+  Return registered coding terminal statuses that are post-terminal adoptable.
+
+  This list is passive vocabulary. It does not grant authority to adopt.
+  """
+  @spec adoptable_terminal_statuses() :: [String.t()]
+  def adoptable_terminal_statuses, do: @adoptable_terminal_statuses
+
   @doc "Return coding parity terminal statuses in their historical order."
   @spec parity_terminal_statuses() :: [String.t()]
   def parity_terminal_statuses, do: @parity_terminal_statuses
@@ -409,6 +426,11 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
   @doc "Whether a status is a canonical coding TaskOutcome terminal status."
   @spec terminal_status?(term()) :: boolean()
   def terminal_status?(status), do: is_binary(status) and status in @terminal_statuses
+
+  @doc "Whether a status is a registered post-terminal-adoptable coding terminal status."
+  @spec adoptable_terminal_status?(term()) :: boolean()
+  def adoptable_terminal_status?(status),
+    do: is_binary(status) and status in @adoptable_terminal_statuses
 
   @doc "Whether a status is accepted by the legacy-compatible coding parity projection."
   @spec parity_terminal_status?(term()) :: boolean()

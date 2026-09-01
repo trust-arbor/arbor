@@ -70,6 +70,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     ReadinessReport,
     TaskEvidenceDescriptor,
     TaskOutcome,
+    TaskOutcomeRegistry,
     TranscriptDescriptor,
     VerificationReport,
     WorkPacket,
@@ -289,7 +290,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_finalize_task_id_bytes 512
   @max_compilation_artifact_bytes 4_194_304
 
-  @adoptable_statuses MapSet.new(~w(change_committed human_review_required pr_created))
   @adoption_request_keys MapSet.new(~w(destination_ref))
   @adoption_candidate_keys MapSet.new(~w(
     base_commit
@@ -796,7 +796,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp verified_adoption_candidate(result, root, task_id, agent_id)
        when is_map(result) and not is_struct(result) do
-    with true <- MapSet.member?(@adoptable_statuses, Map.get(result, "status")),
+    with {:ok, _outcome} <- adoptable_registered_result(result),
          artifacts when is_map(artifacts) <- Map.get(result, "artifacts"),
          descriptor when is_map(descriptor) <- Map.get(artifacts, "task_evidence"),
          {:ok, descriptor} <- validate_terminal_evidence_descriptor(descriptor, root, task_id),
@@ -816,6 +816,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp verified_adoption_candidate(_result, _root, _task_id, _agent_id),
     do: {:error, :invalid_adoption_result}
+
+  defp adoptable_registered_result(result) when is_map(result) and not is_struct(result) do
+    case TaskOutcome.validate_registered(Map.get(result, "outcome")) do
+      {:ok, outcome} ->
+        if TaskOutcomeRegistry.adoptable_terminal_status?(outcome.code),
+          do: {:ok, outcome},
+          else: {:error, :coding_task_not_adoptable}
+
+      _other ->
+        {:error, :coding_task_not_adoptable}
+    end
+  end
 
   defp read_terminal_evidence_body(descriptor) do
     with {:ok, bytes} <- read_bounded_terminal_evidence_file(descriptor["path"]),

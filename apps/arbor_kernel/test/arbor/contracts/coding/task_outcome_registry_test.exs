@@ -142,9 +142,43 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
     end
   end
 
+  test "adoptable terminal statuses are the exact closed post-terminal vocabulary" do
+    assert TaskOutcomeRegistry.adoptable_terminal_statuses() ==
+             ~w(change_committed human_review_required pr_created)
+
+    assert Enum.all?(
+             TaskOutcomeRegistry.adoptable_terminal_statuses(),
+             fn status ->
+               TaskOutcomeRegistry.adoptable_terminal_status?(status) and
+                 TaskOutcomeRegistry.terminal_status?(status) and
+                 TaskOutcomeRegistry.registered_code?(status)
+             end
+           )
+
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("validation_capacity_exceeded")
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("review_requires_rework")
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("no_changes")
+    refute TaskOutcomeRegistry.adoptable_terminal_status?(nil)
+    refute TaskOutcomeRegistry.adoptable_terminal_status?(:human_review_required)
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("unknown_code")
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("change_committed/extra")
+
+    assert {:ok, spec} = TaskOutcomeRegistry.lookup("human_review_required")
+    assert Map.keys(spec) |> Enum.sort() == [:code, :disposition, :origin, :phase, :retry]
+    refute Map.has_key?(spec, :adoptable)
+    refute Map.has_key?(spec, "adoptable")
+
+    assert {:ok, outcome} = TaskOutcome.from_code("human_review_required")
+    assert outcome.disposition == "requires_input"
+    assert outcome.phase == "review"
+    assert outcome.origin == "reviewer"
+    assert outcome.retry == "none"
+  end
+
   test "unknown status and code queries fail closed" do
     for unknown <- [nil, :change_committed, "unknown_code", "change_committed/extra"] do
       refute TaskOutcomeRegistry.terminal_status?(unknown)
+      refute TaskOutcomeRegistry.adoptable_terminal_status?(unknown)
       refute TaskOutcomeRegistry.coding_result_status?(unknown)
       refute TaskOutcomeRegistry.pipeline_error_code?(unknown)
       refute TaskOutcomeRegistry.registered_code?(unknown)

@@ -186,24 +186,38 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert {:docs_v1, _, :elixir, _, %{"en" => moduledoc}, _, _} =
              Code.fetch_docs(TaskExecutor)
 
-    assert moduledoc =~ "JSON-clean"
-    assert moduledoc =~ "pending_approval"
-    assert moduledoc =~ "coding_change"
-    assert moduledoc =~ "task_status"
-    assert moduledoc =~ "project_dispatch_readiness"
-    assert moduledoc =~ "cancel_task"
-    assert moduledoc =~ "steer_task"
-    assert moduledoc =~ "finalize_terminal_task"
-    assert moduledoc =~ "finalize_task"
-    assert moduledoc =~ "adopt_task"
-    assert moduledoc =~ "post-terminal task adoption"
-    assert moduledoc =~ "terminal artifact retention"
-    assert moduledoc =~ "terminal steering reconciliation"
-    assert moduledoc =~ "explicit runner overrides do not invoke this callback"
-    assert moduledoc =~ "transfers responsibility"
-    assert moduledoc =~ "successful `run/3` return"
-    assert moduledoc =~ "binding_digest"
-    assert moduledoc =~ "execution_principal"
-    assert moduledoc =~ "probe_recovery"
+    collapsed = String.replace(moduledoc, ~r/\s+/, " ")
+
+    for phrase <- [
+          "JSON-clean",
+          "pending_approval",
+          "coding_change",
+          "task_status",
+          "project_dispatch_readiness",
+          "cancel_task",
+          "steer_task",
+          "finalize_terminal_task",
+          "finalize_task",
+          "adopt_task",
+          "post-terminal task adoption",
+          "terminal artifact retention",
+          "terminal steering reconciliation",
+          "explicit runner overrides do not invoke this callback",
+          "transfers responsibility",
+          "successful `run/3` return",
+          "binding_digest",
+          "execution_principal",
+          "probe_recovery",
+          "requires_input",
+          "adoptable_terminal_status?",
+          "validation_capacity_exceeded",
+          "legacy result finalizer",
+          "generic dual-finalizer compatibility",
+          "malformed, unknown, or semantically mismatched outcomes",
+          "human_review_required",
+          "does not require a `succeeded` disposition"
+        ] do
+      assert collapsed =~ phrase
+    end
   end
 end
