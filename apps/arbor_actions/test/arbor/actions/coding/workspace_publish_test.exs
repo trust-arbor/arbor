@@ -238,7 +238,9 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
     assert published.evidence_ref == fixture.evidence_ref
     refute File.dir?(fixture.lease.worktree_path)
     assert git!(fixture.repo, ["rev-parse", published.evidence_ref]) == fixture.candidate_commit
-    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) == fixture.base_commit
+
+    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) ==
+             fixture.base_commit
 
     assert {:error, :not_found} =
              WorkspaceLeaseRegistry.resolve_review_snapshot(
@@ -265,7 +267,9 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
     assert published.published_commit == fixture.candidate_commit
     assert File.dir?(fixture.lease.worktree_path)
     assert git!(fixture.lease.worktree_path, ["rev-parse", "HEAD"]) == fixture.base_commit
-    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) == fixture.base_commit
+
+    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) ==
+             fixture.base_commit
 
     assert {:ok, _removed} =
              Workspace.Release.run(
@@ -520,7 +524,9 @@ defmodule Arbor.Actions.Coding.WorkspacePublishTest do
              )
 
     assert File.dir?(fixture.lease.worktree_path)
-    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) == fixture.base_commit
+
+    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) ==
+             fixture.base_commit
   end
 
   defp build_immutable_publish_fixture(tmp_dir, prefix) do

@@ -174,7 +174,9 @@ defmodule Arbor.Actions.Coding.AdoptionTest do
     assert {:ok, proof} = Adoption.prove(explicit, fixture.destination_ref)
     assert {:error, :branch_ref_oid_mismatch} = Adoption.settle(explicit, proof)
     assert branch_exists?(fixture.repo, fixture.branch)
-    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) == fixture.base_commit
+
+    assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.branch}"]) ==
+             fixture.base_commit
 
     at_candidate = published_candidate(tmp_dir, "created", "publish")
 

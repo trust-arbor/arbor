@@ -1201,6 +1201,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert base_read.content == "defmodule Changed do\n  def v, do: :base\nend\n"
       assert worktree_identity(fixture.lease.worktree_path) == before
       assert git!(fixture.lease.worktree_path, ["rev-parse", "HEAD"]) == fixture.base_commit
+
       assert git!(fixture.repo, ["rev-parse", "refs/heads/#{fixture.lease.branch}"]) ==
                fixture.base_commit
     end
@@ -1446,7 +1447,9 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
           stderr_to_stdout: true
         )
 
-      assert replace_aware_tree_oid(fixture.repo, fixture.candidate_commit) == decoy_candidate_tree
+      assert replace_aware_tree_oid(fixture.repo, fixture.candidate_commit) ==
+               decoy_candidate_tree
+
       assert replace_aware_tree_oid(fixture.repo, fixture.base_commit) == decoy_base_tree
 
       before = worktree_identity(fixture.lease.worktree_path)
