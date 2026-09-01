@@ -6,8 +6,9 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
   artifact by digest — worker-supplied `design` context is ignored. Consult
   goes through the public `Arbor.Consensus` facade (injectable for tests).
   Failure, timeout, or a missing ConsultationLog run id is an explicit error,
-  never an approval. A configured veto perspective classified as a seat
-  error fails with `:design_council_veto_unavailable` rather than
+  never an approval. A configured veto perspective that is classified as
+  a seat error, omitted, or duplicated fails with
+  `:design_council_veto_unavailable` rather than
   `checkpoint_outcome=rework`. Admitted design-review votes are only
   approve and rework; out-of-protocol verdicts including `:abstain` remain
   fail-closed rework.
@@ -40,7 +41,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
       veto_perspectives: [
         type: {:list, :string},
         required: false,
-        doc: "Perspectives whose reject forces rework"
+        doc:
+          "Perspectives whose reject forces rework; a configured veto seat that is classified as error, omitted, or duplicated fails with :design_council_veto_unavailable"
       ],
       reject_threshold: [
         type: :integer,

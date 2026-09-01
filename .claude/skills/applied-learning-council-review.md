@@ -178,6 +178,7 @@ crash-attribution findings).
 design rework.** `DesignCouncilCore.decide/1` must return
 `{:error, :design_council_veto_unavailable}` rather than
 `checkpoint_outcome=rework`, so the coding graph's `outcome=fail` path runs and
-does not consume design-rework budget. Out-of-protocol design-review verdicts
+does not consume design-rework budget. The same atom applies when a configured
+veto seat is omitted or duplicated. Out-of-protocol design-review verdicts
 including `:abstain` stay admitted rework and are never reclassified as provider
 failure (found 2026-08-31).

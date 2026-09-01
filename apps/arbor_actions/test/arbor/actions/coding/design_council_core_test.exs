@@ -95,6 +95,9 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
 
   test "note is bounded, unique, and deterministically ordered" do
     evaluations = [
+      {:adversarial, %{vote: :approve, concerns: []}},
+      {:security, %{vote: :approve, concerns: []}},
+      {:stability, %{vote: :approve, concerns: []}},
       {:privacy, %{vote: :reject, concerns: ["zeta concern", "alpha concern"]}},
       {:capability, %{vote: :reject, concerns: ["alpha concern", String.duplicate("x", 500)]}}
     ]
@@ -109,6 +112,9 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
 
   test "malformed concern terms on non-veto seats are errors, never raised or inspected" do
     evaluations = [
+      {:adversarial, %{vote: :approve, concerns: []}},
+      {:security, %{vote: :approve, concerns: []}},
+      {:stability, %{vote: :approve, concerns: []}},
       {:brainstorming, %{vote: :approve, concerns: [%{nested: :map}]}},
       {:user_experience, %{vote: :approve, concerns: [{:tuple, :term}]}},
       {:privacy, %{vote: :approve, concerns: [<<0xFF, 0xFE>>]}},
@@ -118,7 +124,7 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     assert {:ok, state} = DesignCouncilCore.new(%{"evaluations" => evaluations})
     assert {:ok, decided} = DesignCouncilCore.decide(state)
     assert decided["dispersion"]["error"] == 3
-    assert decided["dispersion"]["approve"] == 1
+    assert decided["dispersion"]["approve"] == 4
     assert decided["checkpoint_outcome"] == "rework"
   end
 
@@ -176,6 +182,22 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     assert decided["checkpoint_outcome"] == "rework"
     assert decided["note"] == "Missing capability check"
     assert decided["dispersion"]["reject"] == 1
+  end
+
+  test "an omitted default veto seat fails closed as veto unavailable" do
+    evaluations =
+      unanimous(:approve)
+      |> Enum.reject(fn {perspective, _eval} -> perspective == :security end)
+
+    assert {:error, :design_council_veto_unavailable} = decide(evaluations)
+  end
+
+  test "a duplicate veto seat identity fails closed as veto unavailable" do
+    evaluations =
+      unanimous(:approve) ++
+        [{:security, %{vote: :approve, concerns: [], perspective: :security}}]
+
+    assert {:error, :design_council_veto_unavailable} = decide(evaluations)
   end
 
   test "near-limit valid packet keeps the design and every section label" do

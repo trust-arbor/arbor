@@ -364,7 +364,24 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
-  test "end-to-end AdvisoryLLM provider failure is a seat error, not a rework vote", ctx do
+  test "an omitted veto seat fails closed through run/2", ctx do
+    evaluations =
+      unanimous_approve()
+      |> Enum.reject(fn {perspective, _eval} -> perspective == :security end)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_omitted_veto"}}
+    )
+
+    assert {:error, :design_council_veto_unavailable} =
+             DesignCouncilReview.run(ctx.params, ctx.context)
+  after
+    Process.delete(:consult_result)
+  end
+
+  test "end-to-end AdvisoryLLM veto-seat provider failure fails closed with veto unavailable",
+       ctx do
     {:ok, proposal} =
       Arbor.Contracts.Consensus.Proposal.new(%{
         proposer: "human",

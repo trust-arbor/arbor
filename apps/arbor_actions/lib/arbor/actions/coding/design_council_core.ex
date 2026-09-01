@@ -6,9 +6,10 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
   `"rework"`), a bounded consolidated `note`, and `dispersion` counts.
   Admitted design-review votes are only approve and rework. Errors and
   leftover abstain tokens never count as approvals. A configured veto
-  perspective classified as an error fails with
-  `:design_council_veto_unavailable` instead of a checkpoint outcome, so a
-  provider outage does not become design rework. The question builder uses
+  perspective that is classified as an error, omitted, or duplicated
+  fails with `:design_council_veto_unavailable` instead of a checkpoint
+  outcome, so a provider outage or missing veto seat does not become
+  design rework. The question builder uses
   explicit per-section byte budgets and never tail-clips; overflow fails
   closed.
   """
@@ -269,9 +270,24 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
   end
 
   defp veto_unavailable?(classified, rule) do
-    Enum.any?(classified, fn evaluation ->
-      evaluation["kind"] == "error" and
-        evaluation["perspective"] in rule["veto_perspectives"]
+    veto_perspectives = rule["veto_perspectives"]
+
+    counts =
+      classified
+      |> Enum.map(& &1["perspective"])
+      |> Enum.filter(&(&1 in veto_perspectives))
+      |> Enum.frequencies()
+
+    Enum.any?(veto_perspectives, fn perspective ->
+      case Map.get(counts, perspective, 0) do
+        1 ->
+          Enum.any?(classified, fn evaluation ->
+            evaluation["perspective"] == perspective and evaluation["kind"] == "error"
+          end)
+
+        _other ->
+          true
+      end
     end)
   end
 
