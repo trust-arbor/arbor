@@ -17,7 +17,17 @@ defmodule Arbor.Commands.CodingGrantCore do
   @horizon_path ["planes", "executor", "details", "projection", "authority_horizon"]
   @projection_path ["planes", "executor", "details", "projection"]
   @allowed_opt_keys [:max_rounds, :dry_run]
-  @state_keys [:max_rounds, :dry_run, :rounds, :granted, :failed, :remaining, :queue, :phase]
+  @state_keys [
+    :max_rounds,
+    :dry_run,
+    :rounds,
+    :granted,
+    :failed,
+    :remaining,
+    :queue,
+    :phase,
+    :canonical
+  ]
   @known_roles ["authenticated_caller", "execution_principal"]
   @plan_validation_codes [
     :invalid_object,
@@ -43,8 +53,29 @@ defmodule Arbor.Commands.CodingGrantCore do
           | {:emit, String.t()}
           | {:halt, result()}
 
+  @type result_status ::
+          :converged
+          | :unconverged
+          | :malformed_report
+          | :grant_failed
+          | :report_truncated
+          | :invalid_max_rounds
+          | :invalid_options
+          | :invalid_object
+          | :invalid_field
+          | :invalid_field_type
+          | :missing_field
+          | :blank_field
+          | :invalid_object_key
+          | {:invalid_object, String.t()}
+          | {:invalid_field, String.t()}
+          | {:invalid_field_type, String.t()}
+          | {:missing_field, String.t()}
+          | {:blank_field, String.t()}
+          | {:invalid_object_key, String.t()}
+
   @type result :: %{
-          status: atom() | {atom(), String.t()} | map(),
+          status: result_status(),
           rounds: non_neg_integer(),
           granted: [grant_target()],
           failed: [{grant_target(), term()}],
@@ -59,7 +90,8 @@ defmodule Arbor.Commands.CodingGrantCore do
           failed: [{grant_target(), term()}],
           remaining: [grant_target()],
           queue: [grant_target()],
-          phase: atom()
+          phase: atom(),
+          canonical: boolean()
         }
 
   @doc """
@@ -174,7 +206,22 @@ defmodule Arbor.Commands.CodingGrantCore do
       failed: [],
       remaining: [],
       queue: [],
-      phase: :idle
+      phase: :idle,
+      canonical: true
+    }
+  end
+
+  defp normalize_state(%{canonical: true} = state, max_rounds) do
+    %{
+      max_rounds: max_rounds,
+      dry_run: Map.get(state, :dry_run, false) == true,
+      rounds: non_neg_or(Map.get(state, :rounds), 0),
+      granted: list_or(Map.get(state, :granted), []),
+      failed: list_or(Map.get(state, :failed), []),
+      remaining: list_or(Map.get(state, :remaining), []),
+      queue: list_or(Map.get(state, :queue), []),
+      phase: Map.get(state, :phase, :idle),
+      canonical: true
     }
   end
 
@@ -191,6 +238,7 @@ defmodule Arbor.Commands.CodingGrantCore do
     |> Map.put(:remaining, normalize_grant_list(list_or(Map.get(state, :remaining), [])))
     |> Map.put(:queue, normalize_grant_list(list_or(Map.get(state, :queue), [])))
     |> Map.put(:rounds, non_neg_or(Map.get(state, :rounds), 0))
+    |> Map.put(:canonical, true)
   end
 
   defp list_or(value, _default) when is_list(value), do: value
@@ -266,7 +314,7 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp emit_named(state, targets, follow) do
     next_phase = if follow == :halt, do: :after_emit_halt, else: :after_emit
     state = %{state | remaining: targets, queue: [], phase: next_phase}
-    {state, {:emit, format_uri_list(targets)}}
+    {state, {:emit, format_named_emission(targets)}}
   end
 
   # Listing ack after {:emit, text}. Not a grant: URI and result are ignored.
@@ -401,17 +449,28 @@ defmodule Arbor.Commands.CodingGrantCore do
   end
 
   defp put_principals_list(acc, %{"principals" => list}) when is_list(list) do
-    Enum.reduce(list, acc, fn
-      %{"role" => role, "principal_id" => id}, acc
-      when role in @known_roles and is_binary(id) and id != "" ->
-        Map.put_new(acc, role, id)
-
-      _other, acc ->
-        acc
+    Enum.reduce(list, acc, fn entry, acc ->
+      case principal_entry(entry) do
+        {:ok, role, id} -> Map.put_new(acc, role, id)
+        :error -> acc
+      end
     end)
   end
 
   defp put_principals_list(acc, _horizon), do: acc
+
+  defp principal_entry(entry) when is_map(entry) do
+    role = Map.get(entry, "principal_role") || Map.get(entry, "role")
+    id = Map.get(entry, "principal_id")
+
+    if role in @known_roles and is_binary(id) and id != "" do
+      {:ok, role, id}
+    else
+      :error
+    end
+  end
+
+  defp principal_entry(_entry), do: :error
 
   defp put_fallback(acc, role, candidates) do
     case Map.get(acc, role) do
@@ -453,16 +512,12 @@ defmodule Arbor.Commands.CodingGrantCore do
   end
 
   defp consume_finding(finding, targets, uri_count, named) when is_map(finding) do
-    if known_role_missing?(finding) do
-      case resolve_finding_principal(finding, named) do
-        {:ok, role, principal_id} ->
-          take_missing_uris(finding, targets, uri_count, role, principal_id)
+    case Map.get(finding, "classification") do
+      "missing" ->
+        consume_missing_finding(finding, targets, uri_count, named)
 
-        {:error, :malformed_report} = error ->
-          error
-      end
-    else
-      {:ok, targets, uri_count}
+      _other ->
+        {:ok, targets, uri_count}
     end
   end
 
@@ -470,9 +525,20 @@ defmodule Arbor.Commands.CodingGrantCore do
     {:error, :malformed_report}
   end
 
-  defp known_role_missing?(finding) do
-    Map.get(finding, "principal_role") in @known_roles and
-      Map.get(finding, "classification") == "missing"
+  defp consume_missing_finding(finding, targets, uri_count, named) do
+    case Map.get(finding, "principal_role") do
+      role when role in @known_roles ->
+        case resolve_finding_principal(finding, named) do
+          {:ok, ^role, principal_id} ->
+            take_missing_uris(finding, targets, uri_count, role, principal_id)
+
+          {:error, :malformed_report} = error ->
+            error
+        end
+
+      _unknown ->
+        {:error, :malformed_report}
+    end
   end
 
   defp resolve_finding_principal(finding, named) do
@@ -654,15 +720,27 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp status_line(status), do: "coding grant: #{inspect(status)}"
 
   defp format_section(label, items) do
-    if items == [] or caller_only_items?(items) do
-      "#{label}: #{format_uri_list(items)}"
-    else
-      "#{label}:\n#{format_uris_by_role(items)}"
+    cond do
+      items == [] ->
+        "#{label}: (none)"
+
+      legacy_string_items?(items) ->
+        "#{label}: #{Enum.map_join(items, "\n", &uri_of/1)}"
+
+      true ->
+        "#{label}:\n#{format_uris_by_role(items)}"
     end
   end
 
-  defp format_uri_list([]), do: "(none)"
-  defp format_uri_list(items), do: Enum.map_join(items, "\n", &uri_of/1)
+  defp format_named_emission([]), do: "(none)"
+
+  defp format_named_emission(items) do
+    if legacy_string_items?(items) do
+      Enum.map_join(items, "\n", &uri_of/1)
+    else
+      format_uris_by_role(items)
+    end
+  end
 
   defp format_uris_by_role(items) do
     grouped = Enum.group_by(items, &role_of/1)
@@ -680,15 +758,15 @@ defmodule Arbor.Commands.CodingGrantCore do
   defp format_failed([]), do: "(none)"
 
   defp format_failed(failed) do
-    if caller_only_failed?(failed) do
-      Enum.map_join(failed, "\n", &format_caller_failed/1)
+    if legacy_failed?(failed) do
+      Enum.map_join(failed, "\n", &format_legacy_failed/1)
     else
       Enum.map_join(failed, "\n", &format_role_failed/1)
     end
   end
 
-  defp format_caller_failed({item, reason}), do: "#{uri_of(item)} (#{inspect(reason)})"
-  defp format_caller_failed(other), do: inspect(other)
+  defp format_legacy_failed({item, reason}), do: "#{uri_of(item)} (#{inspect(reason)})"
+  defp format_legacy_failed(other), do: inspect(other)
 
   defp format_role_failed({item, reason}) do
     "#{role_of(item)} #{principal_id_of(item)} #{uri_of(item)} (#{inspect(reason)})"
@@ -696,15 +774,14 @@ defmodule Arbor.Commands.CodingGrantCore do
 
   defp format_role_failed(other), do: inspect(other)
 
-  defp caller_only_items?(items) when is_list(items), do: Enum.all?(items, &caller_item?/1)
-  defp caller_only_failed?(failed) when is_list(failed), do: Enum.all?(failed, &caller_failed?/1)
+  defp legacy_string_items?(items) when is_list(items), do: Enum.all?(items, &is_binary/1)
 
-  defp caller_failed?({item, _reason}), do: caller_item?(item)
-  defp caller_failed?(item), do: caller_item?(item)
-
-  defp caller_item?(uri) when is_binary(uri), do: true
-  defp caller_item?(%{principal_role: "authenticated_caller"}), do: true
-  defp caller_item?(_other), do: false
+  defp legacy_failed?(failed) when is_list(failed) do
+    Enum.all?(failed, fn
+      {item, _reason} -> is_binary(item)
+      item -> is_binary(item)
+    end)
+  end
 
   defp uri_of(%{uri: uri}) when is_binary(uri), do: uri
   defp uri_of(uri) when is_binary(uri), do: uri

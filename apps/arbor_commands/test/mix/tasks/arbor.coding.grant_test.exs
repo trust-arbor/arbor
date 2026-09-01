@@ -142,8 +142,17 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     named = Enum.filter(infos, &String.contains?(&1, @uri_a))
     assert length(named) == 2
 
+    expected_emit =
+      """
+      authenticated_caller (#{@caller}):
+      #{@uri_a}
+      #{@uri_a}
+      #{@uri_b}
+      """
+      |> String.trim_trailing()
+
     Enum.each(named, fn text ->
-      assert text == Enum.join([@uri_a, @uri_a, @uri_b], "\n")
+      assert text == expected_emit
     end)
   end
 

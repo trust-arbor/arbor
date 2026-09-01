@@ -2,6 +2,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Commands.CodingGrantCore, as: Core
+  alias Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore
 
   @moduletag :fast
 
@@ -105,7 +106,9 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
              """
              coding grant: converged
              rounds: 2
-             granted: arbor://fs/read/tmp
+             granted:
+             authenticated_caller (#{@caller}):
+             arbor://fs/read/tmp
              arbor://action/coding/dispatch
              failed: (none)
              remaining: (none)
@@ -156,9 +159,13 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
              """
              coding grant: grant_failed
              rounds: 1
-             granted: arbor://fs/read/tmp
-             failed: arbor://action/coding/dispatch (:denied)
-             remaining: arbor://action/coding/dispatch
+             granted:
+             authenticated_caller (#{@caller}):
+             arbor://fs/read/tmp
+             failed: authenticated_caller #{@caller} arbor://action/coding/dispatch (:denied)
+             remaining:
+             authenticated_caller (#{@caller}):
+             arbor://action/coding/dispatch
              arbor://agent/dispatch
              """
              |> String.trim_trailing()
@@ -175,8 +182,17 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     emits = for {:emit, text} <- effects, do: text
     assert length(emits) == 3
 
+    expected_emit =
+      """
+      authenticated_caller (#{@caller}):
+      #{@uri_a}
+      #{@uri_a}
+      #{@uri_b}
+      """
+      |> String.trim_trailing()
+
     Enum.each(emits, fn text ->
-      assert text == Enum.join([@uri_a, @uri_a, @uri_b], "\n")
+      assert text == expected_emit
     end)
 
     assert {:halt, result} = List.last(effects)
@@ -189,6 +205,35 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
              caller_target(@uri_a),
              caller_target(@uri_b)
            ]
+  end
+
+  test "dry-run emits mixed-role missing URIs grouped by principal" do
+    coordinator = "agent_coordinator_dry_run"
+
+    report =
+      readiness_report(
+        [
+          caller_missing_finding([@uri_a]),
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        agent_id: coordinator
+      )
+
+    {:ok, state} = Core.new(max_rounds: 2, dry_run: true)
+    {_state, {:emit, text}} = Core.step(state, {:readiness, report})
+
+    assert text ==
+             """
+             authenticated_caller (#{@caller}):
+             #{@uri_a}
+             execution_principal (#{coordinator}):
+             #{@uri_b}
+             """
+             |> String.trim_trailing()
   end
 
   test "dry-run converges only when a report names nothing" do
@@ -244,14 +289,32 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
   end
 
   @tag :security_regression
-  test "security regression: role-less and unrelated-plane findings never grant" do
-    report =
-      readiness_report([
-        %{"classification" => "missing", "resource_uris" => [@uri_a]}
-      ])
+  test "security regression: unknown-role or role-less missing findings fail closed" do
+    Enum.each(
+      [
+        %{"classification" => "missing", "resource_uris" => [@uri_a]},
+        %{
+          "principal_role" => "third_party",
+          "classification" => "missing",
+          "resource_uris" => [@uri_a]
+        }
+      ],
+      fn finding ->
+        {:ok, state} = Core.new([])
+        {_, effect} = Core.step(state, {:readiness, readiness_report([finding])})
+        assert {:halt, result} = effect
+        assert result.status == :malformed_report
+        refute result.status == :converged
+        refute match?({:grant, _}, effect)
+        assert result.granted == []
+      end
+    )
+  end
 
+  @tag :security_regression
+  test "security regression: unrelated-plane findings never grant" do
     report =
-      put_in(report, ["planes", "other"], %{
+      put_in(readiness_report([]), ["planes", "other"], %{
         "details" => %{
           "projection" => %{
             "authority_horizon" => %{
@@ -384,7 +447,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     assert result.status == :malformed_report
   end
 
-  test "security regression: converged despite execution-principal missing findings on recorded 2026-08-31 shape" do
+  test "recorded 2026-08-31 execution-principal missing finding is granted to the coordinator and does not halt converged" do
     report = recorded_exec_missing_report()
     target = exec_target(@recorded_uri, @recorded_coordinator)
 
@@ -403,6 +466,101 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     assert unconverged.status == :unconverged
     assert unconverged.remaining == [target]
     refute unconverged.status == :converged
+  end
+
+  test "resolves principals from AuthorityHorizonCore.project_horizon_report without top-level id fallbacks" do
+    caller = "agent_projected_caller"
+    coordinator = "agent_projected_coordinator"
+    uri = @recorded_uri
+
+    horizon =
+      AuthorityHorizonCore.project_horizon_report(%{
+        principals: [
+          {:execution_principal, coordinator},
+          {:authenticated_caller, caller}
+        ],
+        findings: [
+          %{
+            role: :execution_principal,
+            classification: :missing,
+            resource_uris: [uri],
+            total_count: 1
+          }
+        ],
+        resources: [uri],
+        status: "missing"
+      })
+
+    refute Map.has_key?(horizon, "caller_id")
+    refute Map.has_key?(horizon, "agent_id")
+
+    report = %{
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => %{"authority_horizon" => horizon}
+          }
+        }
+      }
+    }
+
+    refute Map.has_key?(report, "caller_id")
+    refute Map.has_key?(report, "agent_id")
+    refute Map.has_key?(report["planes"]["executor"]["details"]["projection"], "caller_id")
+    refute Map.has_key?(report["planes"]["executor"]["details"]["projection"], "agent_id")
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, target} = effect
+    assert target == exec_target(uri, coordinator)
+  end
+
+  test "resolves principals listed under principal_role without top-level id fallbacks" do
+    caller = "agent_role_key_caller"
+    coordinator = "agent_role_key_coordinator"
+
+    report =
+      readiness_report(
+        [
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        caller_id: nil,
+        principals: [
+          %{"principal_role" => "execution_principal", "principal_id" => coordinator},
+          %{"principal_role" => "authenticated_caller", "principal_id" => caller}
+        ]
+      )
+      |> Map.delete("caller_id")
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, target} = effect
+    assert target == exec_target(@uri_b, coordinator)
+  end
+
+  test "show/1 flattens only legacy binary grant lists" do
+    shown =
+      Core.show(%{
+        status: :converged,
+        rounds: 1,
+        granted: [@uri_a],
+        failed: [],
+        remaining: []
+      })
+
+    assert shown ==
+             """
+             coding grant: converged
+             rounds: 1
+             granted: arbor://fs/read/tmp
+             failed: (none)
+             remaining: (none)
+             """
+             |> String.trim_trailing()
   end
 
   test "a URI is never granted to a principal the readiness report did not name" do

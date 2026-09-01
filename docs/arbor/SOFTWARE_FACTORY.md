@@ -279,10 +279,10 @@ of readiness rounds is reached.
   --agent-id agent_<coordinator> --dry-run
 ```
 
-`--dry-run`: every round invokes readiness and emits the full list of
-missing URIs named that round (no dedupe). Dry-run never emits a grant. It
-halts converged only when a report names nothing; otherwise it ends
-unconverged at max-rounds.
+`--dry-run`: every round invokes readiness and emits the missing URIs named
+that round grouped by `{principal_role, principal_id}` (no dedupe). Dry-run
+never emits a grant. It halts converged only when a report names nothing;
+otherwise it ends unconverged at max-rounds.
 
 Do not copy a URI count from an old session — profile and graph changes
 alter the set. The Mix task is the grant loop for both principal roles. If

@@ -22,8 +22,9 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     * `--key-file` — caller key file (default `~/.arbor/identity.key`)
     * `--max-rounds` — readiness invocations allowed (default 5, valid 1..20)
     * `--dry-run` — every round invokes readiness and emits the full list of
-      missing URIs named that round (no dedupe). Dry-run never emits a grant.
-      It halts converged only when a report names nothing; otherwise it ends
+      missing URIs named that round (no dedupe), grouped by principal role
+      and id. Dry-run never emits a grant. It
+      halts converged only when a report names nothing; otherwise it ends
       unconverged at max-rounds.
 
   Each grant uses the principal the finding names. A URI is never granted to a
