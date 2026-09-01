@@ -275,6 +275,24 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "twelve approvals plus one provider error approve with error=1 and reject=0", ctx do
+    evaluations = put_error(unanimous_approve(), :brainstorming, :api_error)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_provider_error"}}
+    )
+
+    assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+    assert result["checkpoint_outcome"] == "approve"
+    assert result["dispersion"]["approve"] == 12
+    assert result["dispersion"]["error"] == 1
+    assert result["dispersion"]["reject"] == 0
+    assert result["dispersion"]["responded"] == 12
+  after
+    Process.delete(:consult_result)
+  end
+
   test "out-of-protocol abstain/error verdicts convert to rework, never approve", ctx do
     # Three seats answer outside the approve|rework protocol: a structured
     # abstain, a structured error verdict, and an unknown token. Each must
@@ -307,6 +325,88 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     assert result["dispersion"]["error"] == 1
     assert result["dispersion"]["reject"] == 0
     assert result["checkpoint_outcome"] == "approve"
+  after
+    Process.delete(:consult_result)
+  end
+
+  test "end-to-end AdvisoryLLM provider failure is a seat error, not a rework vote", ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    llm_fn = fn _system_prompt, _user_prompt -> {:error, :api_error} end
+
+    seat =
+      Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+    assert {:error, :api_error} = seat
+
+    evaluations =
+      Enum.map(unanimous_approve(), fn
+        {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+        other -> other
+      end)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_e2e_provider_error"}}
+    )
+
+    assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+    assert result["checkpoint_outcome"] == "approve"
+    assert result["dispersion"]["error"] == 1
+    assert result["dispersion"]["reject"] == 0
+    assert result["dispersion"]["approve"] == 12
+    assert result["dispersion"]["responded"] == 12
+  after
+    Process.delete(:consult_result)
+  end
+
+  test "end-to-end AdvisoryLLM model-authored abstain remains rework, not a seat error", ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    llm_fn = fn _system_prompt, _user_prompt ->
+      {:ok, Jason.encode!(%{"verdict" => "abstain", "concerns" => []})}
+    end
+
+    seat =
+      Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: llm_fn)
+
+    assert {:ok, eval} = seat
+    assert eval.vote == :reject
+
+    evaluations =
+      Enum.map(unanimous_approve(), fn
+        {:brainstorming, _eval} -> {:brainstorming, seat_as_consult_term(seat)}
+        {:user_experience, _eval} -> {:user_experience, seat_as_consult_term(seat)}
+        {:privacy, _eval} -> {:privacy, seat_as_consult_term(seat)}
+        other -> other
+      end)
+
+    Process.put(
+      :consult_result,
+      {:ok, %{evaluations: evaluations, run_id: "run_e2e_model_abstain"}}
+    )
+
+    assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+    assert result["checkpoint_outcome"] == "rework"
+    assert result["dispersion"]["reject"] == 3
+    assert result["dispersion"]["error"] == 0
+    assert result["dispersion"]["abstain"] == 0
   after
     Process.delete(:consult_result)
   end
@@ -560,6 +660,13 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
   defp put_vote(evaluations, perspective, vote, concerns) do
     Enum.map(evaluations, fn
       {^perspective, eval} -> {perspective, Map.merge(eval, %{vote: vote, concerns: concerns})}
+      other -> other
+    end)
+  end
+
+  defp put_error(evaluations, perspective, reason) do
+    Enum.map(evaluations, fn
+      {^perspective, _eval} -> {perspective, {:error, reason}}
       other -> other
     end)
   end

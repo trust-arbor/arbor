@@ -136,15 +136,99 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
   end
 
   describe "evaluate/3 — error handling" do
-    test "handles LLM error gracefully" do
+    defmodule RecordingConsultationLog do
+      def log_single(question, perspective, eval, llm_meta, opts) do
+        send(self(), {:log_single, question, perspective, eval, llm_meta, opts})
+        :ok
+      end
+    end
+
+    defmodule RaisingConsultationLog do
+      def log_single(_question, _perspective, _eval, _llm_meta, _opts) do
+        raise "consultation log boom"
+      end
+    end
+
+    test "returns {:error, reason} when the one-shot transport errors" do
       proposal = TestHelpers.build_proposal(%{description: "Test error handling"})
 
-      assert {:ok, eval} =
+      assert {:error, :api_error} =
                AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: error_llm_fn())
+    end
 
+    test "returns {:error, :timeout} when the one-shot transport exceeds its timeout" do
+      hung_fn = fn _system_prompt, _user_prompt ->
+        Process.sleep(5_000)
+        {:ok, "too late"}
+      end
+
+      proposal = TestHelpers.build_proposal(%{description: "Test timeout handling"})
+      started = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming, llm_fn: hung_fn, timeout: 50)
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed < 1_000
+    end
+
+    test "logs synthetic sealed abstain evidence before returning a transport error" do
+      proposal = TestHelpers.build_proposal(%{description: "Log provider failure"})
+
+      assert {:error, :api_error} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming,
+                 llm_fn: error_llm_fn(),
+                 consultation_id: "run_provider_failure",
+                 consultation_log: RecordingConsultationLog
+               )
+
+      assert_received {:log_single, question, :brainstorming, eval, llm_meta, opts}
+      assert question == proposal.description
+      assert Keyword.get(opts, :run_id) == "run_provider_failure"
       assert eval.vote == :abstain
+      assert eval.sealed == true
       assert eval.confidence == 0.0
       assert eval.reasoning =~ "LLM error"
+      assert llm_meta.provider
+      assert llm_meta.model
+      assert llm_meta.error == inspect(:api_error)
+      assert llm_meta.raw_response == ""
+    end
+
+    test "logs synthetic sealed abstain evidence before returning a timeout" do
+      hung_fn = fn _system_prompt, _user_prompt ->
+        Process.sleep(5_000)
+        {:ok, "too late"}
+      end
+
+      proposal = TestHelpers.build_proposal(%{description: "Log provider timeout"})
+
+      assert {:error, :timeout} =
+               AdvisoryLLM.evaluate(proposal, :stability,
+                 llm_fn: hung_fn,
+                 timeout: 50,
+                 consultation_id: "run_provider_timeout",
+                 consultation_log: RecordingConsultationLog
+               )
+
+      assert_received {:log_single, _question, :stability, eval, llm_meta, opts}
+      assert Keyword.get(opts, :run_id) == "run_provider_timeout"
+      assert eval.vote == :abstain
+      assert eval.sealed == true
+      assert eval.reasoning =~ "LLM timeout"
+      assert llm_meta.error == "timeout"
+      assert llm_meta.duration_ms == 50
+    end
+
+    test "a logging failure does not convert the original provider error into success" do
+      proposal = TestHelpers.build_proposal(%{description: "Log boom"})
+
+      assert {:error, :api_error} =
+               AdvisoryLLM.evaluate(proposal, :brainstorming,
+                 llm_fn: error_llm_fn(),
+                 consultation_id: "run_log_boom",
+                 consultation_log: RaisingConsultationLog
+               )
     end
 
     test "includes context in evaluation" do
@@ -746,6 +830,21 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
         assert {:error, :malformed_evaluation} =
                  AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
       end)
+    end
+
+    test "a model-authored abstain verdict remains a successful evaluation, not a provider error" do
+      llm_fn = fn _system_prompt, _user_prompt ->
+        {:ok, Jason.encode!(%{"verdict" => "abstain", "concerns" => []})}
+      end
+
+      proposal = design_review_proposal("Model authored abstain")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :security, llm_fn: llm_fn)
+
+      assert eval.vote == :reject
+      assert eval.sealed == true
+      assert Enum.any?(eval.concerns, &String.contains?(&1, "malformed design-review verdict"))
     end
   end
 

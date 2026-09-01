@@ -72,6 +72,29 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
     end
   end
 
+  defmodule MixedSeatAdvisoryEvaluator do
+    @moduledoc false
+    @behaviour Arbor.Contracts.Consensus.Evaluator
+
+    alias Arbor.Consensus.TestHelpers.TestAdvisoryEvaluator
+
+    @impl true
+    def name, do: :mixed_seat_advisory
+
+    @impl true
+    def perspectives, do: [:brainstorming, :design_review]
+
+    @impl true
+    def evaluate(proposal, :brainstorming, opts) do
+      TestAdvisoryEvaluator.evaluate(proposal, :brainstorming, opts)
+    end
+
+    @impl true
+    def evaluate(_proposal, :design_review, _opts) do
+      {:error, :api_error}
+    end
+  end
+
   describe "ask_logged/3" do
     defmodule RecordingLog do
       alias Arbor.Consensus.TestHelpers
@@ -323,6 +346,19 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
 
       def supervisor(_owner, _timeout), do: raise("supervisor boom")
       def stop(_owner), do: Process.sleep(:infinity)
+    end
+
+    test "preserves a provider-failure seat as {:error, reason} while other seats complete" do
+      assert {:ok, %{evaluations: results, run_id: run_id}} =
+               Consult.ask_logged(MixedSeatAdvisoryEvaluator, "One seat provider failed",
+                 consultation_log: RecordingLog
+               )
+
+      assert is_binary(run_id)
+      assert [{:brainstorming, eval}, {:design_review, {:error, :api_error}}] = results
+      assert eval.perspective == :brainstorming
+      assert eval.sealed == true
+      assert eval.vote == :approve
     end
 
     test "returns evaluations plus the ConsultationLog run id" do

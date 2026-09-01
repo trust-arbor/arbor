@@ -62,8 +62,10 @@ defmodule Arbor.Consensus.ConsultationLog do
   @doc """
   Log a single perspective evaluation result.
 
-  Called automatically from `AdvisoryLLM.do_evaluate/3` after each successful
-  LLM call. Creates an individual `EvalResult` record.
+  Called automatically from `AdvisoryLLM.do_evaluate/3` after each LLM call,
+  including provider-failure evidence (a synthetic sealed abstain) logged
+  before the evaluator returns `{:error, reason}`. Creates an individual
+  `EvalResult` record.
 
   ## Parameters
 

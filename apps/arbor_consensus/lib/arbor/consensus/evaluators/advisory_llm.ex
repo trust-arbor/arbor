@@ -522,34 +522,57 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         result
 
       {:ok, {:error, reason}} ->
-        result =
-          error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
-
-        error_meta =
-          Map.merge(llm_meta, %{duration_ms: 0, raw_response: "", error: inspect(reason)})
-
-        with {:ok, eval} <- result,
-             do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
-
-        result
+        return_provider_failure(
+          proposal,
+          perspective,
+          evaluator_id,
+          reason,
+          "LLM error: #{inspect(reason)}",
+          Map.merge(llm_meta, %{duration_ms: 0, raw_response: "", error: inspect(reason)}),
+          opts
+        )
 
       nil ->
-        result =
-          error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
-
-        error_meta =
-          Map.merge(llm_meta, %{duration_ms: timeout, raw_response: "", error: "timeout"})
-
-        with {:ok, eval} <- result,
-             do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
-
-        result
+        return_provider_failure(
+          proposal,
+          perspective,
+          evaluator_id,
+          :timeout,
+          "LLM timeout after #{timeout}ms",
+          Map.merge(llm_meta, %{duration_ms: timeout, raw_response: "", error: "timeout"}),
+          opts
+        )
     end
+  end
+
+  # Provider failure is an evaluator error, never a successful abstain
+  # Evaluation. The synthetic sealed abstain is logged first for
+  # observability; a logging failure must not convert the original
+  # transport error into success.
+  defp return_provider_failure(
+         proposal,
+         perspective,
+         evaluator_id,
+         reason,
+         reason_text,
+         error_meta,
+         opts
+       ) do
+    case error_evaluation(proposal, perspective, evaluator_id, reason_text) do
+      {:ok, eval} ->
+        log_consultation_result(proposal, perspective, eval, error_meta, opts)
+
+      {:error, _} ->
+        :ok
+    end
+
+    {:error, reason}
   end
 
   defp log_consultation_result(proposal, perspective, eval, llm_meta, opts) do
     run_id = Keyword.get(opts, :consultation_id)
-    ConsultationLog.log_single(proposal.description, perspective, eval, llm_meta, run_id: run_id)
+    log = Keyword.get(opts, :consultation_log, ConsultationLog)
+    log.log_single(proposal.description, perspective, eval, llm_meta, run_id: run_id)
   rescue
     _ -> :ok
   catch
@@ -581,8 +604,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   # Same rules as the binding council's seats: a preferred route this host
   # knows but cannot call is rerouted to the first available fallback; an
   # unknown route or an explicit per-call override is left alone; when
-  # nothing is available the preferred route stays and the seat abstains
-  # with that provider's own error. Availability comes through the
+  # nothing is available the preferred route stays and the seat returns
+  # that provider's own error. Availability comes through the
   # `:provider_route_mfa` seam (set to `{Arbor.LLM, :provider_route}` by the
   # umbrella config) because this library must not depend on arbor_llm.
   defp resolve_against_host(perspective, provider, model, opts) do
