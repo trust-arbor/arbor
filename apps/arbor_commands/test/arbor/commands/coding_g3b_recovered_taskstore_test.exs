@@ -686,7 +686,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
              )
   end
 
-  test "security regression: canonical-only historical terminal rehydrates after coding graph upgrade",
+  test "security regression: sparse historical terminal rehydrates after coding graph upgrade",
        %{
          repo: repo,
          agent: agent,
@@ -727,8 +727,9 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     archived_result = get_in(archived, ["terminal_envelope", "evidence", "result"])
     assert archived_result["status"] == "change_committed"
     assert archived_result["canonical_status"] == "change_committed"
+    assert archived_result["outcome"] == archived["terminal_envelope"]["outcome"]
 
-    historical_result = Map.delete(archived_result, "status")
+    historical_result = Map.drop(archived_result, ["status", "outcome"])
 
     historical_archive =
       put_in(archived, ["terminal_envelope", "evidence", "result"], historical_result)
@@ -745,7 +746,9 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert original.raw["status"] == "change_committed"
     refute get_in(original.raw, ["outcome", "code"]) == "task_finalization_failed"
 
-    historical_raw = Map.delete(original.raw, "status")
+    historical_raw = Map.drop(original.raw, ["status", "outcome"])
+    refute Map.has_key?(historical_raw, "status")
+    refute Map.has_key?(historical_raw, "outcome")
     assert historical_raw["canonical_status"] == "change_committed"
 
     {:ok, task_read_uri} = TaskControlLease.uri(:task_read, task_id)
@@ -780,7 +783,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store_b)
     assert {:ok, completed} = TaskStore.result(task_id, name: store_b)
     assert completed.result_type == :coding_change
-    assert completed.raw === historical_raw
+    assert completed.raw === original.raw
     refute get_in(completed.raw, ["outcome", "code"]) == "task_finalization_failed"
 
     assert File.read!(terminal_path) == terminal_bytes

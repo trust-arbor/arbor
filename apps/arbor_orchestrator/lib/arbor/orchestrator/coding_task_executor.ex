@@ -693,9 +693,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, exec_ctx} <- validate_context(context),
          :ok <- validate_finalize_task_id(exec_ctx.task_id),
          original_result = result,
-         {:ok, result, result_shape} <- normalize_finalize_result(result),
          :ok <- validate_finalize_controls(controls),
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+         terminal_defaults = historical_finalize_defaults(logs_root, exec_ctx.task_id),
+         {:ok, result, result_shape} <- normalize_finalize_result(result, terminal_defaults),
          :ok <- validate_finalize_artifact_files(result, logs_root),
          {:ok, compilation_policy} <-
            reverify_finalize_compilation(
@@ -714,7 +715,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       finalized =
         Map.put(result, "artifacts", Map.put(artifacts, "task_evidence", descriptor))
 
-      {:ok, restore_finalize_result_shape(finalized, result_shape)}
+      {:ok, finalized}
     end
   rescue
     exception -> {:error, {:coding_task_finalize_error, Exception.message(exception)}}
@@ -734,6 +735,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          {:ok, controls} <-
            reconcile_settled_controls(logs_root, exec_ctx.task_id, controls),
+         {:ok, terminal_envelope} <-
+           reconcile_terminal_envelope_for_archive(
+             logs_root,
+             exec_ctx.task_id,
+             terminal_envelope
+           ),
          {:ok, archive} <-
            build_task_terminal_archive(exec_ctx.task_id, terminal_envelope, controls),
          {:ok, descriptor} <-
@@ -1178,8 +1185,28 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       else: {:error, {:invalid_finalize_result, :outcome}}
   end
 
-  defp normalize_finalize_result(result) do
-    {candidate, shape} = prepare_finalize_result_shape(result)
+  # Early terminal archives kept these fields on the envelope but omitted
+  # their duplicate copies from the executor result.
+  defp historical_finalize_defaults(logs_root, task_id) do
+    case ArtifactStore.read_task_terminal(logs_root, task_id) do
+      {:ok,
+       %{
+         "terminal_envelope" => %{
+           "terminal_state" => "done",
+           "evidence" => %{"kind" => "executor_result"},
+           "outcome" => outcome
+         }
+       }}
+      when is_map(outcome) and not is_struct(outcome) ->
+        %{"outcome" => outcome}
+
+      _other ->
+        %{}
+    end
+  end
+
+  defp normalize_finalize_result(result, terminal_defaults) do
+    {candidate, shape} = prepare_finalize_result_shape(result, terminal_defaults)
 
     with :ok <- validate_finalize_result(candidate),
          {:ok, normalized} <- normalize_finalize_capacity(candidate) do
@@ -1187,29 +1214,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp prepare_finalize_result_shape(result) when is_map(result) and not is_struct(result) do
-    case {Map.fetch(result, "status"), Map.fetch(result, "canonical_status")} do
-      {:error, {:ok, canonical_status}} when is_binary(canonical_status) ->
-        {Map.put(result, "status", canonical_status), :canonical_only_historical}
+  defp prepare_finalize_result_shape(result, terminal_defaults)
+       when is_map(result) and not is_struct(result) and is_map(terminal_defaults) do
+    missing_fields =
+      Enum.filter(["status", "outcome"], fn field -> not Map.has_key?(result, field) end)
 
-      _other ->
-        {result, :current}
-    end
+    candidate =
+      result
+      |> put_historical_finalize_default("status", result["canonical_status"])
+      |> put_historical_finalize_default("outcome", terminal_defaults["outcome"])
+
+    shape = if missing_fields == [], do: :current, else: {:historical, missing_fields}
+    {candidate, shape}
   end
 
-  defp prepare_finalize_result_shape(result), do: {result, :current}
+  defp prepare_finalize_result_shape(result, _terminal_defaults), do: {result, :current}
+
+  defp put_historical_finalize_default(result, field, value) do
+    if Map.has_key?(result, field), do: result, else: Map.put(result, field, value)
+  end
 
   defp admit_finalize_result_shape(:current, _compilation_policy), do: :ok
 
-  defp admit_finalize_result_shape(:canonical_only_historical, :admitted_terminal), do: :ok
+  defp admit_finalize_result_shape({:historical, _missing_fields}, :admitted_terminal), do: :ok
 
-  defp admit_finalize_result_shape(:canonical_only_historical, _compilation_policy),
-    do: {:error, {:invalid_finalize_result, :canonical_only_without_admitted_terminal}}
-
-  defp restore_finalize_result_shape(result, :canonical_only_historical),
-    do: Map.delete(result, "status")
-
-  defp restore_finalize_result_shape(result, :current), do: result
+  defp admit_finalize_result_shape({:historical, _missing_fields}, _compilation_policy),
+    do: {:error, {:invalid_finalize_result, :historical_shape_without_admitted_terminal}}
 
   defp normalize_finalize_capacity(result),
     do: ValidationCapacityTerminal.normalize_result(result, :finalize)
@@ -1516,6 +1546,61 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   catch
     _kind, _reason -> {:error, :coding_plan_artifact_store_unavailable}
   end
+
+  # Re-finalization may enrich a sparse historical result for current TaskStore
+  # consumers. Project only those authenticated duplicates away before the
+  # immutable archive's exact byte comparison.
+  defp reconcile_terminal_envelope_for_archive(root, task_id, requested)
+       when is_map(requested) and not is_struct(requested) do
+    case ArtifactStore.read_task_terminal(root, task_id) do
+      {:error, :not_found} ->
+        {:ok, requested}
+
+      {:ok, %{"terminal_envelope" => existing}}
+      when is_map(existing) and not is_struct(existing) ->
+        if compatible_terminal_replay?(existing, requested),
+          do: {:ok, existing},
+          else: {:error, :coding_task_terminal_archive_failed}
+
+      {:error, :unavailable} ->
+        {:error, :unavailable}
+
+      _other ->
+        {:error, :coding_task_terminal_archive_failed}
+    end
+  end
+
+  defp reconcile_terminal_envelope_for_archive(_root, _task_id, _requested),
+    do: {:error, :coding_task_terminal_archive_failed}
+
+  defp compatible_terminal_replay?(existing, requested) do
+    existing === requested or historical_terminal_projection(existing) === {:ok, requested}
+  end
+
+  defp historical_terminal_projection(
+         %{
+           "terminal_state" => "done",
+           "evidence" => %{"kind" => "executor_result", "result" => result},
+           "outcome" => outcome
+         } = existing
+       )
+       when is_map(result) and not is_struct(result) and is_map(outcome) and
+              not is_struct(outcome) do
+    case Map.get(result, "canonical_status") do
+      canonical_status when is_binary(canonical_status) ->
+        projected_result =
+          result
+          |> Map.put_new("status", canonical_status)
+          |> Map.put_new("outcome", outcome)
+
+        {:ok, put_in(existing, ["evidence", "result"], projected_result)}
+
+      _other ->
+        :error
+    end
+  end
+
+  defp historical_terminal_projection(_existing), do: :error
 
   defp invoke_task_terminal_store(store, root, task_id, terminal_envelope, controls) do
     case store.archive_task_terminal(root, task_id, terminal_envelope, controls) do

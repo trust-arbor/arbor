@@ -2451,7 +2451,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     @tag :security_regression
-    test "security regression: canonical-only historical terminal refinalizes without mutation" do
+    test "security regression: sparse historical terminal refinalizes without mutation" do
       put_success_runner_reply()
       assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
       controls = [reconciled_control()]
@@ -2498,12 +2498,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         update_in(
           archive,
           ["terminal_envelope", "evidence", "result"],
-          &Map.delete(&1, "status")
+          &Map.drop(&1, ["status", "outcome"])
         )
 
       historical_envelope = historical_archive["terminal_envelope"]
       historical_result = get_in(historical_envelope, ["evidence", "result"])
       refute Map.has_key?(historical_result, "status")
+      refute Map.has_key?(historical_result, "outcome")
       assert historical_result["canonical_status"] == "change_committed"
 
       {:ok, canonical_archive} = CodingRunRecoveryCore.canonical_json(historical_archive)
@@ -2517,6 +2518,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
       refute Map.has_key?(recovered, "status")
+      refute Map.has_key?(recovered, "outcome")
       assert recovered["canonical_status"] == "change_committed"
       refute Map.has_key?(recovered["artifacts"], "task_evidence")
 
@@ -2528,12 +2530,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context()
                )
 
-      assert refinialized === historical_result
+      assert refinialized === finalized
+
+      {:ok, replay_envelope} =
+        TaskTerminalEnvelope.preserve(
+          refinialized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => refinialized}
+        )
 
       assert :ok =
                CodingTaskExecutor.finalize_terminal_task(
                  "agent_1",
-                 historical_envelope,
+                 replay_envelope,
+                 controls,
+                 valid_context()
+               )
+
+      conflicting_envelope =
+        put_in(replay_envelope, ["evidence", "result", "status"], "no_changes")
+
+      assert {:error, :coding_task_terminal_archive_failed} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 conflicting_envelope,
                  controls,
                  valid_context()
                )
