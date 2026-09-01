@@ -138,7 +138,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   end
 
   defp os_processes do
-    {output, 0} = System.cmd("ps", ["-axww", "-o", "pid=,command="])
+    {output, 0} = System.cmd("ps", os_process_args(:os.type()))
 
     output
     |> String.split("\n", trim: true)
@@ -149,6 +149,9 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
       end
     end)
   end
+
+  defp os_process_args({:unix, :darwin}), do: ["-axww", "-o", "pid=,command="]
+  defp os_process_args(_other), do: ["-o", "pid=,args="]
 
   defp compile_replace_environ_harness! do
     root = Path.join(System.tmp_dir!(), "arbor-tb-env-#{System.unique_integer([:positive])}")

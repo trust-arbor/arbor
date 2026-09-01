@@ -498,6 +498,7 @@ static int g5b1_noreplace_move(int src_parent, const char *src_name, int dst_par
   return renameatx_np(src_parent, src_name, dst_parent, dst_name, RENAME_EXCL);
 #elif defined(__linux__)
 #ifdef SYS_renameat2
+  /* musl omits the libc wrapper; the direct syscall is portable across Linux libcs. */
   return (int)syscall(SYS_renameat2, src_parent, src_name, dst_parent, dst_name,
                       RENAME_NOREPLACE);
 #else
