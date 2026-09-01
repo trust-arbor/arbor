@@ -281,15 +281,23 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp coding_tool_name?(_name), do: false
 
   defp coding_result?(%{} = map) do
-    status = value(map, :status)
+    status = effective_coding_status(map)
     artifacts = value(map, :artifacts)
+
+    coding_evidence? =
+      Enum.any?(
+        [:branch, :commit, :worktree_path, :validation, :review],
+        &present?(value(map, &1))
+      ) or valid_coding_artifacts?(artifacts) or pipeline_error?(map, status)
+
+    shape_evidence? =
+      if canonical_only_status?(map),
+        do: valid_coding_artifacts?(artifacts),
+        else: coding_evidence?
 
     is_binary(status) and
       TaskOutcomeRegistry.coding_result_status?(status) and
-      (Enum.any?(
-         [:branch, :commit, :worktree_path, :validation, :review],
-         &present?(value(map, &1))
-       ) or valid_coding_artifacts?(artifacts) or pipeline_error?(map, status))
+      shape_evidence?
   end
 
   defp pipeline_error?(map, "pipeline_error") do
@@ -326,7 +334,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     review = value(raw, :review)
 
     %{
-      status: value(raw, :status),
+      status: effective_coding_status(raw),
       canonical_status: value(raw, :canonical_status),
       validation: value(raw, :validation),
       response_text: value(raw, :response_text),
@@ -349,6 +357,17 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     }
     |> reject_nil_values()
   end
+
+  defp effective_coding_status(map) do
+    cond do
+      Map.has_key?(map, :status) -> Map.get(map, :status)
+      Map.has_key?(map, "status") -> Map.get(map, "status")
+      true -> value(map, :canonical_status)
+    end
+  end
+
+  defp canonical_only_status?(map),
+    do: not Map.has_key?(map, :status) and not Map.has_key?(map, "status")
 
   defp bounded_approval_request_id(id) when is_binary(id) do
     case ApprovalAnswer.validate_request_id(id) do
@@ -540,7 +559,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     (value(raw, :verdict) ||
        (is_map(review) && value(review, :verdict)) ||
        %{
-         status: value(raw, :status),
+         status: effective_coding_status(raw),
          recommendation: value(raw, :review_recommendation) || value(review, :recommendation),
          tier_decision: value(raw, :tier_decision) || value(review, :tier_decision),
          human_required: value(raw, :human_required) || value(review, :human_required),

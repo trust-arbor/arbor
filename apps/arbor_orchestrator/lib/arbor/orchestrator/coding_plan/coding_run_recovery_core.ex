@@ -872,8 +872,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
   @spec admit_executor_result(map(), map(), map()) :: :ok | {:error, :binding_mismatch}
   def admit_executor_result(receipt, decision, result)
       when is_map(receipt) and is_map(decision) and is_map(result) do
+    canonical = result["canonical_status"] || result[:canonical_status]
+    status_present? = Map.has_key?(result, "status") or Map.has_key?(result, :status)
     status = result["status"] || result[:status]
-    canonical = result["canonical_status"] || result[:canonical_status] || status
+    status = if status_present?, do: status, else: canonical
+    canonical = canonical || status
 
     with :ok <- closed_receipt?(receipt),
          :ok <- closed_decision?(decision),

@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   alias Arbor.Orchestrator.CodingPlan.{
     ArtifactStore,
+    CodingRunRecoveryCore,
     Compiler,
     BudgetPolicy,
     Profiles,
@@ -2442,6 +2443,98 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_1",
                  envelope,
                  [],
+                 valid_context()
+               )
+
+      assert File.read!(terminal_path) == terminal_bytes
+      assert File.read!(evidence_path) == evidence_bytes
+    end
+
+    @tag :security_regression
+    test "security regression: canonical-only historical terminal refinalizes without mutation" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      assert {:error, _reason} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 Map.delete(original, "status"),
+                 controls,
+                 valid_context()
+               )
+
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 original,
+                 controls,
+                 valid_context()
+               )
+
+      {:ok, envelope} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 envelope,
+                 controls,
+                 valid_context()
+               )
+
+      root = task_terminal_root("task_coding_1")
+      terminal_path = Path.join(root, "coding-task-terminal.json")
+      evidence_path = Path.join(root, "coding-terminal-evidence.json")
+      evidence_bytes = File.read!(evidence_path)
+
+      archive = terminal_path |> File.read!() |> Jason.decode!()
+
+      historical_archive =
+        update_in(
+          archive,
+          ["terminal_envelope", "evidence", "result"],
+          &Map.delete(&1, "status")
+        )
+
+      historical_envelope = historical_archive["terminal_envelope"]
+      historical_result = get_in(historical_envelope, ["evidence", "result"])
+      refute Map.has_key?(historical_result, "status")
+      assert historical_result["canonical_status"] == "change_committed"
+
+      {:ok, canonical_archive} = CodingRunRecoveryCore.canonical_json(historical_archive)
+      terminal_bytes = Jason.encode!(canonical_archive, pretty: true)
+      File.rm!(terminal_path)
+      File.write!(terminal_path, terminal_bytes)
+      File.chmod!(terminal_path, 0o600)
+
+      seed_matching_record!("task_coding_1", "agent_1")
+      Process.sleep(30)
+
+      assert {:ok, recovered} = CodingTaskExecutor.recover_task("agent_1", valid_context())
+      refute Map.has_key?(recovered, "status")
+      assert recovered["canonical_status"] == "change_committed"
+      refute Map.has_key?(recovered["artifacts"], "task_evidence")
+
+      assert {:ok, refinialized} =
+               CodingTaskExecutor.finalize_task(
+                 "agent_1",
+                 recovered,
+                 controls,
+                 valid_context()
+               )
+
+      assert refinialized === historical_result
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 historical_envelope,
+                 controls,
                  valid_context()
                )
 

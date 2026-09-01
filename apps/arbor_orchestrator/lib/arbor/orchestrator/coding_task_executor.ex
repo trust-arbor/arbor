@@ -692,17 +692,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
          :ok <- validate_finalize_task_id(exec_ctx.task_id),
-         {:ok, result} <- normalize_finalize_result(result),
+         original_result = result,
+         {:ok, result, result_shape} <- normalize_finalize_result(result),
          :ok <- validate_finalize_controls(controls),
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          :ok <- validate_finalize_artifact_files(result, logs_root),
-         :ok <- reverify_finalize_compilation(result, logs_root, exec_ctx.task_id, agent_id),
+         {:ok, compilation_policy} <-
+           reverify_finalize_compilation(
+             original_result,
+             logs_root,
+             exec_ctx.task_id,
+             agent_id
+           ),
+         :ok <- admit_finalize_result_shape(result_shape, compilation_policy),
          {:ok, descriptor} <-
            archive_terminal_evidence(logs_root, exec_ctx.task_id, result, controls),
          {:ok, descriptor} <-
            validate_terminal_evidence_descriptor(descriptor, logs_root, exec_ctx.task_id) do
       artifacts = Map.fetch!(result, "artifacts")
-      {:ok, Map.put(result, "artifacts", Map.put(artifacts, "task_evidence", descriptor))}
+
+      finalized =
+        Map.put(result, "artifacts", Map.put(artifacts, "task_evidence", descriptor))
+
+      {:ok, restore_finalize_result_shape(finalized, result_shape)}
     end
   rescue
     exception -> {:error, {:coding_task_finalize_error, Exception.message(exception)}}
@@ -1167,11 +1179,37 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp normalize_finalize_result(result) do
-    with :ok <- validate_finalize_result(result),
-         {:ok, normalized} <- normalize_finalize_capacity(result) do
-      {:ok, normalized}
+    {candidate, shape} = prepare_finalize_result_shape(result)
+
+    with :ok <- validate_finalize_result(candidate),
+         {:ok, normalized} <- normalize_finalize_capacity(candidate) do
+      {:ok, normalized, shape}
     end
   end
+
+  defp prepare_finalize_result_shape(result) when is_map(result) and not is_struct(result) do
+    case {Map.fetch(result, "status"), Map.fetch(result, "canonical_status")} do
+      {:error, {:ok, canonical_status}} when is_binary(canonical_status) ->
+        {Map.put(result, "status", canonical_status), :canonical_only_historical}
+
+      _other ->
+        {result, :current}
+    end
+  end
+
+  defp prepare_finalize_result_shape(result), do: {result, :current}
+
+  defp admit_finalize_result_shape(:current, _compilation_policy), do: :ok
+
+  defp admit_finalize_result_shape(:canonical_only_historical, :admitted_terminal), do: :ok
+
+  defp admit_finalize_result_shape(:canonical_only_historical, _compilation_policy),
+    do: {:error, {:invalid_finalize_result, :canonical_only_without_admitted_terminal}}
+
+  defp restore_finalize_result_shape(result, :canonical_only_historical),
+    do: Map.delete(result, "status")
+
+  defp restore_finalize_result_shape(result, :current), do: result
 
   defp normalize_finalize_capacity(result),
     do: ValidationCapacityTerminal.normalize_result(result, :finalize)
@@ -1606,10 +1644,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
     case policy do
       :bypass_for_admitted_terminal ->
-        compare_archived_finalize_compilation(result, logs_root, bundle)
+        with :ok <- compare_archived_finalize_compilation(result, logs_root, bundle) do
+          {:ok, :admitted_terminal}
+        end
 
       :require_current_compilation ->
-        compare_live_finalize_compilation(result, logs_root, bundle)
+        with :ok <- compare_live_finalize_compilation(result, logs_root, bundle) do
+          {:ok, :current_compilation}
+        end
 
       :fail_closed ->
         {:error, :unprovable_recovery}

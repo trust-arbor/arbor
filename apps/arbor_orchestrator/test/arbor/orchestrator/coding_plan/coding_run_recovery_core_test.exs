@@ -169,7 +169,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
              CodingRunRecoveryCore.closed_adapter_input?(Map.put(adapter, "extra", "x"))
   end
 
-  test "decision and receipt identity join recomputes binding and decision digests" do
+  @tag :security_regression
+  test "security regression: decision and receipt identity join admits canonical-only historical executor results" do
     binding = valid_binding()
     {:ok, binding_digest} = CodingRunRecoveryCore.binding_digest(binding)
     adapter = valid_adapter()
@@ -221,6 +222,26 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCoreTest do
 
     assert :ok = CodingRunRecoveryCore.admit_terminal_identity(binding, decision, receipt)
     assert :ok = CodingRunRecoveryCore.admit_adapter_input(decision, adapter)
+
+    assert :ok =
+             CodingRunRecoveryCore.admit_executor_result(receipt, decision, %{
+               "canonical_status" => "change_committed"
+             })
+
+    assert {:error, :binding_mismatch} =
+             CodingRunRecoveryCore.admit_executor_result(receipt, decision, %{
+               "status" => "no_changes",
+               "canonical_status" => "change_committed"
+             })
+
+    assert {:error, :binding_mismatch} =
+             CodingRunRecoveryCore.admit_executor_result(receipt, decision, %{
+               "status" => nil,
+               "canonical_status" => "change_committed"
+             })
+
+    assert {:error, :binding_mismatch} =
+             CodingRunRecoveryCore.admit_executor_result(receipt, decision, %{})
 
     assert {:error, :binding_mismatch} =
              CodingRunRecoveryCore.admit_executor_result(receipt, decision, %{

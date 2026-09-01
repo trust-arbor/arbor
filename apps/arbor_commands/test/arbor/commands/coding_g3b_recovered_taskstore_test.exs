@@ -12,7 +12,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
   @moduletag :security_regression
 
   alias Arbor.Agent.Orchestration.{TaskControlLease, TaskControlRecoveryMemory, TaskStore}
-  alias Arbor.Orchestrator.CodingPlan.ArtifactStore
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, CodingRunRecoveryCore}
   alias Arbor.Orchestrator.CodingTaskExecutor
 
   defmodule CapturingRunner do
@@ -686,7 +686,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
              )
   end
 
-  test "security regression: settled coding task rehydrates exact terminal after coding graph upgrade",
+  test "security regression: canonical-only historical terminal rehydrates after coding graph upgrade",
        %{
          repo: repo,
          agent: agent,
@@ -715,21 +715,38 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     root = task_root(task_id)
     terminal_path = Path.join(root, "coding-task-terminal.json")
     evidence_path = Path.join(root, "coding-terminal-evidence.json")
-    terminal_bytes = File.read!(terminal_path)
     evidence_bytes = File.read!(evidence_path)
-    terminal_sha = sha256(terminal_bytes)
     evidence_sha = sha256(evidence_bytes)
 
-    archived = Jason.decode!(terminal_bytes)
+    archived = terminal_path |> File.read!() |> Jason.decode!()
     assert archived["terminal_envelope"]["outcome"]["code"] == "change_committed"
     assert archived["controls"] != []
     assert hd(archived["controls"])["control_id"] == control["control_id"]
     assert hd(archived["controls"])["status"] == "delivered"
 
+    archived_result = get_in(archived, ["terminal_envelope", "evidence", "result"])
+    assert archived_result["status"] == "change_committed"
+    assert archived_result["canonical_status"] == "change_committed"
+
+    historical_result = Map.delete(archived_result, "status")
+
+    historical_archive =
+      put_in(archived, ["terminal_envelope", "evidence", "result"], historical_result)
+
+    {:ok, canonical_archive} = CodingRunRecoveryCore.canonical_json(historical_archive)
+    terminal_bytes = Jason.encode!(canonical_archive, pretty: true)
+    File.rm!(terminal_path)
+    File.write!(terminal_path, terminal_bytes)
+    File.chmod!(terminal_path, 0o600)
+    terminal_sha = sha256(terminal_bytes)
+
     {:ok, original} = TaskStore.result(task_id, name: store_a)
     assert original.result_type == :coding_change
     assert original.raw["status"] == "change_committed"
     refute get_in(original.raw, ["outcome", "code"]) == "task_finalization_failed"
+
+    historical_raw = Map.delete(original.raw, "status")
+    assert historical_raw["canonical_status"] == "change_committed"
 
     {:ok, task_read_uri} = TaskControlLease.uri(:task_read, task_id)
     {:ok, task_adopt_uri} = TaskControlLease.uri(:task_adopt, task_id)
@@ -763,7 +780,7 @@ defmodule Arbor.Commands.CodingG3BRecoveredTaskStoreTest do
     assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store_b)
     assert {:ok, completed} = TaskStore.result(task_id, name: store_b)
     assert completed.result_type == :coding_change
-    assert completed.raw === original.raw
+    assert completed.raw === historical_raw
     refute get_in(completed.raw, ["outcome", "code"]) == "task_finalization_failed"
 
     assert File.read!(terminal_path) == terminal_bytes

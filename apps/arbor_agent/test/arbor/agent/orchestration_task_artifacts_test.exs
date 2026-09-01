@@ -40,6 +40,33 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.payload.verdict.recommendation == :keep
   end
 
+  @tag :security_regression
+  test "canonical-only historical coding results retain their raw shape" do
+    raw = %{
+      "canonical_status" => "change_committed",
+      "branch" => "agent/historical-change",
+      "worktree_path" => "/tmp/historical-ws",
+      "artifacts" => %{
+        "coding_plan_path" => "/tmp/coding-plan.json",
+        "coding_pipeline_path" => "/tmp/coding-pipeline.dot",
+        "compile_manifest_path" => "/tmp/coding-compile-manifest.json",
+        "compiler_version" => "coding-plan-1",
+        "graph_hash" => String.duplicate("a", 64)
+      }
+    }
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.report.status == "change_committed"
+    assert result.payload.report.canonical_status == "change_committed"
+    assert result.raw === raw
+    refute Map.has_key?(result.raw, "status")
+
+    explicit_nil_status = TaskArtifacts.normalize(Map.put(raw, "status", nil))
+    assert explicit_nil_status.result_type == :value
+  end
+
   test "projects the exact canonical outcome into payload and report" do
     outcome = task_outcome()
 
