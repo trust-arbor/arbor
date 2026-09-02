@@ -113,7 +113,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   ]
   @cross_app_validate_context_keys "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest"
   @descriptor_cross_app_validate_context_keys @cross_app_validate_context_keys <>
-                                                ",validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+                                                ",validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref,candidate_materialization"
   @cross_app_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
   @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
   @cross_app_domain_failure_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
@@ -257,7 +257,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:graph_phase` — `:reviewed` (default) for the complete generated graph,
       or `:executable` for a descriptor-specialized graph after unreachable
       implementation and rework branches have been pruned. The executable
-      phase is valid only with `candidate_materialization: true`.
+      phase is valid only with `candidate_materialization: true`. Descriptor-
+      specialized profile/CrossApp pins apply whenever
+      `candidate_materialization: true`; writer, placement-pruning, and
+      validation-stop checks still key off `:reviewed` vs `:executable`.
     * `:design_checkpoint_timeout_ms` — optional legacy opt; ignored. Human-wait
       capacity is owner-seeded as `coding_budget.interaction_wait_ms`. Open pins
       exact `param.timeout` to
@@ -1371,11 +1374,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   defp descriptor_route?(%Graph{} = graph), do: Map.has_key?(graph.nodes, "materialize_candidate")
   defp descriptor_route?(_graph), do: false
 
-  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
-  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
-  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id"
-  @descriptor_review_identity_keys ~w(candidate_source evidence_ref acquired_base_commit expected_tree_oid candidate_materialization_digest validation_resource_id)
-  @descriptor_materialize_context_keys "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit"
+  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
+  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
+  @descriptor_review_identity_keys ~w(candidate_source evidence_ref acquired_base_commit expected_tree_oid candidate_materialization_digest validation_resource_id candidate_materialization)
+  @descriptor_materialize_context_keys "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit,materialize_window,evidence_ref"
 
   defp check_descriptor_route(errors, graph, %{active: false}) do
     if Map.has_key?(graph.nodes, "materialize_candidate") do
@@ -1401,6 +1404,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       check_workspace_at_base
       skip_descriptor_close
       status_descriptor_pipeline_error
+      hoist_post_validate_resource_id
+      hoist_committed_resource_id
+      sanitize_descriptor_commit_hash
     ]
 
     errors =
@@ -1457,6 +1463,21 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       )
       |> require_descriptor_exact_outgoing(
         graph,
+        "hoist_post_validate_resource_id",
+        [{"route_validation_interaction", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "hoist_descriptor_commit_hash",
+        [{"sanitize_descriptor_commit_hash", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "sanitize_descriptor_commit_hash",
+        [{"materialize_candidate", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
         "compare_descriptor_workspace_base",
         [{"check_workspace_at_base", nil}]
       )
@@ -1476,8 +1497,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "load_committed_change",
         [
           {"error_committed_change_materialization", "outcome=fail"},
-          {"hoist_change_commit", "outcome=success"}
+          {"hoist_committed_resource_id", "outcome=success"}
         ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "hoist_committed_resource_id",
+        [{"hoist_change_commit", nil}]
       )
       |> require_descriptor_exact_outgoing(
         graph,
@@ -1752,6 +1778,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "descriptor_workspace_at_base"
         )
         |> require_dominates(
+          "hoist_committed_resource_id",
+          "review_change",
+          reachable,
+          dominators,
+          "descriptor_committed_resource"
+        )
+        |> require_dominates(
           "materialize_candidate",
           "publish_workspace",
           reachable,
@@ -1898,6 +1931,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "transform" => "identity",
         "source_key" => "source_commit_oid",
         "output_key" => "commit_hash"
+      },
+      "sanitize_descriptor_commit_hash" => %{
+        "type" => "sanitize",
+        "sanitize" => "command_injection",
+        "source_key" => "commit_hash",
+        "output_key" => "commit_hash"
+      },
+      "hoist_post_validate_resource_id" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "validation.resource_id",
+        "output_key" => "validation_resource_id"
+      },
+      "hoist_committed_resource_id" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "change.resource_id",
+        "output_key" => "validation_resource_id"
       },
       "materialize_candidate" => %{
         "type" => "exec",
@@ -5115,6 +5166,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # --- profile-specific reviewed bindings ----------------------------------
 
+  # Specialized CrossApp pins apply whenever candidate_materialization is
+  # active; writer/pruning remain phase-specific.
   defp check_profile_bindings_for_phase(
          errors,
          graph,
@@ -5124,7 +5177,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          validation_test_stage_timeout_ms,
          validation_stage_timeout_ms,
          stop_conditions,
-         %{active: true, phase: :executable}
+         %{active: true}
        ) do
     check_executable_descriptor_profile_bindings(
       errors,
@@ -5717,7 +5770,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {"error_cross_app_window_invalid", nil}
        ]},
       {"hoist_cross_app_progress", [{"hoist_cross_app_progress_binding", nil}]},
-      {"hoist_cross_app_progress_binding", [{"validate", nil}]},
+      {"hoist_cross_app_progress_binding", [{"hoist_materialize_window", nil}]},
+      {"hoist_materialize_window", [{"materialize_candidate", nil}]},
       {"error_cross_app_window_invalid", [{"status_descriptor_pipeline_error", nil}]}
     ]
 
@@ -5733,10 +5787,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_executable_descriptor_cross_app_loop_node_attrs(errors, graph) do
+    window_attrs = [
+      {"hoist_materialize_window",
+       %{
+         "type" => "transform",
+         "transform" => "json_extract",
+         "source_key" => "cross_app_progress",
+         "expression" => "window_ordinal",
+         "output_key" => "materialize_window"
+       }}
+    ]
+
     @cross_app_loop_node_attrs
     |> Enum.reject(fn {node_id, _attrs} ->
       node_id in ["clear_cross_app_progress", "clear_cross_app_progress_binding"]
     end)
+    |> Kernel.++(window_attrs)
     |> Enum.reduce(errors, fn {node_id, attrs}, acc ->
       require_cross_app_node_attrs(acc, graph, node_id, attrs)
     end)
@@ -5996,7 +6062,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     expected = [
       {"check_validation_passed",
        validation_result_gate_outgoing(graph, policy, stop_conditions)},
-      {"validate", hard_validation_failure_outgoing()}
+      {"validate", hard_validation_failure_outgoing(graph)}
     ]
 
     Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
@@ -6025,7 +6091,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"check_validation_passed",
        validation_result_gate_outgoing(graph, policy, stop_conditions)},
       {"hoist_validation_approval_note", operator_validation_rework_outgoing(policy)},
-      {"validate", hard_validation_failure_outgoing()}
+      {"validate", hard_validation_failure_outgoing(graph)}
     ]
 
     Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
@@ -6085,10 +6151,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     [{target, nil}]
   end
 
-  defp hard_validation_failure_outgoing do
+  defp hard_validation_failure_outgoing(graph) do
+    success_to =
+      if descriptor_route?(graph),
+        do: "hoist_post_validate_resource_id",
+        else: "route_validation_interaction"
+
     [
       {"status_validation_failed", "outcome=fail"},
-      {"route_validation_interaction", "outcome=success"}
+      {success_to, "outcome=success"}
     ]
   end
 
@@ -6678,6 +6749,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         dominators,
         "validation"
       )
+
+    errors =
+      Enum.reduce(publication_targets, errors, fn target, acc ->
+        require_dominates(
+          acc,
+          "hoist_committed_resource_id",
+          target,
+          reachable,
+          dominators,
+          "descriptor_committed_resource"
+        )
+      end)
 
     if review_profile in ["binding", "human_required"] do
       errors

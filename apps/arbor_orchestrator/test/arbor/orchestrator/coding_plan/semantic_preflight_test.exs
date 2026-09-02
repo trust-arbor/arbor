@@ -1076,6 +1076,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     {:ok, validation_params} =
       Jason.decode(graph.nodes["validate"].attrs["param.pinned_params_json"])
 
+    policy = Profiles.semantic_policy(profile, true)
+
+    preflight_opts = [
+      review_profile: "binding",
+      checkpoint_policy: "design_required",
+      design_gate: "council_then_operator",
+      checkpoint_work_packet_json: packet_json,
+      candidate_materialization: true,
+      candidate_materialization_digest: digest,
+      graph_phase: :executable,
+      worker_use_pool: plan.worker["use_pool"],
+      worker_resume_session_id: plan.worker["resume_session_id"],
+      worker_permission_mode: plan.worker["permission_mode"],
+      worker_model: plan.worker["model"],
+      rework_max_cycles: plan.rework["max_cycles"],
+      rework_stop_conditions: plan.rework["stop_conditions"],
+      validation_timeout_ms: validation_params["timeout"],
+      validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
+      validation_stage_timeout_ms: validation_params["stage_timeout"]
+    ]
+
     assert graph.nodes["hoist_descriptor_observed_at"].attrs == %{
              "type" => "transform",
              "transform" => "identity",
@@ -1083,25 +1104,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              "output_key" => "validation_observed_at"
            }
 
-    assert :ok =
-             preflight(graph, Profiles.semantic_policy(profile, true),
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               design_gate: "council_then_operator",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               graph_phase: :executable,
-               worker_use_pool: plan.worker["use_pool"],
-               worker_resume_session_id: plan.worker["resume_session_id"],
-               worker_permission_mode: plan.worker["permission_mode"],
-               worker_model: plan.worker["model"],
-               rework_max_cycles: plan.rework["max_cycles"],
-               rework_stop_conditions: plan.rework["stop_conditions"],
-               validation_timeout_ms: validation_params["timeout"],
-               validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
-               validation_stage_timeout_ms: validation_params["stage_timeout"]
-             )
+    assert graph.nodes["hoist_committed_resource_id"].attrs == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "change.resource_id",
+             "output_key" => "validation_resource_id"
+           }
+
+    assert :ok = preflight(graph, policy, preflight_opts)
 
     mutated =
       update_in(
@@ -1110,29 +1120,139 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
-             preflight(mutated, Profiles.semantic_policy(profile, true),
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               design_gate: "council_then_operator",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               graph_phase: :executable,
-               worker_use_pool: plan.worker["use_pool"],
-               worker_resume_session_id: plan.worker["resume_session_id"],
-               worker_permission_mode: plan.worker["permission_mode"],
-               worker_model: plan.worker["model"],
-               rework_max_cycles: plan.rework["max_cycles"],
-               rework_stop_conditions: plan.rework["stop_conditions"],
-               validation_timeout_ms: validation_params["timeout"],
-               validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
-               validation_stage_timeout_ms: validation_params["stage_timeout"]
-             )
+             preflight(mutated, policy, preflight_opts)
 
     assert Enum.any?(errors, fn error ->
              error["code"] == "descriptor_binding_mismatch" and
                error["node_id"] == "hoist_descriptor_observed_at"
            end)
+
+    bypassed = %{
+      graph
+      | adjacency: %{},
+        reverse_adjacency: %{},
+        edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "hoist_cross_app_progress_binding" and
+                 edge.to == "hoist_materialize_window" do
+              %{edge | to: "validate"}
+            else
+              edge
+            end
+          end)
+    }
+
+    assert {:error, {:semantic_preflight_failed, topology_errors}} =
+             preflight(bypassed, policy, preflight_opts)
+
+    assert Enum.any?(topology_errors, &(&1["code"] == "cross_app_topology_mismatch"))
+
+    missing_committed = %{
+      graph
+      | nodes: Map.delete(graph.nodes, "hoist_committed_resource_id"),
+        adjacency: %{},
+        reverse_adjacency: %{},
+        edges:
+          Enum.flat_map(graph.edges, fn edge ->
+            cond do
+              edge.from == "load_committed_change" and
+                edge.to == "hoist_committed_resource_id" and
+                  Map.get(edge.attrs, "condition") == "outcome=success" ->
+                [%{edge | to: "hoist_change_commit"}]
+
+              edge.from == "hoist_committed_resource_id" or
+                  edge.to == "hoist_committed_resource_id" ->
+                []
+
+              true ->
+                [edge]
+            end
+          end)
+    }
+
+    assert {:error, {:semantic_preflight_failed, missing_errors}} =
+             preflight(missing_committed, policy, preflight_opts)
+
+    assert Enum.any?(missing_errors, fn error ->
+             error["code"] == "missing_descriptor_route_node" and
+               error["node_id"] == "hoist_committed_resource_id"
+           end)
+
+    wrong_binding =
+      update_in(
+        graph.nodes["hoist_committed_resource_id"].attrs,
+        &(&1
+          |> Map.put("source_key", "validation.resource_id")
+          |> Map.put("output_key", "commit_hash"))
+      )
+
+    assert {:error, {:semantic_preflight_failed, binding_errors}} =
+             preflight(wrong_binding, policy, preflight_opts)
+
+    assert Enum.any?(binding_errors, fn error ->
+             error["code"] == "descriptor_binding_mismatch" and
+               error["node_id"] == "hoist_committed_resource_id"
+           end)
+
+    bypassed_committed = %{
+      graph
+      | adjacency: %{},
+        reverse_adjacency: %{},
+        edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "load_committed_change" and
+                 edge.to == "hoist_committed_resource_id" and
+                 Map.get(edge.attrs, "condition") == "outcome=success" do
+              %{edge | to: "hoist_change_commit"}
+            else
+              edge
+            end
+          end)
+    }
+
+    assert {:error, {:semantic_preflight_failed, committed_bypass_errors}} =
+             preflight(bypassed_committed, policy, preflight_opts)
+
+    assert Enum.any?(committed_bypass_errors, fn error ->
+             error["code"] == "descriptor_topology_mismatch" and
+               error["node_id"] == "load_committed_change"
+           end)
+
+    wrong_outgoing = %{
+      graph
+      | adjacency: %{},
+        reverse_adjacency: %{},
+        edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "hoist_committed_resource_id" and edge.to == "hoist_change_commit" do
+              %{edge | to: "review_change"}
+            else
+              edge
+            end
+          end)
+    }
+
+    assert {:error, {:semantic_preflight_failed, outgoing_errors}} =
+             preflight(wrong_outgoing, policy, preflight_opts)
+
+    assert Enum.any?(outgoing_errors, fn error ->
+             error["code"] == "descriptor_topology_mismatch" and
+               error["node_id"] == "hoist_committed_resource_id"
+           end)
+
+    for target <- policy["publication_nodes"], Map.has_key?(graph.nodes, target) do
+      early_bypass = add_edge(graph, "prep_expected_commit", target, nil)
+
+      assert {:error, {:semantic_preflight_failed, dominance_errors}} =
+               preflight(early_bypass, policy, preflight_opts)
+
+      assert Enum.any?(dominance_errors, fn error ->
+               error["code"] == "dominance_violation" and
+                 error["node_id"] == target and
+                 error["detail"]["kind"] == "descriptor_committed_resource" and
+                 error["detail"]["required_dominator"] == "hoist_committed_resource_id"
+             end)
+    end
   end
 
   test "compiler and terminal evidence reject duplicate and cross-attribute writers", ctx do

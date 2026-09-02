@@ -2296,6 +2296,10 @@ defmodule Arbor.Actions.Coding.Workspace do
         candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
         validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"],
         evidence_ref: [type: :string, doc: "Pre-pinned evidence ref"],
+        candidate_materialization: [
+          type: :map,
+          doc: "Compiler-owned candidate materialization descriptor"
+        ],
         require_candidate_binding: [
           type: :boolean,
           default: false,
@@ -2304,6 +2308,7 @@ defmodule Arbor.Actions.Coding.Workspace do
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Coding.CandidateMaterializationShell
     alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore
@@ -2333,6 +2338,7 @@ defmodule Arbor.Actions.Coding.Workspace do
         candidate_materialization_digest: :control,
         validation_resource_id: :control,
         evidence_ref: :control,
+        candidate_materialization: :control,
         require_candidate_binding: :control
       }
     end
@@ -2373,15 +2379,18 @@ defmodule Arbor.Actions.Coding.Workspace do
                 :expected_tree_oid,
                 :candidate_materialization_digest,
                 :validation_resource_id,
-                :evidence_ref
+                :evidence_ref,
+                :candidate_materialization
               ],
               release_opts,
               fn key, acc ->
                 value = Map.get(params, key) || Map.get(params, Atom.to_string(key))
 
-                if is_binary(value) and value != "",
-                  do: Map.put(acc, key, value),
-                  else: acc
+                cond do
+                  is_binary(value) and value != "" -> Map.put(acc, key, value)
+                  is_map(value) -> Map.put(acc, key, value)
+                  true -> acc
+                end
               end
             )
 
@@ -2422,8 +2431,8 @@ defmodule Arbor.Actions.Coding.Workspace do
         Map.get(opts, :acquired_base_commit),
         Map.get(opts, :expected_tree_oid),
         Map.get(opts, :candidate_materialization_digest),
-        Map.get(opts, :validation_resource_id),
-        Map.get(opts, :evidence_ref)
+        Map.get(opts, :evidence_ref),
+        Map.get(opts, :candidate_materialization)
       ]
 
       cond do
@@ -2436,25 +2445,32 @@ defmodule Arbor.Actions.Coding.Workspace do
         Enum.any?(extras, &(is_nil(&1) or &1 == "")) ->
           {:error, :incomplete_immutable_review_binding}
 
+        not is_map(Map.get(opts, :candidate_materialization)) ->
+          {:error, :incomplete_immutable_review_binding}
+
         true ->
-          server_opts =
+          input = %{
+            workspace_id: workspace_id,
+            task_id: Map.get(opts, :task_id),
+            principal_id: Map.get(opts, :principal_id),
+            candidate_materialization: Map.get(opts, :candidate_materialization),
+            pinned_descriptor_digest: Map.get(opts, :candidate_materialization_digest),
+            candidate_materialization_digest: Map.get(opts, :candidate_materialization_digest),
+            source_commit_oid:
+              Map.get(opts, :candidate_commit) || Map.get(opts, :source_commit_oid),
+            expected_tree_oid: Map.get(opts, :expected_tree_oid),
+            acquired_base_commit: Map.get(opts, :acquired_base_commit),
+            evidence_ref: Map.get(opts, :evidence_ref),
+            require_evidence_ref: true
+          }
+
+          input =
             case Map.get(opts, :server) do
-              nil -> []
-              server -> [server: server]
+              nil -> input
+              server -> Map.put(input, :server, server)
             end
 
-          with {:ok, _lease} <-
-                 WorkspaceLeaseRegistry.ensure_active_by_lineage(
-                   workspace_id,
-                   Map.get(opts, :task_id),
-                   Map.get(opts, :principal_id),
-                   server_opts
-                 ),
-               {:ok, _resource} <-
-                 WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
-                   opts.validation_resource_id,
-                   opts
-                 ),
+          with {:ok, _handle} <- CandidateMaterializationShell.resolve_or_materialize(input),
                repo when is_binary(repo) <- Map.get(opts, :repo_path),
                commit when is_binary(commit) <- Map.get(opts, :candidate_commit),
                {:ok, %{hidden_ref: hidden_ref}} <-
@@ -2574,10 +2590,15 @@ defmodule Arbor.Actions.Coding.Workspace do
         expected_tree_oid: [type: :string, doc: "Checkpointed candidate tree oid"],
         candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
         validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"],
-        evidence_ref: [type: :string, doc: "Pre-pinned task/workspace evidence ref"]
+        evidence_ref: [type: :string, doc: "Pre-pinned task/workspace evidence ref"],
+        candidate_materialization: [
+          type: :map,
+          doc: "Compiler-owned candidate materialization descriptor"
+        ]
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Coding.CandidateMaterializationShell
     alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
@@ -2593,7 +2614,8 @@ defmodule Arbor.Actions.Coding.Workspace do
         expected_tree_oid: :control,
         candidate_materialization_digest: :control,
         validation_resource_id: :control,
-        evidence_ref: :control
+        evidence_ref: :control,
+        candidate_materialization: :control
       }
     end
 
@@ -2631,8 +2653,16 @@ defmodule Arbor.Actions.Coding.Workspace do
           task_id = Workspace.context_task_id(context)
           principal_id = Workspace.context_principal_id(context)
 
-          with {:ok, _claimed} <-
-                 ensure_active_workspace(workspace_id, task_id, principal_id, context),
+          with {:ok, handle} <-
+                 CandidateMaterializationShell.resolve_or_materialize(
+                   committed_change_resolve_input(
+                     workspace_id,
+                     extras,
+                     task_id,
+                     principal_id,
+                     context
+                   )
+                 ),
                {:ok, lease} <-
                  WorkspaceLeaseRegistry.inspect_lease(
                    workspace_id,
@@ -2642,20 +2672,6 @@ defmodule Arbor.Actions.Coding.Workspace do
                    })
                  ),
                :ok <- require_acquired_base(lease, extras.acquired_base_commit),
-               {:ok, _resource} <-
-                 WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
-                   extras.validation_resource_id,
-                   Workspace.registry_caller(context, %{
-                     task_id: task_id,
-                     principal_id: principal_id,
-                     workspace_id: workspace_id,
-                     source_commit_oid: extras.commit,
-                     expected_tree_oid: extras.expected_tree_oid,
-                     candidate_materialization_digest: extras.digest,
-                     acquired_base_commit: extras.acquired_base_commit,
-                     evidence_ref: extras.evidence_ref
-                   })
-                 ),
                repo_path <- map_value(lease, :repo_path),
                {:ok, %{hidden_ref: hidden_ref}} <-
                  Git.verify_archived_evidence_ref(
@@ -2691,7 +2707,8 @@ defmodule Arbor.Actions.Coding.Workspace do
               "files" => files,
               "base_ref" => extras.acquired_base_commit,
               "branch" => map_value(lease, :branch),
-              "worktree_path" => worktree_path
+              "worktree_path" => worktree_path,
+              "resource_id" => handle["resource_id"]
             }
 
             Actions.emit_completed(__MODULE__, %{
@@ -2788,39 +2805,49 @@ defmodule Arbor.Actions.Coding.Workspace do
       acquired_base = map_value(params, :acquired_base_commit)
       tree = map_value(params, :expected_tree_oid)
       digest = map_value(params, :candidate_materialization_digest)
-      resource_id = map_value(params, :validation_resource_id)
       evidence_ref = map_value(params, :evidence_ref)
       commit = map_value(params, :commit)
 
-      if Enum.all?([acquired_base, tree, digest, resource_id, evidence_ref, commit], fn value ->
-           is_binary(value) and value != ""
-         end) do
+      descriptor =
+        Map.get(params, :candidate_materialization) ||
+          Map.get(params, "candidate_materialization")
+
+      if is_map(descriptor) and
+           Enum.all?([acquired_base, tree, digest, evidence_ref, commit], fn value ->
+             is_binary(value) and value != ""
+           end) do
         %{
           acquired_base_commit: acquired_base,
           expected_tree_oid: tree,
           digest: digest,
-          validation_resource_id: resource_id,
           evidence_ref: evidence_ref,
-          commit: commit
+          commit: commit,
+          candidate_materialization: descriptor
         }
       else
         :incomplete
       end
     end
 
-    defp ensure_active_workspace(workspace_id, task_id, principal_id, context) do
-      server_opts =
-        case Workspace.registry_caller(context, %{}) do
-          %{server: server} -> [server: server]
-          _ -> []
-        end
+    defp committed_change_resolve_input(workspace_id, extras, task_id, principal_id, context) do
+      input = %{
+        workspace_id: workspace_id,
+        task_id: task_id,
+        principal_id: principal_id,
+        candidate_materialization: extras.candidate_materialization,
+        pinned_descriptor_digest: extras.digest,
+        candidate_materialization_digest: extras.digest,
+        source_commit_oid: extras.commit,
+        expected_tree_oid: extras.expected_tree_oid,
+        acquired_base_commit: extras.acquired_base_commit,
+        evidence_ref: extras.evidence_ref,
+        require_evidence_ref: true
+      }
 
-      WorkspaceLeaseRegistry.ensure_active_by_lineage(
-        workspace_id,
-        task_id,
-        principal_id,
-        server_opts
-      )
+      case Workspace.registry_caller(context, %{}) do
+        %{server: server} -> Map.put(input, :server, server)
+        _ -> input
+      end
     end
 
     defp require_acquired_base(lease, acquired_base_commit) do

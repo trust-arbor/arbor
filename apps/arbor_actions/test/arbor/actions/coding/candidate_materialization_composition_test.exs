@@ -486,6 +486,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
       acquired_base_commit: lease.base_commit,
       expected_tree_oid: descriptor["expected_tree_oid"],
       candidate_materialization_digest: digest,
+      candidate_materialization: descriptor,
       validation_resource_id: materialized["resource_id"],
       evidence_ref: materialized["hidden_ref"]
     }
@@ -495,6 +496,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
 
     assert change["commit_hash"] == source
     assert change["base_ref"] == lease.base_commit
+    assert change["resource_id"] == materialized["resource_id"]
     assert Enum.all?(Map.keys(change), &is_binary/1)
 
     assert {:error, :incomplete_immutable_review_binding} =
@@ -504,6 +506,12 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
                  commit: source,
                  candidate_source: "immutable_object"
                },
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :incomplete_immutable_review_binding} =
+             Workspace.CommittedChange.run(
+               Map.delete(identities, :candidate_materialization),
                context(task_id, principal_id, server)
              )
 
@@ -538,7 +546,18 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
       "expected_tree_oid" => String.duplicate("c", 40),
       "candidate_materialization_digest" => String.duplicate("d", 64),
       "acquired_base_commit" => String.duplicate("e", 40),
-      "evidence_ref" => "refs/arbor/evidence/task/workspace"
+      "evidence_ref" => "refs/arbor/evidence/task/workspace",
+      "candidate_materialization" => %{
+        "source_commit_oid" => String.duplicate("b", 40),
+        "expected_tree_oid" => String.duplicate("c", 40),
+        "entries" => [
+          %{
+            "path" => "lib/a.ex",
+            "blob_oid" => String.duplicate("f", 40),
+            "mode" => 100_644
+          }
+        ]
+      }
     }
 
     for key <- ~w(
@@ -548,6 +567,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
           candidate_materialization_digest
           acquired_base_commit
           evidence_ref
+          candidate_materialization
         ) do
       assert {:error, :incomplete_immutable_review_binding} =
                CrossAppShell.run(input, Map.delete(context, key))
@@ -611,6 +631,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
         "source_commit_oid" => source,
         "expected_tree_oid" => descriptor["expected_tree_oid"],
         "candidate_materialization_digest" => digest,
+        "candidate_materialization" => descriptor,
         "acquired_base_commit" => lease.base_commit,
         "evidence_ref" => materialized["hidden_ref"],
         "worktree_path" => worktree,
@@ -727,6 +748,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
                  candidate_materialization_digest: digest,
                  validation_resource_id: materialized["resource_id"],
                  evidence_ref: materialized["hidden_ref"],
+                 candidate_materialization: descriptor,
                  require_candidate_binding: true
                },
                context(task_id, principal_id, server)
@@ -764,7 +786,8 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationCompositionTest do
       candidate_materialization_digest: digest,
       source_commit_oid: descriptor["source_commit_oid"],
       expected_tree_oid: descriptor["expected_tree_oid"],
-      acquired_base_commit: lease.base_commit
+      acquired_base_commit: lease.base_commit,
+      materialize_window: 0
     }
   end
 

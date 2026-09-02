@@ -521,7 +521,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
             "coding_plan_candidate_materialization" => descriptor,
             "coding_plan_candidate_materialization_digest" => digest,
             "coding_plan_source_commit_oid" => descriptor["source_commit_oid"],
-            "coding_plan_expected_tree_oid" => descriptor["expected_tree_oid"]
+            "coding_plan_expected_tree_oid" => descriptor["expected_tree_oid"],
+            "materialize_window" => 0
           })
 
         {:error, _reason} ->
@@ -534,7 +535,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
   defp maybe_put_initial_descriptor(values, _plan), do: values
 
-  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref,candidate_materialization"
 
   defp maybe_append_descriptor_validate_keys(attrs, plan) do
     if descriptor_activated?(plan) do

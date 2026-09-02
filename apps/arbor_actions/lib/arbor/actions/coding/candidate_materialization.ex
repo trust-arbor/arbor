@@ -59,29 +59,24 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
         type: :string,
         required: true,
         doc: "Engine-checkpointed acquired base commit"
+      ],
+      materialize_window: [
+        type: :integer,
+        required: true,
+        doc: "Compiler-owned capacity window ordinal; not identity"
+      ],
+      evidence_ref: [
+        type: :string,
+        required: false,
+        doc: "Checkpointed hidden evidence ref; omitted on first pin"
       ]
     ]
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.CandidateMaterializationShell
-  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
-  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
-  alias Arbor.Contracts.Coding.CandidateMaterialization
 
-  @closed_result_keys [
-    "resource_id",
-    "candidate_path",
-    "tree_oid",
-    "expected_tree_oid",
-    "source_commit_oid",
-    "hidden_ref",
-    "object_format",
-    "descriptor_digest",
-    "base_commit",
-    "workspace_id",
-    "observed_at"
-  ]
+  @max_materialize_window 2_000
 
   @allowed_param_names MapSet.new(~w[
                          workspace_id
@@ -91,6 +86,8 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
                          source_commit_oid
                          expected_tree_oid
                          acquired_base_commit
+                         materialize_window
+                         evidence_ref
                        ])
 
   def taint_roles do
@@ -101,7 +98,9 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
       candidate_materialization_digest: :control,
       source_commit_oid: :control,
       expected_tree_oid: :control,
-      acquired_base_commit: :control
+      acquired_base_commit: :control,
+      materialize_window: :control,
+      evidence_ref: :control
     }
   end
 
@@ -116,6 +115,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
 
     result =
       with :ok <- reject_forbidden_params(params),
+           {:ok, window} <- admit_materialize_window(params),
            {:ok, task_id, principal_id} <- trusted_identity(context),
            {:ok, workspace_id} <- require_binary(params, :workspace_id),
            {:ok, pin} <- require_binary(params, :pinned_descriptor_digest),
@@ -123,65 +123,33 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
            {:ok, source_commit_oid} <- require_binary(params, :source_commit_oid),
            {:ok, expected_tree_oid} <- require_binary(params, :expected_tree_oid),
            {:ok, acquired_base_commit} <- require_binary(params, :acquired_base_commit),
-           descriptor_attrs <- param(params, :candidate_materialization),
-           {:ok, descriptor} <- CandidateMaterialization.new(descriptor_attrs),
-           {:ok, digest} <- CandidateMaterialization.digest(descriptor),
-           :ok <-
-             bind_compiler_identities(
-               digest,
-               pin,
-               checkpoint_digest,
-               descriptor,
-               source_commit_oid,
-               expected_tree_oid
-             ),
-           {:ok, view} <-
-             inspect_lease(workspace_id, task_id, principal_id, context),
-           :ok <- require_owned_workspace(view),
-           :ok <- require_acquired_base(view, acquired_base_commit),
-           identities <-
-             bind_caller(
-               workspace_id,
-               task_id,
-               principal_id,
-               source_commit_oid,
-               expected_tree_oid,
-               digest,
-               acquired_base_commit,
-               nil,
-               registry_server(context)
-             ) do
-        case WorkspaceLeaseRegistry.inspect_object_backed_validation_binding(
-               workspace_id,
-               identities
-             ) do
-          {:ok, binding} ->
-            reuse_or_rematerialize(
-              binding,
-              workspace_id,
-              task_id,
-              principal_id,
-              descriptor,
-              digest,
-              source_commit_oid,
-              expected_tree_oid,
-              acquired_base_commit,
-              identities
-            )
+           {:ok, evidence_ref} <- admit_window_evidence_ref(window, params) do
+        input = %{
+          workspace_id: workspace_id,
+          task_id: task_id,
+          principal_id: principal_id,
+          candidate_materialization: param(params, :candidate_materialization),
+          pinned_descriptor_digest: pin,
+          candidate_materialization_digest: checkpoint_digest,
+          source_commit_oid: source_commit_oid,
+          expected_tree_oid: expected_tree_oid,
+          acquired_base_commit: acquired_base_commit,
+          require_evidence_ref: window > 0
+        }
 
-          {:error, :not_found} ->
-            materialize_fresh(
-              workspace_id,
-              task_id,
-              principal_id,
-              descriptor,
-              digest,
-              identities
-            )
+        input =
+          case evidence_ref do
+            ref when is_binary(ref) and ref != "" -> Map.put(input, :evidence_ref, ref)
+            _ -> input
+          end
 
-          {:error, reason} ->
-            {:error, reason}
-        end
+        input =
+          case registry_server(context) do
+            nil -> input
+            server -> Map.put(input, :server, server)
+          end
+
+        CandidateMaterializationShell.resolve_or_materialize(input)
       end
 
     case result do
@@ -197,126 +165,40 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
 
   def run(_params, _context), do: {:error, :malformed_admission_input}
 
-  defp materialize_fresh(workspace_id, task_id, principal_id, descriptor, digest, identities) do
-    input = %{
-      workspace_id: workspace_id,
-      task_id: task_id,
-      principal_id: principal_id,
-      candidate_materialization: CandidateMaterialization.to_map(descriptor)
-    }
+  defp admit_materialize_window(params) do
+    value = param(params, :materialize_window)
 
-    input =
-      case Map.get(identities, :server) do
-        nil -> input
-        server -> Map.put(input, :server, server)
-      end
+    if is_integer(value) and value >= 0 and value <= @max_materialize_window,
+      do: {:ok, value},
+      else: {:error, :invalid_materialization_params}
+  end
 
-    case CandidateMaterializationShell.admit_and_materialize(input) do
-      {:ok, raw} ->
-        with {:ok, encoded} <-
-               encode_result(
-                 raw,
-                 digest,
-                 descriptor.source_commit_oid,
-                 descriptor.expected_tree_oid,
-                 identities.acquired_base_commit,
-                 workspace_id
-               ),
-             {:ok, _bound} <-
-               WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
-                 encoded["resource_id"],
-                 bind_caller(
-                   workspace_id,
-                   task_id,
-                   principal_id,
-                   descriptor.source_commit_oid,
-                   descriptor.expected_tree_oid,
-                   digest,
-                   identities.acquired_base_commit,
-                   encoded["hidden_ref"],
-                   Map.get(identities, :server)
-                 )
-               ) do
-          {:ok, encoded}
+  defp admit_window_evidence_ref(window, params) do
+    case param(params, :evidence_ref) do
+      value when value in [nil, ""] ->
+        admit_optional_or_required_ref(window)
+
+      ref when is_binary(ref) ->
+        cond do
+          not String.valid?(ref) ->
+            {:error, :incomplete_immutable_review_binding}
+
+          String.trim(ref) == "" ->
+            {:error, :incomplete_immutable_review_binding}
+
+          true ->
+            {:ok, ref}
         end
 
-      {:error, reason} ->
-        {:error, reason}
+      _other ->
+        {:error, :incomplete_immutable_review_binding}
     end
   end
 
-  defp reuse_or_rematerialize(
-         binding,
-         workspace_id,
-         task_id,
-         principal_id,
-         descriptor,
-         digest,
-         source_commit_oid,
-         expected_tree_oid,
-         acquired_base_commit,
-         identities
-       ) do
-    case encode_result(
-           binding,
-           digest,
-           source_commit_oid,
-           expected_tree_oid,
-           acquired_base_commit,
-           workspace_id
-         ) do
-      {:ok, _payload} = ok ->
-        ok
+  defp admit_optional_or_required_ref(window) when window > 0,
+    do: {:error, :incomplete_immutable_review_binding}
 
-      {:error, :invalid_observed_at} = error ->
-        error
-
-      {:error, :non_json_materialization_result} = error ->
-        resource_id = string_field(binding, :resource_id)
-
-        if is_binary(resource_id) and resource_id != "" do
-          with {:ok, _released} <-
-                 WorkspaceLeaseRegistry.release_validation_resource(resource_id, identities) do
-            materialize_fresh(
-              workspace_id,
-              task_id,
-              principal_id,
-              descriptor,
-              digest,
-              identities
-            )
-          end
-        else
-          error
-        end
-    end
-  end
-
-  defp bind_compiler_identities(
-         digest,
-         pin,
-         checkpoint_digest,
-         descriptor,
-         source_commit_oid,
-         expected_tree_oid
-       ) do
-    cond do
-      not is_binary(pin) or pin == "" ->
-        {:error, :compiler_descriptor_binding_missing}
-
-      digest != pin or digest != checkpoint_digest ->
-        {:error, :compiler_descriptor_mismatch}
-
-      descriptor.source_commit_oid != source_commit_oid ->
-        {:error, :compiler_descriptor_mismatch}
-
-      descriptor.expected_tree_oid != expected_tree_oid ->
-        {:error, :compiler_descriptor_mismatch}
-
-      true ->
-        :ok
-    end
-  end
+  defp admit_optional_or_required_ref(_window), do: {:ok, nil}
 
   defp trusted_identity(context) do
     task_id = Workspace.context_task_id(context)
@@ -330,140 +212,10 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
     end
   end
 
-  defp inspect_lease(workspace_id, task_id, principal_id, context) do
-    opts =
-      case registry_server(context) do
-        nil -> []
-        server -> [server: server]
-      end
-
-    case WorkspaceLeaseRegistry.ensure_active_by_lineage(
-           workspace_id,
-           task_id,
-           principal_id,
-           opts
-         ) do
-      {:ok, view} ->
-        {:ok, view}
-
-      {:error, reason}
-      when reason in [:not_found, :retained_workspace_not_found] ->
-        {:error, :workspace_not_found}
-
-      {:error, reason}
-      when reason in [:not_authorized, :retained_workspace_not_authorized] ->
-        {:error, :workspace_unauthorized}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp require_acquired_base(view, acquired_base_commit) do
-    base = Map.get(view, :base_commit) || Map.get(view, "base_commit")
-
-    if is_binary(base) and base == acquired_base_commit,
-      do: :ok,
-      else: {:error, :acquired_base_mismatch}
-  end
-
-  defp require_owned_workspace(view) do
-    case Map.get(view, :ownership) || Map.get(view, "ownership") do
-      ownership when ownership in [:owned, "owned"] -> :ok
-      _other -> {:error, :descriptor_workspace_not_owned}
-    end
-  end
-
-  defp bind_caller(
-         workspace_id,
-         task_id,
-         principal_id,
-         source_commit_oid,
-         expected_tree_oid,
-         digest,
-         acquired_base_commit,
-         evidence_ref,
-         server
-       ) do
-    caller = %{
-      task_id: task_id,
-      principal_id: principal_id,
-      workspace_id: workspace_id,
-      source_commit_oid: source_commit_oid,
-      expected_tree_oid: expected_tree_oid,
-      candidate_materialization_digest: digest,
-      acquired_base_commit: acquired_base_commit,
-      evidence_ref: evidence_ref
-    }
-
-    if server, do: Map.put(caller, :server, server), else: caller
-  end
-
   defp registry_server(context) do
     context
     |> Workspace.registry_caller(%{})
     |> Map.get(:server)
-  end
-
-  defp encode_result(
-         raw,
-         digest,
-         source_commit_oid,
-         expected_tree_oid,
-         acquired_base_commit,
-         workspace_id
-       )
-       when is_map(raw) do
-    payload = %{
-      "resource_id" => string_field(raw, :resource_id),
-      "candidate_path" => string_field(raw, :candidate_path),
-      "tree_oid" => string_field(raw, :tree_oid) || expected_tree_oid,
-      "expected_tree_oid" => string_field(raw, :expected_tree_oid) || expected_tree_oid,
-      "source_commit_oid" => string_field(raw, :source_commit_oid) || source_commit_oid,
-      "hidden_ref" => string_field(raw, :hidden_ref),
-      "object_format" => string_field(raw, :object_format),
-      "descriptor_digest" => digest,
-      "base_commit" =>
-        string_field(raw, :base_commit) || string_field(raw, :acquired_base_commit) ||
-          acquired_base_commit,
-      "workspace_id" => string_field(raw, :workspace_id) || workspace_id,
-      "observed_at" => string_field(raw, :observed_at)
-    }
-
-    cond do
-      match?({:error, :invalid_observed_at}, admit_encoded_observed_at(payload)) ->
-        {:error, :invalid_observed_at}
-
-      Enum.any?(Map.keys(raw), &is_atom/1) and not Enum.any?(Map.keys(raw), &is_binary/1) ->
-        finalize_encoded(payload)
-
-      Enum.any?(Map.keys(payload), &(not is_binary(&1))) ->
-        {:error, :non_json_materialization_result}
-
-      true ->
-        finalize_encoded(payload)
-    end
-  end
-
-  defp encode_result(_raw, _digest, _source, _tree, _base, _workspace),
-    do: {:error, :non_json_materialization_result}
-
-  defp admit_encoded_observed_at(%{"observed_at" => value})
-       when is_binary(value) and value != "" do
-    ValidationResourceOwner.admit_utc_observed_at(value)
-  end
-
-  defp admit_encoded_observed_at(_payload), do: :ok
-
-  defp finalize_encoded(payload) do
-    if Map.keys(payload) |> Enum.sort() == Enum.sort(@closed_result_keys) and
-         Enum.all?(payload, fn {key, value} ->
-           is_binary(key) and is_binary(value) and value != "" and String.valid?(value)
-         end) do
-      {:ok, payload}
-    else
-      {:error, :non_json_materialization_result}
-    end
   end
 
   defp reject_forbidden_params(params) do
@@ -503,10 +255,5 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
 
   defp param(params, key) when is_atom(key) do
     Map.get(params, key) || Map.get(params, Atom.to_string(key))
-  end
-
-  defp string_field(map, key) when is_atom(key) do
-    value = Map.get(map, key) || Map.get(map, Atom.to_string(key))
-    if is_binary(value) and value != "", do: value, else: nil
   end
 end

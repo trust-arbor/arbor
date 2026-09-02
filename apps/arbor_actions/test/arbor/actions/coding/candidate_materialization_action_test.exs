@@ -4,6 +4,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
   alias Arbor.Actions
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions.Coding.CandidateMaterialization.Materialize
+  alias Arbor.Actions.Coding.CandidateMaterializationShell
   alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
@@ -303,6 +304,281 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
     assert_worktree_unchanged(worktree, before)
   end
 
+  test "rejects non-integer and out-of-range materialize_window", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree
+  } do
+    {_source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+    base = params(lease, descriptor, digest)
+
+    assert {:error, :invalid_materialization_params} =
+             Materialize.run(
+               Map.put(base, :materialize_window, "0"),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :invalid_materialization_params} =
+             Materialize.run(
+               Map.put(base, :materialize_window, -1),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :invalid_materialization_params} =
+             Materialize.run(
+               Map.put(base, :materialize_window, 2_001),
+               context(task_id, principal_id, server)
+             )
+
+    assert_worktree_unchanged(worktree, before)
+  end
+
+  test "security regression: window 0 rejects malformed evidence_ref and still admits omitted or empty",
+       %{
+         server: server,
+         lease: lease,
+         task_id: task_id,
+         principal_id: principal_id,
+         worktree: worktree
+       } do
+    {_source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+    base = params(lease, descriptor, digest)
+    ctx = context(task_id, principal_id, server)
+
+    for bad <- [:bad, 1, %{}, <<0xFF>>, "   "] do
+      assert {:error, :incomplete_immutable_review_binding} =
+               Materialize.run(Map.put(base, :evidence_ref, bad), ctx)
+
+      refute_evidence_ref(
+        lease.repo_path,
+        task_id,
+        lease.workspace_id,
+        descriptor["source_commit_oid"]
+      )
+    end
+
+    assert {:ok, empty} = Materialize.run(Map.put(base, :evidence_ref, ""), ctx)
+    assert is_binary(empty["resource_id"])
+    assert_worktree_unchanged(worktree, before)
+
+    assert {:ok, omitted} = Materialize.run(base, ctx)
+    assert omitted["resource_id"] == empty["resource_id"]
+    assert_worktree_unchanged(worktree, before)
+  end
+
+  test "rematerializes after the live object-backed resource is gone", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree
+  } do
+    {source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+
+    assert {:ok, first} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    old_id = first["resource_id"]
+    old_path = first["candidate_path"]
+    hidden_ref = first["hidden_ref"]
+
+    identities =
+      identities(lease, task_id, principal_id, descriptor, digest, server)
+      |> Map.put(:evidence_ref, hidden_ref)
+
+    assert {:ok, _} = WorkspaceLeaseRegistry.release_validation_resource(old_id, identities)
+    File.rm_rf!(old_path)
+    refute File.exists?(old_path)
+
+    assert {:ok, second} =
+             Materialize.run(
+               params(lease, descriptor, digest)
+               |> Map.put(:evidence_ref, hidden_ref)
+               |> Map.put(:materialize_window, 1),
+               context(task_id, principal_id, server)
+             )
+
+    refute second["resource_id"] == old_id
+    refute File.exists?(old_path)
+    assert File.dir?(second["candidate_path"])
+    assert second["hidden_ref"] == hidden_ref
+    assert second["source_commit_oid"] == source
+    assert second["expected_tree_oid"] == descriptor["expected_tree_oid"]
+    assert second["descriptor_digest"] == digest
+    assert second["workspace_id"] == lease.workspace_id
+    assert_worktree_unchanged(worktree, before)
+  end
+
+  test "security regression: live reuse fails closed without the required evidence ref", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree
+  } do
+    {_source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+
+    assert {:ok, first} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :incomplete_immutable_review_binding} =
+             CandidateMaterializationShell.resolve_or_materialize(
+               resolve_input(lease, task_id, principal_id, descriptor, digest, server, %{
+                 require_evidence_ref: true
+               })
+             )
+
+    identities = identities(lease, task_id, principal_id, descriptor, digest, server)
+
+    assert {:ok, inspected} =
+             WorkspaceLeaseRegistry.inspect_object_backed_validation_binding(
+               lease.workspace_id,
+               identities
+             )
+
+    assert inspected["resource_id"] == first["resource_id"]
+    assert File.dir?(first["candidate_path"])
+    assert_worktree_unchanged(worktree, before)
+  end
+
+  test "security regression: continuation windows require a checkpointed evidence ref", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree
+  } do
+    {_source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+
+    assert {:ok, first} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :incomplete_immutable_review_binding} =
+             Materialize.run(
+               Map.put(params(lease, descriptor, digest), :materialize_window, 1),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:ok, reused} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    assert reused["resource_id"] == first["resource_id"]
+    assert File.dir?(first["candidate_path"])
+    assert_worktree_unchanged(worktree, before)
+  end
+
+  test "security regression: post-acquire rematerialize failures release the partial resource", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree
+  } do
+    {source, descriptor, before} =
+      commit_regular_add(worktree, lease.repo_path, lease.base_commit)
+
+    {:ok, digest} = CandidateMaterialization.digest(descriptor)
+
+    assert {:ok, first} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    old_id = first["resource_id"]
+    old_path = first["candidate_path"]
+    hidden_ref = first["hidden_ref"]
+
+    identities =
+      identities(lease, task_id, principal_id, descriptor, digest, server)
+      |> Map.put(:evidence_ref, hidden_ref)
+
+    assert {:ok, _} = WorkspaceLeaseRegistry.release_validation_resource(old_id, identities)
+    File.rm_rf!(old_path)
+    refute File.exists?(old_path)
+
+    try do
+      Process.put(
+        {CandidateMaterializationShell, :fail_after_acquire},
+        :forced_post_acquire_failure
+      )
+
+      assert {:error, :forced_post_acquire_failure} =
+               Materialize.run(
+                 params(lease, descriptor, digest)
+                 |> Map.put(:evidence_ref, hidden_ref)
+                 |> Map.put(:materialize_window, 1),
+                 context(task_id, principal_id, server)
+               )
+    after
+      Process.delete({CandidateMaterializationShell, :fail_after_acquire})
+    end
+
+    assert {:error, :not_found} =
+             WorkspaceLeaseRegistry.inspect_object_backed_validation_binding(
+               lease.workspace_id,
+               identities
+             )
+
+    state = :sys.get_state(server)
+
+    assert Map.get(state.validation_by_workspace, lease.workspace_id, MapSet.new()) ==
+             MapSet.new()
+
+    assert {:ok, %{hidden_ref: ^hidden_ref}} =
+             Git.verify_archived_evidence_ref(
+               lease.repo_path,
+               task_id,
+               lease.workspace_id,
+               source
+             )
+
+    refute File.exists?(old_path)
+    assert_worktree_unchanged(worktree, before)
+
+    assert {:ok, second} =
+             Materialize.run(
+               params(lease, descriptor, digest)
+               |> Map.put(:evidence_ref, hidden_ref)
+               |> Map.put(:materialize_window, 1),
+               context(task_id, principal_id, server)
+             )
+
+    refute second["resource_id"] == old_id
+    assert second["hidden_ref"] == hidden_ref
+    assert File.dir?(second["candidate_path"])
+    assert_worktree_unchanged(worktree, before)
+  end
+
   defp identities(lease, task_id, principal_id, descriptor, digest, server) do
     %{
       task_id: task_id,
@@ -328,8 +604,27 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
       candidate_materialization_digest: digest,
       source_commit_oid: descriptor["source_commit_oid"],
       expected_tree_oid: descriptor["expected_tree_oid"],
-      acquired_base_commit: lease.base_commit
+      acquired_base_commit: lease.base_commit,
+      materialize_window: 0
     }
+  end
+
+  defp resolve_input(lease, task_id, principal_id, descriptor, digest, server, extras) do
+    Map.merge(
+      %{
+        workspace_id: lease.workspace_id,
+        task_id: task_id,
+        principal_id: principal_id,
+        candidate_materialization: descriptor,
+        pinned_descriptor_digest: digest,
+        candidate_materialization_digest: digest,
+        source_commit_oid: descriptor["source_commit_oid"],
+        expected_tree_oid: descriptor["expected_tree_oid"],
+        acquired_base_commit: lease.base_commit,
+        server: server
+      },
+      extras
+    )
   end
 
   defp context(task_id, principal_id, server) do

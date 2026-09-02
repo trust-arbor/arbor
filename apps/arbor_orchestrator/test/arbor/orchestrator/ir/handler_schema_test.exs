@@ -22,13 +22,13 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
       assert schema.capabilities == []
     end
 
-    test "covers all 29 handler types (15 canonical + 14 legacy)" do
+    test "covers all 31 handler types (17 canonical + 14 legacy)" do
       types = HandlerSchema.known_types()
-      assert length(types) == 29
+      assert length(types) == 31
 
-      # 15 canonical types
+      # 17 canonical types
       for canonical <- ~w(start exit branch parallel fan_in compute transform exec
-                          read write compose map adapt wait gate) do
+                          read write compose map adapt wait gate sanitize extract) do
         assert canonical in types, "Missing canonical type: #{canonical}"
       end
 

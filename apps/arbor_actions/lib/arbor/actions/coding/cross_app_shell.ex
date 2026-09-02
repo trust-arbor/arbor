@@ -41,6 +41,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions
+  alias Arbor.Actions.Coding.CandidateMaterializationShell
   alias Arbor.Actions.Coding.CandidateSourceCore
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
@@ -465,37 +466,76 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   defp do_run_immutable_window(input, context, validation_deadline, window) do
-    with {:ok, identities} <- immutable_context_bindings(context) do
-      resource_id = identities["validation_resource_id"]
-
-      opts = [
-        workspace_id: input.workspace_id,
-        source_commit_oid: identities["source_commit_oid"],
-        expected_tree_oid: identities["expected_tree_oid"],
-        candidate_materialization_digest: identities["candidate_materialization_digest"],
-        acquired_base_commit: identities["acquired_base_commit"],
-        evidence_ref: identities["evidence_ref"],
-        worktree_path: immutable_context_string(context, "worktree_path")
-      ]
-
-      MixAction.with_existing_object_backed_validation_resource(
-        resource_id,
+    with {:ok, identities} <- immutable_context_bindings(context),
+         {:ok, resolve_input} <- snapshot_resolve_input(input, context, identities) do
+      CandidateMaterializationShell.with_resolved_snapshot(
+        resolve_input,
         context,
         fn resource ->
           snapshot_path =
             Map.get(resource, "candidate_path") || Map.get(resource, :candidate_path)
 
-          continue_immutable_window(
-            input,
-            context,
-            validation_deadline,
-            window,
-            resource,
-            snapshot_path
-          )
-        end,
-        opts
+          resource_id =
+            Map.get(resource, "resource_id") || Map.get(resource, :resource_id)
+
+          case continue_immutable_window(
+                 input,
+                 context,
+                 validation_deadline,
+                 window,
+                 resource,
+                 snapshot_path
+               ) do
+            {:ok, envelope} when is_map(envelope) and is_binary(resource_id) ->
+              {:ok, Map.put(envelope, "resource_id", resource_id)}
+
+            other ->
+              other
+          end
+        end
       )
+    end
+  end
+
+  defp snapshot_resolve_input(input, context, identities) do
+    descriptor =
+      Map.get(context, "candidate_materialization") ||
+        Map.get(context, :candidate_materialization)
+
+    task_id = Workspace.context_task_id(context)
+    principal_id = Workspace.context_principal_id(context)
+
+    cond do
+      not is_map(descriptor) ->
+        {:error, :incomplete_immutable_review_binding}
+
+      not is_binary(task_id) or task_id == "" or not is_binary(principal_id) or
+          principal_id == "" ->
+        {:error, :invalid_task_principal}
+
+      true ->
+        resolve_input = %{
+          workspace_id: input.workspace_id,
+          task_id: task_id,
+          principal_id: principal_id,
+          candidate_materialization: descriptor,
+          pinned_descriptor_digest: identities["candidate_materialization_digest"],
+          candidate_materialization_digest: identities["candidate_materialization_digest"],
+          source_commit_oid: identities["source_commit_oid"],
+          expected_tree_oid: identities["expected_tree_oid"],
+          acquired_base_commit: identities["acquired_base_commit"],
+          evidence_ref: identities["evidence_ref"],
+          require_evidence_ref: true,
+          worktree_path: immutable_context_string(context, "worktree_path")
+        }
+
+        resolve_input =
+          case Map.get(context, :workspace_registry) || Map.get(context, "workspace_registry") do
+            nil -> resolve_input
+            server -> Map.put(resolve_input, :server, server)
+          end
+
+        {:ok, resolve_input}
     end
   end
 

@@ -94,7 +94,12 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
         doc: "Checkpointed descriptor digest"
       ],
       acquired_base_commit: [type: :string, required: false, doc: "Checkpointed acquired base"],
-      evidence_ref: [type: :string, required: false, doc: "Pre-pinned evidence ref"]
+      evidence_ref: [type: :string, required: false, doc: "Pre-pinned evidence ref"],
+      candidate_materialization: [
+        type: :map,
+        required: false,
+        doc: "Compiler-owned candidate materialization descriptor"
+      ]
     ]
 
   alias Arbor.Actions
@@ -142,7 +147,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       expected_tree_oid: :control,
       candidate_materialization_digest: :control,
       acquired_base_commit: :control,
-      evidence_ref: :control
+      evidence_ref: :control,
+      candidate_materialization: :control
     }
   end
 
@@ -274,7 +280,8 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
     {"expected_tree_oid", :expected_tree_oid},
     {"candidate_materialization_digest", :candidate_materialization_digest},
     {"acquired_base_commit", :acquired_base_commit},
-    {"evidence_ref", :evidence_ref}
+    {"evidence_ref", :evidence_ref},
+    {"candidate_materialization", :candidate_materialization}
   ]
 
   defp put_cross_app_window_context(%{profile_id: "cross_app"}, params, context)

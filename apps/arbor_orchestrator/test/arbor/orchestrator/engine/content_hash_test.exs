@@ -158,5 +158,39 @@ defmodule Arbor.Orchestrator.Engine.ContentHashTest do
       node = Node.from_attrs("test", %{"type" => "tool"})
       refute ContentHash.can_skip?(node, "abc", "abc", IdempotentHandler)
     end
+
+    test "materialize_window changes hash across windows and keeps same-window replay stable" do
+      node =
+        Node.from_attrs("materialize_candidate", %{
+          "type" => "exec",
+          "target" => "action",
+          "action" => "coding_candidate_materialize",
+          "context_keys" =>
+            "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit,materialize_window,evidence_ref"
+        })
+
+      base = %{
+        "workspace_id" => "ws_1",
+        "candidate_materialization" => %{"source_commit_oid" => "a"},
+        "candidate_materialization_digest" => "d",
+        "source_commit_oid" => "a",
+        "expected_tree_oid" => "b",
+        "acquired_base_commit" => "c"
+      }
+
+      hash0 = ContentHash.compute(node, Context.new(Map.put(base, "materialize_window", 0)))
+      hash1 = ContentHash.compute(node, Context.new(Map.put(base, "materialize_window", 1)))
+      hash1_again = ContentHash.compute(node, Context.new(Map.put(base, "materialize_window", 1)))
+      hash2 = ContentHash.compute(node, Context.new(Map.put(base, "materialize_window", 2)))
+
+      assert hash0 != hash1
+      assert hash1 != hash2
+      assert hash0 != hash2
+      assert hash1 == hash1_again
+
+      cached = %Arbor.Orchestrator.Engine.Outcome{status: :success}
+      refute ContentHash.can_skip?(node, hash1, hash0, :idempotent_with_key, cached)
+      assert ContentHash.can_skip?(node, hash1, hash1, :idempotent_with_key, cached)
+    end
   end
 end

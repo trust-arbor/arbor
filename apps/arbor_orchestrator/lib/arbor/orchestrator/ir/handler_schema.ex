@@ -86,7 +86,7 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
 
   defp schemas do
     %{
-      # ── 15 Canonical Types ──────────────────────────────────────────────
+      # ── 17 Canonical Types ──────────────────────────────────────────────
       "start" =>
         schema("start", [], [], %{}, [], :public, [], [port("context", :any, :public)],
           sensitivity: :public
@@ -368,6 +368,44 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [port("source_key", :string, :public)],
           [port("gate.passed", :boolean, :public)],
           sensitivity: :public
+        ),
+      "sanitize" =>
+        schema(
+          "sanitize",
+          ["sanitize"],
+          ["source_key", "output_key", "allowed_root"],
+          %{
+            "sanitize" => :string,
+            "source_key" => :string,
+            "output_key" => :string,
+            "allowed_root" => :string
+          },
+          [],
+          :internal,
+          [port("context", :any, :internal)],
+          [port("context", :any, :internal)],
+          sensitivity: :internal
+        ),
+      "extract" =>
+        schema(
+          "extract",
+          [],
+          ["source_key", "output_key", "enum", "int", "match", "min", "max", "max_length"],
+          %{
+            "source_key" => :string,
+            "output_key" => :string,
+            "enum" => :string,
+            "int" => :string,
+            "match" => :string,
+            "min" => :integer,
+            "max" => :integer,
+            "max_length" => :integer
+          },
+          [],
+          :internal,
+          [port("context", :any, :internal)],
+          [port("context", :any, :internal)],
+          sensitivity: :internal
         ),
       # ── Legacy aliases (backward compatibility) ─────────────────────────
       "conditional" =>

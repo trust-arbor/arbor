@@ -1,11 +1,15 @@
 defmodule Arbor.Actions.CouncilTest do
   use Arbor.Actions.ActionCase, async: false
 
+  alias Arbor.Actions.Coding.BlobManifest
+  alias Arbor.Actions.Coding.CandidateMaterialization.Materialize
   alias Arbor.Actions.Coding.ReviewLedgerCore
   alias Arbor.Actions.Coding.ReviewTree
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Council
+  alias Arbor.Actions.Git
+  alias Arbor.Contracts.Coding.CandidateMaterialization
 
   @moduletag :fast
 
@@ -1919,7 +1923,17 @@ defmodule Arbor.Actions.CouncilTest do
         acquired_base_commit: String.duplicate("a", 40),
         expected_tree_oid: String.duplicate("b", 40),
         candidate_materialization_digest: String.duplicate("c", 64),
-        validation_resource_id: "validation_" <> String.duplicate("d", 32)
+        candidate_materialization: %{
+          "source_commit_oid" => String.duplicate("e", 40),
+          "expected_tree_oid" => String.duplicate("b", 40),
+          "entries" => [
+            %{
+              "path" => "lib/a.ex",
+              "blob_oid" => String.duplicate("f", 40),
+              "mode" => 100_644
+            }
+          ]
+        }
       }
 
       params = Map.merge(@valid_review_params, identities)
@@ -1935,7 +1949,7 @@ defmodule Arbor.Actions.CouncilTest do
             acquired_base_commit
             expected_tree_oid
             candidate_materialization_digest
-            validation_resource_id
+            candidate_materialization
           )a do
         assert {:error, :incomplete_immutable_review_binding} =
                  Council.ReviewChange.run(Map.delete(params, key), %{
@@ -1944,42 +1958,177 @@ defmodule Arbor.Actions.CouncilTest do
       end
     end
 
-    test "descriptor review forwards immutable identities through the snapshot opener seam" do
+    test "descriptor review rematerializes a missing private resource from live lineage with a valid digest",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "descriptor_review_lineage_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base module"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      task_id = "task_desc_review_#{System.unique_integer([:positive])}"
+      principal_id = "agent_desc_review_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal_id}
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/descriptor-review-lineage",
+                   worktree_base_dir: Path.join(tmp_dir, "descriptor_review_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      File.write!(
+        Path.join(lease.worktree_path, "lib/a.ex"),
+        "defmodule A do\n  def value, do: :candidate\nend\n"
+      )
+
+      git!(lease.worktree_path, ["add", "lib/a.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate module"])
+      source = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      descriptor = descriptor_between(lease.repo_path, lease.base_commit, source)
+      {:ok, digest} = CandidateMaterialization.digest(descriptor)
+      git!(lease.worktree_path, ["reset", "--hard", lease.base_commit])
+      before = worktree_snapshot(lease.worktree_path)
+
+      assert {:ok, first} =
+               Materialize.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   candidate_materialization: descriptor,
+                   pinned_descriptor_digest: digest,
+                   candidate_materialization_digest: digest,
+                   source_commit_oid: source,
+                   expected_tree_oid: descriptor["expected_tree_oid"],
+                   acquired_base_commit: lease.base_commit,
+                   materialize_window: 0
+                 },
+                 authority_context
+               )
+
+      old_id = first["resource_id"]
+      old_path = first["candidate_path"]
+      hidden_ref = first["hidden_ref"]
+
+      release_identities = %{
+        task_id: task_id,
+        principal_id: principal_id,
+        workspace_id: lease.workspace_id,
+        source_commit_oid: source,
+        expected_tree_oid: descriptor["expected_tree_oid"],
+        candidate_materialization_digest: digest,
+        acquired_base_commit: lease.base_commit,
+        evidence_ref: hidden_ref
+      }
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(old_id, release_identities)
+
+      File.rm_rf!(old_path)
+      refute File.exists?(old_path)
+
       parent = self()
-      candidate_commit = String.duplicate("e", 40)
+      snapshot_id = "review_snap_desc_rematerialize"
+      diff = git!(lease.repo_path, ["diff", "#{lease.base_commit}..#{source}"])
 
       identities = %{
         candidate_source: "immutable_object",
-        evidence_ref: "refs/arbor/evidence/task/workspace",
-        acquired_base_commit: String.duplicate("a", 40),
-        expected_tree_oid: String.duplicate("b", 40),
-        candidate_materialization_digest: String.duplicate("c", 64),
-        validation_resource_id: "validation_" <> String.duplicate("d", 32)
+        evidence_ref: hidden_ref,
+        acquired_base_commit: lease.base_commit,
+        expected_tree_oid: descriptor["expected_tree_oid"],
+        candidate_materialization_digest: digest,
+        candidate_materialization: descriptor,
+        validation_resource_id: old_id
       }
 
       params =
         @valid_review_params
         |> Map.merge(identities)
-        |> Map.merge(%{workspace_id: "ws_descriptor_review", commit_hash: candidate_commit})
+        |> Map.merge(%{
+          workspace_id: lease.workspace_id,
+          commit_hash: source,
+          base_ref: lease.base_commit,
+          branch: lease.branch,
+          files: ["lib/a.ex"],
+          diff: diff,
+          agent_id: principal_id
+        })
 
-      assert {:error, :stop_after_identity_capture} =
+      assert {:ok, result} =
                Council.ReviewChange.run(params, %{
-                 task_id: "task_descriptor_review",
-                 agent_id: "agent_descriptor_review",
-                 review_snapshot_opener: fn "ws_descriptor_review", ^candidate_commit, caller ->
-                   send(parent, {:descriptor_review_caller, caller})
-                   {:error, :stop_after_identity_capture}
+                 task_id: task_id,
+                 agent_id: principal_id,
+                 persist_verdict: false,
+                 review_snapshot_opener: fn workspace_id, ^source, caller ->
+                   send(parent, {:opener_caller, workspace_id, caller})
+
+                   {:ok,
+                    %{
+                      review_snapshot_id: snapshot_id,
+                      candidate_commit: source,
+                      base_commit: lease.base_commit
+                    }}
+                 end,
+                 review_snapshot_closer: fn ^snapshot_id, _caller ->
+                   {:ok, %{active: false}}
+                 end,
+                 review_runner: fn _request, _params, _context ->
+                   {:ok,
+                    %{
+                      decision: "approved",
+                      approve_count: 2,
+                      reject_count: 0,
+                      abstain_count: 0,
+                      quorum_met: true,
+                      average_confidence: 0.9,
+                      primary_concerns: []
+                    }}
+                 end
+               })
+
+      assert result.recommendation == "keep"
+      assert_receive {:opener_caller, workspace_id, caller}
+      assert workspace_id == lease.workspace_id
+
+      new_id =
+        Map.get(caller, :validation_resource_id) || Map.get(caller, "validation_resource_id")
+
+      assert is_binary(new_id)
+      refute new_id == ""
+      refute new_id == old_id
+      refute File.exists?(old_path)
+
+      assert {:ok, %{hidden_ref: ^hidden_ref}} =
+               Git.verify_archived_evidence_ref(
+                 lease.repo_path,
+                 task_id,
+                 lease.workspace_id,
+                 source
+               )
+
+      after_snap = worktree_snapshot(lease.worktree_path)
+      assert after_snap == before
+
+      missing_params = Map.put(params, :workspace_id, "ws_missing_lineage_#{task_id}")
+
+      assert {:error, :workspace_not_found} =
+               Council.ReviewChange.run(missing_params, %{
+                 task_id: task_id,
+                 agent_id: principal_id,
+                 persist_verdict: false,
+                 review_snapshot_opener: fn _, _, _ ->
+                   flunk("must fail before the snapshot opener")
                  end,
                  review_runner: fn _, _, _ -> flunk("must not run after opener failure") end
                })
-
-      assert_receive {:descriptor_review_caller, caller}
-      assert caller.task_id == "task_descriptor_review"
-      assert caller.principal_id == "agent_descriptor_review"
-
-      for {key, value} <- identities do
-        assert Map.fetch!(caller, key) == value
-      end
     end
 
     test "rejects graph and quorum overrides for bound reviews" do
@@ -2411,6 +2560,39 @@ defmodule Arbor.Actions.CouncilTest do
   defp git!(path, args) do
     {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
     String.trim(output)
+  end
+
+  defp descriptor_between(repo, base, source) do
+    {:ok, base_listing} = Git.ls_tree_z(repo, base)
+    {:ok, source_listing} = Git.ls_tree_z(repo, source)
+    {:ok, base_manifest} = BlobManifest.parse_ls_tree_z(base_listing)
+    {:ok, source_manifest} = BlobManifest.parse_ls_tree_z(source_listing)
+    {:ok, changed} = BlobManifest.diff_blob_manifests(base_manifest, source_manifest)
+    {:ok, tree} = Git.commit_tree_oid(repo, source)
+    by_path = Map.new(source_manifest, &{&1.path, &1})
+
+    entries =
+      Enum.map(changed, fn path ->
+        entry = Map.fetch!(by_path, path)
+        %{"path" => entry.path, "blob_oid" => entry.oid, "mode" => mode_int(entry.mode)}
+      end)
+
+    %{
+      "source_commit_oid" => source,
+      "expected_tree_oid" => tree,
+      "entries" => entries
+    }
+  end
+
+  defp mode_int("100644"), do: 100_644
+  defp mode_int("100755"), do: 100_755
+
+  defp worktree_snapshot(worktree) do
+    %{
+      head: git!(worktree, ["rev-parse", "HEAD"]),
+      status: git!(worktree, ["status", "--porcelain", "-z"]),
+      index: git!(worktree, ["write-tree"])
+    }
   end
 
   describe "ConsultOne integration" do

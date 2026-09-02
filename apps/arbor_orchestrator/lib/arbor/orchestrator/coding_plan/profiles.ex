@@ -330,7 +330,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                        status_human_review_required
                      ])
 
-  @allowed_handlers Enum.sort(~w[start exit transform exec branch gate])
+  @allowed_handlers Enum.sort(~w[start exit transform exec branch gate sanitize])
   @allowed_exec_targets ["action"]
 
   # Graph inventory contains only the reviewed wrapper. Profile-selected nested

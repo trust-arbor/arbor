@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Edge
+  alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.IR.HandlerSchema
@@ -101,10 +102,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     status_descriptor_pipeline_error
   ]
   @descriptor_dormant_roots @descriptor_dormant_nodes
-  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id"
-  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
-  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
-  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
+  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
+  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
+  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref,candidate_materialization"
+  @descriptor_materialize_context_keys "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit,materialize_window,evidence_ref"
   @descriptor_close_terminals ~w[
     status_validation_failed
     status_validation_capacity_exceeded
@@ -1822,7 +1824,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "close_design_worker"
            ),
          {:ok, graph} <- pin_materialize_digest(graph, digest),
+         {:ok, graph} <- insert_descriptor_commit_hash_sanitizer(graph),
+         {:ok, graph} <- rewrite_descriptor_cross_app_continuation(graph, plan),
          {:ok, graph} <- rewrite_descriptor_worker_close(graph, plan),
+         {:ok, graph} <- insert_post_validate_resource_hoist(graph),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "validate",
+             "outcome=success",
+             "hoist_post_validate_resource_id"
+           ),
          {:ok, graph} <-
            rewrite_outgoing_condition(
              graph,
@@ -1836,6 +1848,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "check_validation_passed",
              "outcome=fail",
              "status_validation_failed"
+           ),
+         {:ok, graph} <- insert_post_committed_resource_hoist(graph),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "load_committed_change",
+             "outcome=success",
+             "hoist_committed_resource_id"
            ),
          {:ok, graph} <-
            rewrite_outgoing_condition(
@@ -1861,9 +1881,90 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp pin_materialize_digest(graph, digest) do
     update_node(graph, "materialize_candidate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "coding_candidate_materialize") do
-        {:ok, Map.put(attrs, "param.pinned_descriptor_digest", digest)}
+        {:ok,
+         attrs
+         |> Map.put("param.pinned_descriptor_digest", digest)
+         |> Map.put("context_keys", @descriptor_materialize_context_keys)}
       end
     end)
+  end
+
+  defp insert_descriptor_commit_hash_sanitizer(graph) do
+    node =
+      Node.from_attrs("sanitize_descriptor_commit_hash", %{
+        "type" => "sanitize",
+        "sanitize" => "command_injection",
+        "source_key" => "commit_hash",
+        "output_key" => "commit_hash"
+      })
+
+    graph = Graph.add_node(graph, node)
+
+    with {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_descriptor_commit_hash",
+             "materialize_candidate",
+             "sanitize_descriptor_commit_hash"
+           ) do
+      add_unconditional_edge(graph, "sanitize_descriptor_commit_hash", "materialize_candidate")
+    end
+  end
+
+  defp rewrite_descriptor_cross_app_continuation(graph, %Plan{validation_profile: "cross_app"}) do
+    node =
+      Node.from_attrs("hoist_materialize_window", %{
+        "type" => "transform",
+        "transform" => "json_extract",
+        "source_key" => "cross_app_progress",
+        "expression" => "window_ordinal",
+        "output_key" => "materialize_window"
+      })
+
+    graph = Graph.add_node(graph, node)
+
+    with {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_cross_app_progress_binding",
+             "validate",
+             "hoist_materialize_window"
+           ) do
+      add_unconditional_edge(graph, "hoist_materialize_window", "materialize_candidate")
+    end
+  end
+
+  defp rewrite_descriptor_cross_app_continuation(graph, _plan), do: {:ok, graph}
+
+  defp insert_post_validate_resource_hoist(graph) do
+    node =
+      Node.from_attrs("hoist_post_validate_resource_id", %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "validation.resource_id",
+        "output_key" => "validation_resource_id"
+      })
+
+    graph = Graph.add_node(graph, node)
+
+    add_unconditional_edge(
+      graph,
+      "hoist_post_validate_resource_id",
+      "route_validation_interaction"
+    )
+  end
+
+  defp insert_post_committed_resource_hoist(graph) do
+    node =
+      Node.from_attrs("hoist_committed_resource_id", %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "change.resource_id",
+        "output_key" => "validation_resource_id"
+      })
+
+    graph = Graph.add_node(graph, node)
+    add_unconditional_edge(graph, "hoist_committed_resource_id", "hoist_change_commit")
   end
 
   defp remove_descriptor_implementation_phase_edge(%Graph{} = graph) do
@@ -2918,7 +3019,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
             @initial_context_keys.candidate_materialization => descriptor,
             @initial_context_keys.candidate_materialization_digest => digest,
             @initial_context_keys.source_commit_oid => descriptor["source_commit_oid"],
-            @initial_context_keys.expected_tree_oid => descriptor["expected_tree_oid"]
+            @initial_context_keys.expected_tree_oid => descriptor["expected_tree_oid"],
+            "materialize_window" => 0
           })
 
         {:error, _reason} ->

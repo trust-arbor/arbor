@@ -486,11 +486,16 @@ defmodule Arbor.Actions.Council do
         acquired_base_commit: [type: :string, doc: "Checkpointed acquired base"],
         expected_tree_oid: [type: :string, doc: "Checkpointed candidate tree"],
         candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
-        validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"]
+        validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"],
+        candidate_materialization: [
+          type: :map,
+          doc: "Compiler-owned candidate materialization descriptor"
+        ]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Council
+    alias Arbor.Actions.Coding.CandidateMaterializationShell
     alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
@@ -523,7 +528,8 @@ defmodule Arbor.Actions.Council do
         acquired_base_commit: :control,
         expected_tree_oid: :control,
         candidate_materialization_digest: :control,
-        validation_resource_id: :control
+        validation_resource_id: :control,
+        candidate_materialization: :control
       }
     end
 
@@ -620,18 +626,18 @@ defmodule Arbor.Actions.Council do
 
       cond do
         valid_id?(workspace_id) and valid_id?(candidate_commit) ->
-          caller = review_snapshot_caller(params, context)
+          with {:ok, caller} <- resolved_review_snapshot_caller(params, context, workspace_id) do
+            case Map.get(context, :review_snapshot_opener) do
+              opener when is_function(opener, 3) ->
+                opener.(workspace_id, candidate_commit, caller)
 
-          case Map.get(context, :review_snapshot_opener) do
-            opener when is_function(opener, 3) ->
-              opener.(workspace_id, candidate_commit, caller)
-
-            _ ->
-              WorkspaceLeaseRegistry.open_review_snapshot(
-                workspace_id,
-                candidate_commit,
-                caller
-              )
+              _ ->
+                WorkspaceLeaseRegistry.open_review_snapshot(
+                  workspace_id,
+                  candidate_commit,
+                  caller
+                )
+            end
           end
 
         bound? ->
@@ -802,6 +808,48 @@ defmodule Arbor.Actions.Council do
       )
     end
 
+    defp resolved_review_snapshot_caller(params, context, workspace_id) do
+      case CandidateSourceCore.admit(params) do
+        {:ok, :immutable_object} ->
+          digest = Council.get_param(params, :candidate_materialization_digest)
+
+          input = %{
+            workspace_id: workspace_id,
+            task_id: Workspace.context_task_id(context),
+            principal_id: Workspace.context_principal_id(context),
+            candidate_materialization: Council.get_param(params, :candidate_materialization),
+            pinned_descriptor_digest: digest,
+            candidate_materialization_digest: digest,
+            source_commit_oid: Council.get_param(params, :commit_hash),
+            expected_tree_oid: Council.get_param(params, :expected_tree_oid),
+            acquired_base_commit: Council.get_param(params, :acquired_base_commit),
+            evidence_ref: Council.get_param(params, :evidence_ref),
+            require_evidence_ref: true
+          }
+
+          input =
+            case registry_caller(context) do
+              %{server: server} -> Map.put(input, :server, server)
+              _other -> input
+            end
+
+          with {:ok, handle} <- CandidateMaterializationShell.resolve_or_materialize(input) do
+            caller =
+              params
+              |> review_snapshot_caller(context)
+              |> Map.put(:validation_resource_id, handle["resource_id"])
+
+            {:ok, caller}
+          end
+
+        {:ok, :workspace_branch} ->
+          {:ok, review_snapshot_caller(params, context)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+
     defp validate_immutable_review_binding(params) do
       case CandidateSourceCore.admit(params) do
         {:ok, :workspace_branch} ->
@@ -814,13 +862,14 @@ defmodule Arbor.Actions.Council do
                 :evidence_ref,
                 :acquired_base_commit,
                 :expected_tree_oid,
-                :candidate_materialization_digest,
-                :validation_resource_id
+                :candidate_materialization_digest
               ],
               &Council.get_param(params, &1)
             )
 
-          if Enum.all?(identities, &(is_binary(&1) and &1 != "")),
+          descriptor = Council.get_param(params, :candidate_materialization)
+
+          if is_map(descriptor) and Enum.all?(identities, &(is_binary(&1) and &1 != "")),
             do: :ok,
             else: {:error, :incomplete_immutable_review_binding}
 

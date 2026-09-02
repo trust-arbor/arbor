@@ -1377,6 +1377,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "load_committed_change")["context_keys"] ==
              "workspace_id,commit,prior_commit"
 
+    assert edge_target(graph, "load_committed_change", "outcome=success") ==
+             "hoist_change_commit"
+
+    refute Map.has_key?(graph.nodes, "hoist_committed_resource_id")
+
     assert edge_target(graph, "review_change", "outcome=success") ==
              "hoist_review_finding_ledger"
 
@@ -2578,7 +2583,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     refute Map.has_key?(parse!(design_a.dot_source).nodes, "materialize_candidate")
     refute Map.has_key?(parse!(design_a.dot_source).nodes, "hoist_descriptor_observed_at")
+    refute Map.has_key?(parse!(design_a.dot_source).nodes, "hoist_committed_resource_id")
+    refute Map.has_key?(parse!(direct_a.dot_source).nodes, "hoist_committed_resource_id")
+    refute Map.has_key?(parse!(v1_a.dot_source).nodes, "hoist_committed_resource_id")
     refute Map.has_key?(design_a.initial_values, "coding_plan_candidate_materialization")
+
+    assert edge_target(parse!(design_a.dot_source), "load_committed_change", "outcome=success") ==
+             "hoist_change_commit"
+
+    assert edge_target(parse!(direct_a.dot_source), "load_committed_change", "outcome=success") ==
+             "hoist_change_commit"
+
+    assert edge_target(parse!(v1_a.dot_source), "load_committed_change", "outcome=success") ==
+             "hoist_change_commit"
   end
 
   test "descriptor plans activate close, six checkpoints, pin, and review identities", ctx do
@@ -2634,7 +2651,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert materialize["param.pinned_descriptor_digest"] == digest
 
     assert materialize["context_keys"] ==
-             "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit"
+             "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit,materialize_window,evidence_ref"
 
     assert node_attrs(graph, "hoist_descriptor_observed_at") == %{
              "type" => "transform",
@@ -2655,10 +2672,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "coding_workspace_ensure_active"
 
     assert node_attrs(graph, "load_committed_change")["context_keys"] ==
-             "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+             "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
 
     assert node_attrs(graph, "publish_workspace")["context_keys"] ==
-             "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+             "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
 
     assert node_attrs(graph, "publish_workspace")["param.require_candidate_binding"] == true
 
@@ -2679,6 +2696,52 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert compilation.initial_values["coding_plan_source_commit_oid"] ==
              plan.candidate_materialization["source_commit_oid"]
+
+    assert compilation.initial_values["materialize_window"] == 0
+
+    assert node_attrs(graph, "hoist_post_validate_resource_id") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "validation.resource_id",
+             "output_key" => "validation_resource_id"
+           }
+
+    assert edge_target(graph, "validate", "outcome=success") ==
+             "hoist_post_validate_resource_id"
+
+    assert edge_target(graph, "hoist_post_validate_resource_id", nil) ==
+             "route_validation_interaction"
+
+    assert edge_target(graph, "check_validation_passed", "outcome=success") ==
+             "prep_expected_commit"
+
+    assert node_attrs(graph, "sanitize_descriptor_commit_hash") == %{
+             "type" => "sanitize",
+             "sanitize" => "command_injection",
+             "source_key" => "commit_hash",
+             "output_key" => "commit_hash"
+           }
+
+    assert edge_target(graph, "hoist_descriptor_commit_hash", nil) ==
+             "sanitize_descriptor_commit_hash"
+
+    assert edge_target(graph, "sanitize_descriptor_commit_hash", nil) ==
+             "materialize_candidate"
+
+    assert node_attrs(graph, "hoist_committed_resource_id") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "change.resource_id",
+             "output_key" => "validation_resource_id"
+           }
+
+    assert edge_target(graph, "load_committed_change", "outcome=success") ==
+             "hoist_committed_resource_id"
+
+    assert edge_target(graph, "load_committed_change", "outcome=fail") ==
+             "error_committed_change_materialization"
+
+    assert edge_target(graph, "hoist_committed_resource_id", nil) == "hoist_change_commit"
 
     close_reachable = reachable_ids(graph, "close_design_worker")
     refute MapSet.member?(close_reachable, "implement")
@@ -2748,7 +2811,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compile_with_catalog(plan, ctx, ctx.template_source, catalog)
   end
 
-  test "descriptor CrossApp plans preserve one materialized validation resource across windows",
+  test "descriptor CrossApp continuation re-enters materialize_candidate per window",
        ctx do
     catalog = descriptor_action_catalog()
     plan = descriptor_plan!(%{"validation_profile" => "cross_app"})
@@ -2768,14 +2831,27 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           candidate_materialization_digest
           acquired_base_commit
           evidence_ref
+          candidate_materialization
         ) do
       assert key in String.split(validate_keys, ",", trim: true)
     end
 
     assert validate_keys ==
-             "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest,validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+             "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest,validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref,candidate_materialization"
 
-    assert edge_target(graph, "hoist_cross_app_progress_binding", nil) == "validate"
+    assert edge_target(graph, "hoist_cross_app_progress_binding", nil) ==
+             "hoist_materialize_window"
+
+    assert node_attrs(graph, "hoist_materialize_window") == %{
+             "type" => "transform",
+             "transform" => "json_extract",
+             "source_key" => "cross_app_progress",
+             "expression" => "window_ordinal",
+             "output_key" => "materialize_window"
+           }
+
+    assert edge_target(graph, "hoist_materialize_window", nil) == "materialize_candidate"
+    assert compilation.initial_values["materialize_window"] == 0
 
     assert edge_target(graph, "error_cross_app_window_invalid", nil) ==
              "status_descriptor_pipeline_error"
