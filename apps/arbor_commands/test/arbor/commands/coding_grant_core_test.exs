@@ -2,12 +2,17 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Commands.CodingGrantCore, as: Core
+  alias Arbor.Orchestrator.CodingPlan.AuthorityHorizonCore
 
   @moduletag :fast
 
+  @caller "agent_operator_grant"
   @uri_a "arbor://fs/read/tmp"
   @uri_b "arbor://action/coding/dispatch"
   @uri_c "arbor://agent/dispatch"
+  @recorded_caller "agent_operator_recorded"
+  @recorded_coordinator "agent_coordinator_recorded"
+  @recorded_uri "arbor://action/coding/design_council_review"
 
   test "exposes new/1, step/2, and show/1 only" do
     assert Enum.sort(Core.__info__(:functions)) == [new: 1, show: 1, step: 2]
@@ -70,17 +75,45 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     assert result.granted == []
     assert result.failed == []
     assert result.remaining == []
+
+    assert Core.show(result) ==
+             """
+             coding grant: converged
+             rounds: 1
+             granted: (none)
+             failed: (none)
+             remaining: (none)
+             """
+             |> String.trim_trailing()
   end
 
   test "grant mode grants named URIs then rechecks readiness" do
     {:ok, state} = Core.new(max_rounds: 3)
-    {state, {:grant, @uri_a}} = Core.step(state, {:readiness, missing_report([@uri_a, @uri_b])})
-    {state, {:grant, @uri_b}} = Core.step(state, {:grant_result, @uri_a, :ok})
-    {state, :readiness} = Core.step(state, {:grant_result, @uri_b, :ok})
+    target_a = caller_target(@uri_a)
+    target_b = caller_target(@uri_b)
+
+    {state, {:grant, ^target_a}} =
+      Core.step(state, {:readiness, missing_report([@uri_a, @uri_b])})
+
+    {state, {:grant, ^target_b}} = Core.step(state, {:grant_result, target_a, :ok})
+    {state, :readiness} = Core.step(state, {:grant_result, target_b, :ok})
     {_state, {:halt, result}} = Core.step(state, {:readiness, missing_report([])})
     assert result.status == :converged
     assert result.rounds == 2
-    assert result.granted == [@uri_a, @uri_b]
+    assert result.granted == [target_a, target_b]
+
+    assert Core.show(result) ==
+             """
+             coding grant: converged
+             rounds: 2
+             granted:
+             authenticated_caller (#{@caller}):
+             arbor://fs/read/tmp
+             arbor://action/coding/dispatch
+             failed: (none)
+             remaining: (none)
+             """
+             |> String.trim_trailing()
   end
 
   test "stable missing report invokes readiness exactly N times and stays unconverged" do
@@ -89,34 +122,53 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     effects = drive_until_halt(state, fn :readiness -> report end)
 
     readiness_count = Enum.count(effects, &(&1 == :readiness))
-    grants = for {:grant, uri} <- effects, do: uri
+    grants = for {:grant, target} <- effects, do: target
 
     assert readiness_count == 2
-    assert grants == [@uri_a, @uri_b]
+    assert grants == [caller_target(@uri_a), caller_target(@uri_b)]
     assert {:halt, result} = List.last(effects)
     assert result.status == :unconverged
     assert result.rounds == 2
     assert result.rounds <= 2
-    assert result.remaining == [@uri_a, @uri_b]
-    assert result.granted == [@uri_a, @uri_b]
+    assert result.remaining == [caller_target(@uri_a), caller_target(@uri_b)]
+    assert result.granted == [caller_target(@uri_a), caller_target(@uri_b)]
     assert Core.show(result) =~ @uri_a
     assert Core.show(result) =~ @uri_b
+    refute Core.show(result) =~ "execution_principal"
   end
 
   test "partial progress: first grant succeeds, second fails" do
     {:ok, state} = Core.new(max_rounds: 5)
+    target_a = caller_target(@uri_a)
+    target_b = caller_target(@uri_b)
+    target_c = caller_target(@uri_c)
 
-    {state, {:grant, @uri_a}} =
+    {state, {:grant, ^target_a}} =
       Core.step(state, {:readiness, missing_report([@uri_a, @uri_b, @uri_c])})
 
-    {state, {:grant, @uri_b}} = Core.step(state, {:grant_result, @uri_a, :ok})
-    {_state, {:halt, result}} = Core.step(state, {:grant_result, @uri_b, {:error, :denied}})
+    {state, {:grant, ^target_b}} = Core.step(state, {:grant_result, target_a, :ok})
+    {_state, {:halt, result}} = Core.step(state, {:grant_result, target_b, {:error, :denied}})
 
     assert result.status == :grant_failed
-    assert result.granted == [@uri_a]
-    assert result.failed == [{@uri_b, :denied}]
-    assert result.remaining == [@uri_b, @uri_c]
+    assert result.granted == [target_a]
+    assert result.failed == [{target_b, :denied}]
+    assert result.remaining == [target_b, target_c]
     assert result.rounds == 1
+
+    assert Core.show(result) ==
+             """
+             coding grant: grant_failed
+             rounds: 1
+             granted:
+             authenticated_caller (#{@caller}):
+             arbor://fs/read/tmp
+             failed: authenticated_caller #{@caller} arbor://action/coding/dispatch (:denied)
+             remaining:
+             authenticated_caller (#{@caller}):
+             arbor://action/coding/dispatch
+             arbor://agent/dispatch
+             """
+             |> String.trim_trailing()
   end
 
   test "dry-run invokes readiness every round, emits named URIs without dedupe, and never grants" do
@@ -130,15 +182,58 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     emits = for {:emit, text} <- effects, do: text
     assert length(emits) == 3
 
+    expected_emit =
+      """
+      authenticated_caller (#{@caller}):
+      #{@uri_a}
+      #{@uri_a}
+      #{@uri_b}
+      """
+      |> String.trim_trailing()
+
     Enum.each(emits, fn text ->
-      assert text == Enum.join([@uri_a, @uri_a, @uri_b], "\n")
+      assert text == expected_emit
     end)
 
     assert {:halt, result} = List.last(effects)
     assert result.status == :unconverged
     assert result.rounds == 3
     assert result.granted == []
-    assert result.remaining == [@uri_a, @uri_a, @uri_b]
+
+    assert result.remaining == [
+             caller_target(@uri_a),
+             caller_target(@uri_a),
+             caller_target(@uri_b)
+           ]
+  end
+
+  test "dry-run emits mixed-role missing URIs grouped by principal" do
+    coordinator = "agent_coordinator_dry_run"
+
+    report =
+      readiness_report(
+        [
+          caller_missing_finding([@uri_a]),
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        agent_id: coordinator
+      )
+
+    {:ok, state} = Core.new(max_rounds: 2, dry_run: true)
+    {_state, {:emit, text}} = Core.step(state, {:readiness, report})
+
+    assert text ==
+             """
+             authenticated_caller (#{@caller}):
+             #{@uri_a}
+             execution_principal (#{coordinator}):
+             #{@uri_b}
+             """
+             |> String.trim_trailing()
   end
 
   test "dry-run converges only when a report names nothing" do
@@ -194,19 +289,32 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
   end
 
   @tag :security_regression
-  test "security regression: role-less, execution_principal, and unrelated-plane findings never grant" do
-    report =
-      readiness_report([
+  test "security regression: unknown-role or role-less missing findings fail closed" do
+    Enum.each(
+      [
         %{"classification" => "missing", "resource_uris" => [@uri_a]},
         %{
-          "principal_role" => "execution_principal",
+          "principal_role" => "third_party",
           "classification" => "missing",
-          "resource_uris" => [@uri_b]
+          "resource_uris" => [@uri_a]
         }
-      ])
+      ],
+      fn finding ->
+        {:ok, state} = Core.new([])
+        {_, effect} = Core.step(state, {:readiness, readiness_report([finding])})
+        assert {:halt, result} = effect
+        assert result.status == :malformed_report
+        refute result.status == :converged
+        refute match?({:grant, _}, effect)
+        assert result.granted == []
+      end
+    )
+  end
 
+  @tag :security_regression
+  test "security regression: unrelated-plane findings never grant" do
     report =
-      put_in(report, ["planes", "other"], %{
+      put_in(readiness_report([]), ["planes", "other"], %{
         "details" => %{
           "projection" => %{
             "authority_horizon" => %{
@@ -229,19 +337,21 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
       Enum.map(1..63, fn n ->
         %{
           "principal_role" => "execution_principal",
-          "classification" => "missing",
+          "classification" => "ready",
           "resource_uris" => ["arbor://fs/read/noise-#{n}"]
         }
       end) ++ [caller_missing_finding([@uri_a])]
 
     {:ok, state} = Core.new([])
     {_, effect} = Core.step(state, {:readiness, readiness_report(findings)})
-    assert {:grant, @uri_a} = effect
+    assert {:grant, target} = effect
+    assert target == caller_target(@uri_a)
 
     uris = Enum.map(1..1024, fn n -> "arbor://fs/read/item-#{n}" end)
     {:ok, state} = Core.new([])
     {_, effect} = Core.step(state, {:readiness, missing_report(uris)})
-    assert {:grant, "arbor://fs/read/item-1"} = effect
+    assert {:grant, first} = effect
+    assert first == caller_target("arbor://fs/read/item-1")
   end
 
   test "scalar or list at each intermediate horizon path is malformed" do
@@ -260,12 +370,13 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
 
   test "later malformed readiness preserves granted progress" do
     {:ok, state} = Core.new([])
-    {state, {:grant, @uri_a}} = Core.step(state, {:readiness, missing_report([@uri_a])})
-    {state, :readiness} = Core.step(state, {:grant_result, @uri_a, :ok})
+    target_a = caller_target(@uri_a)
+    {state, {:grant, ^target_a}} = Core.step(state, {:readiness, missing_report([@uri_a])})
+    {state, :readiness} = Core.step(state, {:grant_result, target_a, :ok})
     {_state, {:halt, result}} = Core.step(state, {:readiness, :unavailable})
 
     assert result.status == :malformed_report
-    assert result.granted == [@uri_a]
+    assert result.granted == [target_a]
     assert result.failed == []
     assert result.rounds == 2
   end
@@ -301,7 +412,7 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
       Enum.map(1..32, fn n ->
         %{
           "principal_role" => "execution_principal",
-          "classification" => "missing",
+          "classification" => "ready",
           "resource_uris" => ["arbor://fs/read/noise-#{n}"]
         }
       end) ++ [caller_missing_finding([@uri_a])]
@@ -310,8 +421,8 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     {_, effect} = Core.step(state, {:readiness, readiness_report(findings)})
 
     case effect do
-      {:grant, @uri_a} ->
-        assert true
+      {:grant, target} ->
+        assert target == caller_target(@uri_a)
 
       {:halt, result} ->
         assert result.status == :report_truncated
@@ -334,6 +445,241 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
 
     {_, {:halt, result}} = Core.step(state, {:readiness, report})
     assert result.status == :malformed_report
+  end
+
+  test "recorded 2026-08-31 execution-principal missing finding is granted to the coordinator and does not halt converged" do
+    report = recorded_exec_missing_report()
+    target = exec_target(@recorded_uri, @recorded_coordinator)
+
+    {:ok, state} = Core.new(max_rounds: 3)
+    {state, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, ^target} = effect
+    refute match?({:halt, %{status: :converged}}, effect)
+
+    {state, :readiness} = Core.step(state, {:grant_result, target, :ok})
+    {_state, {:halt, result}} = Core.step(state, {:readiness, recorded_empty_report()})
+    assert result.status == :converged
+    assert result.granted == [target]
+
+    {:ok, limited} = Core.new(max_rounds: 1)
+    {_state, {:halt, unconverged}} = Core.step(limited, {:readiness, report})
+    assert unconverged.status == :unconverged
+    assert unconverged.remaining == [target]
+    refute unconverged.status == :converged
+  end
+
+  test "resolves principals from AuthorityHorizonCore.project_horizon_report without top-level id fallbacks" do
+    caller = "agent_projected_caller"
+    coordinator = "agent_projected_coordinator"
+    uri = @recorded_uri
+
+    horizon =
+      AuthorityHorizonCore.project_horizon_report(%{
+        principals: [
+          {:execution_principal, coordinator},
+          {:authenticated_caller, caller}
+        ],
+        findings: [
+          %{
+            role: :execution_principal,
+            classification: :missing,
+            resource_uris: [uri],
+            total_count: 1
+          }
+        ],
+        resources: [uri],
+        status: "missing"
+      })
+
+    refute Map.has_key?(horizon, "caller_id")
+    refute Map.has_key?(horizon, "agent_id")
+
+    report = %{
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => %{"authority_horizon" => horizon}
+          }
+        }
+      }
+    }
+
+    refute Map.has_key?(report, "caller_id")
+    refute Map.has_key?(report, "agent_id")
+    refute Map.has_key?(report["planes"]["executor"]["details"]["projection"], "caller_id")
+    refute Map.has_key?(report["planes"]["executor"]["details"]["projection"], "agent_id")
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, target} = effect
+    assert target == exec_target(uri, coordinator)
+  end
+
+  test "resolves principals listed under principal_role without top-level id fallbacks" do
+    caller = "agent_role_key_caller"
+    coordinator = "agent_role_key_coordinator"
+
+    report =
+      readiness_report(
+        [
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        caller_id: nil,
+        principals: [
+          %{"principal_role" => "execution_principal", "principal_id" => coordinator},
+          %{"principal_role" => "authenticated_caller", "principal_id" => caller}
+        ]
+      )
+      |> Map.delete("caller_id")
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, target} = effect
+    assert target == exec_target(@uri_b, coordinator)
+  end
+
+  test "show/1 flattens only legacy binary grant lists" do
+    shown =
+      Core.show(%{
+        status: :converged,
+        rounds: 1,
+        granted: [@uri_a],
+        failed: [],
+        remaining: []
+      })
+
+    assert shown ==
+             """
+             coding grant: converged
+             rounds: 1
+             granted: arbor://fs/read/tmp
+             failed: (none)
+             remaining: (none)
+             """
+             |> String.trim_trailing()
+  end
+
+  test "a URI is never granted to a principal the readiness report did not name" do
+    named = "agent_named"
+    caller = "agent_caller"
+    uri = @uri_b
+
+    report =
+      readiness_report(
+        [
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [uri]
+          }
+        ],
+        caller_id: caller,
+        principals: [
+          %{"role" => "execution_principal", "principal_id" => named},
+          %{"role" => "authenticated_caller", "principal_id" => caller}
+        ]
+      )
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:grant, target} = effect
+    assert target == exec_target(uri, named)
+    refute target.principal_id == caller
+    refute target.principal_id == "agent_other"
+  end
+
+  test "unresolvable execution-principal missing finding is malformed with no grants" do
+    report =
+      readiness_report(
+        [
+          %{
+            "principal_role" => "execution_principal",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        caller_id: nil,
+        principals: []
+      )
+      |> Map.delete("caller_id")
+
+    assert_malformed_no_grant(report)
+  end
+
+  test "finding principal_id that disagrees with the named role id is malformed with no grants" do
+    report =
+      readiness_report(
+        [
+          %{
+            "principal_role" => "execution_principal",
+            "principal_id" => "agent_other",
+            "classification" => "missing",
+            "resource_uris" => [@uri_b]
+          }
+        ],
+        principals: [
+          %{"role" => "execution_principal", "principal_id" => @recorded_coordinator},
+          %{"role" => "authenticated_caller", "principal_id" => @caller}
+        ]
+      )
+
+    assert_malformed_no_grant(report)
+  end
+
+  test "plan-validation error with field is surfaced verbatim" do
+    report =
+      projection_error_report(%{
+        "code" => "invalid_object",
+        "field" => "workspace_policy"
+      })
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:halt, result} = effect
+    assert result.status == {:invalid_object, "workspace_policy"}
+    refute match?({:grant, _}, effect)
+    assert result.granted == []
+    shown = Core.show(result)
+    assert shown =~ ~s({:invalid_object, "workspace_policy"})
+    refute shown =~ "malformed_report"
+  end
+
+  test "live executor plan-validation encoding is not malformed_report" do
+    report =
+      projection_error_report(%{
+        "code" => "invalid_object",
+        "message" => "dispatch readiness blocked: invalid_object"
+      })
+
+    {:ok, state} = Core.new([])
+    {_, effect} = Core.step(state, {:readiness, report})
+    assert {:halt, result} = effect
+    assert result.status == :invalid_object
+    refute result.status == :malformed_report
+    refute match?({:grant, _}, effect)
+    assert result.granted == []
+  end
+
+  test "horizon nil without a plan-validation error stays malformed_report" do
+    {:ok, state} = Core.new([])
+    {_, {:halt, result}} = Core.step(state, {:readiness, :unavailable})
+    assert result.status == :malformed_report
+
+    {_, {:halt, empty}} = Core.step(state, {:readiness, %{}})
+    assert empty.status == :malformed_report
+  end
+
+  test "binary grant ack is not accepted as a grant" do
+    {:ok, state} = Core.new([])
+    target = caller_target(@uri_a)
+    {state, {:grant, ^target}} = Core.step(state, {:readiness, missing_report([@uri_a])})
+    {_state, {:halt, result}} = Core.step(state, {:grant_result, @uri_a, :ok})
+    assert result.status == :grant_failed
+    assert result.granted == []
   end
 
   defp assert_malformed_no_grant(report) do
@@ -359,9 +705,9 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     drive(state, effect, readiness_fun, [:readiness | effects])
   end
 
-  defp drive(state, {:grant, uri}, readiness_fun, effects) do
-    {state, effect} = Core.step(state, {:grant_result, uri, :ok})
-    drive(state, effect, readiness_fun, [{:grant, uri} | effects])
+  defp drive(state, {:grant, target}, readiness_fun, effects) do
+    {state, effect} = Core.step(state, {:grant_result, target, :ok})
+    drive(state, effect, readiness_fun, [{:grant, target} | effects])
   end
 
   defp drive(state, {:emit, text}, readiness_fun, effects) do
@@ -389,20 +735,106 @@ defmodule Arbor.Commands.CodingGrantCoreTest do
     }
   end
 
-  defp readiness_report(findings) do
+  defp caller_target(uri, principal_id \\ @caller) do
+    %{principal_role: "authenticated_caller", principal_id: principal_id, uri: uri}
+  end
+
+  defp exec_target(uri, principal_id) do
+    %{principal_role: "execution_principal", principal_id: principal_id, uri: uri}
+  end
+
+  defp recorded_exec_missing_report do
+    readiness_report(
+      [
+        %{
+          "principal_role" => "execution_principal",
+          "classification" => "missing",
+          "total_count" => 1,
+          "resource_uris" => [@recorded_uri],
+          "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
+        }
+      ],
+      caller_id: @recorded_caller,
+      agent_id: @recorded_coordinator,
+      principals: [
+        %{"role" => "execution_principal", "principal_id" => @recorded_coordinator},
+        %{"role" => "authenticated_caller", "principal_id" => @recorded_caller}
+      ],
+      required_resources: %{
+        "total_count" => 1,
+        "resource_uris" => [@recorded_uri],
+        "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
+      }
+    )
+  end
+
+  defp recorded_empty_report do
+    readiness_report([],
+      caller_id: @recorded_caller,
+      agent_id: @recorded_coordinator,
+      principals: [
+        %{"role" => "execution_principal", "principal_id" => @recorded_coordinator},
+        %{"role" => "authenticated_caller", "principal_id" => @recorded_caller}
+      ]
+    )
+  end
+
+  defp readiness_report(findings, opts \\ []) do
+    caller_id = Keyword.get(opts, :caller_id, @caller)
+    agent_id = Keyword.get(opts, :agent_id)
+    principals = Keyword.get(opts, :principals, default_principals(caller_id, agent_id))
+
+    required =
+      Keyword.get(opts, :required_resources, %{
+        "total_count" => 0,
+        "resource_uris" => [],
+        "resource_uris_digest" => "sha256:" <> String.duplicate("00", 32)
+      })
+
+    horizon =
+      %{
+        "findings" => findings,
+        "required_resources" => required
+      }
+      |> maybe_put("principals", principals)
+
+    projection = %{"authority_horizon" => horizon}
+
+    %{
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => projection
+          }
+        }
+      }
+    }
+    |> maybe_put("caller_id", caller_id)
+    |> maybe_put("agent_id", agent_id)
+  end
+
+  defp default_principals(caller_id, agent_id) do
+    []
+    |> maybe_principal("authenticated_caller", caller_id)
+    |> maybe_principal("execution_principal", agent_id)
+  end
+
+  defp maybe_principal(list, _role, id) when not is_binary(id) or id == "", do: list
+  defp maybe_principal(list, role, id), do: list ++ [%{"role" => role, "principal_id" => id}]
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp projection_error_report(error) do
     %{
       "planes" => %{
         "executor" => %{
           "details" => %{
             "projection" => %{
-              "authority_horizon" => %{
-                "findings" => findings,
-                "required_resources" => %{
-                  "total_count" => 0,
-                  "resource_uris" => [],
-                  "resource_uris_digest" => "sha256:" <> String.duplicate("00", 32)
-                }
-              }
+              "kind" => "coding_dispatch_readiness",
+              "authority_horizon" => nil,
+              "error" => error
             }
           }
         }
