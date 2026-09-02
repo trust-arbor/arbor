@@ -4,6 +4,16 @@ Read this when changing LLM/provider routing, OAuth credentials, refresh ownersh
 
 ## Retained Applied Learning
 
+<!-- applied-learning: backend-specific-responses-usage-extensions-must-be-bounded-and-discarded -->
+<a id="applied-learning-backend-specific-responses-usage-extensions-must-be-bounded-and-discarded"></a>
+**Backend-specific Responses usage extensions must be bounded and discarded when they are not evidence.**
+OpenAI's ChatGPT Responses backend added `usage.attribution`, whose message-keyed items include
+token counters and copies of message content. Observe only field names while diagnosing; accept
+the object only on the exact backend, rely on the enclosing stream's byte/node/depth limits, and do
+not retain or log it. Validate fields that contribute evidence, but do not couple Arbor to the
+private structure of discarded metadata merely to appear stricter (found 2026-09-02 when every
+OpenAI OAuth reviewer failed with `invalid_terminal_usage_keys`).
+
 <!-- applied-learning: a-rotating-oauth-refresh-token-cannot-be-safely-cloned-into-two-independently-refreshing-stores -->
 <a id="applied-learning-a-rotating-oauth-refresh-token-cannot-be-safely-cloned-into-two-independently-refreshing-stores"></a>
 **A rotating OAuth refresh token cannot be safely cloned into two independently

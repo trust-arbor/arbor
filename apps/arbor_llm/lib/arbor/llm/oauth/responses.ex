@@ -39,6 +39,8 @@ defmodule Arbor.LLM.OAuth.Responses do
     "num_sources_used"
   ]
 
+  @openai_terminal_usage_fields ["attribution"]
+
   # The closed set of structured provider error codes that may classify an xAI 403 as
   # subscription tier denial. Matched by EXACT equality on a parsed JSON field — never by
   # substring, regex, or a generic 403. Extend only with a real observed code.
@@ -748,9 +750,11 @@ defmodule Arbor.LLM.OAuth.Responses do
     ]
 
     allowed =
-      if backend == :xai,
-        do: common_allowed ++ @xai_terminal_usage_fields,
-        else: common_allowed
+      case backend do
+        :openai -> common_allowed ++ @openai_terminal_usage_fields
+        :xai -> common_allowed ++ @xai_terminal_usage_fields
+        _ -> common_allowed
+      end
 
     keys = Map.keys(usage)
 
@@ -807,6 +811,7 @@ defmodule Arbor.LLM.OAuth.Responses do
                  :cache_write_tokens
                ),
              :ok <- bounded_terminal_detail(reasoning_tokens, output_tokens, :reasoning_tokens),
+             :ok <- validate_openai_terminal_usage_extensions(usage, backend),
              :ok <-
                validate_xai_terminal_usage_extensions(
                  usage,
@@ -828,6 +833,18 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   defp normalize_terminal_usage(_usage, _backend), do: {:error, :invalid_terminal_usage}
+
+  # Attribution can contain copies of message content. The enclosing SSE decoder already
+  # bounds its bytes/nodes/depth; validate only the backend-owned envelope and discard it.
+  defp validate_openai_terminal_usage_extensions(usage, :openai) do
+    case Map.fetch(usage, "attribution") do
+      :error -> :ok
+      {:ok, attribution} when is_map(attribution) -> :ok
+      {:ok, _attribution} -> {:error, :invalid_terminal_usage_attribution}
+    end
+  end
+
+  defp validate_openai_terminal_usage_extensions(_usage, _backend), do: :ok
 
   defp validate_xai_terminal_usage_extensions(usage, :xai, input_tokens, output_tokens) do
     with :ok <- validate_xai_context_details(usage, input_tokens, output_tokens),

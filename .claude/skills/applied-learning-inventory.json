@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 715,
+  "entry_count": 716,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8839,8 +8839,21 @@
       "source_incident": "found 2026-09-02 while reviewing G5D candidate materialization",
       "always_loaded": false,
       "content_sha256": "4bb56de9b4173139181e285eaccc3e21ee2ed146985b6e7fa909a657b7104c56"
+    },
+    {
+      "source_ordinal": 716,
+      "source_kind": "post-migration",
+      "slug": "backend-specific-responses-usage-extensions-must-be-bounded-and-discarded",
+      "title": "Backend-specific Responses usage extensions must be bounded and discarded when they are not evidence.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-backend-specific-responses-usage-extensions-must-be-bounded-and-discarded",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 when every OpenAI OAuth reviewer failed with invalid_terminal_usage_keys",
+      "always_loaded": false,
+      "content_sha256": "cfc7707cf861b015895e3474a9f4ec5592ffaedcdf0ce34c2f1cd63a56a810ca"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 254
+  "post_migration_entry_count": 255
 }

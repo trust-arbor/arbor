@@ -266,6 +266,58 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     assert %{request: _, body: _} = Task.await(malformed_server, 2_000)
   end
 
+  test "OpenAI terminal usage accepts bounded attribution without retaining its content", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "openai-token"))
+
+    terminal = openai_attribution_terminal()
+    {url, server} = start_request_capture_server(terminal)
+    configure_responses_endpoint!(%{openai: url})
+
+    assert {:ok,
+            result = %{
+              usage: %{
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                cached_tokens: 2,
+                cache_write_tokens: 1,
+                reasoning_tokens: 3
+              }
+            }} = Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    refute inspect(result) =~ "content that must not be retained"
+    assert %{request: _, body: _} = Task.await(server, 2_000)
+  end
+
+  test "security regression: OpenAI attribution is backend-scoped and structurally validated", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "openai.json", oauth_store("openai", "openai-token"))
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-token"))
+
+    terminal = openai_attribution_terminal()
+
+    {xai_url, xai_server} = start_request_capture_server(terminal)
+    configure_responses_endpoint!(%{xai: xai_url})
+
+    assert {:error, %ResponsesFailure{backend: :xai, class: :protocol, code: :invalid_stream}} =
+             Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(xai_server, 2_000)
+
+    malformed = put_in(terminal, ["usage", "attribution"], "not-an-object")
+
+    {openai_url, openai_server} = start_request_capture_server(malformed)
+    configure_responses_endpoint!(%{openai: openai_url})
+
+    assert {:error, %ResponsesFailure{backend: :openai, class: :protocol, code: :invalid_stream}} =
+             Responses.complete(:openai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(openai_server, 2_000)
+  end
+
   test "OpenAI terminal usage preserves its observed cache-write detail" do
     raw =
       terminal_sse(%{
@@ -1244,6 +1296,39 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
     do: sse(%{"type" => "response.completed", "response" => response})
 
   defp empty_request, do: %{instructions: "", input: [], tools: nil}
+
+  defp openai_attribution_terminal do
+    %{
+      "model" => "gpt-5.6-sol",
+      "usage" => %{
+        "input_tokens" => 10,
+        "output_tokens" => 5,
+        "total_tokens" => 15,
+        "input_tokens_details" => %{"cached_tokens" => 2, "cache_write_tokens" => 1},
+        "output_tokens_details" => %{"reasoning_tokens" => 3},
+        "attribution" => %{
+          "items" => %{
+            "msg_input" => %{
+              "input_tokens" => 6,
+              "output_tokens" => 0,
+              "cached_tokens" => 2,
+              "cache_write_tokens" => 1,
+              "content" => [
+                %{"type" => "input_text", "text" => "content that must not be retained"}
+              ]
+            },
+            "msg_output" => %{
+              "input_tokens" => 0,
+              "output_tokens" => 5,
+              "cached_tokens" => 0,
+              "cache_write_tokens" => 0,
+              "content" => [%{"type" => "output_text", "text" => "ok"}]
+            }
+          }
+        }
+      }
+    }
+  end
 
   defp assert_unstored_responses_body!(body) when is_binary(body) do
     decoded = Jason.decode!(body)
