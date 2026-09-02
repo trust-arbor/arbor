@@ -594,6 +594,41 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
   end
 
+  test "security regression: design review context stays frozen through council review", ctx do
+    plan = v2_plan!(%{"design_gate" => "council"})
+    assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    review_context_json = frozen_design_review_context_json(graph)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    mutations = [
+      update_in(
+        graph.nodes["freeze_coding_plan_design_review_context_json"].attrs,
+        &Map.put(&1, "expression", "{}")
+      ),
+      update_in(graph.nodes["council_review_design"].attrs, fn attrs ->
+        Map.update!(attrs, "context_keys", fn keys ->
+          String.replace(keys, "plan_review_context_json,", "", global: false)
+        end)
+      end)
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 checkpoint_policy: "design_required",
+                 design_gate: "council",
+                 checkpoint_work_packet_json: packet_json,
+                 checkpoint_design_review_context_json: review_context_json,
+                 design_checkpoint_timeout_ms: plan.budgets["inactivity_timeout_ms"]
+               )
+
+      assert Enum.any?(errors, &(&1["code"] == "design_checkpoint_binding_mismatch"))
+    end
+  end
+
   test "security regression: v2 direct worker prompts retain the frozen work packet", ctx do
     plan = v2_plan!("direct")
     assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
@@ -3202,16 +3237,26 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     plan
   end
 
-  defp v2_plan!(checkpoint_policy \\ "design_required") do
-    packet = %{
-      "version" => 1,
-      "success_criteria" => ["focused tests pass"],
-      "non_goals" => ["execution authority"],
-      "constraints" => ["touch only owned files"],
-      "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
-      "required_evidence" => ["focused test output"],
-      "checkpoint_policy" => checkpoint_policy
-    }
+  defp v2_plan!(checkpoint_policy_or_overrides \\ "design_required")
+
+  defp v2_plan!(checkpoint_policy) when is_binary(checkpoint_policy) do
+    v2_plan!(%{"checkpoint_policy" => checkpoint_policy})
+  end
+
+  defp v2_plan!(packet_overrides) when is_map(packet_overrides) do
+    packet =
+      Map.merge(
+        %{
+          "version" => 1,
+          "success_criteria" => ["focused tests pass"],
+          "non_goals" => ["execution authority"],
+          "constraints" => ["touch only owned files"],
+          "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+          "required_evidence" => ["focused test output"],
+          "checkpoint_policy" => "design_required"
+        },
+        packet_overrides
+      )
 
     {:ok, digest} = WorkPacket.digest(packet)
 
@@ -3272,6 +3317,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       graph,
       policy,
       opts
+      |> Keyword.put_new_lazy(:checkpoint_design_review_context_json, fn ->
+        frozen_design_review_context_json(graph)
+      end)
       |> Keyword.put_new(:rework_max_cycles, 2)
       |> Keyword.put_new(:rework_stop_conditions, [])
       |> Keyword.put_new_lazy(:validation_timeout_ms, fn -> validation_timeout_ms(policy) end)
@@ -3282,6 +3330,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
         validation_static_timeout_ms(policy, "stage_timeout")
       end)
     )
+  end
+
+  defp frozen_design_review_context_json(graph) do
+    with %{attrs: attrs} <- Map.get(graph.nodes, "freeze_coding_plan_design_review_context_json"),
+         value when is_binary(value) <- Map.get(attrs, "expression") do
+      value
+    else
+      _other -> "{}"
+    end
   end
 
   defp validation_timeout_ms(policy) do

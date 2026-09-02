@@ -25,6 +25,16 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
       work_packet_digest: [type: :string, required: false, doc: "Alias for packet_digest"],
       task_id: [type: :string, required: true, doc: "Coding task identity"],
       task: [type: :string, required: true, doc: "Exact nonempty reviewed coding task text"],
+      plan_review_context_json: [
+        type: :string,
+        required: true,
+        doc: "Compiler-owned canonical plan policy projection"
+      ],
+      plan_fingerprint: [
+        type: :string,
+        required: true,
+        doc: "SHA-256 fingerprint of the complete normalized coding plan"
+      ],
       design_artifact: [type: :map, required: true, doc: "Closed design artifact descriptor"],
       design_digest: [type: :string, required: true, doc: "Exact sha256: design digest"],
       design_attempt: [type: :integer, required: true, doc: "One-based design attempt"],
@@ -68,6 +78,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
       work_packet_digest: :control,
       task_id: :control,
       task: :data,
+      plan_review_context_json: :data,
+      plan_fingerprint: :control,
       design_artifact: :control,
       design_digest: :control,
       design_attempt: :control,
@@ -88,9 +100,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
     with {:ok, %{packet: packet}} <- DesignCheckpoint.bind_work_packet(params, context),
          {:ok, task_id} <- required_task_id(params, context),
          {:ok, task} <- required_task(params, context),
+         {:ok, plan_review_context} <- bind_plan_review_context(params, context),
          {:ok, design_attempt} <- required_attempt(params, context),
          {:ok, design} <- load_admitted_design(params, context, task_id, design_attempt),
-         {:ok, question} <- DesignCouncilCore.build_question(packet, task, design),
+         {:ok, question} <-
+           DesignCouncilCore.build_question(packet, task, plan_review_context, design),
          {:ok, deadline} <- consult_deadline(params, context),
          {:ok, %{evaluations: evaluations, run_id: run_id}} <-
            consult(question, deadline, context),
@@ -423,6 +437,44 @@ defmodule Arbor.Actions.Coding.DesignCouncilReview do
       _ -> {:error, :design_checkpoint_task_required}
     end
   end
+
+  defp bind_plan_review_context(params, context) do
+    review_context = value(params, context, :plan_review_context_json)
+    fingerprint = value(params, context, :plan_fingerprint)
+
+    with true <-
+           is_binary(review_context) and String.valid?(review_context) and
+             byte_size(review_context) in 2..4_096,
+         true <- is_binary(fingerprint) and Regex.match?(~r/\A[0-9a-f]{64}\z/, fingerprint),
+         {:ok, decoded} when is_map(decoded) <- Jason.decode(review_context),
+         true <- decoded["plan_fingerprint"] == fingerprint,
+         true <- is_map(decoded["budgets"]),
+         true <- is_integer(decoded["budgets"]["wall_clock_ms"]),
+         {:ok, canonical} <- encode_canonical(decoded),
+         true <- canonical == review_context do
+      {:ok, review_context}
+    else
+      _other -> {:error, :design_council_plan_context_invalid}
+    end
+  end
+
+  defp encode_canonical(value) do
+    value
+    |> canonicalize()
+    |> Jason.encode()
+  rescue
+    _exception -> {:error, :invalid}
+  end
+
+  defp canonicalize(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
+  defp canonicalize(value), do: value
 
   defp required_attempt(params, context) do
     case value(params, context, :design_attempt) do

@@ -202,6 +202,13 @@ digraph CodingChangeV1 {
     output_key="coding_plan_work_packet_json"
   ]
 
+  freeze_coding_plan_design_review_context_json [
+    type="transform",
+    transform="constant",
+    expression="{}",
+    output_key="coding_plan_design_review_context_json"
+  ]
+
   init_operator_rework_count [
     type="transform",
     transform="constant",
@@ -445,6 +452,13 @@ digraph CodingChangeV1 {
     transform="identity",
     source_key="coding_plan_work_packet_digest",
     output_key="packet_digest"
+  ]
+
+  prep_checkpoint_plan_review_context [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_design_review_context_json",
+    output_key="plan_review_context_json"
   ]
 
   prep_checkpoint_plan_fingerprint [
@@ -2364,7 +2378,8 @@ digraph CodingChangeV1 {
 
   init_design_defaults -> init_design_rework_count -> init_design_attempt ->
   init_design_envelope_retry_count -> init_worker_phase
-  init_worker_phase -> freeze_coding_plan_work_packet_json -> build_design_prompt
+  init_worker_phase -> freeze_coding_plan_work_packet_json ->
+  freeze_coding_plan_design_review_context_json -> build_design_prompt
   build_design_prompt -> capture_pre_turn_workspace
   route_worker_phase -> check_design_workspace_unchanged [condition="context.worker_phase=design"]
   route_worker_phase -> route_turn_progress [condition="context.worker_phase=implement"]
@@ -2388,7 +2403,8 @@ digraph CodingChangeV1 {
   capture_design_artifact -> hoist_design_artifact [condition="outcome=success"]
   hoist_design_artifact -> prep_checkpoint_work_packet
   prep_checkpoint_work_packet -> prep_checkpoint_packet_digest
-  prep_checkpoint_packet_digest -> prep_checkpoint_plan_fingerprint
+  prep_checkpoint_packet_digest -> prep_checkpoint_plan_review_context
+  prep_checkpoint_plan_review_context -> prep_checkpoint_plan_fingerprint
   prep_checkpoint_plan_fingerprint -> open_design_checkpoint
 
   // Open and Await are deliberately separate Engine nodes. The Engine
@@ -2794,7 +2810,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="coding_design_council_review",
-    context_keys="work_packet,packet_digest,session.task_id,task,design_artifact,design_digest,design_attempt,session.run_deadline_unix_ms",
+    context_keys="work_packet,packet_digest,session.task_id,task,plan_review_context_json,plan_fingerprint,design_artifact,design_digest,design_attempt,session.run_deadline_unix_ms",
     param.timeout=3600000,
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.interaction_wait_ms",

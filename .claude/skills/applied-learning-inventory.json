@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 717,
+  "entry_count": 718,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8865,8 +8865,21 @@
       "source_incident": "found 2026-09-02 during G5E CrossApp replay",
       "always_loaded": false,
       "content_sha256": "2897edefd44f1aa9d77a2f6f5252b7145bb7d042f4f1b2a780d2007aeae193fd"
+    },
+    {
+      "source_ordinal": 718,
+      "source_kind": "post-migration",
+      "slug": "design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate",
+      "title": "Design reviewers need every authoritative plan field they are expected to validate.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 after a council approved a 5,400,000 ms design against a 28,800,000 ms frozen plan",
+      "always_loaded": false,
+      "content_sha256": "46cff51b3d07f3479b97d16f8994c77f004937de3898006bc00674c6b195ab4a"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 256
+  "post_migration_entry_count": 257
 }

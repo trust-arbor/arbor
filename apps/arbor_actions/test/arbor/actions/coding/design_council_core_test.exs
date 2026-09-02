@@ -212,12 +212,21 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
       "architecture_refs" => [item]
     }
 
-    assert {:ok, question} = DesignCouncilCore.build_question(packet, task, design)
-    assert question =~ "Judge only the frozen task, success criteria, constraints, non-goals"
+    plan_review_context =
+      ~s({"budgets":{"wall_clock_ms":28800000},"plan_fingerprint":"#{String.duplicate("a", 64)}"})
+
+    assert {:ok, question} =
+             DesignCouncilCore.build_question(packet, task, plan_review_context, design)
+
+    assert question =~
+             "Judge only the frozen task, compiler-owned plan review context, success criteria"
+
     assert question =~ "new platform features outside this packet are nonblocking"
     assert question =~ "manager-observed verification"
     assert question =~ "cannot deny or expand the task"
     assert question =~ "Task:"
+    assert question =~ "Plan review context (canonical JSON):"
+    assert question =~ ~s("wall_clock_ms":28800000)
     assert question =~ "Success criteria:"
     assert question =~ "Constraints:"
     assert question =~ "Non-goals:"
@@ -239,7 +248,12 @@ defmodule Arbor.Actions.Coding.DesignCouncilCoreTest do
     design = String.duplicate("d", DesignArtifactDescriptor.max_bytes() + 1)
 
     assert {:error, {:design_council_section_overflow, "design"}} =
-             DesignCouncilCore.build_question(%{"success_criteria" => ["one"]}, "task", design)
+             DesignCouncilCore.build_question(
+               %{"success_criteria" => ["one"]},
+               "task",
+               ~s({"budgets":{"wall_clock_ms":10000}}),
+               design
+             )
   end
 
   test "functional core contains no impurity" do

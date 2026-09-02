@@ -2478,7 +2478,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     {result, calls, plan, compilation}
   end
 
-  defp run_compiled_v2_design_gate_fixture(scenario, design_gate) do
+  defp run_compiled_v2_design_gate_fixture(scenario, design_gate, plan_overrides \\ %{}) do
     packet = %{
       "version" => 1,
       "success_criteria" => ["focused tests pass"],
@@ -2492,10 +2492,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
     {:ok, digest} = WorkPacket.digest(packet)
 
-    run_compiled_v2_fixture(scenario, "design_required", %{
-      "work_packet" => packet,
-      "work_packet_digest" => digest
-    })
+    run_compiled_v2_fixture(
+      scenario,
+      "design_required",
+      deep_merge(
+        %{
+          "work_packet" => packet,
+          "work_packet_digest" => digest
+        },
+        plan_overrides
+      )
+    )
   end
 
   defp v2_plan!(checkpoint_policy, overrides) do
@@ -3560,12 +3567,29 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
   describe "compiled CodingPlan v2 design_gate routing" do
     test "design_gate=council approve loads the artifact without opening the operator checkpoint" do
-      assert {{:ok, result}, calls, _plan, _compilation} =
-               run_compiled_v2_design_gate_fixture(:design_approved, "council")
+      assert {{:ok, result}, calls, plan, compilation} =
+               run_compiled_v2_design_gate_fixture(:design_approved, "council", %{
+                 "budgets" => %{"wall_clock_ms" => 28_800_000}
+               })
 
       assert result.context["status"] == "change_committed"
       assert result.context["accepted_design"] == fixture_design(1)
       assert result.context["accepted_design_council_run_id"] == "council_run_fixture"
+
+      review_context_json =
+        compilation.initial_values["coding_plan_design_review_context_json"]
+
+      review_context = Jason.decode!(review_context_json)
+      assert plan.budgets["wall_clock_ms"] == 28_800_000
+      assert review_context["budgets"]["wall_clock_ms"] == 28_800_000
+      assert review_context["plan_fingerprint"] == compilation.plan_fingerprint
+
+      [design_prompt | _rest] = action_prompts(calls)
+      assert design_prompt =~ review_context_json
+
+      [council_args] = action_calls(calls, "coding_design_council_review")
+      assert council_args["plan_review_context_json"] == review_context_json
+      assert council_args["plan_fingerprint"] == compilation.plan_fingerprint
 
       assert result.context["accepted_design_evidence"]["design_council_run_id"] ==
                "council_run_fixture"

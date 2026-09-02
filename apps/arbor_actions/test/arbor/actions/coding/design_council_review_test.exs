@@ -44,6 +44,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     }
 
     {:ok, packet_digest} = WorkPacket.digest(packet)
+    plan_fingerprint = String.duplicate("a", 64)
+
+    plan_review_context_json =
+      ~s({"budgets":{"wall_clock_ms":28800000},"plan_fingerprint":"#{plan_fingerprint}"})
+
     now_ms = System.system_time(:millisecond)
     deadline = now_ms + 5_000
 
@@ -52,6 +57,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
       packet_digest: packet_digest,
       task_id: "task-council-1",
       task: "Add the design council gate",
+      plan_review_context_json: plan_review_context_json,
+      plan_fingerprint: plan_fingerprint,
       design_artifact: descriptor,
       design_digest: design_digest,
       design_attempt: 1,
@@ -72,6 +79,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
      spoofed: spoofed,
      packet: packet,
      packet_digest: packet_digest,
+     plan_fingerprint: plan_fingerprint,
+     plan_review_context_json: plan_review_context_json,
      params: params,
      context: context}
   end
@@ -92,11 +101,28 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     refute question =~ ctx.spoofed
     assert question =~ "Add the design council gate"
     assert question =~ "core is pure"
+    assert question =~ ctx.plan_review_context_json
+    assert question =~ ~s("wall_clock_ms":28800000)
     assert Keyword.get(opts, :deadline_unix_ms) == ctx.params.run_deadline_unix_ms
     assert Keyword.get(opts, :context) == %{"evaluation_protocol" => "design_review"}
     refute Keyword.has_key?(opts, :now_ms)
   after
     Process.delete(:consult_result)
+  end
+
+  test "plan-context fingerprint mismatch fails closed before any consult", ctx do
+    params = Map.put(ctx.params, :plan_fingerprint, String.duplicate("b", 64))
+
+    assert {:error, :design_council_plan_context_invalid} =
+             DesignCouncilReview.run(params, %{
+               ctx.context
+               | consensus: fn _q, _opts ->
+                   send(self(), :consulted)
+                   {:ok, %{evaluations: [], run_id: "run"}}
+                 end
+             })
+
+    refute_received :consulted
   end
 
   test "packet-digest binding fails closed before any consult", ctx do

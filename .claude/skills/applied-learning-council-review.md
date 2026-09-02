@@ -182,3 +182,14 @@ does not consume design-rework budget. The same atom applies when a configured
 veto seat is omitted or duplicated. Out-of-protocol design-review verdicts
 including `:abstain` stay admitted rework and are never reclassified as provider
 failure (found 2026-08-31).
+
+<!-- applied-learning: design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate -->
+<a id="applied-learning-design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate"></a>
+**Design reviewers need every authoritative plan field they are expected to validate.**
+Packet-only context cannot detect contradictions in budgets, worker/provider policy,
+validation or review profiles, output, or immutable candidate identity. Bind one
+compiler-owned bounded canonical plan-review projection plus the full-plan
+fingerprint into worker prompts, council input, compilation verification, and
+semantic preflight; omit execution authority and redundant large payloads (found
+2026-09-02 after a council approved a 5,400,000 ms design against a 28,800,000 ms
+frozen plan).

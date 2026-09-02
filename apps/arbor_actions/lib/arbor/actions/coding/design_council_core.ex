@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
 
   @question_preamble """
   Advisory design review. Each seat must answer approve or rework.
-  Judge only the frozen task, success criteria, constraints, non-goals, architecture refs, and design below.
+  Judge only the frozen task, compiler-owned plan review context, success criteria, constraints, non-goals, architecture refs, and design below.
   Rework only for a concrete in-scope requirement or cited architecture rule the design omits; name both the requirement and omission.
   Enhancements, general hardening, and new platform features outside this packet are nonblocking and must not be raised as rework concerns.
   Acceptance evidence and manager-observed verification do not imply a new product protocol unless the packet explicitly requires one.
@@ -37,6 +37,7 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
 
   @section_labels %{
     "task" => "Task:",
+    "plan_review_context" => "Plan review context (canonical JSON):",
     "success_criteria" => "Success criteria:",
     "constraints" => "Constraints:",
     "non_goals" => "Non-goals:",
@@ -96,10 +97,14 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
   artifact-loaded design. Each required section has an explicit byte budget.
   The assembled prompt is never tail-clipped.
   """
-  @spec build_question(map(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def build_question(packet, task, design)
-      when is_map(packet) and is_binary(task) and is_binary(design) do
+  @spec build_question(map(), String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def build_question(packet, task, plan_review_context, design)
+      when is_map(packet) and is_binary(task) and is_binary(plan_review_context) and
+             is_binary(design) do
     with {:ok, task} <- required_section(task, "task", @max_task_bytes),
+         {:ok, plan_review_context} <-
+           required_section(plan_review_context, "plan_review_context", @max_list_section_bytes),
          {:ok, design} <- required_section(design, "design", DesignArtifactDescriptor.max_bytes()),
          {:ok, success} <-
            required_list_section(list_field(packet, "success_criteria"), "success_criteria"),
@@ -114,6 +119,9 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
           "",
           @section_labels["task"],
           task,
+          "",
+          @section_labels["plan_review_context"],
+          plan_review_context,
           "",
           @section_labels["success_criteria"],
           success,
@@ -140,7 +148,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilCore do
     end
   end
 
-  def build_question(_packet, _task, _design), do: {:error, :invalid_design_council_question}
+  def build_question(_packet, _task, _plan_review_context, _design),
+    do: {:error, :invalid_design_council_question}
 
   defp normalize_rule(params) do
     with {:ok, veto} <- normalize_veto_perspectives(value(params, :veto_perspectives)),

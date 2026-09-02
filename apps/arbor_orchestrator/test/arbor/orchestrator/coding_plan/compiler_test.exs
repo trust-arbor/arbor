@@ -329,9 +329,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 101_796
-    assert map_size(graph.nodes) == 289
-    assert length(graph.edges) == 446
+    assert byte_size(ctx.template_source) == 102_338
+    assert map_size(graph.nodes) == 291
+    assert length(graph.edges) == 448
     assert byte_size(ctx.template_source) <= 262_144
     # Dormant CrossApp and descriptor routes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
@@ -351,6 +351,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                "build_implement_prompt"
 
       assert edge_target(graph, "freeze_coding_plan_work_packet_json", nil) ==
+               "freeze_coding_plan_design_review_context_json"
+
+      assert edge_target(graph, "freeze_coding_plan_design_review_context_json", nil) ==
                "build_design_prompt"
 
       assert edge_target(
@@ -413,6 +416,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           "task" => plan.task,
           "worktree_path" => "/tmp/direct-worktree",
           "coding_plan_work_packet_json" => packet_json,
+          "coding_plan_design_review_context_json" =>
+            compilation.initial_values["coding_plan_design_review_context_json"],
           "validation.feedback_json" => ~s({"errors":["compile failed"]}),
           "review.feedback_json" => ~s({"findings":["scope drift"]}),
           "approval_note" => "Keep the implementation inside the reviewed packet.",
@@ -515,12 +520,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     plan =
       v2_plan!(%{
         "checkpoint_policy" => "design_required",
-        "budgets" => %{"wall_clock_ms" => 120_000}
+        "budgets" => %{"wall_clock_ms" => 28_800_000}
       })
 
     assert {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
     assert {:ok, compilation} = compile(plan, ctx)
     graph = parse!(compilation.dot_source)
+
+    design_review_context_json =
+      compilation.initial_values["coding_plan_design_review_context_json"]
+
+    design_review_context = Jason.decode!(design_review_context_json)
+
+    assert design_review_context["budgets"]["wall_clock_ms"] == 28_800_000
+    assert design_review_context["plan_fingerprint"] == compilation.plan_fingerprint
+    assert design_review_context["work_packet_digest"] == plan.work_packet_digest
+    refute Map.has_key?(design_review_context, "task")
+    refute Map.has_key?(design_review_context, "repo_root")
 
     assert node_attrs(graph, "init_worker_phase")["expression"] == "design"
 
@@ -528,6 +544,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              ~s({"design_attempt":1,"design_envelope_retry_count":0})
 
     assert node_attrs(graph, "freeze_coding_plan_work_packet_json")["expression"] == packet_json
+
+    assert node_attrs(graph, "freeze_coding_plan_design_review_context_json")["expression"] ==
+             design_review_context_json
+
     assert edge_target(graph, "hoist_worker_provider_session_id", nil) == "init_design_defaults"
     assert edge_target(graph, "hoist_workspace_fingerprint", nil) == "route_worker_phase"
 
@@ -619,11 +639,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         "build_design_prompt",
         %{
           "task" => plan.task,
-          "coding_plan_work_packet_json" => packet_json
+          "coding_plan_work_packet_json" => packet_json,
+          "coding_plan_design_review_context_json" => design_review_context_json
         }
       )
 
     assert design_prompt =~ packet_json
+    assert design_prompt =~ design_review_context_json
+    assert design_prompt =~ ~s("wall_clock_ms":28800000)
     assert design_prompt =~ "MUST NOT edit"
     assert design_prompt =~ "MUST NOT create commits"
     refute design_prompt =~ "12,000 UTF-8 bytes"
@@ -644,6 +667,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         %{
           "task" => plan.task,
           "coding_plan_work_packet_json" => packet_json,
+          "coding_plan_design_review_context_json" => design_review_context_json,
           "design_attempt" => 1
         }
       )
@@ -689,6 +713,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           "task" => plan.task,
           "worktree_path" => "/tmp/worktree",
           "coding_plan_work_packet_json" => packet_json,
+          "coding_plan_design_review_context_json" => design_review_context_json,
           "accepted_design" => "Use the existing compiler rewrite pattern.",
           "accepted_design_digest" => "sha256:" <> String.duplicate("a", 64),
           "accepted_design_request_id" => "coding-design:" <> String.duplicate("b", 64),
@@ -697,12 +722,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
 
     assert implementation_prompt =~ packet_json
+    assert implementation_prompt =~ design_review_context_json
     assert implementation_prompt =~ "Use the existing compiler rewrite pattern."
     assert implementation_prompt =~ "IMPLEMENTATION PHASE"
 
     scope = %{
       "task" => plan.task,
       "coding_plan_work_packet_json" => packet_json,
+      "coding_plan_design_review_context_json" => design_review_context_json,
       "accepted_design" => "Use the existing compiler rewrite pattern.",
       "accepted_design_digest" => "sha256:" <> String.duplicate("a", 64),
       "accepted_design_request_id" => "coding-design:" <> String.duplicate("b", 64),
@@ -721,6 +748,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       prompt = run_transform(graph, node_id, scope)
 
       assert prompt =~ packet_json
+      assert prompt =~ design_review_context_json
       assert prompt =~ scope["accepted_design"]
       assert prompt =~ scope["accepted_design_digest"]
       assert prompt =~ scope["accepted_design_request_id"]
@@ -2620,6 +2648,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert compilation.initial_values["coding_plan_candidate_materialization_digest"] == digest
 
+    design_review_context =
+      compilation.initial_values["coding_plan_design_review_context_json"]
+      |> Jason.decode!()
+
+    assert design_review_context["candidate_materialization"] == %{
+             "digest" => digest,
+             "entry_count" => length(plan.candidate_materialization["entries"]),
+             "expected_tree_oid" => plan.candidate_materialization["expected_tree_oid"],
+             "source_commit_oid" => plan.candidate_materialization["source_commit_oid"]
+           }
+
+    refute Map.has_key?(design_review_context["candidate_materialization"], "entries")
+
     assert compilation.initial_values["coding_plan_source_commit_oid"] ==
              plan.candidate_materialization["source_commit_oid"]
 
@@ -2753,6 +2794,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       checkpoint_policy: "design_required",
       design_gate: "council_then_operator",
       checkpoint_work_packet_json: packet_json,
+      checkpoint_design_review_context_json:
+        compilation.initial_values["coding_plan_design_review_context_json"],
       candidate_materialization: true,
       candidate_materialization_digest: digest,
       graph_phase: :executable,

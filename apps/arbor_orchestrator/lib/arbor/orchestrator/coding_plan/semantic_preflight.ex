@@ -251,6 +251,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
       serialization embedded by the compiler.
+    * `:checkpoint_design_review_context_json` — the bounded canonical plan
+      policy projection embedded by the compiler for the worker and design
+      council. It carries the full-plan fingerprint but no execution authority.
     * `:graph_phase` — `:reviewed` (default) for the complete generated graph,
       or `:executable` for a descriptor-specialized graph after unreachable
       implementation and rework branches have been pruned. The executable
@@ -954,6 +957,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         :error -> :missing
       end
 
+    design_review_context_json =
+      case Keyword.fetch(opts, :checkpoint_design_review_context_json) do
+        {:ok, value} -> value
+        :error when policy == "direct" -> "{}"
+        :error -> :missing
+      end
+
     # Legacy callers may still pass :design_checkpoint_timeout_ms; it is ignored.
     # Human-wait capacity is owner-seeded (coding_budget.interaction_wait_ms).
     # Open's requested timeout is the action-owned maximum, pinned below.
@@ -971,9 +981,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           not match?({:ok, value} when is_map(value), Jason.decode(packet_json)) ->
         {:error, {:invalid_semantic_policy, :invalid_checkpoint_work_packet_json}}
 
+      not is_binary(design_review_context_json) or
+          not String.valid?(design_review_context_json) ->
+        {:error, {:invalid_semantic_policy, :invalid_checkpoint_design_review_context_json}}
+
+      policy == "design_required" and
+          not match?(
+            {:ok, value} when is_map(value),
+            Jason.decode(design_review_context_json)
+          ) ->
+        {:error, {:invalid_semantic_policy, :invalid_checkpoint_design_review_context_json}}
+
       true ->
         effective_gate = if policy == "direct", do: "operator", else: design_gate
-        {:ok, %{policy: policy, work_packet_json: packet_json, design_gate: effective_gate}}
+
+        {:ok,
+         %{
+           policy: policy,
+           work_packet_json: packet_json,
+           design_review_context_json: design_review_context_json,
+           design_gate: effective_gate
+         }}
     end
   end
 
@@ -3166,6 +3194,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "expression" => checkpoint.work_packet_json,
          "output_key" => "coding_plan_work_packet_json"
        }},
+      {"freeze_coding_plan_design_review_context_json",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => checkpoint.design_review_context_json,
+         "output_key" => "coding_plan_design_review_context_json"
+       }},
       {"check_design_workspace_unchanged",
        %{"type" => "branch", "shape" => "diamond", "fan_out" => "false"}},
       {"check_design_envelope_retry_budget",
@@ -3238,6 +3273,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "transform" => "identity",
          "source_key" => "coding_plan_work_packet_digest",
          "output_key" => "packet_digest"
+       }},
+      {"prep_checkpoint_plan_review_context",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "coding_plan_design_review_context_json",
+         "output_key" => "plan_review_context_json"
        }},
       {"prep_checkpoint_plan_fingerprint",
        %{
@@ -3379,7 +3421,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
                "target" => "action",
                "action" => "coding_design_council_review",
                "context_keys" =>
-                 "work_packet,packet_digest,session.task_id,task,design_artifact,design_digest," <>
+                 "work_packet,packet_digest,session.task_id,task,plan_review_context_json," <>
+                   "plan_fingerprint,design_artifact,design_digest," <>
                    "design_attempt,session.run_deadline_unix_ms",
                "param.timeout" => Arbor.Actions.coding_design_checkpoint_max_timeout_ms(),
                "timeout_budget.deadline_key" => "session.run_deadline_unix_ms",
@@ -3494,6 +3537,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "accepted_design_evidence_json" => ["format_accepted_design_evidence"],
       "accepted_design_request_id" => ["hoist_accepted_design_request_id"],
       "accepted_design_council_run_id" => ["hoist_accepted_design_council_run_id"],
+      "coding_plan_design_review_context_json" => [
+        "freeze_coding_plan_design_review_context_json"
+      ],
       "coding_plan_work_packet_json" => ["freeze_coding_plan_work_packet_json"],
       "design" => ["extract_design"],
       "design_artifact" => ["hoist_design_artifact"],
@@ -3505,6 +3551,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "reset_design_envelope_retry_count"
       ],
       "packet_digest" => ["prep_checkpoint_packet_digest"],
+      "plan_review_context_json" => ["prep_checkpoint_plan_review_context"],
       "plan_fingerprint" => ["prep_checkpoint_plan_fingerprint"],
       "request_id" => ["hoist_design_checkpoint_request_id"],
       "worker_phase" =>
@@ -3572,6 +3619,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "DESIGN PHASE ONLY",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "hard admission limit",
            "MUST NOT edit",
            "MUST NOT create commits",
@@ -3584,6 +3632,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "DESIGN ENVELOPE REPAIR ONLY",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.design_attempt}",
            "condense an oversized design",
            "hard admission limit",
@@ -3598,6 +3647,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "DESIGN REWORK PHASE ONLY",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.approval_note}",
            "hard admission limit",
            "MUST NOT edit",
@@ -3611,6 +3661,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "IMPLEMENTATION PHASE",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.accepted_design}",
            "{ctx.accepted_design_digest}",
            "{ctx.accepted_design_request_id}",
@@ -3621,6 +3672,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "VALIDATION REWORK",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.accepted_design}",
            "{ctx.accepted_design_digest}",
            "{ctx.accepted_design_request_id}",
@@ -3634,6 +3686,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "COUNCIL REVIEW REWORK",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.accepted_design}",
            "{ctx.accepted_design_digest}",
            "{ctx.accepted_design_request_id}",
@@ -3645,6 +3698,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            "OPERATOR REWORK",
            "{value}",
            "{ctx.coding_plan_work_packet_json}",
+           "{ctx.coding_plan_design_review_context_json}",
            "{ctx.accepted_design}",
            "{ctx.accepted_design_digest}",
            "{ctx.accepted_design_request_id}",
@@ -3697,7 +3751,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "IMPLEMENTATION PHASE",
          "{value}",
          "{ctx.worktree_path}",
-         "{ctx.coding_plan_work_packet_json}"
+         "{ctx.coding_plan_work_packet_json}",
+         "{ctx.coding_plan_design_review_context_json}"
        ]},
       {"build_validation_rework_prompt",
        [
@@ -3705,6 +3760,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "{value}",
          "{ctx.worktree_path}",
          "{ctx.coding_plan_work_packet_json}",
+         "{ctx.coding_plan_design_review_context_json}",
          "{ctx.validation.feedback_json}",
          "{ctx.approval_note}",
          "{ctx.approval_request_id}"
@@ -3715,6 +3771,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "{value}",
          "{ctx.worktree_path}",
          "{ctx.coding_plan_work_packet_json}",
+         "{ctx.coding_plan_design_review_context_json}",
          "{ctx.review.feedback_json}"
        ]},
       {"build_operator_rework_prompt",
@@ -3723,6 +3780,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "{value}",
          "{ctx.worktree_path}",
          "{ctx.coding_plan_work_packet_json}",
+         "{ctx.coding_plan_design_review_context_json}",
          "{ctx.approval_note}"
        ]}
     ]
@@ -3783,7 +3841,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"init_design_attempt", [{"init_design_envelope_retry_count", nil}]},
       {"init_design_envelope_retry_count", [{"init_worker_phase", nil}]},
       {"init_worker_phase", [{"freeze_coding_plan_work_packet_json", nil}]},
-      {"freeze_coding_plan_work_packet_json", [{"build_design_prompt", nil}]},
+      {"freeze_coding_plan_work_packet_json",
+       [{"freeze_coding_plan_design_review_context_json", nil}]},
+      {"freeze_coding_plan_design_review_context_json", [{"build_design_prompt", nil}]},
       {"build_design_prompt", [{"capture_pre_turn_workspace", nil}]},
       {"route_worker_phase", worker_phase_edges},
       {"check_design_workspace_unchanged",
@@ -3827,7 +3887,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ]},
       {"hoist_design_artifact", [{"prep_checkpoint_work_packet", nil}]},
       {"prep_checkpoint_work_packet", [{"prep_checkpoint_packet_digest", nil}]},
-      {"prep_checkpoint_packet_digest", [{"prep_checkpoint_plan_fingerprint", nil}]},
+      {"prep_checkpoint_packet_digest", [{"prep_checkpoint_plan_review_context", nil}]},
+      {"prep_checkpoint_plan_review_context", [{"prep_checkpoint_plan_fingerprint", nil}]},
       {"prep_checkpoint_plan_fingerprint", [{prep_target, nil}]},
       {"open_design_checkpoint",
        [

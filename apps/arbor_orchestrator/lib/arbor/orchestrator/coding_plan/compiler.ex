@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     ActionCatalog,
     Compilation,
     DeadlineBudget,
+    DesignReviewContext,
     ExecutionManifest,
     Profiles,
     SemanticPreflight,
@@ -154,6 +155,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
+    design_review_context_json: "coding_plan_design_review_context_json",
     checkpoint_policy: "coding_plan_checkpoint_policy",
     design_gate: "coding_plan_design_gate",
     candidate_materialization: "coding_plan_candidate_materialization",
@@ -186,6 +188,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
            Profiles.execution_manifest_profile(profile, descriptor_activated?(plan)),
          :ok <- validate_design_checkpoint_task(plan),
          {:ok, work_packet_json} <- canonical_work_packet_json(plan),
+         plan_map = Plan.to_map(plan),
+         {:ok, plan_fingerprint} <- fingerprint(plan_map, :plan),
+         {:ok, design_review_context_json} <-
+           DesignReviewContext.canonical_json(plan, plan_fingerprint),
          {:ok, semantic_preflight_opts} <-
            semantic_preflight_options(
              plan,
@@ -196,8 +202,6 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, action_catalog} <- resolve_action_catalog(opts),
          {:ok, template_source} <- resolve_template_source(opts),
          :ok <- SemanticPreflight.validate_source(template_source),
-         plan_map = Plan.to_map(plan),
-         {:ok, plan_fingerprint} <- fingerprint(plan_map, :plan),
          {:ok, template_graph} <- parse_dot(template_source, :template_parse_failed),
          {:ok, generated_graph} <-
            apply_reviewed_mutations(
@@ -206,6 +210,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              validation_program,
              plan_fingerprint,
              work_packet_json,
+             design_review_context_json,
              action_catalog
            ),
          reviewed_source = DotSerializer.serialize(generated_graph),
@@ -255,7 +260,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
           validation_program,
           plan_fingerprint,
           action_catalog["digest"],
-          work_packet_json
+          work_packet_json,
+          design_review_context_json
         )
 
       manifest =
@@ -536,6 +542,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_program,
          plan_fingerprint,
          work_packet_json,
+         design_review_context_json,
          action_catalog
        ) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
@@ -546,7 +553,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
-         {:ok, graph} <- rewrite_design_checkpoint(graph, plan, work_packet_json),
+         {:ok, graph} <-
+           rewrite_design_checkpoint(
+             graph,
+             plan,
+             work_packet_json,
+             design_review_context_json
+           ),
          {:ok, graph} <- rewrite_validation(graph, validation_program),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <- rewrite_validation_stop_conditions(graph, plan),
@@ -916,7 +929,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_design_checkpoint(graph, plan, work_packet_json) do
+  defp rewrite_design_checkpoint(
+         graph,
+         plan,
+         work_packet_json,
+         design_review_context_json
+       ) do
     policy = checkpoint_policy(plan)
     initial_phase = if policy == "design_required", do: "design", else: "implement"
 
@@ -928,6 +946,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "freeze_coding_plan_work_packet_json",
              "coding_plan_work_packet_json",
              work_packet_json
+           ),
+         {:ok, graph} <-
+           rewrite_constant_node(
+             graph,
+             "freeze_coding_plan_design_review_context_json",
+             "coding_plan_design_review_context_json",
+             design_review_context_json
            ),
          {:ok, graph} <-
            update_node(graph, "open_design_checkpoint", fn attrs ->
@@ -1318,6 +1343,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp design_prompt do
     "DESIGN PHASE ONLY. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. " <>
       "Produce a concrete implementation design satisfying that packet. " <>
       design_size_instruction() <>
       "You MUST NOT edit, create, delete, or rename files; MUST NOT run commands that modify " <>
@@ -1330,6 +1357,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp design_rework_prompt do
     "DESIGN REWORK PHASE ONLY. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. " <>
       "Design attempt: {ctx.design_attempt}. Operator correction note: {ctx.approval_note}. " <>
       "Correct the design to satisfy the packet and operator note. " <>
       design_size_instruction() <>
@@ -1344,6 +1373,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     "DESIGN ENVELOPE REPAIR ONLY. Your preceding response could not be admitted as the " <>
       "required checkpoint envelope. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. " <>
       "Design attempt: {ctx.design_attempt}. Preserve the preceding design's meaning while " <>
       "correcting every admission defect: remove prose outside the JSON object, use only the " <>
       "required field, and condense an oversized design. " <>
@@ -1363,6 +1394,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     "IMPLEMENTATION PHASE. You are implementing an Arbor code change inside worktree " <>
       "{ctx.worktree_path}. Exact reviewed task: {value}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. " <>
       "Approved design (exact): {ctx.accepted_design}. " <>
       "Approved design digest: {ctx.accepted_design_digest}. " <>
       "Approval request ID: {ctx.accepted_design_request_id}. " <>
@@ -1407,7 +1440,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp direct_scope_prompt(phase, task_placeholder) do
     "#{phase}. You are implementing an Arbor code change inside worktree " <>
       "{ctx.worktree_path}. Exact reviewed task: #{task_placeholder}. " <>
-      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. "
+      "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. "
   end
 
   defp approved_validation_rework_prompt("security_regression") do
@@ -1448,6 +1483,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp approved_scope_prompt(phase, task_placeholder) do
     "#{phase}. Exact reviewed task: #{task_placeholder}. " <>
       "Frozen canonical work packet JSON: {ctx.coding_plan_work_packet_json}. " <>
+      "Frozen compiler-owned plan review context JSON: " <>
+      "{ctx.coding_plan_design_review_context_json}. " <>
       "Approved design (exact): {ctx.accepted_design}. " <>
       "Approved design digest: {ctx.accepted_design_digest}. " <>
       "Approval request ID: {ctx.accepted_design_request_id}. " <>
@@ -2836,7 +2873,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_program,
          plan_fingerprint,
          catalog_digest,
-         work_packet_json
+         work_packet_json,
+         design_review_context_json
        ) do
     submit_review = plan.review_profile != "none"
 
@@ -2863,7 +2901,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
     |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
     |> maybe_put("model", plan.worker["model"])
-    |> maybe_put_initial_work_packet(plan, work_packet_json)
+    |> maybe_put_initial_work_packet(plan, work_packet_json, design_review_context_json)
     |> maybe_put_initial_work_packet_digest(plan)
     |> maybe_put_test_paths(plan)
     |> maybe_put_initial_descriptor(plan)
@@ -2898,11 +2936,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   # recomputes this same materialization (including the design_gate
   # condition) as an independent cross-check of compiler output. Change
   # the two functions together or the verifier will reject compilations.
-  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
+  defp maybe_put_initial_work_packet(
+         values,
+         %Plan{version: 2} = plan,
+         work_packet_json,
+         design_review_context_json
+       ) do
     values =
       Map.merge(values, %{
         @initial_context_keys.work_packet => plan.work_packet,
         @initial_context_keys.work_packet_json => work_packet_json,
+        @initial_context_keys.design_review_context_json => design_review_context_json,
         @initial_context_keys.checkpoint_policy =>
           Map.fetch!(plan.work_packet, "checkpoint_policy")
       })
@@ -2916,10 +2960,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
-  defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
+  defp maybe_put_initial_work_packet(
+         values,
+         _plan,
+         _work_packet_json,
+         _design_review_context_json
+       ) do
     values
     |> Map.delete(@initial_context_keys.work_packet)
     |> Map.delete(@initial_context_keys.work_packet_json)
+    |> Map.delete(@initial_context_keys.design_review_context_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
     |> Map.delete(@initial_context_keys.design_gate)
   end
@@ -2963,7 +3013,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         validation_test_stage_timeout_ms,
         validation_stage_timeout_ms \\ nil
       ) do
-    with {:ok, work_packet_json} <- canonical_work_packet_json(plan) do
+    with {:ok, work_packet_json} <- canonical_work_packet_json(plan),
+         {:ok, plan_fingerprint} <- fingerprint(Plan.to_map(plan), :plan),
+         {:ok, design_review_context_json} <-
+           DesignReviewContext.canonical_json(plan, plan_fingerprint) do
       {:ok,
        [
          review_profile: plan.review_profile,
@@ -2974,6 +3027,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          checkpoint_policy: checkpoint_policy(plan),
          design_gate: effective_design_gate(plan),
          checkpoint_work_packet_json: work_packet_json,
+         checkpoint_design_review_context_json: design_review_context_json,
          rework_max_cycles: plan.rework["max_cycles"],
          rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,

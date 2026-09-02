@@ -4,7 +4,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   use TypedStruct
 
   alias Arbor.Contracts.Coding.{CandidateMaterialization, Plan, WorkPacket}
-  alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, Profiles, ValidationProgram}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    DesignReviewContext,
+    ExecutionManifest,
+    Profiles,
+    ValidationProgram
+  }
+
   alias Arbor.Orchestrator.Dot.Parser
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
@@ -14,6 +21,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   @initial_context_keys %{
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
+    design_review_context_json: "coding_plan_design_review_context_json",
     checkpoint_policy: "coding_plan_checkpoint_policy",
     design_gate: "coding_plan_design_gate"
   }
@@ -160,7 +168,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
   defp validate_initial_values(compilation, plan) do
     with {:ok, validation_program} <- validation_program(compilation, plan),
-         {:ok, work_packet_json} <- canonical_work_packet_json(plan) do
+         {:ok, work_packet_json} <- canonical_work_packet_json(plan),
+         {:ok, design_review_context_json} <-
+           DesignReviewContext.canonical_json(plan, compilation.plan_fingerprint) do
       expected =
         %{
           "task" => plan.task,
@@ -185,7 +195,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
         |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
         |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
         |> maybe_put("model", plan.worker["model"])
-        |> maybe_put_initial_work_packet(plan, work_packet_json)
+        |> maybe_put_initial_work_packet(plan, work_packet_json, design_review_context_json)
         |> maybe_put_initial_work_packet_digest(plan)
         |> maybe_put_test_paths(plan)
         |> maybe_put_initial_descriptor(plan)
@@ -321,11 +331,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   # this same materialization (including the design_gate condition); this
   # copy is the independent verifier-side recomputation. Change the two
   # functions together or verification will reject valid compilations.
-  defp maybe_put_initial_work_packet(values, %Plan{version: 2} = plan, work_packet_json) do
+  defp maybe_put_initial_work_packet(
+         values,
+         %Plan{version: 2} = plan,
+         work_packet_json,
+         design_review_context_json
+       ) do
     values =
       Map.merge(values, %{
         @initial_context_keys.work_packet => plan.work_packet,
         @initial_context_keys.work_packet_json => work_packet_json,
+        @initial_context_keys.design_review_context_json => design_review_context_json,
         @initial_context_keys.checkpoint_policy =>
           Map.fetch!(plan.work_packet, "checkpoint_policy")
       })
@@ -340,10 +356,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     end
   end
 
-  defp maybe_put_initial_work_packet(values, _plan, _work_packet_json) do
+  defp maybe_put_initial_work_packet(
+         values,
+         _plan,
+         _work_packet_json,
+         _design_review_context_json
+       ) do
     values
     |> Map.delete(@initial_context_keys.work_packet)
     |> Map.delete(@initial_context_keys.work_packet_json)
+    |> Map.delete(@initial_context_keys.design_review_context_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
     |> Map.delete(@initial_context_keys.design_gate)
   end
