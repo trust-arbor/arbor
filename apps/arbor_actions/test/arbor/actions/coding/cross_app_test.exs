@@ -1218,6 +1218,64 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute_receive {:unexpected_mix, _}, 25
   end
 
+  test "changing present max_original_batches_per_window fails closed before Mix", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+
+    bundle =
+      progress_window_bundle(fixture,
+        accepted_count: 0,
+        extra_params: %{max_original_batches_per_window: 20}
+      )
+
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:unexpected_mix, args})
+      successful_mix()
+    end)
+
+    context = window_context(fixture.context, bundle)
+    drifted = Map.put(bundle.params, :max_original_batches_per_window, 19)
+
+    assert {:error, :identity_drift} = Validate.run(drifted, context)
+    refute_receive {:unexpected_mix, _}, 25
+  end
+
+  test "work-unit window hands off deferred originals as infrastructure progress", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = continuation_fixture(tmp_dir)
+
+    bundle =
+      progress_window_bundle(fixture,
+        accepted_count: 0,
+        extra_params: %{max_original_batches_per_window: 1}
+      )
+
+    assert length(bundle.compact_plan) >= 2
+    parent = self()
+
+    put_cross_app_runner!(fn _path, args, _opts ->
+      send(parent, {:mix, args})
+      successful_mix()
+    end)
+
+    context = window_context(fixture.context, bundle)
+    assert {:ok, observation} = Validate.run(bundle.params, context)
+    assert observation["disposition_type"] == "capacity_handoff"
+    assert observation["progress_status"] == "in_progress"
+    refute Map.has_key?(observation, "passed")
+    assert observation["progress"]["completed_batch_count"] == 1
+    assert observation["progress"]["next_batch_index"] == 2
+    assert is_map(observation["progress"]["capacity"])
+    assert observation["progress"]["capacity"]["available_budget_ms"] == 0
+
+    assert_receive {:mix, ["test", "--no-deps-check", "--" | _]}
+    refute_receive {:mix, ["test", "--no-deps-check", "--" | _]}, 25
+  end
+
   test "compiler binding without progress fails closed before Mix", %{tmp_dir: tmp_dir} do
     fixture = continuation_fixture(tmp_dir)
     bundle = progress_window_bundle(fixture, accepted_count: 1)
@@ -1588,12 +1646,16 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
   end
 
   defp continuation_bundle(fixture, opts) do
-    params = %{
-      workspace_id: fixture.lease.workspace_id,
-      timeout: 300_000,
-      stage_timeout: 1_200_000,
-      test_stage_timeout: 600_000
-    }
+    params =
+      Map.merge(
+        %{
+          workspace_id: fixture.lease.workspace_id,
+          timeout: 300_000,
+          stage_timeout: 1_200_000,
+          test_stage_timeout: 600_000
+        },
+        Keyword.get(opts, :extra_params, %{})
+      )
 
     {:ok, resolved} =
       Shell.resolve_selection(fixture.lease.worktree_path, fixture.lease.base_commit)

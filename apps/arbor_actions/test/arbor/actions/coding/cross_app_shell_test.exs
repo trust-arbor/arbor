@@ -34,6 +34,37 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     %{worktree: worktree}
   end
 
+  test "work-unit window hands off deferred original without launching it", %{
+    worktree: worktree
+  } do
+    parent = self()
+    paths = write_numbered_tests!(worktree, "alpha", Core.max_test_batch_files() + 1)
+    assert {:ok, [batch1, batch2]} = Core.partition_test_batches(paths)
+    assert {:ok, execution} = Core.new_test_execution([batch1, batch2], launchable_op_ms(), 0, 1)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+      {:ok, %{exit_code: 0, stdout: "batch1 ok", stderr: "", timed_out: false}}
+    end)
+
+    deadline = System.monotonic_time(:millisecond) + launchable_stage_ms()
+    check = Shell.run_test_execution(worktree, execution, deadline)
+
+    refute check["passed"]
+    assert check["reason"] == "validation_capacity_exceeded"
+    handoff = check["capacity_handoff"]
+    assert handoff["schema_version"] == 3
+    assert handoff["phase"] == "runtime"
+    assert handoff["available_budget_ms"] == 0
+    assert handoff["completed_batch_count"] == 1
+    assert handoff["interrupted_batch"] == nil
+    assert handoff["unstarted_batches"] == [compact_capacity_batch(batch2)]
+
+    assert_receive {:mix_invocation, ["test", "--no-deps-check", "--" | received], _opts}
+    assert received == batch1.paths
+    refute_received {:mix_invocation, _, _}
+  end
+
   test "malformed Core execution state has one stable Shell error tag", %{worktree: worktree} do
     deadline = System.monotonic_time(:millisecond) + 10_000
 
@@ -1394,6 +1425,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha"])
     resource = %{id: "validation-resource-fixture"}
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, opts ->
       send(parent, {:mix_invocation, path, args, opts})

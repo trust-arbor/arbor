@@ -55,7 +55,16 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @pretest_intensive_children 3
   @maximum_stage_timeout @pretest_intensive_children * @maximum_timeout +
                            @maximum_test_stage_timeout
-  @allowed_param_keys [:workspace_id, :timeout, :stage_timeout, :test_stage_timeout]
+  # Compiler-owned work-unit pin for newly compiled cross_app programs.
+  @max_original_batches_per_window 20
+  @minimum_original_batches_per_window 1
+  @allowed_param_keys [
+    :workspace_id,
+    :timeout,
+    :stage_timeout,
+    :test_stage_timeout,
+    :max_original_batches_per_window
+  ]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
   @configuration_digest_domain "arbor.actions.coding.cross_app.continuation.configuration"
   @configuration_digest_schema_version 1
@@ -86,6 +95,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @max_test_batch_runtime_files 20
   @max_test_batch_argv_files Arbor.Shell.spawn_capable_max_command_args() - @test_batch_fixed_args
   @max_test_batch_files min(@max_test_batch_runtime_files, @max_test_batch_argv_files)
+  # Producer original-batch ceiling (currently 20-file packing): 255 singleton
+  # roots plus ceil(1,745 / batch_size) batches in the last root. Derive from
+  # the effective producer bound so a future tighter Shell argv ceiling cannot
+  # make this input ceiling smaller than a valid plan. Do not restate the
+  # numeric result outside this module / the Arbor.Actions facade.
+  @maximum_original_batches_per_window @max_apps - 1 +
+                                         div(
+                                           @max_expanded_test_files - (@max_apps - 1) +
+                                             @max_test_batch_files - 1,
+                                           @max_test_batch_files
+                                         )
   # "root" plus bit_length(max_files - 1): the split tree's worst-case depth.
   @max_refinement_position_bytes byte_size("root") +
                                    length(Integer.digits(@max_test_batch_files - 1, 2))
@@ -144,7 +164,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           workspace_id: String.t(),
           timeout: pos_integer(),
           stage_timeout: pos_integer() | nil,
-          test_stage_timeout: pos_integer()
+          test_stage_timeout: pos_integer(),
+          max_original_batches_per_window: pos_integer() | nil
         }
 
   @typedoc "One umbrella app's static dependency metadata."
@@ -264,9 +285,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @typedoc """
   Complete pure state for deterministic timeout refinement.
 
-  `original_batches` is immutable. `completed_originals`, `current_original`,
-  and `original_suffix` are its exact ordered partition. `work_queue` contains
-  only runtime attempt descriptors for the current original; Shell may read
+  `original_batches` is the immutable admitted prefix for this invocation.
+  `completed_originals`, `current_original`, and `original_suffix` are its
+  exact ordered partition. `deferred_originals` is the immutable tail beyond
+  that prefix and is never placed on `work_queue`. `work_queue` contains only
+  runtime attempt descriptors for the current original; Shell may read
   `operation_timeout` but all state transitions and validation stay in Core.
   `accepted_positions` is the exact ordered cut of accepted nodes. `prior_frontier`
   is the admitted compact cut rehydrated in this process, or nil.
@@ -277,6 +300,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           completed_originals: [test_batch()],
           current_original: test_batch() | nil,
           original_suffix: [test_batch()],
+          deferred_originals: [test_batch()],
           work_queue: [test_attempt()],
           accepted_paths: [String.t()],
           accepted_positions: [String.t()],
@@ -288,7 +312,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           total_attempt_count: non_neg_integer(),
           operation_timeout: pos_integer(),
           postflight_reserve_ms: non_neg_integer(),
-          prior_frontier: map() | nil
+          prior_frontier: map() | nil,
+          max_original_batches_per_window: pos_integer() | nil
         }
 
   @typedoc "Bounded evidence for a validation capacity handoff."
@@ -372,18 +397,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
   def new(params) when is_map(params) do
-    with :ok <- validate_param_keys(params),
+    with :ok <- reject_dual_window_alias(params),
+         :ok <- validate_param_keys(params),
          {:ok, workspace_id} <- validate_workspace_id(param(params, :workspace_id)),
          {:ok, timeout} <- validate_timeout(param(params, :timeout)),
          {:ok, stage_timeout} <- validate_stage_timeout(param(params, :stage_timeout)),
          {:ok, test_stage_timeout} <-
-           validate_test_stage_timeout(param(params, :test_stage_timeout)) do
+           validate_test_stage_timeout(param(params, :test_stage_timeout)),
+         {:ok, max_original_batches_per_window} <-
+           validate_max_original_batches_per_window(
+             param(params, :max_original_batches_per_window)
+           ) do
       {:ok,
        %{
          workspace_id: workspace_id,
          timeout: timeout,
          stage_timeout: stage_timeout,
-         test_stage_timeout: test_stage_timeout
+         test_stage_timeout: test_stage_timeout,
+         max_original_batches_per_window: max_original_batches_per_window
        }}
     end
   end
@@ -391,24 +422,19 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def new(_params), do: {:error, :invalid_parameters}
 
   @doc """
-  Canonical configuration identity for the three normalized CrossApp budgets.
+  Canonical configuration identity for the normalized CrossApp budgets.
 
   `workspace_id` is deliberately excluded. The digest is over the values
   admitted by `new/1`, so aliases, defaults, and decimal string inputs cannot
   create distinct identities for the same effective configuration.
+
+  `max_original_batches_per_window` is included only when present. Omitted
+  input therefore preserves the exact pre-change digest bytes.
   """
   @spec configuration_digest(map()) :: {:ok, String.t()} | {:error, atom()}
   def configuration_digest(params) when is_map(params) do
-    with {:ok, input} <- new(params),
-         {:ok, digest} <-
-           Arbor.Actions.Coding.CrossApp.EvidenceCore.digest(%{
-             "domain" => @configuration_digest_domain,
-             "schema_version" => @configuration_digest_schema_version,
-             "stage_timeout" => input.stage_timeout,
-             "test_stage_timeout" => input.test_stage_timeout,
-             "timeout" => input.timeout
-           }) do
-      {:ok, digest}
+    with {:ok, input} <- new(params) do
+      Arbor.Actions.Coding.CrossApp.EvidenceCore.digest(configuration_digest_subject(input))
     end
   end
 
@@ -708,6 +734,15 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @doc false
   def maximum_stage_timeout, do: @maximum_stage_timeout
+
+  @doc false
+  def max_original_batches_per_window, do: @max_original_batches_per_window
+
+  @doc false
+  def minimum_original_batches_per_window, do: @minimum_original_batches_per_window
+
+  @doc false
+  def maximum_original_batches_per_window, do: @maximum_original_batches_per_window
 
   @doc false
   def max_expanded_test_files, do: @max_expanded_test_files
@@ -1012,42 +1047,99 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
        do: false
 
   @doc """
-  Construct bounded pure state for sequential test execution with timeout refinement.
+  Validate the full remaining original-batch suffix, then apply the work-unit cap.
 
-  The supplied batches remain the immutable capacity-handoff plan. Refined
-  attempts are runtime-only descriptors and can never replace plan entries.
+  `limit == nil` admits the entire suffix and defers nothing. A present limit
+  takes the first N originals as the admitted prefix and defers the rest
+  without re-indexing or re-hashing. The full suffix is validated before
+  take/drop.
   """
-  @spec new_test_execution([test_batch()], pos_integer(), non_neg_integer()) ::
-          {:ok, test_execution()} | {:error, term()}
-  def new_test_execution(batches, operation_timeout, postflight_reserve_ms \\ 0)
+  @spec partition_original_window(term(), term()) ::
+          {:ok, %{admitted: [test_batch()], deferred: [test_batch()]}} | {:error, term()}
+  def partition_original_window(batches, limit)
 
-  def new_test_execution([], operation_timeout, postflight_reserve_ms)
-      when is_integer(operation_timeout) and operation_timeout > 0 and
-             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
-    {:ok, empty_test_execution(operation_timeout, postflight_reserve_ms)}
-  end
-
-  def new_test_execution(batches, operation_timeout, postflight_reserve_ms)
-      when is_list(batches) and is_integer(operation_timeout) and operation_timeout > 0 and
-             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
-    if valid_remaining_batches?(batches) do
-      [current | suffix] = batches
-
-      {:ok,
-       empty_test_execution(operation_timeout, postflight_reserve_ms)
-       |> Map.merge(%{
-         original_batches: batches,
-         current_original: current,
-         original_suffix: suffix,
-         work_queue: [root_attempt(current)]
-       })}
-    else
-      {:error, :invalid_test_batch_plan}
+  def partition_original_window([], limit) do
+    with :ok <- validate_window_limit(limit) do
+      {:ok, %{admitted: [], deferred: []}}
     end
   end
 
-  def new_test_execution(_batches, _operation_timeout, _postflight_reserve_ms),
-    do: {:error, :invalid_test_batch_plan}
+  def partition_original_window(batches, limit) when is_list(batches) do
+    with :ok <- validate_window_limit(limit),
+         true <- valid_remaining_batches?(batches) do
+      case limit do
+        nil ->
+          {:ok, %{admitted: batches, deferred: []}}
+
+        n ->
+          {:ok, %{admitted: Enum.take(batches, n), deferred: Enum.drop(batches, n)}}
+      end
+    else
+      {:error, _reason} = error -> error
+      false -> {:error, :invalid_test_batch_plan}
+    end
+  end
+
+  def partition_original_window(_batches, _limit), do: {:error, :invalid_test_batch_plan}
+
+  @doc """
+  Construct bounded pure state for sequential test execution with timeout refinement.
+
+  The supplied batches are the full remaining original suffix and remain the
+  immutable capacity-handoff plan. A present window limit admits only the first
+  N originals into live execution; deferred originals stay off the work queue.
+  Refined attempts are runtime-only descriptors and can never replace plan entries.
+  """
+  @spec new_test_execution([test_batch()], pos_integer(), non_neg_integer(), pos_integer() | nil) ::
+          {:ok, test_execution()} | {:error, term()}
+  def new_test_execution(
+        batches,
+        operation_timeout,
+        postflight_reserve_ms \\ 0,
+        max_original_batches_per_window \\ nil
+      )
+
+  def new_test_execution(
+        batches,
+        operation_timeout,
+        postflight_reserve_ms,
+        max_original_batches_per_window
+      )
+      when is_list(batches) and is_integer(operation_timeout) and operation_timeout > 0 and
+             is_integer(postflight_reserve_ms) and postflight_reserve_ms >= 0 do
+    with {:ok, %{admitted: admitted, deferred: deferred}} <-
+           partition_original_window(batches, max_original_batches_per_window) do
+      execution =
+        empty_test_execution(
+          operation_timeout,
+          postflight_reserve_ms,
+          max_original_batches_per_window,
+          deferred
+        )
+
+      case admitted do
+        [] ->
+          {:ok, execution}
+
+        [current | suffix] ->
+          {:ok,
+           Map.merge(execution, %{
+             original_batches: admitted,
+             current_original: current,
+             original_suffix: suffix,
+             work_queue: [root_attempt(current)]
+           })}
+      end
+    end
+  end
+
+  def new_test_execution(
+        _batches,
+        _operation_timeout,
+        _postflight_reserve_ms,
+        _max_original_batches_per_window
+      ),
+      do: {:error, :invalid_test_batch_plan}
 
   @doc """
   Project a bounded, non-accepting ordered_binary_split_v1 cut from live state.
@@ -1166,7 +1258,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     with :ok <- validate_test_execution(state) do
       case state.current_original do
         nil ->
-          {:complete, aggregate_test_check(state.original_results)}
+          case state.deferred_originals do
+            [] ->
+              {:complete, aggregate_test_check(state.original_results)}
+
+            deferred ->
+              {:capacity, state.completed_originals, nil, deferred}
+          end
 
         current ->
           if residual_allows_mix_launch?(
@@ -1183,9 +1281,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
             end
           else
             if state.current_started do
-              {:capacity, state.completed_originals, current, state.original_suffix}
+              capacity_effect(state, current, state.original_suffix)
             else
-              {:capacity, state.completed_originals, nil, [current | state.original_suffix]}
+              capacity_effect(state, nil, [current | state.original_suffix])
             end
           end
       end
@@ -1252,7 +1350,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           state.operation_timeout,
           reserve
         ) ->
-          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+          capacity_effect(state, state.current_original, state.original_suffix)
 
         runner_timeout and attempt.count == 1 ->
           result = original_result(state, feedback, false, true)
@@ -1312,10 +1410,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
            state.postflight_reserve_ms
          ) do
         if state.current_started do
-          {:capacity, state.completed_originals, state.current_original, state.original_suffix}
+          capacity_effect(state, state.current_original, state.original_suffix)
         else
-          {:capacity, state.completed_originals, nil,
-           [state.current_original | state.original_suffix]}
+          capacity_effect(state, nil, [state.current_original | state.original_suffix])
         end
       else
         [attempt | _] = state.work_queue
@@ -1327,12 +1424,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   def record_test_execution_prelaunch_error(_state, _reason, _remaining_after),
     do: {:error, :invalid_refinement_state}
 
-  defp empty_test_execution(operation_timeout, postflight_reserve_ms) do
+  defp empty_test_execution(
+         operation_timeout,
+         postflight_reserve_ms,
+         max_original_batches_per_window,
+         deferred_originals
+       ) do
     %{
       original_batches: [],
       completed_originals: [],
       current_original: nil,
       original_suffix: [],
+      deferred_originals: deferred_originals,
       work_queue: [],
       accepted_paths: [],
       accepted_positions: [],
@@ -1344,8 +1447,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       total_attempt_count: 0,
       operation_timeout: operation_timeout,
       postflight_reserve_ms: postflight_reserve_ms,
-      prior_frontier: nil
+      prior_frontier: nil,
+      max_original_batches_per_window: max_original_batches_per_window
     }
+  end
+
+  defp capacity_effect(state, interrupted, unstarted) when is_list(unstarted) do
+    {:capacity, state.completed_originals, interrupted, unstarted ++ state.deferred_originals}
   end
 
   defp accept_passing_attempt(state, attempt, rest, feedback, _remaining_after) do
@@ -1597,6 +1705,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :completed_originals,
       :current_original,
       :original_suffix,
+      :deferred_originals,
       :work_queue,
       :accepted_paths,
       :accepted_positions,
@@ -1608,7 +1717,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :total_attempt_count,
       :operation_timeout,
       :postflight_reserve_ms,
-      :prior_frontier
+      :prior_frontier,
+      :max_original_batches_per_window
     ]
 
     cond do
@@ -1622,9 +1732,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         {:error, :invalid_refinement_state}
 
       not is_list(state.original_batches) or not is_list(state.completed_originals) or
-        not is_list(state.original_suffix) or not is_list(state.work_queue) or
+        not is_list(state.original_suffix) or not is_list(state.deferred_originals) or
+        not is_list(state.work_queue) or
         not is_list(state.accepted_paths) or not is_list(state.accepted_positions) or
         not is_list(state.original_results) or not is_list(state.attempt_records) ->
+        {:error, :invalid_refinement_state}
+
+      not valid_window_limit?(state.max_original_batches_per_window) ->
         {:error, :invalid_refinement_state}
 
       not is_boolean(state.current_started) or not is_boolean(state.refined?) or
@@ -1632,10 +1746,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         not is_integer(state.total_attempt_count) or state.total_attempt_count < 0 ->
         {:error, :invalid_refinement_state}
 
+      not valid_window_partition?(state) ->
+        {:error, :invalid_refinement_state}
+
       state.original_batches == [] ->
         validate_empty_test_execution(state)
 
-      not valid_remaining_batches?(state.original_batches) ->
+      not valid_remaining_batches?(state.original_batches ++ state.deferred_originals) ->
         {:error, :invalid_refinement_state}
 
       true ->
@@ -1645,7 +1762,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   defp validate_empty_test_execution(state) do
     if state.completed_originals == [] and is_nil(state.current_original) and
-         state.original_suffix == [] and state.work_queue == [] and
+         state.original_suffix == [] and state.deferred_originals == [] and
+         state.work_queue == [] and
          state.accepted_paths == [] and state.accepted_positions == [] and
          state.original_results == [] and
          state.attempt_records == [] and state.current_started == false and
@@ -1654,6 +1772,35 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       :ok
     else
       {:error, :invalid_refinement_state}
+    end
+  end
+
+  defp valid_window_limit?(nil), do: true
+
+  defp valid_window_limit?(limit)
+       when is_integer(limit) and limit >= @minimum_original_batches_per_window and
+              limit <= @maximum_original_batches_per_window,
+       do: true
+
+  defp valid_window_limit?(_limit), do: false
+
+  defp valid_window_partition?(state) do
+    limit = state.max_original_batches_per_window
+    admitted_count = length(state.original_batches)
+    full_count = admitted_count + length(state.deferred_originals)
+
+    cond do
+      is_nil(limit) ->
+        state.deferred_originals == []
+
+      admitted_count > limit ->
+        false
+
+      admitted_count != min(limit, full_count) ->
+        false
+
+      true ->
+        true
     end
   end
 
@@ -3272,6 +3419,61 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       align_utf8_start(text, start + 1, n + 1)
     end
   end
+
+  defp configuration_digest_subject(input) do
+    subject = %{
+      "domain" => @configuration_digest_domain,
+      "schema_version" => @configuration_digest_schema_version,
+      "stage_timeout" => input.stage_timeout,
+      "test_stage_timeout" => input.test_stage_timeout,
+      "timeout" => input.timeout
+    }
+
+    case input.max_original_batches_per_window do
+      nil -> subject
+      value -> Map.put(subject, "max_original_batches_per_window", value)
+    end
+  end
+
+  defp reject_dual_window_alias(params) do
+    if Map.has_key?(params, :max_original_batches_per_window) and
+         Map.has_key?(params, "max_original_batches_per_window") do
+      {:error, :invalid_cross_app_input}
+    else
+      :ok
+    end
+  end
+
+  defp validate_window_limit(nil), do: :ok
+
+  defp validate_window_limit(limit)
+       when is_integer(limit) and limit >= @minimum_original_batches_per_window and
+              limit <= @maximum_original_batches_per_window,
+       do: :ok
+
+  defp validate_window_limit(_limit), do: {:error, :invalid_max_original_batches_per_window}
+
+  defp validate_max_original_batches_per_window(nil), do: {:ok, nil}
+
+  defp validate_max_original_batches_per_window(value)
+       when is_integer(value) and value >= @minimum_original_batches_per_window and
+              value <= @maximum_original_batches_per_window,
+       do: {:ok, value}
+
+  defp validate_max_original_batches_per_window(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} ->
+        if Integer.to_string(parsed) == value,
+          do: validate_max_original_batches_per_window(parsed),
+          else: {:error, :invalid_max_original_batches_per_window}
+
+      _other ->
+        {:error, :invalid_max_original_batches_per_window}
+    end
+  end
+
+  defp validate_max_original_batches_per_window(_value),
+    do: {:error, :invalid_max_original_batches_per_window}
 
   defp validate_param_keys(params) do
     valid? =

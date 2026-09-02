@@ -1077,7 +1077,30 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Core.maximum_stage_timeout()
   end
 
-  @doc "Canonical digest of Core-normalized CrossApp timeout configuration."
+  @doc """
+  Compiler-owned CrossApp original-batch work-unit pin.
+
+  Newly compiled `cross_app` validation programs always project this value as
+  `max_original_batches_per_window`. Direct action calls may omit the field.
+  Callers must not import `Arbor.Actions.Coding.CrossApp.Core` or restate `20`.
+  """
+  @spec cross_app_max_original_batches_per_window() :: pos_integer()
+  def cross_app_max_original_batches_per_window do
+    Arbor.Actions.Coding.CrossApp.Core.max_original_batches_per_window()
+  end
+
+  @doc """
+  Reviewed finite maximum for optional `max_original_batches_per_window` input.
+
+  Derived from the current 20-file original-batch producer ceiling. Coding-plan
+  profiles must not restate the numeric result.
+  """
+  @spec cross_app_maximum_original_batches_per_window() :: pos_integer()
+  def cross_app_maximum_original_batches_per_window do
+    Arbor.Actions.Coding.CrossApp.Core.maximum_original_batches_per_window()
+  end
+
+  @doc "Canonical digest of Core-normalized CrossApp configuration."
   @spec coding_cross_app_configuration_digest(map()) ::
           {:ok, String.t()} | {:error, atom()}
   def coding_cross_app_configuration_digest(params) do

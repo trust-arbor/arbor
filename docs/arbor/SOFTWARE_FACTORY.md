@@ -51,7 +51,12 @@ Typical stages:
 3. Implement. The worker must return exactly one JSON object:
    `{"status":"implemented"|"declined","summary":"..."}`.
 4. Validate through the reviewed wrapper. Nested validators stay
-   approval-gated.
+   approval-gated. Compiled `cross_app` validation pins a compiler-owned
+   `max_original_batches_per_window=20` work-unit bound: each action
+   invocation newly completes at most 20 original batches, and a remaining
+   original suffix is infrastructure progress through the existing capacity
+   handoff rather than acceptance. Callers cannot select that bound through
+   Plan v2.
 5. Binding council review (default) decides `human_review` vs `auto_proceed`.
 6. Optionally commit. Merge remains a human Git operation. Settlement is a
    later `arbor_adopt_task_change` call.

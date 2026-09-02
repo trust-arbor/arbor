@@ -312,7 +312,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                  "coding_plan_work_packet_digest"
                ],
                "result_adapter" => "cross_app_v1",
-               "static_parameters" => %{},
+               "static_parameters" => %{
+                 "max_original_batches_per_window" =>
+                   Arbor.Actions.cross_app_max_original_batches_per_window()
+               },
                "timeout_budget_param" => "stage_timeout",
                "timeout_budget_source" => "budgets.wall_clock_ms",
                "timeout_max_ms" => intensive_ceiling,

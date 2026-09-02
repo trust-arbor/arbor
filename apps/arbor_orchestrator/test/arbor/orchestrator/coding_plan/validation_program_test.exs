@@ -36,6 +36,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
              "coding_plan_work_packet_digest"
            ],
            "static_parameters" => %{
+             "max_original_batches_per_window" =>
+               Arbor.Actions.cross_app_max_original_batches_per_window(),
              "stage_timeout" => 900_000,
              "test_stage_timeout" => 900_000,
              "timeout" => 900_000
@@ -108,24 +110,32 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
          }},
         {"cross_app", 120_000,
          %{
+           "max_original_batches_per_window" =>
+             Arbor.Actions.cross_app_max_original_batches_per_window(),
            "timeout" => 120_000,
            "test_stage_timeout" => 120_000,
            "stage_timeout" => 120_000
          }},
         {"cross_app", 1_500_000,
          %{
+           "max_original_batches_per_window" =>
+             Arbor.Actions.cross_app_max_original_batches_per_window(),
            "timeout" => 1_200_000,
            "test_stage_timeout" => 1_500_000,
            "stage_timeout" => 1_500_000
          }},
         {"cross_app", 5_000_000,
          %{
+           "max_original_batches_per_window" =>
+             Arbor.Actions.cross_app_max_original_batches_per_window(),
            "timeout" => 1_200_000,
            "test_stage_timeout" => 4_200_000,
            "stage_timeout" => 5_000_000
          }},
         {"cross_app", 8_000_000,
          %{
+           "max_original_batches_per_window" =>
+             Arbor.Actions.cross_app_max_original_batches_per_window(),
            "timeout" => 1_200_000,
            "test_stage_timeout" => 4_200_000,
            "stage_timeout" => Arbor.Actions.cross_app_maximum_stage_timeout_ms()
@@ -328,6 +338,28 @@ defmodule Arbor.Orchestrator.CodingPlan.ValidationProgramTest do
         refute Map.has_key?(attrs, "param.unreviewed")
         refute Map.has_key?(attrs, "arg.legacy")
       end
+    end
+
+    test "rejects cross_app programs that drop or change max_original_batches_per_window" do
+      assert {:ok, program} =
+               ValidationProgram.build(strategy!("cross_app"), %{"wall_clock_ms" => 900_000})
+
+      assert program["static_parameters"]["max_original_batches_per_window"] ==
+               Arbor.Actions.cross_app_max_original_batches_per_window()
+
+      dropped =
+        update_in(
+          program,
+          ["static_parameters"],
+          &Map.delete(&1, "max_original_batches_per_window")
+        )
+
+      changed = put_in(program, ["static_parameters", "max_original_batches_per_window"], 19)
+
+      assert {:error, :invalid_validation_program} = ValidationProgram.validate(dropped)
+      assert {:error, :invalid_validation_program} = ValidationProgram.validate(changed)
+      assert {:error, :invalid_validation_program} = ValidationProgram.project_onto(dropped, %{})
+      assert {:error, :invalid_validation_program} = ValidationProgram.project_onto(changed, %{})
     end
 
     test "rejects drifted descriptors instead of projecting them" do

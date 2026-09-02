@@ -1788,6 +1788,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert pinned["timeout"] == 900_000
     assert pinned["test_stage_timeout"] == 900_000
     assert pinned["stage_timeout"] == 900_000
+
+    assert pinned["max_original_batches_per_window"] ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
+    refute Map.has_key?(validate, "param.max_original_batches_per_window")
     assert validate["param.stage_timeout"] == 900_000
     assert validate["timeout_budget.param"] == "stage_timeout"
     refute Map.has_key?(validate, "param.timeout")
@@ -2021,6 +2026,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert pinned["timeout"] == 120_000
     assert pinned["test_stage_timeout"] == 120_000
     assert pinned["stage_timeout"] == 120_000
+
+    assert pinned["max_original_batches_per_window"] ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
     assert validate["param.stage_timeout"] == 120_000
   end
 
@@ -2041,6 +2050,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert pinned["timeout"] == 1_200_000
     assert pinned["test_stage_timeout"] == 1_500_000
     assert pinned["stage_timeout"] == 1_500_000
+
+    assert pinned["max_original_batches_per_window"] ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
     assert validate["param.stage_timeout"] == 1_500_000
   end
 
@@ -2060,6 +2073,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert pinned["timeout"] == 1_200_000
     assert pinned["test_stage_timeout"] == 4_200_000
     assert pinned["stage_timeout"] == stage_max
+
+    assert pinned["max_original_batches_per_window"] ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
     assert validate["param.stage_timeout"] == stage_max
 
     assert pinned["test_stage_timeout"] ==
@@ -2086,6 +2103,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert pinned["timeout"] == 1_200_000
     assert pinned["test_stage_timeout"] == 4_200_000
     assert pinned["stage_timeout"] == 5_000_000
+
+    assert pinned["max_original_batches_per_window"] ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
     assert validate["param.stage_timeout"] == 5_000_000
   end
 

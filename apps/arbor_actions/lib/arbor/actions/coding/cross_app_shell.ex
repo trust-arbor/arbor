@@ -122,6 +122,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
       operation_timeout,
       test_stage_timeout,
       nil,
+      nil,
       nil
     )
   end
@@ -646,7 +647,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                    input.timeout,
                    input.test_stage_timeout,
                    validation_deadline,
-                   resource
+                   resource,
+                   input.max_original_batches_per_window
                  )
                end,
                validation_resource_opts(input.timeout, validation_deadline)
@@ -1115,12 +1117,17 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp static_stages_passed?(_checks), do: false
 
   defp input_params(input) do
-    %{
+    params = %{
       workspace_id: input.workspace_id,
       timeout: input.timeout,
       stage_timeout: input.stage_timeout,
       test_stage_timeout: input.test_stage_timeout
     }
+
+    case Map.get(input, :max_original_batches_per_window) do
+      nil -> params
+      value -> Map.put(params, :max_original_batches_per_window, value)
+    end
   end
 
   defp finish_admitted_progress(
@@ -1218,7 +1225,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                        accepted_count,
                        frontier,
                        validation_deadline,
-                       resource
+                       resource,
+                       input.max_original_batches_per_window
                      ) do
                 finalize_progress_observation(
                   observation,
@@ -1276,7 +1284,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              accepted_count,
              frontier,
              validation_deadline,
-             resource
+             resource,
+             input.max_original_batches_per_window
            ) do
       finalize_progress_observation(
         observation,
@@ -1301,7 +1310,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          _accepted_count,
          _frontier,
          _validation_deadline,
-         _resource
+         _resource,
+         _max_original_batches_per_window
        ) do
     {:ok, %{new_receipts: [], disposition: %{"type" => "completed"}}}
   end
@@ -1315,7 +1325,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          accepted_count,
          frontier,
          validation_deadline,
-         resource
+         resource,
+         max_original_batches_per_window
        ) do
     {available_ms, test_deadline} =
       validation_test_budget(test_stage_timeout, validation_deadline)
@@ -1336,7 +1347,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
               nil,
               test_deadline,
               resource,
-              reserve_ms
+              reserve_ms,
+              max_original_batches_per_window
             )
 
           {:capacity_exceeded, check} ->
@@ -1368,7 +1380,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
           frontier,
           test_deadline,
           resource,
-          reserve_ms
+          reserve_ms,
+          max_original_batches_per_window
         )
 
       true ->
@@ -1390,11 +1403,18 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          frontier,
          test_deadline,
          resource,
-         reserve_ms
+         reserve_ms,
+         max_original_batches_per_window
        ) do
     deadline = test_deadline || monotonic_ms() + test_stage_timeout
 
-    with {:ok, execution} <- Core.new_test_execution(suffix, operation_timeout, reserve_ms),
+    with {:ok, execution} <-
+           Core.new_test_execution(
+             suffix,
+             operation_timeout,
+             reserve_ms,
+             max_original_batches_per_window
+           ),
          {:ok, execution} <- Core.resume_test_execution(execution, frontier) do
       continue_progress_tests(
         worktree_path,
@@ -2069,7 +2089,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          operation_timeout,
          test_stage_timeout,
          validation_deadline,
-         resource
+         resource,
+         max_original_batches_per_window \\ nil
        ) do
     with {:ok, normalized_selection} <- normalize_selection(selection),
          {:ok, ordered_apps} <- execution_ordered_apps(normalized_selection),
@@ -2081,7 +2102,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         operation_timeout,
         test_stage_timeout,
         validation_deadline,
-        resource
+        resource,
+        max_original_batches_per_window
       )
     else
       {:error, reason} -> {:error, {:invalid_validation_selection, reason}}
@@ -2095,7 +2117,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          operation_timeout,
          test_stage_timeout,
          validation_deadline,
-         resource
+         resource,
+         max_original_batches_per_window
        ) do
     compile = run_compile(worktree_path, operation_timeout, validation_deadline, resource)
 
@@ -2116,7 +2139,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
               operation_timeout,
               test_stage_timeout,
               validation_deadline,
-              resource
+              resource,
+              max_original_batches_per_window
             )
           else
             Core.skipped_check("test_compile_failed")
@@ -2318,7 +2342,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          _operation_timeout,
          _test_stage_timeout,
          _validation_deadline,
-         _resource
+         _resource,
+         _max_original_batches_per_window
        ) do
     Core.empty_pass_check("no_affected_app_tests")
   end
@@ -2330,7 +2355,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          operation_timeout,
          test_stage_timeout,
          validation_deadline,
-         resource
+         resource,
+         max_original_batches_per_window
        )
        when is_list(test_paths) do
     case expand_test_files(path, test_paths, ordered_apps) do
@@ -2360,7 +2386,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
                 deadline =
                   validation_test_deadline || monotonic_ms() + test_stage_timeout
 
-                case Core.new_test_execution(batches, operation_timeout, reserve_ms) do
+                case Core.new_test_execution(
+                       batches,
+                       operation_timeout,
+                       reserve_ms,
+                       max_original_batches_per_window
+                     ) do
                   {:ok, execution} ->
                     run_tests_sequential(path, execution, deadline, resource)
 

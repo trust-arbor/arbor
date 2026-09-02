@@ -66,6 +66,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
         type: :non_neg_integer,
         doc:
           "Aggregate sequential test-stage timeout in milliseconds (1,000 to 4,200,000); distinct from the intensive per-process Shell ceiling"
+      ],
+      max_original_batches_per_window: [
+        type: :non_neg_integer,
+        doc:
+          "Optional original-batch work-unit window; omit for prior unlimited-by-count behavior; compiled programs pin 20"
       ]
     ]
 
@@ -79,7 +84,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Validate do
       workspace_id: :control,
       timeout: :control,
       stage_timeout: :control,
-      test_stage_timeout: :control
+      test_stage_timeout: :control,
+      max_original_batches_per_window: :control
     }
   end
 

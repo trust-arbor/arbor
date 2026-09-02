@@ -35,6 +35,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   # pre-test children + aggregate test-stage max). Never import CrossApp.Core
   # or restate the numeric product here.
   @cross_app_stage_timeout_max_ms Arbor.Actions.cross_app_maximum_stage_timeout_ms()
+  # Compiler-owned original-batch work-unit pin. Never restate 20 here.
+  @cross_app_max_original_batches_per_window Arbor.Actions.cross_app_max_original_batches_per_window()
+
   # Security-regression per-revision Mix child hard max from Actions facade
   # (intensive Shell spawn-capable ceiling). Never restate the number.
   @security_regression_timeout_max_ms Arbor.Actions.security_regression_maximum_timeout_ms()
@@ -2229,7 +2232,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     "coding_plan_work_packet_digest"
                   ],
                   "result_adapter" => "cross_app_v1",
-                  "static_parameters" => %{},
+                  "static_parameters" => %{
+                    "max_original_batches_per_window" =>
+                      @cross_app_max_original_batches_per_window
+                  },
                   "timeout_budget_param" => "stage_timeout",
                   "timeout_budget_source" => "budgets.wall_clock_ms",
                   # Intensive Shell profile: per-op child ceiling only.

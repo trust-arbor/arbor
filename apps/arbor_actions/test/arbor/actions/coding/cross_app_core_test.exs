@@ -99,6 +99,52 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
              Core.new(%{workspace_id: "ws_opaque", test_paths: ["apps/a/test"]})
 
     assert {:error, :invalid_workspace_id} = Core.new(%{})
+
+    assert {:ok, %{max_original_batches_per_window: nil}} =
+             Core.new(%{workspace_id: "ws_opaque"})
+
+    assert Core.max_original_batches_per_window() == 20
+
+    assert Core.max_original_batches_per_window() ==
+             Arbor.Actions.cross_app_max_original_batches_per_window()
+
+    assert Core.minimum_original_batches_per_window() == 1
+    ceiling = Core.maximum_original_batches_per_window()
+
+    assert ceiling == Arbor.Actions.cross_app_maximum_original_batches_per_window()
+
+    assert {:ok, %{max_original_batches_per_window: 20}} =
+             Core.new(%{workspace_id: "ws_opaque", max_original_batches_per_window: 20})
+
+    assert {:ok, %{max_original_batches_per_window: 20}} =
+             Core.new(%{workspace_id: "ws_opaque", max_original_batches_per_window: "20"})
+
+    assert {:ok, %{max_original_batches_per_window: 1}} =
+             Core.new(%{workspace_id: "ws_opaque", max_original_batches_per_window: 1})
+
+    assert {:ok, %{max_original_batches_per_window: ^ceiling}} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               max_original_batches_per_window: ceiling
+             })
+
+    for invalid <- [0, -1, ceiling + 1, 1.5, "020", "20ms", "", " 20", [20], %{n: 20}] do
+      assert {:error, :invalid_max_original_batches_per_window} =
+               Core.new(%{workspace_id: "ws_opaque", max_original_batches_per_window: invalid})
+    end
+
+    assert {:error, :invalid_cross_app_input} =
+             Core.new(%{
+               "max_original_batches_per_window" => 20,
+               workspace_id: "ws_opaque",
+               max_original_batches_per_window: 20
+             })
+
+    assert {:error, :unsupported_parameter} =
+             Core.new(%{workspace_id: "ws_opaque", max_batches: 20})
+
+    assert {:error, :unsupported_parameter} =
+             Core.new(%{workspace_id: "ws_opaque", original_batches_per_window: 20})
   end
 
   test "configuration digest uses normalized budgets and compact helpers bind full batches" do
@@ -140,6 +186,19 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
       refute changed == digest
     end
 
+    present_params = Map.put(params, :max_original_batches_per_window, 20)
+    assert {:ok, present_digest} = Core.configuration_digest(present_params)
+    refute present_digest == digest
+
+    present_subject = Map.put(subject, "max_original_batches_per_window", 20)
+    assert {:ok, ^present_digest} = EvidenceCore.digest(present_subject)
+
+    assert {:ok, nineteen} =
+             Core.configuration_digest(Map.put(params, :max_original_batches_per_window, 19))
+
+    refute nineteen == present_digest
+    refute nineteen == digest
+
     files =
       for i <- 1..(Core.max_test_batch_files() + 1) do
         "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 3, "0")}_test.exs"
@@ -156,6 +215,143 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:error, :invalid_test_batch_plan} =
              Core.compact_batch_plan(Enum.reverse(batches))
+  end
+
+  test "work-unit window validates the full suffix then executes only the admitted prefix" do
+    assert {:ok, twenty_one} = Core.partition_test_batches(singleton_app_files(21))
+    assert length(twenty_one) == 21
+
+    assert {:error, :invalid_test_batch_plan} =
+             Core.partition_original_window(Enum.reverse(twenty_one), 20)
+
+    assert {:error, :invalid_max_original_batches_per_window} =
+             Core.partition_original_window(twenty_one, 0)
+
+    assert {:ok, %{admitted: ^twenty_one, deferred: []}} =
+             Core.partition_original_window(twenty_one, nil)
+
+    assert {:ok, %{admitted: admitted, deferred: deferred}} =
+             Core.partition_original_window(twenty_one, 20)
+
+    assert admitted == Enum.take(twenty_one, 20)
+    assert deferred == [List.last(twenty_one)]
+    assert hd(admitted).index == 1
+    assert hd(deferred).index == 21
+    assert hd(deferred).total == 21
+
+    assert {:ok, five} = Core.partition_test_batches(singleton_app_files(5))
+
+    assert {:ok, %{admitted: ^five, deferred: []}} =
+             Core.partition_original_window(five, 20)
+
+    assert {:ok, exact} = Core.new_test_execution(twenty_one, 10_000, 0, 20)
+    assert exact.max_original_batches_per_window == 20
+    assert exact.original_batches == admitted
+    assert exact.deferred_originals == deferred
+    refute Enum.any?(exact.work_queue, &(&1.original_index == 21))
+
+    exact = pass_admitted_originals(exact)
+    assert {:capacity, completed, nil, unstarted} = Core.next_test_execution_step(exact, 20_000)
+    assert completed == admitted
+    assert unstarted == deferred
+
+    assert {:ok, below} = Core.new_test_execution(five, 10_000, 0, 20)
+    below = pass_admitted_originals(below)
+    assert {:complete, passed_check} = Core.next_test_execution_step(below, 20_000)
+    assert passed_check["passed"]
+
+    assert {:ok, twenty} = Core.partition_test_batches(singleton_app_files(20))
+    assert {:ok, final_window} = Core.new_test_execution(twenty, 10_000, 0, 20)
+    assert final_window.deferred_originals == []
+    final_window = pass_admitted_originals(final_window)
+    assert {:complete, final_check} = Core.next_test_execution_step(final_window, 20_000)
+    assert final_check["passed"]
+
+    assert {:ok, fifty} = Core.partition_test_batches(singleton_app_files(50))
+    assert {:ok, timed} = Core.new_test_execution(fifty, 10_000, 0, 20)
+    timed = pass_admitted_originals(timed, 3)
+
+    assert {:capacity, timed_completed, nil, timed_unstarted} =
+             Core.next_test_execution_step(timed, 0)
+
+    assert length(timed_completed) == 3
+    assert Enum.map(timed_unstarted, & &1.index) == Enum.to_list(4..50)
+    assert List.last(timed_unstarted) == List.last(fifty)
+
+    paths =
+      for i <- 1..(Core.max_test_batch_files() + 1) do
+        "apps/alpha/test/f#{String.pad_leading(Integer.to_string(i), 2, "0")}_test.exs"
+      end
+
+    assert {:ok, [original, suffix]} = Core.partition_test_batches(paths)
+    assert {:ok, refined_exec} = Core.new_test_execution([original, suffix], 10_000, 0, 1)
+    assert refined_exec.deferred_originals == [suffix]
+    assert {:run, root, 10_000} = Core.next_test_execution_step(refined_exec, 20_000)
+
+    assert {:continue, refined} =
+             Core.record_test_execution_attempt(
+               refined_exec,
+               root,
+               test_feedback(nil, "root timeout"),
+               true,
+               10_000,
+               10_000
+             )
+
+    assert {:run, left, 10_000} = Core.next_test_execution_step(refined, 10_000)
+
+    assert {:continue, after_left} =
+             Core.record_test_execution_attempt(
+               refined,
+               left,
+               test_feedback(0, "left pass"),
+               false,
+               10_000,
+               9_000
+             )
+
+    assert {:run, right, 9_000} = Core.next_test_execution_step(after_left, 9_000)
+
+    assert {:continue, after_right} =
+             Core.record_test_execution_attempt(
+               after_left,
+               right,
+               test_feedback(0, "right pass"),
+               false,
+               9_000,
+               8_000
+             )
+
+    assert after_right.completed_originals == [original]
+
+    assert {:capacity, [^original], nil, [^suffix]} =
+             Core.next_test_execution_step(after_right, 8_000)
+
+    assert {:ok, frontier} = Core.compact_refinement_frontier(after_left)
+    assert {:ok, resumed} = Core.new_test_execution([original, suffix], 10_000, 0, 1)
+    assert {:ok, resumed} = Core.resume_test_execution(resumed, frontier)
+    assert resumed.deferred_originals == [suffix]
+    assert {:run, resume_right, 8_000} = Core.next_test_execution_step(resumed, 8_000)
+
+    assert {:continue, resumed_done} =
+             Core.record_test_execution_attempt(
+               resumed,
+               resume_right,
+               test_feedback(0, "right pass"),
+               false,
+               8_000,
+               7_000
+             )
+
+    assert {:capacity, [^original], nil, [^suffix]} =
+             Core.next_test_execution_step(resumed_done, 7_000)
+
+    assert {:ok, unlimited} = Core.new_test_execution(twenty_one, 10_000)
+    assert unlimited.deferred_originals == []
+    assert is_nil(unlimited.max_original_batches_per_window)
+    unlimited = pass_admitted_originals(unlimited)
+    assert {:complete, unlimited_check} = Core.next_test_execution_step(unlimited, 20_000)
+    assert unlimited_check["passed"]
   end
 
   test "selects directly changed apps plus every downstream in-umbrella dependent" do
@@ -3127,6 +3323,47 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
 
     assert {:capacity, [], ^original, [^suffix]} =
              Core.next_test_execution_step(after_left_leftover, reserve)
+  end
+
+  defp singleton_app_files(count) when is_integer(count) and count > 0 do
+    for i <- 1..count do
+      app = "app#{String.pad_leading(Integer.to_string(i), 2, "0")}"
+      "apps/#{app}/test/#{app}_test.exs"
+    end
+  end
+
+  defp pass_admitted_originals(execution, count \\ :all) do
+    pass_admitted_originals(execution, count, 20_000)
+  end
+
+  defp pass_admitted_originals(execution, 0, _remaining), do: execution
+
+  defp pass_admitted_originals(execution, count, remaining) do
+    case Core.next_test_execution_step(execution, remaining) do
+      {:run, attempt, budget} ->
+        {:continue, next} =
+          Core.record_test_execution_attempt(
+            execution,
+            attempt,
+            test_feedback(0, "ok"),
+            false,
+            budget,
+            remaining - 1
+          )
+
+        next_count =
+          case count do
+            :all -> :all
+            n -> n - 1
+          end
+
+        if next_count == 0,
+          do: next,
+          else: pass_admitted_originals(next, next_count, remaining - 1)
+
+      _other ->
+        execution
+    end
   end
 
   defp test_feedback(exit_code, stdout) do

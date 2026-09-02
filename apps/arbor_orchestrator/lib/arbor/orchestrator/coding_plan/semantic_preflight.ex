@@ -5073,7 +5073,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "param.pinned_params" => %{
           "timeout" => validation_timeout_ms,
           "test_stage_timeout" => validation_test_stage_timeout_ms,
-          "stage_timeout" => validation_stage_timeout_ms
+          "stage_timeout" => validation_stage_timeout_ms,
+          "max_original_batches_per_window" =>
+            Arbor.Actions.cross_app_max_original_batches_per_window()
         },
         "param.stage_timeout" => validation_stage_timeout_ms
       },
@@ -5160,7 +5162,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "param.pinned_params" => %{
           "timeout" => validation_timeout_ms,
           "test_stage_timeout" => validation_test_stage_timeout_ms,
-          "stage_timeout" => validation_stage_timeout_ms
+          "stage_timeout" => validation_stage_timeout_ms,
+          "max_original_batches_per_window" =>
+            Arbor.Actions.cross_app_max_original_batches_per_window()
         },
         "param.stage_timeout" => validation_stage_timeout_ms
       },

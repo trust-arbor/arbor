@@ -752,6 +752,19 @@ The `cross_app` validation profile compiles three distinct budgets into
   aggregate test-stage ceiling, and further bounded by
   `budgets.wall_clock_ms`
 
+Newly compiled `cross_app` plans also pin compiler-owned
+`max_original_batches_per_window=20` as static action input. Callers cannot
+select or override it through Plan v2. Each validation-action invocation
+validates the remaining original-batch suffix as a whole, then executes at
+most 20 originals. Deferred originals return as the canonical schema-v3
+unstarted suffix (`available_budget_ms=0`), including when the shared
+deadline interrupts the admitted prefix; the existing graph loop continues
+validation. A completed prefix is infrastructure progress, not acceptance.
+Aggregate completion happens only when every original-batch receipt is
+present. Direct action calls that omit the field keep the prior
+unlimited-by-count behavior. The 20-file original packing limit is
+unchanged.
+
 Each compile stage remains one contained child, but a fresh validation resource
 has an empty private `MIX_BUILD_PATH`. The sources-only dependency baseline
 supplies dep checkouts (including git metadata) at `MIX_DEPS_PATH`. The exact
@@ -1037,26 +1050,33 @@ positive — per-batch timeout ceilings are **never** multiplied by batch count
 as a predicted total duration.
 
 A capacity handoff is emitted only when residual budget is exhausted
-(`available_budget_ms == 0`):
+(`available_budget_ms == 0`), or when a compiled work-unit window has
+completed its admitted original-batch prefix while an immutable original
+suffix remains:
 
 - **structural** — residual is already 0 before the first child launches
 - **runtime** — the shared deadline expires after a completed prefix, leaving
   an exact unstarted suffix, or interrupts one immutable original batch during
-  timeout refinement
+  timeout refinement; a work-unit window uses the same runtime handoff so
+  deferred originals stay in the ordered unstarted suffix rather than counting
+  as validation success
 
-The workflow bypasses validation and total rework counters, closes the worker,
-and retains the workspace. Live `validation[0].test.capacity_handoff` is schema
-**v3**: a closed, bounded descriptor whose optional interrupted batch and
-ordered unstarted batch labels, counts, and SHA-256 digests bind the immutable
-original plan without copying raw paths into the terminal artifact or replacing
-it with runtime-only refined children. The current 20-file producer emits at
-most 343 descriptors for the bounded 2,000-file, 256-root inventory. The
-contract retains the five-file-era schema-v3 compatibility bound of 604
-descriptors so historical evidence remains readable; that archive bound is not
-the current producer cap. An authorized operator or CI job can reconstruct
-paths from the retained workspace and verify the digest chain. Historical
-schema-v1 and schema-v2 handoffs remain available only through their explicit
-archive-only verifiers; live normalize/finalize/write paths accept v3 only.
+Canonical schema-v3 progress bypasses validation and total rework counters and
+loops through another approval-gated validation invocation without closing the
+worker. The legacy/untyped capacity fallback remains terminal: it closes the
+worker and retains the workspace. Live
+`validation[0].test.capacity_handoff` is schema **v3**: a closed, bounded
+descriptor whose optional interrupted batch and ordered unstarted batch labels,
+counts, and SHA-256 digests bind the immutable original plan without copying raw
+paths into the terminal artifact or replacing it with runtime-only refined
+children. The current 20-file producer emits at most 343 descriptors for the
+bounded 2,000-file, 256-root inventory. The contract retains the five-file-era
+schema-v3 compatibility bound of 604 descriptors so historical evidence remains
+readable; that archive bound is not the current producer cap. An authorized
+operator or CI job can reconstruct paths from the retained workspace and verify
+the digest chain. Historical schema-v1 and schema-v2 handoffs remain available
+only through their explicit archive-only verifiers; live normalize/finalize/write
+paths accept v3 only.
 
 ## Post-integration settlement
 

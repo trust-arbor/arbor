@@ -3058,6 +3058,34 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
 
     assert Enum.any?(absent_opt_errors, &(&1["code"] == "validation_parameter_violation"))
+
+    window_pin = Arbor.Actions.cross_app_max_original_batches_per_window()
+
+    for {kind, mutated_value} <- [
+          {"removed", :delete},
+          {"changed_down", window_pin - 1},
+          {"changed_up", window_pin + 1},
+          {"zero", 0}
+        ] do
+      mutated =
+        mutate_pinned_params(graph, fn pinned ->
+          case mutated_value do
+            :delete -> Map.delete(pinned, "max_original_batches_per_window")
+            value -> Map.put(pinned, "max_original_batches_per_window", value)
+          end
+        end)
+
+      assert {:error, {:semantic_preflight_failed, window_errors}} =
+               preflight(mutated, profile["semantic_policy"],
+                 review_profile: "binding",
+                 validation_timeout_ms: 900_000,
+                 validation_test_stage_timeout_ms: 900_000,
+                 validation_stage_timeout_ms: 900_000
+               ),
+             "expected preflight failure for #{kind} max_original_batches_per_window"
+
+      assert Enum.any?(window_errors, &(&1["code"] == "validation_parameter_violation"))
+    end
   end
 
   test "adversarial: wrapper pin shape fails closed on action, profile, JSON, and timeout drift",
