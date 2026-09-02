@@ -1341,6 +1341,43 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     )
   end
 
+  defp valid_v2_descriptor_task do
+    packet = %{
+      "version" => 1,
+      "success_criteria" => ["the immutable candidate validates"],
+      "non_goals" => ["run an ACP implementation turn"],
+      "constraints" => ["preserve descriptor-bound identity"],
+      "architecture_refs" => [
+        "apps/arbor_orchestrator/lib/arbor/orchestrator/coding_task_executor.ex"
+      ],
+      "required_evidence" => ["descriptor execution-boundary preflight"],
+      "checkpoint_policy" => "design_required",
+      "design_gate" => "council_then_operator"
+    }
+
+    {:ok, packet_digest} = WorkPacket.digest(packet)
+
+    valid_direct_task(%{
+      "version" => 2,
+      "task" => "validate an immutable descriptor candidate",
+      "task_class" => "cross_app",
+      "validation_profile" => "cross_app",
+      "work_packet" => packet,
+      "work_packet_digest" => packet_digest,
+      "candidate_materialization" => %{
+        "source_commit_oid" => String.duplicate("a", 40),
+        "expected_tree_oid" => String.duplicate("b", 40),
+        "entries" => [
+          %{
+            "path" => "lib/example.ex",
+            "blob_oid" => String.duplicate("c", 40),
+            "mode" => 100_644
+          }
+        ]
+      }
+    })
+  end
+
   defp verification_task("security_regression") do
     valid_v2_direct_task(%{
       "validation_profile" => "security_regression",
@@ -8755,6 +8792,30 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert_received {:list_capabilities, "agent_1", []}
       assert_received {:list_capabilities, "caller_other", []}
+    end
+
+    test "regression: descriptor plans rederive their specialized execution boundary" do
+      now = ~U[2026-09-02 07:00:00.000000Z]
+      put_degraded_acp_aligned_to(now)
+
+      deps = %{
+        now_datetime: now,
+        now_unix_ms: DateTime.to_unix(now, :millisecond),
+        security: MutationSpySecurity
+      }
+
+      assert {:ok, report} =
+               CodingTaskExecutor.project_dispatch_readiness_with_deps(
+                 "agent_1",
+                 valid_v2_descriptor_task(),
+                 %{"caller_id" => "caller_other"},
+                 deps
+               )
+
+      assert report["execution_boundary"] == %{"status" => "verified", "code" => nil}
+      assert report["status"] == "degraded"
+      assert report["error"] == nil
+      assert report["authority_horizon"]["status"] == "ready"
     end
 
     test "authority expiring alone yields top-level blocked" do

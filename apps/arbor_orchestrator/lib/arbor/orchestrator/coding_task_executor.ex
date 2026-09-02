@@ -3039,11 +3039,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              validation_test_stage_timeout_ms,
              validation_stage_timeout_ms
            ),
-         :ok <- Profiles.validate_requirements(profile, compiled_graph),
+         descriptor_activated = execution_boundary_descriptor_activated?(plan),
+         :ok <-
+           validate_execution_profile_requirements(
+             profile,
+             compiled_graph,
+             descriptor_activated
+           ),
          :ok <-
            SemanticPreflight.validate(
              compiled_graph,
-             profile["semantic_policy"],
+             Profiles.semantic_policy(profile, descriptor_activated),
              semantic_preflight_opts
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
@@ -3131,7 +3137,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          validation_stage_timeout_ms
        ) do
     with {:ok, {checkpoint_policy, checkpoint_work_packet_json}} <-
-           execution_boundary_checkpoint_binding(plan) do
+           execution_boundary_checkpoint_binding(plan),
+         {:ok, {candidate_materialization, candidate_materialization_digest}} <-
+           execution_boundary_candidate_materialization_binding(plan) do
       {:ok,
        [
          review_profile: plan.review_profile,
@@ -3146,10 +3154,46 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms: validation_stage_timeout_ms
+         validation_stage_timeout_ms: validation_stage_timeout_ms,
+         candidate_materialization: candidate_materialization,
+         candidate_materialization_digest: candidate_materialization_digest,
+         graph_phase: if(candidate_materialization, do: :executable, else: :reviewed)
        ]}
     end
   end
+
+  # The compiler first validates the complete profile graph, then prunes nodes
+  # made unreachable by the closed descriptor route. At execution time the
+  # descriptor-specific semantic policy owns that surviving graph exactly;
+  # requiring the unspecialized inventory here would require dead worker and
+  # rework nodes to remain executable.
+  defp validate_execution_profile_requirements(_profile, _graph, true), do: :ok
+
+  defp validate_execution_profile_requirements(profile, graph, false),
+    do: Profiles.validate_requirements(profile, graph)
+
+  defp execution_boundary_candidate_materialization_binding(%Plan{} = plan) do
+    if execution_boundary_descriptor_activated?(plan) do
+      with {:ok, digest} <-
+             Arbor.Contracts.Coding.CandidateMaterialization.digest(
+               plan.candidate_materialization
+             ) do
+        {:ok, {true, digest}}
+      end
+    else
+      {:ok, {false, nil}}
+    end
+  end
+
+  defp execution_boundary_descriptor_activated?(%Plan{
+         version: 2,
+         candidate_materialization: descriptor,
+         work_packet: %{"checkpoint_policy" => "design_required"}
+       })
+       when is_map(descriptor),
+       do: true
+
+  defp execution_boundary_descriptor_activated?(_plan), do: false
 
   defp execution_boundary_checkpoint_binding(%Plan{version: 2, work_packet: work_packet})
        when is_map(work_packet) do

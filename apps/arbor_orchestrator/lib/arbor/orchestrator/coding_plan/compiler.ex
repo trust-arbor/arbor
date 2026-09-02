@@ -237,6 +237,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, compiled_graph} <- compile_ir(final_graph),
          :ok <- validate_typed_graph(compiled_graph),
          :ok <- validate_executable_requirements(profile, compiled_graph, plan),
+         :ok <-
+           validate_executable_semantics(
+             compiled_graph,
+             plan,
+             semantic_policy,
+             semantic_preflight_opts
+           ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
            ExecutionManifest.build(compiled_graph, action_catalog, graph_hash),
@@ -2776,6 +2783,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       :ok
     else
       Profiles.validate_requirements(profile, graph)
+    end
+  end
+
+  defp validate_executable_semantics(graph, %Plan{} = plan, policy, opts) do
+    if descriptor_activated?(plan) do
+      SemanticPreflight.validate(graph, policy, Keyword.put(opts, :graph_phase, :executable))
+    else
+      :ok
     end
   end
 

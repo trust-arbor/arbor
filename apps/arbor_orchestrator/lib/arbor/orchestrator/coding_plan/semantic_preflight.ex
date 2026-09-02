@@ -33,6 +33,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
                               "materialize_candidate",
                               "prove_workspace_at_base"
                             ])
+  @descriptor_bypassed_placements MapSet.new(~w[
+                                      implement
+                                      retry_recovered_send
+                                      parse_worker_terminal
+                                      capture_pre_turn_workspace
+                                      capture_pre_turn_recovery
+                                      inspect_workspace
+                                      open_recovery_worker
+                                      coding_workspace_recovery_summary
+                                      acp_session_status
+                                      close_stale_worker
+                                      commit_change
+                                      capture_validation_workspace
+                                      hoist_validation_candidate_tree_oid
+                                      hoist_validation_observed_at
+                                      route_after_commit
+                                    ])
+  @descriptor_pruned_action_placements MapSet.new(~w[
+                                         capture_validation_workspace
+                                         commit_change
+                                       ])
   @max_graph_edges 512
   @max_node_id_bytes 512
   @max_attribute_container_bytes 131_072
@@ -230,6 +251,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       This binds the worker-continuity edge and design-checkpoint topology.
     * `:checkpoint_work_packet_json` — the contract-canonical frozen packet
       serialization embedded by the compiler.
+    * `:graph_phase` — `:reviewed` (default) for the complete generated graph,
+      or `:executable` for a descriptor-specialized graph after unreachable
+      implementation and rework branches have been pruned. The executable
+      phase is valid only with `candidate_materialization: true`.
     * `:design_checkpoint_timeout_ms` — optional legacy opt; ignored. Human-wait
       capacity is owner-seeded as `coding_budget.interaction_wait_ms`. Open pins
       exact `param.timeout` to
@@ -252,43 +277,60 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
            normalize_validation_test_stage_timeout_ms(opts),
          {:ok, validation_stage_timeout_ms} <- normalize_validation_stage_timeout_ms(opts),
          {:ok, descriptor_opt} <- normalize_candidate_materialization_opt(opts),
+         {:ok, descriptor_opt} <- normalize_graph_phase_opt(opts, descriptor_opt),
          :ok <- require_compiled(graph) do
       errors =
         []
         |> check_handlers_and_targets(graph, policy)
         |> check_actions(graph, policy)
-        |> check_action_placement_bindings(graph, policy)
+        |> check_action_placement_bindings(graph, policy, descriptor_opt)
         |> check_commit_approval_gate(graph)
         |> check_operator_approval_routing(graph)
         |> check_forbidden_authority(graph)
         |> check_forbidden_denial_bypass_attrs(graph)
         |> check_immutable_context_writers(graph)
         |> check_terminal_timeout_budget_bindings(graph, policy)
-        |> check_worker_continuity_bindings(graph, worker_continuity, checkpoint.policy)
+        |> check_worker_continuity_bindings(
+          graph,
+          worker_continuity,
+          checkpoint.policy,
+          descriptor_opt
+        )
         |> check_worker_recovery_bindings(
           graph,
           policy,
           worker_continuity,
           checkpoint.policy
         )
-        |> check_review_convergence_bindings(
+        |> check_review_convergence_bindings_for_phase(
           graph,
           policy,
           rework_max_cycles,
           descriptor_opt
         )
-        |> check_design_checkpoint_bindings(graph, checkpoint, rework_max_cycles)
+        |> check_design_checkpoint_bindings(
+          graph,
+          checkpoint,
+          rework_max_cycles,
+          descriptor_opt
+        )
         |> check_workspace_cleanup_topology(graph, descriptor_opt)
-        |> check_profile_bindings(
+        |> check_profile_bindings_for_phase(
           graph,
           policy,
           review_profile,
           validation_timeout_ms,
           validation_test_stage_timeout_ms,
           validation_stage_timeout_ms,
-          rework_stop_conditions
+          rework_stop_conditions,
+          descriptor_opt
         )
-        |> check_validation_stop_topology(graph, policy, rework_stop_conditions)
+        |> check_validation_stop_topology_for_phase(
+          graph,
+          policy,
+          rework_stop_conditions,
+          descriptor_opt
+        )
         |> check_reachability_and_dominance(graph, policy, review_profile, descriptor_opt)
         |> check_descriptor_route(graph, descriptor_opt)
         |> Enum.sort_by(&error_sort_key/1)
@@ -1088,7 +1130,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   # Exact node-identity action bindings. Allowed action names alone are not a
   # placement contract: an extra allowlisted git_pr node (or a swapped pair of
   # allowed actions) must fail closed.
-  defp check_action_placement_bindings(errors, graph, policy) do
+  defp check_action_placement_bindings(errors, graph, policy, descriptor_opt) do
     placements = policy["action_placements"]
 
     if placements == [] do
@@ -1138,6 +1180,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             acc
 
           MapSet.member?(@optional_placement_nodes, node_id) ->
+            acc
+
+          executable_descriptor?(descriptor_opt) and
+              MapSet.member?(@descriptor_pruned_action_placements, node_id) ->
             acc
 
           true ->
@@ -1282,6 +1328,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
+  defp normalize_graph_phase_opt(opts, descriptor_opt) do
+    case {Keyword.get(opts, :graph_phase, :reviewed), descriptor_opt.active} do
+      {:reviewed, _active?} -> {:ok, Map.put(descriptor_opt, :phase, :reviewed)}
+      {:executable, true} -> {:ok, Map.put(descriptor_opt, :phase, :executable)}
+      {:executable, false} -> {:error, {:invalid_semantic_policy, :executable_without_descriptor}}
+      {other, _active?} -> {:error, {:invalid_semantic_policy, {:invalid_graph_phase, other}}}
+    end
+  end
+
+  defp executable_descriptor?(%{active: true, phase: :executable}), do: true
+  defp executable_descriptor?(_descriptor_opt), do: false
+
   defp descriptor_route?(%Graph{} = graph), do: Map.has_key?(graph.nodes, "materialize_candidate")
   defp descriptor_route?(_graph), do: false
 
@@ -1382,6 +1440,33 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           {"error_descriptor_workspace_moved", "context.descriptor_workspace_moved=true"},
           {"validate",
            "context.base_proof.exists=true&&context.base_proof.dirty=false&&context.descriptor_workspace_moved=false"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "load_committed_change",
+        [
+          {"error_committed_change_materialization", "outcome=fail"},
+          {"hoist_change_commit", "outcome=success"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "review_change",
+        [
+          {"error_council_review", "outcome=fail"},
+          {"hoist_review_finding_ledger", "outcome=success"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "route_review",
+        [
+          {"status_review_failed", "context.review.tier_decision=rework"},
+          {"status_review_rejected", "context.review.tier_decision=stop"},
+          {"route_human_review", "context.review.tier_decision=human_review"},
+          {"route_publish", "context.review.tier_decision=auto_proceed"},
+          {"error_review_tier_invalid", nil}
         ]
       )
 
@@ -2721,7 +2806,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_worker_continuity_bindings(errors, graph, continuity, checkpoint_policy) do
+  defp check_worker_continuity_bindings(
+         errors,
+         graph,
+         continuity,
+         checkpoint_policy,
+         descriptor_opt
+       ) do
     first_prompt =
       if checkpoint_policy == "design_required",
         do: "init_design_defaults",
@@ -2874,6 +2965,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"check_workspace_exists", "hoist_dirty", "context.inspect.exists=true"}
     ]
 
+    expected_edges =
+      if executable_descriptor?(descriptor_opt) do
+        Enum.reject(expected_edges, fn
+          {"build_implement_prompt", "capture_pre_turn_workspace", nil} -> true
+          _edge -> false
+        end)
+      else
+        expected_edges
+      end
+
     errors =
       Enum.reduce(expected_nodes, errors, fn {node_id, expected}, acc ->
         require_worker_continuity_node_attrs(acc, graph, node_id, expected)
@@ -3012,7 +3113,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  defp check_design_checkpoint_bindings(errors, graph, checkpoint, rework_max_cycles) do
+  defp check_design_checkpoint_bindings(
+         errors,
+         graph,
+         checkpoint,
+         rework_max_cycles,
+         descriptor_opt
+       ) do
+    executable_descriptor? = executable_descriptor?(descriptor_opt)
+
     context_keys =
       "work_packet,packet_digest,session.task_id,task,plan_fingerprint," <>
         "coding_plan_fingerprint,workspace_id,worker_session_id," <>
@@ -3294,20 +3403,42 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         expected_nodes
       end
 
+    expected_nodes =
+      if executable_descriptor? do
+        Enum.reject(expected_nodes, &(elem(&1, 0) == "mark_implementation_phase"))
+      else
+        expected_nodes
+      end
+
     errors =
       Enum.reduce(expected_nodes, errors, fn {node_id, expected}, acc ->
         require_design_checkpoint_node_attrs(acc, graph, node_id, expected)
       end)
 
     errors
-    |> check_design_checkpoint_writers(graph)
-    |> check_worker_phase_derivation_nodes(graph)
-    |> check_design_checkpoint_prompts(graph, checkpoint)
-    |> check_design_checkpoint_topology(graph, checkpoint, rework_max_cycles)
+    |> check_design_checkpoint_writers(graph, executable_descriptor?)
+    |> check_worker_phase_derivation_nodes(graph, executable_descriptor?)
+    |> check_design_checkpoint_prompts(graph, checkpoint, executable_descriptor?)
+    |> check_design_checkpoint_topology(
+      graph,
+      checkpoint,
+      rework_max_cycles,
+      executable_descriptor?
+    )
   end
 
-  defp check_worker_phase_derivation_nodes(errors, graph) do
-    expected = Enum.sort(WorkerPhaseCore.derivation_nodes())
+  defp check_worker_phase_derivation_nodes(errors, graph, executable_descriptor?) do
+    expected =
+      WorkerPhaseCore.derivation_nodes()
+      |> then(fn nodes ->
+        if executable_descriptor? do
+          Enum.reject(nodes, &(&1 in ["build_implement_prompt", "mark_implementation_phase"]))
+        else
+          nodes
+        end
+      end)
+      |> Enum.sort()
+
     missing = Enum.reject(expected, &Map.has_key?(graph.nodes, &1))
 
     if missing == [] do
@@ -3355,7 +3486,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_design_checkpoint_writers(errors, graph) do
+  defp check_design_checkpoint_writers(errors, graph, executable_descriptor?) do
     expected = %{
       "accepted_design" => ["hoist_accepted_design"],
       "accepted_design_digest" => ["hoist_accepted_design_digest"],
@@ -3376,7 +3507,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       "packet_digest" => ["prep_checkpoint_packet_digest"],
       "plan_fingerprint" => ["prep_checkpoint_plan_fingerprint"],
       "request_id" => ["hoist_design_checkpoint_request_id"],
-      "worker_phase" => ["init_worker_phase", "mark_implementation_phase"],
+      "worker_phase" =>
+        if(executable_descriptor?,
+          do: ["init_worker_phase"],
+          else: ["init_worker_phase", "mark_implementation_phase"]
+        ),
       "work_packet" => ["prep_checkpoint_work_packet"]
     }
 
@@ -3419,7 +3554,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_design_checkpoint_prompts(errors, graph, checkpoint) do
+  defp check_design_checkpoint_prompts(errors, graph, checkpoint, executable_descriptor?) do
     initial_phase = if checkpoint.policy == "design_required", do: "design", else: "implement"
 
     errors =
@@ -3518,6 +3653,19 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          ]}
       ]
 
+      prompt_requirements =
+        if executable_descriptor? do
+          Enum.filter(prompt_requirements, fn {node_id, _required} ->
+            node_id in [
+              "build_design_prompt",
+              "build_design_envelope_repair_prompt",
+              "build_design_rework_prompt"
+            ]
+          end)
+        else
+          prompt_requirements
+        end
+
       Enum.reduce(prompt_requirements, errors, fn {node_id, required}, acc ->
         expression =
           graph.nodes
@@ -3598,7 +3746,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  defp check_design_checkpoint_topology(errors, graph, checkpoint, rework_max_cycles) do
+  defp check_design_checkpoint_topology(
+         errors,
+         graph,
+         checkpoint,
+         rework_max_cycles,
+         executable_descriptor?
+       ) do
     policy = checkpoint.policy
     design_gate = Map.get(checkpoint, :design_gate, "operator")
 
@@ -3740,6 +3894,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     ]
 
     common =
+      if executable_descriptor? do
+        Enum.reject(common, &(elem(&1, 0) == "mark_implementation_phase"))
+      else
+        common
+      end
+
+    common =
       if design_gate in ["council", "council_then_operator"] do
         common ++
           [
@@ -3785,7 +3946,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             [{"init_design_defaults", nil}],
             [{"route_worker_phase", nil}],
             0,
-            [{"mark_implementation_phase", nil}],
+            if(executable_descriptor?, do: [], else: [{"mark_implementation_phase", nil}]),
             if(descriptor_route?(graph),
               do: [],
               else: [{"route_worker_phase", "context.worker_phase=implement"}]
@@ -3832,13 +3993,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> require_design_exact_incoming(
       graph,
       "mark_approval_denied_error",
-      [
-        {"hoist_approval_note", nil},
-        {"route_design_nonapproval", "context.design_checkpoint.checkpoint_outcome=deny"}
-      ]
+      if(executable_descriptor?,
+        do: [
+          {"route_design_nonapproval", "context.design_checkpoint.checkpoint_outcome=deny"}
+        ],
+        else: [
+          {"hoist_approval_note", nil},
+          {"route_design_nonapproval", "context.design_checkpoint.checkpoint_outcome=deny"}
+        ]
+      )
     )
     |> check_design_seed_edges(graph, seed_count)
-    |> check_design_approval_dominance(graph, policy, design_gate)
+    |> check_design_approval_dominance(
+      graph,
+      policy,
+      design_gate,
+      executable_descriptor?
+    )
   end
 
   defp require_design_exact_outgoing(errors, graph, node_id, expected) do
@@ -3917,9 +4088,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_design_approval_dominance(errors, _graph, "direct", _design_gate), do: errors
+  defp check_design_approval_dominance(
+         errors,
+         _graph,
+         "direct",
+         _design_gate,
+         _executable_descriptor?
+       ),
+       do: errors
 
-  defp check_design_approval_dominance(errors, graph, "design_required", design_gate) do
+  defp check_design_approval_dominance(
+         errors,
+         graph,
+         "design_required",
+         design_gate,
+         executable_descriptor?
+       ) do
     case Graph.find_start_node(graph) do
       nil ->
         errors
@@ -3927,6 +4111,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       start ->
         reachable = reachable_from(graph, start.id)
         dominators = compute_dominators(graph, start.id, reachable)
+
+        accepted_target =
+          if executable_descriptor?, do: "close_design_worker", else: "mark_implementation_phase"
 
         errors
         |> require_dominates(
@@ -3950,7 +4137,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
               graph,
               start.id,
               ["await_design_checkpoint", "council_review_design"],
-              "mark_implementation_phase",
+              accepted_target,
               reachable,
               "design_checkpoint_approval_gate"
             )
@@ -3958,7 +4145,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             require_dominates(
               errors,
               "await_design_checkpoint",
-              "mark_implementation_phase",
+              accepted_target,
               reachable,
               dominators,
               "design_checkpoint_approval_gate"
@@ -3967,25 +4154,39 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end)
         |> require_dominates(
           "load_design_artifact",
-          "mark_implementation_phase",
+          accepted_target,
           reachable,
           dominators,
           "design_checkpoint_load_gate"
         )
         |> require_dominates(
           "hoist_accepted_design_evidence",
-          "mark_implementation_phase",
+          accepted_target,
           reachable,
           dominators,
           "design_checkpoint_accepted_evidence_gate"
         )
-        |> require_dominates(
-          "mark_implementation_phase",
-          "build_implement_prompt",
-          reachable,
-          dominators,
-          "design_checkpoint_implementation_phase_gate"
-        )
+        |> then(fn errors ->
+          if executable_descriptor? do
+            require_dominates(
+              errors,
+              "close_design_worker",
+              "materialize_candidate",
+              reachable,
+              dominators,
+              "design_checkpoint_descriptor_handoff"
+            )
+          else
+            require_dominates(
+              errors,
+              "mark_implementation_phase",
+              "build_implement_prompt",
+              reachable,
+              dominators,
+              "design_checkpoint_implementation_phase_gate"
+            )
+          end
+        end)
     end
   end
 
@@ -4070,6 +4271,31 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       )
 
     check_worker_recovery_start_nodes(errors, graph, continuity, checkpoint_policy)
+  end
+
+  defp check_review_convergence_bindings_for_phase(
+         errors,
+         _graph,
+         _policy,
+         _rework_max_cycles,
+         %{active: true, phase: :executable}
+       ),
+       do: errors
+
+  defp check_review_convergence_bindings_for_phase(
+         errors,
+         graph,
+         policy,
+         rework_max_cycles,
+         descriptor_opt
+       ) do
+    check_review_convergence_bindings(
+      errors,
+      graph,
+      policy,
+      rework_max_cycles,
+      descriptor_opt
+    )
   end
 
   defp check_review_convergence_bindings(
@@ -4779,6 +5005,111 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # --- profile-specific reviewed bindings ----------------------------------
 
+  defp check_profile_bindings_for_phase(
+         errors,
+         graph,
+         policy,
+         review_profile,
+         validation_timeout_ms,
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms,
+         stop_conditions,
+         %{active: true, phase: :executable}
+       ) do
+    check_executable_descriptor_profile_bindings(
+      errors,
+      graph,
+      policy,
+      review_profile,
+      validation_timeout_ms,
+      validation_test_stage_timeout_ms,
+      validation_stage_timeout_ms,
+      stop_conditions
+    )
+  end
+
+  defp check_profile_bindings_for_phase(
+         errors,
+         graph,
+         policy,
+         review_profile,
+         validation_timeout_ms,
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms,
+         stop_conditions,
+         _descriptor_opt
+       ) do
+    check_profile_bindings(
+      errors,
+      graph,
+      policy,
+      review_profile,
+      validation_timeout_ms,
+      validation_test_stage_timeout_ms,
+      validation_stage_timeout_ms,
+      stop_conditions
+    )
+  end
+
+  defp check_executable_descriptor_profile_bindings(
+         errors,
+         graph,
+         %{"validation_profile" => "cross_app"},
+         _review_profile,
+         validation_timeout_ms,
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms,
+         _stop_conditions
+       )
+       when is_integer(validation_test_stage_timeout_ms) and
+              validation_test_stage_timeout_ms > 0 and
+              is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0 do
+    errors
+    |> check_validation_parameters(
+      graph,
+      %{
+        "param.pinned_action" => "coding_cross_app_validate",
+        "param.pinned_profile_id" => "cross_app",
+        "param.pinned_params" => %{
+          "timeout" => validation_timeout_ms,
+          "test_stage_timeout" => validation_test_stage_timeout_ms,
+          "stage_timeout" => validation_stage_timeout_ms
+        },
+        "param.stage_timeout" => validation_stage_timeout_ms
+      },
+      "validation_parameter_violation"
+    )
+    |> check_cross_app_validate_context_keys(graph)
+    |> check_executable_descriptor_cross_app_topology(graph)
+    |> check_executable_descriptor_cross_app_loop_node_attrs(graph)
+    |> reject_caller_cross_app_params(graph)
+  end
+
+  defp check_executable_descriptor_profile_bindings(
+         errors,
+         _graph,
+         policy,
+         _review_profile,
+         _validation_timeout_ms,
+         validation_test_stage_timeout_ms,
+         validation_stage_timeout_ms,
+         _stop_conditions
+       ) do
+    [
+      error("validation_parameter_violation", "validate", %{
+        "descriptor_validation_profile" => policy["validation_profile"],
+        "missing_validation_stage_timeout_ms" =>
+          not (is_integer(validation_stage_timeout_ms) and validation_stage_timeout_ms > 0),
+        "missing_validation_test_stage_timeout_ms" =>
+          not (is_integer(validation_test_stage_timeout_ms) and
+                 validation_test_stage_timeout_ms > 0),
+        "got_test_stage" => validation_test_stage_timeout_ms,
+        "got_stage" => validation_stage_timeout_ms
+      })
+      | errors
+    ]
+  end
+
   defp check_profile_bindings(
          errors,
          graph,
@@ -5250,8 +5581,49 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
+  # Descriptor specialization keeps the capacity continuation loop but removes
+  # every implementation/rework edge. Pin the surviving loop exactly instead of
+  # weakening the full reviewed-graph contract.
+  defp check_executable_descriptor_cross_app_topology(errors, graph) do
+    expected = [
+      {"route_validation_interaction",
+       [
+         {"status_validation_capacity_exceeded", @cross_app_legacy_capacity_condition},
+         {"check_validation_passed", @cross_app_completed_condition},
+         {"route_cross_app_window", @cross_app_capacity_condition},
+         {"check_validation_passed", @cross_app_domain_failure_condition},
+         {"status_validation_failed", "context.validation.interaction_outcome=rework"},
+         {"hoist_validation_approval_request_id_denied",
+          "context.validation.interaction_outcome=denied"},
+         {"error_validation_interaction_invalid", nil}
+       ]},
+      {"route_cross_app_window",
+       [
+         {"hoist_cross_app_progress", @cross_app_capacity_condition},
+         {"error_cross_app_window_invalid", nil}
+       ]},
+      {"hoist_cross_app_progress", [{"hoist_cross_app_progress_binding", nil}]},
+      {"hoist_cross_app_progress_binding", [{"validate", nil}]},
+      {"error_cross_app_window_invalid", [{"status_descriptor_pipeline_error", nil}]}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_cross_app_outgoing(acc, graph, node_id, outgoing)
+    end)
+  end
+
   defp check_cross_app_loop_node_attrs(errors, graph) do
     Enum.reduce(@cross_app_loop_node_attrs, errors, fn {node_id, attrs}, acc ->
+      require_cross_app_node_attrs(acc, graph, node_id, attrs)
+    end)
+  end
+
+  defp check_executable_descriptor_cross_app_loop_node_attrs(errors, graph) do
+    @cross_app_loop_node_attrs
+    |> Enum.reject(fn {node_id, _attrs} ->
+      node_id in ["clear_cross_app_progress", "clear_cross_app_progress_binding"]
+    end)
+    |> Enum.reduce(errors, fn {node_id, attrs}, acc ->
       require_cross_app_node_attrs(acc, graph, node_id, attrs)
     end)
   end
@@ -5494,6 +5866,40 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
     |> Enum.sort()
   end
+
+  defp check_validation_stop_topology_for_phase(
+         errors,
+         graph,
+         policy,
+         stop_conditions,
+         %{active: true, phase: :executable}
+       ) do
+    expected = [
+      {"check_validation_passed",
+       validation_result_gate_outgoing(graph, policy, stop_conditions)},
+      {"validate", hard_validation_failure_outgoing()}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_validation_stop_outgoing(
+        acc,
+        graph,
+        node_id,
+        outgoing,
+        stop_conditions,
+        policy
+      )
+    end)
+  end
+
+  defp check_validation_stop_topology_for_phase(
+         errors,
+         graph,
+         policy,
+         stop_conditions,
+         _descriptor_opt
+       ),
+       do: check_validation_stop_topology(errors, graph, policy, stop_conditions)
 
   defp check_validation_stop_topology(errors, graph, policy, stop_conditions) do
     expected = [
@@ -5866,24 +6272,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   # Prove each reviewed action node is reachable and that its policy-encoded
   # gates dominate the node where the side effect occurs. Unreachable or missing
   # targets fail closed (unlike optional publication dominance skips).
-  @descriptor_bypassed_placements MapSet.new(~w[
-    implement
-    retry_recovered_send
-    parse_worker_terminal
-    capture_pre_turn_workspace
-    capture_pre_turn_recovery
-    inspect_workspace
-    open_recovery_worker
-    coding_workspace_recovery_summary
-    acp_session_status
-    close_stale_worker
-    commit_change
-    capture_validation_workspace
-    hoist_validation_candidate_tree_oid
-    hoist_validation_observed_at
-    route_after_commit
-  ])
-
   defp check_action_placement_dominance(
          errors,
          graph,

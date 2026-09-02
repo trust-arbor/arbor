@@ -2720,6 +2720,37 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
     {:ok, digest} = CandidateMaterialization.digest(plan.candidate_materialization)
 
+    {:ok, validation_params} =
+      Jason.decode(graph.nodes["validate"].attrs["param.pinned_params_json"])
+
+    executable_preflight_opts = [
+      review_profile: plan.review_profile,
+      worker_use_pool: plan.worker["use_pool"],
+      worker_resume_session_id: plan.worker["resume_session_id"],
+      worker_permission_mode: plan.worker["permission_mode"],
+      worker_model: plan.worker["model"],
+      checkpoint_policy: "design_required",
+      design_gate: "council_then_operator",
+      checkpoint_work_packet_json: packet_json,
+      candidate_materialization: true,
+      candidate_materialization_digest: digest,
+      graph_phase: :executable,
+      rework_max_cycles: plan.rework["max_cycles"],
+      rework_stop_conditions: plan.rework["stop_conditions"],
+      validation_timeout_ms: validation_params["timeout"],
+      validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
+      validation_stage_timeout_ms: validation_params["stage_timeout"]
+    ]
+
+    assert {:ok, executable_graph} = IRCompiler.compile(graph)
+
+    assert :ok =
+             SemanticPreflight.validate(
+               executable_graph,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
     injected =
       Arbor.Orchestrator.Graph.add_edge(
         graph,
@@ -2733,15 +2764,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:semantic_preflight_failed, errors}} =
              SemanticPreflight.validate(
                injected,
-               profile["semantic_policy"],
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               rework_max_cycles: 2,
-               rework_stop_conditions: [],
-               validation_timeout_ms: 900_000
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
              )
 
     assert Enum.any?(errors, &(&1["code"] == "descriptor_bypass_violation"))
@@ -2764,15 +2788,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:semantic_preflight_failed, identity_errors}} =
              SemanticPreflight.validate(
                stripped,
-               profile["semantic_policy"],
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               rework_max_cycles: 2,
-               rework_stop_conditions: [],
-               validation_timeout_ms: 900_000
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
              )
 
     assert Enum.any?(identity_errors, fn error ->
@@ -2796,14 +2813,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              SemanticPreflight.validate(
                checkpoint_substitution,
                Profiles.semantic_policy(profile, true),
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               rework_max_cycles: 2,
-               rework_stop_conditions: [],
-               validation_timeout_ms: 900_000
+               executable_preflight_opts
              )
 
     assert Enum.any?(checkpoint_errors, fn error ->
@@ -2830,19 +2840,41 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              SemanticPreflight.validate(
                validate_with_extra_key,
                Profiles.semantic_policy(profile, true),
-               review_profile: "binding",
-               checkpoint_policy: "design_required",
-               checkpoint_work_packet_json: packet_json,
-               candidate_materialization: true,
-               candidate_materialization_digest: digest,
-               rework_max_cycles: 2,
-               rework_stop_conditions: [],
-               validation_timeout_ms: 900_000
+               executable_preflight_opts
              )
 
     assert Enum.any?(validation_errors, fn error ->
              error["code"] == "validation_parameter_violation" and
                error["node_id"] == "validate"
+           end)
+
+    review_rework_bypass = %{
+      graph
+      | edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "route_review" and
+                 edge.attrs["condition"] == "context.review.tier_decision=rework" do
+              %{edge | to: "route_publish"}
+            else
+              edge
+            end
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, review_rework_bypass} = IRCompiler.compile(review_rework_bypass)
+
+    assert {:error, {:semantic_preflight_failed, review_route_errors}} =
+             SemanticPreflight.validate(
+               review_rework_bypass,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
+    assert Enum.any?(review_route_errors, fn error ->
+             error["code"] == "descriptor_topology_mismatch" and
+               error["node_id"] == "route_review"
            end)
   end
 
