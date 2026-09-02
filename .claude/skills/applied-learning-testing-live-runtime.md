@@ -1006,3 +1006,12 @@ non-accepting infrastructure evidence rather than proof that the bug existed. Pu
 compile or API work behind a delayed factory invoked from the test process, keep a behavioral
 assertion against the missing or fixed public API, and require candidate success plus ordinary
 parent test failure (found 2026-09-01 during G5B1 exact-two-revision verification).
+
+<!-- applied-learning: source-corpus-tests-must-not-require-ambient-git-metadata -->
+<a id="applied-learning-source-corpus-tests-must-not-require-ambient-git-metadata"></a>
+**Source-corpus tests must not require ambient Git metadata.** Immutable
+object-backed validation mounts tracked source bytes without `.git`; a test that
+uses the repository only as a large fixture must construct its own temporary Git
+repository instead of asserting `<root>/.git`. When seeding from bytes, force-add
+all files so tracked paths that now match `.gitignore` are not silently dropped
+(found 2026-09-02 during G5E CrossApp replay).

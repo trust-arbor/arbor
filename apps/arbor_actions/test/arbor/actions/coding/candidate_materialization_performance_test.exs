@@ -31,10 +31,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationPerformanceTest do
     source_repo = Path.expand("../../../../../..", __DIR__)
     repo = Path.join(tmp_dir, "repo")
 
-    assert File.exists?(Path.join(source_repo, ".git"))
-    git_clone!(source_repo, repo)
-    git!(repo, ["config", "user.email", "test@example.com"])
-    git!(repo, ["config", "user.name", "Test User"])
+    prepare_source_repo!(source_repo, repo)
 
     server = :"g5d_performance_#{System.unique_integer([:positive])}"
 
@@ -113,6 +110,21 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationPerformanceTest do
     Logger.info("candidate_materialization_full_manifest #{inspect(measurement)}")
   end
 
+  test "prepares a repository fixture from immutable source bytes", %{tmp_dir: tmp_dir} do
+    source = Path.join(tmp_dir, "source")
+    repo = Path.join(tmp_dir, "repo")
+
+    File.mkdir_p!(source)
+    File.write!(Path.join(source, ".gitignore"), "ignored.txt\n")
+    File.write!(Path.join(source, "ignored.txt"), "retained source bytes\n")
+
+    prepare_source_repo!(source, repo)
+
+    refute File.exists?(Path.join(source, ".git"))
+    assert File.exists?(Path.join(repo, ".git"))
+    assert git!(repo, ["show", "HEAD:ignored.txt"]) == "retained source bytes"
+  end
+
   defp descriptor_between(repo, base, source) do
     {:ok, base_listing} = Git.ls_tree_z(repo, base)
     {:ok, source_listing} = Git.ls_tree_z(repo, source)
@@ -138,11 +150,34 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationPerformanceTest do
   defp mode_int("100644"), do: 100_644
   defp mode_int("100755"), do: 100_755
 
-  defp git_clone!(source, destination) do
-    {output, status} =
-      System.cmd("git", ["clone", "--no-local", source, destination], stderr_to_stdout: true)
+  defp prepare_source_repo!(source, destination) do
+    source_has_git_metadata? = File.exists?(Path.join(source, ".git"))
 
-    assert status == 0, output
+    if source_has_git_metadata? do
+      {output, status} =
+        System.cmd("git", ["clone", "--no-local", source, destination], stderr_to_stdout: true)
+
+      assert status == 0, output
+    else
+      # Object-backed validation mounts source bytes without repository metadata.
+      File.mkdir_p!(destination)
+
+      source
+      |> File.ls!()
+      |> Enum.each(fn entry ->
+        File.cp_r!(Path.join(source, entry), Path.join(destination, entry))
+      end)
+
+      git!(destination, ["init"])
+    end
+
+    git!(destination, ["config", "user.email", "test@example.com"])
+    git!(destination, ["config", "user.name", "Test User"])
+
+    unless source_has_git_metadata? do
+      git!(destination, ["add", "--force", "--all"])
+      git!(destination, ["commit", "-m", "Materialize source fixture"])
+    end
   end
 
   defp git!(path, args) do
