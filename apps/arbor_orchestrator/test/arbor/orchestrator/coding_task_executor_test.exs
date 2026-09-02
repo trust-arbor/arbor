@@ -3264,7 +3264,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end
     end
 
-    test "execution boundary preserves council design gate semantics" do
+    test "execution boundary preserves council gate and canonical plan review context" do
       packet = %{
         "version" => 1,
         "success_criteria" => ["focused tests pass"],
@@ -3286,6 +3286,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
             "model" => "grok-4.6",
             "permission_mode" => "deny"
           },
+          "budgets" => %{"wall_clock_ms" => 28_800_000},
           "work_packet" => packet,
           "work_packet_digest" => packet_digest
         })
@@ -3301,6 +3302,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert opts[:initial_values]["coding_plan_design_gate"] ==
                "council_then_operator"
+
+      review_context =
+        opts[:initial_values]["coding_plan_design_review_context_json"]
+        |> Jason.decode!()
+
+      assert review_context["budgets"]["wall_clock_ms"] == 28_800_000
+
+      assert review_context["plan_fingerprint"] ==
+               opts[:initial_values]["coding_plan_fingerprint"]
     end
 
     test "invalid high-risk checkpoint policy returns a bounded typed admission failure" do

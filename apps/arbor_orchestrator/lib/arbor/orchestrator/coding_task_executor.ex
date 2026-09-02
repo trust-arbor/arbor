@@ -90,6 +90,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     BudgetPolicy,
     CandidateVerificationCore,
     Compilation,
+    DesignReviewContext,
     ExecutionManifest,
     Normalizer,
     OutcomeMapper,
@@ -3035,6 +3036,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, semantic_preflight_opts} <-
            execution_boundary_semantic_preflight_opts(
              plan,
+             compilation.plan_fingerprint,
              validation_timeout_ms,
              validation_test_stage_timeout_ms,
              validation_stage_timeout_ms
@@ -3132,12 +3134,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # future compile/boundary drift fail closed before the runner is invoked.
   defp execution_boundary_semantic_preflight_opts(
          %Plan{} = plan,
+         plan_fingerprint,
          validation_timeout_ms,
          validation_test_stage_timeout_ms,
          validation_stage_timeout_ms
        ) do
     with {:ok, {checkpoint_policy, checkpoint_work_packet_json}} <-
            execution_boundary_checkpoint_binding(plan),
+         {:ok, checkpoint_design_review_context_json} <-
+           DesignReviewContext.canonical_json(plan, plan_fingerprint),
          {:ok, {candidate_materialization, candidate_materialization_digest}} <-
            execution_boundary_candidate_materialization_binding(plan) do
       {:ok,
@@ -3149,6 +3154,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          worker_model: plan.worker["model"],
          checkpoint_policy: checkpoint_policy,
          checkpoint_work_packet_json: checkpoint_work_packet_json,
+         checkpoint_design_review_context_json: checkpoint_design_review_context_json,
          design_gate: execution_boundary_design_gate(plan, checkpoint_policy),
          rework_max_cycles: plan.rework["max_cycles"],
          rework_stop_conditions: plan.rework["stop_conditions"],
