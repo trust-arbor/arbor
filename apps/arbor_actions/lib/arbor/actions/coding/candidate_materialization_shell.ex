@@ -197,7 +197,11 @@ defmodule Arbor.Actions.Coding.CandidateMaterializationShell do
          |> Map.put(:tree_oid, Map.get(binding, :tree_oid) || meta.expected_tree_oid)
          |> Map.put(:expected_tree_oid, meta.expected_tree_oid)
          |> Map.put(:object_format, format_name(proof.object_format))
-         |> Map.put(:dest_verify, Map.get(binding, :dest_verify))}
+         |> Map.put(:dest_verify, Map.get(binding, :dest_verify))
+         |> Map.put(
+           :observed_at,
+           Map.get(binding, :observed_at) || Map.get(binding, "observed_at")
+         )}
 
       {:error, reason} ->
         _ =

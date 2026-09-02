@@ -2205,6 +2205,13 @@ digraph CodingChangeV1 {
     output_key="validation_candidate_tree_oid"
   ]
 
+  hoist_descriptor_observed_at [
+    type="transform",
+    transform="identity",
+    source_key="materialize.observed_at",
+    output_key="validation_observed_at"
+  ]
+
   hoist_descriptor_candidate_path [
     type="transform",
     transform="identity",
@@ -2490,6 +2497,7 @@ digraph CodingChangeV1 {
   start -> hoist_validation_resource_id [condition="0=1"]
   start -> hoist_descriptor_evidence_ref [condition="0=1"]
   start -> hoist_descriptor_tree_oid [condition="0=1"]
+  start -> hoist_descriptor_observed_at [condition="0=1"]
   start -> hoist_descriptor_candidate_path [condition="0=1"]
   start -> prove_workspace_at_base [condition="0=1"]
   start -> compare_descriptor_workspace_base [condition="0=1"]
@@ -2880,7 +2888,8 @@ digraph CodingChangeV1 {
   materialize_candidate -> hoist_validation_resource_id [condition="outcome=success"]
   hoist_validation_resource_id -> hoist_descriptor_evidence_ref
   hoist_descriptor_evidence_ref -> hoist_descriptor_tree_oid
-  hoist_descriptor_tree_oid -> hoist_descriptor_candidate_path
+  hoist_descriptor_tree_oid -> hoist_descriptor_observed_at
+  hoist_descriptor_observed_at -> hoist_descriptor_candidate_path
   hoist_descriptor_candidate_path -> prove_workspace_at_base
   prove_workspace_at_base -> error_descriptor_workspace_moved [condition="outcome=fail"]
   prove_workspace_at_base -> compare_descriptor_workspace_base [condition="outcome=success"]

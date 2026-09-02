@@ -1385,7 +1385,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_descriptor_route(errors, graph, %{active: true, digest: digest}) do
+  defp check_descriptor_route(errors, graph, %{active: true, digest: digest} = descriptor_opt) do
     required = ~w[
       close_design_worker
       checkpoint_candidate_materialization
@@ -1395,6 +1395,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       checkpoint_workspace
       checkpoint_acquired_base
       materialize_candidate
+      hoist_descriptor_observed_at
       prove_workspace_at_base
       compare_descriptor_workspace_base
       check_workspace_at_base
@@ -1502,6 +1503,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       Enum.reduce(descriptor_exact_node_attrs(digest), errors, fn {node_id, attrs}, acc ->
         require_descriptor_node_attrs(acc, graph, node_id, attrs)
       end)
+
+    errors = require_descriptor_observed_at_writers(errors, graph, descriptor_opt)
 
     errors =
       if Map.has_key?(graph.nodes, "error_cross_app_window_invalid") do
@@ -1707,6 +1710,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "descriptor_materialize"
         )
         |> require_dominates(
+          "hoist_descriptor_observed_at",
+          "validate",
+          reachable,
+          dominators,
+          "descriptor_observed_at"
+        )
+        |> require_dominates(
           "check_workspace_at_base",
           "validate",
           reachable,
@@ -1774,6 +1784,31 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         error("descriptor_topology_mismatch", node_id, %{
           "expected" => Enum.map(expected, &edge_binding_to_json/1),
           "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp require_descriptor_observed_at_writers(errors, graph, descriptor_opt) do
+    actual = writer_nodes(graph, "output_key", "validation_observed_at")
+
+    expected =
+      if executable_descriptor?(descriptor_opt) do
+        ["hoist_descriptor_observed_at"]
+      else
+        Enum.sort(["hoist_descriptor_observed_at", "hoist_validation_observed_at"])
+      end
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("review_convergence_writer_violation", nil, %{
+          "attribute" => "output_key",
+          "context_key" => "validation_observed_at",
+          "expected_nodes" => expected,
+          "actual_nodes" => actual
         })
         | errors
       ]
@@ -1890,6 +1925,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         "transform" => "identity",
         "source_key" => "materialize.tree_oid",
         "output_key" => "validation_candidate_tree_oid"
+      },
+      "hoist_descriptor_observed_at" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "materialize.observed_at",
+        "output_key" => "validation_observed_at"
       },
       "hoist_descriptor_candidate_path" => %{
         "type" => "transform",
@@ -4574,6 +4615,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     Enum.sort(["hoist_descriptor_tree_oid" | expected_nodes])
   end
 
+  defp descriptor_review_writer_nodes(
+         "validation_observed_at",
+         expected_nodes,
+         %{active: true}
+       ) do
+    Enum.sort(["hoist_descriptor_observed_at" | expected_nodes])
+  end
+
   defp descriptor_review_writer_nodes(_context_key, expected_nodes, _descriptor_opt),
     do: expected_nodes
 
@@ -5873,6 +5922,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         do: ["hoist_descriptor_tree_oid", "hoist_validation_candidate_tree_oid"],
         else: ["hoist_validation_candidate_tree_oid"]
 
+    observed_writers =
+      if descriptor_route?(graph),
+        do: ["hoist_descriptor_observed_at", "hoist_validation_observed_at"],
+        else: ["hoist_validation_observed_at"]
+
     commit_hash_writers =
       if descriptor_route?(graph),
         do: ["hoist_change_commit", "hoist_commit_hash", "hoist_descriptor_commit_hash"],
@@ -5891,7 +5945,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"output_prefix", "validation", ["validate"]},
       {"output_key", "validation_candidate_tree_oid", tree_writers},
       {"output_prefix", "validation_candidate_tree_oid", []},
-      {"output_key", "validation_observed_at", ["hoist_validation_observed_at"]},
+      {"output_key", "validation_observed_at", observed_writers},
       {"output_prefix", "validation_observed_at", []},
       {"output_key", "validation_workspace", []},
       {"output_prefix", "validation_workspace", ["capture_validation_workspace"]},

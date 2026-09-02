@@ -64,6 +64,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
 
   alias Arbor.Actions
   alias Arbor.Actions.Coding.CandidateMaterializationShell
+  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Contracts.Coding.CandidateMaterialization
@@ -78,7 +79,8 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
     "object_format",
     "descriptor_digest",
     "base_commit",
-    "workspace_id"
+    "workspace_id",
+    "observed_at"
   ]
 
   @allowed_param_names MapSet.new(~w[
@@ -266,6 +268,9 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
       {:ok, _payload} = ok ->
         ok
 
+      {:error, :invalid_observed_at} = error ->
+        error
+
       {:error, :non_json_materialization_result} = error ->
         resource_id = string_field(binding, :resource_id)
 
@@ -421,10 +426,14 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
       "base_commit" =>
         string_field(raw, :base_commit) || string_field(raw, :acquired_base_commit) ||
           acquired_base_commit,
-      "workspace_id" => string_field(raw, :workspace_id) || workspace_id
+      "workspace_id" => string_field(raw, :workspace_id) || workspace_id,
+      "observed_at" => string_field(raw, :observed_at)
     }
 
     cond do
+      match?({:error, :invalid_observed_at}, admit_encoded_observed_at(payload)) ->
+        {:error, :invalid_observed_at}
+
       Enum.any?(Map.keys(raw), &is_atom/1) and not Enum.any?(Map.keys(raw), &is_binary/1) ->
         finalize_encoded(payload)
 
@@ -438,6 +447,13 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.Materialize do
 
   defp encode_result(_raw, _digest, _source, _tree, _base, _workspace),
     do: {:error, :non_json_materialization_result}
+
+  defp admit_encoded_observed_at(%{"observed_at" => value})
+       when is_binary(value) and value != "" do
+    ValidationResourceOwner.admit_utc_observed_at(value)
+  end
+
+  defp admit_encoded_observed_at(_payload), do: :ok
 
   defp finalize_encoded(payload) do
     if Map.keys(payload) |> Enum.sort() == Enum.sort(@closed_result_keys) and

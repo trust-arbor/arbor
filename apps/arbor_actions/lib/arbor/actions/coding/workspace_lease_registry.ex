@@ -1455,13 +1455,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:reply, {:error, :admitted_tree_mismatch}, state}
 
           true ->
-            case ValidationResourceOwner.recapture_committable_candidate(
-                   owner,
-                   expected,
-                   dest_opts_from_caller(caller)
-                 ) do
-              :ok -> {:reply, :ok, state}
-              {:error, reason} -> {:reply, {:error, reason}, state}
+            case sealed_dest_opts(resource, caller) do
+              {:error, :invalid_observed_at} ->
+                {:reply, {:error, :invalid_observed_at}, state}
+
+              {:ok, opts} ->
+                case ValidationResourceOwner.recapture_committable_candidate(
+                       owner,
+                       expected,
+                       opts
+                     ) do
+                  :ok -> {:reply, :ok, state}
+                  {:error, reason} -> {:reply, {:error, reason}, state}
+                end
             end
         end
 
@@ -1490,23 +1496,29 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:reply, {:error, :admitted_tree_mismatch}, state}
 
           true ->
-            case ValidationResourceOwner.bind_committable_candidate(
-                   owner,
-                   expected,
-                   dest_opts_from_caller(caller)
-                 ) do
-              {:ok, binding} ->
-                {:reply,
-                 {:ok,
-                  %{
-                    head: Map.get(resource, :expected_head) || Map.get(binding, :head),
-                    tree_oid: expected,
-                    paths: Map.get(binding, :paths, []),
-                    dest_verify: Map.get(binding, :dest_verify)
-                  }}, state}
+            case sealed_dest_opts(resource, caller) do
+              {:error, :invalid_observed_at} ->
+                {:reply, {:error, :invalid_observed_at}, state}
 
-              {:error, reason} ->
-                {:reply, {:error, reason}, state}
+              {:ok, opts} ->
+                case ValidationResourceOwner.bind_committable_candidate(
+                       owner,
+                       expected,
+                       opts
+                     ) do
+                  {:ok, binding} ->
+                    {:reply,
+                     {:ok,
+                      %{
+                        head: Map.get(resource, :expected_head) || Map.get(binding, :head),
+                        tree_oid: expected,
+                        paths: Map.get(binding, :paths, []),
+                        dest_verify: Map.get(binding, :dest_verify)
+                      }}, state}
+
+                  {:error, reason} ->
+                    {:reply, {:error, reason}, state}
+                end
             end
         end
 
@@ -2194,22 +2206,89 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     owner = Map.get(resource, :resource_owner_pid)
 
     if is_pid(owner) do
-      case ValidationResourceOwner.create_object_backed_candidate(owner, meta) do
-        {:ok, tree_oid, binding} ->
-          next = %{
-            resource
-            | expected_tree_oid: tree_oid,
-              expected_head: nil
-          }
-
-          {:reply, {:ok, Map.put(binding, :tree_oid, tree_oid)},
-           put_validation_resource(state, next)}
-
+      case require_persisted_seal(resource) do
         {:error, reason} ->
           {:reply, {:error, reason}, state}
+
+        :ok ->
+          materialize_object_backed_owner(state, resource, meta, owner)
       end
     else
       {:reply, {:error, :admitted_tree_mismatch}, state}
+    end
+  end
+
+  defp materialize_object_backed_owner(state, resource, meta, owner) do
+    meta = put_sealed_observed_at(meta, resource)
+
+    case ValidationResourceOwner.create_object_backed_candidate(owner, meta) do
+      {:ok, tree_oid, binding} ->
+        case seal_observed_at(resource, binding) do
+          {:ok, sealed, resource} ->
+            next = %{
+              resource
+              | expected_tree_oid: tree_oid,
+                expected_head: nil,
+                observed_at: sealed
+            }
+
+            {:reply,
+             {:ok,
+              binding
+              |> Map.put(:tree_oid, tree_oid)
+              |> Map.put(:observed_at, sealed)}, put_validation_resource(state, next)}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp require_persisted_seal(resource) do
+    case Map.get(resource, :observed_at) do
+      nil ->
+        :ok
+
+      sealed ->
+        case ValidationResourceOwner.admit_utc_observed_at(sealed) do
+          {:ok, _admitted} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp put_sealed_observed_at(meta, resource) when is_map(meta) do
+    meta =
+      meta
+      |> Map.delete(:observed_at)
+      |> Map.delete("observed_at")
+
+    case ValidationResourceOwner.admit_utc_observed_at(Map.get(resource, :observed_at)) do
+      {:ok, sealed} -> Map.put(meta, :observed_at, sealed)
+      {:error, _} -> meta
+    end
+  end
+
+  defp seal_observed_at(resource, binding) when is_map(resource) and is_map(binding) do
+    owner_ts = Map.get(binding, :observed_at) || Map.get(binding, "observed_at")
+    sealed = Map.get(resource, :observed_at)
+
+    case ValidationResourceOwner.admit_utc_observed_at(sealed) do
+      {:ok, kept} ->
+        {:ok, kept, resource}
+
+      {:error, _} ->
+        if is_nil(sealed) do
+          case ValidationResourceOwner.admit_utc_observed_at(owner_ts) do
+            {:ok, minted} -> {:ok, minted, resource}
+            {:error, reason} -> {:error, reason}
+          end
+        else
+          {:error, :invalid_observed_at}
+        end
     end
   end
 
@@ -2502,6 +2581,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       source_projection: candidate_source_projection(candidate_source),
       expected_tree_oid: nil,
       expected_head: nil,
+      observed_at: nil,
       candidate_cleanup_identity: nil,
       base_commit: lease.base_commit,
       root_path: root_path,
@@ -3018,6 +3098,22 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp dest_opts_from_caller(_caller), do: []
 
+  defp sealed_dest_opts(resource, caller) do
+    opts = dest_opts_from_caller(caller)
+    sealed = Map.get(resource, :observed_at)
+
+    cond do
+      is_nil(sealed) ->
+        {:ok, opts}
+
+      true ->
+        case ValidationResourceOwner.admit_utc_observed_at(sealed) do
+          {:ok, admitted} -> {:ok, Keyword.put(opts, :observed_at, admitted)}
+          {:error, :invalid_observed_at} -> {:error, :invalid_observed_at}
+        end
+    end
+  end
+
   defp inspect_object_backed_for_workspace(state, workspace_id, caller) do
     with :ok <- require_object_backed_binding_caller(caller),
          {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
@@ -3236,7 +3332,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       "object_format" => object_format_name(Map.get(resource, :expected_tree_oid)),
       "descriptor_digest" => Map.get(resource, :descriptor_digest),
       "candidate_materialization_digest" => Map.get(resource, :descriptor_digest),
-      "acquired_base_commit" => lease.base_commit
+      "acquired_base_commit" => lease.base_commit,
+      "observed_at" => Map.get(resource, :observed_at)
     })
   end
 

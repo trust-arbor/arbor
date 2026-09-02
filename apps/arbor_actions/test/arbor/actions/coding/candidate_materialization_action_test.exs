@@ -4,6 +4,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
   alias Arbor.Actions
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions.Coding.CandidateMaterialization.Materialize
+  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
   alias Arbor.Actions.Mix, as: MixAction
@@ -100,6 +101,7 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
     assert result["workspace_id"] == lease.workspace_id
     assert String.starts_with?(result["hidden_ref"], "refs/arbor/evidence/")
     refute result["candidate_path"] == worktree
+    assert_utc_observed_at(result["observed_at"])
     assert_worktree_unchanged(worktree, before)
 
     assert {:ok, reused} =
@@ -110,6 +112,68 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
 
     assert reused["resource_id"] == result["resource_id"]
     assert reused["hidden_ref"] == result["hidden_ref"]
+    assert reused["observed_at"] == result["observed_at"]
+    assert_worktree_unchanged(worktree, before)
+
+    identities =
+      identities(lease, task_id, principal_id, descriptor, digest, server)
+
+    assert {:ok, inspected} =
+             WorkspaceLeaseRegistry.inspect_object_backed_validation_binding(
+               lease.workspace_id,
+               identities
+             )
+
+    assert inspected["observed_at"] == result["observed_at"]
+
+    assert {:ok, rebound} =
+             WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
+               result["resource_id"],
+               identities
+             )
+
+    assert rebound["observed_at"] == result["observed_at"]
+
+    {:ok, source_listing} = Git.ls_tree_z(lease.repo_path, source)
+    {:ok, source_manifest} = BlobManifest.parse_ls_tree_z(source_listing)
+    bounds = MixAction.snapshot_bounds()
+    caller = %{task_id: task_id, principal_id: principal_id, server: server}
+
+    assert {:ok, rematerialized} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               result["resource_id"],
+               %{
+                 expected_tree_oid: descriptor["expected_tree_oid"],
+                 object_format: object_format(descriptor["expected_tree_oid"]),
+                 blob_manifest: source_manifest,
+                 max_entries: bounds.max_entries,
+                 max_bytes: bounds.max_bytes,
+                 max_depth: bounds.max_depth
+               },
+               caller
+             )
+
+    assert rematerialized[:observed_at] == result["observed_at"] or
+             rematerialized["observed_at"] == result["observed_at"]
+
+    assert {:error, :admitted_tree_mismatch} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               result["resource_id"],
+               %{
+                 expected_tree_oid: lease.base_commit,
+                 object_format: object_format(descriptor["expected_tree_oid"]),
+                 blob_manifest: source_manifest
+               },
+               caller
+             )
+
+    assert {:ok, after_fail} =
+             Materialize.run(
+               params(lease, descriptor, digest),
+               context(task_id, principal_id, server)
+             )
+
+    assert after_fail["observed_at"] == result["observed_at"]
     assert_worktree_unchanged(worktree, before)
   end
 
@@ -218,6 +282,13 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
     assert {:error, :invalid_materialization_params} =
              Materialize.run(
                params(lease, descriptor, digest)
+               |> Map.put(:observed_at, "2026-07-22T12:00:00Z"),
+               context(task_id, principal_id, server)
+             )
+
+    assert {:error, :invalid_materialization_params} =
+             Materialize.run(
+               params(lease, descriptor, digest)
                |> Map.put("workspace_id", lease.workspace_id),
                context(task_id, principal_id, server)
              )
@@ -230,6 +301,23 @@ defmodule Arbor.Actions.Coding.CandidateMaterialization.MaterializeTest do
     )
 
     assert_worktree_unchanged(worktree, before)
+  end
+
+  defp identities(lease, task_id, principal_id, descriptor, digest, server) do
+    %{
+      task_id: task_id,
+      principal_id: principal_id,
+      workspace_id: lease.workspace_id,
+      source_commit_oid: descriptor["source_commit_oid"],
+      expected_tree_oid: descriptor["expected_tree_oid"],
+      candidate_materialization_digest: digest,
+      acquired_base_commit: lease.base_commit,
+      server: server
+    }
+  end
+
+  defp assert_utc_observed_at(value) do
+    assert {:ok, ^value} = ValidationResourceOwner.admit_utc_observed_at(value)
   end
 
   defp params(lease, descriptor, digest) do

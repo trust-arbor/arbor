@@ -1216,7 +1216,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           :cross_app_capacity_then_complete,
           :cross_app_capacity_then_domain_rework,
           :cross_app_capacity_then_tampered_resume,
-          :cross_app_completed_flags_in_progress_status
+          :cross_app_completed_flags_in_progress_status,
+          :descriptor_validation_failed
         ] ->
           n = Map.get(counters, :validate, 0)
 
@@ -1557,6 +1558,18 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
+    defp cross_app_window_response(:descriptor_validation_failed, _n, _args) do
+      {:ok,
+       %{
+         interaction_outcome: "",
+         disposition_type: "failed",
+         passed: false,
+         reason: "tests_failed",
+         request_id: "",
+         note: ""
+       }}
+    end
+
     defp seed_args?(args) do
       present_window_arg(args, "cross_app_progress", :cross_app_progress) in [nil, ""] and
         present_window_arg(args, "cross_app_progress_binding", :cross_app_progress_binding) in [
@@ -1886,7 +1899,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
          object_format: "sha1",
          descriptor_digest: descriptor_digest,
          base_commit: acquired_base,
-         workspace_id: workspace_id
+         workspace_id: workspace_id,
+         observed_at: "2026-07-22T12:00:00.000000Z"
        }}
     end
 
@@ -2392,6 +2406,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     calls = snapshot.calls
 
     assert result.context["status"] == "change_committed"
+    assert result.context["validation_observed_at"] == "2026-07-22T12:00:00.000000Z"
     assert snapshot.mutations == 0
 
     for action <- ~w(
@@ -3106,6 +3121,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert checkpoint.context_values["materialize.tree_oid"] ==
                crash.descriptor["expected_tree_oid"]
 
+      assert checkpoint.context_values["materialize.observed_at"] ==
+               "2026-07-22T12:00:00.000000Z"
+
       kill_coding_engine!(engine_pid, monitor)
       assert :ok = CrashHoldStore.release(crash.store_name)
       assert %Record{status: :interrupted} = await_interrupted!(crash)
@@ -3134,6 +3152,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                pretty: true,
                limit: :infinity
              )
+
+      assert result.context["validation_observed_at"] == "2026-07-22T12:00:00.000000Z"
+      assert result.context["validation_candidate_tree_oid"] == descriptor["expected_tree_oid"]
 
       assert length(action_calls(calls, "coding_candidate_materialize")) == 1
       assert length(action_calls(calls, "acp_send_message")) == 1
@@ -3194,6 +3215,28 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert length(action_calls(calls, "acp_close_session")) == 1
       refute called?(calls, "coding_candidate_materialize")
       refute called?(calls, "coding_reviewed_validation")
+    end
+
+    test "descriptor validation failure keeps owner observation evidence and typed status" do
+      descriptor = descriptor_fixture()
+
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(
+                 :descriptor_validation_failed,
+                 "design_required",
+                 %{
+                   "validation_profile" => "cross_app",
+                   "candidate_materialization" => descriptor
+                 }
+               )
+
+      assert result.context["status"] == "validation_failed"
+      refute result.context["status"] == "task_runner_failed"
+      assert result.context["validation_observed_at"] == "2026-07-22T12:00:00.000000Z"
+      assert result.context["validation_candidate_tree_oid"] == descriptor["expected_tree_oid"]
+      assert length(action_calls(calls, "coding_candidate_materialize")) == 1
+      assert called?(calls, "coding_reviewed_validation")
+      refute called?(calls, "coding_reviewed_commit")
     end
 
     test "descriptor route rejects a workspace that moves after immutable materialization" do

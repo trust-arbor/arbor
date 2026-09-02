@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwnerObjectBackedTest do
 
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions.Coding.CandidateMaterializationShell
+  alias Arbor.Actions.Coding.ValidationResourceOwner
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
   alias Arbor.Actions.Git
   alias Arbor.Actions.TestLinuxBaselineMaterializer
@@ -43,9 +44,272 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwnerObjectBackedTest do
     refute result.candidate_path == worktree
     assert result.tree_oid == descriptor["expected_tree_oid"]
     assert is_map(result.dest_verify)
+
+    assert {:ok, result.observed_at} ==
+             ValidationResourceOwner.admit_utc_observed_at(result.observed_at)
+
     assert_worktree_unchanged(worktree, snapshot)
 
     _ = release_resource(result.resource_id, task_id, principal_id, server)
+  end
+
+  test "security regression: caller observed_at cannot control returned or persisted stamp", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    repo: repo,
+    worktree: worktree,
+    source: source,
+    descriptor: descriptor,
+    snapshot: snapshot
+  } do
+    caller = %{task_id: task_id, principal_id: principal_id, server: server}
+    forged_first = "2020-01-01T00:00:00Z"
+    forged_retry = "2021-06-15T12:34:56+00:00"
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               lease.workspace_id,
+               Map.put(caller, :object_backed_snapshot, true)
+             )
+
+    {:ok, listing} = Git.ls_tree_z(repo, source)
+    {:ok, manifest} = BlobManifest.parse_ls_tree_z(listing)
+
+    meta = %{
+      "observed_at" => forged_retry,
+      expected_tree_oid: descriptor["expected_tree_oid"],
+      object_format: :sha1,
+      blob_manifest: manifest,
+      observed_at: forged_first
+    }
+
+    assert {:ok, first} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               resource.resource_id,
+               meta,
+               caller
+             )
+
+    stamped = first[:observed_at] || first["observed_at"]
+    assert is_binary(stamped) and stamped != ""
+    assert {:ok, ^stamped} = ValidationResourceOwner.admit_utc_observed_at(stamped)
+    refute stamped == forged_first
+    refute stamped == forged_retry
+
+    assert {:ok, retry} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               resource.resource_id,
+               %{
+                 "observed_at" => forged_first,
+                 expected_tree_oid: descriptor["expected_tree_oid"],
+                 object_format: :sha1,
+                 blob_manifest: manifest,
+                 observed_at: forged_retry
+               },
+               caller
+             )
+
+    retried = retry[:observed_at] || retry["observed_at"]
+    assert retried == stamped
+    refute retried == forged_first
+    refute retried == forged_retry
+    assert_worktree_unchanged(worktree, snapshot)
+
+    _ = release_resource(resource.resource_id, task_id, principal_id, server)
+  end
+
+  test "security regression: malformed persisted seal fails closed on recapture and bind", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    repo: repo,
+    worktree: worktree,
+    source: source,
+    descriptor: descriptor,
+    snapshot: snapshot
+  } do
+    caller = %{task_id: task_id, principal_id: principal_id, server: server}
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               lease.workspace_id,
+               Map.put(caller, :object_backed_snapshot, true)
+             )
+
+    {:ok, listing} = Git.ls_tree_z(repo, source)
+    {:ok, manifest} = BlobManifest.parse_ls_tree_z(listing)
+
+    assert {:ok, first} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               resource.resource_id,
+               %{
+                 expected_tree_oid: descriptor["expected_tree_oid"],
+                 object_format: :sha1,
+                 blob_manifest: manifest
+               },
+               caller
+             )
+
+    stamped = first[:observed_at] || first["observed_at"]
+    assert {:ok, ^stamped} = ValidationResourceOwner.admit_utc_observed_at(stamped)
+
+    for malformed <- ["2026-07-22T13:00:00+01:00", ""] do
+      :sys.replace_state(server, fn state ->
+        current = Map.fetch!(state.validation_resources, resource.resource_id)
+        corrupted = %{current | observed_at: malformed}
+
+        %{
+          state
+          | validation_resources:
+              Map.put(state.validation_resources, resource.resource_id, corrupted)
+        }
+      end)
+
+      assert {:error, :invalid_observed_at} =
+               WorkspaceLeaseRegistry.recapture_committable_snapshot(
+                 resource.resource_id,
+                 caller
+               )
+
+      assert {:error, :invalid_observed_at} =
+               WorkspaceLeaseRegistry.bind_committable_snapshot(resource.resource_id, caller)
+
+      assert {:error, :invalid_observed_at} =
+               WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+                 resource.resource_id,
+                 %{
+                   expected_tree_oid: descriptor["expected_tree_oid"],
+                   object_format: :sha1,
+                   blob_manifest: manifest
+                 },
+                 caller
+               )
+
+      persisted =
+        server
+        |> :sys.get_state()
+        |> Map.fetch!(:validation_resources)
+        |> Map.fetch!(resource.resource_id)
+        |> Map.fetch!(:observed_at)
+
+      assert persisted == malformed
+    end
+
+    :sys.replace_state(server, fn state ->
+      current = Map.fetch!(state.validation_resources, resource.resource_id)
+      restored = %{current | observed_at: stamped}
+
+      %{
+        state
+        | validation_resources:
+            Map.put(state.validation_resources, resource.resource_id, restored)
+      }
+    end)
+
+    assert :ok =
+             WorkspaceLeaseRegistry.recapture_committable_snapshot(
+               resource.resource_id,
+               caller
+             )
+
+    assert {:ok, rebound} =
+             WorkspaceLeaseRegistry.bind_committable_snapshot(resource.resource_id, caller)
+
+    assert rebound.tree_oid == descriptor["expected_tree_oid"]
+
+    assert {:ok, retry} =
+             WorkspaceLeaseRegistry.materialize_object_backed_snapshot(
+               resource.resource_id,
+               %{
+                 expected_tree_oid: descriptor["expected_tree_oid"],
+                 object_format: :sha1,
+                 blob_manifest: manifest
+               },
+               caller
+             )
+
+    retried = retry[:observed_at] || retry["observed_at"]
+    assert retried == stamped
+    assert_worktree_unchanged(worktree, snapshot)
+
+    _ = release_resource(resource.resource_id, task_id, principal_id, server)
+  end
+
+  test "admit_utc_observed_at keeps original UTC bytes and rejects nonzero offsets" do
+    z = "2026-07-22T12:00:00Z"
+    plus_zero = "2026-07-22T12:00:00+00:00"
+    plus_one = "2026-07-22T13:00:00+01:00"
+
+    assert {:ok, ^z} = ValidationResourceOwner.admit_utc_observed_at(z)
+    assert {:ok, ^plus_zero} = ValidationResourceOwner.admit_utc_observed_at(plus_zero)
+
+    assert {:error, :invalid_observed_at} =
+             ValidationResourceOwner.admit_utc_observed_at(plus_one)
+
+    assert {:error, :invalid_observed_at} =
+             ValidationResourceOwner.admit_utc_observed_at("2026-07-22T07:00:00-05:00")
+
+    assert {:error, :invalid_observed_at} = ValidationResourceOwner.admit_utc_observed_at("")
+    assert {:error, :invalid_observed_at} = ValidationResourceOwner.admit_utc_observed_at(nil)
+
+    assert {:error, :invalid_observed_at} =
+             ValidationResourceOwner.admit_utc_observed_at("not-a-timestamp")
+
+    assert {:ok, %DateTime{time_zone: "Etc/UTC"}, 3600} = DateTime.from_iso8601(plus_one)
+  end
+
+  test "pack-objects is explicitly single-threaded during object-backed materialization", %{
+    server: server,
+    lease: lease,
+    task_id: task_id,
+    principal_id: principal_id,
+    worktree: worktree,
+    descriptor: descriptor,
+    snapshot: snapshot
+  } do
+    parent = self()
+
+    tracer =
+      spawn_link(fn ->
+        pack_objects_tracer(parent, [])
+      end)
+
+    :erlang.trace_pattern({Arbor.Shell, :execute_direct, 3}, true, [])
+    :erlang.trace(:new, true, [:call, {:tracer, tracer}])
+
+    try do
+      assert {:ok, result} =
+               CandidateMaterializationShell.admit_and_materialize(
+                 input(lease, task_id, principal_id, descriptor, server)
+               )
+
+      send(tracer, :done)
+
+      assert_receive {:pack_objects_argvs, argvs}, 2_000
+      assert argvs != []
+
+      for argv <- argvs do
+        pack_index = Enum.find_index(argv, &(&1 == "pack-objects"))
+        assert is_integer(pack_index) and pack_index >= 2
+        assert Enum.at(argv, pack_index - 2) == "-c"
+        assert Enum.at(argv, pack_index - 1) == "pack.threads=1"
+        assert "--threads=1" in Enum.drop(argv, pack_index + 1)
+        assert "--no-reuse-delta" in argv
+        assert "--no-reuse-object" in argv
+      end
+
+      assert result.tree_oid == descriptor["expected_tree_oid"]
+      assert is_map(result.dest_verify)
+      assert_worktree_unchanged(worktree, snapshot)
+
+      _ = release_resource(result.resource_id, task_id, principal_id, server)
+    after
+      :erlang.trace(:new, false, [:call])
+      :erlang.trace_pattern({Arbor.Shell, :execute_direct, 3}, false, [])
+    end
   end
 
   test "SHA-256 object format reconstructs when git init supports it, otherwise fails closed", %{
@@ -371,6 +635,24 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwnerObjectBackedTest do
 
     assert_worktree_unchanged(ctx.worktree, ctx.snapshot)
     _ = release_resource(resource.resource_id, ctx.task_id, ctx.principal_id, ctx.server)
+  end
+
+  defp pack_objects_tracer(parent, acc) do
+    receive do
+      {:trace, _pid, :call, {Arbor.Shell, :execute_direct, ["git", args, _opts]}}
+      when is_list(args) ->
+        if "pack-objects" in args do
+          pack_objects_tracer(parent, [args | acc])
+        else
+          pack_objects_tracer(parent, acc)
+        end
+
+      {:trace, _pid, :call, _mfa} ->
+        pack_objects_tracer(parent, acc)
+
+      :done ->
+        send(parent, {:pack_objects_argvs, Enum.reverse(acc)})
+    end
   end
 
   defp leased_repo(tmp_dir, repo_name, branch) do

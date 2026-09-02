@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
+  alias Arbor.Contracts.Coding.{CandidateMaterialization, Plan, WorkPacket}
 
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
@@ -1014,6 +1014,125 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                ]
              end)
     end
+  end
+
+  test "descriptor routes must hoist materialize.observed_at before validate", ctx do
+    {:ok, catalog} =
+      ActionCatalog.snapshot(
+        modules:
+          CodingPlanTestActionCatalog.modules() ++
+            [
+              Arbor.Actions.Coding.CandidateMaterialization.Materialize,
+              Arbor.Actions.Coding.Workspace.EnsureActive
+            ]
+      )
+
+    descriptor = %{
+      "source_commit_oid" => String.duplicate("a", 40),
+      "expected_tree_oid" => String.duplicate("b", 40),
+      "entries" => [
+        %{"path" => "lib/a.ex", "blob_oid" => String.duplicate("c", 40), "mode" => 100_644}
+      ]
+    }
+
+    packet =
+      Map.merge(
+        %{
+          "version" => 1,
+          "success_criteria" => ["focused tests pass"],
+          "non_goals" => ["execution authority"],
+          "constraints" => ["touch only owned files"],
+          "architecture_refs" => ["apps/arbor_orchestrator/lib/arbor/orchestrator/coding_plan"],
+          "required_evidence" => ["focused test output"],
+          "checkpoint_policy" => "design_required",
+          "design_gate" => "council_then_operator"
+        },
+        %{}
+      )
+
+    {:ok, packet_digest} = WorkPacket.digest(packet)
+
+    plan =
+      plan!(%{
+        "version" => 2,
+        "work_packet" => packet,
+        "work_packet_digest" => packet_digest,
+        "validation_profile" => "cross_app",
+        "candidate_materialization" => descriptor
+      })
+
+    {:ok, digest} = CandidateMaterialization.digest(plan.candidate_materialization)
+
+    assert {:ok, compilation} =
+             Compiler.compile(plan,
+               template_source: ctx.template_source,
+               action_catalog: catalog
+             )
+
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+    {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+
+    {:ok, validation_params} =
+      Jason.decode(graph.nodes["validate"].attrs["param.pinned_params_json"])
+
+    assert graph.nodes["hoist_descriptor_observed_at"].attrs == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "materialize.observed_at",
+             "output_key" => "validation_observed_at"
+           }
+
+    assert :ok =
+             preflight(graph, Profiles.semantic_policy(profile, true),
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               design_gate: "council_then_operator",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               graph_phase: :executable,
+               worker_use_pool: plan.worker["use_pool"],
+               worker_resume_session_id: plan.worker["resume_session_id"],
+               worker_permission_mode: plan.worker["permission_mode"],
+               worker_model: plan.worker["model"],
+               rework_max_cycles: plan.rework["max_cycles"],
+               rework_stop_conditions: plan.rework["stop_conditions"],
+               validation_timeout_ms: validation_params["timeout"],
+               validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
+               validation_stage_timeout_ms: validation_params["stage_timeout"]
+             )
+
+    mutated =
+      update_in(
+        graph.nodes["hoist_descriptor_observed_at"].attrs,
+        &Map.put(&1, "source_key", "validation_workspace.committable_tree_observed_at")
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             preflight(mutated, Profiles.semantic_policy(profile, true),
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               design_gate: "council_then_operator",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               graph_phase: :executable,
+               worker_use_pool: plan.worker["use_pool"],
+               worker_resume_session_id: plan.worker["resume_session_id"],
+               worker_permission_mode: plan.worker["permission_mode"],
+               worker_model: plan.worker["model"],
+               rework_max_cycles: plan.rework["max_cycles"],
+               rework_stop_conditions: plan.rework["stop_conditions"],
+               validation_timeout_ms: validation_params["timeout"],
+               validation_test_stage_timeout_ms: validation_params["test_stage_timeout"],
+               validation_stage_timeout_ms: validation_params["stage_timeout"]
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "descriptor_binding_mismatch" and
+               error["node_id"] == "hoist_descriptor_observed_at"
+           end)
   end
 
   test "compiler and terminal evidence reject duplicate and cross-attribute writers", ctx do

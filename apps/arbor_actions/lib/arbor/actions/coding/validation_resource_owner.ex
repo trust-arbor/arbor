@@ -102,6 +102,22 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   @doc false
   def stop(owner), do: call(owner, :stop)
 
+  @doc false
+  @spec admit_utc_observed_at(term()) :: {:ok, String.t()} | {:error, :invalid_observed_at}
+  def admit_utc_observed_at(value)
+      when is_binary(value) and value != "" and byte_size(value) > 0 do
+    if String.valid?(value) do
+      case DateTime.from_iso8601(value) do
+        {:ok, %DateTime{}, 0} -> {:ok, value}
+        _other -> {:error, :invalid_observed_at}
+      end
+    else
+      {:error, :invalid_observed_at}
+    end
+  end
+
+  def admit_utc_observed_at(_value), do: {:error, :invalid_observed_at}
+
   defp call(owner, message) when is_pid(owner) do
     GenServer.call(owner, message, :infinity)
   catch
@@ -144,7 +160,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
       snapshot_dest: nil,
       snapshot_tree_oid: nil,
       snapshot_head: nil,
-      snapshot_stage_stats: nil
+      snapshot_stage_stats: nil,
+      snapshot_observed_at: nil
     }
 
     case Arbor.Shell.create_private_owned_tree(root_path) do
@@ -199,7 +216,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   def handle_call({:recapture_committable_candidate, expected_oid, opts}, _from, state)
       when is_list(opts) do
     case recapture_held_tree(state, expected_oid, opts) do
-      {:ok, _binding} -> {:reply, :ok, state}
+      {:ok, binding} -> {:reply, :ok, put_snapshot_observed_at(state, binding)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -207,7 +224,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   def handle_call({:bind_committable_candidate, expected_oid, opts}, _from, state)
       when is_list(opts) do
     case recapture_held_tree(state, expected_oid, opts) do
-      {:ok, binding} -> {:reply, {:ok, binding}, state}
+      {:ok, binding} -> {:reply, {:ok, binding}, put_snapshot_observed_at(state, binding)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -669,8 +686,11 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
       }
 
       case recapture_held_tree(next, tree_oid, opts) do
-        {:ok, binding} -> {:ok, tree_oid, binding, next}
-        {:error, reason} -> {:error, reason}
+        {:ok, binding} ->
+          {:ok, tree_oid, binding, put_snapshot_observed_at(next, binding)}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       false -> {:error, :invalid_committable_snapshot}
@@ -683,7 +703,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
     [
       max_entries: Map.get(meta, :max_entries) || Map.get(meta, "max_entries"),
       max_bytes: Map.get(meta, :max_bytes) || Map.get(meta, "max_bytes"),
-      max_depth: Map.get(meta, :max_depth) || Map.get(meta, "max_depth")
+      max_depth: Map.get(meta, :max_depth) || Map.get(meta, "max_depth"),
+      observed_at: Map.get(meta, :observed_at) || Map.get(meta, "observed_at")
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
@@ -829,7 +850,10 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
                [
                  "-C",
                  repo_path,
+                 "-c",
+                 "pack.threads=1",
                  "pack-objects",
+                 "--threads=1",
                  "--quiet",
                  "--no-reuse-delta",
                  "--no-reuse-object",
@@ -1071,7 +1095,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
           restore_started = monotonic_ms()
 
           with :ok <- read_held_tree(objects, index, held),
-               :ok <- checkout_held_tree(objects, index, dest) do
+               :ok <- checkout_held_tree(objects, index, dest),
+               {:ok, observed_at} <- choose_observed_at(state, opts) do
             restore_ms = elapsed_ms(restore_started)
             git_invocations = git_invocation_count()
 
@@ -1091,7 +1116,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
               "dest_verify done dest_files=#{dest_verify.dest_files} dest_bytes=#{dest_verify.dest_bytes} walk_ms=#{walk_ms} git_invocations=#{git_invocations}"
             )
 
-            {:ok, snapshot_binding(state, held_entries, dest_verify)}
+            {:ok, snapshot_binding(state, held_entries, dest_verify, observed_at)}
           end
 
         {:error, reason} ->
@@ -1111,14 +1136,44 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
     end
   end
 
-  defp snapshot_binding(state, held_entries, dest_verify)
-       when is_list(held_entries) and is_map(dest_verify) do
+  defp snapshot_binding(state, held_entries, dest_verify, observed_at)
+       when is_list(held_entries) and is_map(dest_verify) and is_binary(observed_at) do
     %{
       head: Map.get(state, :snapshot_head),
       tree_oid: Map.get(state, :snapshot_tree_oid),
       paths: held_entries |> Enum.map(& &1.path) |> Enum.sort(),
-      dest_verify: dest_verify
+      dest_verify: dest_verify,
+      observed_at: observed_at
     }
+  end
+
+  defp choose_observed_at(state, opts) when is_list(opts) do
+    case Keyword.fetch(opts, :observed_at) do
+      {:ok, value} ->
+        admit_utc_observed_at(value)
+
+      :error ->
+        case admit_utc_observed_at(Map.get(state, :snapshot_observed_at)) do
+          {:ok, existing} -> {:ok, existing}
+          {:error, :invalid_observed_at} -> mint_observed_at()
+        end
+    end
+  end
+
+  defp mint_observed_at do
+    DateTime.utc_now()
+    |> DateTime.to_iso8601(:extended)
+    |> admit_utc_observed_at()
+  end
+
+  defp put_snapshot_observed_at(state, binding) when is_map(binding) do
+    case Map.get(binding, :observed_at) || Map.get(binding, "observed_at") do
+      value when is_binary(value) and value != "" ->
+        %{state | snapshot_observed_at: value}
+
+      _other ->
+        state
+    end
   end
 
   defp match_expected_tree(_actual, nil), do: :ok

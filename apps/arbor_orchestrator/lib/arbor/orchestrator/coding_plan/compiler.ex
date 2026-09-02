@@ -91,6 +91,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     hoist_descriptor_candidate_path
     hoist_descriptor_commit_hash
     hoist_descriptor_evidence_ref
+    hoist_descriptor_observed_at
     hoist_descriptor_tree_oid
     hoist_validation_resource_id
     mark_candidate_source_immutable

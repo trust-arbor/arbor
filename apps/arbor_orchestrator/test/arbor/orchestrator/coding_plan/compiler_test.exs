@@ -329,9 +329,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 102_338
-    assert map_size(graph.nodes) == 291
-    assert length(graph.edges) == 448
+    assert byte_size(ctx.template_source) == 102_627
+    assert map_size(graph.nodes) == 292
+    assert length(graph.edges) == 450
     assert byte_size(ctx.template_source) <= 262_144
     # Dormant CrossApp and descriptor routes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
@@ -2577,6 +2577,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert serialized_compilation_fixture(design_a) == serialized_compilation_fixture(design_b)
 
     refute Map.has_key?(parse!(design_a.dot_source).nodes, "materialize_candidate")
+    refute Map.has_key?(parse!(design_a.dot_source).nodes, "hoist_descriptor_observed_at")
     refute Map.has_key?(design_a.initial_values, "coding_plan_candidate_materialization")
   end
 
@@ -2634,6 +2635,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert materialize["context_keys"] ==
              "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit"
+
+    assert node_attrs(graph, "hoist_descriptor_observed_at") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "materialize.observed_at",
+             "output_key" => "validation_observed_at"
+           }
+
+    assert edge_target(graph, "hoist_descriptor_tree_oid", nil) == "hoist_descriptor_observed_at"
+
+    assert edge_target(graph, "hoist_descriptor_observed_at", nil) ==
+             "hoist_descriptor_candidate_path"
+
+    assert MapSet.member?(reachable_ids(graph, "hoist_descriptor_observed_at"), "validate")
+    assert MapSet.member?(reachable_ids(graph, "materialize_candidate"), "validate")
 
     assert node_attrs(graph, "prove_workspace_at_base")["action"] ==
              "coding_workspace_ensure_active"
@@ -2939,6 +2955,111 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert Enum.any?(review_route_errors, fn error ->
              error["code"] == "descriptor_topology_mismatch" and
                error["node_id"] == "route_review"
+           end)
+
+    observed_source =
+      %{
+        graph
+        | nodes:
+            Map.update!(graph.nodes, "hoist_descriptor_observed_at", fn node ->
+              %{node | attrs: Map.put(node.attrs, "source_key", "materialize.tree_oid")}
+            end),
+          adjacency: %{},
+          reverse_adjacency: %{}
+      }
+
+    assert {:ok, observed_source} = IRCompiler.compile(observed_source)
+
+    assert {:error, {:semantic_preflight_failed, observed_source_errors}} =
+             SemanticPreflight.validate(
+               observed_source,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
+    assert Enum.any?(observed_source_errors, fn error ->
+             error["code"] == "descriptor_binding_mismatch" and
+               error["node_id"] == "hoist_descriptor_observed_at"
+           end)
+
+    observed_output =
+      %{
+        graph
+        | nodes:
+            Map.update!(graph.nodes, "hoist_descriptor_observed_at", fn node ->
+              %{node | attrs: Map.put(node.attrs, "output_key", "materialize.observed_at")}
+            end),
+          adjacency: %{},
+          reverse_adjacency: %{}
+      }
+
+    assert {:ok, observed_output} = IRCompiler.compile(observed_output)
+
+    assert {:error, {:semantic_preflight_failed, observed_output_errors}} =
+             SemanticPreflight.validate(
+               observed_output,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
+    assert Enum.any?(observed_output_errors, fn error ->
+             error["code"] == "descriptor_binding_mismatch" and
+               error["node_id"] == "hoist_descriptor_observed_at"
+           end)
+
+    skipped_hoist = %{
+      graph
+      | edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "hoist_descriptor_tree_oid" and
+                 edge.to == "hoist_descriptor_observed_at" do
+              %{edge | to: "hoist_descriptor_candidate_path"}
+            else
+              edge
+            end
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, skipped_hoist} = IRCompiler.compile(skipped_hoist)
+
+    assert {:error, {:semantic_preflight_failed, skipped_errors}} =
+             SemanticPreflight.validate(
+               skipped_hoist,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
+    assert Enum.any?(skipped_errors, fn error ->
+             error["code"] in [
+               "descriptor_topology_mismatch",
+               "dominance_violation",
+               "unreachable_dominator"
+             ]
+           end)
+
+    extra_writer = %{
+      graph
+      | nodes:
+          Map.update!(graph.nodes, "hoist_descriptor_candidate_path", fn node ->
+            %{node | attrs: Map.put(node.attrs, "output_key", "validation_observed_at")}
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, extra_writer} = IRCompiler.compile(extra_writer)
+
+    assert {:error, {:semantic_preflight_failed, extra_writer_errors}} =
+             SemanticPreflight.validate(
+               extra_writer,
+               Profiles.semantic_policy(profile, true),
+               executable_preflight_opts
+             )
+
+    assert Enum.any?(extra_writer_errors, fn error ->
+             error["code"] == "review_convergence_writer_violation"
            end)
   end
 
