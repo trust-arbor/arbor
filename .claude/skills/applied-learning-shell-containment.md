@@ -415,3 +415,13 @@ image-owned portable fixtures rather than assuming Python or procps, and must
 exercise the exact effective selected set rather than only the requested subset
 (found 2026-09-01 when G5B1 passed on macOS but the authoritative Alpine guest
 exposed harness, musl, and fixture assumptions).
+
+<!-- applied-learning: pin-thread-counts-for-git-plumbing-inside-constrained-guests -->
+<a id="applied-learning-pin-thread-counts-for-git-plumbing-inside-constrained-guests"></a>
+**Pin thread counts for Git plumbing inside constrained guests.** Commands such
+as `git pack-objects` may create worker threads even when Arbor invokes one
+process. Under cap-drop or seccomp profiles this can fail with an opaque resource
+error. Set both the Git config and command option explicitly (for example,
+`-c pack.threads=1 pack-objects --threads=1`) and regression-test the actual argv
+used by the contained path, not only its eventual output (found 2026-09-02 while
+replaying the exact CrossApp validation candidate).

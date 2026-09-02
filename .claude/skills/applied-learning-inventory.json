@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 718,
+  "entry_count": 719,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8878,8 +8878,21 @@
       "source_incident": "found 2026-09-02 after a council approved a 5,400,000 ms design against a 28,800,000 ms frozen plan",
       "always_loaded": false,
       "content_sha256": "46cff51b3d07f3479b97d16f8994c77f004937de3898006bc00674c6b195ab4a"
+    },
+    {
+      "source_ordinal": 719,
+      "source_kind": "post-migration",
+      "slug": "pin-thread-counts-for-git-plumbing-inside-constrained-guests",
+      "title": "Pin thread counts for Git plumbing inside constrained guests.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-pin-thread-counts-for-git-plumbing-inside-constrained-guests",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 while replaying the exact CrossApp validation candidate",
+      "always_loaded": false,
+      "content_sha256": "7d35a5e3fa260b69bd00c24bb9884d1f784b60cf50ba93a7a1c96d2843792d1e"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 257
+  "post_migration_entry_count": 258
 }
