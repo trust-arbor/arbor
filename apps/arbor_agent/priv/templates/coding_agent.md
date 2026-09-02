@@ -75,6 +75,8 @@ required_capabilities:
   resource: "arbor://action/coding/cross_app/validate"
 - description: "Validate CONTRACT_RULES preflight and bounded contract tests for contract changes"
   resource: "arbor://action/coding/contract_change/validate"
+- description: "Materialize a compiler-owned candidate descriptor into an object-backed snapshot"
+  resource: "arbor://action/coding/candidate_materialization"
 - description: "Acquire, inspect, retain, and release isolated coding workspaces"
   resource: "arbor://action/coding/workspace/**"
 - description: "Verify the host-installed Linux dependency baseline before opening a coding worker"
@@ -120,6 +122,7 @@ trust_preset:
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
     "arbor://action/coding/contract_change/validate": ask
+    "arbor://action/coding/candidate_materialization": auto
     "arbor://action/coding/workspace": auto
     "arbor://action/coding/dependency_baseline/check": auto
     "arbor://action/coding/review_tree/read": auto

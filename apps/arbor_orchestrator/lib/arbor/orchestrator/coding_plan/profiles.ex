@@ -261,6 +261,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                            ])
 
   @required_nested_actions Enum.sort(["consensus_decide_review", "git_commit"])
+  @descriptor_required_nested_actions ["consensus_decide_review"]
 
   @binding_council_review %{
     "action" => "council_review_change",
@@ -268,6 +269,44 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   }
 
   @optional_reviewed_actions Enum.sort(["coding_design_council_review", "git_pr"])
+
+  @descriptor_optional_actions [
+    "coding_candidate_materialize",
+    "coding_workspace_ensure_active"
+  ]
+
+  @descriptor_action_placements [
+    %{
+      "node_id" => "close_design_worker",
+      "action" => "acp_close_session",
+      "required_dominators" => ["open_worker"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "materialize_candidate",
+      "action" => "coding_candidate_materialize",
+      "required_dominators" => [
+        "acquire_workspace",
+        "checkpoint_acquired_base",
+        "checkpoint_candidate_materialization",
+        "checkpoint_candidate_materialization_digest",
+        "checkpoint_expected_tree",
+        "checkpoint_source_commit",
+        "checkpoint_workspace",
+        "close_design_worker"
+      ],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "prove_workspace_at_base",
+      "action" => "coding_workspace_ensure_active",
+      "required_dominators" => ["materialize_candidate"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    }
+  ]
 
   @mandatory_gate_nodes Enum.sort(~w[
                           capture_validation_workspace
@@ -2363,6 +2402,31 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
         {:error, {:profile_not_executable, profile["id"], profile["unsupported_reason"]}}
       end
     end
+  end
+
+  @doc false
+  @spec semantic_policy(descriptor(), boolean()) :: descriptor()
+  def semantic_policy(%{"semantic_policy" => policy}, false), do: policy
+
+  def semantic_policy(%{"semantic_policy" => policy}, true) do
+    policy
+    |> Map.update!("optional_actions", fn actions ->
+      Enum.sort(Enum.uniq(@descriptor_optional_actions ++ actions))
+    end)
+    |> Map.update!("allowed_actions", fn actions ->
+      Enum.sort(Enum.uniq(@descriptor_optional_actions ++ actions))
+    end)
+    |> Map.update!("action_placements", fn placements ->
+      Enum.sort_by(@descriptor_action_placements ++ placements, & &1["node_id"])
+    end)
+  end
+
+  @doc false
+  @spec execution_manifest_profile(descriptor(), boolean()) :: descriptor()
+  def execution_manifest_profile(profile, false), do: profile
+
+  def execution_manifest_profile(profile, true) do
+    Map.put(profile, "required_nested_actions", @descriptor_required_nested_actions)
   end
 
   @doc "Bound a plan wall-clock budget to the reviewed per-operation validation ceiling."

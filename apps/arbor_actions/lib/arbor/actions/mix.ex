@@ -547,6 +547,80 @@ defmodule Arbor.Actions.Mix do
   def with_validation_resource(_workspace_id, _context, _fun, _opts),
     do: {:error, :invalid_validation_resource_request}
 
+  @doc """
+  Bind an existing object-backed validation resource and run `fun` without
+  acquiring or releasing. Lifecycle stays with the graph until publish/release.
+  """
+  @spec with_existing_object_backed_validation_resource(
+          String.t(),
+          map(),
+          (map() -> result),
+          keyword()
+        ) :: result | {:error, term()}
+        when result: term()
+  def with_existing_object_backed_validation_resource(resource_id, context, fun, opts \\ [])
+
+  def with_existing_object_backed_validation_resource(resource_id, context, fun, opts)
+      when is_binary(resource_id) and is_map(context) and is_function(fun, 1) and is_list(opts) do
+    caller =
+      context
+      |> validation_caller()
+      |> Map.merge(%{
+        workspace_id: Keyword.get(opts, :workspace_id),
+        source_commit_oid: Keyword.get(opts, :source_commit_oid),
+        expected_tree_oid: Keyword.get(opts, :expected_tree_oid),
+        candidate_materialization_digest: Keyword.get(opts, :candidate_materialization_digest),
+        acquired_base_commit: Keyword.get(opts, :acquired_base_commit),
+        evidence_ref: Keyword.get(opts, :evidence_ref)
+      })
+
+    server =
+      Keyword.get(opts, :server) ||
+        Map.get(context, :workspace_registry) ||
+        Map.get(context, "workspace_registry") ||
+        Map.get(caller, :server)
+
+    caller = if server, do: Map.put(caller, :server, server), else: caller
+
+    server_opts = if server, do: [server: server], else: []
+
+    with {:ok, _lease} <-
+           WorkspaceLeaseRegistry.ensure_active_by_lineage(
+             Keyword.get(opts, :workspace_id),
+             Map.get(caller, :task_id),
+             Map.get(caller, :principal_id),
+             server_opts
+           ),
+         {:ok, resource} <-
+           WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
+             resource_id,
+             caller
+           ),
+         resource <- if(server, do: Map.put(resource, :server, server), else: resource),
+         :ok <- recapture_committable_snapshot(resource) do
+      candidate_path =
+        Map.get(resource, "candidate_path") || Map.get(resource, :candidate_path)
+
+      worktree_path = Keyword.get(opts, :worktree_path)
+
+      cond do
+        not is_binary(candidate_path) or candidate_path == "" ->
+          {:error, :validation_infrastructure_failed}
+
+        is_binary(worktree_path) and candidate_path == worktree_path ->
+          {:error, :validation_infrastructure_failed}
+
+        true ->
+          fun.(resource)
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def with_existing_object_backed_validation_resource(_resource_id, _context, _fun, _opts),
+    do: {:error, :invalid_validation_resource_request}
+
   defp maybe_put_committable_snapshot(acquire_opts, opts) when is_list(opts) do
     if Keyword.get(opts, :committable_snapshot) == true do
       acquire_opts
@@ -595,14 +669,59 @@ defmodule Arbor.Actions.Mix do
 
     if is_binary(resource_id) and resource_id != "" do
       caller =
-        %{task_id: task_id, principal_id: principal_id}
+        %{
+          task_id: task_id,
+          principal_id: principal_id,
+          workspace_id: resource_field(resource, :workspace_id),
+          source_commit_oid: resource_field(resource, :source_commit_oid),
+          expected_tree_oid: resource_field(resource, :expected_tree_oid),
+          candidate_materialization_digest:
+            resource_field(resource, :candidate_materialization_digest) ||
+              resource_field(resource, :descriptor_digest),
+          acquired_base_commit:
+            resource_field(resource, :acquired_base_commit) ||
+              resource_field(resource, :base_commit),
+          evidence_ref:
+            resource_field(resource, :evidence_ref) || resource_field(resource, :hidden_ref),
+          validation_resource_id: resource_id,
+          server: resource_field(resource, :server)
+        }
         |> maybe_put_caller_bound(:max_entries, Keyword.get(opts, :max_entries))
         |> maybe_put_caller_bound(:max_bytes, Keyword.get(opts, :max_bytes))
         |> maybe_put_caller_bound(:max_depth, Keyword.get(opts, :max_depth))
 
-      fun.(resource_id, caller)
+      with :ok <- require_object_backed_child_identities(resource) do
+        fun.(resource_id, caller)
+      end
     else
       {:error, :validation_resource_required}
+    end
+  end
+
+  defp require_object_backed_child_identities(resource) do
+    if resource_field(resource, :candidate_source) == "object_backed_private_snapshot" do
+      required = [
+        :resource_id,
+        :workspace_id,
+        :task_id,
+        :principal_id,
+        :source_commit_oid,
+        :expected_tree_oid,
+        :candidate_materialization_digest,
+        :acquired_base_commit,
+        :evidence_ref
+      ]
+
+      if Enum.all?(required, fn key ->
+           value = resource_field(resource, key)
+           is_binary(value) and value != "" and String.valid?(value)
+         end) do
+        :ok
+      else
+        {:error, :incomplete_immutable_review_binding}
+      end
+    else
+      :ok
     end
   end
 

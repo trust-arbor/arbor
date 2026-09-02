@@ -1,8 +1,7 @@
 defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Contracts.Coding.WorkPacket
+  alias Arbor.Contracts.Coding.{CandidateMaterialization, Plan, WorkPacket}
 
   alias Arbor.Orchestrator.CodingPlan.{
     ActionCatalog,
@@ -11,6 +10,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     DeadlineBudget,
     ExecutionManifest,
     Profiles,
+    SemanticPreflight,
     ValidationProgram
   }
 
@@ -329,11 +329,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 93_758
-    assert map_size(graph.nodes) == 266
-    assert length(graph.edges) == 392
+    assert byte_size(ctx.template_source) == 101_796
+    assert map_size(graph.nodes) == 289
+    assert length(graph.edges) == 446
     assert byte_size(ctx.template_source) <= 262_144
-    # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
+    # Dormant CrossApp and descriptor routes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
     assert map_size(graph.nodes) <= 320
     assert length(graph.edges) <= 512
@@ -812,7 +812,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert reset_retry_count === 0
   end
 
-  test "direct and operator design_gate compilations stay byte-identical and omit council bindings",
+  test "direct and operator design_gate graphs stay byte-identical and omit council bindings",
        ctx do
     direct = v2_plan!()
     absent = v2_plan!(%{"checkpoint_policy" => "design_required"})
@@ -859,11 +859,15 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
     end
 
-    assert serialized_compilation_fixture(direct_compilation) ==
-             pre_change_compilation_fixture("pre_change_direct_compilation.json")
+    assert graph_and_inputs_fixture(direct_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_direct_compilation.json")
+             )
 
-    assert serialized_compilation_fixture(operator_compilation) ==
-             pre_change_compilation_fixture("pre_change_operator_compilation.json")
+    assert graph_and_inputs_fixture(operator_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_operator_compilation.json")
+             )
 
     assert serialized_compilation_fixture(absent_compilation) ==
              serialized_compilation_fixture(operator_compilation)
@@ -2482,6 +2486,366 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              compile_with_catalog(plan!(), ctx, ctx.template_source, malformed_catalog)
   end
 
+  test "descriptor-free Plan v1 and v2 compilations stay byte-identical with or without the field",
+       ctx do
+    catalog = descriptor_action_catalog()
+
+    assert {:ok, cross_app_profile} = Profiles.fetch_executable("cross_app")
+    descriptor_free_policy = cross_app_profile["semantic_policy"]
+
+    refute "coding_candidate_materialize" in descriptor_free_policy["allowed_actions"]
+    refute "coding_candidate_materialize" in descriptor_free_policy["optional_actions"]
+    refute "coding_workspace_ensure_active" in descriptor_free_policy["allowed_actions"]
+    refute "coding_workspace_ensure_active" in descriptor_free_policy["optional_actions"]
+
+    refute Enum.any?(
+             descriptor_free_policy["action_placements"],
+             &(&1["node_id"] in ~w(close_design_worker materialize_candidate prove_workspace_at_base))
+           )
+
+    v1 = plan!()
+    v2_direct = v2_plan!()
+    v2_design = v2_plan!(%{"checkpoint_policy" => "design_required"})
+
+    assert {:ok, v1_a} = compile_with_catalog(v1, ctx, ctx.template_source, catalog)
+    assert {:ok, v1_b} = compile_with_catalog(v1, ctx, ctx.template_source, catalog)
+    assert serialized_compilation_fixture(v1_a) == serialized_compilation_fixture(v1_b)
+
+    assert {:ok, direct_a} =
+             compile_with_catalog(v2_direct, ctx, ctx.template_source, catalog)
+
+    assert {:ok, direct_b} =
+             compile_with_catalog(v2_direct, ctx, ctx.template_source, catalog)
+
+    assert serialized_compilation_fixture(direct_a) == serialized_compilation_fixture(direct_b)
+
+    assert {:ok, design_a} =
+             compile_with_catalog(v2_design, ctx, ctx.template_source, catalog)
+
+    assert {:ok, design_b} =
+             compile_with_catalog(v2_design, ctx, ctx.template_source, catalog)
+
+    assert serialized_compilation_fixture(design_a) == serialized_compilation_fixture(design_b)
+
+    refute Map.has_key?(parse!(design_a.dot_source).nodes, "materialize_candidate")
+    refute Map.has_key?(design_a.initial_values, "coding_plan_candidate_materialization")
+  end
+
+  test "descriptor plans activate close, six checkpoints, pin, and review identities", ctx do
+    catalog = descriptor_action_catalog()
+    plan = descriptor_plan!()
+    {:ok, digest} = CandidateMaterialization.digest(plan.candidate_materialization)
+
+    assert {:ok, compilation} =
+             compile_with_catalog(plan, ctx, ctx.template_source, catalog)
+
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+    graph = parse!(compilation.dot_source)
+
+    assert Map.has_key?(graph.nodes, "materialize_candidate")
+
+    assert edge_target(graph, "format_accepted_design_evidence", nil) == "close_design_worker"
+
+    assert node_attrs(graph, "close_design_worker")["param.return_to_pool"] == false
+
+    assert graph
+           |> Arbor.Orchestrator.Graph.outgoing_edges("check_design_worker_closed")
+           |> Enum.map(&{&1.to, &1.attrs["condition"]})
+           |> Enum.sort() ==
+             [
+               {"checkpoint_candidate_materialization",
+                "context.design_close.status=already_closed"},
+               {"checkpoint_candidate_materialization", "context.design_close.status=closed"},
+               {"error_descriptor_worker_close_failed",
+                "context.design_close.status!=closed&&context.design_close.status!=already_closed"}
+             ]
+
+    refute Enum.any?(
+             Arbor.Orchestrator.Graph.outgoing_edges(graph, "route_worker_phase"),
+             &(&1.to == "route_turn_progress" and
+                 &1.attrs["condition"] == "context.worker_phase=implement")
+           )
+
+    assert edge_target(graph, "checkpoint_candidate_materialization", nil) ==
+             "checkpoint_candidate_materialization_digest"
+
+    assert edge_target(graph, "checkpoint_candidate_materialization_digest", nil) ==
+             "checkpoint_source_commit"
+
+    assert edge_target(graph, "checkpoint_source_commit", nil) == "checkpoint_expected_tree"
+    assert edge_target(graph, "checkpoint_expected_tree", nil) == "checkpoint_workspace"
+    assert edge_target(graph, "checkpoint_workspace", nil) == "checkpoint_acquired_base"
+
+    assert edge_target(graph, "checkpoint_acquired_base", nil) ==
+             "mark_candidate_source_immutable"
+
+    materialize = node_attrs(graph, "materialize_candidate")
+    assert materialize["action"] == "coding_candidate_materialize"
+    assert materialize["param.pinned_descriptor_digest"] == digest
+
+    assert materialize["context_keys"] ==
+             "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit"
+
+    assert node_attrs(graph, "prove_workspace_at_base")["action"] ==
+             "coding_workspace_ensure_active"
+
+    assert node_attrs(graph, "load_committed_change")["context_keys"] ==
+             "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+
+    assert node_attrs(graph, "publish_workspace")["context_keys"] ==
+             "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+
+    assert node_attrs(graph, "publish_workspace")["param.require_candidate_binding"] == true
+
+    assert compilation.initial_values["coding_plan_candidate_materialization_digest"] == digest
+
+    assert compilation.initial_values["coding_plan_source_commit_oid"] ==
+             plan.candidate_materialization["source_commit_oid"]
+
+    close_reachable = reachable_ids(graph, "close_design_worker")
+    refute MapSet.member?(close_reachable, "implement")
+    refute MapSet.member?(close_reachable, "commit_change")
+    refute MapSet.member?(close_reachable, "retry_recovered_send")
+    assert MapSet.member?(close_reachable, "materialize_candidate")
+    assert MapSet.member?(close_reachable, "validate")
+    assert MapSet.member?(close_reachable, "load_committed_change")
+    refute MapSet.member?(close_reachable, "close_worker")
+    refute MapSet.member?(close_reachable, "open_recovery_worker")
+    refute MapSet.member?(close_reachable, "build_validation_rework_prompt")
+    refute MapSet.member?(close_reachable, "build_review_rework_prompt")
+    refute MapSet.member?(close_reachable, "build_operator_rework_prompt")
+    assert node_attrs(graph, "materialize_candidate")["max_retries"] == "0"
+
+    assert edge_target(graph, "status_approval_denied", nil) == "close_worker"
+    assert edge_target(graph, "status_rework_exhausted", nil) == "close_worker"
+    assert edge_target(graph, "status_validation_failed", nil) == "skip_descriptor_close"
+    assert edge_target(graph, "status_review_failed", nil) == "skip_descriptor_close"
+
+    assert edge_target(graph, "status_descriptor_pipeline_error", nil) ==
+             "prep_release_mode_retain"
+
+    assert edge_target(graph, "skip_descriptor_close", nil) == "route_release_mode"
+
+    assert edge_target(graph, "error_validation_interaction_invalid", nil) ==
+             "status_descriptor_pipeline_error"
+
+    assert graph
+           |> Arbor.Orchestrator.Graph.outgoing_edges("close_worker")
+           |> Enum.map(&{&1.to, &1.attrs["condition"]})
+           |> Enum.sort() ==
+             [
+               {"prep_release_mode_retain", "outcome=fail"},
+               {"prep_release_mode_retain", "outcome=success"}
+             ]
+
+    start_reachable = reachable_ids(graph, "start")
+    refute MapSet.member?(start_reachable, "commit_change")
+    assert MapSet.size(start_reachable) == map_size(graph.nodes)
+
+    errors =
+      compilation.dot_source
+      |> Arbor.Orchestrator.validate()
+      |> Enum.filter(&(&1.severity == :error))
+
+    assert errors == []
+  end
+
+  test "descriptor plans reject validation profiles without immutable-object support", ctx do
+    catalog = descriptor_action_catalog()
+
+    for profile <- ~w(default contract_change security_regression) do
+      plan = descriptor_plan!(%{"validation_profile" => profile})
+
+      assert {:error, {:candidate_materialization_validation_profile_not_supported, ^profile}} =
+               compile_with_catalog(plan, ctx, ctx.template_source, catalog)
+    end
+  end
+
+  test "descriptor plans reject draft PR publication before immutable candidate publication",
+       ctx do
+    catalog = descriptor_action_catalog()
+    plan = descriptor_plan!(%{"output" => %{"draft_pr" => true}})
+
+    assert {:error, :candidate_materialization_draft_pr_not_supported} =
+             compile_with_catalog(plan, ctx, ctx.template_source, catalog)
+  end
+
+  test "descriptor CrossApp plans preserve one materialized validation resource across windows",
+       ctx do
+    catalog = descriptor_action_catalog()
+    plan = descriptor_plan!(%{"validation_profile" => "cross_app"})
+
+    assert {:ok, compilation} =
+             compile_with_catalog(plan, ctx, ctx.template_source, catalog)
+
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+    graph = parse!(compilation.dot_source)
+    validate_keys = node_attrs(graph, "validate")["context_keys"]
+
+    for key <- ~w(
+          validation_resource_id
+          candidate_source
+          source_commit_oid
+          expected_tree_oid
+          candidate_materialization_digest
+          acquired_base_commit
+          evidence_ref
+        ) do
+      assert key in String.split(validate_keys, ",", trim: true)
+    end
+
+    assert validate_keys ==
+             "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest,validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+
+    assert edge_target(graph, "hoist_cross_app_progress_binding", nil) == "validate"
+
+    assert edge_target(graph, "error_cross_app_window_invalid", nil) ==
+             "status_descriptor_pipeline_error"
+
+    close_reachable = reachable_ids(graph, "close_design_worker")
+    assert MapSet.member?(close_reachable, "route_cross_app_window")
+    refute MapSet.member?(close_reachable, "close_worker")
+    refute MapSet.member?(close_reachable, "open_recovery_worker")
+  end
+
+  test "security regression: descriptor substitution and implement edges fail closed", ctx do
+    catalog = descriptor_action_catalog()
+    plan = descriptor_plan!()
+
+    assert {:ok, compilation} =
+             compile_with_catalog(plan, ctx, ctx.template_source, catalog)
+
+    graph = parse!(compilation.dot_source)
+    {:ok, profile} = Profiles.fetch_executable(plan.validation_profile)
+    {:ok, packet_json} = WorkPacket.canonical_bytes(plan.work_packet)
+    {:ok, digest} = CandidateMaterialization.digest(plan.candidate_materialization)
+
+    injected =
+      Arbor.Orchestrator.Graph.add_edge(
+        graph,
+        Arbor.Orchestrator.Graph.Edge.from_attrs("close_design_worker", "implement", %{
+          "condition" => "outcome=success"
+        })
+      )
+
+    assert {:ok, injected} = IRCompiler.compile(injected)
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(
+               injected,
+               profile["semantic_policy"],
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               rework_max_cycles: 2,
+               rework_stop_conditions: [],
+               validation_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(errors, &(&1["code"] == "descriptor_bypass_violation"))
+
+    stripped = %{
+      graph
+      | nodes:
+          Map.update!(graph.nodes, "load_committed_change", fn node ->
+            %{
+              node
+              | attrs: Map.put(node.attrs, "context_keys", "workspace_id,commit,candidate_source")
+            }
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, stripped} = IRCompiler.compile(stripped)
+
+    assert {:error, {:semantic_preflight_failed, identity_errors}} =
+             SemanticPreflight.validate(
+               stripped,
+               profile["semantic_policy"],
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               rework_max_cycles: 2,
+               rework_stop_conditions: [],
+               validation_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(identity_errors, fn error ->
+             error["code"] == "descriptor_review_identities_missing" and
+               error["node_id"] == "load_committed_change"
+           end)
+
+    checkpoint_substitution = %{
+      graph
+      | nodes:
+          Map.update!(graph.nodes, "checkpoint_source_commit", fn node ->
+            %{node | attrs: Map.put(node.attrs, "source_key", "untrusted_source_commit_oid")}
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, checkpoint_substitution} = IRCompiler.compile(checkpoint_substitution)
+
+    assert {:error, {:semantic_preflight_failed, checkpoint_errors}} =
+             SemanticPreflight.validate(
+               checkpoint_substitution,
+               Profiles.semantic_policy(profile, true),
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               rework_max_cycles: 2,
+               rework_stop_conditions: [],
+               validation_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(checkpoint_errors, fn error ->
+             error["code"] == "descriptor_binding_mismatch" and
+               error["node_id"] == "checkpoint_source_commit"
+           end)
+
+    validate_with_extra_key = %{
+      graph
+      | nodes:
+          Map.update!(graph.nodes, "validate", fn node ->
+            %{
+              node
+              | attrs: Map.update!(node.attrs, "context_keys", &(&1 <> ",unreviewed_context_key"))
+            }
+          end),
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:ok, validate_with_extra_key} = IRCompiler.compile(validate_with_extra_key)
+
+    assert {:error, {:semantic_preflight_failed, validation_errors}} =
+             SemanticPreflight.validate(
+               validate_with_extra_key,
+               Profiles.semantic_policy(profile, true),
+               review_profile: "binding",
+               checkpoint_policy: "design_required",
+               checkpoint_work_packet_json: packet_json,
+               candidate_materialization: true,
+               candidate_materialization_digest: digest,
+               rework_max_cycles: 2,
+               rework_stop_conditions: [],
+               validation_timeout_ms: 900_000
+             )
+
+    assert Enum.any?(validation_errors, fn error ->
+             error["code"] == "validation_parameter_violation" and
+               error["node_id"] == "validate"
+           end)
+  end
+
   test "structural and malformed option inputs return tagged errors", ctx do
     no_start =
       Regex.replace(~r/\bstart\b/, ctx.template_source, "origin")
@@ -2621,6 +2985,21 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     end
   end
 
+  # Action schemas legitimately evolve as optional owner-only bindings are
+  # added. The compatibility fixture here protects the compiled graph and its
+  # initial inputs; execution-manifest schema identity is covered separately.
+  defp graph_and_inputs_fixture(%Compilation{} = compilation) do
+    compilation
+    |> serialized_compilation_fixture()
+    |> graph_and_inputs_fixture()
+  end
+
+  defp graph_and_inputs_fixture(bytes) when is_binary(bytes) do
+    bytes
+    |> Jason.decode!()
+    |> Map.take(~w(dot_source initial_values))
+  end
+
   defp pre_change_compilation_fixture(name) do
     path = Path.expand("../../../fixtures/coding_plan/#{name}", __DIR__)
 
@@ -2643,6 +3022,62 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
     catalog
+  end
+
+  defp descriptor_action_catalog do
+    {:ok, catalog} =
+      ActionCatalog.snapshot(
+        modules:
+          CodingPlanTestActionCatalog.modules() ++
+            [
+              Arbor.Actions.Coding.CandidateMaterialization.Materialize,
+              Arbor.Actions.Coding.Workspace.EnsureActive
+            ]
+      )
+
+    catalog
+  end
+
+  defp descriptor_plan!(overrides \\ %{}) do
+    descriptor = %{
+      "source_commit_oid" => String.duplicate("a", 40),
+      "expected_tree_oid" => String.duplicate("b", 40),
+      "entries" => [
+        %{"path" => "lib/a.ex", "blob_oid" => String.duplicate("c", 40), "mode" => 100_644}
+      ]
+    }
+
+    v2_plan!(
+      Map.merge(
+        %{
+          "checkpoint_policy" => "design_required",
+          "design_gate" => "council_then_operator",
+          "validation_profile" => "cross_app",
+          "candidate_materialization" => descriptor
+        },
+        overrides
+      )
+    )
+  end
+
+  defp reachable_ids(graph, entry) do
+    do_reachable(:queue.from_list([entry]), MapSet.new(), graph)
+  end
+
+  defp do_reachable(queue, visited, graph) do
+    case :queue.out(queue) do
+      {:empty, _} ->
+        visited
+
+      {{:value, node_id}, rest} ->
+        if MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) do
+          do_reachable(rest, visited, graph)
+        else
+          next = Enum.map(Arbor.Orchestrator.Graph.outgoing_edges(graph, node_id), & &1.to)
+          rest = Enum.reduce(next, rest, &:queue.in(&1, &2))
+          do_reachable(rest, MapSet.put(visited, node_id), graph)
+        end
+    end
   end
 
   defp compile_with_catalog(plan, _ctx, template_source, action_catalog) do

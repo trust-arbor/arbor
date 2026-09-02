@@ -27,6 +27,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @max_source_bytes 262_144
   @max_graph_nodes 320
   @optional_design_council_node "council_review_design"
+  @optional_placement_nodes MapSet.new([
+                              @optional_design_council_node,
+                              "close_design_worker",
+                              "materialize_candidate",
+                              "prove_workspace_at_base"
+                            ])
   @max_graph_edges 512
   @max_node_id_bytes 512
   @max_attribute_container_bytes 131_072
@@ -85,6 +91,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     route_cross_app_window
   ]
   @cross_app_validate_context_keys "workspace_id,cross_app_progress,cross_app_progress_binding,coding_plan_work_packet_digest"
+  @descriptor_cross_app_validate_context_keys @cross_app_validate_context_keys <>
+                                                ",validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
   @cross_app_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
   @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
   @cross_app_domain_failure_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff&&context.validation.passed=false"
@@ -243,6 +251,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {:ok, validation_test_stage_timeout_ms} <-
            normalize_validation_test_stage_timeout_ms(opts),
          {:ok, validation_stage_timeout_ms} <- normalize_validation_stage_timeout_ms(opts),
+         {:ok, descriptor_opt} <- normalize_candidate_materialization_opt(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -262,9 +271,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           worker_continuity,
           checkpoint.policy
         )
-        |> check_review_convergence_bindings(graph, policy, rework_max_cycles)
+        |> check_review_convergence_bindings(
+          graph,
+          policy,
+          rework_max_cycles,
+          descriptor_opt
+        )
         |> check_design_checkpoint_bindings(graph, checkpoint, rework_max_cycles)
-        |> check_workspace_cleanup_topology(graph)
+        |> check_workspace_cleanup_topology(graph, descriptor_opt)
         |> check_profile_bindings(
           graph,
           policy,
@@ -275,7 +289,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           rework_stop_conditions
         )
         |> check_validation_stop_topology(graph, policy, rework_stop_conditions)
-        |> check_reachability_and_dominance(graph, policy, review_profile)
+        |> check_reachability_and_dominance(graph, policy, review_profile, descriptor_opt)
+        |> check_descriptor_route(graph, descriptor_opt)
         |> Enum.sort_by(&error_sort_key/1)
 
       if errors == [] do
@@ -1122,7 +1137,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           MapSet.member?(present_ids, node_id) ->
             acc
 
-          node_id == @optional_design_council_node ->
+          MapSet.member?(@optional_placement_nodes, node_id) ->
             acc
 
           true ->
@@ -1259,14 +1274,548 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     "status_pipeline_error" => [{"done", nil}]
   }
 
-  defp check_workspace_cleanup_topology(errors, graph) do
+  defp normalize_candidate_materialization_opt(opts) do
+    case Keyword.get(opts, :candidate_materialization, false) do
+      true -> {:ok, %{active: true, digest: Keyword.get(opts, :candidate_materialization_digest)}}
+      false -> {:ok, %{active: false, digest: nil}}
+      other -> {:error, {:invalid_semantic_policy, {:invalid_candidate_materialization, other}}}
+    end
+  end
+
+  defp descriptor_route?(%Graph{} = graph), do: Map.has_key?(graph.nodes, "materialize_candidate")
+  defp descriptor_route?(_graph), do: false
+
+  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id"
+  @descriptor_review_identity_keys ~w(candidate_source evidence_ref acquired_base_commit expected_tree_oid candidate_materialization_digest validation_resource_id)
+  @descriptor_materialize_context_keys "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit"
+
+  defp check_descriptor_route(errors, graph, %{active: false}) do
+    if Map.has_key?(graph.nodes, "materialize_candidate") do
+      [error("unexpected_descriptor_route", "materialize_candidate", %{}) | errors]
+    else
+      errors
+    end
+  end
+
+  defp check_descriptor_route(errors, graph, %{active: true, digest: digest}) do
+    required = ~w[
+      close_design_worker
+      checkpoint_candidate_materialization
+      checkpoint_candidate_materialization_digest
+      checkpoint_source_commit
+      checkpoint_expected_tree
+      checkpoint_workspace
+      checkpoint_acquired_base
+      materialize_candidate
+      prove_workspace_at_base
+      compare_descriptor_workspace_base
+      check_workspace_at_base
+      skip_descriptor_close
+      status_descriptor_pipeline_error
+    ]
+
+    errors =
+      Enum.reduce(required, errors, fn node_id, acc ->
+        if Map.has_key?(graph.nodes, node_id) do
+          acc
+        else
+          [error("missing_descriptor_route_node", node_id, %{}) | acc]
+        end
+      end)
+
+    errors =
+      errors
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "close_worker",
+        [
+          {"prep_release_mode_retain", "outcome=fail"},
+          {"prep_release_mode_retain", "outcome=success"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "status_descriptor_pipeline_error",
+        [{"prep_release_mode_retain", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "check_design_worker_closed",
+        [
+          {"checkpoint_candidate_materialization", "context.design_close.status=closed"},
+          {"checkpoint_candidate_materialization", "context.design_close.status=already_closed"},
+          {"error_descriptor_worker_close_failed",
+           "context.design_close.status!=closed&&context.design_close.status!=already_closed"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "skip_descriptor_close",
+        [{"route_release_mode", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "error_validation_interaction_invalid",
+        [{"status_descriptor_pipeline_error", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "prove_workspace_at_base",
+        [
+          {"error_descriptor_workspace_moved", "outcome=fail"},
+          {"compare_descriptor_workspace_base", "outcome=success"}
+        ]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "compare_descriptor_workspace_base",
+        [{"check_workspace_at_base", nil}]
+      )
+      |> require_descriptor_exact_outgoing(
+        graph,
+        "check_workspace_at_base",
+        [
+          {"error_descriptor_workspace_moved", "context.base_proof.exists!=true"},
+          {"error_descriptor_workspace_moved", "context.base_proof.dirty=true"},
+          {"error_descriptor_workspace_moved", "context.descriptor_workspace_moved=true"},
+          {"validate",
+           "context.base_proof.exists=true&&context.base_proof.dirty=false&&context.descriptor_workspace_moved=false"}
+        ]
+      )
+
+    errors =
+      Enum.reduce(descriptor_exact_node_attrs(digest), errors, fn {node_id, attrs}, acc ->
+        require_descriptor_node_attrs(acc, graph, node_id, attrs)
+      end)
+
+    errors =
+      if Map.has_key?(graph.nodes, "error_cross_app_window_invalid") do
+        require_descriptor_exact_outgoing(
+          errors,
+          graph,
+          "error_cross_app_window_invalid",
+          [{"status_descriptor_pipeline_error", nil}]
+        )
+      else
+        errors
+      end
+
+    errors =
+      case Map.get(graph.nodes, "materialize_candidate") do
+        %{attrs: attrs} ->
+          pin = Map.get(attrs, "param.pinned_descriptor_digest")
+          keys = Map.get(attrs, "context_keys")
+
+          cond do
+            not is_binary(digest) or digest == "" ->
+              [error("missing_descriptor_digest_pin", "materialize_candidate", %{}) | errors]
+
+            pin != digest ->
+              [
+                error("descriptor_digest_pin_mismatch", "materialize_candidate", %{
+                  "expected" => digest,
+                  "actual" => pin
+                })
+                | errors
+              ]
+
+            keys != @descriptor_materialize_context_keys ->
+              [
+                error("descriptor_materialize_context_keys", "materialize_candidate", %{
+                  "actual" => keys
+                })
+                | errors
+              ]
+
+            true ->
+              errors
+          end
+
+        _ ->
+          errors
+      end
+
+    errors =
+      case Map.get(graph.nodes, "load_committed_change") do
+        %{attrs: attrs} ->
+          keys = Map.get(attrs, "context_keys")
+
+          if keys == @descriptor_committed_change_keys do
+            errors
+          else
+            [
+              error("descriptor_review_identities_missing", "load_committed_change", %{
+                "expected" => @descriptor_committed_change_keys,
+                "actual" => keys
+              })
+              | errors
+            ]
+          end
+
+        _ ->
+          [error("missing_descriptor_route_node", "load_committed_change", %{}) | errors]
+      end
+
+    errors =
+      case Map.get(graph.nodes, "review_change") do
+        %{attrs: attrs} ->
+          keys = Map.get(attrs, "context_keys")
+
+          if is_binary(keys) and
+               Enum.all?(
+                 @descriptor_review_identity_keys,
+                 &(&1 in String.split(keys, ",", trim: true))
+               ) do
+            errors
+          else
+            [
+              error("descriptor_review_identities_missing", "review_change", %{
+                "actual" => keys
+              })
+              | errors
+            ]
+          end
+
+        _ ->
+          [error("missing_descriptor_route_node", "review_change", %{}) | errors]
+      end
+
+    errors =
+      case Map.get(graph.nodes, "publish_workspace") do
+        %{attrs: attrs} ->
+          keys = Map.get(attrs, "context_keys")
+          required? = Map.get(attrs, "param.require_candidate_binding")
+
+          if keys == @descriptor_publish_keys and required? == true do
+            errors
+          else
+            [
+              error("descriptor_review_identities_missing", "publish_workspace", %{
+                "expected" => @descriptor_publish_keys,
+                "actual" => keys,
+                "require_candidate_binding" => required?
+              })
+              | errors
+            ]
+          end
+
+        _ ->
+          [error("missing_descriptor_route_node", "publish_workspace", %{}) | errors]
+      end
+
+    case Graph.find_start_node(graph) do
+      nil ->
+        errors
+
+      start_node ->
+        reachable = reachable_from(graph, start_node.id)
+        dominators = compute_dominators(graph, start_node.id, reachable)
+        close_reachable = reachable_from(graph, "close_design_worker")
+
+        errors =
+          Enum.reduce(["commit_change"], errors, fn node_id, acc ->
+            if MapSet.member?(reachable, node_id) do
+              [error("descriptor_bypass_violation", node_id, %{}) | acc]
+            else
+              acc
+            end
+          end)
+
+        errors =
+          Enum.reduce(
+            ["close_worker", "implement", "open_recovery_worker", "retry_recovered_send"],
+            errors,
+            fn node_id, acc ->
+              if MapSet.member?(close_reachable, node_id) do
+                [error("descriptor_bypass_violation", node_id, %{}) | acc]
+              else
+                acc
+              end
+            end
+          )
+
+        errors
+        |> require_dominates(
+          "close_design_worker",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_close"
+        )
+        |> require_dominates(
+          "checkpoint_candidate_materialization",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_checkpoint"
+        )
+        |> require_dominates(
+          "checkpoint_candidate_materialization_digest",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_digest_checkpoint"
+        )
+        |> require_dominates(
+          "checkpoint_source_commit",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_source_checkpoint"
+        )
+        |> require_dominates(
+          "checkpoint_expected_tree",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_tree_checkpoint"
+        )
+        |> require_dominates(
+          "checkpoint_workspace",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_workspace_checkpoint"
+        )
+        |> require_dominates(
+          "checkpoint_acquired_base",
+          "materialize_candidate",
+          reachable,
+          dominators,
+          "descriptor_acquired_base"
+        )
+        |> require_dominates(
+          "materialize_candidate",
+          "validate",
+          reachable,
+          dominators,
+          "descriptor_materialize"
+        )
+        |> require_dominates(
+          "check_workspace_at_base",
+          "validate",
+          reachable,
+          dominators,
+          "descriptor_workspace_at_base"
+        )
+        |> require_dominates(
+          "materialize_candidate",
+          "load_committed_change",
+          reachable,
+          dominators,
+          "descriptor_materialize"
+        )
+        |> require_dominates(
+          "check_workspace_at_base",
+          "load_committed_change",
+          reachable,
+          dominators,
+          "descriptor_workspace_at_base"
+        )
+        |> require_dominates(
+          "materialize_candidate",
+          "review_change",
+          reachable,
+          dominators,
+          "descriptor_materialize"
+        )
+        |> require_dominates(
+          "check_workspace_at_base",
+          "review_change",
+          reachable,
+          dominators,
+          "descriptor_workspace_at_base"
+        )
+        |> require_dominates(
+          "materialize_candidate",
+          "publish_workspace",
+          reachable,
+          dominators,
+          "descriptor_materialize"
+        )
+        |> require_dominates(
+          "check_workspace_at_base",
+          "publish_workspace",
+          reachable,
+          dominators,
+          "descriptor_workspace_at_base"
+        )
+    end
+  end
+
+  defp require_descriptor_exact_outgoing(errors, graph, node_id, expected) do
+    actual =
+      graph
+      |> Graph.outgoing_edges(node_id)
+      |> Enum.map(&{&1.to, edge_condition(&1)})
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("descriptor_topology_mismatch", node_id, %{
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp require_descriptor_node_attrs(errors, graph, node_id, expected) do
+    case Map.get(graph.nodes, node_id) do
+      %{attrs: attrs} ->
+        if attrs == expected do
+          errors
+        else
+          [
+            error("descriptor_binding_mismatch", node_id, %{
+              "expected" => expected,
+              "actual" => attrs
+            })
+            | errors
+          ]
+        end
+
+      _other ->
+        [error("missing_descriptor_route_node", node_id, %{}) | errors]
+    end
+  end
+
+  defp descriptor_exact_node_attrs(digest) do
+    %{
+      "close_design_worker" => %{
+        "type" => "exec",
+        "target" => "action",
+        "action" => "acp_close_session",
+        "context_keys" => "worker_session_id",
+        "param.return_to_pool" => false,
+        "output_prefix" => "design_close",
+        "max_retries" => "0"
+      },
+      "check_design_worker_closed" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      },
+      "checkpoint_candidate_materialization" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "coding_plan_candidate_materialization",
+        "output_key" => "candidate_materialization"
+      },
+      "checkpoint_candidate_materialization_digest" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "coding_plan_candidate_materialization_digest",
+        "output_key" => "candidate_materialization_digest"
+      },
+      "checkpoint_source_commit" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "coding_plan_source_commit_oid",
+        "output_key" => "source_commit_oid"
+      },
+      "checkpoint_expected_tree" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "coding_plan_expected_tree_oid",
+        "output_key" => "expected_tree_oid"
+      },
+      "checkpoint_workspace" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "workspace_id",
+        "output_key" => "workspace_id"
+      },
+      "checkpoint_acquired_base" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "base_commit",
+        "output_key" => "acquired_base_commit"
+      },
+      "mark_candidate_source_immutable" => %{
+        "type" => "transform",
+        "transform" => "constant",
+        "expression" => "immutable_object",
+        "output_key" => "candidate_source"
+      },
+      "hoist_descriptor_commit_hash" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "source_commit_oid",
+        "output_key" => "commit_hash"
+      },
+      "materialize_candidate" => %{
+        "type" => "exec",
+        "target" => "action",
+        "action" => "coding_candidate_materialize",
+        "context_keys" => @descriptor_materialize_context_keys,
+        "output_prefix" => "materialize",
+        "max_retries" => "0",
+        "param.pinned_descriptor_digest" => digest
+      },
+      "hoist_validation_resource_id" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "materialize.resource_id",
+        "output_key" => "validation_resource_id"
+      },
+      "hoist_descriptor_evidence_ref" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "materialize.hidden_ref",
+        "output_key" => "evidence_ref"
+      },
+      "hoist_descriptor_tree_oid" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "materialize.tree_oid",
+        "output_key" => "validation_candidate_tree_oid"
+      },
+      "hoist_descriptor_candidate_path" => %{
+        "type" => "transform",
+        "transform" => "identity",
+        "source_key" => "materialize.candidate_path",
+        "output_key" => "path"
+      },
+      "prove_workspace_at_base" => %{
+        "type" => "exec",
+        "target" => "action",
+        "action" => "coding_workspace_ensure_active",
+        "context_keys" => "workspace_id",
+        "output_prefix" => "base_proof",
+        "max_retries" => "0"
+      },
+      "compare_descriptor_workspace_base" => %{
+        "type" => "transform",
+        "transform" => "not_equal",
+        "source_key" => "base_proof.head_commit",
+        "expression" => "acquired_base_commit",
+        "output_key" => "descriptor_workspace_moved"
+      },
+      "check_workspace_at_base" => %{
+        "type" => "branch",
+        "shape" => "diamond",
+        "fan_out" => "false"
+      }
+    }
+  end
+
+  defp check_workspace_cleanup_topology(errors, graph, descriptor_opt) do
     errors =
       Enum.reduce(@workspace_cleanup_node_attrs, errors, fn {node_id, expected}, acc ->
         case Map.fetch(graph.nodes, node_id) do
           {:ok, node} when is_map(node.attrs) ->
             actual = Map.take(node.attrs, Map.keys(expected))
 
-            if actual == expected do
+            if actual == expected or
+                 descriptor_publish_keys_ok?(node_id, actual, expected, descriptor_opt) do
               acc
             else
               [
@@ -1285,6 +1834,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     errors =
       Enum.reduce(@workspace_cleanup_outgoing, errors, fn {node_id, expected}, acc ->
+        expected = descriptor_cleanup_outgoing(node_id, expected, descriptor_opt)
+
         actual =
           graph
           |> Graph.outgoing_edges(node_id)
@@ -1304,20 +1855,36 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       end)
 
-    errors
-    |> require_all_paths_through_any(
-      graph,
-      "close_worker",
-      MapSet.new(["publish_workspace", "release_workspace"]),
-      "workspace_cleanup_release"
-    )
-    |> require_all_paths_through(
+    errors =
+      if descriptor_opt.active do
+        errors
+      else
+        require_all_paths_through_any(
+          errors,
+          graph,
+          "close_worker",
+          MapSet.new(["publish_workspace", "release_workspace"]),
+          "workspace_cleanup_release"
+        )
+      end
+
+    require_all_paths_through(
+      errors,
       graph,
       "prep_release_mode_only",
       "release_workspace_only",
       "workspace_cleanup_release_only"
     )
   end
+
+  defp descriptor_cleanup_outgoing("close_worker", _expected, %{active: true}) do
+    [
+      {"prep_release_mode_retain", "outcome=fail"},
+      {"prep_release_mode_retain", "outcome=success"}
+    ]
+  end
+
+  defp descriptor_cleanup_outgoing(_node_id, expected, _descriptor_opt), do: expected
 
   @precommit_abort_origins %{
     "status_no_changes" => "route_no_progress",
@@ -1359,6 +1926,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   ])
 
   defp check_commit_approval_gate(errors, graph) do
+    if descriptor_route?(graph) do
+      errors
+    else
+      check_commit_approval_gate_body(errors, graph)
+    end
+  end
+
+  defp check_commit_approval_gate_body(errors, graph) do
     case Map.get(graph.nodes, @commit_approval_node) do
       nil ->
         [error("missing_commit_approval_gate", @commit_approval_node, %{}) | errors]
@@ -1397,6 +1972,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   #   * every operator rework path passes category+total budget then fresh gate
   #   * direct bypass edges (commit_change -> hoist/route_after) fail closed
   defp check_operator_approval_routing(errors, graph) do
+    if descriptor_route?(graph) do
+      errors
+    else
+      check_operator_approval_routing_body(errors, graph)
+    end
+  end
+
+  defp check_operator_approval_routing_body(errors, graph) do
     errors = check_approval_graph_shape(errors, graph)
 
     required =
@@ -3019,6 +3602,20 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     policy = checkpoint.policy
     design_gate = Map.get(checkpoint, :design_gate, "operator")
 
+    worker_phase_edges =
+      if descriptor_route?(graph) do
+        [
+          {"check_design_workspace_unchanged", "context.worker_phase=design"},
+          {"error_design_worker_phase_invalid", nil}
+        ]
+      else
+        [
+          {"check_design_workspace_unchanged", "context.worker_phase=design"},
+          {"route_turn_progress", "context.worker_phase=implement"},
+          {"error_design_worker_phase_invalid", nil}
+        ]
+      end
+
     prep_target =
       if design_gate in ["council", "council_then_operator"] do
         "route_design_gate"
@@ -3034,12 +3631,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"init_worker_phase", [{"freeze_coding_plan_work_packet_json", nil}]},
       {"freeze_coding_plan_work_packet_json", [{"build_design_prompt", nil}]},
       {"build_design_prompt", [{"capture_pre_turn_workspace", nil}]},
-      {"route_worker_phase",
-       [
-         {"check_design_workspace_unchanged", "context.worker_phase=design"},
-         {"route_turn_progress", "context.worker_phase=implement"},
-         {"error_design_worker_phase_invalid", nil}
-       ]},
+      {"route_worker_phase", worker_phase_edges},
       {"check_design_workspace_unchanged",
        [
          {"error_design_modified_workspace", nil},
@@ -3115,7 +3707,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_accepted_design_digest", [{"hoist_accepted_design_request_id", nil}]},
       {"hoist_accepted_design_request_id", [{"hoist_accepted_design_council_run_id", nil}]},
       {"hoist_accepted_design_council_run_id", [{"format_accepted_design_evidence", nil}]},
-      {"format_accepted_design_evidence", [{"mark_implementation_phase", nil}]},
+      {"format_accepted_design_evidence",
+       [
+         {if(descriptor_route?(graph),
+            do: "close_design_worker",
+            else: "mark_implementation_phase"
+          ), nil}
+       ]},
       {"mark_implementation_phase", [{"build_implement_prompt", nil}]},
       {"hoist_design_decision_request_id", [{"hoist_design_decision_note", nil}]},
       {"hoist_design_decision_note", [{"route_design_nonapproval", nil}]},
@@ -3188,7 +3786,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             [{"route_worker_phase", nil}],
             0,
             [{"mark_implementation_phase", nil}],
-            [{"route_worker_phase", "context.worker_phase=implement"}]
+            if(descriptor_route?(graph),
+              do: [],
+              else: [{"route_worker_phase", "context.worker_phase=implement"}]
+            )
           }
 
         "direct" ->
@@ -3471,7 +4072,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     check_worker_recovery_start_nodes(errors, graph, continuity, checkpoint_policy)
   end
 
-  defp check_review_convergence_bindings(errors, graph, policy, rework_max_cycles) do
+  defp check_review_convergence_bindings(
+         errors,
+         graph,
+         policy,
+         rework_max_cycles,
+         descriptor_opt
+       ) do
     convergence = policy["review_convergence"]
 
     errors =
@@ -3481,17 +4088,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
                                                         },
                                                         acc ->
         case Map.fetch(graph.nodes, node_id) do
-          {:ok, %{attrs: ^expected}} ->
-            acc
-
           {:ok, node} ->
-            [
-              error("review_convergence_node_mismatch", node_id, %{
-                "expected" => expected,
-                "actual" => node.attrs
-              })
-              | acc
-            ]
+            if review_convergence_node_attrs_match?(
+                 node_id,
+                 node.attrs,
+                 expected,
+                 policy,
+                 descriptor_opt
+               ) do
+              acc
+            else
+              [
+                error("review_convergence_node_mismatch", node_id, %{
+                  "expected" => expected,
+                  "actual" => node.attrs
+                })
+                | acc
+              ]
+            end
 
           :error ->
             [error("review_convergence_missing_node", node_id, %{}) | acc]
@@ -3552,6 +4166,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       Enum.reduce(convergence["protected_writers"], errors, fn {context_key, expected_nodes},
                                                                acc ->
         actual_nodes = writer_nodes(graph, "output_key", context_key)
+
+        expected_nodes =
+          descriptor_review_writer_nodes(context_key, expected_nodes, descriptor_opt)
 
         if actual_nodes == expected_nodes do
           acc
@@ -3625,6 +4242,53 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       rework_max_cycles
     )
   end
+
+  defp review_convergence_node_attrs_match?(
+         "load_committed_change",
+         actual,
+         expected,
+         _policy,
+         %{active: true}
+       ) do
+    actual == Map.put(expected, "context_keys", @descriptor_committed_change_keys)
+  end
+
+  defp review_convergence_node_attrs_match?(
+         "review_change",
+         actual,
+         expected,
+         policy,
+         %{active: true}
+       ) do
+    context_keys =
+      if policy["validation_profile"] == "security_regression" do
+        @descriptor_review_context_keys <> ",test_paths,validation_profile"
+      else
+        @descriptor_review_context_keys
+      end
+
+    actual == Map.put(expected, "context_keys", context_keys)
+  end
+
+  defp review_convergence_node_attrs_match?(
+         _node_id,
+         actual,
+         expected,
+         _policy,
+         _descriptor_opt
+       ),
+       do: actual == expected
+
+  defp descriptor_review_writer_nodes(
+         "validation_candidate_tree_oid",
+         expected_nodes,
+         %{active: true}
+       ) do
+    Enum.sort(["hoist_descriptor_tree_oid" | expected_nodes])
+  end
+
+  defp descriptor_review_writer_nodes(_context_key, expected_nodes, _descriptor_opt),
+    do: expected_nodes
 
   defp check_dynamic_total_budget_edges(
          errors,
@@ -4339,7 +5003,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "type" => "exec",
          "target" => "action",
          "action" => "coding_workspace_committed_change",
-         "context_keys" => "workspace_id,commit,prior_commit",
+         "context_keys" =>
+           if(descriptor_route?(graph),
+             do: @descriptor_committed_change_keys,
+             else: "workspace_id,commit,prior_commit"
+           ),
          "output_prefix" => "change"
        }},
       {"prep_review_diff",
@@ -4369,7 +5037,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "council_review_change",
          "context_keys" =>
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile",
+           if(descriptor_route?(graph),
+             do:
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,test_paths,validation_profile",
+             else:
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+           ),
          "output_prefix" => "review"
        }},
       {"remember_validation_reviewed_commit",
@@ -4518,12 +5191,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {:ok, node} ->
         actual = Map.get(node.attrs, "context_keys")
 
-        if actual == @cross_app_validate_context_keys do
+        expected =
+          if descriptor_route?(graph),
+            do: @descriptor_cross_app_validate_context_keys,
+            else: @cross_app_validate_context_keys
+
+        if actual == expected do
           errors
         else
           [
             error("validation_parameter_violation", "validate", %{
-              "expected_context_keys" => @cross_app_validate_context_keys,
+              "expected_context_keys" => expected,
               "actual_context_keys" => actual
             })
             | errors
@@ -4540,8 +5218,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          {"check_validation_passed", @cross_app_completed_condition},
          {"route_cross_app_window", @cross_app_capacity_condition},
          {"check_validation_passed", @cross_app_domain_failure_condition},
-         {"hoist_validation_approval_request_id",
-          "context.validation.interaction_outcome=rework"},
+         {if(descriptor_route?(graph),
+            do: "status_validation_failed",
+            else: "hoist_validation_approval_request_id"
+          ), "context.validation.interaction_outcome=rework"},
          {"hoist_validation_approval_request_id_denied",
           "context.validation.interaction_outcome=denied"},
          {"error_validation_interaction_invalid", nil}
@@ -4555,7 +5235,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_cross_app_progress_binding", [{"validate", nil}]},
       {"clear_cross_app_progress", [{"clear_cross_app_progress_binding", nil}]},
       {"clear_cross_app_progress_binding", [{"capture_pre_turn_workspace", nil}]},
-      {"error_cross_app_window_invalid", [{"status_pipeline_error_then_close", nil}]},
+      {"error_cross_app_window_invalid",
+       [
+         {if(descriptor_route?(graph),
+            do: "status_descriptor_pipeline_error",
+            else: "status_pipeline_error_then_close"
+          ), nil}
+       ]},
       {"build_validation_rework_prompt", [{"clear_cross_app_progress", nil}]}
     ]
 
@@ -4740,10 +5426,25 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_security_protected_writers(errors, graph) do
+    workspace_writers =
+      if descriptor_route?(graph),
+        do: ["checkpoint_workspace", "hoist_workspace_id"],
+        else: ["hoist_workspace_id"]
+
+    tree_writers =
+      if descriptor_route?(graph),
+        do: ["hoist_descriptor_tree_oid", "hoist_validation_candidate_tree_oid"],
+        else: ["hoist_validation_candidate_tree_oid"]
+
+    commit_hash_writers =
+      if descriptor_route?(graph),
+        do: ["hoist_change_commit", "hoist_commit_hash", "hoist_descriptor_commit_hash"],
+        else: ["hoist_change_commit", "hoist_commit_hash"]
+
     expected = [
       {"output_key", "coding_plan_validation_program", []},
       {"output_prefix", "coding_plan_validation_program", []},
-      {"output_key", "workspace_id", ["hoist_workspace_id"]},
+      {"output_key", "workspace_id", workspace_writers},
       {"output_key", "test_paths", []},
       {"output_key", "validation_profile", ["prep_review_validation_profile"]},
       {"output_prefix", "review", ["review_change"]},
@@ -4751,7 +5452,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"output_key", "review_attestation_id", ["hoist_review_attestation_id"]},
       {"output_key", "validation", []},
       {"output_prefix", "validation", ["validate"]},
-      {"output_key", "validation_candidate_tree_oid", ["hoist_validation_candidate_tree_oid"]},
+      {"output_key", "validation_candidate_tree_oid", tree_writers},
       {"output_prefix", "validation_candidate_tree_oid", []},
       {"output_key", "validation_observed_at", ["hoist_validation_observed_at"]},
       {"output_prefix", "validation_observed_at", []},
@@ -4761,7 +5462,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ["remember_review_reviewed_commit", "remember_validation_reviewed_commit"]},
       {"output_key", "fresh_rework_commit", ["compare_security_rework_commit"]},
       {"output_key", "commit", ["post_validation_expected_commit", "prep_expected_commit"]},
-      {"output_key", "commit_hash", ["hoist_change_commit", "hoist_commit_hash"]},
+      {"output_key", "commit_hash", commit_hash_writers},
       {"output_key", "diff", ["prep_review_diff"]},
       {"output_key", "files", ["prep_review_files"]}
     ]
@@ -4796,7 +5497,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_validation_stop_topology(errors, graph, policy, stop_conditions) do
     expected = [
-      {"check_validation_passed", validation_result_gate_outgoing(policy, stop_conditions)},
+      {"check_validation_passed",
+       validation_result_gate_outgoing(graph, policy, stop_conditions)},
       {"hoist_validation_approval_note", operator_validation_rework_outgoing(policy)},
       {"validate", hard_validation_failure_outgoing()}
     ]
@@ -4813,16 +5515,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  defp validation_result_gate_outgoing(policy, stop_conditions) do
+  defp validation_result_gate_outgoing(graph, policy, stop_conditions) do
     success_to =
-      if policy["validation_profile"] == "security_regression" do
-        "post_validation_expected_commit"
-      else
-        "prep_commit_path"
+      cond do
+        descriptor_route?(graph) ->
+          "prep_expected_commit"
+
+        policy["validation_profile"] == "security_regression" ->
+          "post_validation_expected_commit"
+
+        true ->
+          "prep_commit_path"
       end
 
     fail_to =
       cond do
+        descriptor_route?(graph) ->
+          "status_validation_failed"
+
         "validation_failed" in stop_conditions ->
           "status_validation_failed"
 
@@ -4940,7 +5650,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ]},
       {"route_review",
        [
-         {"remember_review_reviewed_commit", "context.review.tier_decision=rework"},
+         {if(descriptor_route?(graph),
+            do: "status_review_failed",
+            else: "remember_review_reviewed_commit"
+          ), "context.review.tier_decision=rework"},
          {"status_review_rejected", "context.review.tier_decision=stop"},
          {"route_security_attested_human", "context.review.tier_decision=human_review"},
          {"route_security_attested_auto", "context.review.tier_decision=auto_proceed"},
@@ -4984,8 +5697,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded"},
          {"check_validation_passed",
           "context.validation.interaction_outcome=\"\"&&context.validation.reason!=validation_capacity_exceeded"},
-         {"hoist_validation_approval_request_id",
-          "context.validation.interaction_outcome=rework"},
+         {if(descriptor_route?(graph),
+            do: "status_validation_failed",
+            else: "hoist_validation_approval_request_id"
+          ), "context.validation.interaction_outcome=rework"},
          {"hoist_validation_approval_request_id_denied",
           "context.validation.interaction_outcome=denied"},
          {"error_validation_interaction_invalid", nil}
@@ -4995,9 +5710,16 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"hoist_validation_approval_request_id_denied",
        [{"hoist_validation_approval_note_denied", nil}]},
       {"hoist_validation_approval_note_denied", [{"status_validation_failed", nil}]},
-      {"error_validation_interaction_invalid", [{"status_pipeline_error_then_close", nil}]},
+      {"error_validation_interaction_invalid",
+       [
+         {if(descriptor_route?(graph),
+            do: "status_descriptor_pipeline_error",
+            else: "status_pipeline_error_then_close"
+          ), nil}
+       ]},
       {"check_validation_passed",
        validation_result_gate_outgoing(
+         graph,
          %{"validation_profile" => "security_regression"},
          stop_conditions
        )},
@@ -5047,7 +5769,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # --- reachability + dominance ---------------------------------------------
 
-  defp check_reachability_and_dominance(errors, graph, policy, review_profile) do
+  defp descriptor_publish_keys_ok?("publish_workspace", actual, expected, %{active: true}) do
+    is_map(actual) and is_map(expected) and
+      Map.drop(actual, ["context_keys"]) == Map.drop(expected, ["context_keys"]) and
+      is_binary(actual["context_keys"]) and
+      String.contains?(actual["context_keys"], "candidate_source") and
+      String.contains?(actual["context_keys"], "evidence_ref") and
+      String.contains?(actual["context_keys"], "acquired_base_commit")
+  end
+
+  defp descriptor_publish_keys_ok?(_node_id, _actual, _expected, _opt), do: false
+
+  defp check_reachability_and_dominance(errors, graph, policy, review_profile, descriptor_opt) do
     case Graph.find_start_node(graph) do
       nil ->
         [error("missing_start", nil, %{}) | errors]
@@ -5057,24 +5790,35 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         reachable = reachable_from(graph, entry)
         dominators = compute_dominators(graph, entry, reachable)
 
+        errors =
+          errors
+          |> check_mandatory_gates(policy, reachable, descriptor_opt)
+          |> check_publication_presence(policy, reachable, review_profile)
+          |> check_action_placement_dominance(
+            graph,
+            policy,
+            entry,
+            reachable,
+            dominators,
+            review_profile,
+            descriptor_opt
+          )
+          |> check_dominance(
+            policy,
+            dominators,
+            reachable,
+            review_profile,
+            descriptor_opt
+          )
+
+        errors =
+          if descriptor_opt.active do
+            errors
+          else
+            check_worker_continuity_dominance(errors, reachable, dominators)
+          end
+
         errors
-        |> check_mandatory_gates(policy, reachable)
-        |> check_publication_presence(policy, reachable, review_profile)
-        |> check_action_placement_dominance(
-          graph,
-          policy,
-          entry,
-          reachable,
-          dominators,
-          review_profile
-        )
-        |> check_dominance(
-          policy,
-          dominators,
-          reachable,
-          review_profile
-        )
-        |> check_worker_continuity_dominance(reachable, dominators)
         |> check_validation_rework_observation_dominance(graph, policy)
         |> check_security_rework_dominance(graph, policy)
     end
@@ -5122,6 +5866,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   # Prove each reviewed action node is reachable and that its policy-encoded
   # gates dominate the node where the side effect occurs. Unreachable or missing
   # targets fail closed (unlike optional publication dominance skips).
+  @descriptor_bypassed_placements MapSet.new(~w[
+    implement
+    retry_recovered_send
+    parse_worker_terminal
+    capture_pre_turn_workspace
+    capture_pre_turn_recovery
+    inspect_workspace
+    open_recovery_worker
+    coding_workspace_recovery_summary
+    acp_session_status
+    close_stale_worker
+    commit_change
+    capture_validation_workspace
+    hoist_validation_candidate_tree_oid
+    hoist_validation_observed_at
+    route_after_commit
+  ])
+
   defp check_action_placement_dominance(
          errors,
          graph,
@@ -5129,7 +5891,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          entry,
          reachable,
          dominators,
-         review_profile
+         review_profile,
+         descriptor_opt
        ) do
     Enum.reduce(policy["action_placements"], errors, fn placement, acc ->
       node_id = placement["node_id"]
@@ -5139,7 +5902,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           MapSet.member?(reachable, node_id) ->
             acc
 
-          node_id == @optional_design_council_node and not Map.has_key?(graph.nodes, node_id) ->
+          MapSet.member?(@optional_placement_nodes, node_id) and
+              not Map.has_key?(graph.nodes, node_id) ->
+            acc
+
+          MapSet.member?(@optional_placement_nodes, node_id) and
+              not MapSet.member?(reachable, node_id) ->
+            acc
+
+          descriptor_opt.active and MapSet.member?(@descriptor_bypassed_placements, node_id) ->
             acc
 
           true ->
@@ -5167,7 +5938,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             node_id,
             reachable,
             dominators,
-            "action_placement"
+            "action_placement",
+            descriptor_opt
           )
         end)
 
@@ -5185,10 +5957,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  defp require_placement_dominates(errors, dominator, node, reachable, dominators, kind) do
+  defp require_placement_dominates(
+         errors,
+         dominator,
+         node,
+         reachable,
+         dominators,
+         kind,
+         descriptor_opt
+       ) do
     cond do
       not MapSet.member?(reachable, node) ->
         # Unreachable placement nodes are already reported.
+        errors
+
+      not MapSet.member?(reachable, dominator) and descriptor_opt.active and
+          MapSet.member?(@descriptor_bypassed_placements, dominator) ->
         errors
 
       not MapSet.member?(reachable, dominator) ->
@@ -5296,12 +6080,28 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_mandatory_gates(errors, policy, reachable) do
+  defp check_mandatory_gates(errors, policy, reachable, descriptor_opt) do
+    skip =
+      if descriptor_opt.active,
+        do: MapSet.new(~w[
+            capture_validation_workspace
+            commit_change
+            hoist_validation_observed_at
+            hoist_validation_candidate_tree_oid
+            route_after_commit
+          ]),
+        else: MapSet.new()
+
     Enum.reduce(policy["mandatory_gate_nodes"], errors, fn node_id, acc ->
-      if MapSet.member?(reachable, node_id) do
-        acc
-      else
-        [error("unreachable_mandatory_gate", node_id, %{}) | acc]
+      cond do
+        MapSet.member?(skip, node_id) ->
+          acc
+
+        MapSet.member?(reachable, node_id) ->
+          acc
+
+        true ->
+          [error("unreachable_mandatory_gate", node_id, %{}) | acc]
       end
     end)
   end
@@ -5324,11 +6124,85 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
-  defp check_dominance(errors, policy, dominators, reachable, review_profile) do
-    if policy["validation_profile"] == "security_regression" do
-      check_security_dominance(errors, policy, dominators, reachable)
+  defp check_dominance(errors, policy, dominators, reachable, review_profile, descriptor_opt) do
+    cond do
+      descriptor_opt.active ->
+        check_descriptor_dominance(errors, policy, dominators, reachable, review_profile)
+
+      policy["validation_profile"] == "security_regression" ->
+        check_security_dominance(errors, policy, dominators, reachable)
+
+      true ->
+        check_default_dominance(errors, policy, dominators, reachable, review_profile)
+    end
+  end
+
+  defp check_descriptor_dominance(errors, policy, dominators, reachable, review_profile) do
+    validation_gate = policy["validation_gate"]
+    validation_result_gate = policy["validation_result_gate"]
+    review_gate = policy["review_gate"]
+    review_routing_gate = policy["review_routing_gate"]
+
+    publication_targets =
+      policy["publication_nodes"]
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+      |> Enum.sort()
+
+    errors =
+      errors
+      |> require_dominates(
+        "materialize_candidate",
+        validation_gate,
+        reachable,
+        dominators,
+        "descriptor_materialize"
+      )
+      |> require_dominates(
+        "check_workspace_at_base",
+        validation_gate,
+        reachable,
+        dominators,
+        "descriptor_workspace_at_base"
+      )
+      |> require_dominates(
+        validation_gate,
+        validation_result_gate,
+        reachable,
+        dominators,
+        "validation"
+      )
+
+    if review_profile in ["binding", "human_required"] do
+      errors
+      |> require_dominates(
+        "load_committed_change",
+        review_gate,
+        reachable,
+        dominators,
+        "descriptor_review_material"
+      )
+      |> require_dominates(
+        review_gate,
+        review_routing_gate,
+        reachable,
+        dominators,
+        "review"
+      )
+      |> then(fn acc ->
+        Enum.reduce(publication_targets, acc, fn target, inner ->
+          inner
+          |> require_dominates(
+            review_routing_gate,
+            target,
+            reachable,
+            dominators,
+            "review_routing"
+          )
+          |> require_dominates(review_gate, target, reachable, dominators, "review")
+        end)
+      end)
     else
-      check_default_dominance(errors, policy, dominators, reachable, review_profile)
+      errors
     end
   end
 
@@ -5511,6 +6385,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_security_rework_dominance(
          errors,
+         %{nodes: nodes},
+         _policy
+       )
+       when is_map_key(nodes, "materialize_candidate"),
+       do: errors
+
+  defp check_security_rework_dominance(
+         errors,
          graph,
          %{"validation_profile" => "security_regression"} = policy
        ) do
@@ -5619,6 +6501,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_security_rework_dominance(errors, _graph, _policy), do: errors
+
+  defp check_validation_rework_observation_dominance(
+         errors,
+         %{nodes: nodes},
+         _policy
+       )
+       when is_map_key(nodes, "materialize_candidate"),
+       do: errors
 
   defp check_validation_rework_observation_dominance(errors, graph, policy) do
     rework_graph =

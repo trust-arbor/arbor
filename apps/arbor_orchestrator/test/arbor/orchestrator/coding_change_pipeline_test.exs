@@ -6,8 +6,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   """
   use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Persistence.Record, as: PersistenceRecord
   alias Arbor.Contracts.Coding.{Plan, WorkPacket}
+  alias Arbor.Orchestrator.{Engine, PipelineStatus, RunJournal}
   alias Arbor.Orchestrator.CodingPlan.{BudgetPolicy, Compiler}
+  alias Arbor.Orchestrator.Engine.Checkpoint
+  alias Arbor.Orchestrator.RunLifecycle.Record
 
   @moduletag :fast
   @moduletag :coding_change_pipeline
@@ -15,9 +19,113 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   @pipeline_path "apps/arbor_orchestrator/priv/pipelines/coding-change-v1.dot"
   @fixture_run_deadline_unix_ms 4_102_444_800_000
 
+  defmodule CrashHoldStore do
+    @moduledoc false
+    use GenServer
+
+    def child_spec(opts) do
+      %{id: Keyword.fetch!(opts, :name), start: {__MODULE__, :start_link, [opts]}}
+    end
+
+    def durability_class(_opts), do: :process_lifetime
+
+    def start_link(opts) do
+      name = Keyword.fetch!(opts, :name)
+
+      GenServer.start_link(
+        __MODULE__,
+        %{
+          hold_on: Keyword.fetch!(opts, :hold_on),
+          hold_node: Keyword.fetch!(opts, :hold_node),
+          parent: Keyword.fetch!(opts, :parent),
+          held_from: nil,
+          hold_fired?: false,
+          data: %{}
+        },
+        name: name
+      )
+    end
+
+    def put(key, value, opts) do
+      GenServer.call(Keyword.fetch!(opts, :name), {:put, key, value}, :infinity)
+    end
+
+    def get(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:get, key})
+    def list(opts), do: GenServer.call(Keyword.fetch!(opts, :name), :list)
+    def delete(key, opts), do: GenServer.call(Keyword.fetch!(opts, :name), {:delete, key})
+    def release(name), do: GenServer.call(name, :release, 5_000)
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call({:put, key, value}, from, state) do
+      data = Map.put(state.data, key, value)
+
+      if not state.hold_fired? and transition?(state.hold_on, state.hold_node, value) do
+        lifecycle = lifecycle_data(value)
+
+        send(
+          state.parent,
+          {:coding_change_store_held, state.hold_on,
+           %{
+             completed_nodes: List.wrap(lifecycle["completed_nodes"]),
+             effect: lifecycle["current_effect"]
+           }}
+        )
+
+        {:noreply, %{state | data: data, hold_fired?: true, held_from: from}}
+      else
+        {:reply, :ok, %{state | data: data}}
+      end
+    end
+
+    def handle_call({:get, key}, _from, state) do
+      case Map.fetch(state.data, key) do
+        {:ok, value} -> {:reply, {:ok, value}, state}
+        :error -> {:reply, {:error, :not_found}, state}
+      end
+    end
+
+    def handle_call(:list, _from, state), do: {:reply, {:ok, Map.keys(state.data)}, state}
+
+    def handle_call({:delete, key}, _from, state) do
+      {:reply, :ok, %{state | data: Map.delete(state.data, key)}}
+    end
+
+    def handle_call(:release, _from, %{held_from: nil} = state), do: {:reply, :ok, state}
+
+    def handle_call(:release, _from, %{held_from: from} = state) do
+      GenServer.reply(from, :ok)
+      {:reply, :ok, %{state | held_from: nil}}
+    end
+
+    defp transition?(:checkpointed_node, hold_node, value) do
+      hold_node in List.wrap(lifecycle_data(value)["completed_nodes"])
+    end
+
+    defp transition?(:completed_progress, hold_node, value) do
+      lifecycle = lifecycle_data(value)
+      effect = lifecycle["current_effect"]
+      completed = List.wrap(lifecycle["completed_nodes"])
+
+      is_map(effect) and effect["status"] == "completed" and
+        effect["node_id"] == hold_node and hold_node in completed
+    end
+
+    defp transition?(_hold_on, _hold_node, _value), do: false
+
+    defp lifecycle_data(%PersistenceRecord{data: data}) when is_map(data), do: data
+    defp lifecycle_data(%{data: data}) when is_map(data), do: data
+    defp lifecycle_data(data) when is_map(data), do: data
+    defp lifecycle_data(_value), do: %{}
+  end
+
   @exec_actions ~w(
     coding_workspace_acquire
+    coding_candidate_materialize
     coding_dependency_baseline_check
+    coding_workspace_ensure_active
     coding_workspace_inspect
     coding_workspace_release
     coding_workspace_committed_change
@@ -221,6 +329,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "coding_workspace_inspect" ->
           inspect_response(scenario, counters, state, args)
 
+        "coding_workspace_ensure_active" ->
+          inspect_response(scenario, counters, state, args)
+
         "mix_compile" ->
           validate_response(scenario, counters, state)
 
@@ -232,6 +343,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
         "coding_reviewed_commit" ->
           commit_response(scenario, counters, state, args)
+
+        "coding_candidate_materialize" ->
+          materialize_response(args, state)
 
         "coding_workspace_committed_change" ->
           committed_change_response(scenario, args)
@@ -246,6 +360,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           case scenario do
             :close_failed ->
               {:error, "close session failed"}
+
+            :descriptor_close_in_progress ->
+              {:ok, %{worker_session_id: "acp_worker_fixture_1", status: "closing"}}
 
             :recovery_close_failed ->
               return_to_pool =
@@ -952,6 +1069,23 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                     fingerprint: fingerprint
                   })
 
+                :descriptor_workspace_moved_after_materialization ->
+                  if Map.get(current.counters, :materialize, 0) > 0 do
+                    Map.merge(base, %{
+                      dirty: false,
+                      head_commit: "movedcommit0001",
+                      changed_from_base: true,
+                      fingerprint: fingerprint
+                    })
+                  else
+                    Map.merge(base, %{
+                      dirty: false,
+                      head_commit: "basecommit0001",
+                      changed_from_base: false,
+                      fingerprint: fingerprint
+                    })
+                  end
+
                 _ ->
                   Map.merge(base, %{
                     dirty: fingerprint != "fp-clean",
@@ -1026,6 +1160,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :design_council_rework,
                :design_council_failed,
                :cross_app_capacity_then_complete,
+               :descriptor_close_in_progress,
+               :descriptor_workspace_moved_after_materialization,
                :cross_app_capacity_then_domain_rework,
                :cross_app_capacity_then_tampered_resume,
                :cross_app_completed_flags_in_progress_status,
@@ -1727,6 +1863,33 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       {:ok, result}
     end
 
+    defp materialize_response(args, state) do
+      Agent.update(state, fn current ->
+        count = Map.get(current.counters, :materialize, 0)
+        %{current | counters: Map.put(current.counters, :materialize, count + 1)}
+      end)
+
+      source_commit = Map.fetch!(args, "source_commit_oid")
+      expected_tree = Map.fetch!(args, "expected_tree_oid")
+      descriptor_digest = Map.fetch!(args, "candidate_materialization_digest")
+      acquired_base = Map.fetch!(args, "acquired_base_commit")
+      workspace_id = Map.fetch!(args, "workspace_id")
+
+      {:ok,
+       %{
+         resource_id: "validation_fixture_immutable_1",
+         candidate_path: "/tmp/private-candidate-fixture",
+         tree_oid: expected_tree,
+         expected_tree_oid: expected_tree,
+         source_commit_oid: source_commit,
+         hidden_ref: "refs/arbor/evidence/task_fixture/#{workspace_id}",
+         object_format: "sha1",
+         descriptor_digest: descriptor_digest,
+         base_commit: acquired_base,
+         workspace_id: workspace_id
+       }}
+    end
+
     defp review_response(scenario, counters, state, args) do
       case Arbor.Actions.Council.build_code_review_request(args) do
         {:ok, _request} -> do_review_response(scenario, counters, state, args)
@@ -1966,6 +2129,27 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
          dot_source \\ load_dot(),
          engine_opts \\ []
        ) do
+    state = start_fake_state(scenario)
+    initial = fixture_initial_values(scenario, initial_overrides)
+
+    opts = [
+      authorization: false,
+      actions_executor: FakeActionsExecutor,
+      initial_values: initial,
+      # Valid multi-cycle review and format-repair fixtures now traverse more
+      # reviewed nodes; retain a bounded guard with enough room for the graph.
+      max_steps: Keyword.get(engine_opts, :max_steps, 400),
+      sleep_fn: fn _ -> :ok end
+    ]
+
+    result = Arbor.Orchestrator.run(dot_source, opts)
+    snapshot = Agent.get(state, & &1)
+    Process.put(:coding_change_validation_captures, snapshot.validation_captures)
+    calls = snapshot.calls
+    {result, calls}
+  end
+
+  defp start_fake_state(scenario) do
     {:ok, state} =
       Agent.start_link(fn ->
         %{
@@ -1986,42 +2170,281 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       if Process.alive?(state), do: Agent.stop(state)
     end)
 
-    # Concrete optional acquire keys silence ExecHandler missing-context warnings.
-    initial =
-      %{
-        "task" => "fixture task for #{scenario}",
-        "repo_path" => "/tmp/repo",
-        "base_ref" => "HEAD",
-        "branch_name" => "arbor/coding-agent/fixture",
-        "worktree_base_dir" => "/tmp/worktrees",
-        "acp_agent" => "codex",
-        "timeout" => 900_000,
-        "inactivity_timeout_ms" => 300_000,
-        "open_pr" => "false",
-        "retain_workspace" => "true",
-        "submit_review" => "true",
-        "session.agent_id" => "agent_fixture",
-        "session.task_id" => "task_fixture",
-        "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
-      }
-      |> Map.merge(fixture_budget_values())
-      |> Map.merge(initial_overrides)
+    state
+  end
 
-    opts = [
-      authorization: false,
+  defp fixture_initial_values(scenario, overrides) do
+    # Concrete optional acquire keys silence ExecHandler missing-context warnings.
+    %{
+      "task" => "fixture task for #{scenario}",
+      "repo_path" => "/tmp/repo",
+      "base_ref" => "HEAD",
+      "branch_name" => "arbor/coding-agent/fixture",
+      "worktree_base_dir" => "/tmp/worktrees",
+      "acp_agent" => "codex",
+      "timeout" => 900_000,
+      "inactivity_timeout_ms" => 300_000,
+      "open_pr" => "false",
+      "retain_workspace" => "true",
+      "submit_review" => "true",
+      "session.agent_id" => "agent_fixture",
+      "session.task_id" => "task_fixture",
+      "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
+    }
+    |> Map.merge(fixture_budget_values())
+    |> Map.merge(overrides)
+  end
+
+  defp start_descriptor_crash_fixture(hold_on, hold_node, label) do
+    scenario = :cross_app_capacity_then_complete
+    descriptor = descriptor_fixture()
+
+    plan =
+      v2_plan!("design_required", %{
+        "validation_profile" => "cross_app",
+        "candidate_materialization" => descriptor
+      })
+
+    assert {:ok, compilation} = Compiler.compile(plan)
+    assert {:ok, parsed} = Arbor.Orchestrator.parse(compilation.dot_source)
+    assert {:ok, graph} = Arbor.Orchestrator.IR.Compiler.compile(parsed)
+
+    initial =
+      fixture_initial_values(
+        scenario,
+        Map.merge(compilation.initial_values, %{
+          "session.agent_id" => "agent_fixture",
+          "session.task_id" => "task_fixture",
+          "session.run_deadline_unix_ms" => @fixture_run_deadline_unix_ms
+        })
+      )
+
+    state = start_fake_state(scenario)
+    journal = start_crash_hold_journal(label, hold_on, hold_node)
+    identity = :crypto.strong_rand_bytes(32)
+    logs_root = crash_logs_root(label)
+
+    engine_opts = [
       actions_executor: FakeActionsExecutor,
+      authorization: false,
+      graph_hash: compilation.graph_hash,
+      identity_private_key: identity,
       initial_values: initial,
-      # Valid multi-cycle review and format-repair fixtures now traverse more
-      # reviewed nodes; retain a bounded guard with enough room for the graph.
-      max_steps: Keyword.get(engine_opts, :max_steps, 400),
-      sleep_fn: fn _ -> :ok end
+      journal_opts: [server: journal.journal_name],
+      logs_root: logs_root,
+      max_steps: 400,
+      resumable: true,
+      run_id: journal.run_id,
+      sleep_fn: fn _milliseconds -> :ok end
     ]
 
-    result = Arbor.Orchestrator.run(dot_source, opts)
-    snapshot = Agent.get(state, & &1)
-    Process.put(:coding_change_validation_captures, snapshot.validation_captures)
+    Map.merge(journal, %{
+      compilation: compilation,
+      descriptor: descriptor,
+      descriptor_digest:
+        compilation.initial_values["coding_plan_candidate_materialization_digest"],
+      engine_opts: engine_opts,
+      graph: graph,
+      identity: identity,
+      logs_root: logs_root,
+      state: state
+    })
+  end
+
+  defp start_crash_hold_journal(label, hold_on, hold_node) do
+    suffix = System.unique_integer([:positive, :monotonic])
+    journal_name = :"#{label}_journal_#{suffix}"
+    ets_table = :"#{label}_hot_#{suffix}"
+    store_name = :"#{label}_store_#{suffix}"
+    run_id = "#{label}_run_#{suffix}"
+
+    start_supervised!(
+      {CrashHoldStore, name: store_name, hold_on: hold_on, hold_node: hold_node, parent: self()}
+    )
+
+    journal =
+      start_supervised!(
+        {RunJournal,
+         name: journal_name,
+         ets_table: ets_table,
+         backend: CrashHoldStore,
+         store_name: store_name,
+         start_store: false}
+      )
+
+    on_exit(fn ->
+      try do
+        CrashHoldStore.release(store_name)
+      catch
+        :exit, _reason -> :ok
+      end
+
+      try do
+        PipelineStatus.delete(run_id, server: journal_name)
+      catch
+        :exit, _reason -> :ok
+      end
+
+      if Process.alive?(journal), do: GenServer.stop(journal, :normal, 1_000)
+    end)
+
+    %{
+      journal_name: journal_name,
+      run_id: run_id,
+      store_name: store_name
+    }
+  end
+
+  defp crash_logs_root(label) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_coding_change_#{label}_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(path)
+    on_exit(fn -> File.rm_rf(path) end)
+    path
+  end
+
+  defp spawn_coding_engine(crash) do
+    test = self()
+
+    spawn_monitor(fn ->
+      Process.put(:coding_change_fake_state, crash.state)
+
+      result =
+        try do
+          Engine.run(crash.graph, crash.engine_opts)
+        catch
+          kind, reason -> {:engine_crash, kind, reason, __STACKTRACE__}
+        end
+
+      send(test, {:coding_change_engine_finished, self(), result})
+    end)
+  end
+
+  defp kill_coding_engine!(pid, monitor) do
+    assert Process.alive?(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, 2_000
+
+    receive do
+      {:coding_change_engine_finished, ^pid, _result} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  defp load_crash_checkpoint!(crash) do
+    hmac = Engine.derive_checkpoint_hmac_secret(identity_private_key: crash.identity)
+    assert is_binary(hmac)
+
+    assert {:ok, checkpoint} =
+             Checkpoint.load(
+               Path.join(crash.logs_root, "checkpoint.json"),
+               run_id: crash.run_id,
+               hmac_secret: hmac
+             )
+
+    checkpoint
+  end
+
+  defp await_interrupted!(crash) do
+    deadline = System.monotonic_time(:millisecond) + 2_000
+    await_interrupted!(crash, deadline)
+  end
+
+  defp await_interrupted!(crash, deadline) do
+    record = PipelineStatus.get_record(crash.run_id, server: crash.journal_name)
+
+    cond do
+      match?(%Record{status: :interrupted}, record) ->
+        record
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("timed out waiting for interrupted run: #{inspect(record)}")
+
+      true ->
+        Process.sleep(10)
+        await_interrupted!(crash, deadline)
+    end
+  end
+
+  defp resume_descriptor_crash!(crash) do
+    assert {:ok, _record} =
+             PipelineStatus.claim_for_recovery_record(
+               crash.run_id,
+               node(),
+               server: crash.journal_name
+             )
+
+    Process.put(:coding_change_fake_state, crash.state)
+
+    Engine.run(
+      crash.graph,
+      Keyword.merge(crash.engine_opts, resume: true, recovery: true)
+    )
+  end
+
+  defp assert_descriptor_crash_result(crash, result) do
+    snapshot = Agent.get(crash.state, & &1)
     calls = snapshot.calls
-    {result, calls}
+
+    assert result.context["status"] == "change_committed"
+    assert snapshot.mutations == 0
+
+    for action <- ~w(
+          coding_workspace_acquire
+          acp_start_session
+          acp_send_message
+          acp_close_session
+          coding_candidate_materialize
+          coding_workspace_committed_change
+          council_review_change
+          coding_workspace_release
+        ) do
+      assert length(action_calls(calls, action)) == 1
+    end
+
+    assert length(action_calls(calls, "coding_reviewed_validation")) == 2
+    refute called?(calls, "coding_reviewed_commit")
+    assert [design_prompt] = action_prompts(calls)
+    assert design_prompt =~ "DESIGN PHASE ONLY"
+
+    [materialize] = action_calls(calls, "coding_candidate_materialize")
+    assert materialize["candidate_materialization"] == crash.descriptor
+    assert materialize["pinned_descriptor_digest"] == crash.descriptor_digest
+    assert materialize["candidate_materialization_digest"] == crash.descriptor_digest
+    assert materialize["source_commit_oid"] == crash.descriptor["source_commit_oid"]
+    assert materialize["expected_tree_oid"] == crash.descriptor["expected_tree_oid"]
+    assert materialize["workspace_id"] == "ws_fixture_1"
+    assert materialize["acquired_base_commit"] == "basecommit0001"
+
+    validations = action_calls(calls, "coding_reviewed_validation")
+    [committed] = action_calls(calls, "coding_workspace_committed_change")
+    [review] = action_calls(calls, "council_review_change")
+    [publish] = action_calls(calls, "coding_workspace_release")
+
+    for binding <- validations ++ [committed, review, publish] do
+      assert binding["candidate_source"] == "immutable_object"
+      assert binding["expected_tree_oid"] == crash.descriptor["expected_tree_oid"]
+      assert binding["candidate_materialization_digest"] == crash.descriptor_digest
+      assert binding["acquired_base_commit"] == "basecommit0001"
+      assert binding["validation_resource_id"] == "validation_fixture_immutable_1"
+    end
+
+    for validation <- validations do
+      assert validation["source_commit_oid"] == crash.descriptor["source_commit_oid"]
+
+      assert validation["evidence_ref"] ==
+               "refs/arbor/evidence/task_fixture/ws_fixture_1"
+    end
+
+    for binding <- [committed, review, publish] do
+      assert binding["evidence_ref"] ==
+               "refs/arbor/evidence/task_fixture/ws_fixture_1"
+    end
   end
 
   defp fixture_budget_values do
@@ -2112,6 +2535,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         right_value
       end
     end)
+  end
+
+  defp descriptor_fixture do
+    %{
+      "source_commit_oid" => String.duplicate("a", 40),
+      "expected_tree_oid" => String.duplicate("b", 40),
+      "entries" => [
+        %{"path" => "lib/a.ex", "blob_oid" => String.duplicate("c", 40), "mode" => 100_644}
+      ]
+    }
+  end
+
+  defp call_index!(calls, action_name) do
+    Enum.find_index(calls, fn {name, _args} -> name == action_name end) ||
+      flunk("expected action #{action_name}")
   end
 
   defp seed_window_args?(args) when is_map(args) do
@@ -2579,6 +3017,197 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   # ---------------------------------------------------------------------------
 
   describe "compiled CodingPlan v2 design checkpoint fixtures" do
+    test "descriptor route resumes from immutable checkpoints before materialization" do
+      crash =
+        start_descriptor_crash_fixture(
+          :checkpointed_node,
+          "hoist_descriptor_commit_hash",
+          "descriptor_before_materialize"
+        )
+
+      {engine_pid, monitor} = spawn_coding_engine(crash)
+
+      assert_receive {:coding_change_store_held, :checkpointed_node, held}, 10_000
+      assert "hoist_descriptor_commit_hash" in held.completed_nodes
+
+      before_crash = Agent.get(crash.state, & &1)
+      refute called?(before_crash.calls, "coding_candidate_materialize")
+      assert length(action_calls(before_crash.calls, "acp_send_message")) == 1
+      assert length(action_calls(before_crash.calls, "acp_close_session")) == 1
+      assert before_crash.mutations == 0
+
+      checkpoint = load_crash_checkpoint!(crash)
+      assert checkpoint.current_node == "hoist_descriptor_commit_hash"
+
+      for node <- ~w(
+            checkpoint_candidate_materialization
+            checkpoint_candidate_materialization_digest
+            checkpoint_source_commit
+            checkpoint_expected_tree
+            checkpoint_workspace
+            checkpoint_acquired_base
+          ) do
+        assert node in checkpoint.completed_nodes
+      end
+
+      values = checkpoint.context_values
+      assert values["candidate_materialization"] == crash.descriptor
+      assert values["candidate_materialization_digest"] == crash.descriptor_digest
+      assert values["source_commit_oid"] == crash.descriptor["source_commit_oid"]
+      assert values["expected_tree_oid"] == crash.descriptor["expected_tree_oid"]
+      assert values["workspace_id"] == "ws_fixture_1"
+      assert values["acquired_base_commit"] == "basecommit0001"
+      assert values["candidate_source"] == "immutable_object"
+
+      kill_coding_engine!(engine_pid, monitor)
+      assert :ok = CrashHoldStore.release(crash.store_name)
+      assert %Record{status: :interrupted} = await_interrupted!(crash)
+
+      assert {:ok, result} = resume_descriptor_crash!(crash)
+      assert result.context["status"] == "change_committed"
+      assert_descriptor_crash_result(crash, result)
+    end
+
+    test "descriptor route resumes after checkpointed materialization without replay" do
+      crash =
+        start_descriptor_crash_fixture(
+          :completed_progress,
+          "materialize_candidate",
+          "descriptor_after_materialize"
+        )
+
+      {engine_pid, monitor} = spawn_coding_engine(crash)
+
+      assert_receive {:coding_change_store_held, :completed_progress, held}, 10_000
+      assert held.effect["status"] == "completed"
+      assert held.effect["node_id"] == "materialize_candidate"
+      assert "materialize_candidate" in held.completed_nodes
+
+      before_crash = Agent.get(crash.state, & &1)
+      assert length(action_calls(before_crash.calls, "coding_candidate_materialize")) == 1
+      assert before_crash.mutations == 0
+
+      checkpoint = load_crash_checkpoint!(crash)
+      assert checkpoint.current_node == "materialize_candidate"
+
+      assert checkpoint.execution_digests["materialize_candidate"].execution_id ==
+               held.effect["execution_id"]
+
+      assert checkpoint.context_values["materialize.resource_id"] ==
+               "validation_fixture_immutable_1"
+
+      assert checkpoint.context_values["materialize.tree_oid"] ==
+               crash.descriptor["expected_tree_oid"]
+
+      kill_coding_engine!(engine_pid, monitor)
+      assert :ok = CrashHoldStore.release(crash.store_name)
+      assert %Record{status: :interrupted} = await_interrupted!(crash)
+
+      assert {:ok, result} = resume_descriptor_crash!(crash)
+      assert result.context["status"] == "change_committed"
+      assert_descriptor_crash_result(crash, result)
+    end
+
+    test "descriptor route closes design worker and preserves immutable identities end to end" do
+      descriptor = descriptor_fixture()
+
+      assert {{:ok, result}, calls, _plan, compilation} =
+               run_compiled_v2_fixture(
+                 :cross_app_capacity_then_complete,
+                 "design_required",
+                 %{
+                   "validation_profile" => "cross_app",
+                   "candidate_materialization" => descriptor
+                 }
+               )
+
+      assert result.context["status"] == "change_committed",
+             inspect(
+               Map.take(result.context, ["status", "error", "current_node", "__completed_nodes__"]),
+               pretty: true,
+               limit: :infinity
+             )
+
+      assert length(action_calls(calls, "coding_candidate_materialize")) == 1
+      assert length(action_calls(calls, "acp_send_message")) == 1
+      assert length(action_calls(calls, "acp_close_session")) == 1
+      refute called?(calls, "coding_reviewed_commit")
+
+      [materialize] = action_calls(calls, "coding_candidate_materialize")
+      digest = compilation.initial_values["coding_plan_candidate_materialization_digest"]
+
+      assert materialize["candidate_materialization"] == descriptor
+      assert materialize["pinned_descriptor_digest"] == digest
+      assert materialize["candidate_materialization_digest"] == digest
+      assert materialize["source_commit_oid"] == descriptor["source_commit_oid"]
+      assert materialize["expected_tree_oid"] == descriptor["expected_tree_oid"]
+      assert materialize["workspace_id"] == "ws_fixture_1"
+      assert materialize["acquired_base_commit"] == "basecommit0001"
+
+      [first_validation | _] = action_calls(calls, "coding_reviewed_validation")
+      [committed] = action_calls(calls, "coding_workspace_committed_change")
+      [review] = action_calls(calls, "council_review_change")
+      [publish] = action_calls(calls, "coding_workspace_release")
+
+      for binding <- [first_validation, committed, review, publish] do
+        assert binding["candidate_source"] == "immutable_object"
+        assert binding["expected_tree_oid"] == descriptor["expected_tree_oid"]
+        assert binding["candidate_materialization_digest"] == digest
+        assert binding["acquired_base_commit"] == "basecommit0001"
+        assert binding["validation_resource_id"] == "validation_fixture_immutable_1"
+      end
+
+      for binding <- [committed, review, publish] do
+        assert binding["evidence_ref"] ==
+                 "refs/arbor/evidence/task_fixture/ws_fixture_1"
+      end
+
+      close_index = call_index!(calls, "acp_close_session")
+      materialize_index = call_index!(calls, "coding_candidate_materialize")
+      assert close_index < materialize_index
+
+      refute calls
+             |> Enum.drop(close_index + 1)
+             |> Enum.any?(fn {name, _args} -> name == "acp_send_message" end)
+    end
+
+    test "security regression: descriptor route cannot materialize while worker close is unsettled" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(
+                 :descriptor_close_in_progress,
+                 "design_required",
+                 %{
+                   "validation_profile" => "cross_app",
+                   "candidate_materialization" => descriptor_fixture()
+                 }
+               )
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "descriptor_worker_close_failed"
+      assert length(action_calls(calls, "acp_close_session")) == 1
+      refute called?(calls, "coding_candidate_materialize")
+      refute called?(calls, "coding_reviewed_validation")
+    end
+
+    test "descriptor route rejects a workspace that moves after immutable materialization" do
+      assert {{:ok, result}, calls, _plan, _compilation} =
+               run_compiled_v2_fixture(
+                 :descriptor_workspace_moved_after_materialization,
+                 "design_required",
+                 %{
+                   "validation_profile" => "cross_app",
+                   "candidate_materialization" => descriptor_fixture()
+                 }
+               )
+
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "descriptor_workspace_moved"
+      assert length(action_calls(calls, "coding_candidate_materialize")) == 1
+      refute called?(calls, "coding_reviewed_validation")
+      refute called?(calls, "coding_workspace_committed_change")
+      refute called?(calls, "council_review_change")
+    end
+
     test "approval freezes the WorkPacket and accepted evidence into implementation" do
       assert {{:ok, result}, calls, plan, compilation} =
                run_compiled_v2_fixture(:design_approved, "design_required")

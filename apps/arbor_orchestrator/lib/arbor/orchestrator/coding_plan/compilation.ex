@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
   use TypedStruct
 
-  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
+  alias Arbor.Contracts.Coding.{CandidateMaterialization, Plan, WorkPacket}
   alias Arbor.Orchestrator.CodingPlan.{ExecutionManifest, Profiles, ValidationProgram}
   alias Arbor.Orchestrator.Dot.Parser
 
@@ -68,10 +68,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
            ),
          :ok <- validate_json_object(compilation.initial_values, "initial_values"),
          :ok <- validate_json_object(compilation.manifest, "manifest"),
-         :ok <- reject_forbidden_keys(compilation.initial_values, "initial_values", :control),
+         :ok <- reject_forbidden_initial_values(compilation.initial_values, plan),
          :ok <- reject_manifest_envelope_forbidden_keys(compilation.manifest),
          :ok <- validate_initial_values(compilation, plan),
-         :ok <- validate_manifest(compilation, plan) do
+         :ok <- validate_manifest(compilation, plan),
+         :ok <- validate_descriptor_pin(compilation, plan) do
       {:ok, compilation}
     end
   end
@@ -187,6 +188,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
         |> maybe_put_initial_work_packet(plan, work_packet_json)
         |> maybe_put_initial_work_packet_digest(plan)
         |> maybe_put_test_paths(plan)
+        |> maybe_put_initial_descriptor(plan)
 
       require_equal(compilation.initial_values, expected, "initial_values")
     end
@@ -203,6 +205,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
          {:ok, graph} <- parse_graph(compilation.dot_source),
          {:ok, validate_node} <- Map.fetch(graph.nodes, "validate"),
          {:ok, projected_attrs} <- ValidationProgram.project_onto(program, validate_node.attrs),
+         {:ok, projected_attrs} <- maybe_append_descriptor_validate_keys(projected_attrs, plan),
          :ok <- require_equal(projected_attrs, validate_node.attrs, "initial_values") do
       {:ok, program}
     else
@@ -365,6 +368,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     |> reject_forbidden_keys("manifest", :authority)
   end
 
+  defp reject_forbidden_initial_values(initial_values, plan) do
+    values =
+      if descriptor_activated?(plan) do
+        # CandidateMaterialization is a closed, canonical contract whose path
+        # entries are data bound to the plan and compiler digest. The generic
+        # control-key scanner still applies to every other initial value.
+        Map.delete(initial_values, "coding_plan_candidate_materialization")
+      else
+        initial_values
+      end
+
+    reject_forbidden_keys(values, "initial_values", :control)
+  end
+
   defp reject_forbidden_keys(value, field, scope) do
     case forbidden_categories(value, scope) |> Enum.uniq() |> Enum.sort() do
       [] -> :ok
@@ -463,6 +480,101 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     do: Map.put(values, "test_paths", plan.requested_paths)
 
   defp maybe_put_test_paths(values, _plan), do: values
+
+  defp maybe_put_initial_descriptor(
+         values,
+         %Plan{version: 2, candidate_materialization: descriptor} = plan
+       )
+       when is_map(descriptor) do
+    policy =
+      case plan.work_packet do
+        %{"checkpoint_policy" => policy} -> policy
+        _ -> "direct"
+      end
+
+    if policy == "design_required" do
+      case CandidateMaterialization.digest(descriptor) do
+        {:ok, digest} ->
+          Map.merge(values, %{
+            "coding_plan_candidate_materialization" => descriptor,
+            "coding_plan_candidate_materialization_digest" => digest,
+            "coding_plan_source_commit_oid" => descriptor["source_commit_oid"],
+            "coding_plan_expected_tree_oid" => descriptor["expected_tree_oid"]
+          })
+
+        {:error, _reason} ->
+          values
+      end
+    else
+      values
+    end
+  end
+
+  defp maybe_put_initial_descriptor(values, _plan), do: values
+
+  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+
+  defp maybe_append_descriptor_validate_keys(attrs, plan) do
+    if descriptor_activated?(plan) do
+      case Map.get(attrs, "context_keys") do
+        keys when is_binary(keys) ->
+          extras =
+            @descriptor_validate_extra_keys
+            |> String.split(",", trim: true)
+            |> Enum.reject(&(&1 in String.split(keys, ",", trim: true)))
+            |> Enum.join(",")
+
+          if extras == "" do
+            {:ok, attrs}
+          else
+            {:ok, Map.put(attrs, "context_keys", keys <> "," <> extras)}
+          end
+
+        _other ->
+          invalid("initial_values")
+      end
+    else
+      {:ok, attrs}
+    end
+  end
+
+  defp validate_descriptor_pin(compilation, plan) do
+    if descriptor_activated?(plan) do
+      with {:ok, digest} <- CandidateMaterialization.digest(plan.candidate_materialization),
+           {:ok, graph} <- parse_graph(compilation.dot_source),
+           {:ok, node} <- Map.fetch(graph.nodes, "materialize_candidate") do
+        pin = Map.get(node.attrs, "param.pinned_descriptor_digest")
+
+        if pin == digest and
+             Map.get(compilation.initial_values, "coding_plan_candidate_materialization_digest") ==
+               digest do
+          :ok
+        else
+          mismatch("initial_values")
+        end
+      else
+        _other -> mismatch("initial_values")
+      end
+    else
+      with {:ok, graph} <- parse_graph(compilation.dot_source) do
+        if Map.has_key?(graph.nodes, "materialize_candidate") do
+          mismatch("dot_source")
+        else
+          :ok
+        end
+      end
+    end
+  end
+
+  defp descriptor_activated?(%Plan{version: 2, candidate_materialization: descriptor} = plan)
+       when is_map(descriptor) do
+    case plan.work_packet do
+      %{"checkpoint_policy" => "design_required"} -> true
+      _other -> false
+    end
+  end
+
+  defp descriptor_activated?(_plan), do: false
 
   defp bool_string(true), do: "true"
   defp bool_string(false), do: "false"

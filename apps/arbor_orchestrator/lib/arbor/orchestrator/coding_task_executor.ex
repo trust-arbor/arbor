@@ -282,6 +282,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     published_commit
     artifacts
     branch_lifecycle
+    candidate_source
   ))
 
   @finalize_artifact_optional_keys MapSet.new(
@@ -302,6 +303,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     task_id
     workspace_id
   ))
+  @adoption_candidate_keys_with_source MapSet.put(@adoption_candidate_keys, "candidate_source")
   @max_destination_ref_bytes 256
 
   @type json_map :: Arbor.Contracts.Agent.TaskExecutor.json_map()
@@ -835,7 +837,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, descriptor} <- validate_terminal_evidence_descriptor(descriptor, root, task_id),
          {:ok, body} <- read_terminal_evidence_body(descriptor),
          candidate when is_map(candidate) <- Map.get(body, "candidate"),
-         true <- MapSet.equal?(Map.keys(candidate) |> MapSet.new(), @adoption_candidate_keys),
+         keys <- Map.keys(candidate) |> MapSet.new(),
+         true <-
+           MapSet.equal?(keys, @adoption_candidate_keys) or
+             MapSet.equal?(keys, @adoption_candidate_keys_with_source),
          true <- Map.get(candidate, "task_id") == task_id,
          :ok <- candidate_matches_result(candidate, result) do
       {:ok, Map.put(candidate, "principal_id", agent_id)}
@@ -889,7 +894,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         end
       )
 
-    if matches?, do: :ok, else: {:error, :adoption_candidate_result_mismatch}
+    source_match? =
+      case {Map.get(candidate, "candidate_source"), Map.get(result, "candidate_source")} do
+        {nil, nil} ->
+          true
+
+        {left, right} ->
+          left == right
+      end
+
+    if matches? and source_match?,
+      do: :ok,
+      else: {:error, :adoption_candidate_result_mismatch}
   end
 
   defp archive_adoption_evidence(root, task_id, candidate, proof) do
@@ -1313,6 +1329,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     with :ok <- validate_finalize_json_field(result, "validation", &is_list/1),
          :ok <- validate_finalize_verification_report(result),
          :ok <- validate_finalize_json_field(result, "review", &is_map/1),
+         :ok <- validate_finalize_candidate_source(result),
          :ok <-
            validate_finalize_descriptor_field(
              result,
@@ -1320,6 +1337,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              BranchLifecycleDescriptor
            ) do
       :ok
+    end
+  end
+
+  defp validate_finalize_candidate_source(result) do
+    case Map.fetch(result, "candidate_source") do
+      :error ->
+        :ok
+
+      {:ok, source} when source in ["workspace_branch", "immutable_object"] ->
+        :ok
+
+      {:ok, _source} ->
+        {:error, {:invalid_finalize_field, "candidate_source"}}
     end
   end
 
@@ -5551,6 +5581,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         context_get(context, "blast_radius") || nested_get(review, "blast_radius"),
       "pr_url" => extract_pr_url(context),
       "workspace_id" => context_get(context, "workspace_id"),
+      "candidate_source" => context_get(context, "candidate_source"),
       "evidence_ref" => metric_context_value(context, "release", "evidence_ref"),
       "published_commit" => metric_context_value(context, "release", "published_commit"),
       "branch_lifecycle" => metric_context_value(context, "release", "branch_lifecycle"),

@@ -6,7 +6,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   edges, action names, capabilities, principals, or other execution authority.
   """
 
-  alias Arbor.Contracts.Coding.{Plan, WorkPacket}
+  alias Arbor.Contracts.Coding.{CandidateMaterialization, Plan, WorkPacket}
   alias Arbor.Contracts.Security.Classification
 
   alias Arbor.Orchestrator.CodingPlan.{
@@ -73,6 +73,46 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     route_cross_app_window
   ]
   @cross_app_dormant_roots @cross_app_dormant_nodes
+  @descriptor_dormant_nodes ~w[
+    check_design_worker_closed
+    check_workspace_at_base
+    checkpoint_acquired_base
+    checkpoint_candidate_materialization
+    checkpoint_candidate_materialization_digest
+    checkpoint_expected_tree
+    checkpoint_source_commit
+    checkpoint_workspace
+    close_design_worker
+    compare_descriptor_workspace_base
+    error_descriptor_materialization_failed
+    error_descriptor_worker_close_failed
+    error_descriptor_workspace_moved
+    hoist_descriptor_candidate_path
+    hoist_descriptor_commit_hash
+    hoist_descriptor_evidence_ref
+    hoist_descriptor_tree_oid
+    hoist_validation_resource_id
+    mark_candidate_source_immutable
+    materialize_candidate
+    prove_workspace_at_base
+    skip_descriptor_close
+    status_descriptor_pipeline_error
+  ]
+  @descriptor_dormant_roots @descriptor_dormant_nodes
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id"
+  @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+  @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref"
+  @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref"
+  @descriptor_close_terminals ~w[
+    status_validation_failed
+    status_validation_capacity_exceeded
+    status_review_failed
+    status_review_rejected
+    status_human_review_required
+    status_change_committed
+    status_pr_failed
+    status_pr_created
+  ]
   @cross_app_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=capacity_handoff&&context.validation.progress_status=in_progress"
   @cross_app_completed_condition "context.validation.interaction_outcome=\"\"&&context.validation.disposition_type=completed&&context.validation.progress_status=completed&&context.validation.passed=true"
   @cross_app_legacy_capacity_condition "context.validation.interaction_outcome=\"\"&&context.validation.reason=validation_capacity_exceeded&&context.validation.disposition_type!=capacity_handoff"
@@ -115,7 +155,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
     checkpoint_policy: "coding_plan_checkpoint_policy",
-    design_gate: "coding_plan_design_gate"
+    design_gate: "coding_plan_design_gate",
+    candidate_materialization: "coding_plan_candidate_materialization",
+    candidate_materialization_digest: "coding_plan_candidate_materialization_digest",
+    source_commit_oid: "coding_plan_source_commit_oid",
+    expected_tree_oid: "coding_plan_expected_tree_oid"
   }
 
   @type compile_error :: term()
@@ -137,6 +181,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          validation_stage_timeout_ms =
            validation_program["static_parameters"]["stage_timeout"],
          :ok <- validate_supported_features(plan),
+         semantic_policy = Profiles.semantic_policy(profile, descriptor_activated?(plan)),
+         execution_manifest_profile =
+           Profiles.execution_manifest_profile(profile, descriptor_activated?(plan)),
          :ok <- validate_design_checkpoint_task(plan),
          {:ok, work_packet_json} <- canonical_work_packet_json(plan),
          {:ok, semantic_preflight_opts} <-
@@ -161,27 +208,40 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              work_packet_json,
              action_catalog
            ),
-         dot_source = DotSerializer.serialize(generated_graph),
+         reviewed_source = DotSerializer.serialize(generated_graph),
+         :ok <- SemanticPreflight.validate_source(reviewed_source),
+         {:ok, reviewed_graph} <- parse_dot(reviewed_source, :generated_dot_parse_failed),
+         :ok <- verify_canonical_roundtrip(reviewed_graph, reviewed_source),
+         :ok <- validate_known_handler_types(reviewed_graph),
+         :ok <- validate_action_nodes(reviewed_graph, action_catalog),
+         :ok <- Profiles.validate_requirements(profile, reviewed_graph),
+         :ok <- validate_reviewed_structure(reviewed_graph, plan),
+         {:ok, reviewed_compiled_graph} <- compile_ir(reviewed_graph),
+         :ok <- validate_typed_graph(reviewed_compiled_graph),
+         :ok <- Profiles.validate_requirements(profile, reviewed_compiled_graph),
+         :ok <-
+           SemanticPreflight.validate(
+             reviewed_compiled_graph,
+             semantic_policy,
+             semantic_preflight_opts
+           ),
+         {:ok, executable_graph} <- prune_descriptor_unreachable_nodes(reviewed_graph, plan),
+         dot_source = DotSerializer.serialize(executable_graph),
          :ok <- SemanticPreflight.validate_source(dot_source),
          {:ok, final_graph} <- parse_dot(dot_source, :generated_dot_parse_failed),
          :ok <- verify_canonical_roundtrip(final_graph, dot_source),
          :ok <- validate_known_handler_types(final_graph),
          :ok <- validate_action_nodes(final_graph, action_catalog),
-         :ok <- Profiles.validate_requirements(profile, final_graph),
-         :ok <- validate_structural_graph(final_graph),
+         :ok <- validate_executable_requirements(profile, final_graph, plan),
+         :ok <- validate_executable_structure(final_graph),
          {:ok, compiled_graph} <- compile_ir(final_graph),
          :ok <- validate_typed_graph(compiled_graph),
-         :ok <- Profiles.validate_requirements(profile, compiled_graph),
-         :ok <-
-           SemanticPreflight.validate(
-             compiled_graph,
-             profile["semantic_policy"],
-             semantic_preflight_opts
-           ),
+         :ok <- validate_executable_requirements(profile, compiled_graph, plan),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
            ExecutionManifest.build(compiled_graph, action_catalog, graph_hash),
-         :ok <- Profiles.validate_execution_manifest(profile, execution_manifest) do
+         :ok <-
+           Profiles.validate_execution_manifest(execution_manifest_profile, execution_manifest) do
       initial_values =
         build_initial_values(
           plan,
@@ -416,6 +476,13 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp validate_supported_features(%Plan{} = plan) do
     cond do
+      descriptor_activated?(plan) and plan.validation_profile != "cross_app" ->
+        {:error,
+         {:candidate_materialization_validation_profile_not_supported, plan.validation_profile}}
+
+      descriptor_activated?(plan) and plan.output["draft_pr"] ->
+        {:error, :candidate_materialization_draft_pr_not_supported}
+
       plan.validation_profile == "security_regression" and plan.review_profile == "none" ->
         {:error, {:security_regression_review_profile_not_allowed, "none"}}
 
@@ -476,6 +543,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          {:ok, graph} <- rewrite_validation(graph, validation_program),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <- rewrite_validation_stop_conditions(graph, plan),
+         {:ok, graph} <- activate_descriptor_route(graph, plan),
          {:ok, graph} <- rewrite_design_rework_prompts(graph, plan),
          {:ok, graph} <-
            rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
@@ -1608,6 +1676,361 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
+  defp activate_descriptor_route(graph, %Plan{} = plan) do
+    if descriptor_activated?(plan) do
+      activate_descriptor_nodes(graph, plan)
+    else
+      drop_descriptor_dormant_nodes(graph)
+    end
+  end
+
+  defp descriptor_activated?(%Plan{version: 2, candidate_materialization: descriptor} = plan)
+       when is_map(descriptor) do
+    checkpoint_policy(plan) == "design_required"
+  end
+
+  defp descriptor_activated?(_plan), do: false
+
+  defp prune_descriptor_unreachable_nodes(%Graph{} = graph, %Plan{} = plan) do
+    if descriptor_activated?(plan) do
+      prune_unreachable_nodes(graph, "start")
+    else
+      {:ok, graph}
+    end
+  end
+
+  defp prune_unreachable_nodes(%Graph{} = graph, entry_id) do
+    if Map.has_key?(graph.nodes, entry_id) do
+      adjacency =
+        Enum.reduce(graph.edges, %{}, fn edge, acc ->
+          Map.update(acc, edge.from, [edge.to], &[edge.to | &1])
+        end)
+
+      reachable = collect_reachable_ids([entry_id], adjacency, MapSet.new())
+
+      nodes = Map.take(graph.nodes, MapSet.to_list(reachable))
+
+      edges =
+        Enum.filter(graph.edges, fn edge ->
+          MapSet.member?(reachable, edge.from) and MapSet.member?(reachable, edge.to)
+        end)
+
+      subgraphs =
+        Enum.map(graph.subgraphs, &retain_reachable_subgraph_nodes(&1, reachable))
+
+      {:ok,
+       %{
+         graph
+         | nodes: nodes,
+           edges: edges,
+           subgraphs: subgraphs,
+           adjacency: %{},
+           reverse_adjacency: %{}
+       }}
+    else
+      {:error, {:missing_template_node, entry_id}}
+    end
+  end
+
+  defp collect_reachable_ids([], _adjacency, visited), do: visited
+
+  defp collect_reachable_ids([node_id | rest], adjacency, visited) do
+    if MapSet.member?(visited, node_id) do
+      collect_reachable_ids(rest, adjacency, visited)
+    else
+      next = Map.get(adjacency, node_id, [])
+      collect_reachable_ids(next ++ rest, adjacency, MapSet.put(visited, node_id))
+    end
+  end
+
+  defp retain_reachable_subgraph_nodes(subgraph, reachable) do
+    cond do
+      Map.has_key?(subgraph, :nodes) ->
+        Map.update!(
+          subgraph,
+          :nodes,
+          &Enum.filter(&1, fn id -> MapSet.member?(reachable, id) end)
+        )
+
+      Map.has_key?(subgraph, "nodes") ->
+        Map.update!(
+          subgraph,
+          "nodes",
+          &Enum.filter(&1, fn id -> MapSet.member?(reachable, id) end)
+        )
+
+      true ->
+        subgraph
+    end
+  end
+
+  defp activate_descriptor_nodes(graph, plan) do
+    with {:ok, digest} <- CandidateMaterialization.digest(plan.candidate_materialization),
+         {:ok, graph} <- remove_descriptor_dormant_seed_edges(graph),
+         {:ok, graph} <- remove_descriptor_implementation_phase_edge(graph),
+         {:ok, graph} <- rewrite_descriptor_pre_materialization_cleanup(graph),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "format_accepted_design_evidence",
+             "mark_implementation_phase",
+             "close_design_worker"
+           ),
+         {:ok, graph} <- pin_materialize_digest(graph, digest),
+         {:ok, graph} <- rewrite_descriptor_worker_close(graph, plan),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "check_validation_passed",
+             "outcome=success",
+             "prep_expected_commit"
+           ),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "check_validation_passed",
+             "outcome=fail",
+             "status_validation_failed"
+           ),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "route_review",
+             "context.review.tier_decision=rework",
+             "status_review_failed"
+           ),
+         {:ok, graph} <-
+           rewrite_outgoing_condition(
+             graph,
+             "route_validation_interaction",
+             "context.validation.interaction_outcome=rework",
+             "status_validation_failed"
+           ),
+         {:ok, graph} <- rewrite_descriptor_action_bindings(graph, plan),
+         {:ok, graph} <- rewrite_descriptor_close_terminals(graph),
+         {:ok, graph} <- rewrite_descriptor_post_close_pipeline_errors(graph) do
+      {:ok, graph}
+    end
+  end
+
+  defp pin_materialize_digest(graph, digest) do
+    update_node(graph, "materialize_candidate", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "coding_candidate_materialize") do
+        {:ok, Map.put(attrs, "param.pinned_descriptor_digest", digest)}
+      end
+    end)
+  end
+
+  defp remove_descriptor_implementation_phase_edge(%Graph{} = graph) do
+    condition = "context.worker_phase=implement"
+
+    matches =
+      Enum.count(graph.edges, fn edge ->
+        edge.from == "route_worker_phase" and edge.to == "route_turn_progress" and
+          Map.get(edge.attrs, "condition") == condition
+      end)
+
+    if matches == 1 do
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          edge.from == "route_worker_phase" and edge.to == "route_turn_progress" and
+            Map.get(edge.attrs, "condition") == condition
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error,
+       {:unexpected_template_edge, "route_worker_phase", "route_turn_progress", condition,
+        matches}}
+    end
+  end
+
+  defp rewrite_descriptor_pre_materialization_cleanup(graph) do
+    with {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "close_worker",
+             "route_release_mode",
+             "outcome=success",
+             "prep_release_mode_retain",
+             "outcome=success"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "close_worker",
+             "route_release_mode",
+             "outcome=fail",
+             "prep_release_mode_retain",
+             "outcome=fail"
+           ) do
+      rewrite_unconditional_edge(
+        graph,
+        "status_descriptor_pipeline_error",
+        "skip_descriptor_close",
+        "prep_release_mode_retain"
+      )
+    end
+  end
+
+  defp rewrite_descriptor_post_close_pipeline_errors(graph) do
+    with {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "error_validation_interaction_invalid",
+             "status_pipeline_error_then_close",
+             "status_descriptor_pipeline_error"
+           ) do
+      if Map.has_key?(graph.nodes, "error_cross_app_window_invalid") do
+        rewrite_unconditional_edge(
+          graph,
+          "error_cross_app_window_invalid",
+          "status_pipeline_error_then_close",
+          "status_descriptor_pipeline_error"
+        )
+      else
+        {:ok, graph}
+      end
+    end
+  end
+
+  defp rewrite_descriptor_worker_close(graph, _plan) do
+    update_node(graph, "close_design_worker", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "acp_close_session") do
+        # Candidate materialization needs proof that no delegated worker can
+        # continue writing the workspace. Returning a pooled session is not a
+        # quiescence boundary even when the current provider usually closes
+        # tool-bound sessions on check-in.
+        {:ok, Map.put(attrs, "param.return_to_pool", false)}
+      end
+    end)
+  end
+
+  defp rewrite_descriptor_action_bindings(graph, plan) do
+    with {:ok, graph} <-
+           update_node(graph, "load_committed_change", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "coding_workspace_committed_change") do
+               {:ok, Map.put(attrs, "context_keys", @descriptor_committed_change_keys)}
+             end
+           end),
+         {:ok, graph} <-
+           update_node(graph, "review_change", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "council_review_change") do
+               keys =
+                 if plan.validation_profile == "security_regression" do
+                   @descriptor_review_context_keys <> ",test_paths,validation_profile"
+                 else
+                   @descriptor_review_context_keys
+                 end
+
+               {:ok, Map.put(attrs, "context_keys", keys)}
+             end
+           end),
+         {:ok, graph} <-
+           update_node(graph, "publish_workspace", fn attrs ->
+             with :ok <- require_action_attrs(attrs, "coding_workspace_release") do
+               {:ok,
+                attrs
+                |> Map.put("context_keys", @descriptor_publish_keys)
+                |> Map.put("param.require_candidate_binding", true)}
+             end
+           end) do
+      append_validate_identity_keys(graph)
+    end
+  end
+
+  defp append_validate_identity_keys(graph) do
+    update_node(graph, "validate", fn attrs ->
+      case Map.get(attrs, "context_keys") do
+        keys when is_binary(keys) ->
+          extras =
+            @descriptor_validate_extra_keys
+            |> String.split(",", trim: true)
+            |> Enum.reject(&(&1 in String.split(keys, ",", trim: true)))
+            |> Enum.join(",")
+
+          if extras == "" do
+            {:ok, attrs}
+          else
+            {:ok, Map.put(attrs, "context_keys", keys <> "," <> extras)}
+          end
+
+        _ ->
+          {:error, :invalid_context_keys}
+      end
+    end)
+  end
+
+  defp rewrite_descriptor_close_terminals(graph) do
+    Enum.reduce_while(@descriptor_close_terminals, {:ok, graph}, fn node_id, {:ok, graph} ->
+      has_close? =
+        Map.has_key?(graph.nodes, node_id) and
+          Enum.any?(graph.edges, fn edge ->
+            edge.from == node_id and edge.to == "close_worker" and
+              is_nil(Map.get(edge.attrs, "condition"))
+          end)
+
+      cond do
+        not has_close? ->
+          {:cont, {:ok, graph}}
+
+        true ->
+          case rewrite_unconditional_edge(graph, node_id, "close_worker", "skip_descriptor_close") do
+            {:ok, graph} -> {:cont, {:ok, graph}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+      end
+    end)
+  end
+
+  defp drop_descriptor_dormant_nodes(%Graph{} = graph) do
+    missing = Enum.reject(@descriptor_dormant_nodes, &Map.has_key?(graph.nodes, &1))
+
+    if missing == [] do
+      drop_ids = MapSet.new(@descriptor_dormant_nodes)
+
+      nodes = Map.drop(graph.nodes, @descriptor_dormant_nodes)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          MapSet.member?(drop_ids, edge.from) or MapSet.member?(drop_ids, edge.to)
+        end)
+
+      {:ok, %{graph | nodes: nodes, edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:missing_template_nodes, Enum.sort(missing)}}
+    end
+  end
+
+  defp remove_descriptor_dormant_seed_edges(%Graph{} = graph) do
+    counts =
+      Map.new(@descriptor_dormant_roots, fn root ->
+        count =
+          Enum.count(graph.edges, fn edge ->
+            edge.from == "start" and edge.to == root and
+              Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+          end)
+
+        {root, count}
+      end)
+
+    unexpected = Enum.reject(counts, fn {_root, count} -> count == 1 end)
+
+    if unexpected == [] do
+      roots = MapSet.new(@descriptor_dormant_roots)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          edge.from == "start" and MapSet.member?(roots, edge.to) and
+            Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:unexpected_descriptor_dormant_seed_edges, Enum.sort(unexpected)}}
+    end
+  end
+
   defp remove_cross_app_dormant_seed_edges(%Graph{} = graph) do
     counts =
       Map.new(@cross_app_dormant_roots, fn root ->
@@ -1837,6 +2260,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     case Enum.find(expected, fn {key, value} -> Map.get(attrs, key) != value end) do
       nil -> :ok
       {key, value} -> {:error, {:expected_attribute, key, value, Map.get(attrs, key)}}
+    end
+  end
+
+  defp rewrite_outgoing_condition(%Graph{} = graph, from, condition, new_to) do
+    matches =
+      Enum.filter(graph.edges, fn edge ->
+        edge.from == from and Map.get(edge.attrs, "condition") == condition
+      end)
+
+    case matches do
+      [%{to: to}] ->
+        rewrite_edge(graph, from, to, condition, new_to, condition)
+
+      _other ->
+        {:error, {:unexpected_template_edge, from, condition, length(matches)}}
     end
   end
 
@@ -2313,10 +2751,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp string_constraints_valid?(_type, _value, _constraints), do: true
 
-  defp validate_structural_graph(graph) do
+  defp validate_reviewed_structure(graph, %Plan{} = plan) do
+    opts = if descriptor_activated?(plan), do: [exclude: ["reachability"]], else: []
+
+    graph
+    |> StructuralValidator.validate(opts)
+    |> reject_error_diagnostics(:structural_validation_failed)
+  end
+
+  defp validate_executable_structure(graph) do
     graph
     |> StructuralValidator.validate()
     |> reject_error_diagnostics(:structural_validation_failed)
+  end
+
+  # Descriptor specialization starts from a template whose complete profile
+  # inventory was admitted above, then removes only nodes unreachable from the
+  # canonical start after the reviewed edge rewrites. The descriptor semantic
+  # preflight owns the surviving route's exact nodes, actions, bindings, and
+  # dominance; applying the unspecialized profile inventory here would require
+  # dead implementation and rework code to remain in the executable graph.
+  defp validate_executable_requirements(profile, graph, %Plan{} = plan) do
+    if descriptor_activated?(plan) do
+      :ok
+    else
+      Profiles.validate_requirements(profile, graph)
+    end
   end
 
   defp compile_ir(graph) do
@@ -2391,6 +2851,32 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> maybe_put_initial_work_packet(plan, work_packet_json)
     |> maybe_put_initial_work_packet_digest(plan)
     |> maybe_put_test_paths(plan)
+    |> maybe_put_initial_descriptor(plan)
+  end
+
+  defp maybe_put_initial_descriptor(values, %Plan{} = plan) do
+    if descriptor_activated?(plan) do
+      descriptor = plan.candidate_materialization
+
+      case CandidateMaterialization.digest(descriptor) do
+        {:ok, digest} ->
+          Map.merge(values, %{
+            @initial_context_keys.candidate_materialization => descriptor,
+            @initial_context_keys.candidate_materialization_digest => digest,
+            @initial_context_keys.source_commit_oid => descriptor["source_commit_oid"],
+            @initial_context_keys.expected_tree_oid => descriptor["expected_tree_oid"]
+          })
+
+        {:error, _reason} ->
+          values
+      end
+    else
+      values
+      |> Map.delete(@initial_context_keys.candidate_materialization)
+      |> Map.delete(@initial_context_keys.candidate_materialization_digest)
+      |> Map.delete(@initial_context_keys.source_commit_oid)
+      |> Map.delete(@initial_context_keys.expected_tree_oid)
+    end
   end
 
   # LOCKSTEP: Compilation.maybe_put_initial_work_packet/3 deliberately
@@ -2477,8 +2963,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          rework_stop_conditions: plan.rework["stop_conditions"],
          validation_timeout_ms: validation_timeout_ms,
          validation_test_stage_timeout_ms: validation_test_stage_timeout_ms,
-         validation_stage_timeout_ms: validation_stage_timeout_ms
+         validation_stage_timeout_ms: validation_stage_timeout_ms,
+         candidate_materialization: descriptor_activated?(plan),
+         candidate_materialization_digest: descriptor_digest(plan)
        ]}
+    end
+  end
+
+  defp descriptor_digest(%Plan{} = plan) do
+    if descriptor_activated?(plan) do
+      case CandidateMaterialization.digest(plan.candidate_materialization) do
+        {:ok, digest} -> digest
+        {:error, _reason} -> nil
+      end
+    else
+      nil
     end
   end
 

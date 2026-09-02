@@ -79,7 +79,22 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
         type: :string,
         required: false,
         doc: "Compiler-owned digest binding CrossApp evidence to the frozen work packet"
-      ]
+      ],
+      validation_resource_id: [
+        type: :string,
+        required: false,
+        doc: "Pre-created object-backed resource"
+      ],
+      candidate_source: [type: :string, required: false, doc: "Closed candidate source"],
+      source_commit_oid: [type: :string, required: false, doc: "Checkpointed source commit"],
+      expected_tree_oid: [type: :string, required: false, doc: "Checkpointed candidate tree"],
+      candidate_materialization_digest: [
+        type: :string,
+        required: false,
+        doc: "Checkpointed descriptor digest"
+      ],
+      acquired_base_commit: [type: :string, required: false, doc: "Checkpointed acquired base"],
+      evidence_ref: [type: :string, required: false, doc: "Pre-pinned evidence ref"]
     ]
 
   alias Arbor.Actions
@@ -120,7 +135,14 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
       stage_timeout: :control,
       cross_app_progress: :control,
       cross_app_progress_binding: :control,
-      coding_plan_work_packet_digest: :control
+      coding_plan_work_packet_digest: :control,
+      validation_resource_id: :control,
+      candidate_source: :control,
+      source_commit_oid: :control,
+      expected_tree_oid: :control,
+      candidate_materialization_digest: :control,
+      acquired_base_commit: :control,
+      evidence_ref: :control
     }
   end
 
@@ -245,7 +267,14 @@ defmodule Arbor.Actions.Coding.ReviewedValidation do
   @cross_app_window_keys [
     {"cross_app_progress", :cross_app_progress},
     {"cross_app_progress_binding", :cross_app_progress_binding},
-    {"coding_plan_work_packet_digest", :coding_plan_work_packet_digest}
+    {"coding_plan_work_packet_digest", :coding_plan_work_packet_digest},
+    {"validation_resource_id", :validation_resource_id},
+    {"candidate_source", :candidate_source},
+    {"source_commit_oid", :source_commit_oid},
+    {"expected_tree_oid", :expected_tree_oid},
+    {"candidate_materialization_digest", :candidate_materialization_digest},
+    {"acquired_base_commit", :acquired_base_commit},
+    {"evidence_ref", :evidence_ref}
   ]
 
   defp put_cross_app_window_context(%{profile_id: "cross_app"}, params, context)

@@ -638,6 +638,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
     end
   end
 
+  test "descriptor execution manifests retain review but omit unreachable commit dependencies" do
+    assert {:ok, profile} = Profiles.fetch_executable("cross_app")
+
+    assert Profiles.execution_manifest_profile(profile, false)["required_nested_actions"] ==
+             ["consensus_decide_review", "git_commit"]
+
+    assert Profiles.execution_manifest_profile(profile, true)["required_nested_actions"] ==
+             ["consensus_decide_review"]
+  end
+
   defp inventory_for(profile) do
     %{
       nodes: profile["required_nodes"],

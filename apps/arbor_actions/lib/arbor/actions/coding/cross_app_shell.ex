@@ -41,6 +41,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   alias Arbor.Actions.Coding.BlobManifest
   alias Arbor.Actions
+  alias Arbor.Actions.Coding.CandidateSourceCore
   alias Arbor.Actions.Coding.CrossApp.Core
   alias Arbor.Actions.Coding.CrossApp.ProgressCore
   alias Arbor.Actions.Coding.CrossApp.Parser
@@ -62,6 +63,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     work_packet_digest
     wrapper_digest
   ))
+  @immutable_context_keys ~w(
+    validation_resource_id
+    source_commit_oid
+    expected_tree_oid
+    candidate_materialization_digest
+    acquired_base_commit
+    evidence_ref
+  )
 
   @doc "Execute cross-app validation against a leased workspace."
   @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
@@ -425,16 +434,191 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   defp do_run(input, context, validation_deadline, window) do
-    case window do
-      :ordinary ->
+    case {CandidateSourceCore.admit(context), window} do
+      {{:ok, :immutable_object}, :ordinary} ->
+        do_run_immutable_window(input, context, validation_deadline, :seed)
+
+      {{:ok, :immutable_object}, :seed} ->
+        do_run_immutable_window(input, context, validation_deadline, :seed)
+
+      {{:ok, :immutable_object}, {:window, progress, binding}} ->
+        do_run_immutable_window(
+          input,
+          context,
+          validation_deadline,
+          {:window, progress, binding}
+        )
+
+      {{:error, reason}, _window} ->
+        {:error, reason}
+
+      {_workspace_branch, :ordinary} ->
         do_run_unbound(input, context, validation_deadline)
 
-      :seed ->
+      {_workspace_branch, :seed} ->
         do_run_seed_window(input, context, validation_deadline)
 
-      {:window, progress, binding} ->
+      {_workspace_branch, {:window, progress, binding}} ->
         do_run_progress_window(input, context, progress, binding, validation_deadline)
     end
+  end
+
+  defp do_run_immutable_window(input, context, validation_deadline, window) do
+    with {:ok, identities} <- immutable_context_bindings(context) do
+      resource_id = identities["validation_resource_id"]
+
+      opts = [
+        workspace_id: input.workspace_id,
+        source_commit_oid: identities["source_commit_oid"],
+        expected_tree_oid: identities["expected_tree_oid"],
+        candidate_materialization_digest: identities["candidate_materialization_digest"],
+        acquired_base_commit: identities["acquired_base_commit"],
+        evidence_ref: identities["evidence_ref"],
+        worktree_path: immutable_context_string(context, "worktree_path")
+      ]
+
+      MixAction.with_existing_object_backed_validation_resource(
+        resource_id,
+        context,
+        fn resource ->
+          snapshot_path =
+            Map.get(resource, "candidate_path") || Map.get(resource, :candidate_path)
+
+          continue_immutable_window(
+            input,
+            context,
+            validation_deadline,
+            window,
+            resource,
+            snapshot_path
+          )
+        end,
+        opts
+      )
+    end
+  end
+
+  defp continue_immutable_window(
+         input,
+         context,
+         validation_deadline,
+         :seed,
+         resource,
+         snapshot_path
+       ) do
+    with :ok <- require_static_receipt_boundary(context),
+         {:ok, lease} <- resolve_lease(input.workspace_id, context),
+         {:ok, _worktree_path, base_commit} <- lease_paths(lease),
+         source_commit <- immutable_context_string(context, "source_commit_oid"),
+         expected_tree <- immutable_context_string(context, "expected_tree_oid"),
+         true <- is_binary(source_commit) and source_commit != "",
+         {:ok, resolved} <-
+           resolve_commit_selection(lease_repo(lease), base_commit, source_commit),
+         true <-
+           resolved.candidate_tree_oid == expected_tree || {:error, :admitted_tree_mismatch},
+         {:ok, base_tree_oid} <- commit_tree_oid(lease_repo(lease), base_commit) do
+      resolved = Map.put(resolved, :candidate_head, base_commit)
+
+      before_binding = %{
+        head: source_commit,
+        tree_oid: resolved.candidate_tree_oid,
+        blob_manifest: resolved.candidate_blob_manifest
+      }
+
+      seed_on_snapshot(
+        input,
+        context,
+        resource,
+        snapshot_path,
+        resolved,
+        base_commit,
+        base_tree_oid,
+        before_binding,
+        validation_deadline
+      )
+    else
+      false -> {:error, :incomplete_immutable_review_binding}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp continue_immutable_window(
+         input,
+         context,
+         validation_deadline,
+         {:window, progress, binding},
+         resource,
+         snapshot_path
+       ) do
+    with :ok <- require_static_receipt_boundary(context),
+         {:ok, binding} <- admit_progress_binding(binding),
+         {:ok, lease} <- resolve_lease(input.workspace_id, context),
+         {:ok, _worktree_path, base_commit} <- lease_paths(lease),
+         {:ok, base_tree_oid} <- commit_tree_oid(lease_repo(lease), base_commit),
+         source_commit <- immutable_context_string(context, "source_commit_oid"),
+         expected_tree <- immutable_context_string(context, "expected_tree_oid"),
+         {:ok, resolved} <-
+           resolve_commit_selection(lease_repo(lease), base_commit, source_commit),
+         true <-
+           resolved.candidate_tree_oid == expected_tree || {:error, :admitted_tree_mismatch},
+         resolved <- Map.put(resolved, :candidate_head, base_commit),
+         {:ok, admitted, bindings, batches} <-
+           admit_progress_against_resolution(
+             input,
+             context,
+             progress,
+             binding,
+             base_commit,
+             base_tree_oid,
+             resolved
+           ) do
+      before_binding = %{
+        head: source_commit,
+        tree_oid: resolved.candidate_tree_oid,
+        blob_manifest: resolved.candidate_blob_manifest
+      }
+
+      finish_admitted_progress(
+        input,
+        admitted,
+        bindings,
+        snapshot_path,
+        batches,
+        before_binding,
+        validation_deadline,
+        resource,
+        binding
+      )
+    else
+      false -> {:error, :incomplete_immutable_review_binding}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp immutable_context_bindings(context) when is_map(context) do
+    bindings =
+      Map.new(@immutable_context_keys, fn key ->
+        {key, immutable_context_string(context, key)}
+      end)
+
+    if Enum.all?(bindings, fn {_key, value} ->
+         is_binary(value) and value != "" and String.valid?(value)
+       end) do
+      {:ok, bindings}
+    else
+      {:error, :incomplete_immutable_review_binding}
+    end
+  end
+
+  defp lease_repo(lease) do
+    Map.get(lease, :repo_path) || Map.get(lease, "repo_path")
+  end
+
+  defp immutable_context_string(context, key) when is_binary(key) do
+    Map.get(context, key) ||
+      Map.get(context, String.to_existing_atom(key))
+  rescue
+    ArgumentError -> Map.get(context, key)
   end
 
   # Ordinary Validate.run retains owner/context lease fallback and the exact
@@ -671,7 +855,55 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
          {:ok, worktree_path, base_commit} <- lease_paths(lease),
          {:ok, base_tree_oid} <- commit_tree_oid(worktree_path, base_commit),
          {:ok, resolved} <- resolve_selection(worktree_path, base_commit),
-         {:ok, prepared} <-
+         {:ok, admitted, bindings, batches} <-
+           admit_progress_against_resolution(
+             input,
+             context,
+             progress,
+             binding,
+             base_commit,
+             base_tree_oid,
+             resolved
+           ) do
+      before_binding = %{
+        head: resolved.candidate_head,
+        tree_oid: resolved.candidate_tree_oid,
+        blob_manifest: resolved.candidate_blob_manifest
+      }
+
+      finish_admitted_progress(
+        input,
+        admitted,
+        bindings,
+        worktree_path,
+        batches,
+        before_binding,
+        validation_deadline,
+        nil,
+        binding
+      )
+    else
+      {:error, :missing_progress_binding} = error -> error
+      {:error, :missing_progress} = error -> error
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :invalid_cross_app_input}
+  catch
+    {:execution_error, reason} -> {:error, reason}
+    _, _ -> {:error, :invalid_cross_app_input}
+  end
+
+  defp admit_progress_against_resolution(
+         input,
+         context,
+         progress,
+         binding,
+         base_commit,
+         base_tree_oid,
+         resolved
+       ) do
+    with {:ok, prepared} <-
            prepare_progress_batches(resolved.selection, resolved.candidate_blob_manifest),
          {:ok, compact_plan} <- Core.compact_batch_plan(prepared.batches),
          {:ok, configuration_digest} <- Core.configuration_digest(input_params(input)),
@@ -703,33 +935,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
              "per_batch_budget_ms" => input.timeout
            },
          {:ok, admitted} <- ProgressCore.admit(progress, bindings) do
-      before_binding = %{
-        head: resolved.candidate_head,
-        tree_oid: resolved.candidate_tree_oid,
-        blob_manifest: resolved.candidate_blob_manifest
-      }
-
-      finish_admitted_progress(
-        input,
-        admitted,
-        bindings,
-        worktree_path,
-        prepared.batches,
-        before_binding,
-        validation_deadline,
-        nil,
-        binding
-      )
-    else
-      {:error, :missing_progress_binding} = error -> error
-      {:error, :missing_progress} = error -> error
-      {:error, reason} -> {:error, reason}
+      {:ok, admitted, bindings, prepared.batches}
     end
-  rescue
-    _ -> {:error, :invalid_cross_app_input}
-  catch
-    {:execution_error, reason} -> {:error, reason}
-    _, _ -> {:error, :invalid_cross_app_input}
   end
 
   defp admit_progress_binding(binding) do
@@ -1703,10 +1910,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     do: {:error, :validation_tree_mutated}
 
   defp resolve_lease(workspace_id, context) do
-    caller = %{
-      task_id: Workspace.context_task_id(context),
-      principal_id: Workspace.context_principal_id(context)
-    }
+    caller =
+      Workspace.registry_caller(context, %{
+        task_id: Workspace.context_task_id(context),
+        principal_id: Workspace.context_principal_id(context)
+      })
 
     case WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller) do
       {:ok, lease} -> {:ok, lease}
@@ -2190,9 +2398,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_bounded_mix(path, args, opts, operation_timeout, validation_deadline, stage) do
     timeout = remaining_stage_timeout!(operation_timeout, validation_deadline, stage)
     result = run_mix(path, args, Keyword.put(opts, :timeout, timeout))
-    assert_stage_deadline!(validation_deadline, stage)
-    result
+
+    with :ok <- reauthorize_object_backed_child(Keyword.get(opts, :validation_resource)) do
+      assert_stage_deadline!(validation_deadline, stage)
+      result
+    end
   end
+
+  defp reauthorize_object_backed_child(resource) when is_map(resource) do
+    case map_value(resource, :candidate_source) do
+      source when source in ["object_backed_private_snapshot", :object_backed_private_snapshot] ->
+        after_progress_child(resource)
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp reauthorize_object_backed_child(_resource), do: :ok
 
   defp remaining_stage_timeout!(operation_timeout, nil, _stage), do: operation_timeout
 
@@ -2257,35 +2480,41 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         # Exact multi-file batch argv — never shell-joined strings or directories.
         case run_mix(worktree_path, MixAction.test_argv(attempt.paths), mix_opts) do
           {:ok, result} ->
-            # Re-check shared deadline immediately after every child, including the final one.
-            remaining_after = deadline - monotonic_ms()
-            runner_timeout = Core.runner_timed_out?(result)
-            feedback = Core.feedback_from_result(result)
+            case reauthorize_object_backed_child(resource) do
+              :ok ->
+                # Re-check shared deadline immediately after every child, including the final one.
+                remaining_after = deadline - monotonic_ms()
+                runner_timeout = Core.runner_timed_out?(result)
+                feedback = Core.feedback_from_result(result)
 
-            case Core.record_test_execution_attempt(
-                   execution,
-                   attempt,
-                   feedback,
-                   runner_timeout,
-                   budget_ms,
-                   remaining_after
-                 ) do
-              {:continue, next_execution} ->
-                run_tests_sequential(worktree_path, next_execution, deadline, resource)
+                case Core.record_test_execution_attempt(
+                       execution,
+                       attempt,
+                       feedback,
+                       runner_timeout,
+                       budget_ms,
+                       remaining_after
+                     ) do
+                  {:continue, next_execution} ->
+                    run_tests_sequential(worktree_path, next_execution, deadline, resource)
 
-              {:terminal, check} ->
-                check
+                  {:terminal, check} ->
+                    check
 
-              {:capacity, completed, interrupted, unstarted} ->
-                emit_runtime_handoff(
-                  completed,
-                  interrupted,
-                  unstarted,
-                  execution.operation_timeout
-                )
+                  {:capacity, completed, interrupted, unstarted} ->
+                    emit_runtime_handoff(
+                      completed,
+                      interrupted,
+                      unstarted,
+                      execution.operation_timeout
+                    )
+
+                  {:error, reason} ->
+                    invalid_test_execution!(reason)
+                end
 
               {:error, reason} ->
-                invalid_test_execution!(reason)
+                throw({:execution_error, {:test_postflight_failed, reason}})
             end
 
           {:error, reason} ->

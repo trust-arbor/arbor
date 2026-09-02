@@ -2497,7 +2497,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.ContractChange.Validate,
+        Arbor.Actions.Coding.CandidateMaterialization.Materialize,
         Arbor.Actions.Coding.Workspace.Acquire,
+        Arbor.Actions.Coding.Workspace.EnsureActive,
         Arbor.Actions.Coding.Workspace.Inspect,
         Arbor.Actions.Coding.DependencyBaselineAdmission,
         Arbor.Actions.Coding.Workspace.RecoverySummary,
@@ -3746,7 +3748,11 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
     Arbor.Actions.Coding.ContractChange.Validate =>
       "arbor://action/coding/contract_change/validate",
+    Arbor.Actions.Coding.CandidateMaterialization.Materialize =>
+      "arbor://action/coding/candidate_materialization",
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
+    Arbor.Actions.Coding.Workspace.EnsureActive =>
+      "arbor://action/coding/workspace/ensure_active",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
     Arbor.Actions.Coding.DependencyBaselineAdmission =>
       "arbor://action/coding/dependency_baseline/check",

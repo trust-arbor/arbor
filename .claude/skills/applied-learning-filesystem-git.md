@@ -194,6 +194,16 @@ unrelated commit appear ancestral or hide an untracked mutation.
 <a id="applied-learning-never-feed-colorized-command-output-back-into-a-filesystem-command"></a>
 **Never feed colorized command output back into a filesystem command.** ANSI prefixes/suffixes are data once captured; a colored temporary path can create a literal escape-named directory tree instead of targeting the intended worktree. Disable color (`NO_COLOR=1` or the tool's never-color flag), validate the captured scalar, and canonicalize it before reuse (found 2026-07-15 when an isolated validation build path included Git/Mix color escapes).
 
+<!-- applied-learning: restart-durable-immutable-materialization-requires-an-owned-workspace -->
+<a id="applied-learning-restart-durable-immutable-materialization-requires-an-owned-workspace"></a>
+**Restart-durable immutable materialization requires an owned workspace.** Arbor
+can retain, reactivate, and eventually clean a task-created worktree after owner
+death; it has neither retention nor deletion authority over a reused caller-owned
+path. Reject reused workspaces before allocating immutable validation resources or
+evidence refs whenever downstream checkpoints promise exact-lineage recovery, and
+leave the reused directory untouched (found 2026-09-02 while reviewing G5D
+candidate materialization).
+
 <!-- applied-learning: do-not-combine-shared-source-dependencies-with-a-fresh-isolated-build-tree-blindly -->
 <a id="applied-learning-do-not-combine-shared-source-dependencies-with-a-fresh-isolated-build-tree-blindly"></a>
 **Do not combine shared source dependencies with a fresh isolated build tree blindly.** Pointing a worktree's `MIX_DEPS_PATH` at the canonical `deps/` while giving it a new `MIX_BUILD_PATH` can force rebar dependencies such as `yamerl` to recompile from an incomplete fetched-source layout and fail on missing include headers. Use the worktree harness's prepared build, or validate the integrated commit in the canonical test build; sharing source deps is not equivalent to sharing a complete build cache (found 2026-07-15 independently validating L4 worker commits).

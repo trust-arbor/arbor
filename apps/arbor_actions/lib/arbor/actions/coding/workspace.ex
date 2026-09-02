@@ -11,6 +11,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   |--------|---------------|
   | `Acquire` | `arbor://action/coding/workspace/acquire` |
   | `Inspect` | `arbor://action/coding/workspace/inspect` |
+  | `EnsureActive` | `arbor://action/coding/workspace/ensure_active` |
   | `RecoverySummary` | `arbor://action/coding/workspace/recovery_summary` |
   | `LifecycleStatus` | `arbor://action/coding/workspace/status` |
   | `Release` | `arbor://action/coding/workspace/release` |
@@ -611,6 +612,19 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   def context_principal_id(_), do: nil
+
+  @doc false
+  def registry_caller(context, caller) when is_map(context) and is_map(caller) do
+    server =
+      Map.get(context, :workspace_registry) ||
+        Map.get(context, "workspace_registry") ||
+        Map.get(context, :server) ||
+        Map.get(context, "server")
+
+    if server, do: Map.put(caller, :server, server), else: caller
+  end
+
+  def registry_caller(_context, caller) when is_map(caller), do: caller
 
   @doc false
   @spec inspect_worktree(String.t() | nil, String.t() | nil, keyword() | map()) :: map()
@@ -1877,6 +1891,101 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
   end
 
+  defmodule EnsureActive do
+    @moduledoc """
+    Recover an exact-lineage workspace for descriptor pipeline continuation.
+
+    A live foreign owner is never preempted. A confirmed dead owner or retained
+    workspace may be claimed only by the same non-empty task and principal.
+    Complete immutable validation resources move with the workspace; partial
+    resources are cleaned by the registry.
+    """
+
+    use Jido.Action,
+      name: "coding_workspace_ensure_active",
+      description: "Ensure exact-lineage ownership of a resumable coding workspace",
+      category: "coding",
+      tags: ["coding", "workspace", "lease", "recovery", "pipeline_internal"],
+      schema: [
+        workspace_id: [
+          type: :string,
+          required: true,
+          doc: "Opaque workspace lease id from acquire"
+        ]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Coding.Workspace
+    alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+
+    def taint_roles, do: %{workspace_id: :control}
+
+    def effect_class, do: :local_write
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
+    def run(params, context) when is_map(params) and is_map(context) do
+      workspace_id = map_value(params, :workspace_id)
+      task_id = Workspace.context_task_id(context)
+      principal_id = Workspace.context_principal_id(context)
+
+      if is_binary(workspace_id) and workspace_id != "" do
+        Actions.emit_started(__MODULE__, %{workspace_id: workspace_id})
+
+        server_opts =
+          case registry_server(context) do
+            nil -> []
+            server -> [server: server]
+          end
+
+        case WorkspaceLeaseRegistry.ensure_active_by_lineage(
+               workspace_id,
+               task_id,
+               principal_id,
+               server_opts
+             ) do
+          {:ok, lease} ->
+            view =
+              Map.merge(
+                lease,
+                Workspace.inspect_worktree(
+                  map_value(lease, :worktree_path),
+                  map_value(lease, :base_commit)
+                )
+              )
+
+            if map_value(view, :exists) != true or
+                 map_value(view, :fingerprint_valid) != true do
+              Actions.emit_failed(__MODULE__, :workspace_fingerprint_failed)
+              {:error, :workspace_fingerprint_failed}
+            else
+              Actions.emit_completed(__MODULE__, %{workspace_id: workspace_id})
+              {:ok, view}
+            end
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, reason}
+        end
+      else
+        {:error, "workspace_id is required"}
+      end
+    end
+
+    def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    defp registry_server(context) do
+      Map.get(context, :workspace_registry) ||
+        Map.get(context, "workspace_registry") ||
+        Map.get(context, :server) ||
+        Map.get(context, "server")
+    end
+
+    defp map_value(map, key) when is_map(map) and is_atom(key) do
+      Map.get(map, key) || Map.get(map, Atom.to_string(key))
+    end
+  end
+
   defmodule Inspect do
     @moduledoc """
     Inspect an active coding workspace lease when authorized.
@@ -2181,6 +2290,16 @@ defmodule Arbor.Actions.Coding.Workspace do
           type: :string,
           doc:
             "Closed candidate source: omit or \"workspace_branch\" for branch-backed publish; \"immutable_object\" verifies a pre-pinned evidence ref"
+        ],
+        acquired_base_commit: [type: :string, doc: "Checkpointed acquired base commit"],
+        expected_tree_oid: [type: :string, doc: "Checkpointed candidate tree oid"],
+        candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
+        validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"],
+        evidence_ref: [type: :string, doc: "Pre-pinned evidence ref"],
+        require_candidate_binding: [
+          type: :boolean,
+          default: false,
+          doc: "Require the complete compiler-owned immutable candidate binding"
         ]
       ]
 
@@ -2189,6 +2308,7 @@ defmodule Arbor.Actions.Coding.Workspace do
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceBranchLifecycleCore
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+    alias Arbor.Actions.Git
 
     @internal_release_reason_keys [
       :pending_reason,
@@ -2207,7 +2327,13 @@ defmodule Arbor.Actions.Coding.Workspace do
         mode: :control,
         commit_hash: :control,
         repo_path: :control,
-        candidate_source: :control
+        candidate_source: :control,
+        acquired_base_commit: :control,
+        expected_tree_oid: :control,
+        candidate_materialization_digest: :control,
+        validation_resource_id: :control,
+        evidence_ref: :control,
+        require_candidate_binding: :control
       }
     end
 
@@ -2224,12 +2350,15 @@ defmodule Arbor.Actions.Coding.Workspace do
 
       case CandidateSourceCore.admit(params) do
         {:ok, source} ->
-          release_opts = %{
-            task_id: Workspace.context_task_id(context),
-            principal_id: Workspace.context_principal_id(context),
-            candidate_commit: candidate_commit,
-            repo_path: repo_path
-          }
+          release_opts =
+            Workspace.registry_caller(context, %{
+              task_id: Workspace.context_task_id(context),
+              principal_id: Workspace.context_principal_id(context),
+              workspace_id: workspace_id,
+              candidate_commit: candidate_commit,
+              source_commit_oid: candidate_commit,
+              repo_path: repo_path
+            })
 
           release_opts =
             case source do
@@ -2237,22 +2366,44 @@ defmodule Arbor.Actions.Coding.Workspace do
               :workspace_branch -> release_opts
             end
 
-          case WorkspaceLeaseRegistry.release(workspace_id, mode, release_opts) do
-            {:ok, result} ->
-              case format_release_result(result) do
-                {:ok, result} ->
-                  Actions.emit_completed(__MODULE__, %{
-                    workspace_id: workspace_id,
-                    status: result[:status] || result["status"]
-                  })
+          release_opts =
+            Enum.reduce(
+              [
+                :acquired_base_commit,
+                :expected_tree_oid,
+                :candidate_materialization_digest,
+                :validation_resource_id,
+                :evidence_ref
+              ],
+              release_opts,
+              fn key, acc ->
+                value = Map.get(params, key) || Map.get(params, Atom.to_string(key))
 
-                  {:ok, result}
-
-                {:error, reason} ->
-                  Actions.emit_failed(__MODULE__, reason)
-                  {:error, reason}
+                if is_binary(value) and value != "",
+                  do: Map.put(acc, key, value),
+                  else: acc
               end
+            )
 
+          release_opts =
+            if Map.get(params, :require_candidate_binding) == true or
+                 Map.get(params, "require_candidate_binding") == true do
+              Map.put(release_opts, :require_candidate_binding, true)
+            else
+              release_opts
+            end
+
+          with :ok <- rebind_immutable_release(source, workspace_id, release_opts),
+               {:ok, result} <-
+                 WorkspaceLeaseRegistry.release(workspace_id, mode, release_opts),
+               {:ok, result} <- format_release_result(result) do
+            Actions.emit_completed(__MODULE__, %{
+              workspace_id: workspace_id,
+              status: result[:status] || result["status"]
+            })
+
+            {:ok, result}
+          else
             {:error, reason} ->
               Actions.emit_failed(__MODULE__, reason)
               {:error, reason}
@@ -2265,6 +2416,72 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
 
     def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    defp rebind_immutable_release(:immutable_object, workspace_id, opts) do
+      extras = [
+        Map.get(opts, :acquired_base_commit),
+        Map.get(opts, :expected_tree_oid),
+        Map.get(opts, :candidate_materialization_digest),
+        Map.get(opts, :validation_resource_id),
+        Map.get(opts, :evidence_ref)
+      ]
+
+      cond do
+        Map.get(opts, :require_candidate_binding) == true and Enum.all?(extras, &is_nil/1) ->
+          {:error, :incomplete_immutable_review_binding}
+
+        Enum.all?(extras, &is_nil/1) ->
+          :ok
+
+        Enum.any?(extras, &(is_nil(&1) or &1 == "")) ->
+          {:error, :incomplete_immutable_review_binding}
+
+        true ->
+          server_opts =
+            case Map.get(opts, :server) do
+              nil -> []
+              server -> [server: server]
+            end
+
+          with {:ok, _lease} <-
+                 WorkspaceLeaseRegistry.ensure_active_by_lineage(
+                   workspace_id,
+                   Map.get(opts, :task_id),
+                   Map.get(opts, :principal_id),
+                   server_opts
+                 ),
+               {:ok, _resource} <-
+                 WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
+                   opts.validation_resource_id,
+                   opts
+                 ),
+               repo when is_binary(repo) <- Map.get(opts, :repo_path),
+               commit when is_binary(commit) <- Map.get(opts, :candidate_commit),
+               {:ok, %{hidden_ref: hidden_ref}} <-
+                 Git.verify_archived_evidence_ref(
+                   repo,
+                   opts.task_id,
+                   workspace_id,
+                   commit
+                 ),
+               true <- hidden_ref == opts.evidence_ref || {:error, :evidence_ref_mismatch} do
+            :ok
+          else
+            {:error, reason} -> {:error, reason}
+            false -> {:error, :evidence_ref_mismatch}
+            _other -> {:error, :incomplete_immutable_review_binding}
+          end
+      end
+    end
+
+    defp rebind_immutable_release(
+           :workspace_branch,
+           _workspace_id,
+           %{require_candidate_binding: true}
+         ),
+         do: {:error, :incomplete_immutable_review_binding}
+
+    defp rebind_immutable_release(_source, _workspace_id, _opts), do: :ok
 
     @doc false
     @spec format_release_result(map()) :: {:ok, map()} | {:error, term()}
@@ -2348,18 +2565,35 @@ defmodule Arbor.Actions.Coding.Workspace do
           doc:
             "Optional exact ancestor commit hash. Adds delta_diff, delta_files, and " <>
               "new-side delta_ranges from this commit to the current HEAD."
-        ]
+        ],
+        candidate_source: [
+          type: :string,
+          doc: "Closed candidate source; immutable_object requires checkpointed identities"
+        ],
+        acquired_base_commit: [type: :string, doc: "Checkpointed acquired base commit"],
+        expected_tree_oid: [type: :string, doc: "Checkpointed candidate tree oid"],
+        candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
+        validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"],
+        evidence_ref: [type: :string, doc: "Pre-pinned task/workspace evidence ref"]
       ]
 
     alias Arbor.Actions
+    alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+    alias Arbor.Actions.Git
 
     def taint_roles do
       %{
         workspace_id: :control,
         commit: {:control, requires: [:command_injection]},
-        prior_commit: {:control, requires: [:command_injection]}
+        prior_commit: {:control, requires: [:command_injection]},
+        candidate_source: :control,
+        acquired_base_commit: :control,
+        expected_tree_oid: :control,
+        candidate_materialization_digest: :control,
+        validation_resource_id: :control,
+        evidence_ref: :control
       }
     end
 
@@ -2370,10 +2604,123 @@ defmodule Arbor.Actions.Coding.Workspace do
     def run(%{workspace_id: workspace_id} = params, context) when is_binary(workspace_id) do
       Actions.emit_started(__MODULE__, %{workspace_id: workspace_id})
 
-      case WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
-             task_id: Workspace.context_task_id(context),
-             principal_id: Workspace.context_principal_id(context)
-           }) do
+      case CandidateSourceCore.admit(params) do
+        {:ok, :immutable_object} ->
+          run_immutable(workspace_id, params, context)
+
+        {:ok, :workspace_branch} ->
+          run_workspace_branch(workspace_id, params, context)
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, reason}
+      end
+    end
+
+    def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    defp run_immutable(workspace_id, params, context) do
+      extras = immutable_review_identities(params)
+
+      cond do
+        extras == :incomplete ->
+          Actions.emit_failed(__MODULE__, :incomplete_immutable_review_binding)
+          {:error, :incomplete_immutable_review_binding}
+
+        true ->
+          task_id = Workspace.context_task_id(context)
+          principal_id = Workspace.context_principal_id(context)
+
+          with {:ok, _claimed} <-
+                 ensure_active_workspace(workspace_id, task_id, principal_id, context),
+               {:ok, lease} <-
+                 WorkspaceLeaseRegistry.inspect_lease(
+                   workspace_id,
+                   Workspace.registry_caller(context, %{
+                     task_id: task_id,
+                     principal_id: principal_id
+                   })
+                 ),
+               :ok <- require_acquired_base(lease, extras.acquired_base_commit),
+               {:ok, _resource} <-
+                 WorkspaceLeaseRegistry.bind_existing_object_backed_validation_resource(
+                   extras.validation_resource_id,
+                   Workspace.registry_caller(context, %{
+                     task_id: task_id,
+                     principal_id: principal_id,
+                     workspace_id: workspace_id,
+                     source_commit_oid: extras.commit,
+                     expected_tree_oid: extras.expected_tree_oid,
+                     candidate_materialization_digest: extras.digest,
+                     acquired_base_commit: extras.acquired_base_commit,
+                     evidence_ref: extras.evidence_ref
+                   })
+                 ),
+               repo_path <- map_value(lease, :repo_path),
+               {:ok, %{hidden_ref: hidden_ref}} <-
+                 Git.verify_archived_evidence_ref(
+                   repo_path,
+                   task_id,
+                   workspace_id,
+                   extras.commit
+                 ),
+               true <- hidden_ref == extras.evidence_ref || {:error, :evidence_ref_mismatch},
+               worktree_path <- map_value(lease, :worktree_path),
+               inspection <-
+                 Workspace.inspect_worktree(worktree_path, extras.acquired_base_commit),
+               :ok <- require_clean_at_base(inspection, extras.acquired_base_commit),
+               :ok <- require_branch_at_base(lease, extras.acquired_base_commit),
+               {:ok, tree_oid} <- Git.commit_tree_oid(repo_path, extras.commit),
+               true <- tree_oid == extras.expected_tree_oid || {:error, :admitted_tree_mismatch},
+               {:ok, diff} <-
+                 Workspace.committed_diff_material(
+                   repo_path,
+                   extras.acquired_base_commit,
+                   extras.commit
+                 ),
+               {:ok, files} <-
+                 Workspace.committed_files(
+                   repo_path,
+                   extras.acquired_base_commit,
+                   extras.commit
+                 ) do
+            result = %{
+              "workspace_id" => workspace_id,
+              "commit_hash" => extras.commit,
+              "diff" => diff.diff,
+              "files" => files,
+              "base_ref" => extras.acquired_base_commit,
+              "branch" => map_value(lease, :branch),
+              "worktree_path" => worktree_path
+            }
+
+            Actions.emit_completed(__MODULE__, %{
+              workspace_id: workspace_id,
+              commit_hash: extras.commit,
+              files_count: length(files)
+            })
+
+            {:ok, result}
+          else
+            false ->
+              Actions.emit_failed(__MODULE__, :head_commit_mismatch)
+              {:error, :head_commit_mismatch}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, reason}
+          end
+      end
+    end
+
+    defp run_workspace_branch(workspace_id, params, context) do
+      case WorkspaceLeaseRegistry.inspect_lease(
+             workspace_id,
+             Workspace.registry_caller(context, %{
+               task_id: Workspace.context_task_id(context),
+               principal_id: Workspace.context_principal_id(context)
+             })
+           ) do
         {:ok, lease} ->
           worktree_path = map_value(lease, :worktree_path)
           repo_path = map_value(lease, :repo_path)
@@ -2437,7 +2784,84 @@ defmodule Arbor.Actions.Coding.Workspace do
       end
     end
 
-    def run(_params, _context), do: {:error, "workspace_id is required"}
+    defp immutable_review_identities(params) do
+      acquired_base = map_value(params, :acquired_base_commit)
+      tree = map_value(params, :expected_tree_oid)
+      digest = map_value(params, :candidate_materialization_digest)
+      resource_id = map_value(params, :validation_resource_id)
+      evidence_ref = map_value(params, :evidence_ref)
+      commit = map_value(params, :commit)
+
+      if Enum.all?([acquired_base, tree, digest, resource_id, evidence_ref, commit], fn value ->
+           is_binary(value) and value != ""
+         end) do
+        %{
+          acquired_base_commit: acquired_base,
+          expected_tree_oid: tree,
+          digest: digest,
+          validation_resource_id: resource_id,
+          evidence_ref: evidence_ref,
+          commit: commit
+        }
+      else
+        :incomplete
+      end
+    end
+
+    defp ensure_active_workspace(workspace_id, task_id, principal_id, context) do
+      server_opts =
+        case Workspace.registry_caller(context, %{}) do
+          %{server: server} -> [server: server]
+          _ -> []
+        end
+
+      WorkspaceLeaseRegistry.ensure_active_by_lineage(
+        workspace_id,
+        task_id,
+        principal_id,
+        server_opts
+      )
+    end
+
+    defp require_acquired_base(lease, acquired_base_commit) do
+      base = map_value(lease, :base_commit)
+
+      if is_binary(base) and base == acquired_base_commit,
+        do: :ok,
+        else: {:error, :acquired_base_mismatch}
+    end
+
+    defp require_clean_at_base(inspection, acquired_base_commit) do
+      head = Map.get(inspection, :head_commit) || Map.get(inspection, "head_commit")
+      dirty? = Map.get(inspection, :dirty) || Map.get(inspection, "dirty")
+      exists? = Map.get(inspection, :exists) || Map.get(inspection, "exists")
+
+      cond do
+        exists? != true -> {:error, :workspace_missing}
+        dirty? == true -> {:error, :head_commit_mismatch}
+        head != acquired_base_commit -> {:error, :head_commit_mismatch}
+        true -> :ok
+      end
+    end
+
+    defp require_branch_at_base(lease, acquired_base_commit) do
+      repo = map_value(lease, :repo_path)
+      branch = map_value(lease, :branch)
+
+      case Git.observe_branch_ref(repo, branch) do
+        {:ok, {:present, oid}} when oid == acquired_base_commit ->
+          :ok
+
+        {:ok, {:present, _other}} ->
+          {:error, :head_commit_mismatch}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        _other ->
+          {:error, :head_commit_mismatch}
+      end
+    end
 
     defp map_value(map, key) when is_map(map) and is_atom(key) do
       cond do

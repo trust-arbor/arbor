@@ -888,6 +888,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
                })
     end
 
+    test "ensure_active rejects an active lease whose worktree disappeared", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      task_id = "task_ensure_active_#{System.unique_integer([:positive])}"
+      principal_id = "agent_ensure_active_#{System.unique_integer([:positive])}"
+      server = :"workspace_ensure_active_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {WorkspaceLeaseRegistry,
+         name: server, retention_journal: :disabled, retention_runtime_id: "ensure-active-test"}
+      )
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: "test/ensure-active-missing",
+                   worktree_base_dir: Path.join(tmp_dir, "ensure-active-worktrees"),
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      File.rm_rf!(lease.worktree_path)
+
+      assert {:error, :workspace_fingerprint_failed} =
+               Workspace.EnsureActive.run(
+                 %{workspace_id: lease.workspace_id},
+                 %{task_id: task_id, agent_id: principal_id, server: server}
+               )
+    end
+
     test "security regression: inspect_lease_by_lineage preserves opaque whitespace identities",
          %{tmp_dir: tmp_dir} do
       # Whitespace is significant after validation. Trimming before comparison

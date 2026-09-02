@@ -477,11 +477,21 @@ defmodule Arbor.Actions.Council do
         finding_ledger: [
           type: :any,
           doc: "Frozen string-keyed JSON finding ledger for the current cycle"
-        ]
+        ],
+        candidate_source: [
+          type: :string,
+          doc: "Closed candidate source for snapshot binding"
+        ],
+        evidence_ref: [type: :string, doc: "Pre-pinned evidence ref"],
+        acquired_base_commit: [type: :string, doc: "Checkpointed acquired base"],
+        expected_tree_oid: [type: :string, doc: "Checkpointed candidate tree"],
+        candidate_materialization_digest: [type: :string, doc: "Checkpointed descriptor digest"],
+        validation_resource_id: [type: :string, doc: "Pre-created object-backed resource id"]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Council
+    alias Arbor.Actions.Coding.CandidateSourceCore
     alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
@@ -507,7 +517,13 @@ defmodule Arbor.Actions.Council do
         delta_diff: :data,
         delta_files: :data,
         delta_ranges: :data,
-        finding_ledger: :data
+        finding_ledger: :data,
+        candidate_source: :control,
+        evidence_ref: :control,
+        acquired_base_commit: :control,
+        expected_tree_oid: :control,
+        candidate_materialization_digest: :control,
+        validation_resource_id: :control
       }
     end
 
@@ -523,7 +539,8 @@ defmodule Arbor.Actions.Council do
 
       bound? = Council.bound_review_context?(context)
 
-      with {:ok, request} <- Council.build_code_review_request(params),
+      with :ok <- validate_immutable_review_binding(params),
+           {:ok, request} <- Council.build_code_review_request(params),
            :ok <- Council.reject_bound_review_overrides(params, bound?),
            :ok <- preflight_security_regression_selectors(params, context),
            {:ok, request, decision} <- run_review_with_snapshot(request, params, context),
@@ -603,15 +620,17 @@ defmodule Arbor.Actions.Council do
 
       cond do
         valid_id?(workspace_id) and valid_id?(candidate_commit) ->
+          caller = review_snapshot_caller(params, context)
+
           case Map.get(context, :review_snapshot_opener) do
             opener when is_function(opener, 3) ->
-              opener.(workspace_id, candidate_commit, registry_caller(context))
+              opener.(workspace_id, candidate_commit, caller)
 
             _ ->
               WorkspaceLeaseRegistry.open_review_snapshot(
                 workspace_id,
                 candidate_commit,
-                registry_caller(context)
+                caller
               )
           end
 
@@ -754,11 +773,60 @@ defmodule Arbor.Actions.Council do
     end
 
     defp registry_caller(context) do
-      %{
+      Workspace.registry_caller(context, %{
         task_id: Workspace.context_task_id(context),
-        principal_id: Workspace.context_principal_id(context),
-        server: Map.get(context, :workspace_registry) || Map.get(context, "workspace_registry")
-      }
+        principal_id: Workspace.context_principal_id(context)
+      })
+    end
+
+    defp review_snapshot_caller(params, context) do
+      caller = registry_caller(context)
+
+      Enum.reduce(
+        [
+          :candidate_source,
+          :evidence_ref,
+          :acquired_base_commit,
+          :expected_tree_oid,
+          :candidate_materialization_digest,
+          :validation_resource_id
+        ],
+        caller,
+        fn key, acc ->
+          value = Council.get_param(params, key)
+
+          if is_binary(value) and value != "",
+            do: Map.put(acc, key, value),
+            else: acc
+        end
+      )
+    end
+
+    defp validate_immutable_review_binding(params) do
+      case CandidateSourceCore.admit(params) do
+        {:ok, :workspace_branch} ->
+          :ok
+
+        {:ok, :immutable_object} ->
+          identities =
+            Enum.map(
+              [
+                :evidence_ref,
+                :acquired_base_commit,
+                :expected_tree_oid,
+                :candidate_materialization_digest,
+                :validation_resource_id
+              ],
+              &Council.get_param(params, &1)
+            )
+
+          if Enum.all?(identities, &(is_binary(&1) and &1 != "")),
+            do: :ok,
+            else: {:error, :incomplete_immutable_review_binding}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
 
     defp council_decision_digest(result, decision, request, routing) do

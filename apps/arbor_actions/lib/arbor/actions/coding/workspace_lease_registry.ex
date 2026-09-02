@@ -176,8 +176,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           optional(:retention_lstat_identity) => map(),
           optional(:retention_worktree_registration) => map(),
           workspace_id: String.t(),
-          owner_pid: pid(),
-          owner_ref: reference(),
+          owner_pid: pid() | nil,
+          owner_ref: reference() | nil,
           task_id: String.t() | nil,
           principal_id: String.t() | nil,
           repo_path: String.t(),
@@ -354,6 +354,33 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   def inspect_lease_by_lineage(_workspace_id, _task_id, _principal_id, _opts),
+    do: {:error, :invalid_task_principal}
+
+  @doc """
+  Ensure that the calling process owns an active lease for exact lineage.
+
+  An already active lease is returned only to its current live owner. A dead
+  owner may be replaced after exact workspace, task, and principal matching.
+  A retained lease is reactivated through the normal durable identity checks.
+  Fully bound object-backed validation resources move with the lease; partial
+  resources are cleaned instead of being adopted.
+  """
+  @spec ensure_active_by_lineage(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def ensure_active_by_lineage(workspace_id, task_id, principal_id, opts \\ [])
+
+  def ensure_active_by_lineage(workspace_id, task_id, principal_id, opts)
+      when is_binary(workspace_id) and is_binary(task_id) and is_binary(principal_id) and
+             is_list(opts) do
+    if valid_opaque_id?(workspace_id) and valid_opaque_id?(task_id) and
+         valid_opaque_id?(principal_id) do
+      call({:ensure_active_by_lineage, workspace_id, task_id, principal_id}, opts)
+    else
+      {:error, :invalid_task_principal}
+    end
+  end
+
+  def ensure_active_by_lineage(_workspace_id, _task_id, _principal_id, _opts),
     do: {:error, :invalid_task_principal}
 
   @doc """
@@ -548,6 +575,35 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   def acquire_validation_resource(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
     {server_opts, caller} = split_caller_opts(opts)
     call({:acquire_validation_resource, workspace_id, caller}, server_opts)
+  end
+
+  @doc """
+  Re-bind an existing object-backed validation resource by opaque id.
+
+  The id is never authority. Caller must supply exact task, principal,
+  workspace, source commit, expected tree, descriptor digest, and acquired
+  base. JSON-clean string-keyed view.
+  """
+  @spec bind_existing_object_backed_validation_resource(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def bind_existing_object_backed_validation_resource(resource_id, opts \\ %{})
+      when is_binary(resource_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:bind_existing_object_backed_validation_resource, resource_id, caller}, server_opts)
+  end
+
+  @doc """
+  Inspect the object-backed validation resource for a workspace by lineage.
+
+  Opaque workspace id is never authority. Re-binds the same identities as
+  `bind_existing_object_backed_validation_resource/2`.
+  """
+  @spec inspect_object_backed_validation_binding(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def inspect_object_backed_validation_binding(workspace_id, opts \\ %{})
+      when is_binary(workspace_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:inspect_object_backed_validation_binding, workspace_id, caller}, server_opts)
   end
 
   @doc false
@@ -768,9 +824,31 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     with {:ok, source} <- CandidateSourceCore.admit(opts) do
       {server_opts, caller} = split_caller_opts(opts)
       caller = Map.put(caller, :candidate_source, source)
-      call({:open_review_snapshot, workspace_id, candidate_commit, caller}, server_opts)
+
+      with :ok <- ensure_review_workspace_active(source, workspace_id, caller, server_opts) do
+        call({:open_review_snapshot, workspace_id, candidate_commit, caller}, server_opts)
+      end
     end
   end
+
+  # An immutable review may resume after its predecessor's checkpoint under a
+  # new Engine process. Reclaim the exact task/principal lineage at the
+  # consuming boundary instead of relying on the completed predecessor to run
+  # again. Workspace-branch reviews retain their existing live-owner contract.
+  defp ensure_review_workspace_active(:immutable_object, workspace_id, caller, server_opts) do
+    case ensure_active_by_lineage(
+           workspace_id,
+           Map.get(caller, :task_id),
+           Map.get(caller, :principal_id),
+           server_opts
+         ) do
+      {:ok, _lease} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_review_workspace_active(:workspace_branch, _workspace_id, _caller, _server_opts),
+    do: :ok
 
   @doc """
   Resolve a review snapshot when authorized for its parent workspace lease.
@@ -1127,35 +1205,51 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   def handle_call(
+        {:ensure_active_by_lineage, workspace_id, task_id, principal_id},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{task_id: task_id, principal_id: principal_id, owner_pid: from_pid}
+
+    case Map.fetch(state.leases, workspace_id) do
+      {:ok, lease} ->
+        cond do
+          not principal_task_match?(lease, caller) ->
+            {:reply, {:error, :not_authorized}, state}
+
+          lease.owner_pid == from_pid ->
+            {:reply, {:ok, public_view(lease)}, state}
+
+          is_pid(lease.owner_pid) and Process.alive?(lease.owner_pid) ->
+            {:reply, {:error, :workspace_owner_active}, state}
+
+          true ->
+            claim_dead_active_lease(state, lease, from_pid)
+        end
+
+      :error ->
+        reactivate_retained_by_lineage_reply(
+          state,
+          workspace_id,
+          task_id,
+          principal_id,
+          from_pid
+        )
+    end
+  end
+
+  def handle_call(
         {:reactivate_retained_by_lineage, workspace_id, task_id, principal_id},
         {from_pid, _tag},
         state
       ) do
-    case Map.fetch(state.retained_by_id, workspace_id) do
-      {:ok, retained} ->
-        prepared = %{
-          workspace_id: workspace_id,
-          workspace_id_explicit: true,
-          owner_pid: from_pid,
-          task_id: task_id,
-          principal_id: principal_id,
-          repo_path: retained.repo_path,
-          branch: retained.branch,
-          candidate_path: retained.worktree_path
-        }
-
-        with true <- principal_task_match?(retained, prepared),
-             :ok <- ensure_workspace_id_free(state, workspace_id),
-             :ok <- ensure_target_free(state, retained.repo_path, retained.branch) do
-          continue_retained_acquire(state, retained, prepared)
-        else
-          false -> {:reply, {:error, :retained_workspace_not_authorized}, state}
-          {:error, reason} -> {:reply, {:error, reason}, state}
-        end
-
-      :error ->
-        {:reply, {:error, :retained_workspace_not_found}, state}
-    end
+    reactivate_retained_by_lineage_reply(
+      state,
+      workspace_id,
+      task_id,
+      principal_id,
+      from_pid
+    )
   end
 
   def handle_call({:release, workspace_id, mode, caller}, {from_pid, _tag}, state) do
@@ -1292,6 +1386,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         else
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
+    end
+  end
+
+  def handle_call(
+        {:bind_existing_object_backed_validation_resource, resource_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case rebind_object_backed_resource(state, resource_id, caller) do
+      {:ok, view, next_state} -> {:reply, {:ok, view}, next_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:inspect_object_backed_validation_binding, workspace_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case inspect_object_backed_for_workspace(state, workspace_id, caller) do
+      {:ok, view, next_state} -> {:reply, {:ok, view}, next_state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -1814,6 +1934,40 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   # -- Internals ------------------------------------------------------
 
+  defp reactivate_retained_by_lineage_reply(
+         state,
+         workspace_id,
+         task_id,
+         principal_id,
+         from_pid
+       ) do
+    case Map.fetch(state.retained_by_id, workspace_id) do
+      {:ok, retained} ->
+        prepared = %{
+          workspace_id: workspace_id,
+          workspace_id_explicit: true,
+          owner_pid: from_pid,
+          task_id: task_id,
+          principal_id: principal_id,
+          repo_path: retained.repo_path,
+          branch: retained.branch,
+          candidate_path: retained.worktree_path
+        }
+
+        with true <- principal_task_match?(retained, prepared),
+             :ok <- ensure_workspace_id_free(state, workspace_id),
+             :ok <- ensure_target_free(state, retained.repo_path, retained.branch) do
+          continue_retained_acquire(state, retained, prepared)
+        else
+          false -> {:reply, {:error, :retained_workspace_not_authorized}, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      :error ->
+        {:reply, {:error, :retained_workspace_not_found}, state}
+    end
+  end
+
   defp release_retained_for_authorized_caller(state, retained, caller, mode) do
     if principal_task_match?(retained, caller) do
       result =
@@ -2018,13 +2172,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:noreply, %{state | validation_by_ref: Map.delete(state.validation_by_ref, ref)}}
 
           resource ->
-            {result, state} =
-              do_release_validation_resource(state, resource, demonitor: false)
+            if recoverable_object_backed_resource?(resource) do
+              {:noreply, detach_validation_resource_owner(state, resource)}
+            else
+              {result, state} =
+                do_release_validation_resource(state, resource, demonitor: false)
 
-            state =
-              complete_owner_death_validation_cleanup(state, resource.workspace_id, result)
+              state =
+                complete_owner_death_validation_cleanup(state, resource.workspace_id, result)
 
-            {:noreply, state}
+              {:noreply, state}
+            end
         end
 
       :error ->
@@ -2860,10 +3018,249 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   defp dest_opts_from_caller(_caller), do: []
 
+  defp inspect_object_backed_for_workspace(state, workspace_id, caller) do
+    with :ok <- require_object_backed_binding_caller(caller),
+         {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
+         :ok <- maybe_require_acquired_base(lease, caller) do
+      resources =
+        state
+        |> Map.get(:validation_by_workspace, %{})
+        |> Map.get(workspace_id, MapSet.new())
+        |> Enum.flat_map(fn id ->
+          case Map.fetch(state.validation_resources, id) do
+            {:ok, %{candidate_source: :object_backed_private_snapshot} = resource} ->
+              [resource]
+
+            _other ->
+              []
+          end
+        end)
+
+      case resources do
+        [] ->
+          {:error, :not_found}
+
+        [resource] ->
+          rebind_object_backed_resource(state, resource.resource_id, caller)
+
+        _many ->
+          {:error, :stale_validation_resource}
+      end
+    end
+  end
+
+  defp rebind_object_backed_resource(state, resource_id, caller) do
+    with :ok <- require_object_backed_binding_caller(caller),
+         {:ok, resource} <- fetch_authorized_validation_resource(state, resource_id, caller),
+         {:ok, lease} <- fetch_lease(state, resource.workspace_id),
+         :ok <- require_object_backed_resource(resource),
+         :ok <- maybe_require_workspace_id(resource, caller),
+         :ok <- maybe_require_acquired_base(lease, caller),
+         :ok <- maybe_require_expected_tree(resource, caller),
+         :ok <- maybe_require_digest(resource, caller),
+         :ok <- maybe_require_source_commit(resource, caller),
+         :ok <- reject_candidate_path_is_worktree(resource, lease) do
+      stamped = stamp_object_backed_identities(resource, caller)
+      view = object_backed_binding_view(stamped, lease)
+      {:ok, view, put_validation_resource(state, stamped)}
+    end
+  end
+
+  defp require_object_backed_binding_caller(caller) when is_map(caller) do
+    required = [
+      :task_id,
+      :principal_id,
+      :workspace_id,
+      :source_commit_oid,
+      :expected_tree_oid,
+      :candidate_materialization_digest,
+      :acquired_base_commit
+    ]
+
+    if Enum.all?(required, &is_binary(caller_binary(caller, &1))) do
+      :ok
+    else
+      {:error, :incomplete_immutable_review_binding}
+    end
+  end
+
+  defp require_object_backed_binding_caller(_caller),
+    do: {:error, :incomplete_immutable_review_binding}
+
+  defp require_object_backed_resource(%{candidate_source: :object_backed_private_snapshot}),
+    do: :ok
+
+  defp require_object_backed_resource(_resource),
+    do: {:error, :invalid_validation_resource_request}
+
+  defp maybe_require_workspace_id(resource, caller) do
+    expected = caller_binary(caller, :workspace_id)
+
+    cond do
+      is_nil(expected) ->
+        :ok
+
+      expected == resource.workspace_id ->
+        :ok
+
+      true ->
+        {:error, :workspace_unauthorized}
+    end
+  end
+
+  defp maybe_require_validation_resource_id(resource, caller) do
+    expected = caller_binary(caller, :validation_resource_id)
+
+    cond do
+      is_nil(expected) -> :ok
+      expected == resource.resource_id -> :ok
+      true -> {:error, :invalid_validation_resource_request}
+    end
+  end
+
+  defp maybe_require_acquired_base(lease, caller) do
+    expected = caller_binary(caller, :acquired_base_commit)
+
+    cond do
+      is_nil(expected) ->
+        :ok
+
+      expected == lease.base_commit ->
+        :ok
+
+      true ->
+        {:error, :acquired_base_mismatch}
+    end
+  end
+
+  defp maybe_require_expected_tree(resource, caller) do
+    expected = caller_binary(caller, :expected_tree_oid)
+    observed = Map.get(resource, :expected_tree_oid)
+
+    cond do
+      is_nil(expected) ->
+        :ok
+
+      is_binary(observed) and observed == expected ->
+        :ok
+
+      true ->
+        {:error, :admitted_tree_mismatch}
+    end
+  end
+
+  defp maybe_require_digest(resource, caller) do
+    expected = caller_binary(caller, :candidate_materialization_digest)
+    observed = Map.get(resource, :descriptor_digest)
+
+    cond do
+      is_nil(expected) ->
+        :ok
+
+      is_nil(observed) or observed == expected ->
+        :ok
+
+      true ->
+        {:error, :compiler_descriptor_mismatch}
+    end
+  end
+
+  defp maybe_require_source_commit(resource, caller) do
+    expected =
+      caller_binary(caller, :source_commit_oid) || caller_binary(caller, :candidate_commit)
+
+    observed = Map.get(resource, :source_commit_oid)
+
+    cond do
+      is_nil(expected) ->
+        :ok
+
+      is_nil(observed) or observed == expected ->
+        :ok
+
+      true ->
+        {:error, :compiler_descriptor_mismatch}
+    end
+  end
+
+  defp maybe_require_evidence_ref(resource, caller) do
+    expected = caller_binary(caller, :evidence_ref)
+    observed = Map.get(resource, :evidence_ref)
+
+    cond do
+      is_nil(expected) -> :ok
+      is_nil(observed) or observed == expected -> :ok
+      true -> {:error, :evidence_ref_mismatch}
+    end
+  end
+
+  defp reject_candidate_path_is_worktree(resource, lease) do
+    if is_binary(resource.candidate_path) and resource.candidate_path != "" and
+         resource.candidate_path != lease.worktree_path do
+      :ok
+    else
+      {:error, :validation_infrastructure_failed}
+    end
+  end
+
+  defp stamp_object_backed_identities(resource, caller) do
+    resource
+    |> maybe_stamp(:descriptor_digest, caller_binary(caller, :candidate_materialization_digest))
+    |> maybe_stamp(
+      :source_commit_oid,
+      caller_binary(caller, :source_commit_oid) || caller_binary(caller, :candidate_commit)
+    )
+    |> maybe_stamp(:evidence_ref, caller_binary(caller, :evidence_ref))
+  end
+
+  defp maybe_stamp(resource, _key, nil), do: resource
+
+  defp maybe_stamp(resource, key, value) when is_binary(value) and value != "" do
+    case Map.get(resource, key) do
+      nil -> Map.put(resource, key, value)
+      ^value -> resource
+      _other -> resource
+    end
+  end
+
+  defp object_backed_binding_view(resource, lease) do
+    resource
+    |> validation_resource_view()
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    |> Map.merge(%{
+      "candidate_source" => "object_backed_private_snapshot",
+      "tree_oid" => Map.get(resource, :expected_tree_oid),
+      "source_commit_oid" => Map.get(resource, :source_commit_oid),
+      "hidden_ref" => Map.get(resource, :evidence_ref),
+      "evidence_ref" => Map.get(resource, :evidence_ref),
+      "object_format" => object_format_name(Map.get(resource, :expected_tree_oid)),
+      "descriptor_digest" => Map.get(resource, :descriptor_digest),
+      "candidate_materialization_digest" => Map.get(resource, :descriptor_digest),
+      "acquired_base_commit" => lease.base_commit
+    })
+  end
+
+  defp object_format_name(oid) when is_binary(oid) and byte_size(oid) == 64, do: "sha256"
+  defp object_format_name(oid) when is_binary(oid) and byte_size(oid) == 40, do: "sha1"
+  defp object_format_name(_oid), do: nil
+
+  defp caller_binary(caller, key) when is_map(caller) do
+    value = Map.get(caller, key)
+
+    if is_binary(value) and value != "", do: value, else: nil
+  end
+
   defp fetch_authorized_validation_resource(state, resource_id, caller) do
     with {:ok, resource} <- fetch_validation_resource(state, resource_id),
          {:ok, lease} <- fetch_lease(state, resource.workspace_id),
-         true <- validation_resource_authorized?(resource, lease, caller) do
+         true <- validation_resource_authorized?(resource, lease, caller),
+         :ok <- maybe_require_validation_resource_id(resource, caller),
+         :ok <- maybe_require_workspace_id(resource, caller),
+         :ok <- maybe_require_acquired_base(lease, caller),
+         :ok <- maybe_require_expected_tree(resource, caller),
+         :ok <- maybe_require_digest(resource, caller),
+         :ok <- maybe_require_source_commit(resource, caller),
+         :ok <- maybe_require_evidence_ref(resource, caller) do
       {:ok, resource}
     else
       false -> {:error, :not_authorized}
@@ -2898,7 +3295,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     case attempt_validation_resource_cleanup(state, resource) do
       {:ok, state} ->
         if Keyword.get(opts, :demonitor, true) do
-          Process.demonitor(resource.owner_ref, [:flush])
+          demonitor_ref(Map.get(resource, :owner_ref))
         end
 
         result =
@@ -3669,8 +4066,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       {workspace_id, by_ref} ->
         state = %{state | by_ref: by_ref}
+        lease = Map.get(state.leases, workspace_id)
 
-        case cleanup_workspace_validation_resources(state, workspace_id) do
+        case cleanup_workspace_validation_resources_after_owner_death(
+               state,
+               workspace_id,
+               lease
+             ) do
           {:error, state} ->
             # The dead owner ref is gone, but exact task+principal authority
             # must remain available for the child cleanup. Quarantine the
@@ -3696,6 +4098,163 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         end
     end
   end
+
+  defp claim_dead_active_lease(state, lease, successor_pid) do
+    case prepare_validation_resources_for_successor(state, lease, successor_pid) do
+      {:ok, state} ->
+        demonitor_ref(Map.get(lease, :owner_ref))
+        owner_ref = Process.monitor(successor_pid)
+
+        claimed = %{
+          lease
+          | owner_pid: successor_pid,
+            owner_ref: owner_ref
+        }
+
+        state = %{
+          state
+          | by_ref:
+              state.by_ref
+              |> Map.delete(Map.get(lease, :owner_ref))
+              |> Map.put(owner_ref, lease.workspace_id),
+            leases: Map.put(state.leases, lease.workspace_id, claimed)
+        }
+
+        {:reply, {:ok, public_view(claimed)}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp prepare_validation_resources_for_successor(state, lease, successor_pid) do
+    case validation_resources_for_workspace(state, lease.workspace_id) do
+      [] ->
+        {:ok, state}
+
+      [resource] ->
+        cond do
+          recoverable_object_backed_resource?(resource) and
+              principal_task_match?(resource, lease) ->
+            claim_validation_resource_owner(state, resource, successor_pid)
+
+          recoverable_object_backed_resource?(resource) ->
+            {:error, :not_authorized, state}
+
+          true ->
+            case do_release_validation_resource(state, resource) do
+              {{:ok, _result}, next_state} ->
+                {:ok, next_state}
+
+              {{:error, _reason}, next_state} ->
+                {:error, :validation_resource_cleanup_failed, next_state}
+            end
+        end
+
+      _multiple ->
+        {:error, :stale_validation_resource, state}
+    end
+  end
+
+  defp cleanup_workspace_validation_resources_after_owner_death(state, workspace_id, lease) do
+    state
+    |> validation_resources_for_workspace(workspace_id)
+    |> Enum.reduce_while({:ok, state}, fn resource, {:ok, acc} ->
+      if recoverable_object_backed_resource?(resource) and
+           workspace_retained_after_owner_death?(lease) do
+        {:cont, {:ok, detach_validation_resource_owner(acc, resource)}}
+      else
+        case do_release_validation_resource(acc, resource) do
+          {{:ok, _result}, next_state} -> {:cont, {:ok, next_state}}
+          {{:error, _reason}, next_state} -> {:halt, {:error, next_state}}
+        end
+      end
+    end)
+  end
+
+  defp workspace_retained_after_owner_death?(%{ownership: :owned} = lease) do
+    owner_death_quarantined?(lease) or lease.cleanup_armed == true
+  end
+
+  defp workspace_retained_after_owner_death?(_lease), do: false
+
+  defp validation_resources_for_workspace(state, workspace_id) do
+    state.validation_by_workspace
+    |> Map.get(workspace_id, MapSet.new())
+    |> Enum.map(&Map.get(state.validation_resources, &1))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp recoverable_object_backed_resource?(resource) when is_map(resource) do
+    Map.get(resource, :candidate_source) == :object_backed_private_snapshot and
+      Map.get(resource, :setup_status) == :active and
+      live_pid?(Map.get(resource, :resource_owner_pid)) and
+      Enum.all?(
+        [
+          Map.get(resource, :task_id),
+          Map.get(resource, :principal_id),
+          Map.get(resource, :workspace_id),
+          Map.get(resource, :base_commit),
+          Map.get(resource, :expected_tree_oid),
+          Map.get(resource, :descriptor_digest),
+          Map.get(resource, :source_commit_oid),
+          Map.get(resource, :evidence_ref)
+        ],
+        &non_empty_id?/1
+      )
+  end
+
+  defp recoverable_object_backed_resource?(_resource), do: false
+
+  defp claim_validation_resource_owner(state, resource, successor_pid) do
+    current_owner = Map.get(resource, :owner_pid)
+
+    if live_pid?(current_owner) and current_owner != successor_pid do
+      {:error, :validation_resource_owner_active, state}
+    else
+      demonitor_ref(Map.get(resource, :owner_ref))
+      owner_ref = Process.monitor(successor_pid)
+
+      claimed = %{
+        resource
+        | owner_pid: successor_pid,
+          owner_ref: owner_ref
+      }
+
+      state = %{
+        state
+        | validation_by_ref:
+            state.validation_by_ref
+            |> Map.delete(Map.get(resource, :owner_ref))
+            |> Map.put(owner_ref, resource.resource_id),
+          validation_resources: Map.put(state.validation_resources, resource.resource_id, claimed)
+      }
+
+      {:ok, state}
+    end
+  end
+
+  defp detach_validation_resource_owner(state, resource) do
+    demonitor_ref(Map.get(resource, :owner_ref))
+
+    detached = %{
+      resource
+      | owner_pid: nil,
+        owner_ref: nil
+    }
+
+    %{
+      state
+      | validation_by_ref: Map.delete(state.validation_by_ref, Map.get(resource, :owner_ref)),
+        validation_resources: Map.put(state.validation_resources, resource.resource_id, detached)
+    }
+  end
+
+  defp live_pid?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp live_pid?(_pid), do: false
+
+  defp demonitor_ref(ref) when is_reference(ref), do: Process.demonitor(ref, [:flush])
+  defp demonitor_ref(_ref), do: false
 
   # Registry lifecycle policy for owner death (TaskStore hard cancel / crash).
   # Serialized inside the GenServer — never a DOT node or Jido action.
@@ -3767,8 +4326,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       put_lease(state, lease)
     else
       # Path already gone (common teardown race): drop the lease and its
-      # attestations. Preserve only on actual retain.
-      drop_lease_and_attestations(state, lease)
+      # attestations only after any detached child resource is settled.
+      case cleanup_workspace_validation_resources(state, lease.workspace_id) do
+        {:ok, state} ->
+          drop_lease_and_attestations(state, lease)
+
+        {:error, state} ->
+          preserve_cleanup_pending_after_owner_death(state, lease)
+      end
     end
   end
 
@@ -4140,6 +4705,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     state = ensure_review_snapshot_state(state)
     source = review_source(caller)
 
+    caller =
+      caller
+      |> Map.put(:workspace_id, workspace_id)
+      |> Map.put(:source_commit_oid, candidate_commit)
+
     with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
          true <- lease.active == true || {:error, :not_found},
          :ok <- require_exact_commit_hash(candidate_commit),
@@ -4151,7 +4721,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
            CandidateSourceCore.review_expected_head(source, lease.base_commit, candidate_commit),
          :ok <- require_head_equals_candidate(inspection, expected_head),
          {:ok, candidate_tree_oid, base_tree_oid} <-
-           review_tree_oids(source, lease, candidate_commit) do
+           review_tree_oids(source, lease, candidate_commit),
+         {:ok, state} <-
+           require_optional_review_identities(
+             state,
+             caller,
+             lease,
+             candidate_tree_oid,
+             candidate_commit
+           ) do
       snapshot = %{
         review_snapshot_id: generate_review_snapshot_id(),
         workspace_id: lease.workspace_id,
@@ -4298,6 +4876,68 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp require_optional_review_identities(
+         state,
+         caller,
+         lease,
+         candidate_tree_oid,
+         candidate_commit
+       )
+       when is_map(caller) do
+    with :ok <-
+           optional_identity_match(
+             caller_binary(caller, :acquired_base_commit),
+             lease.base_commit,
+             :acquired_base_mismatch
+           ),
+         :ok <-
+           optional_identity_match(
+             caller_binary(caller, :expected_tree_oid),
+             candidate_tree_oid,
+             :admitted_tree_mismatch
+           ),
+         {:ok, state} <- maybe_bind_review_resource(state, caller) do
+      case caller_binary(caller, :evidence_ref) do
+        nil ->
+          {:ok, state}
+
+        expected_ref ->
+          case Git.verify_archived_evidence_ref(
+                 lease.repo_path,
+                 lease.task_id,
+                 lease.workspace_id,
+                 candidate_commit
+               ) do
+            {:ok, %{hidden_ref: ^expected_ref}} ->
+              {:ok, state}
+
+            {:ok, %{hidden_ref: _other}} ->
+              {:error, :evidence_ref_mismatch}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+      end
+    end
+  end
+
+  defp optional_identity_match(nil, _observed, _reason), do: :ok
+  defp optional_identity_match(expected, expected, _reason), do: :ok
+  defp optional_identity_match(_expected, _observed, reason), do: {:error, reason}
+
+  defp maybe_bind_review_resource(state, caller) do
+    case caller_binary(caller, :validation_resource_id) do
+      nil ->
+        {:ok, state}
+
+      resource_id ->
+        case rebind_object_backed_resource(state, resource_id, caller) do
+          {:ok, _view, next_state} -> {:ok, next_state}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
   defp require_lease_evidence_identity(%{task_id: task_id, workspace_id: workspace_id})
        when is_binary(task_id) and task_id != "" and is_binary(workspace_id) and
               workspace_id != "" do
@@ -4361,7 +5001,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       blob_manifest: Keyword.get(opts, :blob_manifest),
       max_entries: Keyword.get(opts, :max_entries),
       max_bytes: Keyword.get(opts, :max_bytes),
-      max_depth: Keyword.get(opts, :max_depth)
+      max_depth: Keyword.get(opts, :max_depth),
+      source_commit_oid: Keyword.get(opts, :source_commit_oid),
+      acquired_base_commit: Keyword.get(opts, :acquired_base_commit),
+      candidate_materialization_digest: Keyword.get(opts, :candidate_materialization_digest),
+      evidence_ref: Keyword.get(opts, :evidence_ref),
+      validation_resource_id: Keyword.get(opts, :validation_resource_id),
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
 
     {server_opts, caller}
@@ -4416,7 +5062,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       blob_manifest: Map.get(opts, :blob_manifest) || Map.get(opts, "blob_manifest"),
       max_entries: Map.get(opts, :max_entries) || Map.get(opts, "max_entries"),
       max_bytes: Map.get(opts, :max_bytes) || Map.get(opts, "max_bytes"),
-      max_depth: Map.get(opts, :max_depth) || Map.get(opts, "max_depth")
+      max_depth: Map.get(opts, :max_depth) || Map.get(opts, "max_depth"),
+      source_commit_oid: Map.get(opts, :source_commit_oid) || Map.get(opts, "source_commit_oid"),
+      acquired_base_commit:
+        Map.get(opts, :acquired_base_commit) || Map.get(opts, "acquired_base_commit"),
+      candidate_materialization_digest:
+        Map.get(opts, :candidate_materialization_digest) ||
+          Map.get(opts, "candidate_materialization_digest"),
+      evidence_ref: Map.get(opts, :evidence_ref) || Map.get(opts, "evidence_ref"),
+      validation_resource_id:
+        Map.get(opts, :validation_resource_id) || Map.get(opts, "validation_resource_id"),
+      workspace_id: Map.get(opts, :workspace_id) || Map.get(opts, "workspace_id")
     }
 
     {server, caller}
@@ -5982,6 +6638,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     with :ok <- validate_retained_identity(retained, prepared),
          :ok <- ensure_reactivated_id_usable(state, prepared, workspace_id),
+         :ok <- validate_recoverable_resources_for_reactivation(state, retained),
          {:ok, refreshed_retained} <- refresh_marker_before_reactivation(state, retained) do
       owner_ref = Process.monitor(prepared.owner_pid)
       cancel_expiry(refreshed_retained.expiry_ref)
@@ -6016,12 +6673,46 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       # delete it here — only explicit/TTL cleanup after proven absence may.
       state = drop_retained(state, refreshed_retained)
       state = state |> put_lease(lease) |> put_ref(lease)
+      {:ok, state} = claim_retained_validation_resources(state, lease)
 
       {:reply, {:ok, public_view(lease)}, state}
     else
       {:error, reason} ->
         # Persistence or identity failure: leave retained state untouched.
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp validate_recoverable_resources_for_reactivation(state, retained) do
+    case validation_resources_for_workspace(state, retained.workspace_id) do
+      [] ->
+        :ok
+
+      [resource] ->
+        cond do
+          not recoverable_object_backed_resource?(resource) ->
+            {:error, :validation_resource_cleanup_pending}
+
+          not principal_task_match?(resource, retained) ->
+            {:error, :not_authorized}
+
+          live_pid?(Map.get(resource, :owner_pid)) ->
+            {:error, :validation_resource_owner_active}
+
+          true ->
+            :ok
+        end
+
+      _multiple ->
+        {:error, :stale_validation_resource}
+    end
+  end
+
+  defp claim_retained_validation_resources(state, lease) do
+    case validation_resources_for_workspace(state, lease.workspace_id) do
+      [] -> {:ok, state}
+      [resource] -> claim_validation_resource_owner(state, resource, lease.owner_pid)
+      _multiple -> {:error, :stale_validation_resource}
     end
   end
 
@@ -6337,6 +7028,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   # Force-settle a hot retained/orphaned lease after exact task+principal auth.
   defp release_retained_for_settle(state, retained) do
+    case cleanup_workspace_validation_resources(state, retained.workspace_id) do
+      {:ok, state} -> do_release_retained_for_settle(state, retained)
+      {:error, state} -> {:error, :validation_resource_cleanup_failed, state}
+    end
+  end
+
+  defp do_release_retained_for_settle(state, retained) do
     cond do
       # Task settlement must continue an in-flight discard rather than treat it
       # as a plain remove; any leftover marker makes settlement report residue.
@@ -6540,6 +7238,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp remove_retained_now(state, retained) do
+    case cleanup_workspace_validation_resources(state, retained.workspace_id) do
+      {:ok, state} -> do_remove_retained_now(state, retained)
+      {:error, state} -> {:error, :validation_resource_cleanup_failed, state}
+    end
+  end
+
+  defp do_remove_retained_now(state, retained) do
     case reserve_cleanup_attempt(state, retained) do
       {:ok, reserved, state2} ->
         case settle_or_cleanup_retained(state2, reserved) do

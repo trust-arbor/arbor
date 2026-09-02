@@ -632,6 +632,26 @@ same capability and trust rule directly); granting it only to the authenticated
 MCP caller does not satisfy the execution-principal horizon. Direct plans and
 `design_gate=operator` (or an absent gate) do not add it.
 
+Plan v2 `design_required` packets may also include an admitted
+`candidate_materialization` descriptor. That activates a dormant descriptor
+route: after accepted design the graph hard-closes the ACP worker without
+returning it to the pool and advances only on `closed` or idempotent
+`already_closed`. It checkpoints the descriptor digest, source commit, expected
+tree, workspace, and acquired base, then materializes into the existing
+object-backed validation resource. The workspace must be Arbor-owned and clean
+at that acquired base; reused paths fail before resource or evidence allocation.
+Auto trust for `arbor://action/coding/candidate_materialization` does not allow
+descriptor substitution. Validation, review, and publication re-bind the
+checkpointed acquired base, resource, tree, digest, and pre-pinned evidence
+ref. Each immutable consumer reacquires exact task/principal workspace lineage
+after a checkpoint, rather than depending on a completed predecessor to restore
+process ownership. Failures retain evidence and never reopen the closed worker.
+Omitting the field keeps today's ACP implementation path byte-for-byte.
+
+Descriptor-backed plans currently reject `output.draft_pr: true`. Their
+immutable candidate reaches the task branch only during final publication, so
+the earlier draft-PR node cannot safely represent it yet.
+
 The `security_regression` validation profile also requires a nonempty
 `plan.requested_paths` list. Every entry must be a repository-relative path
 ending in `_test.exs`; these are the exact candidate test files overlaid onto

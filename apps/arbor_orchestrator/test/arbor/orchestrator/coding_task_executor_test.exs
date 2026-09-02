@@ -1943,6 +1943,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "repo_path" => repo,
         "workspace_id" => "ws_executor_adoption",
         "evidence_ref" => evidence_ref,
+        "candidate_source" => "workspace_branch",
         "published_commit" => candidate_commit,
         "workspace_release_status" => "removed"
       })
@@ -5384,6 +5385,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "repo_path" => "/tmp/repo",
                  "worktree_path" => "/tmp/ws",
                  "workspace_id" => "ws_1",
+                 "candidate_source" => "immutable_object",
                  "workspace.branch_provenance" => "created",
                  "workspace.base_commit" => "base-commit",
                  "release.evidence_ref" => "refs/arbor/evidence/workspace/task",
@@ -5402,6 +5404,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["branch_provenance"] == "created"
       assert result["base_commit"] == "base-commit"
       assert result["workspace_id"] == "ws_1"
+      assert result["candidate_source"] == "immutable_object"
       assert result["evidence_ref"] == "refs/arbor/evidence/workspace/task"
       assert result["published_commit"] == "cafebabe"
       assert result["worker_session_id"] == "w_1"
@@ -8269,12 +8272,26 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       evidence = descriptor["path"] |> File.read!() |> Jason.decode!()
       assert evidence["candidate"]["candidate_commit"] == fixture.candidate_commit
+      assert evidence["candidate"]["candidate_source"] == "workspace_branch"
       assert evidence["proof"]["destination_commit"] == fixture.candidate_commit
     end
 
     test "fails closed when the stored result disagrees with immutable terminal evidence" do
       fixture = finalized_adoption_fixture()
       tampered = Map.put(fixture.finalized, "commit_hash", String.duplicate("f", 40))
+
+      assert {:error, :adoption_candidate_result_mismatch} =
+               CodingTaskExecutor.adopt_task(
+                 "agent_1",
+                 tampered,
+                 %{"destination_ref" => fixture.destination_ref},
+                 valid_context()
+               )
+    end
+
+    test "security regression: adoption fails when candidate_source disagrees with the result" do
+      fixture = finalized_adoption_fixture()
+      tampered = Map.put(fixture.finalized, "candidate_source", "immutable_object")
 
       assert {:error, :adoption_candidate_result_mismatch} =
                CodingTaskExecutor.adopt_task(

@@ -296,6 +296,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
   } do
     parent = self()
     mkdir_app_tests!(worktree, ["alpha", "beta"])
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})

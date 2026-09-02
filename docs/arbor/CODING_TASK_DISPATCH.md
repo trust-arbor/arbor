@@ -306,7 +306,9 @@ For the standard `coding-change-v1` graph that set includes `arbor://acp/tool`,
 the `arbor://action/coding/*` family (workspace acquire/inspect/release/
 committed_change/recovery_summary, review_tree read/search, review/submit,
 reviewed_commit, reviewed_validation, worker_terminal/parse,
-dependency_baseline/check, and design_checkpoint open/parse/capture/load/await),
+dependency_baseline/check, design_checkpoint open/parse/capture/load/await,
+and `arbor://action/coding/candidate_materialization` when a Plan v2
+`design_required` packet includes `candidate_materialization`),
 the profile-selected validator through the reviewed wrapper's execution
 dependencies, `arbor://action/git/commit`, `arbor://action/git/pr`,
 `arbor://action/council/review`, `arbor://action/consensus/decide_review`, and
@@ -541,6 +543,24 @@ not opt into legacy behavior. Minimally required plan fields:
 | `work_packet` | Canonical bounded work intent; high-risk classes require `checkpoint_policy: "design_required"`. Optional `design_gate` selects who admits that design: `"operator"` (default — the existing operator checkpoint only), `"council"` (advisory council only), or `"council_then_operator"` (advisory council, then the existing operator checkpoint). An absent key is `"operator"`. |
 | `work_packet_digest` | Exact `sha256:` digest of the canonical packet |
 | `requested_paths` | Required and nonempty for `security_regression`; repository-relative `_test.exs` files used for exact-parent overlay verification |
+| `candidate_materialization` | Optional Plan v2 `design_required` contract. When present, compilation activates the dormant descriptor route instead of ACP implementation. Descriptor-free Plan v1 and Plan v2 compilation is unchanged. |
+
+### Candidate materialization (Plan v2 `design_required`)
+
+When `plan.candidate_materialization` is admitted, the compiled `coding-change-v1` graph hard-closes the design worker after accepted design and never returns it to the ACP pool. The graph advances only after the close action reports `closed` or the idempotent `already_closed`; `closing` and every other result fail the descriptor route before materialization. It then checkpoints six Engine identities: the descriptor, its digest, source commit, expected tree, workspace id, and acquired base. `coding_candidate_materialize` binds `param.pinned_descriptor_digest` from the compiler; auto trust cannot substitute a different descriptor map. Task and principal come only from trusted execution context. The descriptor route currently requires `validation_profile: "cross_app"`; other profiles are rejected at compilation until they have an equivalent object-backed consumer.
+
+Materialization writes an object-backed snapshot and pins `refs/arbor/evidence/...`. The task worktree must be Arbor-owned and remain clean at the checkpointed acquired base; a reused workspace is rejected with `descriptor_workspace_not_owned` before allocating a validation resource or evidence ref because Arbor cannot promise owner-death continuity for a caller-owned path. Validation, review, and publication re-bind that same resource plus source commit, candidate tree, descriptor digest, and the pre-pinned evidence ref. Opaque workspace or resource ids are never authority by themselves.
+
+Restart replays from those checkpointed identities. Every immutable-resource consumer independently reacquires the exact task/principal workspace lineage, so recovery does not rely on replaying a completed predecessor merely to restore process ownership. Materialize is idempotent: a second invoke reuses the existing resource and does not acquire a second snapshot or resend ACP implementation. Materialization, validation, review, or approval failure retains evidence and never reopens or messages the closed worker.
+
+Descriptor-backed plans currently reject `output.draft_pr: true`. The immutable
+candidate is published only after validation and review, while the existing
+draft-PR node assumes a branch-backed candidate already exists. Failing at
+compilation prevents a PR from being opened against the unchanged base branch.
+
+Omission of `candidate_source` keeps the `workspace_branch` compatibility path. Descriptor-free graphs do not include `arbor://action/coding/candidate_materialization`.
+
+Representative full-manifest measurement on 2026-09-01 used Arbor `HEAD` plus one descriptor-owned marker: 4,187 entries, 53,879,334 bytes, and 8,880 ms materialization wall-clock. Source staging took 2,968 ms and 38 Git invocations for 4,156 unique objects using nine bounded object batches and nine NUL-delimited index batches. Destination verification listed the held tree in 85 ms, walked 4,963 filesystem entries/4,187 files in-process in 1,356 ms, restored in 635 ms, and used three Git invocations. The initial per-entry implementation exceeded four minutes before completion, which justified batching. The batched path still checks exact source OID/type/size and aggregate bytes, imports only admitted blobs into the private object store, runs strict object `fsck`, rechecks the private inventory, constructs the exact index/tree, and performs the unchanged destination/owner verification. These figures are characterization evidence, not timing thresholds; the slow integration test logs fresh values for the current tree.
 
 Explicit version 1 remains readable and compilable for archived compatibility.
 New high-risk version-1 dispatch is rejected before compilation or workspace

@@ -6,10 +6,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   require Logger
 
   alias Arbor.Actions.Coding.BlobManifest
-  alias Arbor.Actions.Coding.GitBlobOid
   alias Arbor.Actions.Coding.SnapshotDestVerify
   alias Arbor.Actions.Coding.Workspace
-  alias Arbor.Actions.Git
   alias Arbor.Actions.Mix, as: MixAction
 
   @supervisor Arbor.Actions.Coding.ValidationResourceSupervisor
@@ -20,6 +18,9 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   @supervisor_cleanup_budget_ms 20_000
   @cleanup_attempted_key {__MODULE__, :bounded_cleanup_attempted}
   @git_invocations_key {__MODULE__, :git_invocations}
+  # Bounds child-process argv/stdin size; total admission remains governed by
+  # BlobManifest and Mix.snapshot_bounds/0 rather than by this chunk size.
+  @object_backed_batch_entries 512
 
   @doc false
   def supervisor_name, do: @supervisor
@@ -142,7 +143,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
       snapshot_index: nil,
       snapshot_dest: nil,
       snapshot_tree_oid: nil,
-      snapshot_head: nil
+      snapshot_head: nil,
+      snapshot_stage_stats: nil
     }
 
     case Arbor.Shell.create_private_owned_tree(root_path) do
@@ -643,7 +645,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
          :ok <- reject_snapshot_entry_count(entries, budget.max_entries),
          :ok <- reject_snapshot_depth(entries, budget.max_depth),
          :ok <- init_owner_git_format(objects, format),
-         :ok <-
+         {:ok, stage_stats} <-
            stage_object_backed_entries(
              state.repo_path,
              objects,
@@ -662,7 +664,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
           snapshot_index: index,
           snapshot_tree_oid: tree_oid,
           snapshot_dest: dest,
-          snapshot_head: nil
+          snapshot_head: nil,
+          snapshot_stage_stats: stage_stats
       }
 
       case recapture_held_tree(next, tree_oid, opts) do
@@ -737,103 +740,261 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
 
   defp stage_object_backed_entries(repo_path, objects, index, entries, format, max_bytes) do
     _ = File.rm(index)
+    reset_git_invocations()
+    started = monotonic_ms()
 
-    Enum.reduce_while(entries, {:ok, max_bytes}, fn entry, {:ok, remaining} ->
-      stage_object_backed_entry(repo_path, objects, index, entry, format, remaining)
-    end)
-    |> case do
-      {:ok, _remaining} -> :ok
-      {:error, reason} -> {:error, reason}
+    with {:ok, object_sizes, total_bytes} <-
+           inspect_source_objects(repo_path, entries, format, max_bytes),
+         :ok <- import_source_objects(repo_path, objects, object_sizes, format),
+         :ok <- verify_private_objects(objects, object_sizes),
+         :ok <- initialize_owner_index(objects, index),
+         :ok <- populate_owner_index(objects, index, entries) do
+      {:ok,
+       %{
+         batching: true,
+         entries: length(entries),
+         unique_objects: map_size(object_sizes),
+         bytes: total_bytes,
+         object_batches: batch_count(map_size(object_sizes)),
+         index_batches: batch_count(length(entries)),
+         git_invocations: git_invocation_count(),
+         wall_clock_ms: elapsed_ms(started)
+       }}
     end
   end
 
-  defp stage_object_backed_entry(repo_path, objects, index, entry, format, remaining)
-       when is_integer(remaining) and remaining >= 0 do
-    case Git.blob_byte_size(repo_path, entry.oid) do
-      {:ok, size} when size == 0 ->
-        write_object_backed_blob(objects, index, entry, "", remaining)
+  defp inspect_source_objects(repo_path, entries, format, max_bytes)
+       when is_binary(repo_path) and is_list(entries) and format in [:sha1, :sha256] and
+              is_integer(max_bytes) and max_bytes >= 0 do
+    entries
+    |> Enum.chunk_every(@object_backed_batch_entries)
+    |> Enum.reduce_while({:ok, %{}, 0}, fn batch, {:ok, sizes, total_bytes} ->
+      case batch_object_info(["-C", repo_path], batch) do
+        {:ok, rows} ->
+          case merge_source_object_info(rows, sizes, total_bytes, format, max_bytes) do
+            {:ok, next_sizes, next_total} ->
+              {:cont, {:ok, next_sizes, next_total}}
 
-      {:ok, size} when size > remaining ->
-        {:halt, {:error, :snapshot_budget_exceeded}}
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
 
-      {:ok, _size} ->
-        case Git.read_bounded_blob_by_oid(repo_path, entry.oid, remaining) do
-          {:ok, bytes} ->
-            case GitBlobOid.hash_bytes(bytes, format) do
-              {:ok, hashed} when hashed == entry.oid ->
-                write_object_backed_blob(
-                  objects,
-                  index,
-                  entry,
-                  bytes,
-                  remaining - byte_size(bytes)
-                )
+        {:error, _reason} ->
+          {:halt, {:error, :snapshot_blob_read_failed}}
+      end
+    end)
+  end
 
-              {:ok, _other} ->
-                {:halt, {:error, :admitted_tree_mismatch}}
+  defp inspect_source_objects(_repo_path, _entries, _format, _max_bytes),
+    do: {:error, :snapshot_budget_exceeded}
 
-              {:error, _reason} ->
-                {:halt, {:error, :admitted_tree_mismatch}}
+  defp merge_source_object_info(rows, sizes, total_bytes, format, max_bytes) do
+    Enum.reduce_while(rows, {:ok, sizes, total_bytes}, fn %{oid: oid, size: size},
+                                                          {:ok, acc, total} ->
+      next_total = total + size
+
+      cond do
+        not object_id_for_format?(oid, format) ->
+          {:halt, {:error, :admitted_tree_mismatch}}
+
+        next_total > max_bytes ->
+          {:halt, {:error, :snapshot_budget_exceeded}}
+
+        Map.has_key?(acc, oid) and Map.fetch!(acc, oid) != size ->
+          {:halt, {:error, :snapshot_blob_read_failed}}
+
+        true ->
+          {:cont, {:ok, Map.put(acc, oid, size), next_total}}
+      end
+    end)
+  end
+
+  defp import_source_objects(_repo_path, _objects, object_sizes, _format)
+       when map_size(object_sizes) == 0,
+       do: :ok
+
+  defp import_source_objects(repo_path, objects, object_sizes, format) do
+    pack_root = Path.join([objects, "objects", "pack"])
+    pack_prefix = Path.join(pack_root, "candidate")
+
+    with :ok <- File.mkdir_p(pack_root) do
+      object_sizes
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.chunk_every(@object_backed_batch_entries)
+      |> Enum.reduce_while(:ok, fn oids, :ok ->
+        stdin = Enum.join(oids, "\n") <> "\n"
+
+        case git(
+               [
+                 "-C",
+                 repo_path,
+                 "pack-objects",
+                 "--quiet",
+                 "--no-reuse-delta",
+                 "--no-reuse-object",
+                 pack_prefix
+               ],
+               [],
+               stdin: stdin
+             ) do
+          {:ok, pack_id} ->
+            pack_id = String.trim(pack_id)
+
+            if object_id_for_format?(pack_id, format) and
+                 regular_file?("#{pack_prefix}-#{pack_id}.pack") and
+                 regular_file?("#{pack_prefix}-#{pack_id}.idx") do
+              {:cont, :ok}
+            else
+              {:halt, {:error, :snapshot_blob_read_failed}}
             end
-
-          {:error, {:git_blob_read_failed, :output_truncated}} ->
-            {:halt, {:error, :snapshot_budget_exceeded}}
 
           {:error, _reason} ->
             {:halt, {:error, :snapshot_blob_read_failed}}
         end
-
+      end)
+      |> case do
+        :ok -> verify_private_object_store(objects)
+        {:error, reason} -> {:error, reason}
+      end
+    else
       {:error, _reason} ->
-        {:halt, {:error, :snapshot_blob_read_failed}}
+        {:error, :snapshot_blob_read_failed}
     end
   end
 
-  defp stage_object_backed_entry(_repo_path, _objects, _index, _entry, _format, _remaining),
-    do: {:halt, {:error, :snapshot_budget_exceeded}}
+  defp verify_private_object_store(objects) do
+    case git([
+           "--git-dir",
+           objects,
+           "-c",
+           "core.commitGraph=false",
+           "-c",
+           "core.multiPackIndex=false",
+           "fsck",
+           "--strict",
+           "--full",
+           "--no-reflogs",
+           "--no-references",
+           "--no-dangling",
+           "--no-progress"
+         ]) do
+      {:ok, _output} -> :ok
+      {:error, _reason} -> {:error, :snapshot_blob_read_failed}
+    end
+  end
 
-  defp write_object_backed_blob(objects, index, entry, bytes, remaining)
-       when is_integer(remaining) and remaining >= 0 do
-    case GitBlobOid.hash_bytes(bytes, infer_hash_format(entry.oid)) do
-      {:ok, hashed} when hashed != entry.oid ->
-        {:halt, {:error, :admitted_tree_mismatch}}
+  defp verify_private_objects(objects, object_sizes) do
+    object_sizes
+    |> Enum.sort_by(fn {oid, _size} -> oid end)
+    |> Enum.map(fn {oid, size} -> %{oid: oid, size: size} end)
+    |> Enum.chunk_every(@object_backed_batch_entries)
+    |> Enum.reduce_while(:ok, fn batch, :ok ->
+      case batch_object_info(["--git-dir", objects], batch) do
+        {:ok, rows} ->
+          if Enum.zip(batch, rows)
+             |> Enum.all?(fn {expected, actual} -> expected == actual end) do
+            {:cont, :ok}
+          else
+            {:halt, {:error, :snapshot_blob_read_failed}}
+          end
 
-      {:ok, _hashed} ->
-        case git(
-               ["--git-dir", objects, "hash-object", "-w", "--stdin", "--no-filters"],
-               [],
-               stdin: bytes
-             ) do
-          {:ok, hashed} ->
-            if String.trim(hashed) == entry.oid do
-              case git(
-                     [
-                       "--git-dir",
-                       objects,
-                       "update-index",
-                       "--add",
-                       "--cacheinfo",
-                       "#{entry.mode},#{entry.oid},#{entry.path}"
-                     ],
-                     [{"GIT_INDEX_FILE", index}]
-                   ) do
-                {:ok, _} -> {:cont, {:ok, remaining}}
-                {:error, reason} -> {:halt, {:error, reason}}
-              end
-            else
-              {:halt, {:error, :admitted_tree_mismatch}}
+        {:error, _reason} ->
+          {:halt, {:error, :snapshot_blob_read_failed}}
+      end
+    end)
+  end
+
+  defp batch_object_info(git_prefix, entries) do
+    stdin = entries |> Enum.map(&[&1.oid, "\n"]) |> IO.iodata_to_binary()
+
+    case git(
+           git_prefix ++
+             ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+           [],
+           stdin: stdin
+         ) do
+      {:ok, output} -> parse_batch_object_info(output, entries)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_batch_object_info(output, entries) when is_binary(output) and is_list(entries) do
+    lines = String.split(output, "\n", trim: true)
+
+    if length(lines) == length(entries) do
+      entries
+      |> Enum.zip(lines)
+      |> Enum.reduce_while({:ok, []}, fn {entry, line}, {:ok, acc} ->
+        case String.split(line, " ", parts: 3) do
+          [oid, "blob", size_text] when oid == entry.oid ->
+            case Integer.parse(size_text) do
+              {size, ""} when size >= 0 ->
+                {:cont, {:ok, [%{oid: oid, size: size} | acc]}}
+
+              _other ->
+                {:halt, {:error, :snapshot_blob_read_failed}}
             end
 
-          {:error, reason} ->
-            {:halt, {:error, reason}}
+          _other ->
+            {:halt, {:error, :snapshot_blob_read_failed}}
         end
-
-      {:error, _reason} ->
-        {:halt, {:error, :admitted_tree_mismatch}}
+      end)
+      |> case do
+        {:ok, rows} -> {:ok, Enum.reverse(rows)}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :snapshot_blob_read_failed}
     end
   end
 
-  defp infer_hash_format(oid) when is_binary(oid) and byte_size(oid) == 64, do: :sha256
-  defp infer_hash_format(_oid), do: :sha1
+  defp initialize_owner_index(objects, index) do
+    case git(
+           ["--git-dir", objects, "read-tree", "--empty"],
+           [{"GIT_INDEX_FILE", index}]
+         ) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp populate_owner_index(objects, index, entries) do
+    entries
+    |> Enum.chunk_every(@object_backed_batch_entries)
+    |> Enum.reduce_while(:ok, fn batch, :ok ->
+      index_info =
+        batch
+        |> Enum.map(fn entry -> [entry.mode, " ", entry.oid, "\t", entry.path, <<0>>] end)
+        |> IO.iodata_to_binary()
+
+      case git(
+             ["--git-dir", objects, "update-index", "--add", "-z", "--index-info"],
+             [{"GIT_INDEX_FILE", index}],
+             stdin: index_info
+           ) do
+        {:ok, _output} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp object_id_for_format?(oid, :sha1) when is_binary(oid),
+    do: byte_size(oid) == 40 and Regex.match?(~r/\A[0-9a-f]+\z/, oid)
+
+  defp object_id_for_format?(oid, :sha256) when is_binary(oid),
+    do: byte_size(oid) == 64 and Regex.match?(~r/\A[0-9a-f]+\z/, oid)
+
+  defp object_id_for_format?(_oid, _format), do: false
+
+  defp regular_file?(path) do
+    match?({:ok, %File.Stat{type: :regular}}, File.lstat(path))
+  end
+
+  defp batch_count(0), do: 0
+
+  defp batch_count(count) when is_integer(count) and count > 0,
+    do: div(count + @object_backed_batch_entries - 1, @object_backed_batch_entries)
 
   defp materialize_committable_candidate(state, meta) do
     source = Map.get(meta, :source_worktree) || Map.get(meta, "source_worktree")
@@ -891,7 +1052,7 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
   end
 
   # Dest verification hashes in-process and must not write dest bytes into the
-  # owner object store. Source staging keeps hash_source_blob/3 with hash-object -w.
+  # owner object store. Source objects were already imported and fscked above.
   defp recapture_verified_tree(state, objects, index, dest, held, opts) do
     reset_git_invocations()
     held_list_started = monotonic_ms()
@@ -922,7 +1083,8 @@ defmodule Arbor.Actions.Coding.ValidationResourceOwner do
               held_list_ms: held_list_ms,
               walk_ms: walk_ms,
               restore_ms: restore_ms,
-              git_invocations: git_invocations
+              git_invocations: git_invocations,
+              source_stage: Map.get(state, :snapshot_stage_stats)
             }
 
             Logger.info(

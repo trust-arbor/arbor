@@ -103,6 +103,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   @engine_static_receipt_directory "coding-cross-app-static-receipts"
   @engine_static_receipt_generation_limit 8
   @digest_filename_regex ~r/\A[0-9a-f]{64}\.json\z/
+  @terminal_candidate_required_keys MapSet.new(~w(
+    task_id
+    workspace_id
+    repo_path
+    branch
+    base_commit
+    candidate_commit
+    branch_provenance
+    evidence_ref
+  ))
+  @terminal_candidate_sources MapSet.new(~w(workspace_branch immutable_object))
 
   @terminal_result_keys MapSet.new(~w(
     status
@@ -141,6 +152,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     evidence_ref
     published_commit
     branch_lifecycle
+    candidate_source
     artifacts
   ))
 
@@ -1507,6 +1519,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
          :ok <- validate_terminal_verification_report(result),
          :ok <- validate_terminal_verification_consistency(result),
          :ok <- validate_terminal_review(Map.get(result, "review")),
+         :ok <- validate_terminal_candidate_source(result),
          :ok <-
            validate_terminal_descriptor_field(
              result,
@@ -1532,6 +1545,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
         if VerificationReport.valid?(report),
           do: :ok,
           else: {:error, {:invalid_terminal_field, "verification_report"}}
+    end
+  end
+
+  defp validate_terminal_candidate_source(result) do
+    case Map.fetch(result, "candidate_source") do
+      :error ->
+        :ok
+
+      {:ok, source} ->
+        if MapSet.member?(@terminal_candidate_sources, source),
+          do: :ok,
+          else: {:error, {:invalid_terminal_field, "candidate_source"}}
     end
   end
 
@@ -1778,16 +1803,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   end
 
   defp maybe_put_terminal_candidate(body, result, task_id) do
-    candidate = %{
-      "task_id" => task_id,
-      "workspace_id" => Map.get(result, "workspace_id"),
-      "repo_path" => Map.get(result, "repo_path"),
-      "branch" => Map.get(result, "branch"),
-      "base_commit" => Map.get(result, "base_commit"),
-      "candidate_commit" => Map.get(result, "commit_hash") || Map.get(result, "commit"),
-      "branch_provenance" => Map.get(result, "branch_provenance"),
-      "evidence_ref" => Map.get(result, "evidence_ref")
-    }
+    candidate =
+      %{
+        "task_id" => task_id,
+        "workspace_id" => Map.get(result, "workspace_id"),
+        "repo_path" => Map.get(result, "repo_path"),
+        "branch" => Map.get(result, "branch"),
+        "base_commit" => Map.get(result, "base_commit"),
+        "candidate_commit" => Map.get(result, "commit_hash") || Map.get(result, "commit"),
+        "branch_provenance" => Map.get(result, "branch_provenance"),
+        "evidence_ref" => Map.get(result, "evidence_ref")
+      }
+      |> maybe_put_terminal_candidate_source(Map.get(result, "candidate_source"))
 
     if complete_terminal_candidate?(candidate) do
       Map.put(body, "candidate", candidate)
@@ -1796,14 +1823,33 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
     end
   end
 
+  defp maybe_put_terminal_candidate_source(candidate, source)
+       when source in ["workspace_branch", "immutable_object"],
+       do: Map.put(candidate, "candidate_source", source)
+
+  defp maybe_put_terminal_candidate_source(candidate, _source), do: candidate
+
   defp complete_terminal_candidate?(candidate) do
-    Enum.all?(
-      ~w(task_id workspace_id repo_path branch base_commit candidate_commit branch_provenance evidence_ref),
-      fn key ->
+    keys = Map.keys(candidate) |> MapSet.new()
+    keys_with_source = MapSet.put(@terminal_candidate_required_keys, "candidate_source")
+
+    valid_shape? =
+      MapSet.equal?(keys, @terminal_candidate_required_keys) or
+        MapSet.equal?(keys, keys_with_source)
+
+    required_values_valid? =
+      Enum.all?(@terminal_candidate_required_keys, fn key ->
         value = Map.get(candidate, key)
         is_binary(value) and String.valid?(value) and String.trim(value) != ""
+      end)
+
+    source_valid? =
+      case Map.fetch(candidate, "candidate_source") do
+        :error -> :ok
+        {:ok, source} -> MapSet.member?(@terminal_candidate_sources, source)
       end
-    )
+
+    valid_shape? and required_values_valid? and source_valid? in [:ok, true]
   end
 
   defp maybe_put_archived_metrics(body, result) do

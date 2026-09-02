@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 712,
+  "entry_count": 715,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8800,8 +8800,47 @@
       "source_incident": "found 2026-09-01 while repairing settled coding-task rehydration after the design-council graph upgrade",
       "always_loaded": false,
       "content_sha256": "65f6842d7fc66eb65882d2f2adf327e241e2a212355127c1a491e75e4a0183df"
+    },
+    {
+      "source_ordinal": 713,
+      "source_kind": "post-migration",
+      "slug": "worker-close-success-is-not-quiescence-until-cleanup-settles",
+      "title": "Worker-close success is not quiescence until cleanup settles.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-worker-close-success-is-not-quiescence-until-cleanup-settles",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 while reviewing the G5D descriptor route",
+      "always_loaded": false,
+      "content_sha256": "2afd7d3bc3e786f66061e435c8ec65fe86c3f81a92b05e7f5522a1cf5e15bb56"
+    },
+    {
+      "source_ordinal": 714,
+      "source_kind": "post-migration",
+      "slug": "every-checkpoint-resumable-resource-consumer-must-reacquire-ownership",
+      "title": "Every checkpoint-resumable resource consumer must reacquire ownership.",
+      "topic": "otp-ownership-cleanup",
+      "destination": ".claude/skills/applied-learning-otp-ownership-cleanup.md",
+      "anchor": "applied-learning-every-checkpoint-resumable-resource-consumer-must-reacquire-ownership",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 while reviewing immutable CrossApp review snapshots",
+      "always_loaded": false,
+      "content_sha256": "3b677a672118b3d596ee9575515138a1b68eb0230c35c3ec04351f7be6ec46f1"
+    },
+    {
+      "source_ordinal": 715,
+      "source_kind": "post-migration",
+      "slug": "restart-durable-immutable-materialization-requires-an-owned-workspace",
+      "title": "Restart-durable immutable materialization requires an owned workspace.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-restart-durable-immutable-materialization-requires-an-owned-workspace",
+      "source_date": "2026-09-02",
+      "source_incident": "found 2026-09-02 while reviewing G5D candidate materialization",
+      "always_loaded": false,
+      "content_sha256": "4bb56de9b4173139181e285eaccc3e21ee2ed146985b6e7fa909a657b7104c56"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 251
+  "post_migration_entry_count": 254
 }

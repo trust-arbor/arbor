@@ -1926,6 +1926,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
         "base_commit" => base_commit,
         "commit_hash" => candidate_commit,
         "branch_provenance" => "created",
+        "candidate_source" => "immutable_object",
         "evidence_ref" => "refs/arbor/evidence/workspace/task"
       })
 
@@ -1942,8 +1943,21 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
              "base_commit" => base_commit,
              "candidate_commit" => candidate_commit,
              "branch_provenance" => "created",
+             "candidate_source" => "immutable_object",
              "evidence_ref" => "refs/arbor/evidence/workspace/task"
            }
+  end
+
+  test "terminal evidence rejects an unknown candidate source", %{root: root} do
+    File.mkdir_p!(root)
+
+    result =
+      root
+      |> terminal_result()
+      |> Map.put("candidate_source", "worker_branch")
+
+    assert {:error, {:invalid_terminal_field, "candidate_source"}} =
+             ArtifactStore.archive_terminal_evidence(root, "task_coding_1", result, [])
   end
 
   test "adoption evidence is content-addressed, immutable, and replayable", %{root: root} do

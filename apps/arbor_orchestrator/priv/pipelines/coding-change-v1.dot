@@ -2059,6 +2059,175 @@ digraph CodingChangeV1 {
     max_retries="0"
   ]
 
+  // Dormant descriptor-only materialization route. Compiler drops these nodes
+  // unless Plan v2 design_required includes candidate_materialization.
+  close_design_worker [
+    type="exec",
+    target="action",
+    action="acp_close_session",
+    context_keys="worker_session_id",
+    param.return_to_pool=true,
+    output_prefix="design_close",
+    max_retries="0"
+  ]
+
+  check_design_worker_closed [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  error_descriptor_worker_close_failed [
+    type="transform",
+    transform="constant",
+    expression="descriptor_worker_close_failed",
+    output_key="error"
+  ]
+
+  error_descriptor_materialization_failed [
+    type="transform",
+    transform="constant",
+    expression="candidate_materialization_failed",
+    output_key="error"
+  ]
+
+  error_descriptor_workspace_moved [
+    type="transform",
+    transform="constant",
+    expression="descriptor_workspace_moved",
+    output_key="error"
+  ]
+
+  status_descriptor_pipeline_error [
+    type="transform",
+    transform="constant",
+    expression="pipeline_error",
+    output_key="status"
+  ]
+
+  checkpoint_candidate_materialization [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_candidate_materialization",
+    output_key="candidate_materialization"
+  ]
+
+  checkpoint_candidate_materialization_digest [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_candidate_materialization_digest",
+    output_key="candidate_materialization_digest"
+  ]
+
+  checkpoint_source_commit [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_source_commit_oid",
+    output_key="source_commit_oid"
+  ]
+
+  checkpoint_expected_tree [
+    type="transform",
+    transform="identity",
+    source_key="coding_plan_expected_tree_oid",
+    output_key="expected_tree_oid"
+  ]
+
+  checkpoint_workspace [
+    type="transform",
+    transform="identity",
+    source_key="workspace_id",
+    output_key="workspace_id"
+  ]
+
+  checkpoint_acquired_base [
+    type="transform",
+    transform="identity",
+    source_key="base_commit",
+    output_key="acquired_base_commit"
+  ]
+
+  mark_candidate_source_immutable [
+    type="transform",
+    transform="constant",
+    expression="immutable_object",
+    output_key="candidate_source"
+  ]
+
+  hoist_descriptor_commit_hash [
+    type="transform",
+    transform="identity",
+    source_key="source_commit_oid",
+    output_key="commit_hash"
+  ]
+
+  materialize_candidate [
+    type="exec",
+    target="action",
+    action="coding_candidate_materialize",
+    context_keys="workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit",
+    output_prefix="materialize",
+    max_retries="0"
+  ]
+
+  hoist_validation_resource_id [
+    type="transform",
+    transform="identity",
+    source_key="materialize.resource_id",
+    output_key="validation_resource_id"
+  ]
+
+  hoist_descriptor_evidence_ref [
+    type="transform",
+    transform="identity",
+    source_key="materialize.hidden_ref",
+    output_key="evidence_ref"
+  ]
+
+  hoist_descriptor_tree_oid [
+    type="transform",
+    transform="identity",
+    source_key="materialize.tree_oid",
+    output_key="validation_candidate_tree_oid"
+  ]
+
+  hoist_descriptor_candidate_path [
+    type="transform",
+    transform="identity",
+    source_key="materialize.candidate_path",
+    output_key="path"
+  ]
+
+  prove_workspace_at_base [
+    type="exec",
+    target="action",
+    action="coding_workspace_ensure_active",
+    context_keys="workspace_id",
+    output_prefix="base_proof",
+    max_retries="0"
+  ]
+
+  compare_descriptor_workspace_base [
+    type="transform",
+    transform="not_equal",
+    source_key="base_proof.head_commit",
+    expression="acquired_base_commit",
+    output_key="descriptor_workspace_moved"
+  ]
+
+  check_workspace_at_base [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  skip_descriptor_close [
+    type="transform",
+    transform="identity",
+    source_key="status",
+    output_key="status"
+  ]
+
   // Flow
 
   start -> init_validation_rework_count -> init_review_rework_count
@@ -2287,6 +2456,29 @@ digraph CodingChangeV1 {
   start -> clear_cross_app_progress_binding [condition="0=1"]
   start -> error_cross_app_window_invalid [condition="0=1"]
   start -> route_design_gate [condition="0=1"]
+  start -> close_design_worker [condition="0=1"]
+  start -> check_design_worker_closed [condition="0=1"]
+  start -> error_descriptor_worker_close_failed [condition="0=1"]
+  start -> error_descriptor_materialization_failed [condition="0=1"]
+  start -> error_descriptor_workspace_moved [condition="0=1"]
+  start -> status_descriptor_pipeline_error [condition="0=1"]
+  start -> checkpoint_candidate_materialization [condition="0=1"]
+  start -> checkpoint_candidate_materialization_digest [condition="0=1"]
+  start -> checkpoint_source_commit [condition="0=1"]
+  start -> checkpoint_expected_tree [condition="0=1"]
+  start -> checkpoint_workspace [condition="0=1"]
+  start -> checkpoint_acquired_base [condition="0=1"]
+  start -> mark_candidate_source_immutable [condition="0=1"]
+  start -> hoist_descriptor_commit_hash [condition="0=1"]
+  start -> materialize_candidate [condition="0=1"]
+  start -> hoist_validation_resource_id [condition="0=1"]
+  start -> hoist_descriptor_evidence_ref [condition="0=1"]
+  start -> hoist_descriptor_tree_oid [condition="0=1"]
+  start -> hoist_descriptor_candidate_path [condition="0=1"]
+  start -> prove_workspace_at_base [condition="0=1"]
+  start -> compare_descriptor_workspace_base [condition="0=1"]
+  start -> check_workspace_at_base [condition="0=1"]
+  start -> skip_descriptor_close [condition="0=1"]
 
   // Dormant security-regression edges retain default behavior until the
   // compiler connects the reviewed profile-specific entry points.
@@ -2651,4 +2843,37 @@ digraph CodingChangeV1 {
   hoist_design_council_run_id -> open_design_checkpoint
   error_design_council_failed -> status_pipeline_error_then_close
   error_design_council_outcome_invalid -> status_pipeline_error_then_close
+
+  // Descriptor route internals (reachable via 0=1 seeds until compiler activates)
+  close_design_worker -> check_design_worker_closed [condition="outcome=success"]
+  close_design_worker -> error_descriptor_worker_close_failed [condition="outcome=fail"]
+  error_descriptor_worker_close_failed -> status_descriptor_pipeline_error
+  check_design_worker_closed -> checkpoint_candidate_materialization [condition="context.design_close.status=closed"]
+  check_design_worker_closed -> checkpoint_candidate_materialization [condition="context.design_close.status=already_closed"]
+  check_design_worker_closed -> error_descriptor_worker_close_failed [condition="context.design_close.status!=closed&&context.design_close.status!=already_closed"]
+  checkpoint_candidate_materialization -> checkpoint_candidate_materialization_digest
+  checkpoint_candidate_materialization_digest -> checkpoint_source_commit
+  checkpoint_source_commit -> checkpoint_expected_tree
+  checkpoint_expected_tree -> checkpoint_workspace
+  checkpoint_workspace -> checkpoint_acquired_base
+  checkpoint_acquired_base -> mark_candidate_source_immutable
+  mark_candidate_source_immutable -> hoist_descriptor_commit_hash
+  hoist_descriptor_commit_hash -> materialize_candidate
+  materialize_candidate -> error_descriptor_materialization_failed [condition="outcome=fail"]
+  error_descriptor_materialization_failed -> status_descriptor_pipeline_error
+  materialize_candidate -> hoist_validation_resource_id [condition="outcome=success"]
+  hoist_validation_resource_id -> hoist_descriptor_evidence_ref
+  hoist_descriptor_evidence_ref -> hoist_descriptor_tree_oid
+  hoist_descriptor_tree_oid -> hoist_descriptor_candidate_path
+  hoist_descriptor_candidate_path -> prove_workspace_at_base
+  prove_workspace_at_base -> error_descriptor_workspace_moved [condition="outcome=fail"]
+  prove_workspace_at_base -> compare_descriptor_workspace_base [condition="outcome=success"]
+  compare_descriptor_workspace_base -> check_workspace_at_base
+  check_workspace_at_base -> error_descriptor_workspace_moved [condition="context.base_proof.exists!=true"]
+  check_workspace_at_base -> error_descriptor_workspace_moved [condition="context.base_proof.dirty=true"]
+  check_workspace_at_base -> error_descriptor_workspace_moved [condition="context.descriptor_workspace_moved=true"]
+  check_workspace_at_base -> validate [condition="context.base_proof.exists=true&&context.base_proof.dirty=false&&context.descriptor_workspace_moved=false"]
+  error_descriptor_workspace_moved -> status_descriptor_pipeline_error
+  status_descriptor_pipeline_error -> skip_descriptor_close
+  skip_descriptor_close -> route_release_mode
 }

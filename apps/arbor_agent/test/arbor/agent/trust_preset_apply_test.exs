@@ -221,6 +221,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         "arbor://action/coding/review_tree/search",
         "arbor://action/coding/reviewed_commit",
         "arbor://action/coding/reviewed_validation",
+        "arbor://action/coding/candidate_materialization",
         "arbor://action/coding/worker_terminal/parse",
         "arbor://acp/tool/execute",
         "arbor://action/git/pr",

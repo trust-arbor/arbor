@@ -355,3 +355,13 @@ Stamping `cancelled`/`killed` during later cleanup makes Mix project
 `validation_capacity_exceeded` and hides the real compile failure. Capacity
 flags must come from the start phase itself (found 2026-08-27, V7-16, Linux
 factory run 11n).
+
+<!-- applied-learning: every-checkpoint-resumable-resource-consumer-must-reacquire-ownership -->
+<a id="applied-learning-every-checkpoint-resumable-resource-consumer-must-reacquire-ownership"></a>
+**Every checkpoint-resumable resource consumer must reacquire ownership.** Engine
+resume starts a new process after completed nodes, so a predecessor that acquired a
+process-owned lease will not replay merely to restore that ownership. Put exact
+task/principal lineage reactivation at each durable resource consumer boundary and
+test owner death immediately after the predecessor checkpoint; an opaque resource
+id or a successful earlier acquisition is not restart authority (found 2026-09-02
+while reviewing immutable CrossApp review snapshots).

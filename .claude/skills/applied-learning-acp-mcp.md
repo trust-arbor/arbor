@@ -1241,3 +1241,13 @@ transport cannot restore its conversation. Freeze every accepted decision and op
 finding into the canonical packet so a fresh session can continue honestly (found
 2026-08-31 after a CrossApp materialization retry went silent under an inherited
 one-hour timeout and its predecessor's Grok session could not be loaded).
+
+<!-- applied-learning: worker-close-success-is-not-quiescence-until-cleanup-settles -->
+<a id="applied-learning-worker-close-success-is-not-quiescence-until-cleanup-settles"></a>
+**Worker-close success is not quiescence until cleanup settles.** A pooled ACP
+check-in can return successfully while provider-specific state remains able to
+write, and an idempotent replay may report `closing` while asynchronous cleanup is
+still active. Before an irreversible next effect such as immutable candidate
+materialization, force a non-pooled close and advance only on a positively settled
+`closed` or `already_closed` result; all intermediate or unknown states fail closed
+(found 2026-09-02 while reviewing the G5D descriptor route).

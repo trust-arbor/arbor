@@ -1912,6 +1912,76 @@ defmodule Arbor.Actions.CouncilTest do
                })
     end
 
+    test "security regression: descriptor review requires the complete immutable identity bundle" do
+      identities = %{
+        candidate_source: "immutable_object",
+        evidence_ref: "refs/arbor/evidence/task/workspace",
+        acquired_base_commit: String.duplicate("a", 40),
+        expected_tree_oid: String.duplicate("b", 40),
+        candidate_materialization_digest: String.duplicate("c", 64),
+        validation_resource_id: "validation_" <> String.duplicate("d", 32)
+      }
+
+      params = Map.merge(@valid_review_params, identities)
+
+      assert {:error, :incomplete_immutable_review_binding} =
+               Council.ReviewChange.run(
+                 Map.put(@valid_review_params, :candidate_source, "immutable_object"),
+                 %{review_runner: fn _, _, _ -> flunk("must fail before council launch") end}
+               )
+
+      for key <- ~w(
+            evidence_ref
+            acquired_base_commit
+            expected_tree_oid
+            candidate_materialization_digest
+            validation_resource_id
+          )a do
+        assert {:error, :incomplete_immutable_review_binding} =
+                 Council.ReviewChange.run(Map.delete(params, key), %{
+                   review_runner: fn _, _, _ -> flunk("must fail before council launch") end
+                 })
+      end
+    end
+
+    test "descriptor review forwards immutable identities through the snapshot opener seam" do
+      parent = self()
+      candidate_commit = String.duplicate("e", 40)
+
+      identities = %{
+        candidate_source: "immutable_object",
+        evidence_ref: "refs/arbor/evidence/task/workspace",
+        acquired_base_commit: String.duplicate("a", 40),
+        expected_tree_oid: String.duplicate("b", 40),
+        candidate_materialization_digest: String.duplicate("c", 64),
+        validation_resource_id: "validation_" <> String.duplicate("d", 32)
+      }
+
+      params =
+        @valid_review_params
+        |> Map.merge(identities)
+        |> Map.merge(%{workspace_id: "ws_descriptor_review", commit_hash: candidate_commit})
+
+      assert {:error, :stop_after_identity_capture} =
+               Council.ReviewChange.run(params, %{
+                 task_id: "task_descriptor_review",
+                 agent_id: "agent_descriptor_review",
+                 review_snapshot_opener: fn "ws_descriptor_review", ^candidate_commit, caller ->
+                   send(parent, {:descriptor_review_caller, caller})
+                   {:error, :stop_after_identity_capture}
+                 end,
+                 review_runner: fn _, _, _ -> flunk("must not run after opener failure") end
+               })
+
+      assert_receive {:descriptor_review_caller, caller}
+      assert caller.task_id == "task_descriptor_review"
+      assert caller.principal_id == "agent_descriptor_review"
+
+      for {key, value} <- identities do
+        assert Map.fetch!(caller, key) == value
+      end
+    end
+
     test "rejects graph and quorum overrides for bound reviews" do
       context = %{
         persist_verdict: false,
