@@ -1263,7 +1263,9 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert still.review_snapshot_id == branch_snap.review_snapshot_id
     end
 
-    test "security regression: immutable open fails closed without mutation", %{tmp_dir: tmp_dir} do
+    test "security regression: immutable open enforces source and lineage without mutation", %{
+      tmp_dir: tmp_dir
+    } do
       fixture = build_immutable_review_fixture(tmp_dir)
       opts = Map.put(fixture.context, :candidate_source, "immutable_object")
       worktree = fixture.lease.worktree_path
@@ -1390,12 +1392,24 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
                  retained.context
                )
 
-      assert {:error, :not_found} =
+      retained_opts = Map.put(retained.context, :candidate_source, "immutable_object")
+
+      assert {:error, :not_authorized} =
                WorkspaceLeaseRegistry.open_review_snapshot(
                  retained.lease.workspace_id,
                  retained.candidate_commit,
-                 Map.put(retained.context, :candidate_source, "immutable_object")
+                 Map.put(retained_opts, :agent_id, retained.principal_id <> "_wrong")
                )
+
+      assert {:ok, retained_snapshot} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 retained.lease.workspace_id,
+                 retained.candidate_commit,
+                 retained_opts
+               )
+
+      assert retained_snapshot.workspace_id == retained.lease.workspace_id
+      assert retained_snapshot.candidate_commit == retained.candidate_commit
 
       assert git!(fixture.repo, ["rev-parse", fixture.evidence_ref]) == evidence_before
       assert worktree_identity(worktree) == before

@@ -63,6 +63,11 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewSecurityRegressionTest do
     }
 
     {:ok, packet_digest} = WorkPacket.digest(packet)
+    plan_fingerprint = String.duplicate("a", 64)
+
+    plan_review_context_json =
+      ~s({"budgets":{"wall_clock_ms":28800000},"plan_fingerprint":"#{plan_fingerprint}"})
+
     now_ms = System.system_time(:millisecond)
     deadline = now_ms + 5_000
 
@@ -71,6 +76,8 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewSecurityRegressionTest do
       packet_digest: packet_digest,
       task_id: "task-council-sec-1",
       task: "Add the design council gate",
+      plan_review_context_json: plan_review_context_json,
+      plan_fingerprint: plan_fingerprint,
       design_artifact: descriptor,
       design_digest: design_digest,
       design_attempt: 1,

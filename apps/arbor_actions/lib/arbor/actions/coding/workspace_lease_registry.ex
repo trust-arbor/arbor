@@ -843,6 +843,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
            server_opts
          ) do
       {:ok, _lease} -> :ok
+      {:error, :retained_workspace_not_found} -> {:error, :not_found}
+      {:error, :retained_workspace_not_authorized} -> {:error, :not_authorized}
       {:error, reason} -> {:error, reason}
     end
   end

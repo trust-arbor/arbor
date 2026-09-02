@@ -451,7 +451,7 @@ source-coupling baseline).
 
 <!-- applied-learning: run-composition-tests-after-disjoint-delegated-contract-changes -->
 <a id="applied-learning-run-composition-tests-after-disjoint-delegated-contract-changes"></a>
-**Run composition tests after disjoint delegated contract changes.** Two workers can each produce a clean focused commit while a parent aggregate fixture or consumer remains on the prior required shape. Compose the commits in an isolated review worktree and run the child plus every direct consumer before integration; the Apple launchd evidence expansion passed its own tests but initially left 14 aggregate admission tests failing at the newly required `launchd.path` field (found 2026-07-14 combining the Phase 6 Apple admission slices).
+**Run composition tests after disjoint delegated contract changes.** Two workers can each produce a clean focused commit while a parent aggregate fixture or consumer remains on the prior required shape. Compose the commits in an isolated review worktree and run the child plus every direct consumer before integration; the Apple launchd evidence expansion passed its own tests but initially left 14 aggregate admission tests failing at the newly required `launchd.path` field (found 2026-07-14 combining the Phase 6 Apple admission slices). Reinforced 2026-09-02 when canonical design-context admission and retained-workspace review resume each passed focused suites, but the exact CrossApp batch exposed one stale direct-call fixture and one stale pre-resume public-boundary expectation.
 
 <!-- applied-learning: inspect-a-retained-coding-workspace-independently-of-the-terminal-task-verdict -->
 <a id="applied-learning-inspect-a-retained-coding-workspace-independently-of-the-terminal-task-verdict"></a>
