@@ -200,6 +200,57 @@ defmodule Arbor.Commands.CodingGrantTrustCoreTest do
       assert {:error, :invalid_input} = Core.decide(%{})
       assert {:error, :invalid_input} = Core.decide(:nope)
     end
+
+    test "named_execution_principal nil installs the mirrored sibling" do
+      assert {:ok, result} =
+               decide(
+                 [@recorded_uri],
+                 %{@recorded_uri => unmatched(:block)},
+                 @sibling_auto,
+                 named_execution_principal: nil
+               )
+
+      assert hd(result.decisions) == %{
+               action: :install,
+               uri: @recorded_uri,
+               mode: :auto,
+               reason: :mirrored_sibling
+             }
+    end
+
+    test "named_execution_principal equal to principal_id installs the mirrored sibling" do
+      assert {:ok, result} =
+               decide(
+                 [@recorded_uri],
+                 %{@recorded_uri => unmatched(:block)},
+                 @sibling_auto,
+                 named_execution_principal: @principal
+               )
+
+      assert hd(result.decisions) == %{
+               action: :install,
+               uri: @recorded_uri,
+               mode: :auto,
+               reason: :mirrored_sibling
+             }
+    end
+
+    test "named_execution_principal different from principal_id refuses mismatch" do
+      assert {:ok, result} =
+               decide(
+                 [@recorded_uri],
+                 %{@recorded_uri => unmatched(:block)},
+                 @sibling_auto,
+                 named_execution_principal: "agent_other_execution"
+               )
+
+      assert hd(result.decisions) == %{
+               action: :refuse,
+               uri: @recorded_uri,
+               mode: nil,
+               reason: :principal_mismatch
+             }
+    end
   end
 
   test "show/1 lists installed and refused without skip lines" do
@@ -231,13 +282,22 @@ defmodule Arbor.Commands.CodingGrantTrustCoreTest do
     assert shown =~ "#{@recorded_uri} => auto"
   end
 
-  defp decide(required, explanations, sibling_rules) do
-    Core.decide(%{
+  test "show/1 names invalid_input" do
+    assert Core.show({:error, :invalid_input}) == "trust rules:\nerror: invalid_input"
+  end
+
+  defp decide(required, explanations, sibling_rules, opts \\ []) do
+    input = %{
       principal_id: @principal,
       required_resources: required,
       explanations: explanations,
       sibling_rules: sibling_rules
-    })
+    }
+
+    case Keyword.fetch(opts, :named_execution_principal) do
+      {:ok, named} -> Core.decide(Map.put(input, :named_execution_principal, named))
+      :error -> Core.decide(input)
+    end
   end
 
   defp unmatched(mode), do: %{effective_mode: mode, user_match: nil}

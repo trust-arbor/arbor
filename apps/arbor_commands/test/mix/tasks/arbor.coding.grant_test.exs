@@ -448,6 +448,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
 
     refute src =~ "Arbor.Trust.Store"
     refute src =~ "Arbor.Trust.Authority"
+    refute src =~ "reason: :principal_mismatch"
 
     opts =
       runtime_opts(fn node, module, function, args, timeout ->
@@ -638,6 +639,49 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
            ]
   end
 
+  test "invalid_input from trust decide prints the reason and exits non-zero" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn _node, module, function, _args, _timeout ->
+        case {module, function} do
+          {Arbor.Agent, :coding_dispatch_readiness} ->
+            {:ok, converged_coding_report(exec_uri, @agent_id)}
+
+          {Arbor.Trust, :get_trust_profile} ->
+            {:ok, %{rules: :not_a_map}}
+
+          {Arbor.Trust, :explain} ->
+            %{effective_mode: :block, user_match: nil}
+
+          {Arbor.Trust, :set_rule} ->
+            flunk("invalid_input must not set_rule")
+
+          {_mod, :grant} ->
+            flunk("already-granted converging report must not grant")
+        end
+      end)
+
+    args = ["--plan", path, "--agent-id", @agent_id]
+
+    assert {:error, result} = Grant.execute(args, opts)
+    assert result.status == :converged
+    assert result.trust == {:error, :invalid_input}
+
+    assert {:shutdown, 1} = catch_exit(Grant.run(args, opts))
+
+    output =
+      collect_infos([])
+      |> Kernel.++(collect_errors([]))
+      |> Enum.join("\n")
+
+    assert output =~ "coding grant: converged"
+    assert output =~ "invalid_input"
+  end
+
   defp runtime_opts(rpc) do
     [
       caller_resolver: fn _cli -> {:ok, @caller} end,
@@ -788,6 +832,14 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   defp collect_infos(acc) do
     receive do
       {:mix_shell, :info, [text]} -> collect_infos([text | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp collect_errors(acc) do
+    receive do
+      {:mix_shell, :error, [text]} -> collect_errors([text | acc])
     after
       0 -> Enum.reverse(acc)
     end

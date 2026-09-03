@@ -262,6 +262,58 @@ defmodule Arbor.TrustTest do
     end
   end
 
+  describe "set_rule/3 never-widen guard" do
+    setup do
+      case PolicyHost.start_link([]) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+
+      :ok
+    end
+
+    test "refuses glob, wildcard, bare-namespace, traversal, and unparseable prefixes" do
+      prefixes = [
+        "arbor://action/coding/**",
+        "arbor://action/coding/*",
+        "arbor://action",
+        "arbor://action/coding/../sibling",
+        "not-a-uri"
+      ]
+
+      Enum.each(prefixes, fn prefix ->
+        agent_id = "facade_guard_#{System.unique_integer([:positive])}"
+        assert {:ok, before} = Trust.create_trust_profile(agent_id)
+        assert {:error, {:unsafe_prefix, _reason}} = Trust.set_rule(agent_id, prefix, :auto)
+        assert {:ok, after_profile} = Trust.get_trust_profile(agent_id)
+        assert after_profile == before
+      end)
+    end
+
+    test "accepts a bare coding leaf and stores the exact prefix" do
+      leaf = "arbor://action/coding/design_council_review"
+      agent_id = "facade_leaf_#{System.unique_integer([:positive])}"
+      assert {:ok, _} = Trust.create_trust_profile(agent_id)
+      assert {:ok, stored} = Trust.set_rule(agent_id, leaf, :auto)
+      assert stored.rules[leaf] == :auto
+    end
+
+    @tag :security_regression
+    test "security regression: glob prefix is not canonicalized to a namespace-root rule" do
+      agent_id = "facade_glob_widen_#{System.unique_integer([:positive])}"
+      assert {:ok, before} = Trust.create_trust_profile(agent_id)
+      rules_before = before.rules
+
+      assert {:error, {:unsafe_prefix, _reason}} =
+               Trust.set_rule(agent_id, "arbor://action/coding/**", :auto)
+
+      {:ok, profile} = Trust.get_trust_profile(agent_id)
+      assert profile.rules == rules_before
+      refute Map.has_key?(profile.rules, "arbor://action/coding")
+      refute Map.has_key?(profile.rules, "arbor://action/coding/**")
+    end
+  end
+
   # ===========================================================================
   # Integration: Full trust lifecycle
   # ===========================================================================

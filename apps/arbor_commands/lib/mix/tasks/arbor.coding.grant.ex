@@ -379,22 +379,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
         {:ok, result}
 
       uris ->
-        evaluate_trust_rules(result, ctx, uris)
-    end
-  end
-
-  defp evaluate_trust_rules(result, ctx, uris) do
-    named = named_execution_principal(Map.get(ctx, :last_report))
-
-    if is_binary(named) and named != "" and named != ctx.agent_id do
-      decisions =
-        Enum.map(uris, fn uri ->
-          %{action: :refuse, uri: uri, mode: nil, reason: :principal_mismatch}
-        end)
-
-      {:ok, Map.put(result, :trust, trust_result(ctx, uris, decisions))}
-    else
-      apply_trust_decisions(result, ctx, uris)
+        apply_trust_decisions(result, ctx, uris)
     end
   end
 
@@ -407,13 +392,15 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
            principal_id: principal,
            required_resources: uris,
            explanations: explanations,
-           sibling_rules: sibling_rules
+           sibling_rules: sibling_rules,
+           named_execution_principal: named_execution_principal(Map.get(ctx, :last_report)),
+           dry_run: ctx.dry_run == true
          }) do
       {:ok, trust} ->
-        install_trust_rules(result, ctx, Map.put(trust, :dry_run, ctx.dry_run == true))
+        install_trust_rules(result, ctx, trust)
 
       {:error, :invalid_input} ->
-        {:ok, result}
+        {:error, Map.put(result, :trust, {:error, :invalid_input})}
     end
   end
 
@@ -533,14 +520,6 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
 
   defp execution_principal_entry(_entry), do: nil
 
-  defp trust_result(ctx, _uris, decisions) do
-    %{
-      principal_id: ctx.agent_id,
-      decisions: decisions,
-      dry_run: ctx.dry_run == true
-    }
-  end
-
   defp maybe_emit_trust(kind, result) do
     case trust_output(result) do
       nil -> :ok
@@ -564,6 +543,9 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
 
   defp trust_output(result) when is_map(result) do
     case Map.get(result, :trust) do
+      {:error, :invalid_input} = err ->
+        CodingGrantTrustCore.show(err)
+
       %{decisions: decisions} = trust ->
         if Enum.any?(decisions, &(&1.action in [:install, :refuse])) do
           CodingGrantTrustCore.show(trust)

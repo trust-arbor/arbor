@@ -33,7 +33,9 @@ defmodule Arbor.Commands.CodingGrantTrustCore do
   Decide install/skip/refuse for each required URI.
 
   Required keys: `:principal_id`, `:required_resources`, `:explanations`,
-  `:sibling_rules`. Unknown shape is `{:error, :invalid_input}`.
+  `:sibling_rules`. Optional `:named_execution_principal` is `nil` or a binary
+  (missing key is `nil`). Optional `:dry_run` is unchanged. Unknown shape is
+  `{:error, :invalid_input}`.
   """
   @spec decide(map()) :: {:ok, result()} | {:error, :invalid_input}
   def decide(input) when is_map(input) and not is_struct(input) do
@@ -41,9 +43,13 @@ defmodule Arbor.Commands.CodingGrantTrustCore do
     required = Map.get(input, :required_resources)
     explanations = Map.get(input, :explanations)
     sibling_rules = Map.get(input, :sibling_rules)
+    named = Map.get(input, :named_execution_principal)
 
     cond do
       not (is_binary(principal_id) and principal_id != "") ->
+        {:error, :invalid_input}
+
+      not valid_named_execution_principal?(named) ->
         {:error, :invalid_input}
 
       not is_map(explanations) or is_struct(explanations) ->
@@ -55,7 +61,7 @@ defmodule Arbor.Commands.CodingGrantTrustCore do
       true ->
         case extract_uris(required) do
           {:ok, uris} ->
-            decisions = Enum.map(uris, &decide_uri(&1, explanations, sibling_rules))
+            decisions = decide_uris(uris, principal_id, named, explanations, sibling_rules)
 
             {:ok,
              %{
@@ -73,7 +79,9 @@ defmodule Arbor.Commands.CodingGrantTrustCore do
   def decide(_input), do: {:error, :invalid_input}
 
   @doc "Format a trust-rule result for operator output."
-  @spec show(result() | map()) :: String.t()
+  @spec show(result() | map() | {:error, :invalid_input}) :: String.t()
+  def show({:error, :invalid_input}), do: "trust rules:\nerror: invalid_input"
+
   def show(result) when is_map(result) do
     dry_run = Map.get(result, :dry_run) == true
     principal_id = Map.get(result, :principal_id, "")
@@ -96,6 +104,22 @@ defmodule Arbor.Commands.CodingGrantTrustCore do
   end
 
   def show(_result), do: show(%{principal_id: "", decisions: []})
+
+  defp valid_named_execution_principal?(nil), do: true
+  defp valid_named_execution_principal?(id) when is_binary(id), do: true
+  defp valid_named_execution_principal?(_named), do: false
+
+  defp decide_uris(uris, principal_id, named, explanations, sibling_rules) do
+    if principal_mismatch?(principal_id, named) do
+      Enum.map(uris, &refuse(&1, :principal_mismatch))
+    else
+      Enum.map(uris, &decide_uri(&1, explanations, sibling_rules))
+    end
+  end
+
+  defp principal_mismatch?(_principal_id, nil), do: false
+  defp principal_mismatch?(_principal_id, ""), do: false
+  defp principal_mismatch?(principal_id, named), do: named != principal_id
 
   defp extract_uris(required) when is_list(required) do
     if Enum.all?(required, &is_binary/1) do
