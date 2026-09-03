@@ -15,6 +15,11 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
       mix arbor.coding.grant --plan path/to/plan.json --agent-id agent_<coordinator> \
         --dry-run
 
+  After capability convergence the task also closes execution-principal coding
+  trust rules for each required `arbor://action/coding/` URI that has no matching
+  rule, mirroring same-parent sibling modes. `--no-trust-rules` skips that
+  layer. Dry-run lists rules it would install and never calls `set_rule`.
+
   ## Options
 
     * `--plan` — plan JSON path (required)
@@ -25,7 +30,11 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
       missing URIs named that round (no dedupe), grouped by principal role
       and id. Dry-run never emits a grant. It
       halts converged only when a report names nothing; otherwise it ends
-      unconverged at max-rounds.
+      unconverged at max-rounds. After capability convergence it lists the
+      execution-principal trust rules it would install and never calls
+      `Arbor.Trust.set_rule/3`.
+    * `--no-trust-rules` — restore capability-only behaviour; do not explain
+      or install trust rules.
 
   Each grant uses the principal the finding names. A URI is never granted to a
   principal the readiness report did not name. Wildcard and root URIs are
@@ -38,6 +47,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
   @requirements ["compile"]
 
   alias Arbor.Commands.CodingGrantCore
+  alias Arbor.Commands.CodingGrantTrustCore
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
 
   @rpc_timeout_ms 60_000
@@ -66,10 +77,13 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     case execute(args, runtime_opts) do
       {:ok, result} ->
         Mix.shell().info(CodingGrantCore.show(result))
+        maybe_emit_trust(:info, result)
         :ok
 
       {:error, result} when is_map(result) ->
         Mix.shell().error(CodingGrantCore.show(result))
+        maybe_emit_trust(:error, result)
+        emit_trust_install_error(result)
         exit({:shutdown, 1})
 
       {:error, message} when is_binary(message) ->
@@ -94,7 +108,9 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
         caller_id: caller_id,
         agent_id: cli.agent_id,
         plan: plan,
-        runtime_opts: runtime_opts
+        runtime_opts: runtime_opts,
+        trust_rules: cli.trust_rules,
+        dry_run: cli.dry_run
       }
 
       interpret(state, :readiness, ctx)
@@ -121,7 +137,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
           agent_id: :string,
           key_file: :string,
           max_rounds: :integer,
-          dry_run: :boolean
+          dry_run: :boolean,
+          trust_rules: :boolean
         ]
       )
 
@@ -151,7 +168,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
            agent_id: opts[:agent_id],
            key_file: Path.expand(opts[:key_file] || @default_key_path),
            max_rounds: Keyword.get(opts, :max_rounds, @default_max_rounds),
-           dry_run: Keyword.get(opts, :dry_run, false)
+           dry_run: Keyword.get(opts, :dry_run, false),
+           trust_rules: Keyword.get(opts, :trust_rules, true)
          }}
     end
   end
@@ -247,6 +265,7 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
         :error -> :unavailable
       end
 
+    ctx = remember_report(ctx, report)
     {state, effect} = CodingGrantCore.step(state, {:readiness, report})
     interpret(state, effect, ctx)
   end
@@ -271,8 +290,8 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     interpret(state, effect, ctx)
   end
 
-  defp interpret(_state, {:halt, %{status: :converged} = result}, _ctx) do
-    {:ok, result}
+  defp interpret(_state, {:halt, %{status: :converged} = result}, ctx) do
+    finish_ok(result, ctx)
   end
 
   defp interpret(_state, {:halt, result}, _ctx) do
@@ -340,6 +359,219 @@ defmodule Mix.Tasks.Arbor.Coding.Grant do
     _exception -> :unavailable
   catch
     _kind, _reason -> :unavailable
+  end
+
+  defp remember_report(ctx, report) when is_map(report), do: Map.put(ctx, :last_report, report)
+  defp remember_report(ctx, _report), do: ctx
+
+  defp finish_ok(result, ctx) do
+    case close_trust_rules(result, ctx) do
+      {:ok, result} -> {:ok, result}
+      {:error, result} -> {:error, result}
+    end
+  end
+
+  defp close_trust_rules(result, %{trust_rules: false}), do: {:ok, result}
+
+  defp close_trust_rules(result, ctx) do
+    case coding_required_uris(Map.get(ctx, :last_report)) do
+      [] ->
+        {:ok, result}
+
+      uris ->
+        evaluate_trust_rules(result, ctx, uris)
+    end
+  end
+
+  defp evaluate_trust_rules(result, ctx, uris) do
+    named = named_execution_principal(Map.get(ctx, :last_report))
+
+    if is_binary(named) and named != "" and named != ctx.agent_id do
+      decisions =
+        Enum.map(uris, fn uri ->
+          %{action: :refuse, uri: uri, mode: nil, reason: :principal_mismatch}
+        end)
+
+      {:ok, Map.put(result, :trust, trust_result(ctx, uris, decisions))}
+    else
+      apply_trust_decisions(result, ctx, uris)
+    end
+  end
+
+  defp apply_trust_decisions(result, ctx, uris) do
+    principal = ctx.agent_id
+    sibling_rules = fetch_sibling_rules(ctx, principal)
+    explanations = fetch_explanations(ctx, principal, uris)
+
+    case CodingGrantTrustCore.decide(%{
+           principal_id: principal,
+           required_resources: uris,
+           explanations: explanations,
+           sibling_rules: sibling_rules
+         }) do
+      {:ok, trust} ->
+        install_trust_rules(result, ctx, Map.put(trust, :dry_run, ctx.dry_run == true))
+
+      {:error, :invalid_input} ->
+        {:ok, result}
+    end
+  end
+
+  defp install_trust_rules(result, %{dry_run: true}, trust) do
+    {:ok, Map.put(result, :trust, trust)}
+  end
+
+  defp install_trust_rules(result, ctx, trust) do
+    installs = Enum.filter(trust.decisions, &(&1.action == :install))
+
+    case install_each(ctx, installs) do
+      :ok ->
+        {:ok, Map.put(result, :trust, trust)}
+
+      {:error, uri, reason} ->
+        {:error, Map.merge(result, %{trust: trust, trust_install_error: {uri, reason}})}
+    end
+  end
+
+  defp install_each(_ctx, []), do: :ok
+
+  defp install_each(ctx, [decision | rest]) do
+    case invoke_set_rule(ctx, ctx.agent_id, decision.uri, decision.mode) do
+      :ok -> install_each(ctx, rest)
+      {:error, reason} -> {:error, decision.uri, reason}
+    end
+  end
+
+  defp fetch_sibling_rules(ctx, principal) do
+    case rpc(ctx, Arbor.Trust, :get_trust_profile, [principal], @grant_rpc_timeout_ms) do
+      {:ok, profile} when is_map(profile) ->
+        Map.get(profile, :rules) || Map.get(profile, "rules") || %{}
+
+      _other ->
+        %{}
+    end
+  end
+
+  defp fetch_explanations(ctx, principal, uris) do
+    Map.new(uris, fn uri ->
+      case rpc(ctx, Arbor.Trust, :explain, [principal, uri], @grant_rpc_timeout_ms) do
+        result when is_map(result) -> {uri, result}
+        _other -> {uri, %{error: :rpc}}
+      end
+    end)
+  end
+
+  defp invoke_set_rule(ctx, principal, uri, mode) do
+    case rpc(ctx, Arbor.Trust, :set_rule, [principal, uri, mode], @grant_rpc_timeout_ms) do
+      {:ok, _profile} -> :ok
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      {:badrpc, reason} -> {:error, {:rpc_unavailable, reason}}
+      other -> {:error, other}
+    end
+  end
+
+  defp coding_required_uris(report) do
+    case extract_required_resources(report) do
+      {:ok, uris} -> Enum.filter(uris, &coding_namespace_uri?/1)
+      :error -> []
+    end
+  end
+
+  defp extract_required_resources(report) when is_map(report) do
+    horizon =
+      get_in(report, ["planes", "executor", "details", "projection", "authority_horizon"])
+
+    case horizon do
+      %{"required_resources" => required} -> normalize_required(required)
+      _other -> :error
+    end
+  end
+
+  defp extract_required_resources(_report), do: :error
+
+  defp normalize_required(required) when is_list(required) do
+    if Enum.all?(required, &is_binary/1), do: {:ok, required}, else: :error
+  end
+
+  defp normalize_required(%{"resource_uris" => uris}) when is_list(uris) do
+    if Enum.all?(uris, &is_binary/1), do: {:ok, uris}, else: :error
+  end
+
+  defp normalize_required(_required), do: :error
+
+  defp coding_namespace_uri?(uri) when is_binary(uri) do
+    match?({:ok, _parsed}, CapabilityUri.parse(uri)) and
+      CapabilityUri.prefix_match?("arbor://action/coding", uri)
+  end
+
+  defp coding_namespace_uri?(_uri), do: false
+
+  defp named_execution_principal(report) when is_map(report) do
+    horizon =
+      get_in(report, ["planes", "executor", "details", "projection", "authority_horizon"]) || %{}
+
+    horizon
+    |> Map.get("principals")
+    |> execution_principal_id()
+  end
+
+  defp named_execution_principal(_report), do: nil
+
+  defp execution_principal_id(list) when is_list(list) do
+    Enum.find_value(list, &execution_principal_entry/1)
+  end
+
+  defp execution_principal_id(_list), do: nil
+
+  defp execution_principal_entry(entry) when is_map(entry) do
+    role = Map.get(entry, "principal_role") || Map.get(entry, "role")
+    id = Map.get(entry, "principal_id")
+
+    if role == "execution_principal" and is_binary(id) and id != "", do: id
+  end
+
+  defp execution_principal_entry(_entry), do: nil
+
+  defp trust_result(ctx, _uris, decisions) do
+    %{
+      principal_id: ctx.agent_id,
+      decisions: decisions,
+      dry_run: ctx.dry_run == true
+    }
+  end
+
+  defp maybe_emit_trust(kind, result) do
+    case trust_output(result) do
+      nil -> :ok
+      text when kind == :info -> Mix.shell().info(text)
+      text -> Mix.shell().error(text)
+    end
+  end
+
+  defp emit_trust_install_error(result) do
+    case Map.get(result, :trust_install_error) do
+      {uri, reason} ->
+        Mix.shell().error("trust rule failed: #{uri} (#{inspect(reason)})")
+
+      reason when reason != nil ->
+        Mix.shell().error("trust rule failed: #{inspect(reason)}")
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp trust_output(result) when is_map(result) do
+    case Map.get(result, :trust) do
+      %{decisions: decisions} = trust ->
+        if Enum.any?(decisions, &(&1.action in [:install, :refuse])) do
+          CodingGrantTrustCore.show(trust)
+        end
+
+      _other ->
+        nil
+    end
   end
 
   defp halt_error(status) do

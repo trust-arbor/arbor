@@ -352,23 +352,19 @@ The coordinator also needs the template capabilities; `mix arbor.agent start
 coding_agent` requests them at creation.
 
 `mix arbor.coding.grant` closes missing findings for both
-`authenticated_caller` and `execution_principal`. Re-run it after a pipeline
-change that introduces a new action URI (e.g.
-`arbor://action/coding/design_council_review`) so the coordinator receives
-the capability as well as the caller.
+`authenticated_caller` and `execution_principal`, **and** after capability
+convergence installs a bare-prefix trust rule on the execution principal for
+each required `arbor://action/coding/` URI whose `Arbor.Trust.explain/2` has
+`user_match: nil` and effective `:block` or `:ask`. The installed mode mirrors
+same-parent sibling coding rules on that profile (`:auto` on today's
+coding-agent profiles). `--dry-run` lists those rules; `--no-trust-rules` is
+capability-only.
 
-A capability alone may still not be enough: `ApprovalGuard` consults the
-coordinator's **trust profile** separately, and a URI with no rule falls to the
-baseline (`:block` for egress-classed actions — the run dies at the action with
-`Policy denied` in the node log even though the capability signed fine). Mirror
-the sibling rule's mode (coding URIs use `:auto`; bare prefix, never `/**`):
-
-```bash
-./bin/mix arbor.rpc 'Arbor.Trust.Store.update_profile("agent_<coordinator>", &Arbor.Trust.Authority.set_rule(&1, "arbor://action/coding/<new_uri>", :auto))'
-```
-
-Verify both layers with `Arbor.Trust.explain/2` and a fresh readiness probe.
-See `.claude/skills/agent-security-gates.md` for the full gate checklist.
+Re-run the task after a pipeline change that introduces a new action URI (e.g.
+`arbor://action/coding/design_council_review`) so both the capability and trust
+layers close for the coordinator. Verify with `Arbor.Trust.explain/2` and a
+fresh readiness probe. See `.claude/skills/agent-security-gates.md` for the
+full gate checklist.
 
 ### Grok worker OAuth
 
@@ -538,9 +534,11 @@ Three more onboarding traps for a fresh factory host (2026-08-31):
   into the host's `.env` — machine-to-machine, never through a pasteboard or
   chat transcript — and **restart the node**; `.env` is read only at boot.
 - **New pipeline URIs need capability + trust rule on the coordinator** —
-  run `mix arbor.coding.grant` for the plan (it grants both principals).
-  Trust rules remain a separate documented step (the one-liner in the
-  authority-horizon section above).
+  run `mix arbor.coding.grant` for the plan. It grants missing capabilities
+  to both principals and, after capability convergence, installs the
+  execution principal's missing `arbor://action/coding/` trust rules
+  (bare prefix, sibling-mirrored mode). `--no-trust-rules` is
+  capability-only.
 - **A restarted node keeps DB-backed state** (trust profile rules survive),
   but re-run `mix arbor.coding.grant` after any restart before dispatching.
 

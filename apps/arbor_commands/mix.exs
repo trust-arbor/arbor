@@ -49,6 +49,9 @@ defmodule ArborCommands.MixProject do
       # sessions through Arbor.AI before workspace trees are removed so idle
       # pooled workers cannot retain a deleted worktree cwd (L8 → L4).
       {:arbor_ai, in_umbrella: true},
+      # L4 trust facade — coding-grant closes execution-principal trust rules
+      # through Arbor.Trust.explain/2 and Arbor.Trust.set_rule/3 (L8 → L4).
+      {:arbor_trust, in_umbrella: true},
       # L1 signals facade — coding-benchmark approval accounting queries
       # interaction audit events by task correlation_id.
       {:jason, "~> 1.4"},

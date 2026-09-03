@@ -6,6 +6,7 @@ defmodule Arbor.TrustTest do
   alias Arbor.Trust
   alias Arbor.Trust.EventStore
   alias Arbor.Trust.Manager
+  alias Arbor.Trust.PolicyHost
   alias Arbor.Trust.Store
 
   setup do
@@ -215,6 +216,49 @@ defmodule Arbor.TrustTest do
   describe "run_decay_check/0" do
     test "runs without error" do
       assert :ok = Trust.run_decay_check()
+    end
+  end
+
+  describe "explain/2 and set_rule/3" do
+    @coding_uri "arbor://action/coding/design_council_review"
+
+    setup do
+      case PolicyHost.start_link([]) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+
+      :ok
+    end
+
+    test "explain reports user_match nil before a rule and the prefix after set_rule" do
+      agent_id = "facade_explain_#{System.unique_integer([:positive])}"
+      assert {:ok, _} = Trust.create_trust_profile(agent_id)
+
+      before = Trust.explain(agent_id, @coding_uri)
+      assert before.effective_mode in [:block, :ask, :allow, :auto]
+      assert before.user_match == nil
+
+      assert {:ok, stored} = Trust.set_rule(agent_id, @coding_uri, :auto)
+      assert stored.rules[@coding_uri] == :auto
+
+      {:ok, profile} = Trust.get_trust_profile(agent_id)
+      assert profile.rules[@coding_uri] == :auto
+
+      after_rule = Trust.explain(agent_id, @coding_uri)
+      assert after_rule.user_match == {@coding_uri, :auto}
+      assert after_rule.effective_mode in [:auto, :allow]
+    end
+
+    test "set_rule rejects a bad mode and a missing profile" do
+      assert {:error, :invalid_rule} = Trust.set_rule("agent_missing", @coding_uri, :nope)
+
+      assert {:error, :not_found} =
+               Trust.set_rule(
+                 "agent_missing_profile_#{System.unique_integer([:positive])}",
+                 @coding_uri,
+                 :auto
+               )
     end
   end
 

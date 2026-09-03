@@ -297,7 +297,17 @@ defmodule Arbor.Trust do
   @spec effective_mode(String.t(), String.t(), keyword()) :: :block | :ask | :allow | :auto
   defdelegate effective_mode(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
 
-  @doc "Explain the trust resolution chain for debugging."
+  @doc """
+  Explain the trust resolution chain for debugging.
+
+  The returned map includes:
+
+  - `:effective_mode` — `:block | :ask | :allow | :auto`
+  - `:user_match` — `nil` if no profile rule matched, else `{prefix, mode}`
+
+  When the policy host is unavailable the map includes `:error` and
+  `effective_mode: :block` and may omit `:user_match`.
+  """
   @spec explain(String.t(), String.t(), keyword()) :: map()
   defdelegate explain(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
 
@@ -457,6 +467,28 @@ defmodule Arbor.Trust do
       %{profile | rules: Map.put(profile.rules || %{}, uri_prefix, :auto)}
     end)
   end
+
+  @doc """
+  Install a bare-prefix trust rule on an existing principal profile.
+
+  Does not create a profile. Missing principals return `{:error, :not_found}`.
+  """
+  @spec set_rule(String.t(), String.t(), :block | :ask | :allow | :auto) ::
+          {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, term()}
+  def set_rule(agent_id, uri_prefix, mode)
+      when is_binary(agent_id) and is_binary(uri_prefix) and
+             mode in [:block, :ask, :allow, :auto] do
+    Store.update_profile(agent_id, fn profile ->
+      Authority.set_rule(profile, uri_prefix, mode)
+    end)
+  rescue
+    error -> {:error, {:trust_store_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:trust_store_exit, reason}}
+    kind, reason -> {:error, {:trust_store_failure, kind, reason}}
+  end
+
+  def set_rule(_agent_id, _uri_prefix, _mode), do: {:error, :invalid_rule}
 
   @doc """
   Revoke an accepted graduation: remove the auto rule for a URI prefix (reverting

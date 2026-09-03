@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Commands.CodingGrantCore
+  alias Arbor.Commands.CodingGrantTrustCore
   alias Mix.Tasks.Arbor.Coding.Grant
 
   @moduletag :fast
@@ -30,6 +31,9 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     assert doc =~ "never emits a grant"
     assert doc =~ "halts converged only when a report names nothing"
     assert doc =~ "unconverged at max-rounds"
+    assert doc =~ "--no-trust-rules"
+    assert doc =~ "execution-principal"
+    assert doc =~ "Arbor.Trust.set_rule/3"
   end
 
   test "max_rounds 0, negative, and 21 are invalid_max_rounds" do
@@ -431,6 +435,209 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
     assert result.granted == []
   end
 
+  test "after capability convergence calls Trust facade with exact arguments" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    src =
+      Path.expand("../../../lib/mix/tasks/arbor.coding.grant.ex", __DIR__)
+      |> File.read!()
+
+    refute src =~ "Arbor.Trust.Store"
+    refute src =~ "Arbor.Trust.Authority"
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case {module, function} do
+          {Arbor.Agent, :coding_dispatch_readiness} ->
+            {:ok, converged_coding_report(exec_uri, @agent_id)}
+
+          {Arbor.Trust, :get_trust_profile} ->
+            {:ok, %{rules: %{"arbor://action/coding/reviewed_commit" => :auto}}}
+
+          {Arbor.Trust, :explain} ->
+            %{effective_mode: :block, user_match: nil}
+
+          {Arbor.Trust, :set_rule} ->
+            {:ok, %{}}
+
+          {_mod, :grant} ->
+            flunk("already-granted converging report must not grant")
+        end
+      end)
+
+    assert {:ok, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
+    assert result.status == :converged
+    assert result.granted == []
+
+    rpcs = collect_rpcs([])
+
+    assert [
+             {@target, Arbor.Agent, :coding_dispatch_readiness, [_caller, @agent_id, _plan, []],
+              60_000},
+             {@target, Arbor.Trust, :get_trust_profile, [@agent_id], 15_000},
+             {@target, Arbor.Trust, :explain, [@agent_id, ^exec_uri], 15_000},
+             {@target, Arbor.Trust, :set_rule, [@agent_id, ^exec_uri, :auto], 15_000}
+           ] = rpcs
+
+    refute Enum.any?(rpcs, fn
+             {_n, Arbor.Trust, :set_rule, [principal, _uri, _mode], _t} ->
+               principal != @agent_id
+
+             _other ->
+               false
+           end)
+  end
+
+  test "--no-trust-rules restores capability-only output and skips Trust RPCs" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case {module, function} do
+          {Arbor.Agent, :coding_dispatch_readiness} ->
+            {:ok, converged_coding_report(exec_uri, @agent_id)}
+
+          {Arbor.Trust, _fun} ->
+            flunk(" --no-trust-rules must not call Arbor.Trust")
+        end
+      end)
+
+    assert {:ok, result} =
+             Grant.execute(
+               ["--plan", path, "--agent-id", @agent_id, "--no-trust-rules"],
+               opts
+             )
+
+    assert result.status == :converged
+    refute Map.has_key?(result, :trust)
+
+    assert CodingGrantCore.show(result) ==
+             """
+             coding grant: converged
+             rounds: 1
+             granted: (none)
+             failed: (none)
+             remaining: (none)
+             """
+             |> String.trim_trailing()
+
+    rpcs = collect_rpcs([])
+    assert Enum.all?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :coding_dispatch_readiness end)
+  end
+
+  test "dry-run lists would-install trust rules and never calls set_rule" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case {module, function} do
+          {Arbor.Agent, :coding_dispatch_readiness} ->
+            {:ok, converged_coding_report(exec_uri, @agent_id)}
+
+          {Arbor.Trust, :get_trust_profile} ->
+            {:ok, %{rules: %{"arbor://action/coding/reviewed_commit" => :auto}}}
+
+          {Arbor.Trust, :explain} ->
+            %{effective_mode: :block, user_match: nil}
+
+          {Arbor.Trust, :set_rule} ->
+            flunk("dry-run must not set_rule")
+
+          {_mod, :grant} ->
+            flunk("dry-run must not grant")
+        end
+      end)
+
+    args = ["--plan", path, "--agent-id", @agent_id, "--dry-run"]
+    assert {:ok, result} = Grant.execute(args, opts)
+    assert result.status == :converged
+
+    rpcs = collect_rpcs([])
+    refute Enum.any?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :set_rule end)
+    refute Enum.any?(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :grant end)
+
+    assert Enum.any?(rpcs, fn
+             {_n, Arbor.Trust, :explain, _a, _t} -> true
+             _other -> false
+           end)
+
+    assert Enum.any?(rpcs, fn
+             {_n, Arbor.Trust, :get_trust_profile, _a, _t} -> true
+             _other -> false
+           end)
+
+    shown = CodingGrantTrustCore.show(result.trust)
+    assert shown =~ "would install"
+    assert shown =~ exec_uri
+
+    assert :ok = Grant.run(args, opts)
+    infos = collect_infos([])
+    assert Enum.any?(infos, &String.contains?(&1, "would install"))
+    assert Enum.any?(infos, &String.contains?(&1, exec_uri))
+  end
+
+  @tag :security_regression
+  test "security regression: recorded 2026-08-31 capabilities granted and trust rule absent installs :auto for design_council_review only" do
+    path = write_plan!(%{"task" => "grant"})
+    on_exit(fn -> File.rm(path) end)
+
+    test_pid = self()
+    exec_uri = "arbor://action/coding/design_council_review"
+
+    opts =
+      runtime_opts(fn node, module, function, args, timeout ->
+        send(test_pid, {:rpc, node, module, function, args, timeout})
+
+        case {module, function} do
+          {Arbor.Agent, :coding_dispatch_readiness} ->
+            {:ok, converged_coding_report(exec_uri, @agent_id)}
+
+          {Arbor.Trust, :get_trust_profile} ->
+            {:ok,
+             %{
+               rules: %{
+                 "arbor://action/coding/reviewed_commit" => :auto,
+                 "arbor://action/coding/workspace" => :auto
+               }
+             }}
+
+          {Arbor.Trust, :explain} ->
+            %{effective_mode: :block, user_match: nil}
+
+          {Arbor.Trust, :set_rule} ->
+            {:ok, %{}}
+        end
+      end)
+
+    assert {:ok, result} = Grant.execute(["--plan", path, "--agent-id", @agent_id], opts)
+    assert result.status == :converged
+
+    rpcs = collect_rpcs([])
+    set_rules = Enum.filter(rpcs, fn {_n, _m, fun, _a, _t} -> fun == :set_rule end)
+
+    assert set_rules == [
+             {@target, Arbor.Trust, :set_rule, [@agent_id, exec_uri, :auto], 15_000}
+           ]
+  end
+
   defp runtime_opts(rpc) do
     [
       caller_resolver: fn _cli -> {:ok, @caller} end,
@@ -496,6 +703,33 @@ defmodule Mix.Tasks.Arbor.Coding.GrantTest do
                     "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
                   }
                 ],
+                "required_resources" => %{
+                  "total_count" => 1,
+                  "resource_uris" => [uri],
+                  "resource_uris_digest" => "sha256:" <> String.duplicate("ab", 32)
+                },
+                "principals" => [
+                  %{"role" => "execution_principal", "principal_id" => coordinator_id},
+                  %{"role" => "authenticated_caller", "principal_id" => @caller}
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  end
+
+  defp converged_coding_report(uri, coordinator_id) do
+    %{
+      "caller_id" => @caller,
+      "agent_id" => coordinator_id,
+      "planes" => %{
+        "executor" => %{
+          "details" => %{
+            "projection" => %{
+              "authority_horizon" => %{
+                "findings" => [],
                 "required_resources" => %{
                   "total_count" => 1,
                   "resource_uris" => [uri],
