@@ -919,7 +919,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash," <>
                          "review_cycle,finding_ledger,prior_candidate_commit,delta_diff," <>
-                         "delta_files,delta_ranges"
+                         "delta_files,delta_ranges,accepted_design,packet_constraints," <>
+                         "packet_success_criteria"
 
   @security_review_context_keys @review_context_keys <>
                                   ",test_paths,validation_profile"

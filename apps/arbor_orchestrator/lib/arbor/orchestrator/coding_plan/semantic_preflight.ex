@@ -4370,7 +4370,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "council_review_change",
          "context_keys" =>
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile",
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile",
          "output_prefix" => "review"
        }},
       {"remember_validation_reviewed_commit",

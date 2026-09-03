@@ -11,6 +11,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Coding.DesignArtifactDescriptor
+
   @max_delta_files 128
   @max_delta_file_bytes 1_024
   @max_delta_ranges_per_file 128
@@ -21,6 +23,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   @max_prompt_ledger_bytes 32_768
   @max_prompt_delta_bytes 32_768
   @max_prompt_revision_bytes 256
+  @max_prompt_packet_claims_bytes 8_192
+  @max_packet_claim_items 32
+  @max_packet_claim_bytes 4_096
 
   typedstruct enforce: true do
     @typedoc "A code-review request for a completed coding-agent branch"
@@ -39,6 +44,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     field(:delta_files, [String.t()], enforce: false, default: [])
     field(:delta_ranges, map(), enforce: false, default: %{})
     field(:finding_ledger, map(), enforce: false, default: %{})
+    field(:approved_design, String.t() | nil, enforce: false, default: nil)
+    field(:packet_constraints, [String.t()], enforce: false, default: [])
+    field(:packet_success_criteria, [String.t()], enforce: false, default: [])
   end
 
   @doc """
@@ -72,7 +80,11 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          {:ok, delta_diff} <- optional_utf8_string(attrs, :delta_diff, ""),
          {:ok, delta_files} <- optional_delta_files(attrs),
          {:ok, delta_ranges} <- optional_delta_ranges(attrs),
-         {:ok, finding_ledger} <- optional_finding_ledger(attrs) do
+         {:ok, finding_ledger} <- optional_finding_ledger(attrs),
+         {:ok, approved_design} <- optional_approved_design(attrs),
+         {:ok, packet_constraints} <- optional_packet_claims(attrs, :packet_constraints),
+         {:ok, packet_success_criteria} <-
+           optional_packet_claims(attrs, :packet_success_criteria) do
       {:ok,
        %__MODULE__{
          diff: diff,
@@ -88,7 +100,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          delta_diff: delta_diff,
          delta_files: delta_files,
          delta_ranges: delta_ranges,
-         finding_ledger: finding_ledger
+         finding_ledger: finding_ledger,
+         approved_design: approved_design,
+         packet_constraints: packet_constraints,
+         packet_success_criteria: packet_success_criteria
        }}
     end
   end
@@ -115,7 +130,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
         delta_diff: request.delta_diff,
         delta_files: request.delta_files,
         delta_ranges: request.delta_ranges,
-        finding_ledger: request.finding_ledger
+        finding_ledger: request.finding_ledger,
+        approved_design: request.approved_design,
+        packet_constraints: request.packet_constraints,
+        packet_success_criteria: request.packet_success_criteria
       })
     end
   end
@@ -139,7 +157,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "delta_diff" => request.delta_diff,
       "delta_files" => request.delta_files,
       "delta_ranges" => request.delta_ranges,
-      "finding_ledger" => request.finding_ledger
+      "finding_ledger" => request.finding_ledger,
+      "approved_design" => request.approved_design,
+      "packet_constraints" => request.packet_constraints,
+      "packet_success_criteria" => request.packet_success_criteria
     }
   end
 
@@ -150,7 +171,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   (`diff` / `review.diff`) and a nested `review.request` map. Flat keys are
   convenient for `context_keys` and debugging; the nested map is convenient for
   future handlers that want the request as one value. `review.prompt` is the
-  string fed to LLM reviewer nodes through `prompt_context_key`.
+  frozen branch/intent/files/diff body for the ten existing seats.
+  `review.prompt_conformance` is that body plus bounded Approved design and
+  Packet constraints, consumed only by the design_conformance seat.
   """
   @spec to_context(t()) :: map()
   def to_context(%__MODULE__{} = request) do
@@ -190,7 +213,14 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "review.delta_files" => request.delta_files,
       "review.delta_ranges" => request.delta_ranges,
       "review.finding_ledger" => request.finding_ledger,
+      "approved_design" => request.approved_design,
+      "packet_constraints" => request.packet_constraints,
+      "packet_success_criteria" => request.packet_success_criteria,
+      "review.approved_design" => request.approved_design,
+      "review.packet_constraints" => request.packet_constraints,
+      "review.packet_success_criteria" => request.packet_success_criteria,
       "review.prompt" => prompt_text(request),
+      "review.prompt_conformance" => prompt_conformance_text(request),
       "council.question" => question
     }
   end
@@ -240,6 +270,21 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     """
     |> String.trim()
   end
+
+  @doc """
+  Render `prompt_text/1` plus bounded Approved design and Packet constraints.
+
+  Used only by the design_conformance seat. Does not mutate `prompt_text/1`.
+  """
+  @spec prompt_conformance_text(t()) :: String.t()
+  def prompt_conformance_text(%__MODULE__{} = request) do
+    (prompt_text(request) <> "\n\n" <> conformance_sections(request))
+    |> String.trim()
+  end
+
+  @doc "Return the Packet constraints section byte cap."
+  @spec max_prompt_packet_claims_bytes() :: pos_integer()
+  def max_prompt_packet_claims_bytes, do: @max_prompt_packet_claims_bytes
 
   defp required_string(attrs, key) do
     with {:ok, value} <- fetch_attr(attrs, key),
@@ -297,6 +342,87 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       {:error, {:missing_required_field, :finding_ledger}} -> {:ok, %{}}
     end
   end
+
+  defp optional_approved_design(attrs) do
+    case fetch_attr(attrs, :approved_design) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        cond do
+          not String.valid?(value) ->
+            {:error, {:invalid_field, :approved_design, :invalid_utf8}}
+
+          String.trim(value) == "" ->
+            {:ok, nil}
+
+          byte_size(value) > DesignArtifactDescriptor.max_bytes() ->
+            {:error, {:invalid_field, :approved_design, :text_too_large}}
+
+          true ->
+            {:ok, value}
+        end
+
+      {:ok, value} ->
+        {:error, {:invalid_field, :approved_design, {:expected_string_or_nil, value}}}
+
+      {:error, {:missing_required_field, :approved_design}} ->
+        {:ok, nil}
+    end
+  end
+
+  defp optional_packet_claims(attrs, key) do
+    case fetch_attr(attrs, key) do
+      {:ok, value} -> validate_packet_claims(key, value)
+      {:error, {:missing_required_field, ^key}} -> {:ok, []}
+    end
+  end
+
+  defp validate_packet_claims(_key, []), do: {:ok, []}
+
+  defp validate_packet_claims(key, value) when is_list(value) do
+    if length(value) > @max_packet_claim_items do
+      {:error, {:invalid_field, key, :too_many}}
+    else
+      value
+      |> Enum.with_index()
+      |> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, acc} ->
+        case validate_packet_claim_item(key, item, index) do
+          {:ok, text} -> {:cont, {:ok, [text | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, acc} -> {:ok, Enum.reverse(acc)}
+        error -> error
+      end
+    end
+  end
+
+  defp validate_packet_claims(key, value),
+    do: {:error, {:invalid_field, key, {:expected_list, value}}}
+
+  defp validate_packet_claim_item(key, item, index) when is_binary(item) do
+    cond do
+      not String.valid?(item) ->
+        {:error, {:invalid_field, key, {:invalid_utf8, index}}}
+
+      String.trim(item) == "" ->
+        {:error, {:invalid_field, key, {:blank, index}}}
+
+      byte_size(item) > @max_packet_claim_bytes ->
+        {:error, {:invalid_field, key, {:text_too_large, index}}}
+
+      String.match?(item, ~r/[\x00-\x1F\x7F]/) ->
+        {:error, {:invalid_field, key, {:control_character, index}}}
+
+      true ->
+        {:ok, item}
+    end
+  end
+
+  defp validate_packet_claim_item(key, _item, index),
+    do: {:error, {:invalid_field, key, {:expected_string, index}}}
 
   defp optional_delta_ranges(attrs) do
     case fetch_attr(attrs, :delta_ranges) do
@@ -542,6 +668,88 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
 
   defp format_delta_files([]), do: "- none supplied"
   defp format_delta_files(files), do: Enum.map_join(files, "\n", &"- #{&1}")
+
+  defp conformance_sections(request) do
+    [approved_design_section(request), packet_constraints_section(request)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp approved_design_section(request) do
+    body =
+      case sanitize_prompt_text(request.approved_design, DesignArtifactDescriptor.max_bytes()) do
+        "" -> "no approved design; constraints only"
+        text -> text
+      end
+
+    "Approved design:\n#{body}"
+  end
+
+  defp packet_constraints_section(%__MODULE__{
+         packet_constraints: [],
+         packet_success_criteria: []
+       }),
+       do: ""
+
+  defp packet_constraints_section(request) do
+    constraint_lines =
+      request.packet_constraints
+      |> Enum.with_index(1)
+      |> Enum.map(fn {text, index} ->
+        "C#{index}. #{sanitize_prompt_text(text, @max_packet_claim_bytes)}"
+      end)
+
+    criteria_lines =
+      request.packet_success_criteria
+      |> Enum.with_index(1)
+      |> Enum.map(fn {text, index} ->
+        "S#{index}. #{sanitize_prompt_text(text, @max_packet_claim_bytes)}"
+      end)
+
+    body =
+      (constraint_lines ++ criteria_lines)
+      |> Enum.join("\n")
+      |> bounded_text(@max_prompt_packet_claims_bytes)
+
+    "Packet constraints:\n#{body}"
+  end
+
+  defp sanitize_prompt_text(nil, _limit), do: ""
+
+  defp sanitize_prompt_text(value, limit) when is_binary(value) do
+    overflow? = byte_size(value) > limit
+
+    text =
+      value
+      |> take_utf8_bytes(limit)
+      |> strip_unsafe_controls()
+      |> then(fn text -> if String.valid?(text), do: text, else: "" end)
+
+    cond do
+      text == "" ->
+        ""
+
+      overflow? ->
+        marker = "\n[truncated]"
+        utf8_prefix(text, max(limit - byte_size(marker), 0)) <> marker
+
+      true ->
+        text
+    end
+  end
+
+  defp sanitize_prompt_text(_value, _limit), do: ""
+
+  defp take_utf8_bytes(value, limit) when byte_size(value) <= limit, do: value
+  defp take_utf8_bytes(value, limit), do: utf8_prefix(value, limit)
+
+  defp strip_unsafe_controls(value) do
+    for <<byte <- value>>, keep_prompt_byte?(byte), into: <<>>, do: <<byte>>
+  end
+
+  defp keep_prompt_byte?(byte) when byte == 9 or byte == 10, do: true
+  defp keep_prompt_byte?(byte) when byte >= 32 and byte != 127, do: true
+  defp keep_prompt_byte?(_byte), do: false
 
   defp bounded_text(value, limit) when byte_size(value) <= limit, do: value
 

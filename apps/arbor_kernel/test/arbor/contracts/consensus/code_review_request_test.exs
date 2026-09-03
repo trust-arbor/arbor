@@ -33,6 +33,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.delta_files == []
       assert request.delta_ranges == %{}
       assert request.finding_ledger == %{}
+      assert request.approved_design == nil
+      assert request.packet_constraints == []
+      assert request.packet_success_criteria == []
     end
 
     test "accepts string-keyed attrs from JSON boundaries" do
@@ -65,6 +68,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.delta_files == []
       assert request.delta_ranges == %{}
       assert request.finding_ledger == %{}
+      assert request.approved_design == nil
+      assert request.packet_constraints == []
+      assert request.packet_success_criteria == []
     end
 
     test "rejects missing required fields" do
@@ -253,6 +259,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert bound.delta_files == request.delta_files
       assert bound.delta_ranges == request.delta_ranges
       assert bound.finding_ledger == request.finding_ledger
+      assert bound.approved_design == request.approved_design
+      assert bound.packet_constraints == request.packet_constraints
+      assert bound.packet_success_criteria == request.packet_success_criteria
 
       assert {:error, {:review_commit_mismatch, :candidate}} =
                CodeReviewRequest.bind_review_snapshot(request, %{
@@ -281,7 +290,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
                "delta_diff" => "",
                "delta_files" => [],
                "delta_ranges" => %{},
-               "finding_ledger" => %{}
+               "finding_ledger" => %{},
+               "approved_design" => nil,
+               "packet_constraints" => [],
+               "packet_success_criteria" => []
              }
 
       assert context["review.diff"] == @valid_attrs.diff
@@ -304,6 +316,16 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
 
       assert context["council.question"] ==
                "Should branch agent/review-loop be accepted for human review?"
+
+      assert context["approved_design"] == nil
+      assert context["packet_constraints"] == []
+      assert context["packet_success_criteria"] == []
+      assert context["review.approved_design"] == nil
+      assert context["review.packet_constraints"] == []
+      assert context["review.packet_success_criteria"] == []
+      assert context["review.prompt_conformance"] =~ "no approved design; constraints only"
+      refute context["review.prompt"] =~ "Approved design:"
+      refute context["review.prompt"] =~ "no approved design; constraints only"
 
       assert {:ok, _json} = Jason.encode(context)
       refute inspect(context) =~ "%CodeReviewRequest"
@@ -354,6 +376,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert prompt =~ "```diff"
       assert prompt =~ @valid_attrs.diff
       assert Jason.decode!(extract_ledger_json(prompt)) == %{}
+      refute prompt =~ "Approved design:"
+      refute prompt =~ "Packet constraints:"
     end
 
     test "keeps multibyte prompt truncation valid and context JSON-clean" do
@@ -381,6 +405,129 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert bounded["original_bytes"] > 32_768
       assert is_binary(bounded["preview"])
       assert String.valid?(bounded["preview"])
+    end
+
+    test "keeps review.prompt byte-identical when design and packet claims are present" do
+      {:ok, bare} = CodeReviewRequest.new(@valid_attrs)
+
+      {:ok, loaded} =
+        CodeReviewRequest.new(
+          Map.merge(@valid_attrs, %{
+            approved_design: String.duplicate("design promise ", 2_000),
+            packet_constraints: ["caller-only show/1 matches today's literals exactly"],
+            packet_success_criteria: ["focused tests pass"]
+          })
+        )
+
+      bare_prompt = CodeReviewRequest.prompt_text(bare)
+      loaded_prompt = CodeReviewRequest.prompt_text(loaded)
+      context = CodeReviewRequest.to_context(loaded)
+
+      assert loaded_prompt == bare_prompt
+      assert context["review.prompt"] == loaded_prompt
+      assert context["review.prompt"] == CodeReviewRequest.to_context(bare)["review.prompt"]
+      refute context["review.prompt"] =~ "Approved design:"
+      refute context["review.prompt"] =~ "Packet constraints:"
+      refute context["review.prompt"] =~ "C1."
+      refute context["review.prompt"] =~ "S1."
+      refute context["review.prompt"] =~ "no approved design; constraints only"
+    end
+
+    test "renders bounded Approved design and Packet constraints only on review.prompt_conformance" do
+      {:ok, request} =
+        CodeReviewRequest.new(
+          Map.merge(@valid_attrs, %{
+            approved_design: "caller-only show/1 matches today's literals exactly",
+            packet_constraints: ["do not rewrite goldens"],
+            packet_success_criteria: ["focused tests pass"]
+          })
+        )
+
+      shared = CodeReviewRequest.prompt_text(request)
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      context = CodeReviewRequest.to_context(request)
+
+      assert String.starts_with?(conformance, shared)
+
+      assert conformance =~
+               "Approved design:\ncaller-only show/1 matches today's literals exactly"
+
+      assert conformance =~
+               "Packet constraints:\nC1. do not rewrite goldens\nS1. focused tests pass"
+
+      assert context["review.prompt_conformance"] == conformance
+
+      assert context["review.approved_design"] ==
+               "caller-only show/1 matches today's literals exactly"
+
+      assert context["packet_constraints"] == ["do not rewrite goldens"]
+      assert {:ok, _encoded} = Jason.encode(context)
+      refute inspect(context) =~ "%CodeReviewRequest"
+    end
+
+    test "omits Packet constraints on the conformance prompt when both lists are empty" do
+      {:ok, request} =
+        CodeReviewRequest.new(Map.put(@valid_attrs, :approved_design, "keep the public facade"))
+
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      assert conformance =~ "Approved design:\nkeep the public facade"
+      refute conformance =~ "Packet constraints:"
+      refute CodeReviewRequest.prompt_text(request) =~ "Approved design:"
+    end
+
+    test "reports no approved design on the conformance prompt and keeps shared prompt clean" do
+      {:ok, request} =
+        CodeReviewRequest.new(
+          Map.merge(@valid_attrs, %{
+            packet_constraints: ["touch only owned files"]
+          })
+        )
+
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      shared = CodeReviewRequest.prompt_text(request)
+
+      assert conformance =~ "Approved design:\nno approved design; constraints only"
+      assert conformance =~ "Packet constraints:\nC1. touch only owned files"
+      refute conformance =~ "S1."
+      refute shared =~ "no approved design; constraints only"
+      refute shared =~ "Packet constraints:"
+    end
+
+    test "bounds conformance sections on UTF-8 bytes and strips unsafe controls" do
+      {:ok, request} =
+        CodeReviewRequest.new(
+          Map.merge(@valid_attrs, %{
+            approved_design: "keep newlines\nand tabs\t" <> <<0, 1, 7, 127>> <> "tail",
+            packet_constraints: [String.duplicate("a", 4_096), String.duplicate("b", 4_096)]
+          })
+        )
+
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      assert String.valid?(conformance)
+      refute String.contains?(conformance, <<0>>)
+      refute String.contains?(conformance, <<1>>)
+      refute String.contains?(conformance, <<7>>)
+      refute String.contains?(conformance, <<127>>)
+      assert conformance =~ "keep newlines\nand tabs\ttail"
+
+      [_prefix, claims_body] = String.split(conformance, "Packet constraints:\n", parts: 2)
+      assert byte_size(claims_body) <= CodeReviewRequest.max_prompt_packet_claims_bytes()
+      assert String.ends_with?(String.trim_trailing(claims_body), "[truncated]")
+
+      combining = String.duplicate("é", 20_000)
+      assert byte_size(combining) > Arbor.Contracts.Coding.DesignArtifactDescriptor.max_bytes()
+      assert String.length(combining) < byte_size(combining)
+
+      hostile = %{request | approved_design: combining}
+      hostile_conformance = CodeReviewRequest.prompt_conformance_text(hostile)
+      [_prefix, design_body] = String.split(hostile_conformance, "Approved design:\n", parts: 2)
+      [design_body, _rest] = String.split(design_body, "\n\nPacket constraints:\n", parts: 2)
+      assert String.valid?(design_body)
+      assert byte_size(design_body) <= Arbor.Contracts.Coding.DesignArtifactDescriptor.max_bytes()
+      assert String.ends_with?(design_body, "[truncated]")
+
+      assert String.length(design_body) <
+               Arbor.Contracts.Coding.DesignArtifactDescriptor.max_bytes()
     end
   end
 

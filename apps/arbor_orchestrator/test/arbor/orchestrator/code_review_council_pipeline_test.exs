@@ -14,7 +14,8 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
     "contract_api_compat" => {"ollama", "glm-5.2:cloud"},
     "architecture_grain_fit" => {"ollama", "glm-5.2:cloud"},
     "performance_resource" => {"ollama", "minimax-m3:cloud"},
-    "docs_naming" => {"ollama", "minimax-m3:cloud"}
+    "docs_naming" => {"ollama", "minimax-m3:cloud"},
+    "design_conformance" => {"openai_oauth", "gpt-5.6-sol"}
   }
 
   defp load_graph do
@@ -27,21 +28,21 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
     test "parses with the expected node count" do
       graph = load_graph()
 
-      # start + evaluate + 10 reviewers + collect + decide + done
-      assert map_size(graph.nodes) == 15
+      # start + evaluate + 11 reviewers + collect + decide + done
+      assert map_size(graph.nodes) == 16
       assert graph.attrs["mode"] == "decision"
       assert graph.attrs["goal"] =~ "coding-agent branch"
     end
 
-    test "fans out to all 10 configured review perspectives" do
+    test "fans out to all 11 configured review perspectives" do
       graph = load_graph()
       evaluate = graph.nodes["evaluate"]
 
-      assert map_size(@reviewers) == 10
+      assert map_size(@reviewers) == 11
       assert evaluate.attrs["type"] == "parallel"
       assert evaluate.attrs["join_policy"] == "wait_all"
       assert evaluate.attrs["error_policy"] == "continue"
-      assert evaluate.attrs["max_parallel"] == "10"
+      assert evaluate.attrs["max_parallel"] == "11"
       assert evaluate.attrs["join_target"] == "collect"
 
       for {reviewer, {provider, model}} <- @reviewers do
@@ -61,7 +62,13 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
         assert node.attrs["prompt_is_data"] == "true"
         assert node.attrs["llm_provider"] == provider
         assert node.attrs["llm_model"] == model
-        assert node.attrs["prompt_context_key"] == "review.prompt"
+
+        expected_prompt_key =
+          if reviewer == "design_conformance",
+            do: "review.prompt_conformance",
+            else: "review.prompt"
+
+        assert node.attrs["prompt_context_key"] == expected_prompt_key
         refute Map.has_key?(node.attrs, "max_tokens")
       end
     end
@@ -114,6 +121,12 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
                "Security bug fixes must include"
 
       assert graph.nodes["architecture_grain_fit"].attrs["system_prompt"] =~ "DOT graph"
+
+      conformance = graph.nodes["design_conformance"].attrs["system_prompt"]
+      assert conformance =~ "DESIGN CONFORMANCE"
+      assert conformance =~ "no approved design; constraints only"
+      assert conformance =~ "violated"
+      assert conformance =~ "not-checkable-from-diff"
     end
 
     test "collects reviews and calls the strict frozen-ledger decision action" do

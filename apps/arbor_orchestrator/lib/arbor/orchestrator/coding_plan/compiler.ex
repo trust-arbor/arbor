@@ -115,7 +115,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     work_packet: "coding_plan_work_packet",
     work_packet_json: "coding_plan_work_packet_json",
     checkpoint_policy: "coding_plan_checkpoint_policy",
-    design_gate: "coding_plan_design_gate"
+    design_gate: "coding_plan_design_gate",
+    packet_constraints: "packet_constraints",
+    packet_success_criteria: "packet_success_criteria"
   }
 
   @type compile_error :: term()
@@ -771,7 +773,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "context_keys",
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile"
          )}
       end
     end)
@@ -2403,7 +2405,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         @initial_context_keys.work_packet => plan.work_packet,
         @initial_context_keys.work_packet_json => work_packet_json,
         @initial_context_keys.checkpoint_policy =>
-          Map.fetch!(plan.work_packet, "checkpoint_policy")
+          Map.fetch!(plan.work_packet, "checkpoint_policy"),
+        @initial_context_keys.packet_constraints =>
+          packet_claim_list(plan.work_packet, "constraints"),
+        @initial_context_keys.packet_success_criteria =>
+          packet_claim_list(plan.work_packet, "success_criteria")
       })
 
     case {checkpoint_policy(plan), design_gate(plan)} do
@@ -2421,7 +2427,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> Map.delete(@initial_context_keys.work_packet_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
     |> Map.delete(@initial_context_keys.design_gate)
+    |> Map.delete(@initial_context_keys.packet_constraints)
+    |> Map.delete(@initial_context_keys.packet_success_criteria)
   end
+
+  defp packet_claim_list(work_packet, key) when is_map(work_packet) do
+    case Map.get(work_packet, key, []) do
+      list when is_list(list) -> list
+      _other -> []
+    end
+  end
+
+  defp packet_claim_list(_work_packet, _key), do: []
 
   defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),
     do: Map.put(values, @graph_metadata_keys.work_packet_digest, plan.work_packet_digest)

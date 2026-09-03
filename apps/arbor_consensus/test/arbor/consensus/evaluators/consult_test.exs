@@ -312,7 +312,9 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
         result
       end
 
-      def supervisor(owner, timeout), do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+      def supervisor(owner, timeout),
+        do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+
       def stop(_owner), do: Process.sleep(:infinity)
     end
 
@@ -328,7 +330,9 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
         result
       end
 
-      def supervisor(owner, timeout), do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+      def supervisor(owner, timeout),
+        do: Arbor.Consensus.ConsultSeatOwner.supervisor(owner, timeout)
+
       def stop(_owner), do: raise("stop boom")
     end
 
@@ -2166,7 +2170,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       secret = "abcdefghijklmnopqrstuvwx"
 
       reviewer_outcomes =
-        Map.new(1..10, fn index ->
+        Map.new(1..11, fn index ->
           perspective = "reviewer-#{String.pad_leading(Integer.to_string(index), 2, "0")}"
 
           {perspective,
@@ -2187,7 +2191,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
         )
 
       assert Arbor.Consensus.sanitize_reviewer_outcomes(
-               Map.put(reviewer_outcomes, "reviewer-11", %{})
+               Map.put(reviewer_outcomes, "reviewer-12", %{})
              ) == %{}
 
       secret_perspective = "sk-" <> String.duplicate("b", 32)
@@ -2212,7 +2216,7 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
                  engine_runner: engine_runner
                )
 
-      assert map_size(decision.reviewer_outcomes) == 10
+      assert map_size(decision.reviewer_outcomes) == 11
       assert Map.has_key?(decision.reviewer_outcomes, "reviewer-01")
 
       outcome = decision.reviewer_outcomes["reviewer-01"]

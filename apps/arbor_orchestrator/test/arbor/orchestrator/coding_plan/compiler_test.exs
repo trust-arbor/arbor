@@ -250,6 +250,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
       assert compilation.initial_values["coding_plan_checkpoint_policy"] == checkpoint_policy
+      assert compilation.initial_values["packet_constraints"] == plan.work_packet["constraints"]
+
+      assert compilation.initial_values["packet_success_criteria"] ==
+               plan.work_packet["success_criteria"]
+
       refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
       refute Map.has_key?(compilation.initial_values, "design_council_run_id")
       assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
@@ -329,9 +334,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 93_758
-    assert map_size(graph.nodes) == 266
-    assert length(graph.edges) == 392
+    assert byte_size(ctx.template_source) == 94_368
+    assert map_size(graph.nodes) == 267
+    assert length(graph.edges) == 394
     assert byte_size(ctx.template_source) <= 262_144
     # The six dormant CrossApp loop nodes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
@@ -1088,6 +1093,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_json")
     refute Map.has_key?(compilation.initial_values, "coding_plan_checkpoint_policy")
+    refute Map.has_key?(compilation.initial_values, "packet_constraints")
+    refute Map.has_key?(compilation.initial_values, "packet_success_criteria")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_digest")
     refute Map.has_key?(compilation.manifest, "work_packet_digest")
     assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
@@ -1290,6 +1297,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert default_pinned["timeout"] == 900_000
     assert node_attrs(graph, "validate")["param.timeout"] == 900_000
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
+
+    assert node_attrs(graph, "review_change")["context_keys"] ==
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria"
 
     assert node_attrs(graph, "open_design_checkpoint")
            |> Map.take([
@@ -1629,7 +1639,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute validate["context_keys"] =~ "test_paths"
 
     assert node_attrs(graph, "review_change")["context_keys"] ==
-             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile"
 
     assert node_attrs(graph, "prep_review_validation_profile")["expression"] ==
              "security_regression"

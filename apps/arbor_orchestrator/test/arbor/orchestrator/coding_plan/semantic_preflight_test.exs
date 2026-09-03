@@ -2384,8 +2384,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     template_override =
       String.replace(
         ctx.template_source,
-        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
-        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
+        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",),
+        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",),
         global: false
       )
 

@@ -3,7 +3,7 @@ defmodule Arbor.Consensus.ReviewerOutcomes do
 
   alias Arbor.Common.SensitiveData
 
-  @max_outcomes 10
+  @max_outcomes 11
   @max_perspective_bytes 128
   @max_route_bytes 256
   @max_reason_bytes 512

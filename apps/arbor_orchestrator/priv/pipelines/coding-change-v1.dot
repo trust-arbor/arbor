@@ -1432,7 +1432,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="council_review_change",
-    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",
+    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.review_ms",
     timeout_budget.reserve_key="coding_budget.review_completion_reserve_ms",
