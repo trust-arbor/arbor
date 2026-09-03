@@ -629,7 +629,11 @@ ollama_v1_base_url =
     do: ollama_base_url,
     else: ollama_base_url <> "/v1"
 
-config :arbor_orchestrator, :ollama, base_url: ollama_v1_base_url
+# OLLAMA_API_KEY is only needed when ARBOR_OLLAMA_BASE_URL points at a hosted
+# endpoint (https://ollama.com); a local daemon ignores the bearer entirely.
+config :arbor_orchestrator, :ollama,
+  base_url: ollama_v1_base_url,
+  api_key: System.get_env("OLLAMA_API_KEY")
 
 # ============================================================================
 # LLM Model & Provider Configuration

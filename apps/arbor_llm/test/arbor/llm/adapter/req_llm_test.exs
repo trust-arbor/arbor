@@ -172,6 +172,33 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert opts[:base_url] == "http://localhost:11434/v1"
     end
 
+    test "ollama request carries the placeholder bearer when no key is configured" do
+      clear_orchestrator_ollama_config()
+      req = %Request{provider: "ollama", model: "glm-5.2:cloud"}
+      assert Adapter.build_req_opts(req, [])[:api_key] == "arbor-local"
+    end
+
+    test "ollama request carries the operator-configured api_key (hosted ollama.com)" do
+      original = Application.get_env(:arbor_orchestrator, :ollama)
+
+      Application.put_env(:arbor_orchestrator, :ollama,
+        base_url: "https://ollama.com/v1",
+        api_key: "ollama-cloud-secret"
+      )
+
+      try do
+        req = %Request{provider: "ollama", model: "glm-5.2:cloud"}
+        opts = Adapter.build_req_opts(req, [])
+        assert opts[:api_key] == "ollama-cloud-secret"
+        assert opts[:base_url] == "https://ollama.com/v1"
+      after
+        case original do
+          nil -> Application.delete_env(:arbor_orchestrator, :ollama)
+          v -> Application.put_env(:arbor_orchestrator, :ollama, v)
+        end
+      end
+    end
+
     test "caller-supplied base_url wins over the local-LM default" do
       req = %Request{provider: "ollama", model: "x"}
       opts = Adapter.build_req_opts(req, base_url: "http://10.0.0.5:11434/v1")

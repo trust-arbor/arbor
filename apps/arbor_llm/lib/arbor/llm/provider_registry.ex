@@ -285,6 +285,27 @@ defmodule Arbor.LLM.ProviderRegistry do
     end
   end
 
+  @doc """
+  Operator-configured API key for a local-LM provider, or `nil` when unset or
+  blank. Lets a daemon-less host reach a hosted OpenAI-compatible endpoint that
+  still uses the local provider shape — e.g. `ollama` pointed at
+  `https://ollama.com` with `OLLAMA_API_KEY` (wired in `config/runtime.exs`).
+  Cloud providers return `nil`: req_llm resolves their keys itself.
+  """
+  @spec configured_api_key(atom() | String.t()) :: String.t() | nil
+  def configured_api_key(provider) do
+    case Map.fetch(@local_providers, normalize(provider)) do
+      {:ok, %{config_key: config_key}} ->
+        case Keyword.get(Application.get_env(:arbor_orchestrator, config_key, []), :api_key) do
+          key when is_binary(key) and key != "" -> key
+          _other -> nil
+        end
+
+      :error ->
+        nil
+    end
+  end
+
   # ── Availability ────────────────────────────────────────────────────
 
   @doc """
