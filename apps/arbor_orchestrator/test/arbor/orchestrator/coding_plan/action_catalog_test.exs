@@ -5,6 +5,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
   alias Arbor.Common.ActionRegistry
   alias Arbor.Orchestrator.CodingPlan.ActionCatalog
 
+  alias Arbor.Orchestrator.CodingPlan.ActionCatalogTest.{
+    RequiredOrderAAction,
+    RequiredOrderBAction
+  }
+
   alias Arbor.Actions.TestFixtures.{
     AlphaAction,
     AlphaSchemaChangedAction,
@@ -16,6 +21,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
     LongErrorAction,
     MissingDescriptionAction,
     RaisingAction,
+    RequiredOrderAAction,
+    RequiredOrderBAction,
     ZebraAction
   }
 
@@ -50,6 +57,27 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
       assert forward == reverse
       assert ActionCatalog.names(forward) == ["alpha_action", "zebra_action"]
       assert forward["digest"] =~ ~r/^[0-9a-f]{64}$/
+    end
+
+    test "regression: JSON Schema `required` order does not change the catalog digest" do
+      # Schema generators emit `required` in map-iteration order, and large-map
+      # atom ordering follows atom creation order, so identical actions produced
+      # different digests on different builds (2026-09-03). `required` is a set.
+      assert {:ok, first} =
+               ActionCatalog.snapshot(entries: [{"order.action", RequiredOrderAAction, %{}}])
+
+      assert {:ok, second} =
+               ActionCatalog.snapshot(entries: [{"order.action", RequiredOrderBAction, %{}}])
+
+      # The digest also binds each module beam, so compare the normalized schema:
+      # both orders must canonicalize to the same JSON-clean map.
+      [action] = first["actions"]
+      [other] = second["actions"]
+      assert action["parameters_schema"] == other["parameters_schema"]
+      assert action["parameters_schema"]["required"] == ["anchor", "title"]
+
+      assert get_in(action, ["parameters_schema", "properties", "anchor", "required"]) ==
+               ["line", "path"]
     end
 
     test "deduplicates registry aliases by action module" do
