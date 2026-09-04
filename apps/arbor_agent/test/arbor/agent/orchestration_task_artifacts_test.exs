@@ -4,7 +4,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskArtifacts
-  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
+  alias Arbor.Contracts.Coding.{TaskOutcome, TaskOutcomeRegistry}
 
   test "recognizes exactly the closed coding result status set" do
     for status <- TaskOutcomeRegistry.coding_result_statuses() do
@@ -185,6 +185,84 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
       refute Map.has_key?(result.payload.report, :worker_provider_session_id)
       assert result.raw === raw
     end
+  end
+
+  test "recognizes a design-only registered outcome/status pair as a coding result" do
+    {:ok, outcome} = TaskOutcome.from_code("design_rework_exhausted")
+    outcome = TaskOutcome.to_map(outcome)
+    note = "Clarify the focused test coverage."
+
+    raw = %{
+      "status" => "design_rework_exhausted",
+      "canonical_status" => "design_rework_exhausted",
+      "outcome" => outcome,
+      "approval_note" => note,
+      "error" => "design_checkpoint_rework_exhausted"
+    }
+
+    result = TaskArtifacts.normalize(raw)
+    assert result.result_type == :coding_change
+    assert result.payload.outcome == outcome
+    assert result.payload.report.status == "design_rework_exhausted"
+    assert result.payload.report.canonical_status == "design_rework_exhausted"
+    assert result.payload.report.approval_note == note
+    assert result.payload.report.outcome == outcome
+    refute Map.has_key?(result.payload, :branch)
+    refute Map.has_key?(result.payload, :worktree_path)
+
+    {:ok, mismatched_outcome} = TaskOutcome.from_code("no_changes")
+
+    mismatched =
+      Map.put(raw, "outcome", TaskOutcome.to_map(mismatched_outcome))
+
+    assert TaskArtifacts.normalize(mismatched).result_type == :value
+
+    forged = put_in(raw, ["outcome", "diagnostic_refs"], [])
+    assert TaskArtifacts.normalize(forged).result_type == :value
+
+    absent = Map.delete(raw, "outcome")
+    assert TaskArtifacts.normalize(absent).result_type == :value
+
+    {:ok, committed} = TaskOutcome.from_code("change_committed")
+
+    assert TaskArtifacts.normalize(%{
+             "status" => "change_committed",
+             "canonical_status" => "change_committed",
+             "outcome" => TaskOutcome.to_map(committed)
+           }).result_type == :value
+
+    for contradictory <- [
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "design_rework_exhausted",
+            "outcome" => TaskOutcome.to_map(mismatched_outcome)
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "no_changes",
+            "outcome" => outcome
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "no_changes",
+            "outcome" => TaskOutcome.to_map(mismatched_outcome)
+          },
+          %{
+            "status" => "no_changes",
+            "canonical_status" => "design_rework_exhausted",
+            "outcome" => outcome
+          },
+          %{
+            "status" => "design_rework_exhausted",
+            "canonical_status" => "change_committed",
+            "outcome" => TaskOutcome.to_map(committed)
+          }
+        ] do
+      assert TaskArtifacts.normalize(contradictory).result_type == :value
+    end
+
+    without_canonical = Map.delete(raw, "canonical_status")
+    assert TaskArtifacts.normalize(without_canonical).result_type == :coding_change
   end
 
   test "accepts rework_exhausted as a coding status" do

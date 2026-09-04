@@ -58,6 +58,11 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     "detail"
   ]
 
+  # Artifact-free promotion is only for design-phase terminals. Public-status
+  # aliases of post-implementation outcomes (e.g. review_requires_rework ->
+  # rework_exhausted) still require branch/worktree/review artifacts.
+  @legacy_public_to_canonical %{}
+
   alias Arbor.Contracts.Comms.ApprovalAnswer
 
   alias Arbor.Contracts.Coding.{
@@ -297,7 +302,48 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
     is_binary(status) and
       TaskOutcomeRegistry.coding_result_status?(status) and
-      shape_evidence?
+      (shape_evidence? or registered_coding_outcome_pair?(map, status))
+  end
+
+  defp registered_coding_outcome_pair?(map, status) do
+    with {:ok, outcome} <- coding_outcome(map),
+         code when is_binary(code) <- outcome["code"],
+         true <- design_phase_coding_status?(status),
+         true <- design_phase_coding_status?(code),
+         true <- agreed_terminal_codes?(map, status, code) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp design_phase_coding_status?(status) when is_binary(status) do
+    TaskOutcomeRegistry.coding_result_status?(status) and
+      match?({:ok, %{phase: "design"}}, TaskOutcomeRegistry.spec(status))
+  end
+
+  defp design_phase_coding_status?(_status), do: false
+
+  defp agreed_terminal_codes?(map, status, code) do
+    case value(map, :canonical_status) do
+      canonical when canonical in [nil, ""] ->
+        code == status
+
+      canonical when is_binary(canonical) ->
+        case Map.fetch(@legacy_public_to_canonical, status) do
+          {:ok, ^code} when canonical == code ->
+            true
+
+          :error when code == status and canonical == status ->
+            true
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
   end
 
   defp pipeline_error?(map, "pipeline_error") do

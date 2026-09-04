@@ -102,7 +102,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     status_descriptor_pipeline_error
   ]
   @descriptor_dormant_roots @descriptor_dormant_nodes
-  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
   @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
   @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
   @descriptor_validate_extra_keys "validation_resource_id,candidate_source,source_commit_oid,expected_tree_oid,candidate_materialization_digest,acquired_base_commit,evidence_ref,candidate_materialization"
@@ -164,7 +164,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     candidate_materialization: "coding_plan_candidate_materialization",
     candidate_materialization_digest: "coding_plan_candidate_materialization_digest",
     source_commit_oid: "coding_plan_source_commit_oid",
-    expected_tree_oid: "coding_plan_expected_tree_oid"
+    expected_tree_oid: "coding_plan_expected_tree_oid",
+    packet_constraints: "packet_constraints",
+    packet_success_criteria: "packet_success_criteria"
   }
 
   @type compile_error :: term()
@@ -862,7 +864,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "context_keys",
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile"
          )}
       end
     end)
@@ -3051,7 +3053,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         @initial_context_keys.work_packet_json => work_packet_json,
         @initial_context_keys.design_review_context_json => design_review_context_json,
         @initial_context_keys.checkpoint_policy =>
-          Map.fetch!(plan.work_packet, "checkpoint_policy")
+          Map.fetch!(plan.work_packet, "checkpoint_policy"),
+        @initial_context_keys.packet_constraints =>
+          packet_claim_list(plan.work_packet, "constraints"),
+        @initial_context_keys.packet_success_criteria =>
+          packet_claim_list(plan.work_packet, "success_criteria")
       })
 
     case {checkpoint_policy(plan), design_gate(plan)} do
@@ -3075,7 +3081,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     |> Map.delete(@initial_context_keys.design_review_context_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
     |> Map.delete(@initial_context_keys.design_gate)
+    |> Map.delete(@initial_context_keys.packet_constraints)
+    |> Map.delete(@initial_context_keys.packet_success_criteria)
   end
+
+  defp packet_claim_list(work_packet, key) when is_map(work_packet) do
+    case Map.get(work_packet, key, []) do
+      list when is_list(list) -> list
+      _other -> []
+    end
+  end
+
+  defp packet_claim_list(_work_packet, _key), do: []
 
   defp maybe_put_initial_work_packet_digest(values, %Plan{version: 2} = plan),
     do: Map.put(values, @graph_metadata_keys.work_packet_digest, plan.work_packet_digest)

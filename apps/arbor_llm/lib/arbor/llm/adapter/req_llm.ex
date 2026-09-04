@@ -885,7 +885,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         Keyword.get(opts, :api_key)
 
       is_binary(provider) and ProviderRegistry.local?(provider) ->
-        "arbor-local"
+        # A daemon-less host may point a local-shape provider at a hosted
+        # endpoint (ollama -> https://ollama.com); use its configured key,
+        # else the placeholder local servers ignore.
+        ProviderRegistry.configured_api_key(provider) || "arbor-local"
 
       true ->
         nil

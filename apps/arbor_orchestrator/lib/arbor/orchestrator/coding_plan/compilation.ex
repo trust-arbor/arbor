@@ -23,7 +23,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     work_packet_json: "coding_plan_work_packet_json",
     design_review_context_json: "coding_plan_design_review_context_json",
     checkpoint_policy: "coding_plan_checkpoint_policy",
-    design_gate: "coding_plan_design_gate"
+    design_gate: "coding_plan_design_gate",
+    packet_constraints: "packet_constraints",
+    packet_success_criteria: "packet_success_criteria"
   }
   @max_version_bytes 128
 
@@ -343,7 +345,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
         @initial_context_keys.work_packet_json => work_packet_json,
         @initial_context_keys.design_review_context_json => design_review_context_json,
         @initial_context_keys.checkpoint_policy =>
-          Map.fetch!(plan.work_packet, "checkpoint_policy")
+          Map.fetch!(plan.work_packet, "checkpoint_policy"),
+        @initial_context_keys.packet_constraints =>
+          packet_claim_list(plan.work_packet, "constraints"),
+        @initial_context_keys.packet_success_criteria =>
+          packet_claim_list(plan.work_packet, "success_criteria")
       })
 
     case {Map.get(plan.work_packet, "checkpoint_policy"),
@@ -368,7 +374,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     |> Map.delete(@initial_context_keys.design_review_context_json)
     |> Map.delete(@initial_context_keys.checkpoint_policy)
     |> Map.delete(@initial_context_keys.design_gate)
+    |> Map.delete(@initial_context_keys.packet_constraints)
+    |> Map.delete(@initial_context_keys.packet_success_criteria)
   end
+
+  defp packet_claim_list(work_packet, key) when is_map(work_packet) do
+    case Map.get(work_packet, key, []) do
+      list when is_list(list) -> list
+      _other -> []
+    end
+  end
+
+  defp packet_claim_list(_work_packet, _key), do: []
 
   defp canonical_work_packet_json(%Plan{version: 2, work_packet: work_packet}) do
     case WorkPacket.canonical_bytes(work_packet) do

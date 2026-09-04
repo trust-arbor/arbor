@@ -490,6 +490,18 @@ defmodule Arbor.Actions.Council do
         candidate_materialization: [
           type: :map,
           doc: "Compiler-owned candidate materialization descriptor"
+        ],
+        accepted_design: [
+          type: :string,
+          doc: "Admitted approved-design text when a design checkpoint ran"
+        ],
+        packet_constraints: [
+          type: {:list, :string},
+          doc: "Frozen work-packet constraints for conformance review"
+        ],
+        packet_success_criteria: [
+          type: {:list, :string},
+          doc: "Frozen work-packet success criteria for conformance review"
         ]
       ]
 
@@ -529,7 +541,10 @@ defmodule Arbor.Actions.Council do
         expected_tree_oid: :control,
         candidate_materialization_digest: :control,
         validation_resource_id: :control,
-        candidate_materialization: :control
+        candidate_materialization: :control,
+        accepted_design: :data,
+        packet_constraints: :data,
+        packet_success_criteria: :data
       }
     end
 
@@ -941,9 +956,13 @@ defmodule Arbor.Actions.Council do
         normalized == "commit_hash" and not is_nil(value) ->
           Map.put(acc, "candidate_commit", value)
 
+        normalized == "accepted_design" and not is_nil(value) ->
+          Map.put(acc, "approved_design", value)
+
         normalized in ~w(
           diff files branch base_ref candidate_commit intent agent_id review_cycle
           prior_candidate_commit delta_diff delta_files delta_ranges finding_ledger
+          approved_design packet_constraints packet_success_criteria
         ) and
             not is_nil(value) ->
           Map.put(acc, normalized, value)

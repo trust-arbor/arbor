@@ -8,7 +8,7 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
   """
 
   @version "review-ledger-v1"
-  @max_perspectives 10
+  @max_perspectives 11
   @max_findings_per_perspective 8
   @max_findings 128
   @max_encoded_bytes 131_072
@@ -28,7 +28,8 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCore do
     "contract_api_compat",
     "architecture_grain_fit",
     "performance_resource",
-    "docs_naming"
+    "docs_naming",
+    "design_conformance"
   ]
 
   @votes ["approve", "reject", "abstain"]

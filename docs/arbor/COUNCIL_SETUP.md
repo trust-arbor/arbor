@@ -5,7 +5,7 @@ Operator guide for the binding code-review council used by factory
 
 A factory plan with `review_profile: "binding"` (the default) does not merge
 on worker say-so. After implement → validate → commit-gate, Arbor runs the
-reviewed `code-review-council.dot` graph: ten parallel reviewer seats, then
+reviewed `code-review-council.dot` graph: eleven parallel reviewer seats, then
 a deterministic ledger reduce. The council recommends; blast-radius policy
 still decides whether a person must look.
 
@@ -22,7 +22,7 @@ Related: [SOFTWARE_FACTORY.md](./SOFTWARE_FACTORY.md),
 | --- | --- | --- |
 | Used by | Factory `review_profile: "binding"` via `council_review_change` | `council_consult` / `council_consult_one`, design questions |
 | Source of seats | `apps/arbor_actions/priv/pipelines/code-review-council.dot` | `Arbor.Consensus.Evaluators.AdvisoryLLM` |
-| Seat count | 10 compute nodes | 13 perspectives |
+| Seat count | 11 compute nodes | 13 perspectives |
 | How models are chosen | `llm_provider` + `llm_model` on each DOT node | `provider:model` map, overridable |
 | How a new user remaps | Edit that reviewed DOT (or add a `model_stylesheet`) and restart | Env / Application config; no DOT edit |
 | Vote contract | One `coding_submit_review_report` tool call per seat; prose is an abstention | Free-form evaluations collected by Consult |
@@ -33,7 +33,7 @@ you want `mix arbor.consult`.
 
 ## Binding council: stock seats
 
-The packaged graph (`max_parallel="10"`) as of 2026-08-19:
+The packaged graph (`max_parallel="11"`) as of 2026-09-03:
 
 | Node id | Perspective | `llm_provider` | `llm_model` |
 | --- | --- | --- | --- |
@@ -47,6 +47,11 @@ The packaged graph (`max_parallel="10"`) as of 2026-08-19:
 | `architecture_grain_fit` | DOT vs CRC vs action vs handler | `ollama` | `glm-5.2:cloud` |
 | `performance_resource` | Hot path, memory, GenServer blocking | `ollama` | `minimax-m3:cloud` |
 | `docs_naming` | Docs drift, absolute dates | `ollama` | `minimax-m3:cloud` |
+| `design_conformance` | Explicit approved-design promises and packet constraints | `openai_oauth` | `gpt-5.6-sol` |
+
+The ten existing seats still read `review.prompt` (branch, intent, files, and
+diff). Only `design_conformance` reads `review.prompt_conformance`: that same
+shared body plus bounded Approved design and Packet constraints sections.
 
 That is five models across three providers. Diversity is a quality choice
 baked into the reviewed graph, not a hard requirement of the reducer. A
@@ -188,7 +193,7 @@ pipeline.path
 # .../priv/pipelines/code-review-council.dot
 ```
 
-### Option A — keep the ten seats, change provider/model pairs
+### Option A — keep the eleven seats, change provider/model pairs
 
 Edit `apps/arbor_actions/priv/pipelines/code-review-council.dot`. On each
 compute node set `llm_provider` and `llm_model` to a pair this host can

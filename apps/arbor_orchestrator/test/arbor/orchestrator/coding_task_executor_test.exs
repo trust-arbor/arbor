@@ -5140,7 +5140,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context(%{"task_id" => task_id}))
     end
 
-    defp run_program_only_terminal(status, error, completed_nodes) do
+    defp run_program_only_terminal(status, error, completed_nodes, extra_context \\ %{}) do
       task_id = unique_run_task_id()
 
       Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, opts ->
@@ -5152,13 +5152,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         engine_result = %{
           run_id: Keyword.fetch!(opts, :run_id),
           context:
-            Map.merge(completed_turn_context(), %{
+            completed_turn_context()
+            |> Map.merge(%{
               "status" => status,
               "error" => error,
               "coding_plan_validation_program" => program,
               "branch" => "arbor/coding-agent/test",
               "workspace_id" => "ws_1"
-            }),
+            })
+            |> Map.merge(extra_context),
           final_outcome: %{status: :success},
           taint: %{},
           node_durations: %{}
@@ -5757,7 +5759,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "route_design_checkpoint_outcome",
         "check_design_rework_total_budget",
         "mark_design_rework_exhausted_error",
-        "status_rework_exhausted"
+        "status_design_rework_exhausted"
       ]
 
       denial_nodes = [
@@ -5768,7 +5770,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       ]
 
       terminals = [
-        {"rework_exhausted", "design_checkpoint_rework_exhausted", design_nodes},
+        {"design_rework_exhausted", "design_checkpoint_rework_exhausted", design_nodes},
         {"approval_denied", "approval_denied", denial_nodes}
       ]
 
@@ -5792,6 +5794,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         assert decision["candidate_tree_oid"] == ""
         assert decision["observed_at"] == ""
       end
+    end
+
+    test "design rework exhaustion publishes the hoisted checkpoint note" do
+      note = "Clarify the focused test coverage."
+
+      {run_result, _task_id} =
+        run_program_only_terminal(
+          "design_rework_exhausted",
+          "design_checkpoint_rework_exhausted",
+          [
+            "await_design_checkpoint",
+            "hoist_design_decision_note",
+            "check_design_rework_total_budget",
+            "mark_design_rework_exhausted_error",
+            "status_design_rework_exhausted"
+          ],
+          %{"approval_note" => note}
+        )
+
+      assert {:ok, result} = run_result
+      assert result["status"] == "design_rework_exhausted"
+      assert result["canonical_status"] == "design_rework_exhausted"
+      assert result["outcome"]["code"] == "design_rework_exhausted"
+      assert result["outcome"]["retry"] == "none"
+      assert result["approval_note"] == note
+      refute result["outcome"]["code"] == "task_runner_failed"
     end
 
     test "program-only evidence stays incomplete when validate completed" do

@@ -71,12 +71,16 @@
 // post-implementation budget, validation admits one initiated repair, council
 // review admits up to two, and operator approval admits one. At max_cycles=2,
 // a run can therefore admit two design and two post-implementation repairs.
-// Review-budget exhaustion emits status=rework_exhausted (canonical). A
-// legacy_status=review_requires_rework field is also set for Phase 2 adapters.
-// Operator denial of the commit gate emits status=approval_denied (not
-// pipeline_error). Operator rework steers the same worker through another
-// implement/validate/commit cycle; exhausted operator rework uses
-// rework_exhausted with error=operator_approval_rework_exhausted.
+// Design-checkpoint rework-budget exhaustion emits
+// status=design_rework_exhausted (policy terminal; retry none) with
+// error=design_checkpoint_rework_exhausted. Post-implementation review or
+// operator budget exhaustion emits status=rework_exhausted (canonical). A
+// legacy_status=review_requires_rework field is also set for Phase 2 adapters
+// on that post-implementation path only. Operator denial of the commit gate
+// emits status=approval_denied (not pipeline_error). Operator rework steers
+// the same worker through another implement/validate/commit cycle; exhausted
+// operator rework uses rework_exhausted with
+// error=operator_approval_rework_exhausted.
 
 digraph CodingChangeV1 {
   graph [
@@ -1442,7 +1446,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="council_review_change",
-    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",
+    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",
     timeout_budget.deadline_key="session.run_deadline_unix_ms",
     timeout_budget.cap_key="coding_budget.review_ms",
     timeout_budget.reserve_key="coding_budget.review_completion_reserve_ms",
@@ -1740,6 +1744,13 @@ digraph CodingChangeV1 {
     type="transform",
     transform="constant",
     expression="rework_exhausted",
+    output_key="status"
+  ]
+
+  status_design_rework_exhausted [
+    type="transform",
+    transform="constant",
+    expression="design_rework_exhausted",
     output_key="status"
   ]
 
@@ -2452,7 +2463,8 @@ digraph CodingChangeV1 {
 
   check_design_rework_total_budget -> mark_design_rework_exhausted_error [condition="context.design_rework_count>=2"]
   check_design_rework_total_budget -> inc_design_rework_count [condition="context.design_rework_count<2"]
-  mark_design_rework_exhausted_error -> status_rework_exhausted
+  mark_design_rework_exhausted_error -> status_design_rework_exhausted
+  status_design_rework_exhausted -> close_worker
   inc_design_rework_count -> inc_design_attempt
   inc_design_attempt -> reset_design_envelope_retry_count
   reset_design_envelope_retry_count -> mark_design_rework_kind
@@ -2778,6 +2790,7 @@ digraph CodingChangeV1 {
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_failed"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=validation_capacity_exceeded"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=rework_exhausted"]
+  route_release_mode -> prep_release_mode_retain [condition="context.status=design_rework_exhausted"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=approval_denied"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=review_rejected"]
   route_release_mode -> prep_release_mode_retain [condition="context.status=review_failed"]

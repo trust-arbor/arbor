@@ -2973,6 +2973,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # No production prefer_rework_exhausted switch
       refute Map.has_key?(graph.nodes, "status_review_requires_rework")
       assert graph.nodes["status_rework_exhausted"]
+      assert graph.nodes["status_design_rework_exhausted"]
       assert graph.nodes["legacy_status_review_requires_rework"]
       refute Map.has_key?(graph.nodes, "legacy_status_operator_approval_rework")
 
@@ -3030,7 +3031,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert load.attrs["context_keys"] == "workspace_id,commit,prior_commit"
 
       assert graph.nodes["review_change"].attrs["context_keys"] ==
-               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges"
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria"
     end
   end
 
@@ -3270,6 +3271,20 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       [await_args] = action_calls(calls, "coding_design_checkpoint_await")
       assert_design_checkpoint_identity(open_args, await_args, plan, compilation, 1)
 
+      assert [{"council_review_change", review_args}] =
+               Enum.filter(calls, fn {name, _args} -> name == "council_review_change" end)
+
+      assert review_args["accepted_design"] == fixture_design(1)
+      assert review_args["packet_constraints"] == ["touch only owned files"]
+      assert review_args["packet_success_criteria"] == ["focused tests pass"]
+      assert {:ok, request} = Arbor.Actions.Council.build_code_review_request(review_args)
+
+      refute Arbor.Contracts.Consensus.CodeReviewRequest.prompt_text(request) =~
+               "Approved design:"
+
+      assert Arbor.Contracts.Consensus.CodeReviewRequest.prompt_conformance_text(request) =~
+               "Approved design:\n#{fixture_design(1)}"
+
       [design_prompt, implementation_prompt] = action_prompts(calls)
       assert design_prompt =~ "DESIGN PHASE ONLY"
 
@@ -3457,8 +3472,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                    max_steps: 300
                  )
 
-        assert result.context["status"] == "rework_exhausted"
+        assert result.context["status"] == "design_rework_exhausted"
         assert result.context["error"] == "design_checkpoint_rework_exhausted"
+        assert result.context["approval_note"] == "Clarify the focused test coverage."
+        assert "hoist_design_decision_note" in result.completed_nodes
         assert result.context["design_attempt"] == max_cycles + 1
         assert to_string(result.context["design_rework_count"]) == Integer.to_string(max_cycles)
         assert result.context["total_rework_count"] == "0"
@@ -3580,6 +3597,20 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert action_calls(calls, "coding_design_checkpoint_await") == []
       assert_single_worker_session(calls, 1)
       assert_closed_and_released(calls)
+
+      assert [{"council_review_change", review_args}] =
+               Enum.filter(calls, fn {name, _args} -> name == "council_review_change" end)
+
+      assert review_args["accepted_design"] in [nil, ""] or
+               not Map.has_key?(review_args, "accepted_design")
+
+      assert review_args["packet_constraints"] == ["touch only owned files"]
+      assert review_args["packet_success_criteria"] == ["focused tests pass"]
+      assert {:ok, request} = Arbor.Actions.Council.build_code_review_request(review_args)
+      shared = Arbor.Contracts.Consensus.CodeReviewRequest.prompt_text(request)
+      conformance = Arbor.Contracts.Consensus.CodeReviewRequest.prompt_conformance_text(request)
+      refute shared =~ "no approved design; constraints only"
+      assert conformance =~ "no approved design; constraints only"
     end
 
     test "version 2 direct validation approval rework threads exact note and request id into ACP prompt" do

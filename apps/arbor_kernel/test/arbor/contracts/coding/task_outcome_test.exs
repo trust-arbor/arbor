@@ -22,7 +22,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeTest do
              ~w(preflight workspace worker_start design worker_turn validation review commit adoption cleanup control)
 
     assert TaskOutcome.origins() ==
-             ~w(arbor security acp_transport provider worker validator reviewer operator runtime)
+             ~w(arbor security acp_transport provider worker validator reviewer operator runtime policy)
 
     assert TaskOutcome.retries() == ~w(none same_session new_session after_external_change)
 

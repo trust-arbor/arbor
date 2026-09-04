@@ -5,6 +5,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
   No IO, no GenServer, no credential handles.
   """
 
+  alias Arbor.Contracts.Coding.TaskOutcomeRegistry
+
   @idempotence_domain "arbor.agent.coding_run_recovery.terminal.v1"
   @coding_kind "coding_change"
   @admitted_final_outcomes MapSet.new(["success", "partial_success", "fail", "skipped"])
@@ -426,6 +428,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
       MapSet.member?(@non_accepting_diagnostic_statuses, status) ->
         {:ok, "not_applicable"}
 
+      design_phase_status?(status) ->
+        {:ok, "not_applicable"}
+
       evidence_state == :partial ->
         {:error, :partial_validation_evidence}
 
@@ -453,6 +458,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CodingRunRecoveryCore do
   end
 
   def expected_requirement(_status, _evidence_state), do: {:error, :invalid_decision}
+
+  defp design_phase_status?(status) when is_binary(status) do
+    case TaskOutcomeRegistry.spec(status) do
+      {:ok, %{phase: "design"}} -> true
+      _ -> false
+    end
+  end
 
   @spec producer_evidence_state(term(), term(), term(), term()) :: :none | :complete | :partial
   def producer_evidence_state(program, tree_oid, observed_at, action_result) do

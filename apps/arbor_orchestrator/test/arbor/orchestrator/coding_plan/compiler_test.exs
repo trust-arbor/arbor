@@ -250,6 +250,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert compilation.initial_values["coding_plan_work_packet"] == plan.work_packet
       assert compilation.initial_values["coding_plan_checkpoint_policy"] == checkpoint_policy
+      assert compilation.initial_values["packet_constraints"] == plan.work_packet["constraints"]
+
+      assert compilation.initial_values["packet_success_criteria"] ==
+               plan.work_packet["success_criteria"]
+
       refute Map.has_key?(compilation.initial_values, "coding_plan_design_gate")
       refute Map.has_key?(compilation.initial_values, "design_council_run_id")
       assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
@@ -329,9 +334,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   test "template stays within reviewed DOT source, node, and edge ceilings", ctx do
     graph = parse!(ctx.template_source)
 
-    assert byte_size(ctx.template_source) == 102_627
-    assert map_size(graph.nodes) == 292
-    assert length(graph.edges) == 450
+    assert byte_size(ctx.template_source) == 103_237
+    assert map_size(graph.nodes) == 293
+    assert length(graph.edges) == 452
     assert byte_size(ctx.template_source) <= 262_144
     # Dormant CrossApp and descriptor routes crossed the historical 256 sentinel;
     # retain reviewed growth headroom while exact inventory remains pinned above.
@@ -1015,6 +1020,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert edge_target(graph, "mark_implementation_phase", nil) == "build_implement_prompt"
     assert edge_target(graph, "build_implement_prompt", nil) == "capture_pre_turn_workspace"
     assert edge_target(graph, "build_design_rework_prompt", nil) == "capture_pre_turn_workspace"
+
+    assert edge_target(graph, "mark_design_rework_exhausted_error", nil) ==
+             "status_design_rework_exhausted"
+
+    assert graph.nodes["status_design_rework_exhausted"]
+
+    assert node_attrs(graph, "status_design_rework_exhausted")["expression"] ==
+             "design_rework_exhausted"
+
+    assert node_attrs(graph, "status_design_rework_exhausted")["output_key"] == "status"
+    assert graph.nodes["status_rework_exhausted"]
   end
 
   test "version 2 compilation rejects missing or tampered packet bindings", ctx do
@@ -1109,6 +1125,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_json")
     refute Map.has_key?(compilation.initial_values, "coding_plan_checkpoint_policy")
+    refute Map.has_key?(compilation.initial_values, "packet_constraints")
+    refute Map.has_key?(compilation.initial_values, "packet_success_criteria")
     refute Map.has_key?(compilation.initial_values, "coding_plan_work_packet_digest")
     refute Map.has_key?(compilation.manifest, "work_packet_digest")
     assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
@@ -1311,6 +1329,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert default_pinned["timeout"] == 900_000
     assert node_attrs(graph, "validate")["param.timeout"] == 900_000
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
+
+    assert node_attrs(graph, "review_change")["context_keys"] ==
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria"
 
     assert node_attrs(graph, "open_design_checkpoint")
            |> Map.take([
@@ -1655,7 +1676,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute validate["context_keys"] =~ "test_paths"
 
     assert node_attrs(graph, "review_change")["context_keys"] ==
-             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile"
 
     assert node_attrs(graph, "prep_review_validation_profile")["expression"] ==
              "security_regression"
@@ -2758,7 +2779,9 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "materialize_candidate")["max_retries"] == "0"
 
     assert edge_target(graph, "status_approval_denied", nil) == "close_worker"
-    assert edge_target(graph, "status_rework_exhausted", nil) == "close_worker"
+    # Design-phase exhaustion is the only rework-exhaustion path reachable on the
+    # descriptor route; it terminals as design_rework_exhausted (policy), not rework_exhausted.
+    assert edge_target(graph, "status_design_rework_exhausted", nil) == "close_worker"
     assert edge_target(graph, "status_validation_failed", nil) == "skip_descriptor_close"
     assert edge_target(graph, "status_review_failed", nil) == "skip_descriptor_close"
 

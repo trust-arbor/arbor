@@ -1774,6 +1774,90 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:finalize_terminal_task_called, "agent_1", _, _, _, _}, 100
   end
 
+  test "design_rework_exhausted publishes the hoisted approval_note as a policy terminal", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+    outcome = registered_outcome("design_rework_exhausted")
+    # Same note the compiled design_rework_always fixture hoists via
+    # hoist_design_decision_note, then CodingTaskExecutor copies into the payload.
+    approval_note = "Clarify the focused test coverage."
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "design rejected"},
+               name: store,
+               task_id: "task_design_rework_exhausted"
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, context}
+
+    result = %{
+      "status" => "design_rework_exhausted",
+      "canonical_status" => "design_rework_exhausted",
+      "error" => "design_checkpoint_rework_exhausted",
+      "approval_note" => approval_note,
+      "outcome" => outcome
+    }
+
+    send(runner_pid, {:finish, {:ok, result}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], ^context,
+                    _callback_pid}
+
+    assert envelope["terminal_state"] == "done"
+    assert envelope["outcome"] == outcome
+    assert envelope["outcome"]["retry"] == "none"
+    assert envelope["evidence"]["kind"] == "executor_result"
+    assert envelope["evidence"]["result"]["approval_note"] == approval_note
+    refute envelope["outcome"]["code"] == "task_runner_failed"
+    refute envelope["outcome"]["retry"] == "new_session"
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+      assert status.outcome == outcome
+      assert status.outcome["retry"] == "none"
+
+      assert {:ok, completed} = TaskStore.result(task_id, name: store)
+      assert completed.result_type == :coding_change
+      assert completed.payload.outcome == outcome
+      assert completed.payload.report.approval_note == approval_note
+      assert completed.payload.report.status == "design_rework_exhausted"
+      assert completed.raw == result
+      assert completed.raw["approval_note"] == approval_note
+    end)
+  end
+
+  test "runner {:error, :partial_validation_evidence} stays task_runner_failed", %{
+    supervisor: supervisor
+  } do
+    store = start_all_terminal_store(supervisor)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "partial validation evidence"},
+               name: store,
+               task_id: "task_partial_validation_evidence"
+             )
+
+    assert_receive {:all_terminal_executor_started, runner_pid, "agent_1", _task, _context}
+    send(runner_pid, {:finish, {:error, :partial_validation_evidence}})
+
+    assert_receive {:finalize_terminal_task_called, "agent_1", envelope, [], _, _}
+    assert envelope["outcome"]["code"] == "task_runner_failed"
+    assert envelope["outcome"]["retry"] == "new_session"
+    assert envelope["evidence"] == %{"kind" => "task_runner_failed"}
+
+    assert_eventually(fn ->
+      assert {:ok, ^envelope} = TaskStore.result(task_id, name: store)
+      assert {:ok, %{outcome: outcome}} = TaskStore.status(task_id, name: store)
+      assert outcome == envelope["outcome"]
+    end)
+  end
+
   test "all-terminal pipeline failure preserves its canonical outcome in result and status", %{
     supervisor: supervisor
   } do

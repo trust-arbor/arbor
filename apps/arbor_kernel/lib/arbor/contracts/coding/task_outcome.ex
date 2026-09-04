@@ -26,7 +26,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcome do
     cleanup
     control
   )
-  @origins ~w(arbor security acp_transport provider worker validator reviewer operator runtime)
+  @origins ~w(arbor security acp_transport provider worker validator reviewer operator runtime policy)
   @retries ~w(none same_session new_session after_external_change)
 
   # These values are the closed status vocabularies currently emitted by the

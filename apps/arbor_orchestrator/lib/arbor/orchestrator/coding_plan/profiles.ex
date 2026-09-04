@@ -197,6 +197,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_success_workspace_retention
                     reset_design_envelope_retry_count
                     status_approval_denied
+                    status_design_rework_exhausted
                     await_design_checkpoint
                     build_design_envelope_repair_prompt
                     build_design_prompt
@@ -960,7 +961,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash," <>
                          "review_cycle,finding_ledger,prior_candidate_commit,delta_diff," <>
-                         "delta_files,delta_ranges"
+                         "delta_files,delta_ranges,accepted_design,packet_constraints," <>
+                         "packet_success_criteria"
 
   @security_review_context_keys @review_context_keys <>
                                   ",test_paths,validation_profile"
@@ -1518,7 +1520,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     ["inc_design_attempt", "reset_design_envelope_retry_count", nil],
     ["inc_design_envelope_retry_count", "build_design_envelope_repair_prompt", nil],
     ["inc_design_rework_count", "inc_design_attempt", nil],
-    ["mark_design_rework_exhausted_error", "status_rework_exhausted", nil],
+    ["mark_design_rework_exhausted_error", "status_design_rework_exhausted", nil],
     ["mark_design_rework_iteration", "build_design_rework_prompt", nil],
     ["mark_design_rework_kind", "mark_design_rework_iteration", nil],
     ["parse_design_response", "check_design_envelope_retry_budget", "outcome=fail"],

@@ -1336,6 +1336,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"prep_release_mode_retain", "context.status=review_failed"},
       {"prep_release_mode_retain", "context.status=review_rejected"},
       {"prep_release_mode_retain", "context.status=rework_exhausted"},
+      {"prep_release_mode_retain", "context.status=design_rework_exhausted"},
       {"prep_release_mode_retain", "context.status=validation_failed"},
       {"prep_release_mode_retain", "context.status=validation_capacity_exceeded"},
       {"prep_release_mode_retain", nil},
@@ -1376,7 +1377,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   @descriptor_committed_change_keys "workspace_id,commit,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
   @descriptor_publish_keys "workspace_id,mode,commit_hash,repo_path,candidate_source,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,evidence_ref,candidate_materialization"
-  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
+  @descriptor_review_context_keys "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,candidate_materialization"
   @descriptor_review_identity_keys ~w(candidate_source evidence_ref acquired_base_commit expected_tree_oid candidate_materialization_digest validation_resource_id candidate_materialization)
   @descriptor_materialize_context_keys "workspace_id,candidate_materialization,candidate_materialization_digest,source_commit_oid,expected_tree_oid,acquired_base_commit,materialize_window,evidence_ref"
 
@@ -2481,7 +2482,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           (edge.to == @rework_exhaustion_status and edge.from == @rework_exhaustion_marker) or
           (edge.to == "status_approval_denied" and
              edge.from == "mark_approval_denied_error") or
-          (edge.to == "status_rework_exhausted" and
+          (edge.to == "status_design_rework_exhausted" and
              edge.from == "mark_design_rework_exhausted_error")
 
       if allowed? do
@@ -4037,7 +4038,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           "context.design_rework_count>=#{rework_max_cycles}"},
          {"inc_design_rework_count", "context.design_rework_count<#{rework_max_cycles}"}
        ]},
-      {"mark_design_rework_exhausted_error", [{"status_rework_exhausted", nil}]},
+      {"mark_design_rework_exhausted_error", [{"status_design_rework_exhausted", nil}]},
       {"inc_design_rework_count", [{"inc_design_attempt", nil}]},
       {"inc_design_attempt", [{"reset_design_envelope_retry_count", nil}]},
       {"reset_design_envelope_retry_count", [{"mark_design_rework_kind", nil}]},
@@ -5537,9 +5538,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "context_keys" =>
            if(descriptor_route?(graph),
              do:
-               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,test_paths,validation_profile",
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,candidate_source,evidence_ref,acquired_base_commit,expected_tree_oid,candidate_materialization_digest,validation_resource_id,test_paths,validation_profile",
              else:
-               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,test_paths,validation_profile"
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria,test_paths,validation_profile"
            ),
          "output_prefix" => "review"
        }},

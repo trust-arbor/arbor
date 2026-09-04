@@ -21,6 +21,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              rework_exhausted
              validation_capacity_exceeded
              validation_failed
+             design_rework_exhausted
            )
 
     assert TaskOutcomeRegistry.coding_result_statuses() ==
@@ -75,6 +76,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              rework_exhausted
              validation_capacity_exceeded
              validation_failed
+             design_rework_exhausted
            )
 
     assert Enum.all?(
@@ -144,6 +146,15 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
       assert spec(code) == semantics
       assert {:ok, %TaskOutcome{phase: "design"}} = TaskOutcome.from_code(code)
     end
+
+    assert spec("design_rework_exhausted") == {"failed", "design", "policy", "none"}
+    assert TaskOutcomeRegistry.terminal_status?("design_rework_exhausted")
+    assert TaskOutcomeRegistry.registered_code?("design_rework_exhausted")
+    refute TaskOutcomeRegistry.pipeline_error_code?("design_rework_exhausted")
+    refute TaskOutcomeRegistry.adoptable_terminal_status?("design_rework_exhausted")
+
+    assert {:ok, %TaskOutcome{phase: "design", origin: "policy", retry: "none"}} =
+             TaskOutcome.from_code("design_rework_exhausted")
   end
 
   test "adoptable terminal statuses are the exact closed post-terminal vocabulary" do

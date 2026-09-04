@@ -2267,6 +2267,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
     refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
     assert graph.nodes["status_approval_denied"]
+    assert graph.nodes["status_design_rework_exhausted"]
+
+    assert graph.nodes["status_design_rework_exhausted"].attrs["expression"] ==
+             "design_rework_exhausted"
+
+    assert graph.nodes["status_design_rework_exhausted"].attrs["output_key"] == "status"
+    assert graph.nodes["status_design_rework_exhausted"].attrs["transform"] == "constant"
     assert graph.nodes["check_operator_rework_category_budget"]
     assert graph.nodes["check_operator_rework_total_budget"]
 
@@ -2651,8 +2658,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     template_override =
       String.replace(
         ctx.template_source,
-        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
-        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges",),
+        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",),
+        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,review_cycle,finding_ledger,prior_candidate_commit,delta_diff,delta_files,delta_ranges,accepted_design,packet_constraints,packet_success_criteria",),
         global: false
       )
 

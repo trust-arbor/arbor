@@ -269,10 +269,11 @@ read. Grant it once on the live node:
 ```
 
 Close the authority-horizon loop with the Mix task. It runs coding dispatch
-readiness for the plan against the coordinator, grants the capability URIs
-readiness names as missing for the key-file caller through
-`Arbor.Security.grant/1`, and repeats until readiness names nothing or the
-configured maximum number of readiness rounds is reached.
+readiness for the plan against the coordinator, grants each capability URI
+readiness names as missing to the principal that finding names (key-file
+caller or `--agent-id` coordinator) through `Arbor.Security.grant/1`, and
+repeats until no role has missing findings or the configured maximum number
+of readiness rounds is reached.
 
 ```bash
 ./bin/mix arbor.coding.grant --plan /tmp/factory-first-run.json \
@@ -283,15 +284,16 @@ configured maximum number of readiness rounds is reached.
   --agent-id agent_<coordinator> --dry-run
 ```
 
-`--dry-run`: every round invokes readiness and emits the full list of caller
-URIs named that round (no dedupe). Dry-run never emits a grant. It halts
-converged only when a report names nothing; otherwise it ends unconverged at
-max-rounds.
+`--dry-run`: every round invokes readiness and emits the missing URIs named
+that round grouped by `{principal_role, principal_id}` (no dedupe). Dry-run
+never emits a grant. It halts converged only when a report names nothing;
+otherwise it ends unconverged at max-rounds.
 
 Do not copy a URI count from an old session — profile and graph changes
-alter the set. The Mix task is the grant loop. If you must do it by hand,
-start with dispatch, then grant each exact authenticated-caller missing URI
-readiness names (never a wildcard):
+alter the set. The Mix task is the grant loop for both principal roles. If
+you must do it by hand, start with dispatch, then grant each exact missing
+URI readiness names to the principal whose finding named it (never a
+wildcard):
 
 ```elixir
 caller = "agent_<caller_from_key_file>"
@@ -311,7 +313,7 @@ alias Arbor.Contracts.Security.CapabilityUri
 # The horizon enumerates TWO principal roles: the authenticated_caller (your
 # key-file identity) and the execution_principal (the coordinator that runs
 # the task). Each missing URI must be granted to the principal whose finding
-# named it — a caller-only grant leaves the coordinator blocked at preflight.
+# named it — the Mix task already does this for both roles.
 role_to_principal = %{
   "authenticated_caller" => caller,
   "execution_principal" => target
@@ -354,32 +356,20 @@ end
 The coordinator also needs the template capabilities; `mix arbor.agent start
 coding_agent` requests them at creation.
 
-**The horizon checks BOTH principals, but `mix arbor.coding.grant` closes only
-the caller's gaps** (2026-08-31, first design-gated dispatch on a fresh factory host). The task grants
-to the key-file caller and skips `execution_principal` findings entirely, so it
-can print `converged` while dispatch still fails preflight with
-`authority_horizon_missing` / `principal_role=execution_principal` — typically
-when a new pipeline version introduces a new action URI (e.g.
-`arbor://action/coding/design_council_review`) the coordinator has never held.
-When you see that signature, grant the named URI to the **coordinator** by
-hand on the live node:
+`mix arbor.coding.grant` closes missing findings for both
+`authenticated_caller` and `execution_principal`, **and** after capability
+convergence installs a bare-prefix trust rule on the execution principal for
+each required `arbor://action/coding/` URI whose `Arbor.Trust.explain/2` has
+`user_match: nil` and effective `:block` or `:ask`. The installed mode mirrors
+same-parent sibling coding rules on that profile (`:auto` on today's
+coding-agent profiles). `--dry-run` lists those rules; `--no-trust-rules` is
+capability-only.
 
-```bash
-./bin/mix arbor.rpc 'Arbor.Security.grant(principal: "agent_<coordinator>", resource: "arbor://action/coding/<new_uri>")'
-```
-
-A capability alone may still not be enough: `ApprovalGuard` consults the
-coordinator's **trust profile** separately, and a URI with no rule falls to the
-baseline (`:block` for egress-classed actions — the run dies at the action with
-`Policy denied` in the node log even though the capability signed fine). Mirror
-the sibling rule's mode (coding URIs use `:auto`; bare prefix, never `/**`):
-
-```bash
-./bin/mix arbor.rpc 'Arbor.Trust.Store.update_profile("agent_<coordinator>", &Arbor.Trust.Authority.set_rule(&1, "arbor://action/coding/<new_uri>", :auto))'
-```
-
-Verify both layers with `Arbor.Trust.explain/2` and a fresh readiness probe.
-See `.claude/skills/agent-security-gates.md` for the full gate checklist.
+Re-run the task after a pipeline change that introduces a new action URI (e.g.
+`arbor://action/coding/design_council_review`) so both the capability and trust
+layers close for the coordinator. Verify with `Arbor.Trust.explain/2` and a
+fresh readiness probe. See `.claude/skills/agent-security-gates.md` for the
+full gate checklist.
 
 ### Grok worker OAuth
 
@@ -549,10 +539,13 @@ Three more onboarding traps for a fresh factory host (2026-08-31):
   into the host's `.env` — machine-to-machine, never through a pasteboard or
   chat transcript — and **restart the node**; `.env` is read only at boot.
 - **New pipeline URIs need capability + trust rule on the coordinator** —
-  see the authority-horizon section above for both one-liners.
+  run `mix arbor.coding.grant` for the plan. It grants missing capabilities
+  to both principals and, after capability convergence, installs the
+  execution principal's missing `arbor://action/coding/` trust rules
+  (bare prefix, sibling-mirrored mode). `--no-trust-rules` is
+  capability-only.
 - **A restarted node keeps DB-backed state** (trust profile rules survive),
-  but re-run the readiness probe after any restart and re-grant whatever the
-  execution principal is missing before dispatching.
+  but re-run `mix arbor.coding.grant` after any restart before dispatching.
 
 Use a tiny, reversible packet. The point is to prove admission, worker
 launch, validation, and review — not to land a feature.

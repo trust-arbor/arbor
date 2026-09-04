@@ -650,20 +650,21 @@ defmodule Arbor.Actions.Coding.ReviewLedgerCoreTest do
     assert decision["blocking_reasons"] == [%{"id" => "ledger", "reason" => "invalid_ledger"}]
   end
 
-  test "defaults to all ten static owners and abstains missing reports" do
+  test "defaults to all eleven static owners and abstains missing reports" do
     {:ok, ledger} = ReviewLedgerCore.new(%{})
-    assert length(ledger["perspectives"]) == 10
+    assert length(ledger["perspectives"]) == 11
+    assert "design_conformance" in ledger["perspectives"]
 
     {:ok, completed} = ReviewLedgerCore.apply_cycle(ledger, 1, %{})
     cycle = completed["cycles"]["1"]
-    assert map_size(cycle["votes"]) == 10
+    assert map_size(cycle["votes"]) == 11
     assert Enum.all?(cycle["votes"], fn {_owner, vote} -> vote == "abstain" end)
     assert cycle["reported_owners"] == []
 
     assert ReviewLedgerCore.decision(completed)["vote_counts"] == %{
              "approve" => 0,
              "reject" => 0,
-             "abstain" => 10
+             "abstain" => 11
            }
   end
 

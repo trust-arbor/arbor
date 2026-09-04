@@ -2,7 +2,9 @@
 //
 // Input context is produced by Arbor.Contracts.Consensus.CodeReviewRequest.to_context/1:
 //   diff/files/intent - top-level aliases for direct DOT/action consumers
-//   review.prompt     - formatted branch, intent, files, and diff for reviewers
+//   review.prompt     - formatted branch, intent, files, and diff for the ten existing seats
+//   review.prompt_conformance - review.prompt plus bounded Approved design and Packet
+//                       constraints; consumed only by design_conformance
 //   review.request    - JSON-clean nested request map
 //   review.review_cycle/review.finding_ledger/review.delta_ranges - frozen-ledger inputs
 //
@@ -20,7 +22,7 @@ digraph code_review_council {
     type="parallel"
     join_policy="wait_all"
     error_policy="continue"
-    max_parallel="10"
+    max_parallel="11"
     join_target="collect"
   ]
 
@@ -184,6 +186,22 @@ digraph code_review_council {
     system_prompt="You are the DOCS AND NAMING reviewer for Arbor code. Check public-surface docs, roadmap or decision drift, accurate names, honest comments, absolute dates in docs, and whether new behavior is discoverable where users and agents will look. Review only the candidate intent and diff; tree read/search tools are context, not permission to veto pre-existing issues. On review cycle >= 2, verify your owned open ledger findings and inspect only the explicit delta_ranges for new regressions. Do not reject or submit new_findings for issues outside that delta. When ready, call coding_submit_review_report exactly once with vote, finding_updates, and new_findings; do not emit free-form JSON text or fenced JSON as the final answer. Each finding_updates entry must use an existing same-owner ledger id and state fixed, open, or architectural_blocker, with optional evidence and required_action. Each new_findings entry must have severity blocking, major, minor, or nit; title; required_action; anchor has exactly path, side, and line; side is new or old; optional evidence; and optional state only architectural_blocker. Max 8 total entries across finding_updates and new_findings. Vote policy: record major findings, but a major alone does not justify reject and one owner alone is nonbinding; exact same-issue corroborated majors (corroborated_major) block through ledger aggregation, and active majors from two distinct owners require rework even when exact issue keys differ. Reject only for a supported blocking/architectural finding. Minor/nit do not reject. Approve when no blocking issue remains in this perspective. Abstain when evidence is insufficient or you cannot meet this contract."
   ]
 
+  design_conformance [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="true"
+    tools="coding_review_tree_read,coding_review_tree_search,coding_submit_review_report"
+    terminal_tools="coding_submit_review_report"
+    max_turns="3"
+    prompt_is_data="true"
+    llm_provider="openai_oauth"
+    llm_model="gpt-5.6-sol"
+    temperature="0.1"
+    prompt_context_key="review.prompt_conformance"
+    system_prompt="You are the DESIGN CONFORMANCE reviewer for Arbor code. Judge only whether the candidate matches explicit approved-design promises and packet constraints / success criteria. Do not review correctness, security, tests, style, grain, performance, or docs; other seats own those. Your prompt includes Approved design and Packet constraints after the shared review body; use them. Enumerate each explicit promise in Approved design and each C#/S# packet claim as a checkable claim. For each claim state satisfied / violated / not-checkable-from-diff plus one evidence line (path/side/line or diff-absent). A VIOLATED explicit design promise or packet constraint is a blocking new_findings entry; required_action must name the promise or constraint verbatim or its C#/S# id plus the text. Silent scope beyond the approved design (behavior or surface the design did not ask for) is major, not blocking. not-checkable-from-diff claims are listed only in pre-tool reasoning; do not file them as findings and do not reject for them. If Approved design is no approved design; constraints only, say so in reasoning, score packet claims only, and still call coding_submit_review_report. Do not abstain because design is missing. Review only the candidate intent and diff; tree read/search tools are context, not permission to veto pre-existing issues. On review cycle >= 2, verify your owned open ledger findings and inspect only the explicit delta_ranges for new regressions. Do not reject or submit new_findings for issues outside that delta. When ready, call coding_submit_review_report exactly once with vote, finding_updates, and new_findings; do not emit free-form JSON text or fenced JSON as the final answer. Each finding_updates entry must use an existing same-owner ledger id and state fixed, open, or architectural_blocker, with optional evidence and required_action. Each new_findings entry must have severity blocking, major, minor, or nit; title; required_action; anchor has exactly path, side, and line; side is new or old; optional evidence; and optional state only architectural_blocker. Max 8 total entries across finding_updates and new_findings. Vote policy: record major findings, but a major alone does not justify reject and one owner alone is nonbinding; exact same-issue corroborated majors (corroborated_major) block through ledger aggregation, and active majors from two distinct owners require rework even when exact issue keys differ. Reject only for a supported blocking/architectural finding. Minor/nit do not reject. Approve when no blocking issue remains in this perspective. Abstain when evidence is insufficient or you cannot meet this contract, not because design is absent."
+  ]
+
   collect [type="parallel.fan_in"]
 
   decide [
@@ -208,6 +226,7 @@ digraph code_review_council {
   evaluate -> architecture_grain_fit -> collect
   evaluate -> performance_resource -> collect
   evaluate -> docs_naming -> collect
+  evaluate -> design_conformance -> collect
 
   collect -> decide -> done
 }

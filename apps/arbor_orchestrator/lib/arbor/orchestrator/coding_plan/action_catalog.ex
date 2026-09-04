@@ -404,7 +404,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
       with {:ok, key} <- normalize_json_key(key, path),
            false <- Map.has_key?(normalized, key),
            {:ok, item} <- normalize_json(item, path ++ [key]) do
-        {:cont, {:ok, Map.put(normalized, key, item)}}
+        {:cont, {:ok, Map.put(normalized, key, canonicalize_schema_list(key, item))}}
       else
         true -> {:halt, {:error, {:invalid_json, {:duplicate_key, path, key}}}}
         {:error, _reason} = error -> {:halt, error}
@@ -415,6 +415,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
   defp normalize_json(value, _path) when is_atom(value), do: {:ok, Atom.to_string(value)}
 
   defp normalize_json(_value, path), do: {:error, {:invalid_json, {:unsupported_value, path}}}
+
+  # JSON Schema `required` is a set: schema generators emit it in map-iteration
+  # order, and Erlang's large-map atom ordering follows atom creation order, so
+  # the same action produced different `required` orders on different builds
+  # (seen 2026-09-03: the compiled-graph fixture and the catalog digest moved
+  # between two hosts with identical source). Sort it so the digest is a
+  # function of the schema, not of the VM's atom table.
+  defp canonicalize_schema_list("required", list) when is_list(list) do
+    if Enum.all?(list, &is_binary/1), do: Enum.sort(list), else: list
+  end
+
+  defp canonicalize_schema_list(_key, value), do: value
 
   defp normalize_json_key(key, _path) when is_binary(key), do: {:ok, key}
   defp normalize_json_key(key, _path) when is_atom(key), do: {:ok, Atom.to_string(key)}

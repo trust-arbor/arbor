@@ -25,6 +25,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     rework_exhausted
     validation_capacity_exceeded
     validation_failed
+    design_rework_exhausted
   )
 
   @adoptable_terminal_statuses ~w(
@@ -52,6 +53,7 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     rework_exhausted
     validation_capacity_exceeded
     validation_failed
+    design_rework_exhausted
   )
 
   @pipeline_error_codes ~w(
@@ -171,6 +173,12 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       phase: "validation",
       origin: "validator",
       retry: "same_session"
+    },
+    "design_rework_exhausted" => %{
+      disposition: "failed",
+      phase: "design",
+      origin: "policy",
+      retry: "none"
     }
   }
 

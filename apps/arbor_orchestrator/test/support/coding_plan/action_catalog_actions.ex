@@ -339,3 +339,47 @@ defmodule Arbor.Orchestrator.TestHandlers.AlternateActionsExecutor do
     {:ok, %{executed: true}}
   end
 end
+
+defmodule Arbor.Actions.TestFixtures.RequiredOrderAAction do
+  @moduledoc false
+  def to_tool do
+    %{
+      name: "order_action",
+      description: "required-order fixture",
+      parameters_schema: %{
+        type: :object,
+        properties: %{
+          title: %{type: :string},
+          anchor: %{
+            type: :object,
+            properties: %{path: %{type: :string}, line: %{type: :integer}},
+            required: [:path, :line]
+          }
+        },
+        required: [:title, :anchor]
+      }
+    }
+  end
+end
+
+defmodule Arbor.Actions.TestFixtures.RequiredOrderBAction do
+  @moduledoc false
+  def to_tool do
+    %{
+      name: "order_action",
+      description: "required-order fixture",
+      parameters_schema: %{
+        type: :object,
+        properties: %{
+          title: %{type: :string},
+          anchor: %{
+            type: :object,
+            properties: %{path: %{type: :string}, line: %{type: :integer}},
+            required: [:line, :path]
+          }
+        },
+        required: [:anchor, :title]
+      }
+    }
+  end
+end
