@@ -156,7 +156,7 @@ defmodule Arbor.Security.ForgeProjectionSigningTest do
              Security.verify_detached(request_payload, projection_sig, ctx.public_key)
 
     forged_request = %{request | signature: projection_sig}
-    assert {:error, _reason} = Security.verify_request(forged_request)
+    assert {:error, :invalid_signature} = Security.verify_request(forged_request)
 
     # The domains cannot collide by construction: a request payload never starts
     # with the length-prefixed projection domain tag, so the broker refuses to

@@ -32,6 +32,16 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
   by projecting the same subset and applying the same canonicalization.
   """
 
+  alias Arbor.Contracts.Coding.CanonicalJson
+
+  # Archived terminals are attacker-influenced input at a verifier boundary:
+  # bound every collection, string and integer before projecting or encoding.
+  @max_blocking_ids 512
+  @max_reviewer_outcomes 64
+  @max_findings 512
+  @max_string_bytes 512
+  @max_int 1_000_000
+
   @type digest :: String.t()
 
   @doc """
@@ -100,14 +110,14 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
 
   defp fetch_non_neg_int(map, key) do
     case Map.get(map, key) do
-      value when is_integer(value) and value >= 0 -> {:ok, value}
+      value when is_integer(value) and value >= 0 and value <= @max_int -> {:ok, value}
       _ -> {:error, :projection_invalid}
     end
   end
 
   defp fetch_nonblank_string(map, key) do
     case Map.get(map, key) do
-      value when is_binary(value) ->
+      value when is_binary(value) and byte_size(value) <= @max_string_bytes ->
         if String.valid?(value) and String.trim(value) != "" do
           {:ok, value}
         else
@@ -121,7 +131,7 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
 
   defp project_blocking_ids(review) do
     case Map.get(review, "blocking_ids") do
-      ids when is_list(ids) ->
+      ids when is_list(ids) and length(ids) <= @max_blocking_ids ->
         ids
         |> Enum.reduce_while({:ok, []}, fn id, {:ok, acc} ->
           case validate_delimiter_safe_id(id) do
@@ -141,6 +151,7 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
 
   defp validate_delimiter_safe_id(id) when is_binary(id) do
     cond do
+      byte_size(id) > @max_string_bytes -> {:error, :projection_invalid}
       not String.valid?(id) -> {:error, :projection_invalid}
       String.trim(id) == "" -> {:error, :projection_invalid}
       String.match?(id, ~r/[\s\x00-\x1F\x7F=]/) -> {:error, :projection_invalid}
@@ -152,7 +163,9 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
 
   defp project_reviewer_outcomes(review) do
     case Map.get(review, "reviewer_outcomes") do
-      outcomes when is_map(outcomes) and not is_struct(outcomes) ->
+      outcomes
+      when is_map(outcomes) and not is_struct(outcomes) and
+             map_size(outcomes) <= @max_reviewer_outcomes ->
         outcomes
         |> Enum.reduce_while({:ok, %{}}, fn {key, value}, {:ok, acc} ->
           with :ok <- validate_delimiter_safe_id(key),
@@ -192,7 +205,7 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
 
   defp project_consolidated_findings(review) do
     case Map.get(review, "consolidated_findings") do
-      findings when is_list(findings) ->
+      findings when is_list(findings) and length(findings) <= @max_findings ->
         findings
         |> Enum.reduce_while({:ok, []}, fn finding, {:ok, acc} ->
           case project_consolidated_finding(finding) do
@@ -264,20 +277,11 @@ defmodule Arbor.Contracts.Coding.ReviewLedgerDigestCore do
   end
 
   defp canonical_json(value) do
-    {:ok, value |> canonicalize() |> Jason.encode!()}
-  rescue
-    _ -> {:error, :projection_invalid}
+    case CanonicalJson.encode(value) do
+      {:ok, encoded} -> {:ok, encoded}
+      {:error, _} -> {:error, :projection_invalid}
+    end
   end
-
-  defp canonicalize(map) when is_map(map) and not is_struct(map) do
-    map
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
-    |> Map.new()
-  end
-
-  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
-  defp canonicalize(value), do: value
 
   defp sha256_prefixed(data) do
     "sha256:" <> Base.encode16(:crypto.hash(:sha256, data), case: :lower)

@@ -50,6 +50,7 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
   authority can require it before signing (`Arbor.Security.sign_detached_with_authority/3`).
   """
 
+  alias Arbor.Contracts.Coding.CanonicalJson
   alias Arbor.Contracts.Security.SigningAuthority.Validator
 
   @schema "arbor-forge-projection-v1"
@@ -91,11 +92,13 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
 
   # Council review dispositions that map onto a projection verdict. Anything
   # else is not a verdict and must fail, never be coerced.
+  # The review ledger emits exactly accept | human_review | rework
+  # (Arbor.Actions.Coding.ReviewLedgerCore). A rework cycle means the council
+  # rejected this candidate; anything else is not a disposition and must fail.
   @verdict_from_disposition %{
     "accept" => "auto_proceed",
-    "auto_proceed" => "auto_proceed",
     "human_review" => "human_review",
-    "reject" => "reject"
+    "rework" => "reject"
   }
 
   @body_keys ~w(
@@ -262,6 +265,10 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
          :ok <- header_matches_body(header_fields, body),
          {:ok, key_id, signature} <- parse_footer(footer),
          :ok <- footer_matches_body(key_id, body),
+         # The JSON text must be the canonical encoding of what it decodes to:
+         # this rejects whitespace variants, reordered keys and duplicate
+         # members (which collapse on decode) before anything is trusted.
+         true <- CanonicalJson.canonical?(json, body),
          {:ok, fields} <- validate_body_fields(body) do
       {:ok,
        %{
@@ -270,6 +277,8 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
          signature: signature,
          body_without_footer: body_without_footer(header, json)
        }}
+    else
+      _ -> {:error, :projection_invalid}
     end
   end
 
@@ -449,9 +458,11 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
     end
   end
 
+  # The executor's task-id contract (non-blank, bounded, no control
+  # characters) plus header delimiter safety: no whitespace and no `=`.
   defp validate_task(task) when is_binary(task) do
     if String.valid?(task) and byte_size(task) in 1..@max_task_bytes and
-         Regex.match?(~r/\Atask_[A-Za-z0-9._-]+\z/, task) and not secret_shaped?(task),
+         not Regex.match?(~r/[\s=\x00-\x1F\x7F]/u, task) and not secret_shaped?(task),
        do: {:ok, task},
        else: {:error, :projection_invalid}
   end
@@ -537,7 +548,7 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
   defp validate_host(value) when is_binary(value) do
     if byte_size(value) <= @max_context_bytes and
          Regex.match?(
-           ~r/\A[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?\z/,
+           ~r/\A[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?\z/i,
            value
          ) and not secret_shaped?(value),
        do: {:ok, value},
@@ -548,7 +559,7 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
 
   defp validate_project(value) when is_binary(value) do
     if byte_size(value) <= @max_context_bytes and
-         Regex.match?(~r/\A[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+){1,3}\z/, value) and
+         Regex.match?(~r/\A[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+\z/, value) and
          not String.contains?(value, "..") and not secret_shaped?(value),
        do: {:ok, value},
        else: {:error, :projection_invalid}
@@ -599,21 +610,7 @@ defmodule Arbor.Contracts.Coding.ForgeProjection do
     |> canonical_json()
   end
 
-  # Compact JSON with keys sorted at every level, independent of map size or
-  # insertion order.
-  defp canonical_json(value) do
-    value |> ordered() |> Jason.encode!()
-  end
-
-  defp ordered(map) when is_map(map) and not is_struct(map) do
-    map
-    |> Enum.sort_by(fn {key, _} -> key end)
-    |> Enum.map(fn {key, value} -> {key, ordered(value)} end)
-    |> Jason.OrderedObject.new()
-  end
-
-  defp ordered(list) when is_list(list), do: Enum.map(list, &ordered/1)
-  defp ordered(value), do: value
+  defp canonical_json(value), do: CanonicalJson.encode!(value)
 
   defp footer_line(key_id, signature) do
     "<!-- arbor-sig v1 key=#{key_id} sig=#{Base.encode64(signature)} -->"

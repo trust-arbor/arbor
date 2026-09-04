@@ -178,17 +178,21 @@ defmodule Arbor.Contracts.Coding.ForgeProjectionTest do
                )
     end
 
-    test "executor task ids pass: task_coding_<n>, task_<32 hex>, and other task_ ids" do
+    test "task ids follow the executor contract (non-blank, bounded, no control chars) plus header safety" do
       for task <- [
             "task_coding_123",
             "task_" <> String.duplicate("ab", 16),
-            "task_9b2ad3be.rework-2"
+            "task_9b2ad3be.rework-2",
+            "job-1",
+            String.duplicate("t", 256)
           ] do
         assert {:ok, _} = ForgeProjection.build(Map.put(Vectors.build_input(), "task", task))
       end
 
-      assert {:error, :projection_invalid} =
-               ForgeProjection.build(Map.put(Vectors.build_input(), "task", "job_1"))
+      for bad <- [String.duplicate("t", 257), "a b", "a=b", "a\tb", "a\x7fb", ""] do
+        assert {:error, :projection_invalid} =
+                 ForgeProjection.build(Map.put(Vectors.build_input(), "task", bad))
+      end
     end
   end
 
@@ -359,15 +363,45 @@ defmodule Arbor.Contracts.Coding.ForgeProjectionTest do
       end
     end
 
-    test "a non-canonical (whitespace or reordered) JSON body does not bind to the signing context",
+    test "non-canonical JSON (whitespace, reordered keys, duplicate members) is rejected at parse_document",
          ctx do
       pretty =
         ctx.json |> Jason.decode!() |> Jason.encode!(pretty: true) |> String.replace("\n", " ")
 
-      forged = Enum.join([ctx.header, pretty, ctx.footer], "\n")
+      assert {:error, :projection_invalid} =
+               ForgeProjection.parse_document(Enum.join([ctx.header, pretty, ctx.footer], "\n"))
+
+      # Same members, keys reversed: decodes identically, but the bytes are not canonical.
+      reordered =
+        ctx.json
+        |> Jason.decode!()
+        |> Enum.sort_by(fn {k, _} -> k end, :desc)
+        |> Jason.OrderedObject.new()
+        |> Jason.encode!()
+
+      assert reordered != ctx.json
 
       assert {:error, :projection_invalid} =
-               ForgeProjection.parse(forged, Vectors.signing_context())
+               ForgeProjection.parse_document(
+                 Enum.join([ctx.header, reordered, ctx.footer], "\n")
+               )
+
+      # A duplicate member collapses on decode and cannot re-encode to the same bytes.
+      duplicate =
+        String.replace(ctx.json, "\"cycle\":1,", "\"cycle\":1,\"cycle\":1,", global: false)
+
+      assert duplicate != ctx.json
+
+      assert {:error, :projection_invalid} =
+               ForgeProjection.parse_document(
+                 Enum.join([ctx.header, duplicate, ctx.footer], "\n")
+               )
+
+      assert {:error, :projection_invalid} =
+               ForgeProjection.parse(
+                 Enum.join([ctx.header, pretty, ctx.footer], "\n"),
+                 Vectors.signing_context()
+               )
     end
 
     test "invalid body field values are rejected by the same validators as build (M2)", ctx do
@@ -490,18 +524,16 @@ defmodule Arbor.Contracts.Coding.ForgeProjectionTest do
   end
 
   describe "helpers" do
-    test "verdict_from_review_disposition maps only the known dispositions" do
+    test "verdict_from_review_disposition maps exactly the ledger's dispositions (accept | human_review | rework)" do
       assert {:ok, "auto_proceed"} = ForgeProjection.verdict_from_review_disposition("accept")
-
-      assert {:ok, "auto_proceed"} =
-               ForgeProjection.verdict_from_review_disposition("auto_proceed")
 
       assert {:ok, "human_review"} =
                ForgeProjection.verdict_from_review_disposition("human_review")
 
-      assert {:ok, "reject"} = ForgeProjection.verdict_from_review_disposition("reject")
+      assert {:ok, "reject"} = ForgeProjection.verdict_from_review_disposition("rework")
 
-      for bad <- ["rework", "stop", "declined", "", nil, :accept] do
+      # Not dispositions the review ledger produces: fail, never coerce.
+      for bad <- ["reject", "auto_proceed", "stop", "declined", "approved", "", nil, :accept] do
         assert {:error, :projection_invalid} =
                  ForgeProjection.verdict_from_review_disposition(bad)
       end
