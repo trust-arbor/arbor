@@ -130,6 +130,60 @@ defmodule Arbor.Security.ForgeProjectionSigningTest do
              )
   end
 
+  test "cross-protocol negatives: a projection signature is not a SignedRequest signature and vice versa (S5, M6)",
+       ctx do
+    alias Arbor.Contracts.Security.SignedRequest
+
+    {:ok, authority} = open_authority(ctx, :coding_task_executor)
+    {:ok, canonical} = canonical_message(ctx)
+
+    {:ok, projection_sig} =
+      Security.sign_detached_with_authority(authority, ForgeProjection.domain_tag(), canonical)
+
+    assert :ok = Security.verify_detached(canonical, projection_sig, ctx.public_key)
+
+    # An MCP SignedRequest signed with the SAME key over its own payload.
+    {:ok, request} = SignedRequest.sign("{\"tool\":\"noop\"}", ctx.agent_id, ctx.private_key)
+    request_payload = SignedRequest.signing_payload(request)
+    assert byte_size(request.signature) == 64
+
+    # The request's signature does not verify as a projection signature ...
+    assert {:error, :invalid_signature} =
+             Security.verify_detached(canonical, request.signature, ctx.public_key)
+
+    # ... and the projection's signature does not verify over the request payload.
+    assert {:error, :invalid_signature} =
+             Security.verify_detached(request_payload, projection_sig, ctx.public_key)
+
+    forged_request = %{request | signature: projection_sig}
+    assert {:error, _reason} = Security.verify_request(forged_request)
+
+    # The domains cannot collide by construction: a request payload never starts
+    # with the length-prefixed projection domain tag, so the broker refuses to
+    # sign it under the forge domain even for the executor's authority.
+    assert {:error, :domain_tag_mismatch} =
+             Security.sign_detached_with_authority(
+               authority,
+               ForgeProjection.domain_tag(),
+               request_payload
+             )
+  end
+
+  test "verify_detached never raises on hostile inputs", ctx do
+    {:ok, canonical} = canonical_message(ctx)
+
+    for {message, signature, key} <- [
+          {canonical, <<>>, ctx.public_key},
+          {canonical, :binary.copy(<<1>>, 63), ctx.public_key},
+          {canonical, :binary.copy(<<1>>, 64), <<>>},
+          {canonical, :binary.copy(<<1>>, 64), :binary.copy(<<1>>, 31)},
+          {nil, :binary.copy(<<1>>, 64), ctx.public_key},
+          {canonical, nil, ctx.public_key}
+        ] do
+      assert {:error, :invalid_signature} = Security.verify_detached(message, signature, key)
+    end
+  end
+
   test "wrong purpose, principal, and absent authority fail closed", ctx do
     {:ok, session} = open_authority(ctx, :session)
     assert {:ok, message} = canonical_message(ctx)

@@ -3155,13 +3155,10 @@ defmodule Arbor.Security do
     end
   end
 
-  def sign_detached_with_authority(authority, domain_tag, _message) do
+  def sign_detached_with_authority(authority, _domain_tag, _message) do
     case SigningAuthority.canonicalize(authority) do
-      {:ok, _canonical} ->
-        if is_binary(domain_tag), do: {:error, :invalid_payload}, else: {:error, :invalid_payload}
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
     end
   end
 

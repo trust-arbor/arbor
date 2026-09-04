@@ -150,9 +150,24 @@ defmodule Arbor.Contracts.Coding.Plan do
   @type integration_mode :: String.t()
   @type forge_kind :: String.t()
   @type credential_name :: String.t()
+  @typedoc """
+  The normalized forge object. Elixir typespecs cannot name binary keys, so the
+  closed key set is stated here and enforced by `normalize_object/3`:
+  exactly `"kind"` (`forge_kind/0`), `"api_url"` (HTTPS URL or `nil`),
+  `"project"` (`owner/repo`, or `nil`) and `"credential"` (`credential_name/0`
+  or `nil`). For `"kind" => "none"` the last three are `nil` and must be
+  absent from the input.
+  """
   @type forge_config :: %{
           required(String.t()) => forge_kind() | String.t() | nil
         }
+
+  @typedoc """
+  The normalized integration object: exactly `"mode"` (`integration_mode/0`),
+  `"remote"`, `"base_branch"`, `"candidate_namespace"` (strings) and `"forge"`
+  (`forge_config/0`, or `nil` for a `local_merge` plan without a forge block).
+  Unknown keys and atom/string aliases are rejected by `normalize_object/3`.
+  """
   @type integration :: %{
           required(String.t()) => integration_mode() | String.t() | forge_config() | nil
         }
@@ -1004,7 +1019,12 @@ defmodule Arbor.Contracts.Coding.Plan do
     end
   end
 
-  defp normalize_forge_api_url(_value, "none"), do: {:ok, nil}
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_api_url(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_api_url(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.api_url", :not_allowed_for_kind_none}}
 
   defp normalize_forge_api_url(nil, _kind) do
     {:error, {:missing_field, "integration.forge.api_url"}}
@@ -1025,7 +1045,12 @@ defmodule Arbor.Contracts.Coding.Plan do
     {:error, {:invalid_field, "integration.forge.api_url", {:expected_string, value}}}
   end
 
-  defp normalize_forge_project(_value, "none"), do: {:ok, nil}
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_project(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_project(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.project", :not_allowed_for_kind_none}}
 
   defp normalize_forge_project(nil, _kind) do
     {:error, {:missing_field, "integration.forge.project"}}
@@ -1043,7 +1068,12 @@ defmodule Arbor.Contracts.Coding.Plan do
     {:error, {:invalid_field, "integration.forge.project", {:expected_string, value}}}
   end
 
-  defp normalize_forge_credential(_value, "none"), do: {:ok, nil}
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_credential(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_credential(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.credential", :not_allowed_for_kind_none}}
 
   defp normalize_forge_credential(nil, _kind) do
     {:error, {:missing_field, "integration.forge.credential"}}

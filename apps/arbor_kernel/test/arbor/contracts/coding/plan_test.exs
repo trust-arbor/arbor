@@ -1367,6 +1367,42 @@ defmodule Arbor.Contracts.Coding.PlanTest do
                )
     end
 
+    test "kind none accepts no api_url, project, or credential (forbidden fields are rejected, never discarded)" do
+      attrs = v2_attrs()
+
+      assert {:ok, plan} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "pull_request",
+                   forge: %{kind: "none"}
+                 })
+               )
+
+      assert plan.integration["forge"] == %{
+               "kind" => "none",
+               "api_url" => nil,
+               "project" => nil,
+               "credential" => nil
+             }
+
+      for {field, value} <- [
+            {:api_url, "https://user:ghp_secret@git.example/api/v1"},
+            {:api_url, "https://git.example/api/v1"},
+            {:project, "acme/arbor"},
+            {:credential, "gitea_bot"}
+          ] do
+        expected_path = "integration.forge." <> Atom.to_string(field)
+
+        assert {:error, {:invalid_field, ^expected_path, :not_allowed_for_kind_none}} =
+                 Plan.new(
+                   Map.put(attrs, :integration, %{
+                     mode: "pull_request",
+                     forge: %{field => value, kind: "none"}
+                   })
+                 )
+      end
+    end
+
     test "publishable?/1 inspects integration mode on structs and maps" do
       {:ok, pull_request} =
         Plan.new(Map.put(v2_attrs(), :integration, %{mode: "pull_request", forge: @valid_forge}))

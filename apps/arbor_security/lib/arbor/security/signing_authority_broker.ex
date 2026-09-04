@@ -384,7 +384,14 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  @doc false
+  @doc """
+  Detached Ed25519 signature over a domain-tagged message.
+
+  The authority's purpose must be allowed to sign `domain_tag`
+  (`:coding_task_executor` may sign only `arbor-forge-projection-v1`), and the
+  message must begin with the 32-bit length-prefixed tag. The existing
+  `sign_detached/2` (`:platform_activation` only) is unchanged.
+  """
   @spec sign_detached_with_domain(SigningAuthority.t(), String.t(), binary()) ::
           {:ok, binary()} | {:error, term()}
   def sign_detached_with_domain(authority, domain_tag, message)
@@ -395,17 +402,10 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def sign_detached_with_domain(authority, domain_tag, _message) do
+  def sign_detached_with_domain(authority, _domain_tag, _message) do
     case SigningAuthority.canonicalize(authority) do
-      {:ok, _canonical} ->
-        if is_binary(domain_tag) do
-          {:error, :invalid_payload}
-        else
-          {:error, :invalid_payload}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1976,12 +1976,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   defp verify_domain_tag_prefix(message, domain_tag)
        when is_binary(message) and is_binary(domain_tag) do
-    prefix = <<byte_size(domain_tag)::32-big-unsigned-integer, domain_tag::binary>>
+    size = byte_size(domain_tag)
 
-    if String.starts_with?(message, prefix) do
-      :ok
-    else
-      {:error, :domain_tag_mismatch}
+    case message do
+      <<^size::32-big-unsigned-integer, ^domain_tag::binary-size(size), _rest::binary>> -> :ok
+      _ -> {:error, :domain_tag_mismatch}
     end
   end
 
