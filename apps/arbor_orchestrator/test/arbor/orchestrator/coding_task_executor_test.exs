@@ -2407,6 +2407,71 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert second["status"] == third["status"]
     end
 
+    test "finalize_terminal_task appends a lifecycle timeline that shows a placeholder shadowing the real terminal (2026-09-04 regression)" do
+      put_success_runner_reply()
+      assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      controls = [reconciled_control()]
+
+      # The run's real terminal, prepared before any archive exists.
+      assert {:ok, finalized} =
+               CodingTaskExecutor.finalize_task("agent_1", original, controls, valid_context())
+
+      {:ok, real} =
+        TaskTerminalEnvelope.preserve(
+          finalized["outcome"],
+          "done",
+          %{"kind" => "executor_result", "result" => finalized}
+        )
+
+      # A lifecycle placeholder claiming the runner is gone lands first ...
+      {:ok, placeholder} =
+        TaskTerminalEnvelope.from_code("task_runner_failed", "failed", %{
+          "kind" => "task_runner_failed"
+        })
+
+      assert :ok =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 placeholder,
+                 [],
+                 valid_context()
+               )
+
+      # ... and the real terminal can no longer be archived (first-writer).
+      assert {:error, _reason} =
+               CodingTaskExecutor.finalize_terminal_task(
+                 "agent_1",
+                 real,
+                 controls,
+                 valid_context()
+               )
+
+      root = task_terminal_root("task_coding_1")
+      lifecycle_path = Path.join(root, "coding-task-lifecycle.jsonl")
+      assert File.exists?(lifecycle_path)
+      assert Bitwise.band(File.stat!(lifecycle_path).mode, 0o777) == 0o600
+
+      events =
+        lifecycle_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.map(events, &{&1["event"], &1["code"]}) == [
+               {"finalize_attempt", "task_runner_failed"},
+               {"finalize_ok", "task_runner_failed"},
+               {"finalize_attempt", real["outcome"]["code"]},
+               {"finalize_failed", real["outcome"]["code"]}
+             ]
+
+      placeholder_entry = Enum.at(events, 0)
+      assert placeholder_entry["phase"] == "control"
+      assert placeholder_entry["retry"] == "new_session"
+      assert placeholder_entry["terminal_state"] == "failed"
+      assert Enum.all?(events, &is_binary(&1["at"]))
+      assert Enum.at(events, 3)["result"] =~ "error"
+    end
+
     test "settled recover returns the authenticated archived executor result, not recovery-local metrics" do
       put_success_runner_reply()
       assert {:ok, original} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
