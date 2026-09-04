@@ -168,6 +168,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   alias Arbor.Agent.Config
 
+  alias Arbor.Agent.Orchestration.TerminalGuardCore
+
   alias Arbor.Agent.Orchestration.{
     TaskArtifacts,
     TaskControlLease,
@@ -2640,9 +2642,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       {:task, task_id} ->
         now = DateTime.utc_now()
+        # The monitored runner is down: drop its ref before terminalizing (see
+        # complete_task/4).
+        state = remove_ref(state, ref)
         {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
-        state = launch_approval_cleanup_job(state, cleanup_job)
-        remove_ref(state, ref)
+        launch_approval_cleanup_job(state, cleanup_job)
 
       :error ->
         state
@@ -2837,9 +2841,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp complete_task(state, task_id, ref, result) do
     now = DateTime.utc_now()
+    # This runner has delivered its result: drop its monitor ref before the
+    # terminal is finalized so a runner-gone terminal from this very result is
+    # not mistaken for one that contradicts a live runner.
+    state = remove_ref(state, ref)
     {state, cleanup_job} = terminalize_completion(state, task_id, result, now)
-    state = launch_approval_cleanup_job(state, cleanup_job)
-    remove_ref(state, ref)
+    launch_approval_cleanup_job(state, cleanup_job)
   end
 
   # Finalize opted-in successful results before publishing the terminal record;
@@ -12225,7 +12232,40 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     acknowledge_all_terminal(record, envelope, state, module)
   end
 
+  # Every terminal — runner result, cancel, owner DOWN, recovery verdict —
+  # passes through here before the executor archives it. Log each attempt
+  # with the record's state and the TaskStore call chain that produced it, so
+  # a lifecycle terminal written for a task that is still running (2026-09-04:
+  # `task_runner_failed` archived ~10 min into three live composer runs, then
+  # the real terminal could not be archived) names its writer instead of
+  # leaving the node log silent.
   defp acknowledge_all_terminal(record, envelope, state, module) do
+    code = TerminalGuardCore.terminal_code(envelope)
+
+    if TerminalGuardCore.contradicts_live_runner?(
+         record.task_id,
+         code,
+         Map.get(state, :refs, %{})
+       ) do
+      Logger.error(
+        "[TaskStore] refusing to finalize task #{record.task_id} as #{code}: " <>
+          "its runner is still monitored (state=#{inspect(record.state)} " <>
+          "step=#{inspect(record.current_step)}) origin=#{terminal_origin()}"
+      )
+
+      record
+    else
+      do_acknowledge_all_terminal(record, envelope, code, state, module)
+    end
+  end
+
+  defp do_acknowledge_all_terminal(record, envelope, code, state, module) do
+    Logger.info(
+      "[TaskStore] finalizing task #{record.task_id} terminal=#{code} " <>
+        "state=#{inspect(record.state)} step=#{inspect(record.current_step)} " <>
+        "origin=#{terminal_origin()}"
+    )
+
     record = put_terminal_envelope(record, envelope)
 
     timeout =
@@ -12253,7 +12293,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :ok ->
         Map.put(record, :terminal_finalized, true)
 
-      _failure ->
+      failure ->
+        # The executor's reason was discarded here before; keep it on the record
+        # (bounded, like the legacy finalizer path) and say it in the log.
+        reason = bounded_error(failure)
+
+        Logger.warning(
+          "[TaskStore] task #{record.task_id} finalization failed for terminal=#{code}: " <>
+            reason
+        )
+
         failed_envelope = finalization_failure_envelope(envelope)
 
         record
@@ -12262,9 +12311,28 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           state: :failed,
           current_step: "failed",
           waiting_on: nil,
-          error: :task_finalization_failed,
+          error: {:task_finalization_failed, reason},
           terminal_finalized: true
         })
+    end
+  end
+
+  # The TaskStore call chain (handle_info/handle_call frames) that reached the
+  # finalizer — enough to tell a runner result from a DOWN, a timer, or a
+  # recovery op without a debugger.
+  defp terminal_origin do
+    case Process.info(self(), :current_stacktrace) do
+      {:current_stacktrace, frames} ->
+        frames
+        |> Enum.drop(1)
+        |> Enum.filter(fn {mod, _fun, _arity, _loc} -> mod == __MODULE__ end)
+        |> Enum.map(fn {_mod, fun, arity, _loc} -> "#{fun}/#{arity}" end)
+        |> Enum.reject(&String.starts_with?(&1, "terminal_origin"))
+        |> Enum.take(8)
+        |> Enum.join("<")
+
+      _ ->
+        "unknown"
     end
   end
 

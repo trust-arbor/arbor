@@ -420,6 +420,21 @@ is still on disk:
 directory also holds `coding-plan.json`, `coding-pipeline.dot`, and
 `coding-compile-manifest.json` for the compiled run.
 
+The task terminal archive is first-writer: whichever terminal reaches
+`finalize_terminal_task/4` first is the one that stays, and a later terminal
+fails with `task_finalization_failed`. To see *which* terminals were attempted
+and in what order, read `coding-task-lifecycle.jsonl` in the same directory —
+one JSON line per attempt (`finalize_attempt`, then `finalize_ok` or
+`finalize_failed`) with the outcome `code`, `phase`, `retry`, and the bounded
+finalize result. A `task_runner_failed` or `task_owner_died` line that lands
+while the run is still in `implement` means a lifecycle placeholder shadowed
+the run's real terminal (observed 2026-09-04); the TaskStore now refuses to
+finalize those two codes while it still monitors the task's runner and logs
+`[TaskStore] refusing to finalize task …` with the call chain that tried. Every
+finalize is also logged as `[TaskStore] finalizing task … terminal=<code>
+state=… origin=<call chain>`, and a failed finalize keeps the executor's reason
+on the record's `error` (`{:task_finalization_failed, reason}`).
+
 ## Computing `work_packet_digest`
 
 Do not hand-compute it. The canonical encoding is owned by

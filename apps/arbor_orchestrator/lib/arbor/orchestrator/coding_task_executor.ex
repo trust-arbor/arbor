@@ -740,30 +740,112 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @spec finalize_terminal_task(String.t(), map(), list(), map() | keyword()) ::
           :ok | {:error, term()}
   def finalize_terminal_task(agent_id, terminal_envelope, controls, context) do
-    with :ok <- validate_agent_id(agent_id),
-         {:ok, exec_ctx} <- validate_context(context),
-         :ok <- validate_exact_context_task_id(context, exec_ctx.task_id),
-         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
-         {:ok, controls} <-
-           reconcile_settled_controls(logs_root, exec_ctx.task_id, controls),
-         {:ok, terminal_envelope} <-
-           reconcile_terminal_envelope_for_archive(
-             logs_root,
-             exec_ctx.task_id,
-             terminal_envelope
-           ),
-         {:ok, archive} <-
-           build_task_terminal_archive(exec_ctx.task_id, terminal_envelope, controls),
-         {:ok, descriptor} <-
-           archive_task_terminal(logs_root, exec_ctx.task_id, terminal_envelope, controls),
-         :ok <- validate_task_terminal_descriptor(descriptor, logs_root, archive) do
-      :ok
-    end
+    result =
+      with :ok <- validate_agent_id(agent_id),
+           {:ok, exec_ctx} <- validate_context(context),
+           :ok <- validate_exact_context_task_id(context, exec_ctx.task_id),
+           {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+           :ok <- append_task_lifecycle(logs_root, "finalize_attempt", terminal_envelope, nil),
+           {:ok, controls} <-
+             reconcile_settled_controls(logs_root, exec_ctx.task_id, controls),
+           {:ok, terminal_envelope} <-
+             reconcile_terminal_envelope_for_archive(
+               logs_root,
+               exec_ctx.task_id,
+               terminal_envelope
+             ),
+           {:ok, archive} <-
+             build_task_terminal_archive(exec_ctx.task_id, terminal_envelope, controls),
+           {:ok, descriptor} <-
+             archive_task_terminal(logs_root, exec_ctx.task_id, terminal_envelope, controls) do
+        validate_task_terminal_descriptor(descriptor, logs_root, archive)
+      end
+
+    record_finalize_outcome(terminal_envelope, context, result)
+    result
   rescue
     _exception -> {:error, :coding_task_terminal_finalize_error}
   catch
     _kind, _reason -> {:error, :coding_task_terminal_finalize_error}
   end
+
+  # Append-only timeline of every finalize attempt for a task, kept beside the
+  # first-writer `coding-task-terminal.json`. It survives log rotation and shows
+  # a lifecycle placeholder (`task_runner_failed`, `task_owner_died`) landing
+  # while the run was still alive, which is what hid the 2026-09-04 composer
+  # finalization losses. Best effort: it never changes the finalize result.
+  @task_lifecycle_filename "coding-task-lifecycle.jsonl"
+
+  defp record_finalize_outcome(terminal_envelope, context, result) do
+    with {:ok, exec_ctx} <- validate_context(context),
+         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id) do
+      event = if result == :ok, do: "finalize_ok", else: "finalize_failed"
+      append_task_lifecycle(logs_root, event, terminal_envelope, result)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp append_task_lifecycle(logs_root, event, terminal_envelope, result) do
+    outcome = envelope_outcome_summary(terminal_envelope)
+
+    line =
+      %{
+        "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "event" => event,
+        "code" => outcome["code"],
+        "phase" => outcome["phase"],
+        "retry" => outcome["retry"],
+        "terminal_state" => envelope_field(terminal_envelope, "terminal_state"),
+        "prior_code" => get_in_any(terminal_envelope, ["prior_outcome", "code"]),
+        "result" => finalize_result_summary(result),
+        "pid" => inspect(self())
+      }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+
+    with {:ok, path} <- SafePath.safe_join(logs_root, @task_lifecycle_filename),
+         {:ok, encoded} <- Jason.encode(line),
+         :ok <- File.write(path, encoded <> "\n", [:append]) do
+      _ = File.chmod(path, 0o600)
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp envelope_outcome_summary(envelope) do
+    case envelope_field(envelope, "outcome") do
+      %{} = outcome ->
+        Map.new(outcome, fn {k, v} -> {to_string(k), v} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  # Envelopes arrive as canonical string-keyed maps (TaskTerminalEnvelope.to_map).
+  defp envelope_field(%{} = envelope, key), do: Map.get(envelope, key)
+  defp envelope_field(_envelope, _key), do: nil
+
+  defp get_in_any(envelope, [head | rest]) do
+    case envelope_field(envelope, head) do
+      nil -> nil
+      value when rest == [] -> value
+      %{} = value -> get_in_any(value, rest)
+      _ -> nil
+    end
+  end
+
+  defp finalize_result_summary(nil), do: nil
+  defp finalize_result_summary(:ok), do: "ok"
+
+  defp finalize_result_summary(other),
+    do: other |> inspect(limit: 10, printable_limit: 200) |> String.slice(0, 240)
 
   @doc "Prove and settle post-terminal integration of a published coding candidate."
   @impl true
