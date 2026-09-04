@@ -1,21 +1,34 @@
-# ArborPersistenceEcto
+# Arbor Persistence Ecto
 
-**TODO: Add description**
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `arbor_persistence_ecto` to your list of dependencies in `mix.exs`:
+Postgres-backed event storage for Arbor, implementing the EventLog
+behaviour on Commanded's `eventstore` library. Use this when ETS-backed
+`arbor_persistence` is not enough and streams must survive process
+restarts.
 
 ```elixir
-def deps do
-  [
-    {:arbor_persistence_ecto, "~> 0.1.0"}
-  ]
-end
+alias Arbor.Persistence.Ecto.EventLog
+alias Arbor.Persistence.Event
+
+event = Event.new("agent-123", "StateChanged", %{old: "foo", new: "bar"})
+{:ok, [_persisted]} = EventLog.append("agent-123", event, [])
+{:ok, events} = EventLog.read_stream("agent-123", [])
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/arbor_persistence_ecto>.
+Configure `Arbor.Persistence.Ecto.EventStore` under `:arbor_persistence_ecto`,
+then:
 
+```bash
+mix event_store.create -e Arbor.Persistence.Ecto.EventStore
+mix event_store.init -e Arbor.Persistence.Ecto.EventStore
+```
+
+Some EventLog callbacks (for example `list_streams/1`) are still stubs and
+return empty results with a warning. Check `Arbor.Persistence.Ecto.available?/0`
+before treating Postgres as the active backend.
+
+This is an umbrella app (L4). It depends on `arbor_kernel` and
+`arbor_persistence`.
+
+## License
+
+MIT

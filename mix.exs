@@ -59,10 +59,6 @@ defmodule Arbor.MixProject do
       {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:local_cluster, "~> 2.1", only: [:test]}
-
-      # These are umbrella apps now, auto-discovered via apps_path
-      # arbor_eval — merged into arbor_common as Arbor.Eval + Arbor.Common.SensitiveData
-      # arbor_checkpoint — merged into arbor_persistence as Arbor.Persistence.Checkpoint
     ]
   end
 

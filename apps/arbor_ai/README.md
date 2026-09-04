@@ -1,21 +1,25 @@
-# ArborAi
+# Arbor AI
 
-**TODO: Add description**
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `arbor_ai` to your list of dependencies in `mix.exs`:
+Unified LLM and ACP facade for Arbor (`Arbor.AI`). Routes text generation,
+embeddings, provider readiness, budgets, and Agent Client Protocol sessions
+through one library so CLI and API providers share the same call path.
 
 ```elixir
-def deps do
-  [
-    {:arbor_ai, "~> 0.1.0"}
-  ]
-end
+{:ok, result} = Arbor.AI.generate_text("What is 2+2?")
+result.text
+
+{:ok, result} = Arbor.AI.generate_text("Hello", provider: :anthropic)
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/arbor_ai>.
+Defaults live under `:arbor_ai`. API keys come from the environment
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and provider-specific OAuth via
+`Arbor.LLM.OAuth`). Cross-cutting LLM concerns (telemetry, retry, cost)
+belong in the `Arbor.LLM.Plug` pipeline, not as flags on this facade.
 
+This is an umbrella app (L4). It depends on `arbor_llm`, `arbor_security`,
+`arbor_shell`, and `arbor_kernel_runtime`. Higher apps (`arbor_orchestrator`,
+`arbor_agent`) call this facade rather than provider internals.
+
+## License
+
+MIT
