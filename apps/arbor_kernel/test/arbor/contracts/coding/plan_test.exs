@@ -1096,6 +1096,296 @@ defmodule Arbor.Contracts.Coding.PlanTest do
     end
   end
 
+  describe "integration" do
+    @valid_forge %{
+      kind: "forgejo",
+      api_url: "https://forge.example.com",
+      project: "acme/arbor",
+      credential: "gitea_bot"
+    }
+
+    @secret_patterns [
+      {"ghp", "ghp_abcdefghijklmnopqrstuvwxyz"},
+      {"github_pat", "github_pat_abc123456789012345678901234567890"},
+      {"glpat", "glpat-abc123"},
+      {"bearer", "Bearer secret-token"},
+      {"oid40", String.duplicate("f", 40)},
+      {"userinfo", "https://token:secret@forge.example.com/api"}
+    ]
+
+    test "omits integration when absent and keeps v2 to_map byte-identical to plans without it" do
+      assert {:ok, plan} = Plan.new(v2_attrs())
+      assert plan.integration == nil
+      refute Map.has_key?(Plan.to_map(plan), "integration")
+      assert Plan.to_map(plan) == v2_map_fixture()
+    end
+
+    test "accepts explicit local_merge without serializing integration" do
+      attrs = Map.put(v2_attrs(), :integration, %{mode: "local_merge"})
+
+      assert {:ok, plan} = Plan.new(attrs)
+
+      assert plan.integration == %{
+               "mode" => "local_merge",
+               "remote" => "origin",
+               "base_branch" => "main",
+               "candidate_namespace" => "arbor/coding-agent/",
+               "forge" => nil
+             }
+
+      refute Map.has_key?(Plan.to_map(plan), "integration")
+      refute Plan.publishable?(plan)
+    end
+
+    test "round-trips pull_request integration with forge config through JSON" do
+      attrs =
+        Map.put(v2_attrs(), :integration, %{
+          mode: "pull_request",
+          remote: "origin",
+          base_branch: "main",
+          candidate_namespace: "arbor/coding-agent/",
+          forge: @valid_forge
+        })
+
+      assert {:ok, plan} = Plan.new(attrs)
+
+      assert plan.integration == %{
+               "mode" => "pull_request",
+               "remote" => "origin",
+               "base_branch" => "main",
+               "candidate_namespace" => "arbor/coding-agent/",
+               "forge" => %{
+                 "kind" => "forgejo",
+                 "api_url" => "https://forge.example.com",
+                 "project" => "acme/arbor",
+                 "credential" => "gitea_bot"
+               }
+             }
+
+      canonical = Plan.to_map(plan)
+      assert canonical["integration"] == plan.integration
+      assert Plan.publishable?(plan)
+
+      assert {:ok, json} = Jason.encode(canonical)
+      assert Jason.decode!(json) == canonical
+      assert {:ok, reparsed} = Plan.new(Jason.decode!(json))
+      assert Plan.to_map(reparsed) == canonical
+      assert Plan.publishable?(reparsed)
+    end
+
+    test "rejects integration on version 1 plans" do
+      assert {:error, {:invalid_field, "integration", {:unsupported_for_version, 1}}} =
+               Plan.new(
+                 Map.put(@minimal_attrs, :integration, %{
+                   mode: "pull_request",
+                   forge: @valid_forge
+                 })
+               )
+    end
+
+    test "rejects invalid integration mode and forge kind" do
+      attrs = v2_attrs()
+
+      assert {:error,
+              {:invalid_field, "integration.mode",
+               {:expected_one_of, ["local_merge", "pull_request"], "push"}}} =
+               Plan.new(Map.put(attrs, :integration, %{mode: "push", forge: @valid_forge}))
+
+      assert {:error,
+              {:invalid_field, "integration.forge.kind",
+               {:expected_one_of, ["forgejo", "gitea", "github", "gitlab", "none"], "bitbucket"}}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "pull_request",
+                   forge: Map.put(@valid_forge, :kind, "bitbucket")
+                 })
+               )
+    end
+
+    test "rejects unknown integration keys" do
+      assert {:error, {:unknown_fields, ["integration.webhook"]}} =
+               Plan.new(
+                 Map.put(v2_attrs(), :integration, %{
+                   mode: "pull_request",
+                   webhook: "https://example.com/hook",
+                   forge: @valid_forge
+                 })
+               )
+    end
+
+    test "accepts gitea_bot and token_broker credential names" do
+      for credential <- ["gitea_bot", "token_broker"] do
+        attrs =
+          Map.put(v2_attrs(), :integration, %{
+            mode: "pull_request",
+            forge: Map.put(@valid_forge, :credential, credential)
+          })
+
+        assert {:ok, plan} = Plan.new(attrs)
+        assert plan.integration["forge"]["credential"] == credential
+      end
+    end
+
+    test "rejects pull_request integration without forge config" do
+      assert {:error, {:invalid_field, "integration.forge", :required}} =
+               Plan.new(Map.put(v2_attrs(), :integration, %{mode: "pull_request"}))
+    end
+
+    test "secret-shaped integration strings fail closed with exact field paths" do
+      attrs = v2_attrs()
+
+      assert {:error, {:invalid_field, "integration.remote.value", :secret_shaped_value}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "pull_request",
+                   remote: "ghp_abcdefghijklmnopqrstuvwxyz",
+                   forge: @valid_forge
+                 })
+               )
+
+      assert {:error, {:invalid_field, "integration.base_branch.value", :secret_shaped_value}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "pull_request",
+                   base_branch: "github_pat_abc123456789012345678901234567890",
+                   forge: @valid_forge
+                 })
+               )
+
+      assert {:error,
+              {:invalid_field, "integration.forge.credential.value", :secret_shaped_value}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "pull_request",
+                   forge: Map.put(@valid_forge, :credential, "ghp_abcdefghijklmnopqrstuvwxyz")
+                 })
+               )
+    end
+
+    test "per-field secret matrix rejects secret-shaped values where field validation allows them" do
+      attrs = v2_attrs()
+
+      matrix = [
+        {:remote, "ghp_abcdefghijklmnopqrstuvwxyz",
+         {:invalid_field, "integration.remote.value", :secret_shaped_value}},
+        {:remote, String.duplicate("a", 40),
+         {:invalid_field, "integration.remote.value", :secret_shaped_value}},
+        {:base_branch, "glpat-abc123",
+         {:invalid_field, "integration.base_branch.value", :secret_shaped_value}},
+        {:base_branch, "Bearer secret-token",
+         {:invalid_field, "integration.base_branch.value", :secret_shaped_value}},
+        {:credential, "github_pat_abc123456789012345678901234567890",
+         {:invalid_field, "integration.forge.credential.value", :secret_shaped_value}},
+        {:credential, String.duplicate("c", 40),
+         {:invalid_field, "integration.forge.credential.value", :secret_shaped_value}}
+      ]
+
+      for {field, secret, expected} <- matrix do
+        integration =
+          case field do
+            :remote ->
+              %{mode: "pull_request", remote: secret, forge: @valid_forge}
+
+            :base_branch ->
+              %{mode: "pull_request", base_branch: secret, forge: @valid_forge}
+
+            :credential ->
+              %{
+                mode: "pull_request",
+                forge: Map.put(@valid_forge, :credential, secret)
+              }
+          end
+
+        assert {:error, ^expected} = Plan.new(Map.put(attrs, :integration, integration))
+      end
+
+      for {_name, secret} <- @secret_patterns do
+        assert {:error, {:invalid_field, "integration.candidate_namespace", :must_end_with_slash}} =
+                 Plan.new(
+                   Map.put(attrs, :integration, %{
+                     mode: "pull_request",
+                     candidate_namespace: secret,
+                     forge: @valid_forge
+                   })
+                 )
+
+        assert {:error, {:invalid_field, "integration.forge.api_url", :invalid_https_url}} =
+                 Plan.new(
+                   Map.put(attrs, :integration, %{
+                     mode: "pull_request",
+                     forge: Map.put(@valid_forge, :api_url, secret)
+                   })
+                 )
+
+        assert {:error,
+                {:invalid_field, "integration.forge.project", {:expected_project_path, ^secret}}} =
+                 Plan.new(
+                   Map.put(attrs, :integration, %{
+                     mode: "pull_request",
+                     forge: Map.put(@valid_forge, :project, secret)
+                   })
+                 )
+      end
+    end
+
+    test "validates forge objects supplied under local_merge" do
+      attrs = v2_attrs()
+
+      assert {:error, {:missing_field, "integration.forge.api_url"}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "local_merge",
+                   forge: Map.delete(@valid_forge, :api_url)
+                 })
+               )
+
+      assert {:error,
+              {:invalid_field, "integration.forge.kind",
+               {:expected_one_of, ["forgejo", "gitea", "github", "gitlab", "none"], "bitbucket"}}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "local_merge",
+                   forge: Map.put(@valid_forge, :kind, "bitbucket")
+                 })
+               )
+
+      assert {:error,
+              {:invalid_field, "integration.forge.project", {:expected_project_path, "no-slash"}}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "local_merge",
+                   forge: Map.put(@valid_forge, :project, "no-slash")
+                 })
+               )
+
+      assert {:error, {:unknown_fields, ["integration.forge.token"]}} =
+               Plan.new(
+                 Map.put(attrs, :integration, %{
+                   mode: "local_merge",
+                   forge: Map.put(@valid_forge, :token, "secret")
+                 })
+               )
+    end
+
+    test "publishable?/1 inspects integration mode on structs and maps" do
+      {:ok, pull_request} =
+        Plan.new(Map.put(v2_attrs(), :integration, %{mode: "pull_request", forge: @valid_forge}))
+
+      {:ok, local_merge} =
+        Plan.new(Map.put(v2_attrs(), :integration, %{mode: "local_merge"}))
+
+      assert Plan.publishable?(pull_request)
+      assert Plan.publishable?(%{"integration" => %{"mode" => "pull_request"}})
+      assert Plan.publishable?(%{integration: %{mode: "pull_request"}})
+
+      refute Plan.publishable?(local_merge)
+      refute Plan.publishable?(%{"integration" => %{"mode" => "local_merge"}})
+      refute Plan.publishable?(%{integration: %{mode: "local_merge"}})
+      refute Plan.publishable?(%{})
+      refute Plan.publishable?(v2_attrs())
+    end
+  end
+
   defp assert_string_keyed_json(value) when is_map(value) do
     assert Enum.all?(Map.keys(value), &is_binary/1)
     Enum.each(Map.values(value), &assert_string_keyed_json/1)

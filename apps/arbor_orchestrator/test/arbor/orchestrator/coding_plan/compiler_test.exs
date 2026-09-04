@@ -845,6 +845,72 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert reset_retry_count === 0
   end
 
+  test "direct and operator plans ignore absent and local_merge integration for compilation output",
+       ctx do
+    direct = v2_plan!()
+    direct_local_merge = v2_plan!(%{"integration" => %{"mode" => "local_merge"}})
+
+    operator =
+      v2_plan!(%{"checkpoint_policy" => "design_required", "design_gate" => "operator"})
+
+    operator_local_merge =
+      v2_plan!(%{
+        "checkpoint_policy" => "design_required",
+        "design_gate" => "operator",
+        "integration" => %{"mode" => "local_merge"}
+      })
+
+    pre_change_catalog = pre_change_action_catalog()
+
+    assert {:ok, direct_compilation} =
+             compile_with_catalog(direct, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, direct_local_merge_compilation} =
+             compile_with_catalog(
+               direct_local_merge,
+               ctx,
+               ctx.template_source,
+               pre_change_catalog
+             )
+
+    assert {:ok, operator_compilation} =
+             compile_with_catalog(operator, ctx, ctx.template_source, pre_change_catalog)
+
+    assert {:ok, operator_local_merge_compilation} =
+             compile_with_catalog(
+               operator_local_merge,
+               ctx,
+               ctx.template_source,
+               pre_change_catalog
+             )
+
+    assert graph_and_inputs_fixture(direct_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_direct_compilation.json")
+             )
+
+    assert graph_and_inputs_fixture(direct_local_merge_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_direct_compilation.json")
+             )
+
+    assert graph_and_inputs_fixture(operator_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_operator_compilation.json")
+             )
+
+    assert graph_and_inputs_fixture(operator_local_merge_compilation) ==
+             graph_and_inputs_fixture(
+               pre_change_compilation_fixture("pre_change_operator_compilation.json")
+             )
+
+    assert serialized_compilation_fixture(direct_compilation) ==
+             serialized_compilation_fixture(direct_local_merge_compilation)
+
+    assert serialized_compilation_fixture(operator_compilation) ==
+             serialized_compilation_fixture(operator_local_merge_compilation)
+  end
+
   test "direct and operator design_gate graphs stay byte-identical and omit council bindings",
        ctx do
     direct = v2_plan!()

@@ -384,6 +384,31 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  @doc false
+  @spec sign_detached_with_domain(SigningAuthority.t(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_detached_with_domain(authority, domain_tag, message)
+      when is_binary(domain_tag) and is_binary(message) and byte_size(message) > 0 do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:sign_detached, canonical, domain_tag, message})
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def sign_detached_with_domain(authority, domain_tag, _message) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} ->
+        if is_binary(domain_tag) do
+          {:error, :invalid_payload}
+        else
+          {:error, :invalid_payload}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @doc """
   Derive a domain-separated secret from a live authority.
   """
@@ -777,6 +802,19 @@ defmodule Arbor.Security.SigningAuthorityBroker do
       with {:ok, authority} <- SigningAuthority.canonicalize(authority),
            {:ok, entry} <- authorize_authority(authority, state),
            :ok <- require_platform_activation_purpose(entry.purpose),
+           {:ok, private_key} <- private_key_for(entry, authority.token, state) do
+        safely_sign_detached(message, private_key)
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:sign_detached, authority, domain_tag, message}, _from, state) do
+    reply =
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
+           :ok <- require_detached_domain_purpose(entry.purpose, domain_tag),
+           :ok <- verify_domain_tag_prefix(message, domain_tag),
            {:ok, private_key} <- private_key_for(entry, authority.token, state) do
         safely_sign_detached(message, private_key)
       end
@@ -1929,6 +1967,25 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   defp require_platform_activation_purpose(:platform_activation), do: :ok
 
   defp require_platform_activation_purpose(_purpose), do: {:error, :purpose_mismatch}
+
+  @forge_projection_domain "arbor-forge-projection-v1"
+
+  defp require_detached_domain_purpose(:coding_task_executor, @forge_projection_domain), do: :ok
+
+  defp require_detached_domain_purpose(_purpose, _domain_tag), do: {:error, :purpose_mismatch}
+
+  defp verify_domain_tag_prefix(message, domain_tag)
+       when is_binary(message) and is_binary(domain_tag) do
+    prefix = <<byte_size(domain_tag)::32-big-unsigned-integer, domain_tag::binary>>
+
+    if String.starts_with?(message, prefix) do
+      :ok
+    else
+      {:error, :domain_tag_mismatch}
+    end
+  end
+
+  defp verify_domain_tag_prefix(_message, _domain_tag), do: {:error, :domain_tag_mismatch}
 
   defp safely_sign_request(payload, principal_id, private_key) do
     try do

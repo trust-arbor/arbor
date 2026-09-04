@@ -134,6 +134,9 @@ defmodule Arbor.Security.UriRegistry do
     # Gateway MCP bridge
     "arbor://mcp/",
 
+    # Forge project capability prefix (segment-aware; projector must not match)
+    "arbor://forge/project",
+
     # Gateway tool/status bridges — authorized at call-sites (ClaudeSession
     # tool-use fallback, MCP status disclosure) but were unregistered, so
     # denied under enforcement. (Security Sentinel uri-inventory, 2026-06-09.)
