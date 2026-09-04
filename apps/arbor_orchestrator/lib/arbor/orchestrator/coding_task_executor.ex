@@ -799,10 +799,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         "terminal_state" => envelope_field(terminal_envelope, "terminal_state"),
         "prior_code" => get_in_any(terminal_envelope, ["prior_outcome", "code"]),
         "result" => finalize_result_summary(result),
-        "pid" => inspect(self())
+        "pid" => inspect(self()),
+        "provenance" => finalize_provenance()
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
+
+    if event == "finalize_attempt" and outcome["code"] in ~w(task_runner_failed task_owner_died) do
+      Logger.warning(
+        "[CodingTaskExecutor] lifecycle terminal #{outcome["code"]} being archived: " <>
+          inspect(line["provenance"], limit: 40, printable_limit: 1_200)
+      )
+    end
 
     with {:ok, path} <- SafePath.safe_join(logs_root, @task_lifecycle_filename),
          {:ok, encoded} <- Jason.encode(line),
@@ -839,6 +847,35 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       %{} = value -> get_in_any(value, rest)
       _ -> nil
     end
+  end
+
+  # Who is finalizing: the Task callers chain (a TaskStore callback carries the
+  # store pid), the process ancestry, the initial call, and the top frames.
+  defp finalize_provenance do
+    dict =
+      case Process.info(self(), :dictionary) do
+        {:dictionary, dict} -> dict
+        _ -> []
+      end
+
+    stack =
+      case Process.info(self(), :current_stacktrace) do
+        {:current_stacktrace, frames} ->
+          frames
+          |> Enum.drop(2)
+          |> Enum.take(10)
+          |> Enum.map(fn {mod, fun, arity, _loc} -> "#{inspect(mod)}.#{fun}/#{arity}" end)
+
+        _ ->
+          []
+      end
+
+    %{
+      "callers" => dict |> Keyword.get(:"$callers", []) |> Enum.map(&inspect/1),
+      "ancestors" => dict |> Keyword.get(:"$ancestors", []) |> Enum.map(&inspect/1),
+      "initial_call" => inspect(Keyword.get(dict, :"$initial_call")),
+      "stack" => stack
+    }
   end
 
   defp finalize_result_summary(nil), do: nil
