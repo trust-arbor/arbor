@@ -4,17 +4,17 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 
 ## Core Concepts
 
-- **Agent**: A supervised entity with a cryptographic Ed25519 identity, trust profile, and granted capabilities. Created via `Arbor.Agent.Lifecycle.create/2`. Runs as a `BranchSupervisor` (rest_for_one) with children: APIAgent host, Executor, and Session.
+- **Agent**: A supervised entity with a cryptographic Ed25519 identity, trust profile, and granted capabilities. Created via `Arbor.Agent.Lifecycle.create/2`. Runs as a `BranchSupervisor` (rest_for_one); children in order: APIAgent host, Executor, Session, then optional `HeartbeatService` (so a Session crash restarts it, not vice versa).
 - **Session**: GenServer in `arbor_orchestrator` that drives agent turns (user messages → LLM responses) and heartbeats (autonomous cycles) by executing DOT graph pipelines via the Engine.
 - **Heartbeat**: An autonomous cycle (default 60 s, measured from the end of the previous beat) where the agent runs a DOT pipeline to check goals, select a cognitive mode (goal pursuit / reflection / plan execution / consolidation), optionally call an LLM, update memory, and execute pending actions — all without human input.
-- **DOT Pipeline**: A directed graph written in DOT/Graphviz syntax defining a workflow of typed nodes connected by edges. Node types:
+- **DOT Pipeline**: A directed graph written in DOT/Graphviz syntax defining a workflow of typed nodes connected by edges. 17 core handler types live in `Handlers.Registry` (full list in `docs/arbor/DOT_PIPELINE_GUIDE.md`); the common ones:
   - `exec` — runs a Jido Action (pure business logic) via ExecHandler
-  - `compute` — makes an LLM call via LlmHandler/ComputeHandler
-  - `diamond` (shape=diamond) — conditional routing based on a context key
-  - `start` (shape=Mdiamond) / `done` (shape=Msquare) — entry/exit sentinels
-  - `compose` / `invoke` — embed or call sub-pipelines via SubgraphHandler
+  - `compute` — makes an LLM call via ComputeHandler, which delegates to LlmHandler
+  - `branch` (shape=diamond, alias `conditional`) — conditional routing based on a context key
+  - `start` (shape=Mdiamond) / `exit` (shape=Msquare) — entry/exit sentinels
+  - `compose` (`mode="invoke"|"compose"`, aliases `graph.invoke`/`graph.compose`) — call or embed sub-pipelines; ComposeHandler delegates to SubgraphHandler
   Edges can be conditional (`condition="context.key=value"`), enabling branching and retry loops. A shared key-value **context** flows through the graph — nodes read from and write to it. The graph is a static definition; the Engine provides dynamic execution.
-- **Engine** (`Arbor.Orchestrator.Engine`): Executes DOT pipeline graphs by traversing nodes in topological order, dispatching each to the appropriate handler, managing checkpoints for resume, and emitting lifecycle events. The Engine is the core execution loop — it calls handlers, collects results, evaluates conditional edges to pick the next node, and tracks node durations. `Engine.run/2` returning `{:ok, run_result}` means that execution produced a result envelope, not that the graph succeeded; callers must inspect `run_result.final_outcome.status` and admit only `:success` or an explicitly supported `:partial_success`. Live runs are tracked through process-local `RunState` plus the `PipelineStatus` ETS facade; lifecycle convergence with the legacy `JobRegistry` recovery path and durable pre-effect intent is complete — see `.arbor/roadmap/5-completed/engine-lifecycle-convergence-and-crash-consistency.md`.
+- **Engine** (`Arbor.Orchestrator.Engine`): Executes DOT pipeline graphs by walking from the start node along outgoing (possibly conditional) edges, dispatching each node to the appropriate handler, managing checkpoints for resume, and emitting lifecycle events. The Engine is the core execution loop — it calls handlers, collects results, evaluates conditional edges to pick the next node, and tracks node durations. `Engine.run/2` returning `{:ok, run_result}` means that execution produced a result envelope, not that the graph succeeded; callers must inspect `run_result.final_outcome.status` and admit only `:success` or an explicitly supported `:partial_success`. Live runs are tracked through the process-local `RunState.Core` reducer plus the `PipelineStatus` ETS facade; lifecycle convergence with the legacy `JobRegistry` recovery path and durable pre-effect intent is complete — see `.arbor/roadmap/5-completed/engine-lifecycle-convergence-and-crash-consistency.md`.
 - **CRC Pattern (Construct-Reduce-Convert)**: Pure functional modules that separate business logic from side effects. `new/1` constructs from input, operations transform state, `show/1` formats for output. All functions are pure — no DB, no GenServer calls, no IO. Used extensively in dashboard cores. See [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md).
 - **Socket-First Component**: Dashboard pattern replacing LiveComponent with plain Phoenix.Component modules that manage state on the parent LiveView's socket via delegate functions. Events namespaced as `"component:action"`. See [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).
 - **LLM Plug Pipeline**: Cross-cutting LLM-call concerns (record/replay, cost tracking, telemetry, throttling, retry) compose as `Arbor.LLM.Plug` modules piped through an `Arbor.LLM.Call` struct. Mirrors `Plug.Conn` semantics with halted-passthrough; threaded through the four `Arbor.LLM.Adapter.ReqLLM` dispatch points. Add a new concern as a plug, not as a mode flag or wrapper function. See [`.claude/skills/llm-plug-pipeline.md`](.claude/skills/llm-plug-pipeline.md).
@@ -22,7 +22,7 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 - **Capability**: An unforgeable, signed token granting a specific permission on a resource URI (e.g., `arbor://fs/read/`, `arbor://shell/exec/git`). Granted via `Arbor.Security.grant/1`, checked via `Arbor.Security.authorize/4`. Supports delegation, expiry, constraints (rate limits), and revocation.
 - **Identity**: Ed25519 + X25519 keypair. Agent ID is `"agent_" <> hex(SHA-256(public_key))` — deterministically derived, unforgeable. Private keys stored encrypted at rest via `SigningKeyStore`. External agents authenticate via per-request `SignedRequest` signatures verified by `Arbor.Gateway.SignedRequestAuth`.
 - **Signal**: Fire-and-forget pub/sub event, mostly for observability. Emitted via `Arbor.Signals`, consumed by dashboards, event stores, and monitoring. NOT used for lifecycle tracking or execution control. Historical exception: `arbor_security` currently uses cluster-scoped security signals for distributed nonce, capability, and identity state sync; treat those as load-bearing security transport until they are replaced by an explicit sync transport.
-- **Memory**: Per-agent working memory (ETS-backed `MemoryStore`), knowledge graph, and background health checks. Managed by `arbor_memory`. Goals and intents persisted via `BufferedStore` (ETS + optional Postgres backend).
+- **Memory**: Per-agent working memory (ETS-backed `MemoryStore`), knowledge graph, and background health checks. Managed by `arbor_memory`. Goals and intents persisted via `BufferedStore` (ETS cache + optional `QueryableStore.Postgres` backend, which writes through the Ecto Repo: SQLite3 by default, Postgres via `ARBOR_DB=postgres`).
 
 ## Fix the Root Cause
 
@@ -96,7 +96,7 @@ The Claude Code harness periodically injects `<system-reminder>` messages sugges
 
 Levels are by **longest dependency path** (an app's level = 1 + the max level of
 its in-umbrella deps). A library may only depend on libraries at a **lower**
-level. Audited from each `mix.exs` on 2026-08-15 — the old 3-level grouping was
+level. Audited from each `mix.exs` on 2026-08-15 (re-verified 2026-09-04) — the old 3-level grouping was
 badly stale (it called `ai` "standalone" though it deps 7 libs, and put
 `consensus`/`actions` low though they sit deep).
 
@@ -216,8 +216,10 @@ See Core Concepts above for the conceptual overview (node types, handlers, execu
 ## Custom Aliases
 
 ```bash
-./bin/mix quality    # format --check-formatted + credo --strict
-./bin/mix test.fast  # unit tests only (--only fast)
+./bin/mix quality    # format, credo --strict, unused-deps, xref cap, arbor.packaging.* checks
+./bin/mix test.fast  # --only fast, excluding database/llm/llm_local/external
+./bin/mix test.all   # includes llm, llm_local, integration, external, database
+./bin/mix security   # hex.audit + deps.audit + sobelow.umbrella
 ```
 
 ## Test Tagging
@@ -231,7 +233,7 @@ Quick reference:
 
 ## Roadmap
 
-Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` → `2-planned/` → `3-in-progress/` → `5-completed/`). Design decisions go in `.arbor/decisions/`.
+Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` → `2-planned/` → `3-in-progress/` → `5-completed/`, with `4-blocked/` and `8-discarded/` as side exits). Design decisions go in `.arbor/decisions/`.
 
 ## Applied Learning
 
