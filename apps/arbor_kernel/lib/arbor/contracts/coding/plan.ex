@@ -30,6 +30,14 @@ defmodule Arbor.Contracts.Coding.Plan do
   * no explicit model-cost cap and parallelism of one
   * commit and retain the workspace; do not open a draft PR
 
+  ## Integration (version 2, additive)
+
+  An optional `"integration"` block declares forge publish intent. It is **additive**
+  and **defaulted**: omission or `"mode": "local_merge"` preserves today's behaviour —
+  `to_map/1` omits the block and compilation is byte-identical to plans without it.
+  Only `"mode": "pull_request"` is publishable and serialized. Execution wiring is
+  deferred to later packets; absent or local-merge integration has no runtime effect.
+
   Wall-clock values are bounded to 10 seconds through 24 hours. Inactivity is
   bounded to 10 seconds through 1 hour, model cost to 100 USD, and parallelism
   to eight workers.
@@ -85,8 +93,17 @@ defmodule Arbor.Contracts.Coding.Plan do
     :requested_paths,
     :work_packet,
     :work_packet_digest,
-    :candidate_materialization
+    :candidate_materialization,
+    :integration
   ]
+  @integration_fields [:mode, :remote, :base_branch, :candidate_namespace, :forge]
+  @forge_fields [:kind, :api_url, :project, :credential]
+  @integration_modes ~w(local_merge pull_request)
+  @forge_kinds ~w(forgejo gitea github gitlab none)
+  @default_integration_mode "local_merge"
+  @default_integration_remote "origin"
+  @default_integration_base_branch "main"
+  @default_integration_candidate_namespace "arbor/coding-agent/"
   @workspace_fields [:mode, :branch_name, :worktree_base_dir]
   @worker_fields [
     :provider,
@@ -130,6 +147,30 @@ defmodule Arbor.Contracts.Coding.Plan do
   @type budgets :: %{required(String.t()) => number() | nil}
   @type output :: %{required(String.t()) => boolean()}
   @type work_packet :: %{required(String.t()) => term()}
+  @type integration_mode :: String.t()
+  @type forge_kind :: String.t()
+  @type credential_name :: String.t()
+  @typedoc """
+  The normalized forge object. Elixir typespecs cannot name binary keys, so the
+  closed key set is stated here and enforced by `normalize_object/3`:
+  exactly `"kind"` (`forge_kind/0`), `"api_url"` (HTTPS URL or `nil`),
+  `"project"` (`owner/repo`, or `nil`) and `"credential"` (`credential_name/0`
+  or `nil`). For `"kind" => "none"` the last three are `nil` and must be
+  absent from the input.
+  """
+  @type forge_config :: %{
+          required(String.t()) => forge_kind() | String.t() | nil
+        }
+
+  @typedoc """
+  The normalized integration object: exactly `"mode"` (`integration_mode/0`),
+  `"remote"`, `"base_branch"`, `"candidate_namespace"` (strings) and `"forge"`
+  (`forge_config/0`, or `nil` for a `local_merge` plan without a forge block).
+  Unknown keys and atom/string aliases are rejected by `normalize_object/3`.
+  """
+  @type integration :: %{
+          required(String.t()) => integration_mode() | String.t() | forge_config() | nil
+        }
 
   typedstruct enforce: true do
     @typedoc "A normalized coding plan with no embedded execution authority."
@@ -151,7 +192,21 @@ defmodule Arbor.Contracts.Coding.Plan do
     field(:work_packet, work_packet() | nil, default: nil)
     field(:work_packet_digest, String.t() | nil, default: nil)
     field(:candidate_materialization, map() | nil, default: nil)
+    field(:integration, integration() | nil, default: nil)
   end
+
+  @doc """
+  Return whether the plan's integration block declares a publishable pull request.
+  """
+  @spec publishable?(t() | map()) :: boolean()
+  def publishable?(%__MODULE__{integration: integration}) when is_map(integration),
+    do: Map.get(integration, "mode") == "pull_request"
+
+  def publishable?(%{"integration" => %{"mode" => "pull_request"}}), do: true
+  def publishable?(%{"integration" => integration}) when is_map(integration), do: false
+  def publishable?(%{integration: %{mode: "pull_request"}}), do: true
+  def publishable?(%{integration: _}), do: false
+  def publishable?(_), do: false
 
   @doc "Return the legacy schema version retained for compatibility."
   @spec schema_version() :: pos_integer()
@@ -206,6 +261,7 @@ defmodule Arbor.Contracts.Coding.Plan do
            normalize_work_packet_fields(attrs, version),
          {:ok, candidate_materialization} <-
            normalize_candidate_materialization(attrs, version, work_packet),
+         {:ok, integration} <- normalize_integration(attrs, version),
          {:ok, task} <- fetch_nonblank_string(attrs, :task, []),
          {:ok, repo_root} <- fetch_nonblank_string(attrs, :repo_root, []),
          {:ok, base_ref} <-
@@ -252,7 +308,8 @@ defmodule Arbor.Contracts.Coding.Plan do
          requested_paths: requested_paths,
          work_packet: work_packet,
          work_packet_digest: work_packet_digest,
-         candidate_materialization: candidate_materialization
+         candidate_materialization: candidate_materialization,
+         integration: integration
        }}
     end
   rescue
@@ -292,6 +349,15 @@ defmodule Arbor.Contracts.Coding.Plan do
       end
 
     maybe_put_candidate_materialization(v2, plan.candidate_materialization)
+    |> maybe_put_integration(plan.integration)
+  end
+
+  defp maybe_put_integration(map, integration) do
+    if is_map(integration) and Map.get(integration, "mode") == "pull_request" do
+      Map.put(map, "integration", integration)
+    else
+      map
+    end
   end
 
   defp maybe_put_candidate_materialization(map, nil), do: map
@@ -835,4 +901,263 @@ defmodule Arbor.Contracts.Coding.Plan do
   defp qualify_path(parent, field), do: Enum.join(parent ++ [field], ".")
   defp object_path([]), do: "plan"
   defp object_path(path), do: Enum.join(path, ".")
+
+  defp normalize_integration(attrs, @schema_version) do
+    if Map.has_key?(attrs, :integration) do
+      {:error, {:invalid_field, "integration", {:unsupported_for_version, @schema_version}}}
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp normalize_integration(attrs, @latest_schema_version) do
+    case Map.fetch(attrs, :integration) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        normalize_integration_object(value)
+    end
+  end
+
+  defp normalize_integration_object(value) do
+    with {:ok, attrs} <- normalize_object(value, @integration_fields, ["integration"]),
+         merged <- {:ok, merge_integration_defaults(attrs)},
+         {:ok, merged} <- merged,
+         {:ok, mode} <-
+           normalize_enum(
+             Map.get(merged, "mode", @default_integration_mode),
+             @integration_modes,
+             "integration.mode"
+           ),
+         {:ok, remote} <-
+           normalize_integration_remote(Map.get(merged, "remote", @default_integration_remote)),
+         {:ok, base_branch} <-
+           normalize_nonblank_string(
+             Map.get(merged, "base_branch", @default_integration_base_branch),
+             "integration.base_branch"
+           ),
+         {:ok, candidate_namespace} <-
+           normalize_candidate_namespace(
+             Map.get(merged, "candidate_namespace", @default_integration_candidate_namespace)
+           ),
+         {:ok, forge} <- normalize_integration_forge(merged, mode),
+         integration <-
+           %{
+             "mode" => mode,
+             "remote" => remote,
+             "base_branch" => base_branch,
+             "candidate_namespace" => candidate_namespace,
+             "forge" => forge
+           },
+         :ok <- reject_secret_shaped_strings_in_tree(integration, "integration") do
+      {:ok, integration}
+    end
+  end
+
+  defp merge_integration_defaults(attrs) do
+    %{
+      "mode" => Map.get(attrs, :mode, @default_integration_mode),
+      "remote" => Map.get(attrs, :remote, @default_integration_remote),
+      "base_branch" => Map.get(attrs, :base_branch, @default_integration_base_branch),
+      "candidate_namespace" =>
+        Map.get(attrs, :candidate_namespace, @default_integration_candidate_namespace),
+      "forge" => Map.get(attrs, :forge)
+    }
+  end
+
+  defp normalize_integration_remote(value) do
+    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/, value) do
+      {:ok, value}
+    else
+      {:error, {:invalid_field, "integration.remote", {:expected_remote_name, value}}}
+    end
+  end
+
+  defp normalize_candidate_namespace(value) do
+    cond do
+      not String.ends_with?(value, "/") ->
+        {:error, {:invalid_field, "integration.candidate_namespace", :must_end_with_slash}}
+
+      String.contains?(value, "..") ->
+        {:error, {:invalid_field, "integration.candidate_namespace", :traversal_segment}}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp normalize_integration_forge(merged, mode) do
+    has_forge = Map.has_key?(merged, "forge") and Map.get(merged, "forge") != nil
+
+    cond do
+      mode == "pull_request" and not has_forge ->
+        {:error, {:invalid_field, "integration.forge", :required}}
+
+      has_forge ->
+        normalize_forge_object(Map.get(merged, "forge"))
+
+      true ->
+        {:ok, nil}
+    end
+  end
+
+  defp normalize_forge_object(value) do
+    with {:ok, attrs} <- normalize_object(value, @forge_fields, ["integration", "forge"]),
+         {:ok, kind} <-
+           normalize_enum(Map.get(attrs, :kind), @forge_kinds, "integration.forge.kind"),
+         {:ok, api_url} <- normalize_forge_api_url(Map.get(attrs, :api_url), kind),
+         {:ok, project} <- normalize_forge_project(Map.get(attrs, :project), kind),
+         {:ok, credential} <- normalize_forge_credential(Map.get(attrs, :credential), kind) do
+      {:ok,
+       %{
+         "kind" => kind,
+         "api_url" => api_url,
+         "project" => project,
+         "credential" => credential
+       }}
+    end
+  end
+
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_api_url(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_api_url(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.api_url", :not_allowed_for_kind_none}}
+
+  defp normalize_forge_api_url(nil, _kind) do
+    {:error, {:missing_field, "integration.forge.api_url"}}
+  end
+
+  defp normalize_forge_api_url(value, _kind) when is_binary(value) do
+    case URI.parse(value) do
+      %URI{scheme: "https", host: host, userinfo: nil, fragment: nil}
+      when is_binary(host) and host != "" ->
+        {:ok, value}
+
+      _ ->
+        {:error, {:invalid_field, "integration.forge.api_url", :invalid_https_url}}
+    end
+  end
+
+  defp normalize_forge_api_url(value, _kind) do
+    {:error, {:invalid_field, "integration.forge.api_url", {:expected_string, value}}}
+  end
+
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_project(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_project(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.project", :not_allowed_for_kind_none}}
+
+  defp normalize_forge_project(nil, _kind) do
+    {:error, {:missing_field, "integration.forge.project"}}
+  end
+
+  defp normalize_forge_project(value, _kind) when is_binary(value) do
+    if Regex.match?(~r/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+$/, value) do
+      {:ok, value}
+    else
+      {:error, {:invalid_field, "integration.forge.project", {:expected_project_path, value}}}
+    end
+  end
+
+  defp normalize_forge_project(value, _kind) do
+    {:error, {:invalid_field, "integration.forge.project", {:expected_string, value}}}
+  end
+
+  # kind "none" is publish-only: the forge sub-fields must be absent, not
+  # silently discarded (a discarded value is never checked for secrets).
+  defp normalize_forge_credential(nil, "none"), do: {:ok, nil}
+
+  defp normalize_forge_credential(_value, "none"),
+    do: {:error, {:invalid_field, "integration.forge.credential", :not_allowed_for_kind_none}}
+
+  defp normalize_forge_credential(nil, _kind) do
+    {:error, {:missing_field, "integration.forge.credential"}}
+  end
+
+  defp normalize_forge_credential(value, _kind) when is_binary(value) do
+    if Regex.match?(~r/^[a-z][a-z0-9_]{0,63}$/, value) do
+      {:ok, value}
+    else
+      {:error,
+       {:invalid_field, "integration.forge.credential", {:expected_credential_name, value}}}
+    end
+  end
+
+  defp normalize_forge_credential(value, _kind) do
+    {:error, {:invalid_field, "integration.forge.credential", {:expected_string, value}}}
+  end
+
+  defp reject_secret_shaped_strings_in_tree(value, _path) do
+    case walk_secret_strings(value) do
+      :ok ->
+        :ok
+
+      {:error, field_path} ->
+        {:error,
+         {:invalid_field, qualify_path(["integration"], field_path), :secret_shaped_value}}
+    end
+  end
+
+  defp walk_secret_strings(value) when is_binary(value), do: reject_secret_shaped_value(value)
+
+  defp walk_secret_strings(value) when is_map(value) do
+    value
+    |> Map.to_list()
+    |> Enum.reduce_while(:ok, fn {key, nested}, :ok ->
+      path = if is_binary(key), do: key, else: Atom.to_string(key)
+
+      case walk_secret_strings(nested) do
+        :ok -> {:cont, :ok}
+        {:error, nested_path} -> {:halt, {:error, path <> "." <> nested_path}}
+      end
+    end)
+    |> case do
+      :ok -> :ok
+      {:error, path} -> {:error, path}
+    end
+  end
+
+  defp walk_secret_strings(value) when is_list(value) do
+    value
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {item, index}, :ok ->
+      case walk_secret_strings(item) do
+        :ok -> {:cont, :ok}
+        {:error, nested_path} -> {:halt, {:error, "[#{index}]." <> nested_path}}
+      end
+    end)
+    |> case do
+      :ok -> :ok
+      {:error, path} -> {:error, path}
+    end
+  end
+
+  defp walk_secret_strings(_value), do: :ok
+
+  defp reject_secret_shaped_value(value) when is_binary(value) do
+    cond do
+      Regex.match?(~r/^ghp_[A-Za-z0-9]{20,}$/, value) -> {:error, "value"}
+      String.starts_with?(value, "github_pat_") -> {:error, "value"}
+      String.starts_with?(value, "glpat-") -> {:error, "value"}
+      String.starts_with?(value, "Bearer ") -> {:error, "value"}
+      Regex.match?(~r/^[0-9a-fA-F]{40}$/, value) -> {:error, "value"}
+      secret_https_userinfo?(value) -> {:error, "value"}
+      true -> :ok
+    end
+  end
+
+  defp secret_https_userinfo?(value) do
+    case URI.parse(value) do
+      %URI{scheme: "https", userinfo: userinfo} when is_binary(userinfo) and userinfo != "" ->
+        true
+
+      _ ->
+        false
+    end
+  end
 end

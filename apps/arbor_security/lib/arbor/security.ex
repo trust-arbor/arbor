@@ -3137,6 +3137,50 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Sign a domain-tagged detached message using a previously opened signing authority.
+
+  Used for forge projection signing (`arbor-forge-projection-v1`). This path is
+  separate from `sign_with_authority/2`, which produces MCP `SignedRequest` envelopes.
+  """
+  @spec sign_detached_with_authority(SigningAuthority.t(), String.t(), binary()) ::
+          {:ok, binary()} | {:error, term()}
+  def sign_detached_with_authority(authority, domain_tag, message)
+      when is_binary(domain_tag) and is_binary(message) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        SigningAuthorityBroker.sign_detached_with_domain(canonical, domain_tag, message)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def sign_detached_with_authority(authority, _domain_tag, _message) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Verify a detached Ed25519 signature over a raw message.
+  """
+  @spec verify_detached(binary(), binary(), binary()) :: :ok | {:error, term()}
+  def verify_detached(message, signature, public_key)
+      when is_binary(message) and is_binary(signature) and is_binary(public_key) do
+    case Crypto.verify(message, signature, public_key) do
+      true -> :ok
+      false -> {:error, :invalid_signature}
+    end
+  rescue
+    _ -> {:error, :invalid_signature}
+  catch
+    _ -> {:error, :invalid_signature}
+  end
+
+  def verify_detached(_message, _signature, _public_key), do: {:error, :invalid_signature}
+
+  @doc """
   Derive a domain-separated secret using a signing authority.
 
   `purpose` is mandatory domain separation material. The broker always

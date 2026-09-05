@@ -132,6 +132,8 @@ end
 
 **Start minimal.** Fewer fields is better. You can add fields (additive, safe). Removing fields is a breaking change that requires coordinated updates.
 
+**Additive integration blocks.** Optional contract blocks that declare deferred intent — for example `Coding.Plan`'s `"integration"` block for forge publish — must be additive and defaulted: absence or a local/default mode must preserve byte-identical behavior for all pre-existing consumers. Omit the block from `to_map/1` unless an explicit publish mode is declared; leave compilation and runtime wiring unchanged until that mode is selected. New fields inside the block follow the same rule: only an explicitly supported publish mode (such as `"pull_request"`) may change serialized output or downstream behavior.
+
 **Field naming**: Descriptive but standard Elixir. `expires_at` not `exp`. `principal_id` not `pid`. No abbreviations.
 
 ## 6. When to Update Contracts
