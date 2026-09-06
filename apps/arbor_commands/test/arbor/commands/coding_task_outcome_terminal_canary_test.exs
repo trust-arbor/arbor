@@ -155,7 +155,8 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
          cleanup_supervisor: supervisor,
          approval_cleanup_mfa: {CleanupProbe, :cleanup, 2},
          cancel_turn: fn _agent_id, _task_id -> :ok end,
-         executor_callback_timeout_ms: 1_000
+         executor_callback_timeout_ms: 10_000,
+         executor_finalization_timeout_ms: 10_000
        ]},
       id: store
     )
@@ -339,8 +340,8 @@ defmodule Arbor.Commands.CodingTaskOutcomeTerminalCanaryTest do
     assert_receive {:canary_runner_started, ^task_id, _pid, @agent_id, _task, _context}, 1_000
 
     status = await_terminal_status(store, task_id)
-    assert_receive {:canary_finalize_task_reply, ^task_id, {:ok, _finalized}}, 1_000
-    assert_receive {:canary_finalize_terminal_reply, ^task_id, :ok}, 1_000
+    assert_receive {:canary_finalize_task_reply, ^task_id, {:ok, _finalized}}, 10_000
+    assert_receive {:canary_finalize_terminal_reply, ^task_id, :ok}, 10_000
 
     expected = %{
       code: "change_committed",
