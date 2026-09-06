@@ -23,6 +23,30 @@ defmodule Mix.Tasks.Arbor.Packaging.SafeRecoveryClosureTest do
   end
 
   test "report fails closed when committed evidence is absent" do
-    assert {:error, :evidence_missing} = Task.execute([])
+    root = temp_umbrella_root!()
+    on_exit(fn -> File.rm_rf!(root) end)
+    assert {:error, :evidence_missing} = Task.execute(["--root", root])
+  end
+
+  test "report succeeds when committed evidence is present" do
+    assert {:ok, report} = Task.execute([])
+    assert is_map(report)
+  end
+
+  defp temp_umbrella_root! do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-safe-recovery-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    for marker <- ["mix.exs", "apps/arbor_commands/mix.exs", "apps/arbor_kernel/mix.exs"] do
+      path = Path.join(root, marker)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "# marker\n")
+    end
+
+    {:ok, real} = Arbor.Common.SafePath.resolve_real(root)
+    real
   end
 end

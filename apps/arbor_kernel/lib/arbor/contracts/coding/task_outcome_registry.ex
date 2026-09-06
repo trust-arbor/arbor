@@ -85,6 +85,9 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
     design_checkpoint_rework_exhausted
     design_council_failed
     design_council_outcome_invalid
+    candidate_materialization_failed
+    descriptor_worker_close_failed
+    descriptor_workspace_moved
   )
 
   @transcript_terminal_statuses ~w(
@@ -350,6 +353,24 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistry do
       phase: "design",
       origin: "runtime",
       retry: "none"
+    },
+    "candidate_materialization_failed" => %{
+      disposition: "failed",
+      phase: "validation",
+      origin: "arbor",
+      retry: "after_external_change"
+    },
+    "descriptor_worker_close_failed" => %{
+      disposition: "failed",
+      phase: "cleanup",
+      origin: "acp_transport",
+      retry: "new_session"
+    },
+    "descriptor_workspace_moved" => %{
+      disposition: "failed",
+      phase: "workspace",
+      origin: "arbor",
+      retry: "after_external_change"
     }
   }
 

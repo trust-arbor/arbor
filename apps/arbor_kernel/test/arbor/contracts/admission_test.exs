@@ -880,14 +880,14 @@ defmodule Arbor.Contracts.AdmissionTest do
     end
 
     @tag spec: "AC-1,AC-2,AC-6"
-    test "live: coding/candidate_materialization is grandfathered tier d with no external consumers",
+    test "live: coding/candidate_materialization is tier shared with external consumers, AC-12 admission still pending",
          %{
            by_path: by_path
          } do
       e = by_path["lib/arbor/contracts/coding/candidate_materialization.ex"]
       assert e
-      assert e.tier == :d
-      assert e.external_consumers == []
+      assert e.tier == :shared
+      assert e.external_consumers == ["arbor_actions", "arbor_orchestrator"]
       assert "lib/arbor/contracts/coding/plan.ex" in e.internal_consumers
 
       assert @grandfathered["lib/arbor/contracts/coding/candidate_materialization.ex"] ==

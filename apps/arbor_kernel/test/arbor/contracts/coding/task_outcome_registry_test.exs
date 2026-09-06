@@ -56,6 +56,9 @@ defmodule Arbor.Contracts.Coding.TaskOutcomeRegistryTest do
              design_checkpoint_rework_exhausted
              design_council_failed
              design_council_outcome_invalid
+             candidate_materialization_failed
+             descriptor_worker_close_failed
+             descriptor_workspace_moved
            )
   end
 

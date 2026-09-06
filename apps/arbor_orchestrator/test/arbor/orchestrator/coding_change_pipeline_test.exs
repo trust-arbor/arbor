@@ -1165,7 +1165,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                :cross_app_capacity_then_domain_rework,
                :cross_app_capacity_then_tampered_resume,
                :cross_app_completed_flags_in_progress_status,
-               :cross_app_legacy_capacity_exceeded
+               :cross_app_legacy_capacity_exceeded,
+               :descriptor_validation_failed
              ] ->
           if sends == 0, do: "fp-clean", else: "fp-after-send-#{sends}"
 
@@ -1566,7 +1567,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
          passed: false,
          reason: "tests_failed",
          request_id: "",
-         note: ""
+         note: "",
+         resource_id: "validation_fixture_immutable_1"
        }}
     end
 
@@ -1602,6 +1604,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         note: "",
         disposition_type: "capacity_handoff",
         progress_status: "in_progress",
+        resource_id: "validation_fixture_immutable_1",
         progress: %{
           "schema_version" => 1,
           "status" => "in_progress",
@@ -1620,6 +1623,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         disposition_type: "completed",
         progress_status: "completed",
         passed: true,
+        resource_id: "validation_fixture_immutable_1",
         validated_tree_oid: String.duplicate("a", 40),
         progress: %{
           "schema_version" => 1,
@@ -1858,7 +1862,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         files: ["file.ex"],
         base_ref: "basecommit0001",
         branch: "arbor/coding-agent/fixture",
-        worktree_path: "/tmp/ws_fixture_1"
+        worktree_path: "/tmp/ws_fixture_1",
+        resource_id: "validation_fixture_immutable_1"
       }
 
       result =
@@ -2414,7 +2419,6 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           acp_start_session
           acp_send_message
           acp_close_session
-          coding_candidate_materialize
           coding_workspace_committed_change
           council_review_change
           coding_workspace_release
@@ -2422,19 +2426,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert length(action_calls(calls, action)) == 1
     end
 
+    assert length(action_calls(calls, "coding_candidate_materialize")) == 2
     assert length(action_calls(calls, "coding_reviewed_validation")) == 2
     refute called?(calls, "coding_reviewed_commit")
     assert [design_prompt] = action_prompts(calls)
     assert design_prompt =~ "DESIGN PHASE ONLY"
 
-    [materialize] = action_calls(calls, "coding_candidate_materialize")
-    assert materialize["candidate_materialization"] == crash.descriptor
-    assert materialize["pinned_descriptor_digest"] == crash.descriptor_digest
-    assert materialize["candidate_materialization_digest"] == crash.descriptor_digest
-    assert materialize["source_commit_oid"] == crash.descriptor["source_commit_oid"]
-    assert materialize["expected_tree_oid"] == crash.descriptor["expected_tree_oid"]
-    assert materialize["workspace_id"] == "ws_fixture_1"
-    assert materialize["acquired_base_commit"] == "basecommit0001"
+    for materialize <- action_calls(calls, "coding_candidate_materialize") do
+      assert materialize["candidate_materialization"] == crash.descriptor
+      assert materialize["pinned_descriptor_digest"] == crash.descriptor_digest
+      assert materialize["candidate_materialization_digest"] == crash.descriptor_digest
+      assert materialize["source_commit_oid"] == crash.descriptor["source_commit_oid"]
+      assert materialize["expected_tree_oid"] == crash.descriptor["expected_tree_oid"]
+      assert materialize["workspace_id"] == "ws_fixture_1"
+      assert materialize["acquired_base_commit"] == "basecommit0001"
+    end
 
     validations = action_calls(calls, "coding_reviewed_validation")
     [committed] = action_calls(calls, "coding_workspace_committed_change")
@@ -3157,21 +3163,22 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["validation_observed_at"] == "2026-07-22T12:00:00.000000Z"
       assert result.context["validation_candidate_tree_oid"] == descriptor["expected_tree_oid"]
 
-      assert length(action_calls(calls, "coding_candidate_materialize")) == 1
+      assert length(action_calls(calls, "coding_candidate_materialize")) == 2
       assert length(action_calls(calls, "acp_send_message")) == 1
       assert length(action_calls(calls, "acp_close_session")) == 1
       refute called?(calls, "coding_reviewed_commit")
 
-      [materialize] = action_calls(calls, "coding_candidate_materialize")
       digest = compilation.initial_values["coding_plan_candidate_materialization_digest"]
 
-      assert materialize["candidate_materialization"] == descriptor
-      assert materialize["pinned_descriptor_digest"] == digest
-      assert materialize["candidate_materialization_digest"] == digest
-      assert materialize["source_commit_oid"] == descriptor["source_commit_oid"]
-      assert materialize["expected_tree_oid"] == descriptor["expected_tree_oid"]
-      assert materialize["workspace_id"] == "ws_fixture_1"
-      assert materialize["acquired_base_commit"] == "basecommit0001"
+      for materialize <- action_calls(calls, "coding_candidate_materialize") do
+        assert materialize["candidate_materialization"] == descriptor
+        assert materialize["pinned_descriptor_digest"] == digest
+        assert materialize["candidate_materialization_digest"] == digest
+        assert materialize["source_commit_oid"] == descriptor["source_commit_oid"]
+        assert materialize["expected_tree_oid"] == descriptor["expected_tree_oid"]
+        assert materialize["workspace_id"] == "ws_fixture_1"
+        assert materialize["acquired_base_commit"] == "basecommit0001"
+      end
 
       [first_validation | _] = action_calls(calls, "coding_reviewed_validation")
       [committed] = action_calls(calls, "coding_workspace_committed_change")
