@@ -9,17 +9,35 @@ defmodule Arbor.Common.ModelProfileTest do
   # ===========================================================================
 
   describe "exact match" do
-    test "claude-sonnet-4-6" do
+    # The claude-*-4-6 ids have NO static entry on purpose (removed 2026-09-07:
+    # their 200_000 predated the models' current windows).
+    #
+    # These assert ROUTING, not values. We do not maintain llm_db, so pinning
+    # its numbers would make an upstream catalog update fail our suite for a
+    # reason that is not about our code — and it is how the old 200_000 stayed
+    # green for six months while being wrong. What IS ours: that a model with no
+    # static entry reaches the catalog instead of silently taking the invented
+    # unknown default. That is what these check.
+    test "claude-sonnet-4-6 routes to the catalog, not the unknown default" do
       profile = ModelProfile.get("claude-sonnet-4-6")
-      assert profile.context_size == 200_000
-      assert profile.max_output_tokens == 64_000
+
       assert profile.family == :claude
       assert profile.effective_window_pct == 0.75
+      assert is_integer(profile.context_size) and profile.context_size > 0
+      assert is_integer(profile.max_output_tokens) and profile.max_output_tokens > 0
+
+      # The tell: the unknown fallback is exactly 100_000/4_096. Landing on it
+      # means the catalog lookup missed.
+      refute {profile.context_size, profile.max_output_tokens} == {100_000, 4_096}
     end
 
-    test "claude-opus-4-6" do
-      assert ModelProfile.context_size("claude-opus-4-6") == 200_000
-      assert ModelProfile.max_output_tokens("claude-opus-4-6") == 32_000
+    test "claude-opus-4-6 routes to the catalog, not the unknown default" do
+      ctx = ModelProfile.context_size("claude-opus-4-6")
+      out = ModelProfile.max_output_tokens("claude-opus-4-6")
+
+      assert is_integer(ctx) and ctx > 0
+      assert is_integer(out) and out > 0
+      refute {ctx, out} == {100_000, 4_096}
     end
 
     test "gpt-4o" do
@@ -156,8 +174,16 @@ defmodule Arbor.Common.ModelProfileTest do
   # ===========================================================================
 
   describe "effective_window/1" do
-    test "claude: 200k * 0.75 = 150k" do
-      assert ModelProfile.effective_window("claude-sonnet-4-6") == 150_000
+    # Asserts the ARITHMETIC (context * pct), not llm_db's context value.
+    test "catalog-resolved model: effective_window is context * pct" do
+      p = ModelProfile.get("claude-sonnet-4-6")
+
+      assert ModelProfile.effective_window("claude-sonnet-4-6") ==
+               trunc(p.context_size * p.effective_window_pct)
+    end
+
+    test "claude with a static entry still uses it: 200k * 0.75 = 150k" do
+      assert ModelProfile.effective_window("claude-3-5-sonnet-20241022") == 150_000
     end
 
     test "gpt-4o: 128k * 0.75 = 96k" do
@@ -376,10 +402,14 @@ defmodule Arbor.Common.ModelProfileTest do
 
   describe "entry/1 — backwards-compat with existing API" do
     test "get/1 still returns the legacy map shape unchanged" do
+      # Shape, not values: get/1 must keep returning the four-key map its
+      # callers destructure. The VALUES now come from llm_db unless a model has
+      # a deliberate static entry, so pinning numbers here would just re-encode
+      # the staleness that made claude-*-4-6 wrong for six months. A model with
+      # a real static entry is asserted separately below.
       profile = ModelProfile.get("claude-opus-4-6")
-      # The legacy short-form static map still drives get/1 etc. — those
-      # specific values are pinned here so the existing callers don't drift.
-      assert profile.context_size == 200_000
+      assert is_integer(profile.context_size) and profile.context_size > 0
+      assert is_integer(profile.max_output_tokens) and profile.max_output_tokens > 0
       assert profile.family == :claude
       assert profile.effective_window_pct == 0.75
     end

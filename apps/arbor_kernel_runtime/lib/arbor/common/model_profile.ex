@@ -53,8 +53,14 @@ defmodule Arbor.Common.ModelProfile do
   @profiles %{
     # ===== Anthropic Claude =====
     # Claude 4.5/4.6
-    "claude-opus-4-6" => %{context_size: 200_000, max_output_tokens: 32_000, family: :claude},
-    "claude-sonnet-4-6" => %{context_size: 200_000, max_output_tokens: 64_000, family: :claude},
+    #
+    # claude-opus-4-6 / claude-sonnet-4-6 are deliberately ABSENT: their old
+    # 200_000 entries dated to 2026-02-26, before either model shipped its
+    # current window, and capped compaction at 150_000 — 15% of the real one.
+    # llm_db reports both at 1_000_000 / 128_000, active, flat $3/$15 per Mtok,
+    # with no gating flag, so there is nothing local to assert. They now resolve
+    # from the catalog like every other model. If turn cost becomes the concern,
+    # lower `effective_window_pct` rather than re-adding a smaller window here.
     "claude-opus-4-5-20251101" => %{
       context_size: 200_000,
       max_output_tokens: 32_000,
@@ -65,11 +71,20 @@ defmodule Arbor.Common.ModelProfile do
       max_output_tokens: 64_000,
       family: :claude
     },
+    # 8_192 was stale; llm_db 2026.9.1 reports 64_000 for this exact id, matching
+    # its sonnet-4-5 sibling. Verified 2026-09-07.
     "claude-haiku-4-5-20251001" => %{
       context_size: 200_000,
-      max_output_tokens: 8_192,
+      max_output_tokens: 64_000,
       family: :claude
     },
+    # Bare aliases used as `llm_model=` in shipped pipelines (11 nodes). They are
+    # client-side aliases, not API ids, so no pattern matches them and they were
+    # each getting 100K/4_096. Pin them to the conservative Claude shape rather
+    # than leave them on the unknown default.
+    "sonnet" => %{context_size: 200_000, max_output_tokens: 64_000, family: :claude},
+    "haiku" => %{context_size: 200_000, max_output_tokens: 64_000, family: :claude},
+    "opus" => %{context_size: 200_000, max_output_tokens: 32_000, family: :claude},
     # Claude 3.5
     "claude-3-5-sonnet-20241022" => %{
       context_size: 200_000,
@@ -175,7 +190,8 @@ defmodule Arbor.Common.ModelProfile do
     qwen: %{context_size: 32_768, max_output_tokens: 4_096},
     mistral: %{context_size: 32_000, max_output_tokens: 4_096},
     mixtral: %{context_size: 32_000, max_output_tokens: 4_096},
-    glm: %{context_size: 131_072, max_output_tokens: 8_192}
+    glm: %{context_size: 131_072, max_output_tokens: 8_192},
+    grok: %{context_size: 500_000, max_output_tokens: 32_768}
   }
 
   # Pattern matching rules: {pattern, family}
@@ -184,6 +200,8 @@ defmodule Arbor.Common.ModelProfile do
     {"gpt-4", :gpt},
     {"gpt-3", :gpt},
     {"gpt-5", :gpt},
+    {"gpt-6", :gpt},
+    {"grok", :grok},
     {"gemini", :gemini},
     {"deepseek", :deepseek},
     {"llama", :llama},
@@ -303,8 +321,45 @@ defmodule Arbor.Common.ModelProfile do
   by model family. Returns sensible defaults for unknown models.
   """
   @spec get(model_id()) :: profile()
-  def get(model_id) when is_binary(model_id) do
-    base = lookup(model_id)
+  def get(model_id) when is_binary(model_id), do: get(model_id, nil)
+
+  @doc """
+  Get the full profile for a model, resolved for a specific provider.
+
+  llm_db is the source of truth; the static `@profiles` map is only an offline
+  fallback for ids llm_db does not carry.
+
+  **Pass `provider` whenever the caller knows it.** The same model id has
+  materially different limits per provider — `grok-4.6` is 500_000/500_000 on
+  xai but 200_000/128_000 on azure, and `minimax-m3` is 512_000/131_072 on
+  ollama_cloud but 1_048_576/1_048_576 on cortecs. Resolving a bare id picks
+  whichever provider the inference guesses, which is how a hand-maintained
+  table drifts from what the deployment actually calls.
+  """
+  @spec get(model_id(), String.t() | atom() | nil) :: profile()
+  def get(model_id, provider) when is_binary(model_id) do
+    # Precedence: an EXPLICIT static entry wins, then llm_db, then family/default.
+    #
+    # llm_db is the source of truth for capability. An explicit entry is a
+    # DELIBERATE local decision to run a model at less than its capability —
+    # the honest reason is cost: `context_size` sets the compaction trigger
+    # (context * effective_window_pct), so a 1M window means requests can carry
+    # ~750K tokens of context and be billed for them every turn.
+    #
+    # Keep this list SHORT and give every entry a reason. An entry with no
+    # recorded reason is indistinguishable from a stale value — see the
+    # `claude-*` entries below, which predate the models' current windows.
+    base =
+      case explicit_entry(model_id) do
+        nil ->
+          case llmdb_profile(model_id, provider) do
+            {:ok, from_db} -> Map.merge(from_db, local_overlay(model_id))
+            :miss -> lookup(model_id)
+          end
+
+        entry ->
+          entry
+      end
 
     %{
       context_size: base[:context_size] || @default_context_size,
@@ -312,6 +367,100 @@ defmodule Arbor.Common.ModelProfile do
       max_output_tokens: base[:max_output_tokens] || @default_max_output,
       family: base[:family] || :unknown
     }
+  end
+
+  # Arbor's provider names are deployment routes, not llm_db catalog keys.
+  # Only the routes this deployment actually dispatches on are mapped; an
+  # unmapped provider falls through to family inference rather than guessing.
+  @provider_to_llmdb %{
+    "openai_oauth" => "openai",
+    "openai" => "openai",
+    "xai_oauth" => "xai",
+    "xai" => "xai",
+    "ollama" => "ollama_cloud",
+    "anthropic" => "anthropic",
+    "google" => "google"
+  }
+
+  # Local overlay: the ONLY fields Arbor owns for a model llm_db already
+  # describes. Deliberately not capabilities — those come from the catalog.
+  # `effective_window_pct` is an Arbor tunable (how full we let the window get
+  # before compacting), which llm_db has no opinion about.
+  # An exact hit in the curated table. Provider-prefixed ids are stripped the
+  # same way `lookup/1` does, so "anthropic:claude-opus-4-6" still matches.
+  defp explicit_entry(model_id) do
+    case Map.get(@profiles, model_id) do
+      nil ->
+        case String.split(model_id, ":", parts: 2) do
+          [_provider, bare] -> Map.get(@profiles, bare)
+          _ -> nil
+        end
+
+      entry ->
+        entry
+    end
+  end
+
+  defp local_overlay(model_id) do
+    case Map.get(@profiles, model_id) do
+      %{effective_window_pct: pct} when is_float(pct) -> %{effective_window_pct: pct}
+      _ -> %{}
+    end
+  end
+
+  defp llmdb_profile(model_id, provider) do
+    spec =
+      case Map.get(@provider_to_llmdb, to_string(provider || "")) do
+        nil -> model_id
+        llmdb_provider -> llmdb_provider <> ":" <> strip_provider(model_id)
+      end
+
+    case llmdb_lookup(spec) do
+      {:ok, m} ->
+        {:ok,
+         %{
+           context_size: get_in(m.limits, [:context]),
+           max_output_tokens: get_in(m.limits, [:output]),
+           family: llmdb_family(m)
+         }}
+
+      :miss ->
+        :miss
+    end
+  end
+
+  defp strip_provider(model_id) do
+    # "ollama:kimi-k2.7-code:cloud" -> "kimi-k2.7-code:cloud"; a bare id is
+    # returned unchanged. Only the FIRST segment is a provider.
+    case String.split(model_id, ":", parts: 2) do
+      [head, rest] -> if Map.has_key?(@provider_to_llmdb, head), do: rest, else: model_id
+      _ -> model_id
+    end
+    |> strip_ollama_cloud_suffix()
+  end
+
+  # Ollama addresses its hosted models as "<model>:cloud"; llm_db keys the same
+  # model under the `ollama_cloud` provider WITHOUT that suffix. Without this,
+  # every ":cloud" model we run silently falls back to the offline table.
+  defp strip_ollama_cloud_suffix(id) do
+    case String.split(id, ":") do
+      parts when length(parts) > 1 ->
+        case List.last(parts) do
+          "cloud" -> parts |> Enum.drop(-1) |> Enum.join(":")
+          _ -> id
+        end
+
+      _ ->
+        id
+    end
+  end
+
+  defp llmdb_family(m) do
+    case m.family do
+      f when is_atom(f) and not is_nil(f) -> f
+      f when is_binary(f) and f != "" -> safe_family_atom(f, m.id)
+      _ -> infer_family(m.id)
+    end
   end
 
   @doc """
@@ -570,8 +719,8 @@ defmodule Arbor.Common.ModelProfile do
   @doc """
   Get the context window size for a model (in tokens).
 
-      iex> Arbor.Common.ModelProfile.context_size("claude-sonnet-4-6")
-      200_000
+      iex> Arbor.Common.ModelProfile.context_size("gpt-4o")
+      128_000
 
       iex> Arbor.Common.ModelProfile.context_size("unknown-model")
       100_000
@@ -587,7 +736,7 @@ defmodule Arbor.Common.ModelProfile do
   This is the percentage of context window at which compaction should trigger.
   Default is 0.75 (75%). Override per model as empirical eval data arrives.
 
-      iex> Arbor.Common.ModelProfile.effective_window_pct("claude-sonnet-4-6")
+      iex> Arbor.Common.ModelProfile.effective_window_pct("gpt-4o")
       0.75
   """
   @spec effective_window_pct(model_id()) :: float()
@@ -601,8 +750,8 @@ defmodule Arbor.Common.ModelProfile do
   This is `context_size * effective_window_pct` — the single threshold at which
   compaction should begin.
 
-      iex> Arbor.Common.ModelProfile.effective_window(\"claude-sonnet-4-6\")
-      150_000
+      iex> Arbor.Common.ModelProfile.effective_window(\"gpt-4o\")
+      96_000
   """
   @spec effective_window(model_id()) :: non_neg_integer()
   def effective_window(model_id) when is_binary(model_id) do

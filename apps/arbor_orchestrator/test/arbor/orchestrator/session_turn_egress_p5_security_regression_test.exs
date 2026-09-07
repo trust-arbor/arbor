@@ -231,44 +231,11 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
   defp restore_sec(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_sec(key, value), do: Application.put_env(:arbor_security, key, value)
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp ensure_security_children! do
-    backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-    for {name, collection} <- [
-          {:arbor_security_capabilities, "capabilities"},
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_signing_keys, "signing_keys"}
-        ] do
-      child =
-        Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: backend, write_mode: :sync, collection: collection},
-          id: name
-        )
-
-      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-        {:ok, _} -> :ok
-        {:error, {:already_started, _}} -> :ok
-        {:error, :already_present} -> :ok
-      end
-    end
-
-    for child <- [
-          {Arbor.Security.Identity.Registry, []},
-          {Arbor.Security.Identity.NonceCache, []},
-          {Arbor.Security.SystemAuthority, []},
-          {Arbor.Security.Constraint.RateLimiter, []},
-          {Arbor.Security.CapabilityStore, []},
-          {Arbor.Security.Reflex.Registry, []},
-          {Arbor.Security.DeliveryReceiptBroker, []}
-        ] do
-      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-        {:ok, _} -> :ok
-        {:error, {:already_started, _}} -> :ok
-        {:error, :already_present} -> :ok
-      end
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 
   defp register_active_agent! do

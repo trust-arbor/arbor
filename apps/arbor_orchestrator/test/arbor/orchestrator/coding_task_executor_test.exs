@@ -2090,67 +2090,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp ensure_real_authority_stack! do
-    {:ok, _started} = Application.ensure_all_started(:arbor_security)
-    ensure_buffered_store!(:arbor_security_identities, "identities")
-    ensure_buffered_store!(:arbor_security_signing_keys, "signing_keys")
-    ensure_buffered_store!(:arbor_security_capabilities, "capabilities")
-    ensure_security_child!(Arbor.Security.Identity.Registry, [])
-    ensure_security_child!(Arbor.Security.Identity.NonceCache, [])
-    ensure_security_child!(Arbor.Security.SystemAuthority, [])
-    ensure_signing_authority_pair!()
-  end
-
-  defp ensure_buffered_store!(name, collection) do
-    if Process.whereis(name) == nil do
-      child =
-        Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: nil, write_mode: :sync, collection: collection},
-          id: name
-        )
-
-      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-        {:error, {:already_present, _id}} -> :ok
-        other -> flunk("failed to start #{name}: #{inspect(other)}")
-      end
-    end
-  end
-
-  defp ensure_security_child!(module, args) do
-    if Process.whereis(module) == nil do
-      case Supervisor.start_child(Arbor.Security.Supervisor, {module, args}) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-        {:error, {:already_present, _id}} -> :ok
-        other -> flunk("failed to start #{inspect(module)}: #{inspect(other)}")
-      end
-    end
-  end
-
-  defp ensure_signing_authority_pair! do
-    case {Process.whereis(Arbor.Security.SigningAuthorityStateOwner),
-          Process.whereis(SigningAuthorityBroker)} do
-      {owner, broker} when is_pid(owner) and is_pid(broker) ->
-        :ok
-
-      {nil, nil} ->
-        token = make_ref()
-        ensure_security_child!(Arbor.Security.SigningAuthorityStateOwner, broker_token: token)
-        ensure_security_child!(SigningAuthorityBroker, state_owner_token: token)
-
-      {owner, nil} when is_pid(owner) ->
-        case Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker) do
-          {:ok, _pid} -> :ok
-          {:ok, _pid, _info} -> :ok
-          other -> flunk("failed to restart SigningAuthorityBroker: #{inspect(other)}")
-        end
-
-      partial ->
-        flunk("partial signing authority stack: #{inspect(partial)}")
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 
   # ---------------------------------------------------------------------------

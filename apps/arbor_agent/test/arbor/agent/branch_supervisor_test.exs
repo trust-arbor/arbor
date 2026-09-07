@@ -118,54 +118,10 @@ defmodule Arbor.Agent.BranchSupervisorTest do
     end
   end
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp ensure_signing_authority_stack! do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
-
-    for {name, collection} <- [
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_signing_keys, "signing_keys"}
-        ] do
-      unless Process.whereis(name) do
-        child =
-          Supervisor.child_spec(
-            {Arbor.Persistence.BufferedStore,
-             name: name, backend: nil, write_mode: :sync, collection: collection},
-            id: name
-          )
-
-        case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-          {:error, {:already_present, _id}} -> :ok
-        end
-      end
-    end
-
-    ensure_security_child!(Arbor.Security.Identity.Registry, [])
-    ensure_security_child!(Arbor.Security.Identity.NonceCache, [])
-
-    case {Process.whereis(Arbor.Security.SigningAuthorityStateOwner),
-          Process.whereis(Arbor.Security.SigningAuthorityBroker)} do
-      {nil, nil} ->
-        token = make_ref()
-        ensure_security_child!(Arbor.Security.SigningAuthorityStateOwner, broker_token: token)
-        ensure_security_child!(Arbor.Security.SigningAuthorityBroker, state_owner_token: token)
-
-      {owner, broker} when is_pid(owner) and is_pid(broker) ->
-        :ok
-
-      partial ->
-        flunk("partial signing authority stack: #{inspect(partial)}")
-    end
-  end
-
-  defp ensure_security_child!(module, opts) do
-    unless Process.whereis(module) do
-      case Supervisor.start_child(Arbor.Security.Supervisor, {module, opts}) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-        {:error, {:already_present, _id}} -> :ok
-      end
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 end

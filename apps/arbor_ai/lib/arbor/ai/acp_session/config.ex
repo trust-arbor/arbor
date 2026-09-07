@@ -163,10 +163,16 @@ defmodule Arbor.AI.AcpSession.Config do
       adapter: ExMCP.ACP.Adapters.ClaudeSDK,
       adapter_opts: [model: "sonnet", permission_mode: :default]
     },
+    # Default added 2026-09-07 to match `claude` above. Codex previously carried
+    # no default, so every dispatch had to name a model in the packet — which is
+    # how two P1a runs went out on gpt-5.3-codex-spark and gpt-5.6-terra after
+    # both were superseded. gpt-6-astra is confirmed present in the openai_oauth
+    # catalog and answers through codex-cli >= 0.153.4 (0.151.0 rejects it
+    # server-side). A packet may still override this explicitly.
     codex: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.Codex,
-      adapter_opts: []
+      adapter_opts: [model: "gpt-6-astra"]
     },
     pi: %{
       transport_mod: ExMCP.ACP.AdapterTransport,

@@ -140,6 +140,11 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
       {:error, :unavailable} ->
         {:error, :unavailable}
 
+      # An unavailable coding logs root must remain TaskStore-owned. Letting the
+      # generic coordinator proceed here could create a second lifecycle writer.
+      {:error, :root_absent} ->
+        {:error, :unavailable}
+
       {:error, :not_coding_root} ->
         if coding_shaped_logs_root?(record.logs_root) do
           {:error, :unavailable}
@@ -199,8 +204,13 @@ defmodule Arbor.Orchestrator.CodingRunRecovery do
               {:ok, _} ->
                 {:error, :not_coding_root}
 
+              # Absent is NOT the same as "not a coding root". A task-owned run
+              # whose root has not been created (or was cleaned up) must stay
+              # TaskStore-owned; reporting it as an auth failure makes the
+              # coordinator log a warning and record a failure for a run that is
+              # simply owned elsewhere.
               {:error, :enoent} ->
-                {:error, :not_coding_root}
+                {:error, :root_absent}
 
               {:error, _} ->
                 {:error, :unavailable}

@@ -5,17 +5,19 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
   @moduletag :fast
 
   @reviewers %{
-    "correctness" => {"openai_oauth", "gpt-5.6-sol"},
-    "security" => {"openai_oauth", "gpt-5.6-sol"},
+    # Binding seats moved to gpt-6-astra 2026-09-07 (confirmed present in the
+    # openai_oauth catalog). The DOT is the source of truth; this table follows it.
+    "correctness" => {"openai_oauth", "gpt-6-astra"},
+    "security" => {"openai_oauth", "gpt-6-astra"},
     "regression_test_coverage" => {"ollama", "kimi-k2.7-code:cloud"},
     "edge_cases_error_handling" => {"ollama", "kimi-k2.7-code:cloud"},
     "simplicity_yagni_scope" => {"xai_oauth", "grok-4.6"},
     "readability_maintainability" => {"xai_oauth", "grok-4.6"},
-    "contract_api_compat" => {"ollama", "glm-5.2:cloud"},
-    "architecture_grain_fit" => {"ollama", "glm-5.2:cloud"},
+    "contract_api_compat" => {"ollama", "glm-5.3:cloud"},
+    "architecture_grain_fit" => {"ollama", "glm-5.3:cloud"},
     "performance_resource" => {"ollama", "minimax-m3:cloud"},
     "docs_naming" => {"ollama", "minimax-m3:cloud"},
-    "design_conformance" => {"openai_oauth", "gpt-5.6-sol"}
+    "design_conformance" => {"openai_oauth", "gpt-6-astra"}
   }
 
   defp load_graph do

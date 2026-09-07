@@ -579,6 +579,10 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
     stop_named(ProbeServer)
     unload_probe()
     stop_runtime()
+
+    # Roots first: this unloads/reloads them, which is what un-stubs a root a
+    # test replaced (LaterProviderStart swaps :req). The owner cannot start
+    # against a stubbed root.
     restore_provider_roots(originals)
 
     Enum.each(originals.config, fn
@@ -588,6 +592,14 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
 
     restore_app(@owner, Map.fetch!(originals.apps, @owner))
     restore_owner_topology(originals.topology, Map.fetch!(originals.apps, @owner))
+
+    # ...and roots AGAIN, because restoring @owner to :started runs ProviderGate,
+    # whose whole job is to start @provider_roots. Without this second pass every
+    # root ends :started and the assertions below fail against a :loaded snapshot.
+    # That read as suite-order flakiness because it only bites when an EARLIER
+    # test left a root :loaded (helpers_os_mon_test stops :os_mon) — otherwise
+    # the snapshot already says :started and the mismatch is invisible.
+    reconcile_provider_roots(originals)
     _ = :persistent_term.erase(@handles_key)
     _ = :persistent_term.erase(LaterProviderStart.pt_key())
     Process.flag(:trap_exit, originals.trap_exit)
@@ -606,6 +618,18 @@ defmodule Arbor.KernelRuntime.ProviderGateLifecycleSecurityRegressionTest do
 
     Enum.each(@provider_roots, fn app ->
       apply_lifecycle(app, Map.fetch!(originals.apps, app))
+    end)
+  end
+
+  # Second pass: no unload/reload (that would undo the un-stubbing above), just
+  # drive each root to its snapshot lifecycle. Only :loaded needs work — a root
+  # that should be :started already is, courtesy of ProviderGate.
+  defp reconcile_provider_roots(originals) do
+    Enum.each(Enum.reverse(@provider_roots), fn app ->
+      case Map.fetch!(originals.apps, app) do
+        :started -> :ok
+        desired -> stop_app!(app) && apply_lifecycle(app, desired)
+      end
     end)
   end
 

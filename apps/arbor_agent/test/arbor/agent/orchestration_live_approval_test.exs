@@ -147,40 +147,11 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     end
   end
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp bootstrap_security! do
-    {:ok, _} = Application.ensure_all_started(:arbor_security)
-
-    security_backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-    for {name, collection} <- [
-          {:arbor_security_capabilities, "capabilities"},
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_signing_keys, "signing_keys"},
-          {:arbor_security_issuers, "issuers"}
-        ] do
-      child =
-        Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: security_backend, write_mode: :sync, collection: collection},
-          id: name
-        )
-
-      start_child(Arbor.Security.Supervisor, child)
-    end
-
-    for child <- [
-          {Arbor.Security.Identity.Registry, []},
-          {Arbor.Security.IssuerRegistry, []},
-          {Arbor.Security.Identity.NonceCache, []},
-          {Arbor.Security.SystemAuthority, []},
-          {Arbor.Security.Constraint.RateLimiter, []},
-          {Arbor.Security.CapabilityStore, []},
-          {Arbor.Security.Reflex.Registry, []},
-          {Arbor.Security.UriRegistry, []}
-        ] do
-      start_child(Arbor.Security.Supervisor, child)
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 
   defp bootstrap_consensus! do

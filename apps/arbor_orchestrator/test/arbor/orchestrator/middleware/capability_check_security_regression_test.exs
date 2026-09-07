@@ -382,43 +382,11 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   # Minimal authority stack for the valid-authority regression above.
   # ---------------------------------------------------------------------------
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp ensure_authority_stack! do
-    ensure_buffered_store!(:arbor_security_identities, "identities")
-    ensure_buffered_store!(:arbor_security_signing_keys, "signing_keys")
-    ensure_buffered_store!(:arbor_security_capabilities, "capabilities")
-    ensure_child!(Arbor.Security.Identity.Registry, [])
-    ensure_child!(Arbor.Security.Identity.NonceCache, [])
-    ensure_broker_started()
-  end
-
-  defp ensure_buffered_store!(name, collection) do
-    case Process.whereis(name) do
-      pid when is_pid(pid) ->
-        :ok
-
-      nil ->
-        child =
-          Supervisor.child_spec(
-            {Arbor.Persistence.BufferedStore,
-             name: name, backend: nil, write_mode: :sync, collection: collection},
-            id: name
-          )
-
-        case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-          {:ok, _} ->
-            :ok
-
-          {:error, {:already_started, _}} ->
-            :ok
-
-          {:error, {:already_present, _}} ->
-            _ = Supervisor.restart_child(Arbor.Security.Supervisor, name)
-            :ok
-
-          other ->
-            flunk("failed to start #{name}: #{inspect(other)}")
-        end
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 
   defp ensure_child!(module, args) do

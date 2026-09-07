@@ -471,47 +471,11 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
     end
   end
 
+  # Canonical bootstrap: it freezes the authority root and starts the whole
+  # topology in the required order, instead of a hand-copied subset that can
+  # drift from it. Idempotent, so it also restores children a test stopped.
   defp ensure_security_children! do
-    backend =
-      Application.get_env(:arbor_security, :storage_backend, Arbor.Security.Store.JSONFile)
-
-    for {name, collection} <- [
-          {:arbor_security_capabilities, "capabilities"},
-          {:arbor_security_identities, "identities"},
-          {:arbor_security_signing_keys, "signing_keys"}
-        ] do
-      child =
-        Supervisor.child_spec(
-          {Arbor.Persistence.BufferedStore,
-           name: name, backend: backend, write_mode: :sync, collection: collection},
-          id: name
-        )
-
-      ensure_security_child!(child)
-    end
-
-    for child <- [
-          {Arbor.Security.Identity.Registry, []},
-          {Arbor.Security.Identity.NonceCache, []},
-          {Arbor.Security.SystemAuthority, []},
-          {Arbor.Security.Constraint.RateLimiter, []},
-          {Arbor.Security.CapabilityStore, []},
-          {Arbor.Security.Reflex.Registry, []},
-          {Arbor.Security.DeliveryReceiptBroker, []}
-        ] do
-      ensure_security_child!(child)
-    end
-
-    :ok
-  end
-
-  defp ensure_security_child!(child) do
-    case Supervisor.start_child(Arbor.Security.Supervisor, child) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, :already_present} -> :ok
-      other -> flunk("failed to start security child: #{inspect(other)}")
-    end
+    :ok = Arbor.Security.TestBootstrap.start!()
   end
 
   defp configure_security! do
