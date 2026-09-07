@@ -49,6 +49,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
       Task.async(fn ->
         Login.execute(
           ["openai"],
+          ensure_distribution: fn -> :error end,
+          server_running?: fn -> false end,
           output: record(events, :out),
           opener: fn url -> record_event(events, {:open, url}) end,
           start_openai_loopback: fn _opts ->
@@ -81,6 +83,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
       Task.async(fn ->
         Login.execute(
           ["openai", "--no-browser"],
+          ensure_distribution: fn -> :error end,
+          server_running?: fn -> false end,
           output: record(events, :out),
           opener: fn _url -> flunk("opener must not run for --no-browser") end,
           start_openai_loopback: fn _opts ->
@@ -104,6 +108,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
     result =
       Login.execute(
         ["openai", "--manual", "--no-browser"],
+        ensure_distribution: fn -> :error end,
+        server_running?: fn -> false end,
         output: record(events, :out),
         opener: fn _url -> flunk("opener must not run for --no-browser") end,
         start_openai: fn _opts ->
@@ -144,6 +150,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
       Task.async(fn ->
         Login.execute(
           ["xai"],
+          ensure_distribution: fn -> :error end,
+          server_running?: fn -> false end,
           output: record(events, :out),
           start_xai: fn ->
             record_event(events, :start)
@@ -180,6 +188,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
         Task.async(fn ->
           Login.execute(
             ["openai"],
+            ensure_distribution: fn -> :error end,
+            server_running?: fn -> false end,
             output: record(events, :out),
             log: record(logs, :log),
             opener: opener,
@@ -205,6 +215,8 @@ defmodule Mix.Tasks.Arbor.LoginTest do
     assert :ok =
              Login.execute(
                ["status"],
+               ensure_distribution: fn -> :error end,
+               server_running?: fn -> false end,
                output: record(events, :out),
                oauth_health: fn
                  "openai_oauth" -> {:ok, health_fixture("openai_oauth")}

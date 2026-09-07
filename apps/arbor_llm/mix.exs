@@ -50,6 +50,13 @@ defmodule Arbor.LLM.MixProject do
       # comes in a later session with the generic adapter.
       {:arbor_kernel_runtime, in_umbrella: true},
       {:plug_cowboy, "~> 2.9"},
+      # :plug is declared directly (not just via plug_cowboy) because `req`
+      # decides at COMPILE TIME whether to support the `plug:` transport option
+      # (`if Code.ensure_loaded?(Plug.Test)` in Req.Steps). If req is compiled
+      # before plug exists in the build, that support is silently baked out and
+      # every Req.Test stub raises "missing plug dependency" at runtime. See the
+      # guard in test_helper.exs, which turns that stale build into a loud error.
+      {:plug, "~> 1.14"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.2"},
       # Session 3: req_llm is the transport layer the generic

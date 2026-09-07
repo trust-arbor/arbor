@@ -70,9 +70,15 @@ defmodule Mix.Tasks.Arbor.Packaging.StartupFootprintProductionPathTest do
     # The gated runtime owns three empty subsystem supervisors plus the OAuth
     # pool and installs Common's redaction filter. Optional children and the
     # telemetry bridge remain disabled.
+    #
+    # 6 = Monitor + Signals + Common (all empty of optional children) + Common's
+    # always-on OAuth.HttpClient.Pool + the two kernel-runtime gates that own the
+    # boot: BootProfileBinding and ProviderGate. The gates were added after this
+    # count was first pinned at 4; they are deliberate rest_for_one owners, not
+    # children that escaped the start_children gate.
     assert gated["logger_filter_count"] == 1
     assert gated["telemetry_handler_count"] == 0
-    assert gated["supervisor_children"] == 4
+    assert gated["supervisor_children"] == 6
 
     baseline = report["samples"]["baseline"]
     eager = report["samples"]["proposed_eager"]

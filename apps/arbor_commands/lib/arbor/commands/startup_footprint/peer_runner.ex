@@ -25,11 +25,21 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
   @max_path_bytes 4_096
   @max_path_bytes_total 256_000
 
+  # :os_mon, :mint, :finch and :req are Arbor.KernelRuntime.ProviderGate's
+  # ordered roots. The gate starts them under the :full profile, so the peer
+  # needs their code paths admitted or the probe dies with
+  # {:provider_start_failed, :mint, {:mint, ~c"no such file or directory"}}
+  # before it can measure anything. They are paths for a real full-profile boot,
+  # not extra footprint: the probe measures what production actually starts.
   @seed_apps [
     :elixir,
     :jason,
     :telemetry,
     :recon,
+    :os_mon,
+    :mint,
+    :finch,
+    :req,
     :arbor_kernel,
     :arbor_kernel_runtime
   ]
@@ -237,8 +247,38 @@ defmodule Arbor.Commands.StartupFootprint.PeerRunner do
 
   defp install_runtime(control, paths) when is_pid(control) and is_list(paths) do
     with {:ok, admitted} <- admit_paths(paths),
-         :ok <- add_paths(control, admitted) do
-      start_elixir(control)
+         :ok <- add_paths(control, admitted),
+         :ok <- start_elixir(control) do
+      seed_kernel_runtime_env(control)
+    end
+  end
+
+  # `arbor_kernel_runtime` starts `BootProfileBinding` as its rest_for_one owner
+  # child under BOTH start profiles, and that binding fails closed when the
+  # `:arbor_kernel, :kernel_runtime` namespace is absent
+  # (`{:boot_profile_binding_failed, :absent}`). A `:peer` node inherits code
+  # paths but NOT the parent's Mix-applied application env, so without this the
+  # probe never gets past application start and measures nothing. Copy the
+  # parent's namespace verbatim so the peer binds the same boot profile the
+  # parent did; when the parent has no namespace either, leave the peer alone so
+  # the failure is reported rather than masked.
+  defp seed_kernel_runtime_env(control) when is_pid(control) do
+    case Application.fetch_env(:arbor_kernel, :kernel_runtime) do
+      :error ->
+        :ok
+
+      {:ok, namespace} ->
+        case bounded_peer_call(
+               control,
+               :application,
+               :set_env,
+               [[{:arbor_kernel, [{:kernel_runtime, namespace}]}], [persistent: true]],
+               :kernel_runtime_env
+             ) do
+          {:ok, :ok} -> :ok
+          {:ok, other} -> {:error, {:peer_kernel_runtime_env_failed, other}}
+          {:error, _} = err -> err
+        end
     end
   end
 
