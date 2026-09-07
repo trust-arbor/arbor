@@ -53,7 +53,7 @@ defmodule Arbor.AI.AcpPromptFailure do
          {:ok, meta} when is_map(meta) and not is_struct(meta) <-
            Map.fetch(result, "_meta"),
          {:ok, claude_meta} when is_map(claude_meta) and not is_struct(claude_meta) <-
-           Map.fetch(meta, "ex_mcp.claude_sdk"),
+           fetch_claude_sdk_meta(meta),
          {:ok, "success"} <- Map.fetch(claude_meta, "resultSubtype"),
          {:ok, ^text} <- Map.fetch(claude_meta, "text"),
          {:ok, session_id} when is_binary(session_id) and session_id != "" <-
@@ -65,6 +65,34 @@ defmodule Arbor.AI.AcpPromptFailure do
       {:ok, session_id}
     else
       _ -> :error
+    end
+  end
+
+  # ex_mcp restructured adapter `_meta` from a flat dotted key to a nested map:
+  #
+  #     %{"ex_mcp.claude_sdk" => %{...}}          # <= 1.0.x
+  #     %{"ex_mcp" => %{"claude_sdk" => %{...}}}  # 1.3.0
+  #
+  # Only the SHAPE moved — every attested field (resultSubtype, text, sessionId,
+  # totalCostUsd) is still present. Reading only the flat key silently failed
+  # attestation, which downgraded a real Claude monthly-spend-limit hit from
+  # `:provider_account_exhausted` (a delivery receipt the caller can act on) to
+  # `:acp_protocol_failure` (an error the caller retries). Accept both so a
+  # mixed-version upgrade window does not reintroduce the same silent downgrade.
+  defp fetch_claude_sdk_meta(meta) do
+    case Map.fetch(meta, "ex_mcp.claude_sdk") do
+      {:ok, flat} when is_map(flat) and not is_struct(flat) ->
+        {:ok, flat}
+
+      _ ->
+        with {:ok, ex_mcp} when is_map(ex_mcp) and not is_struct(ex_mcp) <-
+               Map.fetch(meta, "ex_mcp"),
+             {:ok, nested} when is_map(nested) and not is_struct(nested) <-
+               Map.fetch(ex_mcp, "claude_sdk") do
+          {:ok, nested}
+        else
+          _ -> :error
+        end
     end
   end
 

@@ -324,6 +324,13 @@ defmodule Arbor.Agent.TemplateAuthorityLifecycleQuiescenceSecurityRegressionTest
         :c2b_calls
       end
 
+    # :c2b_calls is a DUPLICATE_BAG reused across every test in this file, and
+    # nothing cleared it between tests. Recorded calls therefore accumulated:
+    # `:ets.lookup(:c2b_calls, :stop_agent)` returns EVERY {:stop_agent, id}
+    # ever inserted, so an assertion expecting this test's single entry saw
+    # four. It only failed on orders where a prior test had already reaped an
+    # agent, which is why it read as a seed flake. Each test gets a clean table.
+    :ets.delete_all_objects(table)
     :ets.insert(table, {:test_pid, self()})
 
     # Track only C2B-owned ids/pids/profiles for cleanup (on_exit runs after this

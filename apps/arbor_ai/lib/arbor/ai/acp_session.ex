@@ -1706,13 +1706,41 @@ defmodule Arbor.AI.AcpSession do
 
   defp claude_sdk_result_text(result) do
     with %{} = meta <- Map.get(result, "_meta") || Map.get(result, :_meta),
-         %{} = claude <- Map.get(meta, "ex_mcp.claude_sdk"),
+         %{} = claude <- claude_sdk_meta(meta),
          text when is_binary(text) and text != "" <- Map.get(claude, "text") do
       text
     else
       _ -> nil
     end
   end
+
+  # ex_mcp restructured adapter `_meta` from a flat dotted key to a nested map:
+  #
+  #     %{"ex_mcp.claude_sdk" => %{...}}          # <= 1.0.x
+  #     %{"ex_mcp" => %{"claude_sdk" => %{...}}}  # 1.3.0
+  #
+  # Both shapes are read so a mixed-version upgrade window cannot silently drop
+  # the Claude session identity (which is the resume key) or the result text.
+  defp claude_sdk_meta(meta) when is_map(meta) and not is_struct(meta) do
+    case Map.get(meta, "ex_mcp.claude_sdk") do
+      %{} = flat when not is_struct(flat) ->
+        flat
+
+      _ ->
+        case Map.get(meta, "ex_mcp") do
+          %{} = ex_mcp when not is_struct(ex_mcp) ->
+            case Map.get(ex_mcp, "claude_sdk") do
+              %{} = nested when not is_struct(nested) -> nested
+              _ -> nil
+            end
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  defp claude_sdk_meta(_), do: nil
 
   # -- Usage & Context Tracking --
 
@@ -3433,17 +3461,19 @@ defmodule Arbor.AI.AcpSession do
 
   defp reconcile_prompt_provider_session_id(_result, state), do: {:ok, state}
 
-  defp claude_prompt_provider_session_id(%{
-         "_meta" => %{
-           "ex_mcp.claude_sdk" => %{"sessionId" => session_id} = claude_meta
-         }
-       })
-       when is_map(claude_meta) and not is_struct(claude_meta) do
-    if is_binary(session_id) and
-         Regex.match?(@claude_provider_session_id_pattern, session_id) do
-      {:ok, session_id}
-    else
-      {:error, {:invalid_provider_session_id, :claude_prompt_result}}
+  defp claude_prompt_provider_session_id(%{"_meta" => meta})
+       when is_map(meta) and not is_struct(meta) do
+    case claude_sdk_meta(meta) do
+      %{"sessionId" => session_id} ->
+        if is_binary(session_id) and
+             Regex.match?(@claude_provider_session_id_pattern, session_id) do
+          {:ok, session_id}
+        else
+          {:error, {:invalid_provider_session_id, :claude_prompt_result}}
+        end
+
+      _ ->
+        :absent
     end
   end
 

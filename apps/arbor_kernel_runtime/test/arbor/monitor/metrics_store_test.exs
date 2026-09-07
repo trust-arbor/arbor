@@ -4,8 +4,41 @@ defmodule Arbor.Monitor.MetricsStoreTest do
   alias Arbor.Monitor.MetricsStore
 
   setup do
+    # MetricsStore owns its ETS tables in `init/1`, so the tables die with the
+    # process. Several tests in this app legitimately stop and restart
+    # :arbor_kernel_runtime (application_test, boot_profile_binding_*,
+    # provider_gate_lifecycle_*), and the Monitor tree comes back
+    # ASYNCHRONOUSLY. Calling clear_all/0 in that window raised
+    # `ArgumentError ... table identifier does not refer to an existing ETS
+    # table` and took all 7 tests here with it — intermittently, which is why it
+    # read as seed-dependent. Wait for readiness instead of assuming it.
+    assert wait_for_store(2_000), "MetricsStore tables never became available"
     MetricsStore.clear_all()
     :ok
+  end
+
+  defp wait_for_store(timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_store(deadline)
+  end
+
+  defp do_wait_for_store(deadline) do
+    if store_ready?() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(25)
+        do_wait_for_store(deadline)
+      end
+    end
+  end
+
+  defp store_ready? do
+    is_pid(Process.whereis(MetricsStore)) and
+      :ets.whereis(MetricsStore.metrics_table()) != :undefined and
+      :ets.whereis(MetricsStore.anomaly_table()) != :undefined
   end
 
   describe "put/2 and get/1" do
