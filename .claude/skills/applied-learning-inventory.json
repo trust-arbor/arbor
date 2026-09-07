@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 719,
+  "entry_count": 720,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -8891,8 +8891,21 @@
       "source_incident": "found 2026-09-02 while replaying the exact CrossApp validation candidate",
       "always_loaded": false,
       "content_sha256": "7d35a5e3fa260b69bd00c24bb9884d1f784b60cf50ba93a7a1c96d2843792d1e"
+    },
+    {
+      "source_ordinal": 720,
+      "source_kind": "post-migration",
+      "slug": "a-test-that-starts-distribution-corrupts-compilation-across-the-whole-suite",
+      "title": "A test that starts distribution corrupts compilation across the whole suite.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-a-test-that-starts-distribution-corrupts-compilation-across-the-whole-suite",
+      "source_date": "2026-09-06",
+      "source_incident": "found 2026-09-06 auditing the arbor.login distribution leak",
+      "always_loaded": false,
+      "content_sha256": "2ee127a4e80f8804d85e85f0eb6db45ccf879dfc5ea754c0abab7e0fb9bbc681"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 258
+  "post_migration_entry_count": 259
 }

@@ -340,6 +340,14 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
     agent_id=#{identity.agent_id}
     private_key_b64=#{Base.encode64(identity.private_key)}
     """)
+
+    # sign_caps refuses a group/world-readable private key
+    # ({:insecure_permissions, 420} == 0o644). File.write!/2 honours the
+    # developer's umask, so without this the fixture is 0644 on a default macOS
+    # umask and every sign_caps test aborts on permissions — including the
+    # issuer_mismatch regression, which then never reaches its own assertion.
+    # Write the mode the production contract requires instead of inheriting it.
+    File.chmod!(path, 0o600)
   end
 
   defp write_signed_caps(path, identity, caps, root) do

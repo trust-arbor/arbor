@@ -1015,3 +1015,26 @@ uses the repository only as a large fixture must construct its own temporary Git
 repository instead of asserting `<root>/.git`. When seeding from bytes, force-add
 all files so tracked paths that now match `.gitignore` are not silently dropped
 (found 2026-09-02 during G5E CrossApp replay).
+
+<!-- applied-learning: a-test-that-starts-distribution-corrupts-compilation-across-the-whole-suite -->
+<a id="applied-learning-a-test-that-starts-distribution-corrupts-compilation-across-the-whole-suite"></a>
+**A test that starts distribution corrupts compilation across the whole suite.**
+`Node.start` / `:net_kernel.start` mid-run flips node identity (e.g.
+`nonode@nohost` -> `arbor_mix_47323@127.0.0.1`), and every pid created before the
+flip becomes unreachable. A nested `defmodule` compiles to code carrying a
+LITERAL `Kernel.LexicalTracker.read_cache(<pid>, ...)` resolved when the outer
+body runs, so any test file compiled after the flip dies with
+`** (EXIT) no connection to nonode@nohost` — in a DIFFERENT file each run, and
+never in the test that caused it. `--max-cases 1` hides it by finishing
+compilation before any test runs, which makes it look like a parallel-compiler
+bug. If the started node uses longnames it will also join the live dev cluster.
+**Never call the real `ensure_distribution` from a test**: inject it
+(`ensure_distribution: fn -> :error end`, `server_running?: fn -> false end`).
+When a test genuinely needs distribution, use `:shortnames` with a distinct name
+so it cannot reach the longnames dev node. **Enumerate seams by call ORDER, not
+by importance** — the 2026-08-28 `arbor.login` regression injected all four
+facade seams and still shipped this, because `reachable_node/1` calls
+`ensure_distribution` before any facade is reached; the commit message even said
+"Tests keep injecting the facade functions directly." Audit with
+`epmd -names` polled from outside the run: transient names are the leak
+(found 2026-09-06; cost two ledger entries open for nine days).

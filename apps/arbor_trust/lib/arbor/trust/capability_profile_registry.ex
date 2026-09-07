@@ -175,6 +175,13 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   defp owner_for_parsed(%CapabilityUri{domain: "status"}), do: :arbor_gateway
   defp owner_for_parsed(%CapabilityUri{domain: "fs"}), do: :arbor_security
   defp owner_for_parsed(%CapabilityUri{domain: "code"}), do: :arbor_actions
+  # arbor://forge/* was registered by forge packet 1a (contracts + detached
+  # signing). Without an owner its coverage row can be completed by neither a
+  # profile nor an owner/reason pair, so it failed this guard from the day it
+  # was registered — the same way arbor://egress/* did in 2026-08. The publisher
+  # that will hold the grant is a Jido action (packet 1b), so it is owned here
+  # alongside code/ and net/, not by the kernel that defines the projection.
+  defp owner_for_parsed(%CapabilityUri{domain: "forge"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "action"}), do: :arbor_actions
   defp owner_for_parsed(%CapabilityUri{domain: "ai"}), do: :arbor_ai
   defp owner_for_parsed(%CapabilityUri{domain: "net"}), do: :arbor_actions
