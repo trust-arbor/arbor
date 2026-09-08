@@ -121,6 +121,14 @@ path (found 2026-07-12 in ACP timeout task-control settlement).
 <!-- applied-learning: an-absolute-deadline-needs-an-owner-stamped-completion-time -->
 <a id="applied-learning-an-absolute-deadline-needs-an-owner-stamped-completion-time"></a>
 **An absolute deadline needs an owner-stamped completion time.** Checking the clock only when a caller receives a result is not enough: a suspended caller can later accept a success that completed after its deadline, while checking only the receive time can reject a result that completed on time. The operation owner must stamp `completed_mono` before sending the result, and the receiver must compare that immutable timestamp with the original deadline; inactivity timeouts are not a substitute (found 2026-07-11 suspending LLM/eval callers across their deadlines).
+`receive ... after remaining` alone is not an admission check: an already queued
+matching message wins even with `after 0`. Check the chosen absolute deadline
+on matched startup/result messages too; an observation-deadline policy may
+conservatively reject a timely completion observed late, but must say so. Also
+bound startup itself: `Task.Supervisor.async_nolink` can block on a suspended
+supervisor before a later `Task.yield` timer exists (reinforced 2026-09-08 in
+SU-3A; private supervisor probe blocked beyond 6,001 ms, and a local receive
+probe selected its queued message despite `after 0`).
 
 <!-- applied-learning: caller-timeout-does-not-cancel-a-queued-owner-mutation -->
 <a id="applied-learning-caller-timeout-does-not-cancel-a-queued-owner-mutation"></a>

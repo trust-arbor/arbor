@@ -2751,7 +2751,7 @@
       "anchor": "applied-learning-an-absolute-deadline-needs-an-owner-stamped-completion-time",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 suspending LLM/eval callers across their deadlines).",
-      "content_sha256": "1adc5c244b63fb93022c0a465893012a15208781ca338de6583eaad565e20c3a",
+      "content_sha256": "825ca205de0112e5bb27d006a0b31533ffd1121b4c46ad76de552bf5bf8a4fe7",
       "always_loaded": false
     },
     {
