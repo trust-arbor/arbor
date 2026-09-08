@@ -119,16 +119,18 @@ defmodule Arbor.AI.Application do
   end
 
   # Conditionally add ACP session pool based on config.
-  # Auto-enables when CLI agents (claude, gemini, codex, etc.) are detected
-  # in PATH, unless explicitly disabled with `enable_acp_pool: false`.
-  defp acp_pool_children do
-    explicitly_set = Application.get_env(:arbor_ai, :enable_acp_pool)
-
+  # Auto-enables when a catalog CLI is on PATH, unless explicitly disabled
+  # with `enable_acp_pool: false`. Detection uses `AcpSession.Config` so new
+  # native providers (and executable overrides) are picked up without a
+  # second stale name list. Adapted providers still count only when their
+  # CLI is present — never merely because adapter modules compiled.
+  @doc false
+  def acp_pool_children(opts \\ []) do
     enabled =
-      case explicitly_set do
+      case Application.get_env(:arbor_ai, :enable_acp_pool) do
         true -> true
         false -> false
-        nil -> acp_agents_detected?()
+        nil -> acp_agents_detected?(opts)
       end
 
     if enabled do
@@ -143,8 +145,89 @@ defmodule Arbor.AI.Application do
     end
   end
 
-  defp acp_agents_detected? do
-    ~w(claude gemini codex goose aider opencode cline)
-    |> Enum.any?(&System.find_executable/1)
+  defp acp_agents_detected?(opts) do
+    case Keyword.get(opts, :executable_checker, &System.find_executable/1) do
+      checker when is_function(checker, 1) ->
+        Arbor.AI.AcpSession.Config.list_providers()
+        |> Enum.any?(fn {provider, _kind} -> catalog_cli_present?(provider, checker) end)
+
+      _invalid ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
+
+  defp catalog_cli_present?(provider, checker) do
+    case Arbor.AI.AcpSession.Config.resolve(provider) do
+      {:ok, resolved} when is_list(resolved) ->
+        resolved
+        |> detection_executables(provider)
+        |> Enum.any?(&executable_present?(checker, &1))
+
+      _other ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp detection_executables(resolved, provider) do
+    cond do
+      command = Keyword.get(resolved, :command) ->
+        case command_executable(command) do
+          nil -> []
+          executable -> [executable]
+        end
+
+      Keyword.has_key?(resolved, :adapter) or Keyword.has_key?(resolved, :transport_mod) ->
+        adapted_detection_executables(resolved, provider)
+
+      true ->
+        []
+    end
+  end
+
+  defp command_executable([executable | _rest])
+       when is_binary(executable) and executable != "",
+       do: executable
+
+  defp command_executable(executable) when is_binary(executable) and executable != "",
+    do: executable
+
+  defp command_executable(_command), do: nil
+
+  # Adapted providers historically auto-enabled the pool when their CLI name
+  # was on PATH (claude, codex). Honor an explicit `cli_path` override, else
+  # use the catalog provider atom as that CLI name. Do not treat loaded
+  # adapter modules as evidence the CLI is installed.
+  defp adapted_detection_executables(resolved, provider) do
+    adapter_opts = Keyword.get(resolved, :adapter_opts, [])
+
+    case Keyword.get(adapter_opts, :cli_path) do
+      path when is_binary(path) and path != "" ->
+        [path]
+
+      _missing ->
+        [Atom.to_string(provider)]
+    end
+  end
+
+  defp executable_present?(checker, name) when is_function(checker, 1) and is_binary(name) do
+    case checker.(name) do
+      path when is_binary(path) and path != "" -> true
+      true -> true
+      _other -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp executable_present?(_checker, _name), do: false
 end
