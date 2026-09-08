@@ -4,6 +4,9 @@
 
 **State reviewed:** 2026-07-20
 
+**Scoped update:** 2026-09-07, product/security priorities and the current egress
+decision path. This is not a fresh audit of every subsystem described below.
+
 This document describes the security controls represented by the current source and
 the Phase 6 decisions. It deliberately separates implemented controls from planned
 work and from historical design material. It is an architecture overview, not a
@@ -48,6 +51,46 @@ either boundary can defeat in-process controls. Enforcement also depends on whic
 caller path is used: explicitly trusted and legacy paths do not all invoke every
 gate. A control described as implemented is not necessarily provisioned or enabled in
 a particular deployment. The sections below identify those boundaries.
+
+### Personal Use Does Not Mean Weaker Security
+
+Arbor's first delivery target is one person managing several persistent agents;
+developer factory features and enterprise governance are additional product needs.
+The [product architecture](PRODUCT_PROFILES.md) favors a modular trusted host and
+optional features, without requiring every subsystem to become a dynamic plugin.
+
+The baseline promise is that sensitive information does not leave the user's
+approved local boundary without explicit, informed user consent. Content from a
+document, website, tool, memory, or skill cannot give an agent new authority. A
+trusted skill library must distinguish discovered content from an approved immutable
+version. These are required outcomes, not a claim that every current route already
+delivers them.
+
+| Requirement | Source-level status and remaining evidence |
+|---|---|
+| Sensitive-data consent | Exact interactive disclosure capabilities and regressions exist. All-route coverage, derived/recalled data, recipient/purpose disclosure, and standing-consent semantics require the personal-profile audit. |
+| Prompt-injection containment | Capabilities, taint, path/egress controls and containment provide layers. They do not guarantee perfect attack detection; provenance must survive recall, delegation, and recovery. |
+| Trusted skills | Import tags, catalog/activation checks, and regression tests exist. Review-to-digest binding, update invalidation, provenance, and revocation need a current end-to-end coverage assessment. |
+| Local authority/recovery | Identity, replay, revocation and durable ownership mechanisms exist. Secure one-host restart and wrong-agent paths still need profile-specific qualification; single-node operation is not proof of safety. |
+| Enterprise governance | Fleet consistency, centralized retention, separation of duties and compliance integrations are separate requirements. Do not claim them based on local receipts or a protocol model. |
+
+Consent must cover the actual data/recipient/purpose, including additional recalled
+context and downstream recipients. Provider credentials, earned autonomy, a generic
+task approval, or a delegator's scoped worker-approval right are not disclosure
+consent from the user. Explicit narrowly scoped standing consent can reduce redundant
+prompts; route, purpose, or material data changes require renewed consent. An
+autonomous task without required consent holds or uses an authorized local/redacted
+path. Unknown sensitivity cannot be classified by silently exporting it first.
+
+Audit actual effects, not just LLM calls: embeddings, summaries, council/fallback
+routes, ACP/MCP, web searches, Voice, telemetry and exports also count. A local CLI
+can use a cloud backend, and LAN placement alone is not consent. Taint describes
+provenance/trust, not all aspects of data sensitivity; trusted content can be private.
+
+Retain redacted local approval/denial/revocation/recovery evidence even while enterprise
+audit integration is deferred. Optional first-party code loaded in the BEAM remains
+trusted code. External executable plugins require real OS containment and mediated
+effects; a package name, signature, BEAM process, or MCP connection is not isolation.
 
 ## Status Vocabulary
 
@@ -190,28 +233,35 @@ and [`DOT pipeline guide`](./DOT_PIPELINE_GUIDE.md).
 ### Taint and egress gates
 
 Arbor tracks taint through action inputs and outputs and uses resolved security
-classification rather than guessing from a URI name. For an enforced external
-destination, untrusted or hostile taint is a hard block and cannot be overridden by
-trust standing or a capability. The gate also considers destination tier:
+classification rather than guessing from a URI name. When enforcement is enabled,
+hostile taint is blocked at external egress. Untrusted taint is also blocked except
+for a separately validated interactive disclosure capability bound to the exact
+external-provider route. Ordinary capabilities and trust standing cannot make that
+exception; an explicit policy block still wins. The disclosure authority does not
+downgrade taint. The gate also considers destination tier:
 
 - `on_host` and `none` are local and allowed;
 - `on_premises` is allowed unless the operator enables
   `:arbor_security, :gate_on_premises_egress`;
-- `external_provider` is governed by trust standing and may ask or block; and
-- `external_peer` is currently classified and observed but not blocked by the egress
-  gate. Arbor 1.0 deliberately keeps this ACP/peer tier telemetry-only while endpoint
-  coverage is completed; the linked URI-classification decision records that deferral.
+- `external_provider` uses caller-supplied egress policy and may allow, ask, or block;
+  missing/malformed policy defaults to ask; and
+- `external_peer` remains allow at the policy tier, but the preceding external-taint
+  checks still apply. It is not equivalent to complete peer-path disclosure coverage.
 
 The gate is enabled in development and production configuration, while tests keep it
 dark unless a test explicitly enables it. Production's default cloud-provider
 standing is `allow`, so enabling the gate alone is not equivalent to denying all
 external traffic. Operators can provision stricter per-agent egress modes and enable
-on-premises gating.
+on-premises gating. The pure gate also permits most destinations when enforcement
+is disabled, with an independent explicit allowance required for recognized keyless
+destinations. Enabling a gate and provisioning a capability do not by themselves
+prove informed sensitive-data consent at every producer/consumer path.
 
 Authoritative code: [`EgressGate`](../../apps/arbor_security/lib/arbor/security/egress_gate.ex),
 [`Arbor.Trust.Policy`](../../apps/arbor_trust/lib/arbor/trust/policy.ex),
+[`disclosure regressions`](../../apps/arbor_security/test/arbor/security/disclosure_egress_regression_test.exs),
 [`config/prod.exs`](../../config/prod.exs), and the
-[`URI addressing and classification decision`](../../.arbor/decisions/2026-06-14-uri-addressing-vs-security-classification.md).
+[`interactive disclosure decision`](../../.arbor/decisions/2026-08-03-interactive-egress-disclosure-capability.md).
 
 ### Durable ownership, approval, and review
 
@@ -400,7 +450,7 @@ defense in depth.
 - The spawn-capable API is deliberately unavailable when the production containment
   backend or its admission evidence is missing. A configured callback, arbitrary module,
   or legacy `spawn_backend` setting cannot reactivate it.
-- The only implemented spawn-capable backend is Apple Container on macOS 26 or later
+- On macOS, the implemented spawn-capable backend is Apple Container on macOS 26 or later
   with the reviewed signed 1.1.x CLI/API-server/plugin layout, pinned kernel,
   immutable local images, and a verified Linux/arm64 guest toolchain. The accepted
   live proof used macOS 26 and Apple Container 1.1.0; later accepted host versions
@@ -408,9 +458,20 @@ defense in depth.
   operator prerequisite; code presence alone does not prove a host can execute this
   path. The [`Phase 6 live matrix`](../../.arbor/roadmap/3-in-progress/dot-orchestrated-coding-workflow.md)
   records the accepted host proof and its evidence digest.
-- Linux dependency-baseline authority and Linux/arm64 guest materialization exist for
-  the Apple Container validation design, but a general native Linux spawn-capable
-  containment backend is not documented as supported here.
+- Native Linux validation is implemented through rootless Podman/OCI, a pinned
+  root-owned Podman executable, immutable images, a reviewed dependency baseline,
+  private build/workspace mounts and explicit network denial. The dedicated
+  Debian 12 / amd64 factory exercised contained compile and owner-isolated tests
+  on 2026-09-07/08. This is not support for arbitrary OCI runtimes or an automatic
+  fallback to host execution. See [Software Factory](SOFTWARE_FACTORY.md) for the
+  supported setup and admission prerequisites.
+- Operator-owned validation-runtime documents are pinned to the current UID with
+  restricted file permissions. Writable non-sticky ancestors are rejected even
+  when root-owned; root-owned sticky shared directories such as `/tmp` remain
+  usable, but do not relax target-file or user-owned ancestor checks. Admission
+  and re-verification regressions run under both UID 0 and a non-root operator.
+  An operator-only test image or successful source test is not activation of a
+  changed live factory image or runtime configuration.
 - Windows has path-containment handling for filesystem links/reparse-point behavior,
   but no supported Windows spawn-capable containment backend is claimed. The Windows
   shell-containment compatibility item remains open.
@@ -420,7 +481,7 @@ defense in depth.
 | Platform | Current position |
 | --- | --- |
 | macOS | Core Elixir security and direct childless Shell paths are the primary development surface. Spawn-capable admission accepts macOS 26 or later with Apple Container 1.1.x evidence and required locally provisioned assets; the accepted live proof used macOS 26 and Apple Container 1.1.0. Missing assets fail closed. |
-| Linux | Core identity, capability, trust, taint, egress, and path-policy code is not described as macOS-only. Linux/arm64 dependency-baseline and guest-image evidence support the Apple Container design, but no general native Linux spawn-capable backend is supported by this document. |
+| Linux | Native rootless Podman/OCI validation with pinned runtime/image/baseline and fail-closed admission. Debian 12 / amd64 factory compile and isolated test execution were observed on 2026-09-07/08. Native arm64 follows the same configured backend; this run is not a new arm64 qualification. |
 | Windows | FileGuard/SafePath code accounts for Windows junction and reparse-point containment behavior. Native spawn-capable containment and equivalent whole-unit cleanup are not a supported Arbor platform mode. |
 
 Platform support means that the relevant code path can run or fail closed; it does not

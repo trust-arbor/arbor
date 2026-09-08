@@ -19,6 +19,20 @@ MCP identity wiring lives in [EXTERNAL_MCP_CLIENT.md](./EXTERNAL_MCP_CLIENT.md).
 Checkpoint HMAC identity lives in [IDENTITY.md](./IDENTITY.md). Binding council
 seats and provider remaps live in [COUNCIL_SETUP.md](./COUNCIL_SETUP.md).
 
+## Product and Qualification Scope
+
+The factory is a developer capability, not a prerequisite for the
+[personal-agent profile](PRODUCT_PROFILES.md). Keep three claims separate: a
+candidate's admitted change-validation evidence, broad integration/release coverage,
+and qualification of the factory's own restart/recovery machinery. A full authority
+model replay is not a universal gate for unrelated personal-agent features.
+
+This distinction does not change the current compiler or admission policy. A lighter
+lane requires a reviewed owner-controlled scope; workers never choose which tests
+count. Existing CrossApp plans still require their exact inventory and identity
+bindings, and a passed prefix is not acceptance. G5E's broad node-restart replay
+remains incomplete and paused under the 2026-09-07 architecture decision.
+
 ## What the factory is
 
 A factory run is one structured task:
@@ -85,6 +99,10 @@ lease (read, approval-read, steer, cancel, adopt, approval-answer). You do
 not pick capability ids or the `task_id`.
 
 ## Prerequisites
+
+For a dedicated Proxmox factory VM or a separate no-NIC sandbox VM, see the
+[provisioning scripts and runbook](../../scripts/proxmox/README.md). Factory
+operator credentials and provider access do not belong in the offline sandbox.
 
 ### Host
 
