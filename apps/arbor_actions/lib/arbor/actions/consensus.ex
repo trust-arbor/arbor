@@ -683,6 +683,33 @@ defmodule Arbor.Actions.Consensus do
 
     alias Arbor.Actions.Coding.ReviewLedgerCore
 
+    # Project only these known ReviewLedgerCore tags into reviewer_outcomes.reason.
+    # Tuple payloads are ignored so untrusted report terms are never inspected.
+    @ledger_invalid_reason_tags [
+      :incomplete_owned_finding_updates,
+      :unknown_finding,
+      :immutable_finding_field,
+      :duplicate_owned_finding_update,
+      :cross_owner_update,
+      :invalid_update,
+      :invalid_report,
+      :invalid_vote,
+      :invalid_finding_updates,
+      :invalid_finding_update,
+      :invalid_finding_state,
+      :fixed_finding_cannot_reopen,
+      :too_many_findings,
+      :too_many_updates,
+      :too_many_new_findings,
+      :invalid_new_findings,
+      :invalid_new_finding,
+      :invalid_new_finding_state,
+      :embedded_owner_mismatch,
+      :invalid_severity,
+      :invalid_anchor,
+      :invalid_field
+    ]
+
     @impl true
     def run(params, _context) when is_map(params) do
       with {:ok, results} <- results_param(params),
@@ -858,19 +885,24 @@ defmodule Arbor.Actions.Consensus do
       case Jason.decode(response) do
         {:ok, report} when is_map(report) ->
           projected = ReviewLedgerCore.project_report_to_authority(perspective, report, ledger)
+          vote = normalized_vote(Map.get(projected, "vote"))
 
-          if valid_report?(ledger, review_cycle, delta_ranges, perspective, projected) do
-            vote = normalized_vote(Map.get(projected, "vote"))
-            status = if vote == "abstain", do: "abstained", else: "reported"
-            reason_code = if vote == "abstain", do: "deliberate_abstention", else: "valid_report"
+          case apply_strict_report(ledger, review_cycle, delta_ranges, perspective, projected) do
+            {:ok, _completed} ->
+              status = if vote == "abstain", do: "abstained", else: "reported"
 
-            {:ok, perspective, projected,
-             reviewer_outcome(status, reason_code, context_updates, submitted_vote: vote)}
-          else
-            {:abstain, perspective,
-             reviewer_outcome("invalid", "ledger_invalid_report", context_updates,
-               submitted_vote: normalized_vote(Map.get(projected, "vote"))
-             )}
+              reason_code =
+                if vote == "abstain", do: "deliberate_abstention", else: "valid_report"
+
+              {:ok, perspective, projected,
+               reviewer_outcome(status, reason_code, context_updates, submitted_vote: vote)}
+
+            {:error, validation_reason} ->
+              {:abstain, perspective,
+               reviewer_outcome("invalid", "ledger_invalid_report", context_updates,
+                 submitted_vote: vote,
+                 reason: ledger_invalid_reason(validation_reason)
+               )}
           end
 
         {:ok, _other} ->
@@ -948,15 +980,22 @@ defmodule Arbor.Actions.Consensus do
       end
     end
 
-    defp valid_report?(ledger, review_cycle, delta_ranges, perspective, report) do
-      match?(
-        {:ok, _},
-        ReviewLedgerCore.apply_cycle(ledger, review_cycle, %{
-          "reports" => %{perspective => report},
-          "delta_ranges" => delta_ranges
-        })
-      )
+    defp apply_strict_report(ledger, review_cycle, delta_ranges, perspective, report) do
+      ReviewLedgerCore.apply_cycle(ledger, review_cycle, %{
+        "reports" => %{perspective => report},
+        "delta_ranges" => delta_ranges
+      })
     end
+
+    defp ledger_invalid_reason(tag)
+         when is_atom(tag) and tag in @ledger_invalid_reason_tags,
+         do: Atom.to_string(tag)
+
+    defp ledger_invalid_reason({tag, _ignored})
+         when is_atom(tag) and tag in @ledger_invalid_reason_tags,
+         do: Atom.to_string(tag)
+
+    defp ledger_invalid_reason(_reason), do: "ledger_invalid_report"
 
     defp result_for(ledger, reviewer_outcomes) do
       context = ReviewLedgerCore.to_context(ledger)

@@ -20,7 +20,6 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   @max_delta_line_number 10_000_000
   @max_delta_ranges_bytes 131_072
   @max_finding_ledger_bytes 131_072
-  @max_prompt_ledger_bytes 32_768
   @max_prompt_delta_bytes 32_768
   @max_prompt_revision_bytes 256
   @max_prompt_packet_claims_bytes 8_192
@@ -230,7 +229,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   """
   @spec prompt_text(t()) :: String.t()
   def prompt_text(%__MODULE__{} = request) do
-    ledger_json = bounded_json(request.finding_ledger, @max_prompt_ledger_bytes)
+    ledger_json = bounded_json(request.finding_ledger, @max_finding_ledger_bytes)
 
     """
     Branch: #{request.branch}
@@ -256,6 +255,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     ```json
     #{ledger_json}
     ```
+
+    Finding-update rules:
+    Every owned active finding, including minor/nit, needs exactly one update. Copy finding ids verbatim. Omit immutable titles or leave them unchanged.
 
     Intent:
     #{blank_to_none(request.intent)}
@@ -285,6 +287,15 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   @doc "Return the Packet constraints section byte cap."
   @spec max_prompt_packet_claims_bytes() :: pos_integer()
   def max_prompt_packet_claims_bytes, do: @max_prompt_packet_claims_bytes
+
+  @doc """
+  Return the admitted finding-ledger JSON byte cap.
+
+  The same bound is used for request admission and for emitting the complete
+  validated ledger into `prompt_text/1` / `prompt_conformance_text/1`.
+  """
+  @spec max_finding_ledger_bytes() :: pos_integer()
+  def max_finding_ledger_bytes, do: @max_finding_ledger_bytes
 
   defp required_string(attrs, key) do
     with {:ok, value} <- fetch_attr(attrs, key),
@@ -662,7 +673,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   end
 
   defp review_charter(%__MODULE__{}) do
-    "Cycle >1: verify owned open findings, inspect only the supplied delta for regressions, " <>
+    "Cycle >1: update every owned active finding exactly once, including minor/nit; " <>
+      "copy ids verbatim; omit immutable titles or leave them unchanged; " <>
+      "inspect only the supplied delta for regressions, " <>
       "and report pre-existing or out-of-delta issues as nonblocking/out-of-scope."
   end
 

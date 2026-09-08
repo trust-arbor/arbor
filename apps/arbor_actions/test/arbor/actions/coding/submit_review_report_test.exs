@@ -218,5 +218,20 @@ defmodule Arbor.Actions.Coding.SubmitReviewReportTest do
       assert Map.get(schema, :additionalProperties) == false or
                Map.get(schema, "additionalProperties") == false
     end
+
+    test "schema descriptions require complete owned updates, verbatim ids, and immutable titles" do
+      tool = SubmitReviewReport.to_tool()
+      description = tool.description
+      finding_updates = tool.parameters_schema.properties.finding_updates
+      updates_description = finding_updates.description
+
+      for text <- [description, updates_description] do
+        assert is_binary(text)
+        assert text =~ "minor"
+        assert text =~ "nit"
+        assert text =~ "verbatim"
+        assert text =~ "title"
+      end
+    end
   end
 end

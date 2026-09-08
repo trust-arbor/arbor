@@ -160,7 +160,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert {:error, {:invalid_field, :finding_ledger, :invalid_json_or_size}} =
                CodeReviewRequest.new(
                  Map.put(@valid_attrs, :finding_ledger, %{
-                   "large" => String.duplicate("x", 131_073)
+                   "large" =>
+                     String.duplicate("x", CodeReviewRequest.max_finding_ledger_bytes() + 1)
                  })
                )
     end
@@ -371,6 +372,12 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert prompt =~ "Delta files:\n- none supplied"
       assert prompt =~ "Finding ledger (bounded JSON):"
       assert prompt =~ "Review charter:\nCycle 1: review the stated intent and full diff."
+
+      assert prompt =~
+               "Every owned active finding, including minor/nit, needs exactly one update."
+
+      assert prompt =~ "Copy finding ids verbatim."
+      assert prompt =~ "Omit immutable titles or leave them unchanged."
       assert prompt =~ "Intent:\nAdd a review loop"
       assert prompt =~ "- lib/a.ex"
       assert prompt =~ "```diff"
@@ -394,17 +401,113 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
 
       assert {:ok, _encoded} = Jason.encode(context)
       assert String.valid?(prompt)
-      assert prompt =~ "Cycle >1: verify owned open findings"
+
+      assert prompt =~
+               "Cycle >1: update every owned active finding exactly once, including minor/nit"
+
+      assert prompt =~ "copy ids verbatim"
+      assert prompt =~ "omit immutable titles or leave them unchanged"
       assert prompt =~ "pre-existing or out-of-delta issues as nonblocking/out-of-scope"
       assert prompt =~ "[truncated]"
 
       ledger_json = extract_ledger_json(prompt)
-      bounded = Jason.decode!(ledger_json)
-      assert byte_size(ledger_json) <= 32_768
-      assert bounded["truncated"] == true
-      assert bounded["original_bytes"] > 32_768
-      assert is_binary(bounded["preview"])
-      assert String.valid?(bounded["preview"])
+      decoded_ledger = Jason.decode!(ledger_json)
+      assert decoded_ledger == request.finding_ledger
+      assert byte_size(ledger_json) > 32_768
+      assert byte_size(ledger_json) <= CodeReviewRequest.max_finding_ledger_bytes()
+      refute Map.has_key?(decoded_ledger, "truncated")
+      refute Map.has_key?(decoded_ledger, "preview")
+
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      assert extract_ledger_json(conformance) == ledger_json
+    end
+
+    test "prompt_text keeps every admitted finding id past the old 32768-byte preview cap" do
+      padding = String.duplicate("pad", 2_000)
+
+      {findings, ids} =
+        Enum.reduce(
+          [
+            {"correctness", "blocking"},
+            {"correctness", "minor"},
+            {"security", "major"},
+            {"security", "nit"},
+            {"maintainability", "minor"},
+            {"maintainability", "nit"},
+            {"docs_naming", "major"},
+            {"docs_naming", "nit"}
+          ],
+          {%{}, []},
+          fn {owner, severity}, {acc, ids} ->
+            index = length(ids) + 1
+            id = "finding_#{owner}_#{severity}_#{index}"
+
+            finding = %{
+              "id" => id,
+              "owner" => owner,
+              "severity" => severity,
+              "state" => "open",
+              "title" => "#{owner} #{severity} #{index}",
+              "required_action" => "Address #{id}",
+              "evidence" => padding,
+              "anchor" => %{
+                "path" => "lib/#{owner}.ex",
+                "side" => "new",
+                "line" => index
+              }
+            }
+
+            {Map.put(acc, id, finding), ids ++ [id]}
+          end
+        )
+
+      ledger = %{
+        "version" => "review-ledger-v1",
+        "perspectives" => [
+          "correctness",
+          "security",
+          "maintainability",
+          "docs_naming"
+        ],
+        "review_cycle" => 1,
+        "cycles" => %{},
+        "out_of_scope" => [],
+        "findings" => findings
+      }
+
+      encoded = Jason.encode!(ledger)
+      assert byte_size(encoded) > 32_768
+      assert byte_size(encoded) <= CodeReviewRequest.max_finding_ledger_bytes()
+
+      late_ids =
+        Enum.filter(ids, fn id ->
+          case :binary.match(encoded, id) do
+            {offset, _} when offset >= 32_768 -> true
+            _ -> false
+          end
+        end)
+
+      assert late_ids != []
+
+      {:ok, request} =
+        CodeReviewRequest.new(
+          @valid_attrs
+          |> Map.put(:review_cycle, 2)
+          |> Map.put(:finding_ledger, ledger)
+        )
+
+      prompt = CodeReviewRequest.prompt_text(request)
+      conformance = CodeReviewRequest.prompt_conformance_text(request)
+      ledger_json = extract_ledger_json(prompt)
+
+      assert Jason.decode!(ledger_json) == ledger
+      assert extract_ledger_json(conformance) == ledger_json
+      refute Jason.decode!(ledger_json)["truncated"]
+
+      for id <- ids do
+        assert prompt =~ id
+        assert conformance =~ id
+      end
     end
 
     test "keeps review.prompt byte-identical when design and packet claims are present" do

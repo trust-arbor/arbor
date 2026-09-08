@@ -1398,6 +1398,17 @@ defmodule Arbor.Actions.ConsensusTest do
       assert incomplete["review_disposition"] == "human_review"
       assert incomplete["human_required"]
 
+      assert incomplete["reviewer_outcomes"]["correctness"]["status"] == "invalid"
+
+      assert incomplete["reviewer_outcomes"]["correctness"]["reason_code"] ==
+               "ledger_invalid_report"
+
+      assert incomplete["reviewer_outcomes"]["correctness"]["reason"] ==
+               "incomplete_owned_finding_updates"
+
+      assert incomplete["reviewer_outcomes"]["correctness"]["effective_vote"] == "abstain"
+      assert incomplete["reviewer_outcomes"]["correctness"]["submitted_vote"] == "approve"
+
       assert incomplete["blocking_reasons"] == [
                %{"id" => stored["id"], "reason" => "unconfirmed_blocker"}
              ]
@@ -1430,6 +1441,96 @@ defmodule Arbor.Actions.ConsensusTest do
              ]
 
       refute reconfirmed["human_required"]
+    end
+
+    test "ledger_invalid_report keeps bounded known-tag reasons for unknown ids and immutable titles" do
+      secret = "sk-ledger-diagnostic-secret-should-not-leak"
+
+      assert {:ok, first} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("reject",
+                         new_findings: [review_finding("must fix", "minor", 10)]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 1,
+                   finding_ledger: review_ledger()
+                 },
+                 %{}
+               )
+
+      [stored] = first["findings"]
+
+      assert {:ok, unknown} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         finding_updates: [%{"id" => secret, "state" => "fixed"}]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: first["finding_ledger"],
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      assert unknown["reviewer_outcomes"]["correctness"]["status"] == "invalid"
+      assert unknown["reviewer_outcomes"]["correctness"]["reason_code"] == "ledger_invalid_report"
+      assert unknown["reviewer_outcomes"]["correctness"]["reason"] == "unknown_finding"
+      assert unknown["reviewer_outcomes"]["correctness"]["effective_vote"] == "abstain"
+      assert unknown["findings"] |> hd() |> Map.get("state") == "open"
+      refute unknown["reviewer_outcomes"]["correctness"]["reason"] =~ secret
+      assert {:ok, encoded_unknown} = Jason.encode(unknown["reviewer_outcomes"])
+      refute encoded_unknown =~ secret
+
+      assert {:ok, mutated} =
+               Consensus.DecideReview.run(
+                 %{
+                   results: [
+                     make_review_branch(
+                       "correctness",
+                       review_report("approve",
+                         finding_updates: [
+                           %{
+                             "id" => stored["id"],
+                             "state" => "open",
+                             "title" => "mutated #{secret}"
+                           }
+                         ]
+                       )
+                     ),
+                     make_review_branch("security", review_report("approve")),
+                     make_review_branch("maintainability", review_report("approve"))
+                   ],
+                   review_cycle: 2,
+                   finding_ledger: first["finding_ledger"],
+                   delta_ranges: %{}
+                 },
+                 %{}
+               )
+
+      assert mutated["reviewer_outcomes"]["correctness"]["status"] == "invalid"
+      assert mutated["reviewer_outcomes"]["correctness"]["reason_code"] == "ledger_invalid_report"
+      assert mutated["reviewer_outcomes"]["correctness"]["reason"] == "immutable_finding_field"
+      assert mutated["reviewer_outcomes"]["correctness"]["effective_vote"] == "abstain"
+      assert mutated["findings"] |> hd() |> Map.get("id") == stored["id"]
+      assert mutated["findings"] |> hd() |> Map.get("title") == stored["title"]
+      refute mutated["reviewer_outcomes"]["correctness"]["reason"] =~ secret
+      assert {:ok, encoded_mutated} = Jason.encode(mutated["reviewer_outcomes"])
+      refute encoded_mutated =~ secret
     end
   end
 

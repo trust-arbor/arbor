@@ -15,7 +15,7 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
   use Jido.Action,
     name: "coding_submit_review_report",
     description:
-      "Submit the final binding code-review report (vote, finding_updates, new_findings). Call exactly once when ready; do not emit free-form JSON text.",
+      "Submit the final binding code-review report (vote, finding_updates, new_findings). Call exactly once when ready; do not emit free-form JSON text. Recheck: exactly one update per owned active finding including minor/nit; copy ids verbatim; omit immutable titles or leave them unchanged.",
     category: "coding",
     tags: ["coding", "review", "report", "terminal"],
     schema:
@@ -33,7 +33,10 @@ defmodule Arbor.Actions.Coding.SubmitReviewReport do
               required_action: Zoi.string() |> Zoi.max(1024) |> Zoi.optional(),
               evidence: Zoi.string() |> Zoi.max(2048) |> Zoi.optional()
             }),
-            description: "Updates to same-owner ledger findings (max 8 with new_findings)"
+            description:
+              "Exactly one update per owned active finding, including minor/nit. " <>
+                "Copy ids verbatim; omit immutable titles or leave them unchanged. " <>
+                "Max 8 with new_findings"
           )
           |> Zoi.max(8)
           |> Zoi.optional(),
