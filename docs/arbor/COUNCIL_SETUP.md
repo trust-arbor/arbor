@@ -33,21 +33,21 @@ you want `mix arbor.consult`.
 
 ## Binding council: stock seats
 
-The packaged graph (`max_parallel="11"`) as of 2026-09-03:
+The packaged graph (`max_parallel="11"`) as of 2026-09-07:
 
 | Node id | Perspective | `llm_provider` | `llm_model` |
 | --- | --- | --- | --- |
-| `correctness` | Logic, control flow, concurrency | `openai_oauth` | `gpt-5.6-sol` |
-| `security` | Gates, FileGuard, fail-closed auth, egress | `openai_oauth` | `gpt-5.6-sol` |
+| `correctness` | Logic, control flow, concurrency | `openai_oauth` | `gpt-6-astra` |
+| `security` | Gates, FileGuard, fail-closed auth, egress | `openai_oauth` | `gpt-6-astra` |
 | `regression_test_coverage` | Focused tests, security regressions | `ollama` | `kimi-k2.7-code:cloud` |
 | `edge_cases_error_handling` | Nil, timeouts, partial failure | `ollama` | `kimi-k2.7-code:cloud` |
 | `simplicity_yagni_scope` | Minimal surface, no speculative work | `xai_oauth` | `grok-4.6` |
 | `readability_maintainability` | Naming, placement, comments | `xai_oauth` | `grok-4.6` |
-| `contract_api_compat` | Facades, contracts, CLI/API | `ollama` | `glm-5.2:cloud` |
-| `architecture_grain_fit` | DOT vs CRC vs action vs handler | `ollama` | `glm-5.2:cloud` |
+| `contract_api_compat` | Facades, contracts, CLI/API | `ollama` | `glm-5.3:cloud` |
+| `architecture_grain_fit` | DOT vs CRC vs action vs handler | `ollama` | `glm-5.3:cloud` |
 | `performance_resource` | Hot path, memory, GenServer blocking | `ollama` | `minimax-m3:cloud` |
 | `docs_naming` | Docs drift, absolute dates | `ollama` | `minimax-m3:cloud` |
-| `design_conformance` | Explicit approved-design promises and packet constraints | `openai_oauth` | `gpt-5.6-sol` |
+| `design_conformance` | Explicit approved-design promises and packet constraints | `openai_oauth` | `gpt-6-astra` |
 
 The ten existing seats still read `review.prompt` (branch, intent, files, and
 diff). Only `design_conformance` reads `review.prompt_conformance`: that same
@@ -92,17 +92,27 @@ to remap models is therefore itself an authority-surface change.
 You need a live Arbor node (`./bin/mix arbor.start`) plus credentials for
 every provider that still appears in the DOT.
 
-### `openai_oauth` (`gpt-5.6-sol`)
+### `openai_oauth` (`gpt-6-astra`)
 
-Arbor-owned OpenAI loopback login on the live node. The pending handle
-never appears in `inspect/1`; opening the URL completes the flow.
+Use a separate Arbor-owned OpenAI login on each live node. Do not copy another
+installation's rotating refresh tokens. For a remote factory, forward the
+loopback callback before starting login (port 1455 must be free locally):
 
-```elixir
-{:ok, prompt} = Arbor.LLM.start_openai_loopback_login()
-Arbor.LLM.OAuth.Login.LoopbackPrompt.authorize_url(prompt)
+```bash
+# Keep this operator-side connection open until login finishes.
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:1455:127.0.0.1:1455 -L '[::1]:1455:127.0.0.1:1455' arbor@FACTORY_HOST
+# In another terminal, run on the factory from its Arbor checkout:
+./bin/mix arbor.login openai --no-browser
+./bin/mix arbor.login status
 ```
 
-A ChatGPT / Codex subscription that can call `gpt-5.6-sol` is required.
+Open the emitted authorization URL on the operator machine. Its localhost
+callback reaches the factory through SSH; no callback-code copying or LAN
+listener is needed. Close the forwarding connection after login completes.
+
+An account entitled to the exact configured model is required. The stock model
+id is not a promise of availability to every subscription; verify the route's
+live catalog and a small authenticated request on the intended host.
 An `OPENAI_API_KEY` is a different route (`openai`) and will not satisfy
 `llm_provider="openai_oauth"` unless you change the DOT.
 
@@ -116,21 +126,36 @@ state into the BEAM. SuperGrok Heavy can still fail as
 ### `ollama` (three cloud model ids)
 
 Text generation uses `config :arbor_orchestrator, :ollama, base_url`,
-default `http://localhost:11434/v1`. Override with
-`ARBOR_OLLAMA_BASE_URL` (bare URL; runtime appends `/v1` for chat).
+default `http://localhost:11434/v1`. Use `ARBOR_OLLAMA_CHAT_BASE_URL` to override
+**only text generation** (runtime appends `/v1` unless already present).
+For direct cloud access, set `ARBOR_OLLAMA_CHAT_BASE_URL=https://ollama.com` and
+install `OLLAMA_API_KEY` privately in the factory's mode-0600 `.env`.
+Transfer only that explicitly authorized credential, not the operator's entire
+environment or credential directory; remove any temporary transfer file.
+
+The older `ARBOR_OLLAMA_BASE_URL` remains the shared default for chat **and
+embeddings**. Setting it to the cloud would also redirect embeddings there.
+Leave it unset to keep embeddings local, or point it at the intended internal
+embedding endpoint. These environment settings are read at node startup.
 
 The stock ids are Ollama *cloud* model names:
 
 ```text
 kimi-k2.7-code:cloud
-glm-5.2:cloud
+glm-5.3:cloud
 minimax-m3:cloud
 ```
 
 They must resolve on that Ollama instance (pulled / entitled). A local
 llama.cpp or LM Studio on `:1234` is `lm_studio`, not `ollama`. Pointing
-`ARBOR_OLLAMA_BASE_URL` at a host that does not serve those names produces
+`ARBOR_OLLAMA_CHAT_BASE_URL` at a host that does not serve those names produces
 failed seats, which the reducer records as abstentions.
+
+On 2026-09-07, all three exact ids answered through Arbor at
+`https://ollama.com/v1`, although the cloud model inventory listed their names
+without `:cloud`. Test the configured ids rather than treating that naming
+difference as proof of failure. Inventory access proves authentication, not
+generation or the council's terminal-tool contract.
 
 If `ollama` is not a configured provider on the node at all, those six
 seats no longer abstain outright: since 2026-08-27 the LLM handler resolves
@@ -148,8 +173,8 @@ still said READY.
 config :arbor_orchestrator,
   # tried in order when a seat's provider is unavailable on this host
   llm_fallback_providers: [{"openai_oauth", "gpt-5.6-sol"}, {"xai_oauth", "grok-4.6"}],
-  # optional per-provider chains, tried before the generic list
-  llm_provider_fallbacks: %{"ollama" => [{"openrouter", "z-ai/glm-5.2"}]}
+  # optional per-provider chains are tried before the generic list; empty stock
+  llm_provider_fallbacks: %{}
 ```
 
 Rules: the preferred provider is never its own fallback; a provider the

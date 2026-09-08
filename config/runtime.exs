@@ -604,7 +604,7 @@ end
 # ============================================================================
 # Ollama base URL (local-LM provider)
 # ============================================================================
-# Single env var controlling where BOTH the embedding path and the
+# Shared default controlling where BOTH the embedding path and the
 # text-generation path reach Ollama. Defaults to localhost so dev/test
 # without the var behaves exactly as before; CI sets it to the homelab
 # Ollama (e.g. ARBOR_OLLAMA_BASE_URL=http://10.42.42.100:11434).
@@ -624,12 +624,19 @@ config :arbor_ai, :ollama, base_url: ollama_base_url
 
 # Text-gen path: ProviderRegistry reads `config :arbor_orchestrator, :ollama,
 # base_url` for the OpenAI-compatible endpoint — needs the /v1 suffix.
-ollama_v1_base_url =
-  if String.ends_with?(ollama_base_url, "/v1"),
-    do: ollama_base_url,
-    else: ollama_base_url <> "/v1"
+# A cloud council must not silently move the embedding path off-host.
+ollama_chat_base_url =
+  case System.get_env("ARBOR_OLLAMA_CHAT_BASE_URL") do
+    unset when unset in [nil, ""] -> ollama_base_url
+    url -> url
+  end
 
-# OLLAMA_API_KEY is only needed when ARBOR_OLLAMA_BASE_URL points at a hosted
+ollama_v1_base_url =
+  if String.ends_with?(ollama_chat_base_url, "/v1"),
+    do: ollama_chat_base_url,
+    else: ollama_chat_base_url <> "/v1"
+
+# OLLAMA_API_KEY is only needed when the text-generation URL points at a hosted
 # endpoint (https://ollama.com); a local daemon ignores the bearer entirely.
 config :arbor_orchestrator, :ollama,
   base_url: ollama_v1_base_url,
