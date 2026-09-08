@@ -425,3 +425,15 @@ error. Set both the Git config and command option explicitly (for example,
 `-c pack.threads=1 pack-objects --threads=1`) and regression-test the actual argv
 used by the contained path, not only its eventual output (found 2026-09-02 while
 replaying the exact CrossApp validation candidate).
+
+<!-- applied-learning: qualify-fresh-factories-through-actual-worker-startup-not-just-cli-discovery -->
+<a id="applied-learning-qualify-fresh-factories-through-actual-worker-startup-not-just-cli-discovery"></a>
+**Qualify fresh factories through actual worker startup, not just CLI discovery.**
+A host with only Grok exposed stale ACP pool auto-detection that a multi-provider
+laptop masked. CLI presence and OAuth success also did not prove Grok's Linux
+sandbox could launch: bubblewrap was missing. Keep discovery tied to the provider
+catalog, install native sandbox prerequisites, and observe a real ACP start before
+calling the host ready. For provisioning, DHCP success is not internet admission:
+upstream virtual-MAC allowlists need owner approval, not a NAT bypass. Rootless
+Podman may additionally need the newly installed user dbus.socket started. Record
+these separately from candidate validation or journey acceptance (2026-09-07).

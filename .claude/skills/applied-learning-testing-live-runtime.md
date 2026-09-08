@@ -300,7 +300,7 @@ Tests that assert an exact launched budget at a deadline boundary must inject th
 
 <!-- applied-learning: a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process -->
 <a id="applied-learning-a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process"></a>
-**A module-global test fake must not be linked to an arbitrary per-test process.** `ensure_started/0` plus `GenServer.start_link/3` can find the prior test's still-registered process just before that owner exits, then race into `:noproc` on the following call and cascade unrelated failures. Put shared fakes under a suite-stable supervisor/owner or start them unlinked with explicit reset/cleanup; per-test resources may remain linked to the test process (found 2026-07-14 in the Apple unit-worker held-absence suite).
+**A module-global test fake must not be linked to an arbitrary per-test process.** `ensure_started/0` plus `GenServer.start_link/3` can find the prior test's still-registered process just before that owner exits, then race into `:noproc` on the following call and cascade unrelated failures. Put shared fakes under a suite-stable supervisor/owner or start them unlinked with explicit reset/cleanup; per-test resources may remain linked to the test process unless cleanup must read them after exit (found 2026-07-14 in the Apple unit-worker held-absence suite). ExUnit exits tests with `:shutdown` before running `on_exit` in a separate process. Do not keep cleanup snapshots or a final-drain tracer only in test-linked processes; use a lifetime that spans the callback with explicit cleanup ownership, and cover partial setup failure as well as normal teardown. `start_supervised!` children also stop before `on_exit`, so supervision alone does not solve that lifetime requirement (confirmed against ExUnit 1.19.5 source while reviewing J0 on 2026-09-07).
 
 <!-- applied-learning: exunit-setup-callbacks-cannot-dynamically-skip-a-test -->
 <a id="applied-learning-exunit-setup-callbacks-cannot-dynamically-skip-a-test"></a>
@@ -617,7 +617,10 @@ the failure unless `MIX_DEPS_PATH` and the isolated `MIX_BUILD_PATH` are also
 present on `git commit`. Use a compatible pinned dependency cache, never the
 live checkout's build path, and run format, compile, tests, and hooks under the
 same environment (found 2026-07-28 while finalizing the managed ACP settlement
-candidate).
+candidate). This also applies when committing from the main checkout: a pre-commit
+hook can run Mix even when the operator did not explicitly request compilation.
+Pass the isolated environment on the commit command itself; a preceding formatter
+invocation does not export it to later commands (reinforced 2026-09-07 integration).
 
 <!-- applied-learning: aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test -->
 <a id="applied-learning-aggregate-validation-admission-must-not-sum-per-batch-maximums-before-running-any-test"></a>
@@ -1038,3 +1041,42 @@ facade seams and still shipped this, because `reachable_node/1` calls
 "Tests keep injecting the facade functions directly." Audit with
 `epmd -names` polled from outside the run: transient names are the leak
 (found 2026-09-06; cost two ledger entries open for nine days).
+
+<!-- applied-learning: qualification-must-prove-a-named-product-or-runtime-claim -->
+<a id="applied-learning-qualification-must-prove-a-named-product-or-runtime-claim"></a>
+**Qualification must prove a named product or runtime claim.** Separate
+feature/consumer validation, broad integration, factory restart qualification,
+and distributed authority correctness. An executable protocol model is not proof
+of a future runtime; all-batch integration is not a prerequisite for every local
+feature. When a consumer is deferred, record the old experiment as incomplete and
+review any replacement scope explicitly. Never shrink an already admitted plan,
+accept a prefix, or let a worker choose tests. Prefer a small deterministic
+composition fixture for an infrastructure claim, then widen evidence where shared
+state/topology/security demands it (learned 2026-09-07 during the single-user-first
+architecture reassessment).
+
+<!-- applied-learning: trace-evidence-must-preserve-actual-effect-observations -->
+<a id="applied-learning-trace-evidence-must-preserve-actual-effect-observations"></a>
+**Trace evidence must preserve actual effect observations.** Observe the real
+public facade on the actual spawned turn owner, not a wrapper that can return a
+fallback without calling it. A synchronized drain does not fix missing process
+coverage. Preserve every observation: deduplicating by query can erase repeated
+calls with different results. Accept only documented result shapes; an arbitrary
+exception without the expected marker is not proof of empty recall. Pair happy
+paths with counterexamples that bypass the facade, repeat the query, and fail
+the effect (found 2026-09-08 qualifying J0; bridge fallback invented evidence,
+then query-only deduplication discarded genuine calls).
+
+<!-- applied-learning: offline-validation-images-must-cover-executables-and-private-build-descendants -->
+<a id="applied-learning-offline-validation-images-must-cover-executables-and-private-build-descendants"></a>
+**Offline validation images must cover executables and private build descendants.**
+`System.cmd("kill", ...)` needs an OS executable; a shell builtin and a successful
+`command -v kill` probe do not prove it exists. Assert the pinned executable path
+in the image recipe. Tests spawning standalone Mix lanes can derive sibling
+build paths, so mount a private writable build parent rather than only one child;
+retain read-only source/root and network denial. Qualify such subprocesses with
+their compiled dependency requirements too. Record owner-only image/runner proofs
+separately from activation of the live factory baseline. Verify special permission
+bits with stat: pinned `File.chmod!/2` strips sticky mode, while checked OS
+`chmod +t` sets it; otherwise a test never exercises its intended sticky-directory
+case (found 2026-09-08 in the J0 surrounding Commands suite).

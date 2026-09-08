@@ -3,7 +3,7 @@
   "source_file": "CLAUDE.md",
   "source_section": "Applied Learning",
   "source_captured_on": "2026-08-03",
-  "entry_count": 720,
+  "entry_count": 731,
   "always_loaded_count": 12,
   "entries": [
     {
@@ -3567,7 +3567,7 @@
       "anchor": "applied-learning-a-module-global-test-fake-must-not-be-linked-to-an-arbitrary-per-test-process",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 in the Apple unit-worker held-absence suite).",
-      "content_sha256": "b03c58fa3ac3e029aa89aaed697ad99237ed3f8550eb95857c7a288eae498bfb",
+      "content_sha256": "0f906425043cc914d2fef55ac012df9da48a58b931cdbe21f99b5a5b1349b6cf",
       "always_loaded": false
     },
     {
@@ -5548,7 +5548,7 @@
       "anchor": "applied-learning-a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner",
       "source_date": "2026-07-19",
       "source_incident": "live r6 on 2026-07-19 America/Chicago: irq_0f9b88fb1290267d was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred.",
-      "content_sha256": "6e71ba66aaf3d9cdd9c6d50ba005d26dc99ebaf216b53e86bdcc5bb63b3bfc43",
+      "content_sha256": "d2ce14fda0921dab35d444f8166ac94c20c1e14fb07271e8a582c00bc854a3ef",
       "always_loaded": false
     },
     {
@@ -6848,7 +6848,7 @@
       "anchor": "applied-learning-detached-worktree-hooks-need-the-same-explicit-dependency-cache-environment-as-validation",
       "source_date": "2026-07-28",
       "source_incident": "found 2026-07-28 while finalizing the managed ACP settlement candidate).",
-      "content_sha256": "78a9704db96e4f8d8bd2c4124d3abae44071188c08f8e7a7705df7cccf02a4ae",
+      "content_sha256": "5fe5f2164a03787355c27e2e97720caa8e7405e184931831c5ca03d3f397c057",
       "always_loaded": false
     },
     {
@@ -8904,8 +8904,151 @@
       "source_incident": "found 2026-09-06 auditing the arbor.login distribution leak",
       "always_loaded": false,
       "content_sha256": "2ee127a4e80f8804d85e85f0eb6db45ccf879dfc5ea754c0abab7e0fb9bbc681"
+    },
+    {
+      "source_ordinal": 721,
+      "source_kind": "post-migration",
+      "slug": "qualification-must-prove-a-named-product-or-runtime-claim",
+      "title": "Qualification must prove a named product or runtime claim.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-qualification-must-prove-a-named-product-or-runtime-claim",
+      "source_date": "2026-09-07",
+      "source_incident": "learned 2026-09-07 while separating personal-agent delivery from G5E and shared-authority qualification",
+      "always_loaded": false,
+      "content_sha256": "ba15a33f0078e73bef1ba2401706818b8a4117f4f0cfa593723dde1c03909529"
+    },
+    {
+      "source_ordinal": 722,
+      "source_kind": "post-migration",
+      "slug": "preserve-resumable-evidence-outside-os-temporary-roots",
+      "title": "Preserve resumable evidence outside OS temporary roots.",
+      "topic": "filesystem-git",
+      "destination": ".claude/skills/applied-learning-filesystem-git.md",
+      "anchor": "applied-learning-preserve-resumable-evidence-outside-os-temporary-roots",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 preserving G5E evidence after temporary files had disappeared",
+      "always_loaded": false,
+      "content_sha256": "96d6512a32ba3ca6b8ff23a77cdb5278b1aca05ab480916550f8a5eb3603b8fb"
+    },
+    {
+      "source_ordinal": 723,
+      "source_kind": "post-migration",
+      "slug": "reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary",
+      "title": "Reuse the Engine for behavior extensions, not as their own trust boundary.",
+      "topic": "dot-pipelines",
+      "destination": ".claude/skills/dot-pipeline-authoring.md",
+      "anchor": "applied-learning-reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary",
+      "source_date": "2026-09-07",
+      "source_incident": "learned 2026-09-07 while refining plugin infrastructure around DOT behavior packages",
+      "always_loaded": false,
+      "content_sha256": "0ea1671a9e2ba656a65d9998dc7c2f76b430e1e18c821046bb1e7484e70b7307"
+    },
+    {
+      "source_ordinal": 724,
+      "source_kind": "post-migration",
+      "slug": "preserve-the-proof-subject-when-canonicalizing-an-owner",
+      "title": "Preserve the proof subject when canonicalizing an owner.",
+      "topic": "security-gates",
+      "destination": ".claude/skills/agent-security-gates.md",
+      "anchor": "applied-learning-preserve-the-proof-subject-when-canonicalizing-an-owner",
+      "source_date": "2026-09-07",
+      "source_incident": "learned 2026-09-07 reviewing the entry-point convergence plan",
+      "always_loaded": false,
+      "content_sha256": "a912fd2643f2dcab03690a6191387dbf0bfc9fc310c03620ba6047f507abaf83"
+    },
+    {
+      "source_ordinal": 725,
+      "source_kind": "post-migration",
+      "slug": "qualify-fresh-factories-through-actual-worker-startup-not-just-cli-discovery",
+      "title": "Qualify fresh factories through actual worker startup, not just CLI discovery.",
+      "topic": "shell-containment",
+      "destination": ".claude/skills/applied-learning-shell-containment.md",
+      "anchor": "applied-learning-qualify-fresh-factories-through-actual-worker-startup-not-just-cli-discovery",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 provisioning a Grok-only Linux factory and owner-approved offline sandbox",
+      "always_loaded": false,
+      "content_sha256": "cc05b4e0bc566f78ecc4c831d85164e7066f1580defac32ef4d56e43b34919b2"
+    },
+    {
+      "source_ordinal": 726,
+      "source_kind": "post-migration",
+      "slug": "disconnect-a-programmatic-mcp-client-before-stopping-its-genserver",
+      "title": "Disconnect a programmatic MCP client before stopping its GenServer.",
+      "topic": "acp-mcp",
+      "destination": ".claude/skills/applied-learning-acp-mcp.md",
+      "anchor": "applied-learning-disconnect-a-programmatic-mcp-client-before-stopping-its-genserver",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 tracing leaked SSH signing proxies during fresh-factory qualification",
+      "always_loaded": false,
+      "content_sha256": "f52ab6332c0e8eaf327c11926f36a03e1e6834c86fc44af7a11aa6c1b5ebcae3"
+    },
+    {
+      "source_ordinal": 727,
+      "source_kind": "post-migration",
+      "slug": "separate-chat-routing-from-embedding-egress-and-refresh-both-provider-caches",
+      "title": "Separate text-generation routing from embedding egress, and refresh both provider caches after live configuration changes.",
+      "topic": "providers-oauth",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-separate-chat-routing-from-embedding-egress-and-refresh-both-provider-caches",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 enabling the new factory's three-provider council",
+      "always_loaded": false,
+      "content_sha256": "f4c773badfe04fe5e1ba13019539b2ff81c91b325c18be68266af3892e4c61d0"
+    },
+    {
+      "source_ordinal": 728,
+      "source_kind": "post-migration",
+      "slug": "corroborated-council-findings-still-need-independent-factual-verification",
+      "title": "Corroborated council findings still need independent factual verification.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-corroborated-council-findings-still-need-independent-factual-verification",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 validating J0 council claims against the pinned Elixir parser and evaluator",
+      "always_loaded": false,
+      "content_sha256": "cc62f1213cb2e8dae607fb1273c6f829380a9b160adb3ae921538986893feb28"
+    },
+    {
+      "source_ordinal": 729,
+      "source_kind": "post-migration",
+      "slug": "reviewer-evidence-must-not-truncate-below-admitted-ledger-size",
+      "title": "Reviewer evidence must not truncate below admitted ledger size.",
+      "topic": "council-review",
+      "destination": ".claude/skills/applied-learning-council-review.md",
+      "anchor": "applied-learning-reviewer-evidence-must-not-truncate-below-admitted-ledger-size",
+      "source_date": "2026-09-07",
+      "source_incident": "found 2026-09-07 replaying J0 recheck abstentions against the full admitted ledger and actual reviewer prompt",
+      "always_loaded": false,
+      "content_sha256": "44b9d71b19cde9a8fed833a15ffb00d529a9bec00ad9028659e5fb05e28efddc"
+    },
+    {
+      "source_ordinal": 730,
+      "source_kind": "post-migration",
+      "slug": "trace-evidence-must-preserve-actual-effect-observations",
+      "title": "Trace evidence must preserve actual effect observations.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-trace-evidence-must-preserve-actual-effect-observations",
+      "source_date": "2026-09-08",
+      "source_incident": "found 2026-09-08 while independently falsifying J0 recall observation claims",
+      "always_loaded": false,
+      "content_sha256": "fc148d6cc9238d66e969b0e10666efcafc51dc8c0fbbb5675bc0639a8a22ed4f"
+    },
+    {
+      "source_ordinal": 731,
+      "source_kind": "post-migration",
+      "slug": "offline-validation-images-must-cover-executables-and-private-build-descendants",
+      "title": "Offline validation images must cover executables and private build descendants.",
+      "topic": "testing-live-runtime",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime.md",
+      "anchor": "applied-learning-offline-validation-images-must-cover-executables-and-private-build-descendants",
+      "source_date": "2026-09-08",
+      "source_incident": "found 2026-09-08 in isolated J0 surrounding Commands qualification",
+      "always_loaded": false,
+      "content_sha256": "ad72712ca91e9fcc59a01e288489f78fcb2119852ed6f65705390033032d6cdb"
     }
   ],
   "original_entry_count": 461,
-  "post_migration_entry_count": 259
+  "post_migration_entry_count": 270
 }

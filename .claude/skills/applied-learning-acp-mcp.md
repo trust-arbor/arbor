@@ -595,7 +595,9 @@ source-coupling baseline).
 
 <!-- applied-learning: a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner -->
 <a id="applied-learning-a-late-mcp-approval-cannot-retroactively-resume-a-timed-out-coding-owner"></a>
-**A late MCP approval cannot retroactively resume a timed-out coding owner.** Coding pipeline approval owners currently wait a bounded 300,000 ms by default. A late MCP `arbor_answer_approval` can successfully resolve the durable IRQ after the owner has timed out and released the pipeline, but it cannot retroactively resume that dead owner. In live r6 on 2026-07-19 America/Chicago, `irq_0f9b88fb1290267d` was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred. Operational rule: poll/surface delegated approvals well inside the owner timeout and verify the owner resumed/committed, not merely that `answer_approval` returned ok. Architectural follow-up is durable resume/push notification, not an unbounded blocking wait.
+**A late MCP approval cannot retroactively resume a timed-out coding owner.** On 2026-07-19, coding pipeline approval owners waited a bounded 300,000 ms by default. A late MCP `arbor_answer_approval` can successfully resolve the durable IRQ after the owner has timed out and released the pipeline, but it cannot retroactively resume that dead owner. In live r6 on 2026-07-19 America/Chicago, `irq_0f9b88fb1290267d` was created 22:11:09, owner timed out/released at 22:16:09, and the valid bound approval was answered at 22:20:52; no commit occurred. Operational rule: poll/surface delegated approvals well inside the owner timeout and verify the owner resumed/committed, not merely that `answer_approval` returned ok. Architectural follow-up is durable resume/push notification, not an unbounded blocking wait.
+
+A durable task does not wake an external coding harness after its turn ends. Keep the supervising turn open with timed polling through actionable gates, or establish and verify an actual wake-up mechanism before ending it; never imply an unarmed background watcher exists. On 2026-09-07, ending the provider-setup turn left J0 at its 22:41 UTC commit approval until the user prompted again. Record this as a manager continuity failure, not a factory execution stall.
 
 <!-- applied-learning: acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape -->
 <a id="applied-learning-acp-usage-extraction-must-follow-the-provider-s-prompt-result-shape"></a>
@@ -1251,3 +1253,13 @@ still active. Before an irreversible next effect such as immutable candidate
 materialization, force a non-pooled close and advance only on a positively settled
 `closed` or `already_closed` result; all intermediate or unknown states fail closed
 (found 2026-09-02 while reviewing the G5D descriptor route).
+
+<!-- applied-learning: disconnect-a-programmatic-mcp-client-before-stopping-its-genserver -->
+<a id="applied-learning-disconnect-a-programmatic-mcp-client-before-stopping-its-genserver"></a>
+**Disconnect a programmatic MCP client before stopping its GenServer.**
+With ExMCP 1.3.0, Client.stop/1 calls GenServer.stop without closing the
+stdio transport. Repeated short-lived clients left SSH signing proxies running
+on a fresh factory, despite completed requests. Client.disconnect/1 then stop/1
+closed the transport and reaped the extra guest process in a live check. Reuse
+connections and verify child quiescence during teardown; do not infer it from a
+successful stop return. The signer itself exited normally on stdin EOF (2026-09-07).

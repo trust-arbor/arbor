@@ -453,3 +453,16 @@ Compute the true merge base, enumerate the complete merge-base-to-tip commit
 and path manifest, and prove overlap and non-overlap provenance before replay.
 Never treat the final correction's base-to-tip range as the full inherited
 candidate (found 2026-08-23 while reconstructing the contract-change stack).
+
+<!-- applied-learning: preserve-resumable-evidence-outside-os-temporary-roots -->
+<a id="applied-learning-preserve-resumable-evidence-outside-os-temporary-roots"></a>
+**Preserve resumable evidence outside OS temporary roots.** Use a gitignored
+project-local `tmp/` or an explicit persistent artifact root for long-lived candidate
+worktrees, source bundles, manifests, and replay notes. An empty surviving `/tmp`
+directory is not evidence. Preserve committed candidates with a verified Git bundle
+and exact source identities; record missing uncommitted files/logs honestly. Copy
+only scoped diagnostics into a private directory, checksum the copies, and leave
+other agents' originals untouched. Quote Git-owned ref globs in shell commands so
+zsh does not expand or reject them before `git bundle` runs. Reboot persistence is
+not an off-device backup or validation acceptance (found 2026-09-07 during G5E
+preservation).

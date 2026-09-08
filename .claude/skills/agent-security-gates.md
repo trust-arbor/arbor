@@ -858,6 +858,19 @@ of adding sync provenance to it, which would also make observers count both the 
 and its audit reflection as sync events (found 2026-08-21 during the approval CLI Security-suite
 verification).
 
+<!-- applied-learning: preserve-the-proof-subject-when-canonicalizing-an-owner -->
+<a id="applied-learning-preserve-the-proof-subject-when-canonicalizing-an-owner"></a>
+**Preserve the proof subject when canonicalizing an owner.** When linked identities
+should share conversation state, verify the actual signed/session-token identity
+and derive the canonical owner through a trusted, fail-closed boundary. Do not
+rewrite the caller ID before an API that verifies exact proof equality, or relax
+that equality to make aliases work. Trace receipt, sender, owner, grant and consent
+bindings together; successful no-alias resolution differs from unavailable alias
+state. A convenience resolver that returns its input on errors cannot establish
+authoritative canonicalization. Keep the original subject for audit/revocation,
+and test linked identities, unrelated proofs, resolver outages and recovery before
+migrating histories (learned 2026-09-07 reviewing the entry-point convergence plan).
+
 <!-- applied-learning: a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action -->
 <a id="applied-learning-a-tool-s-capability-uri-must-reflect-its-maximum-effect-not-its-default-action"></a>
 **A tool's capability URI must reflect its maximum effect, not its default action.** `memory_review_queue` defaults to `action: "list"` but also accepts `approve`/`reject`/`approve_all`, and the approve path calls `Arbor.Memory.accept_proposal/2`, which CREATES a knowledge node. It was mapped to `arbor://memory/read`, so a read-only capability could mutate the graph through it (found 2026-08-25 auditing the memory tool surface). Any action-dispatching tool — one with an `action:`/`mode:`/`op:` parameter — has to be gated on the most powerful branch it can reach, because the capability is checked once at the tool boundary and never re-checked per branch. Two corollaries: when auditing a URI map, read each action's BRANCHES rather than its name or description; and this is a standing argument against merging read and write tools to slim a tool surface, since the merged tool must then carry the write capability for everyone who only wanted to list.

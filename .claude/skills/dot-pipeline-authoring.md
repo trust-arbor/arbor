@@ -386,3 +386,17 @@ exercise the real request/contract constructor for typed action inputs (found 20
 <!-- applied-learning: validate-trusted-compiler-output-at-the-final-execution-boundary -->
 <a id="applied-learning-validate-trusted-compiler-output-at-the-final-execution-boundary"></a>
 **Validate trusted compiler output at the final execution boundary with the same canonical validator used by preflight.** A compiler-facing readiness check can reject tampered plan bindings while an executor's older parallel validator still accepts extra or newly versioned fields. Reuse the canonical compilation validator immediately before archiving/execution; keep focused compatibility checks only for better diagnostics, and add a public-boundary security regression for every new provenance binding (found 2026-07-22 when Coding Plan v2 bound the work-packet digest in compilation but the executor did not verify it).
+
+<!-- applied-learning: reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary -->
+<a id="applied-learning-reuse-the-engine-for-behavior-extensions-not-as-their-own-trust-boundary"></a>
+**Reuse the Engine for behavior extensions, not as their own trust boundary.**
+Prefer admitted DOT plus declarative assets for composed behavior, direct gated
+actions for atomic contributions, and contained providers only for genuinely new
+executable primitives. Reuse composition/checkpoints/ownership with a narrow
+content/version admission boundary; mutable GraphRegistry discovery is not approval,
+and plugin ingress must use caller-bound execution rather than legacy trusted
+`run/2`. The graph cannot grant itself authority or make sensitive-data consent and
+cleanup optional by omitting their nodes. Pin transitive content and active-run
+versions; keep effect gates and emergency recovery host-owned. Checkpoints do not
+provide universal transactions, and packaging behavior does not itself shrink the
+TCB (learned 2026-09-07 while refining the plugin plan around existing DOT programs).

@@ -183,6 +183,10 @@ veto seat is omitted or duplicated. Out-of-protocol design-review verdicts
 including `:abstain` stay admitted rework and are never reclassified as provider
 failure (found 2026-08-31).
 
+<!-- applied-learning: corroborated-council-findings-still-need-independent-factual-verification -->
+<a id="applied-learning-corroborated-council-findings-still-need-independent-factual-verification"></a>
+**Corroborated council findings still need independent factual verification.** Multiple reviewers can share the same false premise. Before treating a claimed compiler or protocol failure as established, reproduce the smallest case with the pinned toolchain or authoritative implementation. On 2026-09-07, Kimi and GLM both called `case` an illegal Elixir variable, but `Code.eval_string("case = 1\ncase")` returned `{1, [case: 1]}` on Elixir 1.19.5. Keep genuine findings active, send the counterexample to the worker, and distinguish a harmless readability rename from a demonstrated compilation fix.
+
 <!-- applied-learning: design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate -->
 <a id="applied-learning-design-reviewers-need-every-authoritative-plan-field-they-are-expected-to-validate"></a>
 **Design reviewers need every authoritative plan field they are expected to validate.**
@@ -193,3 +197,7 @@ fingerprint into worker prompts, council input, compilation verification, and
 semantic preflight; omit execution authority and redundant large payloads (found
 2026-09-02 after a council approved a 5,400,000 ms design against a 28,800,000 ms
 frozen plan).
+
+<!-- applied-learning: reviewer-evidence-must-not-truncate-below-admitted-ledger-size -->
+<a id="applied-learning-reviewer-evidence-must-not-truncate-below-admitted-ledger-size"></a>
+**Reviewer evidence must not truncate below admitted ledger size.** If recheck requires every owned active finding, the prompt must expose every admitted id, including minor/nit findings. J0's valid 42,651-byte ledger became a 32,768-byte escaped preview, causing six incomplete-owner abstentions on 2026-09-07. Match admission and rendering bounds, preserve strict update validation, and project bounded known failure tags without report payloads. Regression coverage should construct a valid ledger through its real core, render both reviewer prompts, and close the next cycle from model-visible evidence; prove the parent fails on truncation, not a newly added helper's missing function.
