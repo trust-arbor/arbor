@@ -297,7 +297,8 @@ defmodule Arbor.Security.Escalation do
       provenance: Map.get(context, :provenance),
       gate: Map.get(context, :gate),
       reason: Map.get(context, :reason),
-      risk_hints: Map.get(context, :risk_hints)
+      risk_hints: Map.get(context, :risk_hints),
+      trust: Map.get(context, :trust)
     }
     |> compact_map()
   end
@@ -340,6 +341,19 @@ defmodule Arbor.Security.Escalation do
     |> Map.put_new(:capability_id, capability.id)
     |> Map.put_new(:gate, :requires_approval)
     |> Map.put_new(:reason, :capability_requires_approval)
+    |> put_trust_context(opts)
+  end
+
+  # The trust-side explanation (matched rule, ceiling, capability risk
+  # profile) is attached by the policy layer via `:trust_context`. It is
+  # applied AFTER the caller-supplied `:approval_context` merge so a caller
+  # cannot relabel an irreversible action as read-only in the human prompt.
+  # Absent context is simply omitted.
+  defp put_trust_context(context, opts) do
+    case opt(opts, :trust_context) do
+      trust when is_map(trust) and map_size(trust) > 0 -> Map.put(context, :trust, trust)
+      _ -> Map.delete(context, :trust)
+    end
   end
 
   defp sanitize_context(context) do

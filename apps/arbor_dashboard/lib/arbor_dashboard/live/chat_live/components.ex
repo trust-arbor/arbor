@@ -408,11 +408,39 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
           <div style="margin-bottom: 0.2rem; font-weight: 500; color: var(--aw-text, #e0e0e0); word-break: break-all;">
             {approval_resource_uri(approval)}
           </div>
+          <%!-- Target: the concrete file / command / destination, when it adds
+                information beyond the URI. --%>
+          <div
+            :if={H.approval_target(approval)}
+            style="margin-bottom: 0.2rem; font-family: monospace; font-size: 0.85em; color: var(--aw-text, #e0e0e0); word-break: break-all;"
+          >
+            → {H.approval_target(approval)}
+          </div>
+          <%!-- Risk: reversibility, blast radius, effect class — from the
+                capability profile via Arbor.Trust.ApprovalContext. --%>
+          <div
+            :if={H.approval_risk_badges(approval) != []}
+            style="display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.25rem;"
+          >
+            <span
+              :for={badge <- H.approval_risk_badges(approval)}
+              style={"padding: 0.05rem 0.4rem; border-radius: 8px; font-size: 0.75em; font-weight: 600; " <> H.badge_style(badge.tone)}
+            >
+              {badge.label}
+            </span>
+          </div>
+          <%!-- Why: which trust rule / ceiling / constraint produced the ask. --%>
+          <div
+            data-role="approval-why"
+            style="margin-bottom: 0.3rem; font-size: 0.85em; color: var(--aw-text-muted, #aaa); font-style: italic;"
+          >
+            {H.approval_why(approval)}
+          </div>
           <div style="display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.3rem; font-size: 0.85em; color: var(--aw-text-muted, #888);">
             <span>Agent: {String.slice(to_string(approval.proposer), 0..11)}...</span>
             <span style="margin-left: auto;">{H.format_time(approval.created_at)}</span>
           </div>
-          <div style="display: flex; gap: 0.3rem;">
+          <div style="display: flex; gap: 0.3rem; align-items: center; flex-wrap: wrap;">
             <button
               phx-click="approve-tool"
               phx-value-id={approval.id}
@@ -422,7 +450,13 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
             >
               Approve
             </button>
+            <%!-- Standing consent is only offered for actions that can be
+                  undone. One-way actions never graduate to auto (the trust
+                  layer's graduation_threshold is :never for :irreversible), so
+                  offering "Always Allow" here would be a promise the system
+                  will not keep. --%>
             <button
+              :if={!H.approval_irreversible?(approval)}
               phx-click="always-allow-tool"
               phx-value-id={approval.id}
               phx-value-agent={approval.proposer}
@@ -431,6 +465,14 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
             >
               Always Allow
             </button>
+            <span
+              :if={H.approval_irreversible?(approval)}
+              data-role="approval-one-way-note"
+              style="font-size: 0.75em; color: var(--aw-text-muted, #888);"
+              title="Irreversible actions are confirmed every time; they never earn standing autonomy."
+            >
+              one-way: confirmed each time
+            </span>
             <button
               phx-click="deny-tool"
               phx-value-id={approval.id}

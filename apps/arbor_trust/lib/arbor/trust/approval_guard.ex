@@ -8,6 +8,7 @@ defmodule Arbor.Trust.ApprovalGuard do
   """
 
   alias Arbor.Security.Escalation
+  alias Arbor.Trust.ApprovalContext
   alias Arbor.Trust.Config
 
   require Logger
@@ -47,7 +48,13 @@ defmodule Arbor.Trust.ApprovalGuard do
               capability,
               principal_id,
               resource_uri,
-              escalation_opts(opts, :capability_constraint, :capability_requires_approval)
+              escalation_opts(
+                opts,
+                :capability_constraint,
+                :capability_requires_approval,
+                principal_id,
+                resource_uri
+              )
             )
 
           true ->
@@ -74,7 +81,13 @@ defmodule Arbor.Trust.ApprovalGuard do
               capability,
               principal_id,
               resource_uri,
-              escalation_opts(opts, :capability_constraint, :capability_requires_approval)
+              escalation_opts(
+                opts,
+                :capability_constraint,
+                :capability_requires_approval,
+                principal_id,
+                resource_uri
+              )
             )
 
           pre_approved_bypasses_ceiling?(capability, resource_uri) ->
@@ -86,7 +99,7 @@ defmodule Arbor.Trust.ApprovalGuard do
             |> Escalation.maybe_escalate(
               principal_id,
               resource_uri,
-              escalation_opts(opts, :trust_policy, :policy_gated)
+              escalation_opts(opts, :trust_policy, :policy_gated, principal_id, resource_uri)
             )
         end
 
@@ -144,10 +157,16 @@ defmodule Arbor.Trust.ApprovalGuard do
     %{capability | constraints: Map.put(capability.constraints || %{}, :requires_approval, true)}
   end
 
-  defp escalation_opts(opts, gate, reason) do
+  # Attach the trust-side explanation (matched rule, ceiling, capability
+  # risk profile) so the human prompt can say *why* it is asking and *what is
+  # at stake*. Display-only; the decision above was already made.
+  defp escalation_opts(opts, gate, reason, principal_id, resource_uri) do
     opts
     |> Keyword.put_new(:gate, gate)
     |> Keyword.put_new(:reason, reason)
+    |> Keyword.put_new_lazy(:trust_context, fn ->
+      ApprovalContext.build(principal_id, resource_uri, opts)
+    end)
   end
 
   defp approval_required?(capability) do

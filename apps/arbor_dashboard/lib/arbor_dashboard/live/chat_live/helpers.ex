@@ -6,6 +6,224 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
   for display purposes.
   """
 
+  # ── Approval cards ───────────────────────────────────────────────────
+  #
+  # The approval card renders the six trust primitives a human needs before
+  # releasing an agent action (permission, provenance, confirmation, receipt,
+  # reversibility, escalation). These helpers read the `metadata.trust` map
+  # attached by `Arbor.Trust.ApprovalContext` and the `gate`/`reason` pair
+  # attached by `Arbor.Security.Escalation`. Keys may be atoms or strings
+  # (interaction metadata can round-trip through JSON), so every lookup is
+  # tolerant. Everything here is display-only and pure.
+
+  @doc """
+  One sentence explaining why the approval is being asked for.
+
+  Prefers the trust explanation (which rule matched and what ceiling applied);
+  falls back to the escalation gate/reason; falls back to a generic line.
+  """
+  @spec approval_why(map()) :: String.t()
+  def approval_why(approval) do
+    metadata = approval_metadata(approval)
+    trust = mget(metadata, :trust) || %{}
+    gate = mget(metadata, :gate)
+    reason = mget(metadata, :reason)
+
+    cond do
+      is_map(trust) and map_size(trust) > 0 -> trust_why(trust, gate)
+      not is_nil(gate) or not is_nil(reason) -> gate_why(gate, reason)
+      true -> "Requires your approval"
+    end
+  end
+
+  @doc """
+  Risk badges for the approval card: reversibility first, then blast radius,
+  then effect class. Each badge is `%{label: String.t(), tone: atom()}` where
+  `tone` is one of `:danger`, `:warn`, `:ok`, `:muted`.
+  """
+  @spec approval_risk_badges(map()) :: [%{label: String.t(), tone: atom()}]
+  def approval_risk_badges(approval) do
+    profile = approval_profile(approval)
+
+    [
+      reversibility_badge(mget(profile, :reversibility)),
+      blast_radius_badge(mget(profile, :blast_radius)),
+      effect_class_badge(mget(profile, :effect_class))
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  @doc """
+  Whether the requested action is one-way. Irreversible actions never earn
+  standing autonomy (`graduation_threshold` is `:never` for them), so the card
+  hides "Always Allow" and says so.
+  """
+  @spec approval_irreversible?(map()) :: boolean()
+  def approval_irreversible?(approval) do
+    mget(approval_profile(approval), :reversibility) in [:irreversible, "irreversible"]
+  end
+
+  @doc """
+  Whether earned autonomy could ever make this action automatic. `nil` when
+  no profile is attached (unknown), `false` when the threshold is `:never`.
+  """
+  @spec approval_graduation_possible?(map()) :: boolean() | nil
+  def approval_graduation_possible?(approval) do
+    case mget(approval_profile(approval), :graduation_threshold) do
+      nil -> nil
+      :never -> false
+      "never" -> false
+      _ -> true
+    end
+  end
+
+  @doc "The concrete target (file path, command, destination) when it differs from the URI."
+  @spec approval_target(map()) :: String.t() | nil
+  def approval_target(approval) do
+    metadata = approval_metadata(approval)
+    target = mget(metadata, :target)
+    uri = mget(approval, :resource_uri) || mget(metadata, :resource_uri)
+
+    cond do
+      is_nil(target) -> nil
+      to_string(target) == to_string(uri) -> nil
+      true -> to_string(target)
+    end
+  end
+
+  @doc "Inline style for a badge tone."
+  @spec badge_style(atom()) :: String.t()
+  def badge_style(:danger),
+    do:
+      "background: rgba(239, 68, 68, 0.25); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.6);"
+
+  def badge_style(:warn),
+    do:
+      "background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.5);"
+
+  def badge_style(:ok),
+    do:
+      "background: rgba(34, 197, 94, 0.15); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.4);"
+
+  def badge_style(_),
+    do:
+      "background: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4);"
+
+  defp trust_why(trust, gate) do
+    effective = mget(trust, :effective_mode)
+    rule = mget(trust, :matched_rule)
+    ceiling = mget(trust, :ceiling_match)
+    baseline = mget(trust, :baseline)
+
+    source =
+      cond do
+        gate in [:capability_constraint, "capability_constraint"] ->
+          "the granted capability requires approval per use"
+
+        is_map(rule) ->
+          "your trust rule for #{mget(rule, :prefix)} is #{mget(rule, :mode)}"
+
+        not is_nil(baseline) ->
+          "no trust rule matches, so the #{baseline} baseline applies"
+
+        true ->
+          "the trust policy resolved to #{effective || :ask}"
+      end
+
+    ceiling_note =
+      case ceiling do
+        %{} = c when is_map(c) ->
+          mode = mget(c, :mode)
+
+          if mode in [:ask, :block, "ask", "block"],
+            do: " (security ceiling #{mget(c, :prefix)}: #{mode})",
+            else: ""
+
+        _ ->
+          ""
+      end
+
+    "Asking because " <> source <> ceiling_note <> "."
+  end
+
+  defp gate_why(gate, reason) do
+    case {gate, reason} do
+      {g, _} when g in [:capability_constraint, "capability_constraint"] ->
+        "Asking because the granted capability requires approval per use."
+
+      {g, _} when g in [:trust_policy, "trust_policy"] ->
+        "Asking because the agent's trust policy gates this action."
+
+      {_, r} when not is_nil(r) ->
+        "Asking because: #{humanize_atom(r)}."
+
+      _ ->
+        "Requires your approval."
+    end
+  end
+
+  defp reversibility_badge(value) when value in [:irreversible, "irreversible"],
+    do: %{label: "one-way", tone: :danger}
+
+  defp reversibility_badge(value) when value in [:reversible, "reversible"],
+    do: %{label: "reversible", tone: :ok}
+
+  defp reversibility_badge(value) when value in [:read_only, "read_only"],
+    do: %{label: "read-only", tone: :ok}
+
+  defp reversibility_badge(_), do: nil
+
+  defp blast_radius_badge(value) when value in [:critical, "critical"],
+    do: %{label: "blast: critical", tone: :danger}
+
+  defp blast_radius_badge(value) when value in [:high, "high"],
+    do: %{label: "blast: high", tone: :warn}
+
+  defp blast_radius_badge(value) when value in [:medium, "medium"],
+    do: %{label: "blast: medium", tone: :muted}
+
+  defp blast_radius_badge(value) when value in [:low, "low"],
+    do: %{label: "blast: low", tone: :muted}
+
+  defp blast_radius_badge(_), do: nil
+
+  defp effect_class_badge(nil), do: nil
+  defp effect_class_badge(value), do: %{label: humanize_atom(value), tone: :muted}
+
+  defp approval_profile(approval) do
+    approval
+    |> approval_metadata()
+    |> mget(:trust)
+    |> case do
+      trust when is_map(trust) -> mget(trust, :profile) || %{}
+      _ -> %{}
+    end
+  end
+
+  defp approval_metadata(approval) when is_map(approval) do
+    case mget(approval, :metadata) do
+      metadata when is_map(metadata) -> metadata
+      _ -> %{}
+    end
+  end
+
+  defp approval_metadata(_), do: %{}
+
+  defp mget(map, key) when is_map(map) and is_atom(key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
+
+  defp mget(_, _), do: nil
+
+  defp humanize_atom(value) do
+    value
+    |> to_string()
+    |> String.replace("_", " ")
+  end
+
   # ── Message & Role Styling ─────────────────────────────────────────
 
   def message_style(role, sender_type, group_mode)

@@ -25,6 +25,40 @@ defmodule Arbor.Trust.ApprovalGuardTest do
     def confirmation_mode(_principal, _uri), do: exit(:trust_down)
   end
 
+  # Gated policy that can also explain itself, like the real Arbor.Trust.Policy.
+  defmodule ExplainingGatedPolicy do
+    def confirmation_mode(_principal, _uri), do: :gated
+
+    def explain(_principal, uri, _opts) do
+      %{
+        resource_uri: uri,
+        user_mode: :ask,
+        user_match: {"arbor://fs/write", :ask},
+        baseline: :ask,
+        security_ceiling: :ask,
+        ceiling_match: {"arbor://fs/write", :ask},
+        effective_mode: :ask
+      }
+    end
+  end
+
+  # Minimal InteractionRouter so the escalation lands somewhere inspectable.
+  defmodule CapturingRouter do
+    @behaviour Arbor.Security.Contracts.InteractionRouter
+
+    @impl true
+    def request(attrs, _opts \\ []) do
+      request_id = "irq_" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+      send(self(), {:escalated, request_id, attrs})
+      {:ok, request_id}
+    end
+  end
+
+  defmodule MockConsensus do
+    def submit(%{} = _proposal, _opts \\ []), do: {:ok, "proposal_test"}
+    def healthy?, do: true
+  end
+
   setup do
     prev_trust_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
     prev_security_guard = Application.get_env(:arbor_security, :approval_guard_enabled)
@@ -162,6 +196,47 @@ defmodule Arbor.Trust.ApprovalGuardTest do
                )
     end
 
+    test "gated escalation carries the trust explanation and capability risk profile" do
+      Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, ExplainingGatedPolicy)
+      enable_capturing_router()
+
+      assert {:ok, :pending_approval, request_id} =
+               ApprovalGuard.check(
+                 make_capability("arbor://fs/write/report.md"),
+                 "agent_test",
+                 "arbor://fs/write/report.md",
+                 file_path: "/workspace/report.md"
+               )
+
+      assert_received {:escalated, ^request_id, attrs}
+      metadata = attrs.metadata
+
+      assert metadata.gate == :trust_policy
+      assert metadata.reason == :policy_gated
+      assert metadata.trust.effective_mode == :ask
+      assert metadata.trust.matched_rule == %{prefix: "arbor://fs/write", mode: :ask}
+      assert metadata.trust.profile.reversibility == :reversible
+      assert metadata.trust.profile.blast_radius == :high
+      assert metadata.trust.profile.uri_prefix == "arbor://fs/write"
+    end
+
+    test "capability-constraint escalation also carries the trust context" do
+      Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+      enable_capturing_router()
+
+      cap = make_capability("arbor://shell/exec/rm", %{requires_approval: true})
+
+      assert {:ok, :pending_approval, request_id} =
+               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/rm")
+
+      assert_received {:escalated, ^request_id, attrs}
+      assert attrs.metadata.gate == :capability_constraint
+      assert attrs.metadata.trust.profile.reversibility == :irreversible
+      assert attrs.metadata.trust.profile.graduation_threshold == :never
+    end
+
     test "deny policy blocks" do
       Application.put_env(:arbor_trust, :approval_guard_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, DenyPolicy)
@@ -205,6 +280,21 @@ defmodule Arbor.Trust.ApprovalGuardTest do
       constraints: constraints,
       metadata: %{}
     }
+  end
+
+  # Route escalations to CapturingRouter for the duration of one test.
+  defp enable_capturing_router do
+    keys = [:consensus_module, :use_interaction_router_for_approval, :interaction_router]
+    previous = Map.new(keys, &{&1, Application.get_env(:arbor_security, &1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn {key, value} -> restore(:arbor_security, key, value) end)
+    end)
+
+    Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+    Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+    Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_security, :interaction_router, CapturingRouter)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

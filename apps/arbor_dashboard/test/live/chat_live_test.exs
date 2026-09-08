@@ -348,6 +348,105 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
 
     @tag :fast
+    test "approval card says why it is asking, what is at stake, and withholds Always Allow for one-way actions",
+         %{conn: conn} do
+      Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
+        %{
+          id: "irq_one_way",
+          source: :interaction,
+          agent_id: "agent_test_one_way",
+          principal_id: "agent_test_one_way",
+          resource_uri: "arbor://shell/exec/rm",
+          action: :approval,
+          description: "Authorization request for arbor://shell/exec/rm",
+          metadata: %{
+            gate: :trust_policy,
+            reason: :policy_gated,
+            target: "rm -rf build/",
+            trust: %{
+              effective_mode: :ask,
+              baseline: :ask,
+              matched_rule: %{prefix: "arbor://shell", mode: :ask},
+              ceiling_match: %{prefix: "arbor://shell", mode: :ask},
+              profile: %{
+                uri_prefix: "arbor://shell",
+                reversibility: :irreversible,
+                blast_radius: :critical,
+                effect_class: :process_spawn,
+                graduation_threshold: :never
+              }
+            }
+          },
+          created_at: DateTime.utc_now()
+        }
+      ])
+
+      {:ok, view, _html} = live(conn, "/chat")
+
+      {:ok, interaction} =
+        Interaction.new(%{
+          request_id: "irq_one_way",
+          kind: :approval,
+          agent_id: "agent_test_one_way",
+          user_id: "human_dashboard",
+          description: "Authorization request for arbor://shell/exec/rm",
+          resource_uri: "arbor://shell/exec/rm",
+          metadata: %{}
+        })
+
+      send(view.pid, {:dashboard_interaction, interaction})
+      html = render(view)
+
+      assert html =~ "Asking because your trust rule for arbor://shell is ask"
+      assert html =~ "security ceiling arbor://shell: ask"
+      assert html =~ "rm -rf build/"
+      assert html =~ "one-way"
+      assert html =~ "blast: critical"
+      assert html =~ "one-way: confirmed each time"
+      refute html =~ "Always Allow"
+    end
+
+    @tag :fast
+    test "approval card offers Always Allow for reversible actions", %{conn: conn} do
+      Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
+        %{
+          id: "irq_reversible",
+          source: :interaction,
+          agent_id: "agent_test_reversible",
+          principal_id: "agent_test_reversible",
+          resource_uri: "arbor://fs/write/report.md",
+          action: :approval,
+          description: "Authorization request for arbor://fs/write/report.md",
+          metadata: %{
+            gate: :trust_policy,
+            trust: %{profile: %{reversibility: :reversible, blast_radius: :high}}
+          },
+          created_at: DateTime.utc_now()
+        }
+      ])
+
+      {:ok, view, _html} = live(conn, "/chat")
+
+      {:ok, interaction} =
+        Interaction.new(%{
+          request_id: "irq_reversible",
+          kind: :approval,
+          agent_id: "agent_test_reversible",
+          user_id: "human_dashboard",
+          description: "Authorization request for arbor://fs/write/report.md",
+          resource_uri: "arbor://fs/write/report.md",
+          metadata: %{}
+        })
+
+      send(view.pid, {:dashboard_interaction, interaction})
+      html = render(view)
+
+      assert html =~ "reversible"
+      assert html =~ "Always Allow"
+      refute html =~ "one-way: confirmed each time"
+    end
+
+    @tag :fast
     test "approve-tool resolves through shared orchestration facade",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/chat")

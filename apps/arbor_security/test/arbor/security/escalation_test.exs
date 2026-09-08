@@ -239,6 +239,76 @@ defmodule Arbor.Security.EscalationTest do
       assert interaction.description =~ "/workspace/report.md"
     end
 
+    test "carries the policy layer's trust context into interaction metadata", %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      trust = %{
+        effective_mode: :ask,
+        matched_rule: %{prefix: "arbor://fs/write", mode: :ask},
+        profile: %{
+          uri_prefix: "arbor://fs/write",
+          reversibility: :reversible,
+          blast_radius: :high
+        }
+      }
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive",
+                 gate: :trust_policy,
+                 reason: :policy_gated,
+                 trust_context: trust
+               )
+
+      assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
+      assert interaction.metadata.trust == trust
+      assert interaction.metadata.approval_context.trust == trust
+    end
+
+    test "omits :trust when no trust context was supplied", %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
+      refute Map.has_key?(interaction.metadata, :trust)
+      refute Map.has_key?(interaction.metadata.approval_context, :trust)
+    end
+
+    test "security regression: a caller-supplied approval_context cannot relabel the trust context",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      real = %{profile: %{reversibility: :irreversible, blast_radius: :critical}}
+      forged = %{profile: %{reversibility: :read_only, blast_radius: :low}}
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://shell/exec/rm",
+                 trust_context: real,
+                 approval_context: %{trust: forged}
+               )
+
+      assert {:ok, interaction} = FakeInteractionRouter.get(request_id)
+      assert interaction.metadata.trust == real
+      assert interaction.metadata.approval_context.trust == real
+
+      # And with no policy-side context at all, a forged one is dropped, not kept.
+      assert {:ok, :pending_approval, request_id2} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://shell/exec/rm",
+                 approval_context: %{trust: forged}
+               )
+
+      assert {:ok, interaction2} = FakeInteractionRouter.get(request_id2)
+      refute Map.has_key?(interaction2.metadata, :trust)
+      refute Map.has_key?(interaction2.metadata.approval_context, :trust)
+    end
+
     test "with the feature flag off, the consensus path runs (backward compat)",
          %{capability: cap} do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
