@@ -2751,7 +2751,7 @@
       "anchor": "applied-learning-an-absolute-deadline-needs-an-owner-stamped-completion-time",
       "source_date": "2026-07-11",
       "source_incident": "found 2026-07-11 suspending LLM/eval callers across their deadlines).",
-      "content_sha256": "825ca205de0112e5bb27d006a0b31533ffd1121b4c46ad76de552bf5bf8a4fe7",
+      "content_sha256": "ec958c3c4c5cbf77639458e96e123e8a5a53f1a34c5cac9ce3d1f7729dd8914c",
       "always_loaded": false
     },
     {
@@ -2859,7 +2859,7 @@
       "anchor": "applied-learning-make-multi-agent-rework-monotonic-with-a-frozen-finding-ledger",
       "source_date": "2026-07-12",
       "source_incident": "adopted 2026-07-12 after Phase 6 review rounds showed high rejection counts despite substantial accepted progress; ACP continuity corrected 2026-07-12; design constraint retention reinforced 2026-08-02 during VP-04).",
-      "content_sha256": "e99595a5f2426c7801d2137057253ce96b937e3d5388516701294a1f1bde3f4c",
+      "content_sha256": "cf1619b7a2f770b232bca9d31eef7711223c1819fe987fea6cd16ea348fe3e1e",
       "always_loaded": false
     },
     {

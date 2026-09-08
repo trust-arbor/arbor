@@ -129,6 +129,10 @@ bound startup itself: `Task.Supervisor.async_nolink` can block on a suspended
 supervisor before a later `Task.yield` timer exists (reinforced 2026-09-08 in
 SU-3A; private supervisor probe blocked beyond 6,001 ms, and a local receive
 probe selected its queued message despite `after 0`).
+Deadline regression tests must measure from the tested phase's observed start,
+not an earlier graph dispatch. Otherwise graph latency can exhaust the test's
+clock before persistence begins and make a timely result look late (SU-3A
+owner qualification, 2026-09-08).
 
 <!-- applied-learning: caller-timeout-does-not-cancel-a-queued-owner-mutation -->
 <a id="applied-learning-caller-timeout-does-not-cancel-a-queued-owner-mutation"></a>
