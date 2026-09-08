@@ -287,7 +287,7 @@ defmodule Arbor.Shell.TrustedPathTest do
                  TrustedPath.pin_operator_owned_regular_file(file)
 
         assert identity.pin_family == :operator_owned
-        assert identity.uid != 0
+        assert identity.uid == File.stat!(file).uid
         assert identity.sha256 =~ ~r/\A[0-9a-f]{64}\z/
         assert TrustedPath.verify_pinned(identity) == :ok
       after
@@ -383,6 +383,78 @@ defmodule Arbor.Shell.TrustedPathTest do
         File.rm_rf!(dir)
       end
     end
+
+    test "security regression: rejects a non-sticky 0775 ancestor" do
+      {ancestor, _dir, file} = operator_nested_fixture("ancestor-775", 0o775)
+
+      try do
+        assert_non_sticky_writable!(ancestor)
+        assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        File.rm_rf!(ancestor)
+      end
+    end
+
+    test "security regression: rejects a non-sticky 0777 ancestor" do
+      {ancestor, _dir, file} = operator_nested_fixture("ancestor-777", 0o777)
+
+      try do
+        assert_non_sticky_writable!(ancestor)
+        assert {:error, :untrusted_path} = TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        File.rm_rf!(ancestor)
+      end
+    end
+
+    test "security regression: admits 0700 and 0755 ancestry including sticky-root tmp" do
+      {ancestor, _dir, file} = operator_nested_fixture("ancestor-safe", 0o700)
+
+      try do
+        assert_sticky_root_tmp_in_ancestry!(file)
+        assert {:ok, %Identity{}} = TrustedPath.pin_operator_owned_regular_file(file)
+
+        File.chmod!(ancestor, 0o755)
+        assert Bitwise.band(File.stat!(ancestor).mode, 0o022) == 0
+        assert {:ok, %Identity{}} = TrustedPath.pin_operator_owned_regular_file(file)
+      after
+        File.rm_rf!(ancestor)
+      end
+    end
+
+    test "security regression: sticky exception is limited to root-owned ancestors" do
+      {ancestor, _dir, file} = operator_nested_fixture("ancestor-sticky", 0o1777)
+
+      try do
+        {:ok, %File.Stat{uid: uid, mode: mode}} = File.stat(ancestor, time: :posix)
+        assert Bitwise.band(mode, 0o1000) != 0
+        assert Bitwise.band(mode, 0o022) != 0
+
+        result = TrustedPath.pin_operator_owned_regular_file(file)
+
+        if uid == 0 do
+          assert {:ok, %Identity{pin_family: :operator_owned}} = result
+        else
+          assert {:error, :untrusted_path} = result
+        end
+      after
+        File.rm_rf!(ancestor)
+      end
+    end
+
+    test "security regression: post-pin writable non-sticky ancestor fails verify_pinned" do
+      {ancestor, _dir, file} = operator_nested_fixture("ancestor-drift", 0o700)
+
+      try do
+        assert {:ok, identity} = TrustedPath.pin_operator_owned_regular_file(file)
+        assert :ok = TrustedPath.verify_pinned(identity)
+
+        File.chmod!(ancestor, 0o775)
+        assert_non_sticky_writable!(ancestor)
+        assert {:error, :untrusted_path} = TrustedPath.verify_pinned(identity)
+      after
+        File.rm_rf!(ancestor)
+      end
+    end
   end
 
   defp operator_fixture(tag) do
@@ -396,5 +468,48 @@ defmodule Arbor.Shell.TrustedPathTest do
     File.chmod!(file, 0o400)
     {:ok, canonical_file} = TrustedPath.canonicalize_absolute(file)
     {dir, canonical_file}
+  end
+
+  defp operator_nested_fixture(tag, ancestor_mode) do
+    raw = tmp_root(tag)
+    File.mkdir_p!(raw)
+    {:ok, ancestor} = TrustedPath.canonicalize_absolute(raw)
+    File.mkdir_p!(ancestor)
+    File.chmod!(ancestor, 0o700)
+
+    dir = Path.join(ancestor, "home")
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+
+    file = Path.join(dir, "validation-runtime.json")
+    File.write!(file, "{\"runtime\":\"oci\"}\n")
+    File.chmod!(file, 0o400)
+    File.chmod!(ancestor, ancestor_mode)
+
+    # File.chmod/2 strips the sticky bit on the pinned OTP runtime.
+    if Bitwise.band(ancestor_mode, 0o1000) != 0 do
+      assert {_output, 0} = System.cmd("chmod", ["+t", ancestor], stderr_to_stdout: true)
+    end
+
+    {:ok, canonical_file} = TrustedPath.canonicalize_absolute(file)
+    {ancestor, dir, canonical_file}
+  end
+
+  defp assert_non_sticky_writable!(path) do
+    {:ok, %File.Stat{mode: mode}} = File.stat(path, time: :posix)
+    assert Bitwise.band(mode, 0o022) != 0
+    assert Bitwise.band(mode, 0o1000) == 0
+  end
+
+  defp assert_sticky_root_tmp_in_ancestry!(path) do
+    {:ok, tmp} = TrustedPath.canonicalize_absolute(System.tmp_dir!())
+    {:ok, %File.Stat{} = stat} = File.stat(tmp, time: :posix)
+    tmp_parts = Path.split(tmp)
+    path_parts = Path.split(path)
+
+    if Enum.take(path_parts, length(tmp_parts)) == tmp_parts and
+         stat.uid == 0 and Bitwise.band(stat.mode, 0o022) != 0 do
+      assert Bitwise.band(stat.mode, 0o1000) != 0
+    end
   end
 end

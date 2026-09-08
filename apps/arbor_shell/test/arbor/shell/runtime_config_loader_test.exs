@@ -1,8 +1,10 @@
 defmodule Arbor.Shell.RuntimeConfigLoaderTest do
   use ExUnit.Case, async: false
 
+  alias Arbor.Shell
   alias Arbor.Shell.Config
   alias Arbor.Shell.RuntimeConfigLoader
+  alias Arbor.Shell.TrustedPath
   alias Arbor.Shell.TrustedPath.Identity
 
   defmodule TestTrustedPath do
@@ -331,6 +333,96 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
              load_document(root, malformed)
   end
 
+  describe "security regression: operator ancestor write permissions" do
+    @describetag :fast
+    @describetag :security_regression
+
+    test "security regression: non-sticky 0775 ancestor is untrusted via public facade", %{
+      root: root
+    } do
+      # Under UID 0 the ancestor is root-owned, so this is the original
+      # operator_ancestor_ownership?/2 exemption. Under non-root it still
+      # exercises the existing euid ancestor write check.
+      path = operator_owned_runtime_config_fixture(root, 0o775)
+      assert_non_sticky_writable_ancestor!(root)
+
+      assert {:error, :config_file_untrusted} =
+               Shell.admit_operator_owned_runtime_config(path)
+    end
+
+    test "security regression: non-sticky 0777 ancestor is untrusted via public facade", %{
+      root: root
+    } do
+      path = operator_owned_runtime_config_fixture(root, 0o777)
+      assert_non_sticky_writable_ancestor!(root)
+
+      assert {:error, :config_file_untrusted} =
+               Shell.admit_operator_owned_runtime_config(path)
+    end
+
+    test "security regression: 0700/0755 ancestry and sticky-root tmp remain admitted", %{
+      root: root
+    } do
+      path = operator_owned_runtime_config_fixture(root, 0o700)
+      assert_sticky_root_tmp_in_ancestry!(path)
+
+      assert {:ok, %{kind: :oci}} = Shell.admit_operator_owned_runtime_config(path)
+
+      File.chmod!(root, 0o755)
+      assert Bitwise.band(File.stat!(root).mode, 0o022) == 0
+      assert {:ok, %{kind: :oci}} = Shell.admit_operator_owned_runtime_config(path)
+    end
+
+    test "security regression: sticky exception is limited to root-owned ancestors", %{
+      root: root
+    } do
+      path = operator_owned_runtime_config_fixture(root, 0o1777)
+      {:ok, %File.Stat{uid: uid, mode: mode}} = File.stat(root, time: :posix)
+      assert Bitwise.band(mode, 0o1000) != 0
+      assert Bitwise.band(mode, 0o022) != 0
+
+      result = Shell.admit_operator_owned_runtime_config(path)
+
+      if uid == 0 do
+        assert {:ok, %{kind: :oci}} = result
+      else
+        assert {:error, :config_file_untrusted} = result
+      end
+    end
+
+    test "security regression: post-pin writable non-sticky ancestor fails re-verification", %{
+      root: root
+    } do
+      path = operator_owned_runtime_config_fixture(root, 0o700)
+      assert {:ok, identity} = TrustedPath.pin_operator_owned_regular_file(path)
+      assert {:ok, %{kind: :oci}} = Shell.admit_operator_owned_runtime_config(path)
+
+      File.chmod!(root, 0o775)
+      assert_non_sticky_writable_ancestor!(root)
+      assert {:error, :untrusted_path} = TrustedPath.verify_pinned(identity)
+
+      assert {:error, :config_file_untrusted} =
+               Shell.admit_operator_owned_runtime_config(path)
+    end
+
+    test "security regression: group-writable target and symlink locator stay untrusted", %{
+      root: root
+    } do
+      path = operator_owned_runtime_config_fixture(root, 0o700)
+      File.chmod!(path, 0o620)
+
+      assert {:error, :config_file_untrusted} =
+               Shell.admit_operator_owned_runtime_config(path)
+
+      File.chmod!(path, 0o400)
+      link = Path.join(Path.dirname(path), "alias.json")
+      File.ln_s!(path, link)
+
+      assert {:error, :config_locator_noncanonical} =
+               Shell.admit_operator_owned_runtime_config(link)
+    end
+  end
+
   defp write_document(root, document) do
     path = Path.join(root, "config.json")
     File.write!(path, Jason.encode!(document))
@@ -373,5 +465,45 @@ defmodule Arbor.Shell.RuntimeConfigLoaderTest do
       },
       "unit_journal_path" => "/home/operator/.arbor/oci-unit-journal.json"
     }
+  end
+
+  # Nested 0700 home under a chmod'd ancestor, matching mix arbor.baseline.activate
+  # (arbor_home ancestor, owner-only dest dir, 0400 document).
+  defp operator_owned_runtime_config_fixture(root, ancestor_mode) do
+    home = Path.join(root, "home")
+    File.mkdir_p!(home)
+    File.chmod!(root, 0o700)
+    File.chmod!(home, 0o700)
+
+    path = Path.join(home, "validation-runtime.json")
+    File.write!(path, Jason.encode!(oci_document()))
+    File.chmod!(path, 0o400)
+    File.chmod!(root, ancestor_mode)
+
+    # File.chmod/2 strips the sticky bit on the pinned OTP runtime.
+    if Bitwise.band(ancestor_mode, 0o1000) != 0 do
+      assert {_output, 0} = System.cmd("chmod", ["+t", root], stderr_to_stdout: true)
+    end
+
+    {:ok, canonical} = TrustedPath.canonicalize_absolute(path)
+    canonical
+  end
+
+  defp assert_non_sticky_writable_ancestor!(path) do
+    {:ok, %File.Stat{mode: mode}} = File.stat(path, time: :posix)
+    assert Bitwise.band(mode, 0o022) != 0
+    assert Bitwise.band(mode, 0o1000) == 0
+  end
+
+  defp assert_sticky_root_tmp_in_ancestry!(path) do
+    {:ok, tmp} = TrustedPath.canonicalize_absolute(System.tmp_dir!())
+    {:ok, %File.Stat{} = stat} = File.stat(tmp, time: :posix)
+    tmp_parts = Path.split(tmp)
+    path_parts = Path.split(path)
+
+    if Enum.take(path_parts, length(tmp_parts)) == tmp_parts and
+         stat.uid == 0 and Bitwise.band(stat.mode, 0o022) != 0 do
+      assert Bitwise.band(stat.mode, 0o1000) != 0
+    end
   end
 end

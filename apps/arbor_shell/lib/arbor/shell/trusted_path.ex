@@ -552,10 +552,13 @@ defmodule Arbor.Shell.TrustedPath do
   defp others_mode_mask(:no_write), do: 0o022
 
   # Root-owned ancestors are the host path to the operator tree (`/`, `/Users`,
-  # sticky `/tmp`). Load-bearing immutability is euid ownership + no group/other
-  # write on the target and every euid-owned ancestor. Do not require the
-  # world-writable sticky bit off `/tmp`.
-  defp operator_ancestor_ownership?(%File.Stat{uid: 0, type: :directory}, _euid), do: true
+  # sticky `/tmp`). Group/other write is refused unless the directory is sticky.
+  # The sticky exception is limited to root-owned ancestors — not user-owned
+  # directories or target files. Load-bearing immutability is euid ownership
+  # plus no group/other write on the target and every euid-owned ancestor.
+  defp operator_ancestor_ownership?(%File.Stat{uid: 0, type: :directory, mode: mode}, _euid) do
+    (mode &&& 0o022) == 0 or (mode &&& 0o1000) != 0
+  end
 
   defp operator_ancestor_ownership?(%File.Stat{uid: uid, mode: mode}, euid)
        when uid == euid and is_integer(euid),
