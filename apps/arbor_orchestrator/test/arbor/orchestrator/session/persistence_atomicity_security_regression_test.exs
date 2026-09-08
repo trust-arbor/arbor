@@ -69,7 +69,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceAtomicitySecurityRegressionTest 
 
     now = ~U[2026-08-05 12:00:00.000000Z]
 
-    assert {:ok, _task} =
+    assert {:error, :turn_persistence_failed} =
              Persistence.persist_turn_entries(
                state,
                %{"role" => "user", "content" => "first row"},
@@ -83,28 +83,11 @@ defmodule Arbor.Orchestrator.Session.PersistenceAtomicitySecurityRegressionTest 
                assistant_completed_at: now
              )
 
-    await_persistence_effect()
     snapshot = Agent.get(probe, & &1)
 
     assert snapshot.persisted == []
     assert snapshot.batch_calls == 1
     assert snapshot.single_calls == 0
     assert snapshot.ensure_args == {"tenant-session-c6a", "agent_owner_c6a", []}
-  end
-
-  defp await_persistence_effect do
-    receive do
-      {:persistence_effect, :batch, "session-uuid", [user, assistant]} ->
-        assert user.entry_type == "user"
-        assert assistant.entry_type == "assistant"
-
-      {:persistence_effect, :single, 1} ->
-        await_persistence_effect()
-
-      {:persistence_effect, :single, 2} ->
-        :ok
-    after
-      1_000 -> flunk("timed out waiting for the persistence effect")
-    end
   end
 end

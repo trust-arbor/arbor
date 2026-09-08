@@ -6,8 +6,9 @@ defmodule Arbor.Orchestrator.TurnCommitCoreTest do
   Where the graphed spike lifts `apply_turn_result` into a DOT node, this proves
   the *functional-core / imperative-shell* alternative: the whole turn-commit
   DECISION is a single pure function (`SessionCore.commit_turn/1`), and the
-  GenServer shell (`Session.Builders.apply_turn_result/4`) just executes the side
-  effects (compactor, persist, telemetry) and adopts the result.
+  GenServer shell (`Session.Builders.apply_turn_result/4`) awaits acknowledged
+  persist then executes the remaining side effects (compactor, telemetry) and
+  adopts the result.
 
   No orchestrator opcodes added, no graph involved, no JSON serialization
   boundary (F7) — the typed `%AssistantMessage{}` lives in the commit as a real

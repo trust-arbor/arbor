@@ -288,7 +288,14 @@ defmodule Arbor.Orchestrator.Session.Builders do
           String.t() | map(),
           Engine.run_result(),
           keyword()
-        ) :: Arbor.Orchestrator.Session.t()
+        ) ::
+          {:ok, Arbor.Orchestrator.Session.t()}
+          | {:error,
+             :turn_persistence_unavailable
+             | :turn_persistence_malformed
+             | :turn_persistence_failed
+             | :turn_persistence_raised
+             | :turn_persistence_uncertain}
   def apply_turn_result(state, message, result, opts \\ [])
 
   def apply_turn_result(state, message, %{context: result_ctx} = result, opts) do
@@ -342,9 +349,24 @@ defmodule Arbor.Orchestrator.Session.Builders do
     }
 
     # ── Imperative shell ─────────────────────────────────────────────────────
-    # Side effects + state adoption, driven entirely by the pure commit.
+    # Persist first; adopt messages/WM/turn count and compact only after ack.
+    case Persistence.persist_turn_entries(
+           state,
+           commit.user_msg,
+           commit.assistant_message,
+           result,
+           user_sent_at: commit.user_sent_at,
+           assistant_completed_at: commit.assistant_completed_at
+         ) do
+      {:ok, 2} ->
+        {:ok, adopt_turn_commit(state, commit)}
 
-    # Compactor (may trigger compaction) + compaction telemetry.
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp adopt_turn_commit(state, commit) do
     old_compression_count =
       if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
 
@@ -359,17 +381,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
       maybe_record_compaction_telemetry(state.agent_id, utilization)
     end
 
-    # Persist to SessionStore — distinct, accurate user/assistant times.
-    Persistence.persist_turn_entries(
-      state,
-      commit.user_msg,
-      commit.assistant_message,
-      result,
-      user_sent_at: commit.user_sent_at,
-      assistant_completed_at: commit.assistant_completed_at
-    )
-
-    # Adopt new GenServer state.
     state = %{
       state
       | messages: commit.messages,
@@ -434,7 +445,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
           )
       end
 
-    Persistence.persist_turn_entries(
+    Persistence.persist_turn_entries_async(
       state,
       user_msg,
       assistant_message,

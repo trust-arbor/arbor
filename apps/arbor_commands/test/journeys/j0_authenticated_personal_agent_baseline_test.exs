@@ -61,6 +61,13 @@ defmodule Arbor.Commands.Journeys.J0AuthenticatedPersonalAgentBaselineTest do
       assert is_binary(reply)
       assert reply == J0AuthenticatedBaseline.preference_reply()
 
+      J0AuthenticatedBaseline.assert_committed_pair_now!(
+        J0AuthenticatedBaseline.session_id!(conversationalist_id),
+        J0AuthenticatedBaseline.engagement_id!(conversationalist_id, conversant_id),
+        J0AuthenticatedBaseline.preference(),
+        J0AuthenticatedBaseline.preference_reply()
+      )
+
       request = J0AuthenticatedBaseline.await_provider_request!()
       assert %Request{} = request
       assert request.provider == J0AuthenticatedBaseline.capture_provider()

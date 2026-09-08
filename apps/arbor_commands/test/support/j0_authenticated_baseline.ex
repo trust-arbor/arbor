@@ -31,6 +31,7 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
 
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.LLM.{Client, ConfigurationError, ProviderRegistry, Request}
+  alias Arbor.Persistence
   alias Arbor.Persistence.BufferedStore
 
   @preference "Please remember that my favorite midnight snack is pickled-mango-XYZZY-PLUGH-42."
@@ -305,6 +306,24 @@ defmodule Arbor.Commands.J0AuthenticatedBaseline do
       session_token: token,
       timeout: @turn_timeout_ms
     )
+  end
+
+  def assert_committed_pair_now!(session_id, engagement_id, expected_user, expected_assistant) do
+    messages =
+      Persistence.load_recent_session_messages(session_id,
+        engagement_id: engagement_id,
+        limit: 3
+      )
+
+    # This assertion belongs to the first turn in a fresh engagement. A third
+    # row, an older assistant, or a partial/missing pair must not satisfy it.
+    assert [
+             %{role: :user, content: ^expected_user, entry_ordinal: user_ordinal},
+             %{role: :assistant, content: ^expected_assistant, entry_ordinal: assistant_ordinal}
+           ] = messages
+
+    assert assistant_ordinal == user_ordinal + 1
+    messages
   end
 
   def await_provider_request!(timeout_ms \\ 10_000) do

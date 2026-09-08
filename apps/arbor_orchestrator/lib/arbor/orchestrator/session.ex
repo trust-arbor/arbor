@@ -55,7 +55,12 @@ defmodule Arbor.Orchestrator.Session do
   produced — it is **not** success. Session admits only
   `final_outcome.status` of `:success` or `:partial_success` before
   `apply_turn_result` / success signaling; every other final outcome fails
-  closed with a bounded `{:error, :turn_failed}`.
+  closed with a bounded `{:error, :turn_failed}`. A successful public reply
+  also requires the atomic user/assistant pair append to be acknowledged.
+  That ack wait runs inside the turn-completion callback and holds the
+  Session mailbox for the bounded commit timeout (default 10000ms), plus at
+  most a 1000ms cleanup window on failure;
+  steering and cancel stay queued until it returns.
 
   ## Example
 
@@ -1944,11 +1949,22 @@ defmodule Arbor.Orchestrator.Session do
 
     # Fence/revoke before reply/reset so a late wave cannot authorize.
     state = cleanup_turn_terminal(state, kill_task?: false)
+    state = transition_phase(state, :processing, :complete, :idle)
 
+    case Builders.apply_turn_result(state, user_message.content, result,
+           user_message: user_message
+         ) do
+      {:ok, new_state} ->
+        complete_turn_commit_acknowledged(user_message, result, state, new_state, completed)
+
+      {:error, persist_reason} ->
+        complete_turn_commit_failed(state, persist_reason)
+    end
+  end
+
+  defp complete_turn_commit_acknowledged(user_message, result, state, new_state, completed) do
     new_state =
-      state
-      |> transition_phase(:processing, :complete, :idle)
-      |> Builders.apply_turn_result(user_message.content, result, user_message: user_message)
+      new_state
       |> persist_discovered_tools(result)
       |> Builders.maybe_checkpoint()
 
@@ -2012,6 +2028,14 @@ defmodule Arbor.Orchestrator.Session do
     # Normal completion: apply_turn_result already persisted the complete message,
     # so just clear the turn (incl. buffer + timeout).
     reset_and_drain(new_state)
+  end
+
+  defp complete_turn_commit_failed(state, persist_reason) do
+    Logger.warning("[Session] Turn commit failed for #{state.agent_id} reason=#{persist_reason}")
+
+    emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
+    reply_turn(state, steering_aware_failure_reply(state, {:error, :turn_commit_failed}))
+    reset_and_drain(state)
   end
 
   defp complete_turn_error(state, reason) do

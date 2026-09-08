@@ -118,6 +118,15 @@ defmodule Arbor.Orchestrator.SessionTest do
     %{logs_root: logs_root}
   end
 
+  defp succeeding_persist_adapters do
+    %{
+      ensure_session: fn session_id, agent_id, [] ->
+        {:ok, %{id: "uuid_#{session_id}", session_id: session_id, agent_id: agent_id}}
+      end,
+      append_session_entries: fn _uuid, entries -> {:ok, length(entries)} end
+    }
+  end
+
   test "malformed signing-authority bootstrap fails closed during init" do
     Process.flag(:trap_exit, true)
     on_exit(fn -> Process.flag(:trap_exit, false) end)
@@ -1071,7 +1080,7 @@ defmodule Arbor.Orchestrator.SessionTest do
         working_memory: %{"key" => "value"},
         goals: initial_goals,
         cognitive_mode: :goal_pursuit,
-        adapters: %{}
+        adapters: succeeding_persist_adapters()
       }
 
       # Step 1: build_turn_values produces the context the engine will see
@@ -1113,7 +1122,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert run_result.context["session.response"] != nil
 
       # Step 3: apply_turn_result merges engine output back into state
-      new_state = Session.apply_turn_result(state, "What is OTP?", run_result)
+      assert {:ok, new_state} = Session.apply_turn_result(state, "What is OTP?", run_result)
 
       # Messages grew by 2 (user + assistant)
       assert length(new_state.messages) == length(initial_messages) + 2
@@ -1190,7 +1199,7 @@ defmodule Arbor.Orchestrator.SessionTest do
           trust_tier: :established,
           turn_dot: turn_path,
           heartbeat_dot: heartbeat_path,
-          adapters: %{},
+          adapters: succeeding_persist_adapters(),
           start_heartbeat: false
         )
 
@@ -1280,7 +1289,8 @@ defmodule Arbor.Orchestrator.SessionTest do
       File.write!(turn_path, turn_dot)
       File.write!(heartbeat_path, heartbeat_dot)
 
-      adapters = Keyword.get(opts, :adapters, %{})
+      adapters =
+        Map.merge(succeeding_persist_adapters(), Keyword.get(opts, :adapters, %{}))
 
       {:ok, pid} =
         Arbor.Orchestrator.Session.start_link(
@@ -1776,7 +1786,7 @@ defmodule Arbor.Orchestrator.SessionTest do
           trust_tier: :established,
           turn_dot: turn_path,
           heartbeat_dot: heartbeat_path,
-          adapters: %{},
+          adapters: succeeding_persist_adapters(),
           start_heartbeat: false,
           config: %{"llm_model" => "old-model", "llm_provider" => "anthropic"}
         )

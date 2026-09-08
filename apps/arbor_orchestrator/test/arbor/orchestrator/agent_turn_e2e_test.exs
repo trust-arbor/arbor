@@ -108,6 +108,8 @@ defmodule Arbor.Orchestrator.AgentTurnE2ETest do
     counter = :counters.new(1, [:atomics])
 
     adapters = %{
+      ensure_session: fn id, _agent_id, [] -> {:ok, %{id: id}} end,
+      append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end,
       llm_call: fn _messages, _mode, _opts ->
         n = :counters.get(counter, 1)
         :counters.add(counter, 1, 1)

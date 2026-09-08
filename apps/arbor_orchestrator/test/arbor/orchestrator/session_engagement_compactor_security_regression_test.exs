@@ -373,6 +373,10 @@ defmodule Arbor.Orchestrator.SessionEngagementCompactorSecurityRegressionTest do
         session_id: session_id,
         agent_id: agent_id,
         turn_dot: ctx.turn_path,
+        adapters: %{
+          ensure_session: fn ^session_id, ^agent_id, [] -> {:ok, %{id: session_id}} end,
+          append_session_entries: fn ^session_id, [_user, _assistant] -> {:ok, 2} end
+        },
         config: %{
           # TurnEgress classifies the backend atom `:lmstudio` as on-host;
           # Client canonicalization still routes this spelling to `lm_studio`.

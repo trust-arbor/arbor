@@ -21,11 +21,20 @@ the original 4dd1fc4d helper code; they are not product-success claims.
 | Auth | `Arbor.Agent.send_message/4` with a real OIDC human, `SessionToken`, and `DeliveryReceipt` consumption on the Session authenticated path. Proof subject (`conversant`) is distinct from the canonical owner used at `Lifecycle.create/2`. |
 | Reply | Public `{:ok, binary}` from `send_message/4` equals the capture-adapter canned reply, not a fabricated Session result. |
 | Provider request | `CaptureAdapter.complete/2` forwards the actual `Arbor.LLM.Request` to the test process. |
-| Persistence pair | Bounded poll of `Arbor.Persistence.load_recent_session_messages/2` filtered by the test engagement id until a committed user+assistant pair exists. Persistence errors fail immediately. No arbitrary sleep presented as evidence. Control agent also receives a benign turn; its committed pair must exist and must not contain the preference marker. |
+| Persistence pair | Immediate `assert_committed_pair_now!/4` after the first authenticated preference turn: exactly the expected user and assistant content, consecutive ordinals, and no third row in the fresh engagement (one `load_recent_session_messages/2`, no poll). Missing, malformed, or stale evidence fails. The sqlite poll test remains extra inventory. Control agent also receives a benign turn; its committed pair must exist and must not contain the preference marker. |
 | Index | After the preference turn, `Arbor.Memory.recall/2` is queried without calling `Memory.index/2`. Expected: `{:ok, results}` with no marker, or the specific `{:error, :index_not_initialized}`. Any other error fails. |
 | Dispatched recall | Erlang call/return (and exception) trace on the public facade `Arbor.Memory.recall/2,3` only. Production `session_memory.recall` reaches that MFA via `apply/3`; a `SessionMemory.bridge/4` fallback that never calls the facade, and internal `IndexOps.recall`, are not accepted evidence. Process coverage is `Arbor.Orchestrator.Session.TaskSupervisor` (the `start_child` owner in `Arbor.Orchestrator.Session.do_send_message_async/5`) installed **before** any turn, not parent+Session `set_on_spawn` alone. Matched on the exact follow-up query. Every facade observation is retained: nested arities may emit multiple events, and repeated queries may return different results. An empty drain after that coverage is a missing observation, not a claim that recall was absent. Independent of the LLM transcript and of SQLite rows. |
 | Untouched control | Second conversationalist never receives the preference; its captured provider request must not contain the marker. |
 | Outbound denial | Closed `Client` adapters for every known provider except `ollama`, plus middleware; unexpected `openai` `Client.complete/2` returns `{:error, :outbound_denied}`. Every case drains TraceHub and fails if `Arbor.LLM.Adapter.ReqLLM` or ACP `complete` is invoked. |
+
+## Working guarantees
+
+Successful turns acknowledge the pair before the public reply.
+`Session.Persistence.persist_turn_entries/5` awaits the atomic user/assistant
+append. The journey asserts the exact pair immediately after the fresh
+engagement's first `{:ok, reply}` via `assert_committed_pair_now!/4` in
+`j0_authenticated_baseline.ex` (no poll, no sleep). The sqlite poll test remains
+extra inventory, not an async success loophole.
 
 ## Production-path gaps recorded (not repaired)
 
@@ -52,10 +61,7 @@ These are executable observations, not suppressed failures.
    Only a result list or the specific `:index_not_initialized` outcome is
    admitted; other returned errors and traced exceptions fail the baseline.
    Same-session provider history is not treated as recall evidence.
-3. **SQLite append is asynchronous.** `Session.Persistence.persist_turn_entries/5`
-   `Task.start`s the write. Evidence is a bounded poll for a real committed
-   pair scoped to the test engagement, not a fixed sleep.
-4. **`LLM.Client` fake-adapter fallthrough.** `resolve_known_cloud_adapter/2`
+3. **`LLM.Client` fake-adapter fallthrough.** `resolve_known_cloud_adapter/2`
    returns `Arbor.LLM.Adapter.ReqLLM` for unknown-to-the-client but
    registry-known cloud providers. This packet closes that route in the test
    environment (per-provider `ClosedAdapter` map + deny middleware + trace)
@@ -88,10 +94,10 @@ BEAM. Security's canonical test tree is restored through
 
 Remaining fixture/product limits: indexing and follow-up recall on the
 authenticated Session path are still measurements, not success claims;
-SQLite append remains asynchronous and is still proven by bounded poll;
-production `LLM.Client` fake-adapter fallthrough is unchanged outside this
-harness. Do not treat this note as evidence that the helper or journey
-commands were run.
+successful turns acknowledge the SQLite pair before the public reply
+(immediate assertion) while the poll test remains extra inventory; production
+`LLM.Client` fake-adapter fallthrough is unchanged outside this harness. Do
+not treat this note as evidence that the helper or journey commands were run.
 
 ## Constraints honored
 

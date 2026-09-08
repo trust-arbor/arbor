@@ -81,7 +81,11 @@ defmodule Arbor.Orchestrator.AuthorizationGateSecurityRegressionTest do
           trust_tier: :established,
           turn_dot: ctx.turn_path,
           heartbeat_dot: ctx.heartbeat_path,
-          adapters: %{llm_call: fn _, _, _ -> {:ok, %{content: "unused"}} end},
+          adapters: %{
+            ensure_session: fn id, _agent_id, [] -> {:ok, %{id: id}} end,
+            append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end,
+            llm_call: fn _, _, _ -> {:ok, %{content: "unused"}} end
+          },
           start_heartbeat: false
         ],
         overrides

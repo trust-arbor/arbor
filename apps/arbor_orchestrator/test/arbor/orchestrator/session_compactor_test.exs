@@ -168,7 +168,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       state = build_state(compactor: compactor)
 
       result = %{context: %{"session.response" => "Hello back!"}}
-      new_state = Builders.apply_turn_result(state, "Hi there", result)
+      assert {:ok, new_state} = Builders.apply_turn_result(state, "Hi there", result)
 
       assert %TestCompactor{} = new_state.compactor
       assert length(TestCompactor.full_transcript(new_state.compactor)) == 2
@@ -189,7 +189,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
 
       state = build_state(compactor: compactor)
       result = %{context: %{"session.response" => "reply"}}
-      new_state = Builders.apply_turn_result(state, "second", result)
+      assert {:ok, new_state} = Builders.apply_turn_result(state, "second", result)
 
       # Full transcript has all 4 (system + first + second + reply)
       assert length(TestCompactor.full_transcript(new_state.compactor)) == 4
@@ -201,7 +201,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
     test "without compactor state.messages still updated" do
       state = build_state(compactor: nil)
       result = %{context: %{"session.response" => "reply"}}
-      new_state = Builders.apply_turn_result(state, "hello", result)
+      assert {:ok, new_state} = Builders.apply_turn_result(state, "hello", result)
 
       assert new_state.compactor == nil
       assert length(new_state.messages) == 2
@@ -215,7 +215,8 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       state =
         Enum.reduce(1..5, state, fn i, acc ->
           result = %{context: %{"session.response" => "reply #{i}"}}
-          Builders.apply_turn_result(acc, "msg #{i}", result)
+          assert {:ok, next} = Builders.apply_turn_result(acc, "msg #{i}", result)
+          next
         end)
 
       transcript = TestCompactor.full_transcript(state.compactor)
@@ -263,7 +264,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
         }
       }
 
-      updated = Builders.apply_turn_result(state, "follow-up", result)
+      assert {:ok, updated} = Builders.apply_turn_result(state, "follow-up", result)
 
       assert [^prior_user, ^prior_assistant, live_user, live_assistant] = updated.messages
       refute Enum.any?(updated.messages, &(&1["content"] == "synthetic provider-only summary"))
@@ -297,7 +298,7 @@ defmodule Arbor.Orchestrator.SessionCompactorTest do
       session_state: nil,
       session_config: nil,
       behavior: nil,
-      adapters: %{}
+      adapters: persistence_adapters()
     }
 
     struct(Arbor.Orchestrator.Session, Map.new(Enum.into(overrides, defaults)))

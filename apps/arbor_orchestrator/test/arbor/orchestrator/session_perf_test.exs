@@ -81,6 +81,8 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
     counter = :counters.new(1, [:atomics])
 
     adapters = %{
+      ensure_session: fn id, _agent_id, [] -> {:ok, %{id: id}} end,
+      append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end,
       llm_call: fn _messages, _mode, _opts ->
         if simulated_latency > 0, do: Process.sleep(simulated_latency)
         n = :counters.get(counter, 1)

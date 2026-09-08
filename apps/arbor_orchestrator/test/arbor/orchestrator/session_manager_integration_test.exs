@@ -134,12 +134,29 @@ defmodule Arbor.Orchestrator.SessionManagerIntegrationTest do
     end
 
     defp ensure_test_session(agent_id) do
-      @session_manager.ensure_session(agent_id,
-        trust_tier: :established,
-        start_heartbeat: false,
-        provider: :lmstudio,
-        model: "session-manager-integration"
-      )
+      {:ok, pid} =
+        @session_manager.ensure_session(agent_id,
+          trust_tier: :established,
+          start_heartbeat: false,
+          provider: :lmstudio,
+          model: "session-manager-integration"
+        )
+
+      # SessionManager deliberately does not forward persistence adapters.
+      # This lifecycle fixture installs its local acknowledgement before turns;
+      # the authenticated J0 journey exercises the real persistence boundary.
+      :sys.replace_state(pid, fn state ->
+        %{
+          state
+          | adapters:
+              Map.merge(state.adapters, %{
+                ensure_session: fn id, ^agent_id, [] -> {:ok, %{id: id}} end,
+                append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
+              })
+        }
+      end)
+
+      {:ok, pid}
     end
 
     defp restore_env(app, key, nil), do: Application.delete_env(app, key)

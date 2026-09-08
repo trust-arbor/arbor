@@ -4,6 +4,11 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   Handles saving/restoring checkpoints, persisting turn and heartbeat entries
   to the session store, and seeding the compactor from restored checkpoint data.
+
+  Successful turn commits use `persist_turn_entries/5`, which awaits one
+  acknowledged user/assistant pair. Partial and cancelled turns use
+  `persist_turn_entries_async/5`, which is fire-and-forget and must not be used
+  on the acknowledged success path.
   """
 
   require Logger
@@ -13,6 +18,15 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   # Matches the bounded history admitted by the legacy load_entries path.
   @engagement_transcript_limit 1_000
+  @commit_timeout_ms 10_000
+  @commit_reap_ms 1_000
+  @turn_persistence_errors [
+    :turn_persistence_unavailable,
+    :turn_persistence_malformed,
+    :turn_persistence_failed,
+    :turn_persistence_raised,
+    :turn_persistence_uncertain
+  ]
 
   # ── Checkpoint application ────────────────────────────────────────
 
@@ -241,8 +255,65 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   # ── Session entry persistence ─────────────────────────────────────
 
+  # Bounds the caller's wait by commit_timeout_ms (default 10000, never :infinity)
+  # plus one @commit_reap_ms cleanup window. Steering/cancel stay queued until return.
   @doc false
+  @spec persist_turn_entries(map(), term(), term(), term(), keyword()) ::
+          {:ok, 2}
+          | {:error,
+             :turn_persistence_unavailable
+             | :turn_persistence_malformed
+             | :turn_persistence_failed
+             | :turn_persistence_raised
+             | :turn_persistence_uncertain}
   def persist_turn_entries(state, user_msg, assistant_message, run_result, opts \\ []) do
+    case build_turn_entry_pair(state, user_msg, assistant_message, run_result, opts) do
+      {:ok, entries} ->
+        await_turn_persistence(state, entries)
+
+      {:error, :turn_persistence_unavailable} = error ->
+        Logger.warning("[Session] Turn persistence failed reason=turn_persistence_unavailable")
+        error
+    end
+  end
+
+  # Fire-and-forget pair append for partial/cancel only. Always returns :ok.
+  # Must not be used on the acknowledged success path.
+  @doc false
+  @spec persist_turn_entries_async(map(), term(), term(), term(), keyword()) :: :ok
+  def persist_turn_entries_async(state, user_msg, assistant_message, run_result, opts \\ []) do
+    case build_turn_entry_pair(state, user_msg, assistant_message, run_result, opts) do
+      {:ok, entries} ->
+        ensure_session = get_ensure_session_fn(state)
+        append_entries = get_persist_entries_fn(state)
+        session_id = state.session_id
+        agent_id = state.agent_id
+
+        Task.start(fn ->
+          case classify_turn_batch(
+                 ensure_session,
+                 append_entries,
+                 session_id,
+                 agent_id,
+                 entries
+               ) do
+            {:ok, 2} ->
+              :ok
+
+            {:error, atom} ->
+              Logger.warning("[Session] Atomic turn entry persistence failed reason=#{atom}")
+          end
+        end)
+
+        :ok
+
+      {:error, :turn_persistence_unavailable} ->
+        Logger.warning("[Session] Turn persistence failed reason=turn_persistence_unavailable")
+        :ok
+    end
+  end
+
+  defp build_turn_entry_pair(state, user_msg, assistant_message, run_result, opts) do
     user_sent_at = Keyword.get(opts, :user_sent_at) || DateTime.utc_now()
     assistant_completed_at = Keyword.get(opts, :assistant_completed_at) || DateTime.utc_now()
 
@@ -255,43 +326,346 @@ defmodule Arbor.Orchestrator.Session.Persistence do
            engagement_id: Map.get(state, :current_engagement_id),
            turn_count: ContextBuilder.get_turn_count(state)
          }) do
-      {:ok, [_, _] = entries} ->
-        start_turn_persistence(state, entries)
-
-      {:error, _reason} ->
-        Logger.warning("[Session] Turn entry construction failed")
-        {:error, :turn_persistence_unavailable}
+      {:ok, [_, _] = entries} -> {:ok, entries}
+      {:error, _reason} -> {:error, :turn_persistence_unavailable}
     end
   end
 
-  defp start_turn_persistence(state, entries) do
-    ensure_session = get_ensure_session_fn(state)
-    append_entries = get_persist_entries_fn(state)
+  # Commit-guard protocol (private, Session-owned, no named supervisor):
+  # - Caller (Session) stamps deadline_mono, spawn_monitors one guard, then
+  #   selectively receives only {reply_ref, payload, completed_mono}, the guard
+  #   DOWN, or the commit deadline. Unrelated mailbox messages stay in place.
+  #   Session does not trap_exit and does not monitor the writer.
+  # - Guard traps exits, monitors the owner, spawn_links one writer, owns the
+  #   absolute deadline, and reaps the writer (kill + confirmed EXIT) on
+  #   timeout, :settle, owner loss, or completion. Unconfirmed reap cannot
+  #   publish {:ok, 2}. Guard death kills the linked writer.
+  # - Writer does not trap; it runs one ensure_session + append_session_entries
+  #   only if the deadline has not already passed.
+  # - Tags are {reply_ref, payload, completed_mono} with completed_mono stamped
+  #   immediately before send. On-time iff integer stamp <= deadline_mono.
+  #   Late {:ok, 2} is :turn_persistence_uncertain. Late/stale tags must not
+  #   produce a second reply or append. Per-turn cost is one guard + one writer
+  #   for the bounded wait; trap_exit stays off Session so they are not folded.
+  defp await_turn_persistence(state, entries) do
+    owner = self()
+    reply_ref = make_ref()
+    deadline_mono = System.monotonic_time(:millisecond) + commit_timeout_ms(state)
 
-    Task.start(fn ->
-      persist_turn_batch(
-        ensure_session,
-        append_entries,
-        state.session_id,
-        state.agent_id,
-        entries
+    args = %{
+      owner: owner,
+      reply_ref: reply_ref,
+      deadline_mono: deadline_mono,
+      ensure_session: get_ensure_session_fn(state),
+      append_entries: get_persist_entries_fn(state),
+      session_id: state.session_id,
+      agent_id: state.agent_id,
+      entries: entries
+    }
+
+    {guard, guard_mon} = spawn_monitor(fn -> run_commit_guard(args) end)
+    await_guard_result(reply_ref, guard, guard_mon, deadline_mono)
+  end
+
+  defp await_guard_result(reply_ref, guard, guard_mon, deadline_mono) do
+    receive do
+      {^reply_ref, payload, completed_mono} ->
+        classified = classify_tagged_payload(payload, completed_mono, deadline_mono)
+        finish_caller(classified, reply_ref, guard, guard_mon)
+
+      {:DOWN, ^guard_mon, :process, ^guard, reason} ->
+        case take_tagged(reply_ref) do
+          {payload, stamp} ->
+            classified = classify_tagged_payload(payload, stamp, deadline_mono)
+            flush_tagged(reply_ref)
+            classified
+
+          :empty ->
+            {:error, down_reason(reason)}
+        end
+    after
+      remaining_ms(deadline_mono) ->
+        settle_guard(reply_ref, guard, guard_mon, {:error, :turn_persistence_uncertain})
+    end
+  end
+
+  defp finish_caller({:ok, 2}, reply_ref, _guard, guard_mon) do
+    Process.demonitor(guard_mon, [:flush])
+    flush_tagged(reply_ref)
+    {:ok, 2}
+  end
+
+  defp finish_caller({:error, atom}, reply_ref, guard, guard_mon) do
+    settle_guard(reply_ref, guard, guard_mon, {:error, atom})
+  end
+
+  defp settle_guard(reply_ref, guard, guard_mon, result) do
+    if is_pid(guard) and Process.alive?(guard) do
+      send(guard, {:settle, reply_ref})
+    end
+
+    reap_deadline = System.monotonic_time(:millisecond) + @commit_reap_ms
+    down? = await_guard_down(reply_ref, guard, guard_mon, false, reap_deadline)
+
+    down? =
+      if down? do
+        true
+      else
+        if is_pid(guard) and Process.alive?(guard), do: Process.exit(guard, :kill)
+        await_guard_down(reply_ref, guard, guard_mon, false, reap_deadline)
+      end
+
+    _ = down?
+    if is_reference(guard_mon), do: Process.demonitor(guard_mon, [:flush])
+    flush_tagged(reply_ref)
+    result
+  end
+
+  defp await_guard_down(_reply_ref, _guard, _guard_mon, true, _reap_deadline), do: true
+
+  defp await_guard_down(reply_ref, guard, guard_mon, false, reap_deadline) do
+    receive do
+      {^reply_ref, _payload, _stamp} ->
+        await_guard_down(reply_ref, guard, guard_mon, false, reap_deadline)
+
+      {:DOWN, ^guard_mon, :process, ^guard, _reason} ->
+        true
+    after
+      remaining_ms(reap_deadline) ->
+        false
+    end
+  end
+
+  defp run_commit_guard(args) do
+    Process.flag(:trap_exit, true)
+    owner = args.owner
+    owner_mon = Process.monitor(owner)
+
+    cond do
+      not Process.alive?(owner) ->
+        exit(:normal)
+
+      not on_time?(System.monotonic_time(:millisecond), args.deadline_mono) ->
+        reply_owner(
+          owner,
+          args.reply_ref,
+          {:error, :turn_persistence_uncertain},
+          args.deadline_mono
+        )
+
+        exit(:normal)
+
+      true ->
+        guard = self()
+
+        writer =
+          spawn_link(fn ->
+            result = run_writer_batch(args)
+            send(guard, {:writer_done, result})
+          end)
+
+        guard_loop(args, owner, owner_mon, writer)
+    end
+  end
+
+  defp run_writer_batch(args) do
+    if on_time?(System.monotonic_time(:millisecond), args.deadline_mono) do
+      classify_turn_batch(
+        args.ensure_session,
+        args.append_entries,
+        args.session_id,
+        args.agent_id,
+        args.entries
       )
-    end)
+    else
+      {:error, :turn_persistence_uncertain}
+    end
   end
 
-  defp persist_turn_batch(ensure_session, append_entries, session_id, agent_id, entries) do
-    with {:ok, %{id: session_uuid}} when is_binary(session_uuid) <-
-           ensure_session.(session_id, agent_id, []),
-         {:ok, 2} <- append_entries.(session_uuid, entries) do
-      :ok
-    else
-      _other ->
-        Logger.warning("[Session] Atomic turn entry persistence failed")
+  defp guard_loop(args, owner, owner_mon, writer) do
+    deadline_mono = args.deadline_mono
+    reply_ref = args.reply_ref
+
+    receive do
+      {:writer_done, result} ->
+        done_mono = System.monotonic_time(:millisecond)
+
+        classified =
+          if on_time?(done_mono, deadline_mono),
+            do: result,
+            else: {:error, :turn_persistence_uncertain}
+
+        finish_guard(owner, reply_ref, classified, deadline_mono, writer, true)
+
+      {:settle, ^reply_ref} ->
+        finish_guard(
+          owner,
+          reply_ref,
+          {:error, :turn_persistence_uncertain},
+          deadline_mono,
+          writer,
+          true
+        )
+
+      {:DOWN, ^owner_mon, :process, ^owner, _reason} ->
+        finish_guard(
+          owner,
+          reply_ref,
+          {:error, :turn_persistence_uncertain},
+          deadline_mono,
+          writer,
+          false
+        )
+
+      {:EXIT, ^writer, _reason} ->
+        reply_owner(owner, reply_ref, {:error, :turn_persistence_raised}, deadline_mono)
+        exit(:normal)
+
+      {:EXIT, _other, _reason} ->
+        guard_loop(args, owner, owner_mon, writer)
+
+      {:DOWN, _ref, :process, _pid, _reason} ->
+        guard_loop(args, owner, owner_mon, writer)
+    after
+      remaining_ms(deadline_mono) ->
+        finish_guard(
+          owner,
+          reply_ref,
+          {:error, :turn_persistence_uncertain},
+          deadline_mono,
+          writer,
+          true
+        )
     end
-  rescue
-    _ -> Logger.warning("[Session] Atomic turn entry persistence failed")
-  catch
-    _, _ -> Logger.warning("[Session] Atomic turn entry persistence failed")
+  end
+
+  defp finish_guard(owner, reply_ref, classified, deadline_mono, writer, send?) do
+    reap = reap_writer(writer)
+
+    payload =
+      if classified == {:ok, 2} and reap != :confirmed do
+        {:error, :turn_persistence_uncertain}
+      else
+        classified
+      end
+
+    if send?, do: reply_owner(owner, reply_ref, payload, deadline_mono)
+    exit(:normal)
+  end
+
+  defp reap_writer(writer) do
+    Process.exit(writer, :kill)
+    confirm_writer_exit(writer)
+  end
+
+  defp confirm_writer_exit(writer) do
+    receive do
+      {:EXIT, ^writer, _} -> :confirmed
+      {:writer_done, _} -> confirm_writer_exit(writer)
+    after
+      @commit_reap_ms -> :unconfirmed
+    end
+  end
+
+  defp reply_owner(owner, reply_ref, classified, deadline_mono) do
+    if Process.alive?(owner) do
+      completed_mono = System.monotonic_time(:millisecond)
+
+      payload =
+        if classified == {:ok, 2} and not on_time?(completed_mono, deadline_mono) do
+          {:error, :turn_persistence_uncertain}
+        else
+          classified
+        end
+
+      send(owner, {reply_ref, payload, completed_mono})
+    end
+
+    :ok
+  end
+
+  defp classify_turn_batch(ensure_session, append_entries, session_id, agent_id, entries) do
+    try do
+      with {:ok, %{id: session_uuid}} when is_binary(session_uuid) <-
+             ensure_session.(session_id, agent_id, []),
+           {:ok, 2} <- append_entries.(session_uuid, entries) do
+        {:ok, 2}
+      else
+        {:error, _reason} -> {:error, :turn_persistence_failed}
+        _other -> {:error, :turn_persistence_malformed}
+      end
+    rescue
+      _ -> {:error, :turn_persistence_raised}
+    catch
+      :throw, _ -> {:error, :turn_persistence_raised}
+      :exit, _ -> {:error, :turn_persistence_raised}
+    end
+  end
+
+  defp classify_tagged_payload(payload, stamp, deadline) do
+    cond do
+      not is_integer(stamp) ->
+        {:error, :turn_persistence_malformed}
+
+      stamp > deadline ->
+        {:error, :turn_persistence_uncertain}
+
+      payload == {:ok, 2} ->
+        {:ok, 2}
+
+      match?({:error, atom} when atom in @turn_persistence_errors, payload) ->
+        payload
+
+      true ->
+        {:error, :turn_persistence_malformed}
+    end
+  end
+
+  defp on_time?(stamp, deadline) when is_integer(stamp) and stamp <= deadline, do: true
+  defp on_time?(_stamp, _deadline), do: false
+
+  defp remaining_ms(deadline_mono) do
+    rem = deadline_mono - System.monotonic_time(:millisecond)
+    if rem > 0, do: rem, else: 0
+  end
+
+  defp commit_timeout_ms(state) do
+    config = Map.get(state, :config) || %{}
+
+    candidates = [
+      Map.get(config, :turn_commit_timeout_ms),
+      Map.get(config, "turn_commit_timeout_ms")
+    ]
+
+    case Enum.find(candidates, &finite_commit_timeout?/1) do
+      ms when is_integer(ms) -> ms
+      _ -> @commit_timeout_ms
+    end
+  end
+
+  defp finite_commit_timeout?(ms) when is_integer(ms) and ms > 0 and ms <= @commit_timeout_ms,
+    do: true
+
+  defp finite_commit_timeout?(_), do: false
+
+  defp down_reason(:killed), do: :turn_persistence_uncertain
+  defp down_reason(_reason), do: :turn_persistence_raised
+
+  defp take_tagged(reply_ref) do
+    receive do
+      {^reply_ref, payload, stamp} -> {payload, stamp}
+    after
+      0 -> :empty
+    end
+  end
+
+  defp flush_tagged(reply_ref) do
+    receive do
+      {^reply_ref, _payload, _stamp} -> flush_tagged(reply_ref)
+      {^reply_ref, _other} -> flush_tagged(reply_ref)
+    after
+      0 -> :ok
+    end
   end
 
   @doc false

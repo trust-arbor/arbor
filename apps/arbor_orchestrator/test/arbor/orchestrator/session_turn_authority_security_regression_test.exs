@@ -1616,6 +1616,8 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       end)
 
       adapters = %{
+        ensure_session: fn session_id, ^agent_id, [] -> {:ok, %{id: session_id}} end,
+        append_session_entries: fn _session_id, [_user, _assistant] -> {:ok, 2} end,
         checkpoint_save: fn session_id, data ->
           send(test_pid, {:checkpoint_saved, session_id, data})
           :ok

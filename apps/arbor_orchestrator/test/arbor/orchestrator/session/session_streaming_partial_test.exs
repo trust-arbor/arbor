@@ -98,7 +98,7 @@ defmodule Arbor.Orchestrator.Session.StreamingPartialTest do
     struct(base, overrides)
   end
 
-  # persist_turn_entries spawns a Task — give it a moment to land
+  # interruption persist is still fire-and-forget Task.start — give it a moment to land
   defp settle, do: :timer.sleep(60)
 
   describe "{:stream_chunk} accumulation" do

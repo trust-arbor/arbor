@@ -77,6 +77,8 @@ defmodule Arbor.Orchestrator.Session.SupervisorTest do
     end)
 
     adapters = %{
+      ensure_session: fn id, _agent_id, [] -> {:ok, %{id: id}} end,
+      append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end,
       llm_call: fn _messages, _mode, _opts ->
         {:ok, %{content: "test response"}}
       end

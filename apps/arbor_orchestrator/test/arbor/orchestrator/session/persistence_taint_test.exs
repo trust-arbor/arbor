@@ -365,7 +365,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
         }
       }
 
-      updated = Builders.apply_turn_result(state, "builder user", result)
+      assert {:ok, updated} = Builders.apply_turn_result(state, "builder user", result)
       assert updated.turn_count == 1
 
       assert [^prior_message, live_user, live_assistant] = updated.messages
@@ -445,7 +445,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
         }
       }
 
-      assert {:ok, task} =
+      assert {:error, :turn_persistence_failed} =
                Persistence.persist_turn_entries(
                  state,
                  default_user(),
@@ -455,12 +455,9 @@ defmodule Arbor.Orchestrator.Session.PersistenceTaintTest do
                  assistant_completed_at: @completed_at
                )
 
-      monitor = Process.monitor(task)
-
       assert_receive {:ensure_session, "tenant-session-owned", "agent-requesting-owner", []},
                      1_000
 
-      assert_receive {:DOWN, ^monitor, :process, ^task, :normal}, 1_000
       refute_received :unexpected_append
     end
   end

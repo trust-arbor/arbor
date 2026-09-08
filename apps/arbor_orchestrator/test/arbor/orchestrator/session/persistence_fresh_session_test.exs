@@ -228,17 +228,19 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       sent_at = ~U[2026-04-08 15:00:00.000000Z]
       completed_at = ~U[2026-04-08 15:00:42.500000Z]
 
-      Persistence.persist_turn_entries(
-        state,
-        %{"role" => "user", "content" => "hello"},
-        %AssistantMessage{content: "hi there", started_at: sent_at, completed_at: completed_at},
-        %{},
-        user_sent_at: sent_at,
-        assistant_completed_at: completed_at
-      )
-
-      # persist_turn_entries spawns a Task — give it a moment to land
-      :timer.sleep(50)
+      assert {:ok, 2} =
+               Persistence.persist_turn_entries(
+                 state,
+                 %{"role" => "user", "content" => "hello"},
+                 %AssistantMessage{
+                   content: "hi there",
+                   started_at: sent_at,
+                   completed_at: completed_at
+                 },
+                 %{},
+                 user_sent_at: sent_at,
+                 assistant_completed_at: completed_at
+               )
 
       entries = FakePersistence.appended_entries()
       assert length(entries) == 2
@@ -283,16 +285,19 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       sent_at = ~U[2026-04-08 15:00:00.000000Z]
       completed_at = ~U[2026-04-08 15:00:42.500000Z]
 
-      Persistence.persist_turn_entries(
-        state,
-        %{"role" => "user", "content" => "test"},
-        %AssistantMessage{content: "response", started_at: sent_at, completed_at: completed_at},
-        %{},
-        user_sent_at: sent_at,
-        assistant_completed_at: completed_at
-      )
-
-      :timer.sleep(50)
+      assert {:ok, 2} =
+               Persistence.persist_turn_entries(
+                 state,
+                 %{"role" => "user", "content" => "test"},
+                 %AssistantMessage{
+                   content: "response",
+                   started_at: sent_at,
+                   completed_at: completed_at
+                 },
+                 %{},
+                 user_sent_at: sent_at,
+                 assistant_completed_at: completed_at
+               )
 
       entries = FakePersistence.appended_entries()
 
@@ -337,14 +342,14 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       state = build_state("agent-session-ordering_c", "ordering_c")
       before = DateTime.utc_now()
 
-      Persistence.persist_turn_entries(
-        state,
-        %{"role" => "user", "content" => "test"},
-        %AssistantMessage{content: "reply", started_at: before},
-        %{}
-      )
+      assert {:ok, 2} =
+               Persistence.persist_turn_entries(
+                 state,
+                 %{"role" => "user", "content" => "test"},
+                 %AssistantMessage{content: "reply", started_at: before},
+                 %{}
+               )
 
-      :timer.sleep(50)
       after_time = DateTime.utc_now()
 
       entries = FakePersistence.appended_entries()
