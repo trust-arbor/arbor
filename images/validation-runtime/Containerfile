@@ -79,6 +79,13 @@ RUN mkdir -p /usr/local/.mix/archives /usr/local/.cache/elixir_make \
     && mix local.hex --force \
     && mix local.rebar --force
 
+# System.cmd/3 requires an executable, not the shell's built-in kill command.
+# Keep runtime utilities late so adding them does not rebuild OTP and Elixir.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && test -x /usr/bin/kill \
+    && rm -rf /var/lib/apt/lists/*
+
 LABEL org.arbor.validation.schema="1" \
       org.arbor.validation.role="spawn-containment" \
       org.arbor.validation.platform="${ARBOR_VALIDATION_PLATFORM}" \

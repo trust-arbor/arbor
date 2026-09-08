@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Owner-side live check. Credentials never enter argv, terminal output, or logs.
+set timeout 180
+if {$argc != 3} { puts stderr "Usage: verify-sandbox.exp PVE_HOST VMID LOGIN_JSON"; exit 2 }
+lassign $argv host vmid login
+if {![regexp {^[a-zA-Z0-9.-]+$} $host] || ![regexp {^[1-9][0-9]+$} $vmid]} { exit 2 }
+set password [exec jq -er .password $login]
+log_user 0
+spawn ssh -tt -o BatchMode=yes -o StrictHostKeyChecking=yes root@$host qm terminal $vmid
+send -- "\r"
+expect {
+    -re {login: $} {}
+    timeout { puts stderr "No console login prompt"; exit 1 }
+    eof {exit 1}
+}
+puts stderr "Console login prompt reached"
+send -- "sandbox\r"
+expect {
+    "Password:" {}
+    timeout { puts stderr "No password prompt"; exit 1 }
+    eof {exit 1}
+}
+send -- "$password\r"
+unset password
+expect {
+    -re {\$ $} {}
+    "Login incorrect" { puts stderr "Guest login rejected"; exit 1 }
+    timeout { puts stderr "No guest shell"; exit 1 }
+    eof {exit 1}
+}
+puts stderr "Guest login accepted"
+send -- "stty -echo\r"
+expect -re {\$ $}
+log_user 1
+send -- {python3 -c 'import os,socket,subprocess,json,errno; assert os.getuid()!=0; assert os.listdir("/sys/class/net")==["lo"]; assert json.loads(subprocess.check_output(["ip","-j","route"]))==[]; s=socket.socket(); s.settimeout(1); assert s.connect_ex(("1.1.1.1",443))==errno.ENETUNREACH; v=socket.socket(socket.AF_INET6); assert v.connect_ex(("2606:4700:4700::1111",443))==errno.ENETUNREACH; assert subprocess.run(["sudo","-n","true"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode!=0; print("ARBO"+"R_OFFLINE_PASS: console login, non-root, no NIC, no route, IPv4/IPv6 denied, no sudo")'}
+send -- "\r"
+expect {
+    -re {\r\nARBOR_OFFLINE_PASS:[^\r]+\r\n} {}
+    timeout { puts stderr "Offline assertions did not pass"; exit 1 }
+    eof {exit 1}
+}
+expect -re {\$ $}
+send -- "stty echo; exit\r"
+expect {
+    -re {login: $} {}
+    timeout {exit 1}
+}
+send -- "\017"
+expect eof
+exit 0
