@@ -1,5 +1,8 @@
 // Memory Consolidation Pipeline
-// Compresses and archives agent working memory.
+// Optional design example, not loaded by production Session or memory services.
+// It illustrates analysis/compression into an output file; it does not load or
+// commit the live Memory stores. Explicit loading and validation remain available.
+// Callers must supply inputs, model configuration and authority before execution.
 // Council recommendation: strategy selection should be adaptive, visible as graph choices.
 //
 // Pattern: Analyze -> Classify -> Choose strategy -> Execute -> Verify

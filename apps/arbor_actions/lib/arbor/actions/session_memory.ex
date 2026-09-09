@@ -12,7 +12,7 @@ defmodule Arbor.Actions.SessionMemory do
   |--------|-------------|
   | `Recall` | Recall memories, goals, intents, or beliefs by recall_type |
   | `Update` | Index memory notes from LLM output |
-  | `Checkpoint` | Write a session checkpoint for crash recovery |
+  | `Checkpoint` | Retired graph syscall; Session owns transcript and checkpoint persistence |
   | `Consolidate` | Run KG decay/prune + identity consolidation |
   | `UpdateWorkingMemory` | Add concerns and curiosity to working memory |
   """
@@ -224,7 +224,12 @@ defmodule Arbor.Actions.SessionMemory do
 
   defmodule Checkpoint do
     @moduledoc """
-    Write a session checkpoint for crash recovery.
+    Retired graph checkpoint syscall.
+
+    Session owns transcript commits and its optional checkpoint adapter. The old
+    graph action called an unavailable persistence function and reported a
+    successful checkpoint without writing one. Keep the action resolvable so
+    older graphs fail explicitly instead of silently claiming durable state.
 
     ## Parameters
 
@@ -236,7 +241,7 @@ defmodule Arbor.Actions.SessionMemory do
     """
     use Jido.Action,
       name: "session_memory_checkpoint",
-      description: "Write a session checkpoint for crash recovery",
+      description: "Retired graph checkpoint: Session owns checkpoint persistence",
       tags: ["pipeline_internal"],
       schema: [
         session_id: [type: :string, required: true, doc: "Session ID"],
@@ -245,27 +250,7 @@ defmodule Arbor.Actions.SessionMemory do
       ]
 
     @impl true
-    def run(params, _context) do
-      session_id = params[:session_id] || params["session_id"] || params["session.id"]
-
-      unless session_id do
-        raise ArgumentError, "session_id is required"
-      end
-
-      turn_count =
-        params[:turn_count] || params["turn_count"] || params["session.turn_count"] || 0
-
-      snapshot = params[:snapshot] || params["snapshot"] || %{}
-
-      Arbor.Actions.SessionMemory.bridge(
-        Arbor.Persistence.Checkpoint,
-        :write,
-        [session_id, snapshot, [turn: turn_count]],
-        :ok
-      )
-
-      {:ok, %{last_checkpoint: turn_count}}
-    end
+    def run(_params, _context), do: {:error, :session_checkpoint_retired}
   end
 
   # ============================================================================

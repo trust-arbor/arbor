@@ -1,7 +1,9 @@
 // Session Turn Pipeline — Single User Message Processing
 //
 // Processes one user message through the full agent turn lifecycle:
-//   classify -> authorize -> recall -> mode select -> build prompt -> LLM -> memory -> checkpoint
+//   classify -> authorize -> recall -> mode select -> build prompt -> LLM -> memory
+// Session owns the acknowledged transcript append and optional checkpoint adapter
+// after this graph returns. A graph result does not claim a durable Session checkpoint.
 //
 // Architecture: exec nodes (Jido Actions via ExecHandler) + compute node (LLM via CodergenHandler)
 //
@@ -105,15 +107,6 @@ digraph SessionTurn {
     output_prefix="session"
   ]
 
-  // -- Checkpoint state for crash recovery ---------------------------
-  checkpoint [
-    type="exec",
-    target="action",
-    action="session_memory.checkpoint",
-    context_keys="session.session_id,session.turn_count,session.agent_id",
-    output_prefix="session"
-  ]
-
   // -- Exit ----------------------------------------------------------
   done [shape=Msquare]
 
@@ -135,5 +128,5 @@ digraph SessionTurn {
   format -> update_memory
   format_error -> update_memory
 
-  update_memory -> checkpoint -> done
+  update_memory -> done
 }

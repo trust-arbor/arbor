@@ -1,12 +1,13 @@
 // BDI Cycle — Belief-Desire-Intention Reasoning Strategy
 //
-// A composable reasoning strategy expressed as graph topology over exec (action)
-// and compute (LLM) node types. Agents execute this graph to perform one
-// autonomous reasoning cycle using the BDI model.
+// Optional historical example, not selected by the production Session loader.
+// Explicit file loading and graph registration remain available. Callers must
+// supply context, model configuration and authority; this is not a qualified
+// memory/recovery integration. Production uses session/heartbeat.dot.
 //
-// This replaces the hardcoded BDI logic in agent_seed.ex (seed_heartbeat_cycle)
-// with a graph that can be composed, swapped, or extended. Different agents
-// can use different strategy graphs — BDI is just one option.
+// A composable reasoning strategy expressed as graph topology over exec (action)
+// and compute (LLM) node types. This example does not replace AgentSeed or
+// establish Session recovery ownership.
 //
 // Architecture: exec nodes (Jido Actions via ExecHandler) + compute nodes (LLM via CodergenHandler)
 //
@@ -27,7 +28,7 @@
 // │    3. REASON    — build prompt + LLM call in the selected mode         │
 // │    4. ACT       — route actions, execute pending intentions             │
 // │    5. UPDATE    — process results, update goals, store memories         │
-// │    6. MAINTAIN  — consolidation, checkpointing                         │
+// │    6. MAINTAIN  — consolidation                                      │
 // │                                                                        │
 // │  Graph topology:                                                       │
 // │    - goal_pursuit branch uses compute with use_tools="true" for        │
@@ -52,8 +53,8 @@ digraph BDICycle {
   // harness diagnostic, which has moved out of the umbrella into the private
   // arbor_integrations app (it reads ~/.claude paths that exist on no other
   // installation). Despite the "memory health" comment it carried, it never
-  // touched agent memory. Arbor.Memory.BackgroundChecks.run/2 remains unwired
-  // pending an :action_history source. See
+  // touched agent memory. The production heartbeat now runs memory_checks
+  // through session_memory.background_checks with action history. See
   // .arbor/decisions/2026-08-06-harness-learning-enforcement.md.
 
   // Load current goals (Desires in BDI terms)
@@ -291,14 +292,8 @@ digraph BDICycle {
     output_prefix="session"
   ]
 
-  // Checkpoint state for crash recovery
-  checkpoint [
-    type="exec",
-    target="action",
-    action="session_memory.checkpoint",
-    context_keys="session.session_id,session.turn_count,session.agent_id",
-    output_prefix="session"
-  ]
+  // Session owns transcript and optional checkpoint persistence after a graph
+  // result is admitted. This example makes no Session checkpoint claim.
 
   // ==================================================================
   // Exit
@@ -340,6 +335,6 @@ digraph BDICycle {
   // Phase 4: Act — route actions, then route pending intentions
   process -> route_actions -> route_intents
 
-  // Phase 5: Update — goals, decompositions, proposals, identity, memory, checkpoint
-  route_intents -> update_goals -> store_decompositions -> process_proposals -> store_identity -> update_memory -> prune_intents -> checkpoint -> done
+  // Phase 5: Update — goals, decompositions, proposals, identity, memory
+  route_intents -> update_goals -> store_decompositions -> process_proposals -> store_identity -> update_memory -> prune_intents -> done
 }
