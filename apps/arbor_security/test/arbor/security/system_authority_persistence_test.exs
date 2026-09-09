@@ -3,7 +3,11 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Identifiers
+  alias Arbor.Security
   alias Arbor.Security.AuthorityStore
+  alias Arbor.Security.Crypto
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
@@ -333,6 +337,346 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     assert {:ok, committed_identity} = SigningKeyStore.get_authority_bundle(@authority_signing_id)
     assert committed_identity.agent_id != identity.agent_id
     assert SystemAuthority.agent_id() == committed_identity.agent_id
+  end
+
+  test "security regression: private memory root stamps survive restart and reject offline rewrites" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, descriptor, agent, _human} = private_memory_fixture!()
+
+    assert {:ok, stamp} = Security.attest_private_memory_record(admission, descriptor)
+    assert {:ok, ^stamp} = Security.attest_private_memory_record(admission, descriptor)
+    assert :ok = Security.verify_private_memory_record(descriptor, stamp)
+
+    for {key, value} <- descriptor do
+      replacement =
+        case value do
+          value when is_binary(value) ->
+            if key in ["body_digest", "vector_digest"],
+              do: String.duplicate("b", 64),
+              else: value <> "_changed"
+
+          value when is_integer(value) ->
+            value + 1
+
+          false ->
+            true
+        end
+
+      assert {:error, :invalid_memory_record} =
+               Security.verify_private_memory_record(Map.put(descriptor, key, replacement), stamp)
+    end
+
+    payload =
+      "arbor.private-memory-record.v1\0" <> agent.agent_id <> "\0" <> stamp["descriptor_digest"]
+
+    forged = %{
+      stamp
+      | "issuer_id" => agent.agent_id,
+        "signature" => Base.encode64(Crypto.sign(payload, agent.private_key))
+    }
+
+    assert {:error, :invalid_memory_record} =
+             Security.verify_private_memory_record(descriptor, forged)
+
+    assert {:error, :invalid_memory_record} =
+             Security.attest_private_memory_record(
+               admission,
+               Map.put(descriptor, "human_id", "human_forged")
+             )
+
+    restart_system_authority!()
+    assert :ok = Security.verify_private_memory_record(descriptor, stamp)
+    assert :ok = Security.close_private_memory_admission(admission)
+
+    assert {:error, :invalid_memory_admission} =
+             Security.attest_private_memory_record(admission, descriptor)
+
+    assert :ok = Security.verify_private_memory_record(descriptor, stamp)
+
+    assert {:ok, _} = SystemAuthority.rotate()
+
+    assert {:error, :invalid_memory_record} =
+             Security.verify_private_memory_record(descriptor, stamp)
+  end
+
+  test "security regression: ephemeral and volatile roots refuse private stamps without changing ordinary signing" do
+    Application.put_env(:arbor_security, :system_authority_mode, :ephemeral)
+    restart_system_authority!()
+    {admission, descriptor, _agent, _human} = private_memory_fixture!()
+
+    assert {:error, :memory_attestation_unavailable} =
+             Security.attest_private_memory_record(admission, descriptor)
+
+    assert :ok = Security.close_private_memory_admission(admission)
+
+    stop_signing_store!()
+
+    {:ok, store} =
+      AuthorityStore.start_link(name: @store_name, backend: nil, namespace: "signing_keys")
+
+    Process.unlink(store)
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, descriptor, _agent, _human} = private_memory_fixture!()
+
+    assert {:error, :memory_attestation_unavailable} =
+             Security.attest_private_memory_record(admission, descriptor)
+
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  test "security regression: direct root attestation rechecks current memory capability" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, descriptor, agent, _human} = private_memory_fixture!()
+    assert {:ok, _stamp} = SystemAuthority.attest_private_memory_record(admission, descriptor)
+    assert {:ok, caps} = Security.list_capabilities(agent.agent_id)
+    Enum.each(caps, &Security.revoke(&1.id))
+
+    assert {:error, :invalid_memory_admission} =
+             SystemAuthority.attest_private_memory_record(admission, descriptor)
+
+    assert {:error, :invalid_memory_admission} =
+             GenServer.call(
+               SystemAuthority,
+               {:attest_private_memory_record, admission, descriptor}
+             )
+
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  test "security regression: root remains responsive during authorization and deadline retires worker" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, descriptor, _agent, _human} = private_memory_fixture!()
+    previous = Application.fetch_env(:arbor_security, :private_memory_attestation_timeout_ms)
+    Application.put_env(:arbor_security, :private_memory_attestation_timeout_ms, 500)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} ->
+          Application.put_env(:arbor_security, :private_memory_attestation_timeout_ms, value)
+
+        :error ->
+          Application.delete_env(:arbor_security, :private_memory_attestation_timeout_ms)
+      end
+    end)
+
+    registry = Process.whereis(Arbor.Security.Identity.Registry)
+    parent = self()
+
+    observer =
+      spawn(fn ->
+        {reference, job} = await_memory_job!()
+        send(parent, {:memory_job, reference, job.worker, SystemAuthority.agent_id()})
+      end)
+
+    on_exit(fn -> if Process.alive?(observer), do: Process.exit(observer, :kill) end)
+    :sys.suspend(registry)
+
+    try do
+      assert {:error, :memory_attestation_unavailable} =
+               Security.attest_private_memory_record(admission, descriptor)
+
+      assert_receive {:memory_job, reference, worker, authority_id}, 2_000
+      assert is_binary(authority_id)
+      refute Process.alive?(worker)
+      send(SystemAuthority, {:private_memory_authorized, reference, worker, :ok})
+      assert :sys.get_state(SystemAuthority).memory_attestations == %{}
+      refute inspect(:sys.get_status(SystemAuthority)) =~ descriptor["human_id"]
+    after
+      :sys.resume(registry)
+    end
+
+    Application.put_env(:arbor_security, :private_memory_attestation_timeout_ms, 5_000)
+    assert {:ok, _stamp} = Security.attest_private_memory_record(admission, descriptor)
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  test "security regression: caller death and root death retire pending attestation workers" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {initial, descriptor, agent, human} = private_memory_fixture!()
+    assert :ok = Security.close_private_memory_admission(initial)
+    resource = "arbor://chat/agent/" <> agent.agent_id
+    parent = self()
+
+    for victim <- [:caller, :root] do
+      assert {:ok, signed} = SignedRequest.sign(resource, human.agent_id, human.private_key)
+
+      assert {:ok, receipt} =
+               Security.authorize_and_issue_delivery_receipt(human.agent_id, resource, :chat,
+                 signed_request: signed,
+                 expected_resource: resource
+               )
+
+      caller =
+        spawn(fn ->
+          {:ok, admission} =
+            Security.exchange_private_memory_receipt(receipt, agent.agent_id, human.agent_id, %{
+              session_id: descriptor["session_id"],
+              turn_id: descriptor["turn_id"]
+            })
+
+          :ok = Security.activate_private_memory_admission(admission, descriptor["engagement_id"])
+          send(parent, {:caller_ready, self()})
+
+          receive do
+            :attest -> :ok
+          end
+
+          result = Security.attest_private_memory_record(admission, descriptor)
+          send(parent, {:caller_result, result})
+        end)
+
+      assert_receive {:caller_ready, ^caller}, 5_000
+      registry = Process.whereis(Arbor.Security.Identity.Registry)
+      root = Process.whereis(SystemAuthority)
+      :sys.suspend(registry)
+
+      try do
+        send(caller, :attest)
+        {_reference, job} = await_memory_job!()
+        monitor = Process.monitor(job.worker)
+        Process.exit(if(victim == :caller, do: caller, else: root), :kill)
+        assert_receive {:DOWN, ^monitor, :process, _worker, _reason}, 2_000
+        refute_receive {:caller_result, {:ok, _stamp}}, 20
+      after
+        :sys.resume(registry)
+        if Process.alive?(caller), do: Process.exit(caller, :kill)
+      end
+
+      if victim == :root do
+        assert is_pid(wait_for_new_process(SystemAuthority, root))
+        assert is_binary(SystemAuthority.agent_id())
+        assert Map.get(:sys.get_state(SystemAuthority), :memory_attestations, %{}) == %{}
+
+        # Root registration precedes rest_for_one recovery of the capability
+        # store and receipt broker. Wait for the supervising callback to finish
+        # before the test owner exits and fixture cleanup revokes its grants.
+        children = Supervisor.which_children(Arbor.Security.Supervisor)
+
+        for child <- [Arbor.Security.CapabilityStore, Arbor.Security.DeliveryReceiptBroker] do
+          assert {^child, pid, :worker, _modules} = List.keyfind(children, child, 0)
+          assert is_pid(pid) and Process.alive?(pid)
+          assert Process.whereis(child) == pid
+        end
+
+        assert {:ok, _capabilities} = Security.list_capabilities(agent.agent_id)
+      end
+    end
+  end
+
+  defp await_memory_job!(attempts \\ 200)
+  defp await_memory_job!(0), do: flunk("private memory authorization worker did not start")
+
+  defp await_memory_job!(attempts) do
+    case Map.to_list(Map.get(:sys.get_state(SystemAuthority), :memory_attestations, %{})) do
+      [job] ->
+        job
+
+      [] ->
+        Process.sleep(5)
+        await_memory_job!(attempts - 1)
+    end
+  end
+
+  defp private_memory_fixture! do
+    settings = [
+      identity_verification: true,
+      policy_enforcer_enabled: false,
+      approval_guard_enabled: false,
+      reflex_checking_enabled: false,
+      uri_registry_enforcement: false
+    ]
+
+    previous =
+      for {key, value} <- settings do
+        old = Application.fetch_env(:arbor_security, key)
+        Application.put_env(:arbor_security, key, value)
+        {key, old}
+      end
+
+    human =
+      Arbor.Security.OIDCTestHelper.issue_identity(
+        subject: Identifiers.generate_id("memory_root_")
+      )
+
+    assert :ok = Security.register_oidc_identity(human.identity, human.id_token, human.provider)
+    assert {:ok, agent} = Identity.generate(name: "private-memory-root-test")
+    assert :ok = Security.register_identity(Identity.public_only(agent))
+    resource = "arbor://chat/agent/" <> agent.agent_id
+
+    caps =
+      for {principal, uri} <- [
+            {human.identity.agent_id, resource},
+            {agent.agent_id, "arbor://memory/write/" <> agent.agent_id}
+          ] do
+        assert {:ok, cap} = Security.grant(principal: principal, resource: uri)
+        cap
+      end
+
+    on_exit(fn ->
+      Enum.each(caps, &Security.revoke(&1.id))
+      human.cleanup.()
+      Security.deregister_identity(human.identity.agent_id)
+      Security.deregister_identity(agent.agent_id)
+
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_security, key, value)
+        {key, :error} -> Application.delete_env(:arbor_security, key)
+      end)
+    end)
+
+    assert {:ok, signed} =
+             SignedRequest.sign(resource, human.identity.agent_id, human.identity.private_key)
+
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_delivery_receipt(
+               human.identity.agent_id,
+               resource,
+               :chat,
+               signed_request: signed,
+               expected_resource: resource
+             )
+
+    context = %{
+      session_id: Identifiers.generate_id("session_"),
+      turn_id: Identifiers.generate_id("turn_")
+    }
+
+    assert {:ok, admission} =
+             Security.exchange_private_memory_receipt(
+               receipt,
+               agent.agent_id,
+               human.identity.agent_id,
+               context
+             )
+
+    assert :ok = Security.activate_private_memory_admission(admission, "engagement_private")
+
+    descriptor = %{
+      "agent_id" => agent.agent_id,
+      "human_id" => human.identity.agent_id,
+      "engagement_id" => "engagement_private",
+      "session_id" => context.session_id,
+      "turn_id" => context.turn_id,
+      "id" => "private_memory_record",
+      "source_namespace" => "private_memory_namespace",
+      "source_key" => "private_memory_key",
+      "body_digest" => String.duplicate("a", 64),
+      "vector_digest" => String.duplicate("c", 64),
+      "model_id" => "test-model",
+      "dimensions" => 3,
+      "encoding" => "ieee754_float32_be_v1",
+      "category" => "conversation",
+      "generation" => 1,
+      "revision" => 1,
+      "tombstone" => false
+    }
+
+    {admission, descriptor, agent, human.identity}
   end
 
   defp put_legacy_split!(private_identity, public_identity) do

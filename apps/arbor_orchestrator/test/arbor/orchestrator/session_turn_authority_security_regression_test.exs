@@ -1614,6 +1614,218 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
     end
   end
 
+  describe "private memory admission lifecycle" do
+    test "queued receipt is pending until its turn starts, and cancellation closes it", ctx do
+      grant!(ctx.agent_id, "arbor://memory/read")
+      put_orchestrator_cap!(ctx.agent_id)
+      {queued, _message, authority, admission, _from} = queue_private_turn!(ctx)
+
+      assert {:error, _} = Security.authorize_private_memory_turn(admission, :read)
+
+      assert {:noreply, started} =
+               Session.handle_info(:drain_queue, %{queued | turn_in_flight: false})
+
+      assert started.turn_in_flight
+      assert started.turn_authority.turn_id == authority.turn_id
+      assert {:ok, scope} = Security.authorize_private_memory_turn(admission, :read)
+      assert scope.agent_id == ctx.agent_id
+      assert scope.human_id == ctx.human_id
+      assert scope.session_id == started.session_id
+      assert scope.engagement_id == started.turn_user_message.engagement_id
+
+      assert {:reply, :ok, cancelled} =
+               Session.handle_call(:cancel_turn, {self(), make_ref()}, started)
+
+      assert Map.fetch!(cancelled, :private_memory_admissions) == %{}
+      assert {:error, _} = Security.authorize_private_memory_turn(admission, :read)
+
+      assert {:error, _} =
+               Security.activate_private_memory_admission(admission, scope.engagement_id)
+    end
+
+    test "task purge closes the removed pending admission and retains the next one", ctx do
+      {first, first_message, _authority, removed, _from} =
+        queue_private_turn!(ctx, task_id: "private_cancelled")
+
+      second_from = {self(), make_ref()}
+
+      assert {:noreply, both} =
+               Session.handle_call(
+                 {:send_authenticated_message, user_message!(ctx.human_id, "survivor"),
+                  issue_receipt!(ctx.human_id, ctx.resource)},
+                 second_from,
+                 first
+               )
+
+      [{_, _, _}, {second_message, second_authority, _}] = both.turn_queue
+      survivor = Map.fetch!(both.private_memory_admissions, second_authority.turn_id)
+
+      assert {:reply, :ok, purged} =
+               Session.handle_call(
+                 {:cancel_task, "private_cancelled"},
+                 {self(), make_ref()},
+                 both
+               )
+
+      assert [{^second_message, ^second_authority, ^second_from}] = purged.turn_queue
+      assert map_size(purged.private_memory_admissions) == 1
+
+      assert {:error, _} =
+               Security.activate_private_memory_admission(removed, first_message.engagement_id)
+
+      assert :ok =
+               Security.activate_private_memory_admission(survivor, second_message.engagement_id)
+
+      assert :ok = Security.close_private_memory_admission(survivor)
+    end
+
+    test "dead queued caller is dropped and its pending admission cannot activate", ctx do
+      dead = spawn(fn -> :ok end)
+      monitor = Process.monitor(dead)
+      assert_receive {:DOWN, ^monitor, :process, ^dead, _}
+
+      {queued, message, _authority, admission, _from} =
+        queue_private_turn!(ctx, from: {dead, make_ref()})
+
+      assert {:noreply, drained} =
+               Session.handle_info(:drain_queue, %{queued | turn_in_flight: false})
+
+      assert drained.turn_queue == []
+      assert drained.private_memory_admissions == %{}
+      refute drained.turn_in_flight
+
+      assert {:error, _} =
+               Security.activate_private_memory_admission(admission, message.engagement_id)
+    end
+
+    test "security regression: private engagement is rechecked after queue residence", ctx do
+      put_orchestrator_cap!(ctx.agent_id)
+      reply_ref = make_ref()
+
+      state =
+        session_state(ctx.agent_id,
+          signer: ctx.agent_signer,
+          turn_in_flight: true,
+          turn_from: {self(), make_ref()},
+          turn_user_message: UserMessage.from_string("active")
+        )
+
+      assert {:noreply, queued} =
+               Session.handle_call(
+                 {:send_authenticated_message, user_message!(ctx.human_id),
+                  issue_receipt!(ctx.human_id, ctx.resource)},
+                 {self(), reply_ref},
+                 state
+               )
+
+      [{message, authority, _}] = queued.turn_queue
+      on_exit(fn -> EngagementStore.delete(message.engagement_id) end)
+      assert {:ok, engagement} = EngagementStore.get(message.engagement_id)
+      assert :ok = EngagementStore.put(%{engagement | owner_tenant: "human_replaced_owner"})
+
+      assert {:noreply, refused} =
+               Session.handle_info(:drain_queue, %{queued | turn_in_flight: false})
+
+      refute refused.turn_in_flight
+      assert refused.current_engagement_id == queued.current_engagement_id
+      assert refused.private_memory_admissions == %{}
+      assert_receive {^reply_ref, {:error, :private_memory_admission_unavailable}}
+      admission = Map.fetch!(queued.private_memory_admissions, authority.turn_id)
+
+      assert {:error, _} =
+               Security.activate_private_memory_admission(admission, message.engagement_id)
+    end
+
+    test "constructible TurnAuthority without a receipt admission cannot start a private turn",
+         ctx do
+      put_orchestrator_cap!(ctx.agent_id)
+      assert {:ok, engagement} = Comms.resolve_user_engagement(ctx.agent_id, ctx.human_id)
+      on_exit(fn -> EngagementStore.delete(engagement.id) end)
+      authority = authority!(ctx.human_id)
+      message = UserMessage.with_engagement(user_message!(ctx.human_id), engagement.id)
+      reply_ref = make_ref()
+
+      state =
+        session_state(ctx.agent_id,
+          signer: ctx.agent_signer,
+          turn_queue: [{message, authority, {self(), reply_ref}}]
+        )
+
+      assert {:noreply, refused} = Session.handle_info(:drain_queue, state)
+      refute refused.turn_in_flight
+      assert_receive {^reply_ref, {:error, :private_memory_admission_unavailable}}
+    end
+
+    test "admissions are absent from public status, graph values, options and checkpoint data",
+         ctx do
+      {queued, message, authority, admission, _from} = queue_private_turn!(ctx)
+      raw = Map.fetch!(admission, :token)
+      forbidden = [raw, Base.encode16(raw, case: :lower), Base.encode64(raw)]
+
+      assert {:reply, projected, ^queued} =
+               Session.handle_call(:get_state, {self(), make_ref()}, queued)
+
+      assert projected.private_memory_admissions == %{}
+
+      status =
+        Session.format_status(%{
+          state: queued,
+          message: admission,
+          reason: admission,
+          log: [admission]
+        })
+
+      assert status.state.private_memory_admissions == %{}
+      assert status.message == :redacted
+      assert status.reason == :redacted
+      assert status.log == :redacted
+      values = Builders.build_turn_values(queued, message.content)
+      opts = Builders.build_engine_opts(queued, values)
+      checkpoint = Arbor.Orchestrator.Session.Persistence.extract_checkpoint_data(queued)
+
+      for artifact <- [projected, status, values, opts, checkpoint] do
+        refute term_contains_forbidden?(artifact, forbidden, allow_turn_authority?: false)
+      end
+
+      assert Map.fetch!(queued.private_memory_admissions, authority.turn_id) == admission
+      assert :ok = Session.terminate(:normal, queued)
+
+      assert {:error, _} =
+               Security.activate_private_memory_admission(admission, message.engagement_id)
+    end
+  end
+
+  defp queue_private_turn!(ctx, opts \\ []) do
+    from = Keyword.get(opts, :from, {self(), make_ref()})
+    message = user_message!(ctx.human_id, "pending private turn")
+
+    message =
+      case Keyword.get(opts, :task_id) do
+        nil -> message
+        task_id -> %{message | transport_metadata: %{task_id: task_id}}
+      end
+
+    state =
+      session_state(ctx.agent_id,
+        signer: ctx.agent_signer,
+        turn_in_flight: true,
+        turn_from: {self(), make_ref()},
+        turn_user_message: UserMessage.from_string("active compatibility turn")
+      )
+
+    assert {:noreply, queued} =
+             Session.handle_call(
+               {:send_authenticated_message, message, issue_receipt!(ctx.human_id, ctx.resource)},
+               from,
+               state
+             )
+
+    [{bound, authority, ^from}] = queued.turn_queue
+    on_exit(fn -> EngagementStore.delete(bound.engagement_id) end)
+    admission = queued |> Map.fetch!(:private_memory_admissions) |> Map.fetch!(authority.turn_id)
+    {queued, bound, authority, admission, from}
+  end
+
   describe "security regression: leak checks" do
     test "builders and engine values never carry authority or receipt material", %{
       agent_id: agent_id,
