@@ -23,12 +23,62 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
+  alias Arbor.Memory
   alias Arbor.Orchestrator
+  alias Arbor.Orchestrator.ActionsExecutor
   alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Session.Builders
   alias Arbor.Security
   alias Arbor.Security.SessionToken
   alias Arbor.Signals
+
+  defmodule PrivateMemoryEmbedding do
+    def embed(_text) do
+      {:ok,
+       %{
+         embedding: List.duplicate(0.25, 768),
+         dimensions: 768,
+         model: "session-private-memory-policy",
+         provider: :test
+       }}
+    end
+  end
+
+  defmodule PrivateMemoryToolAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    alias Arbor.LLM.{ContentPart, Response}
+
+    def provider, do: "lm_studio"
+
+    def complete(request, opts) do
+      recipient = Application.fetch_env!(:arbor_orchestrator, :_private_memory_test_recipient)
+      send(recipient, {:private_memory_provider_opts, opts})
+
+      case Enum.find(request.messages, &(&1.role == :tool)) do
+        nil ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [
+               ContentPart.tool_call("private_memory", "memory_remember", %{
+                 "content" => "receipt-authenticated private memory sentinel",
+                 "type" => "fact",
+                 "memory_write_policy" => "allow"
+               })
+             ],
+             raw: %{}
+           }}
+
+        result ->
+          send(recipient, {:private_memory_tool_result, result})
+          {:ok, %Response{text: "private turn complete", finish_reason: :stop, raw: %{}}}
+      end
+    end
+
+    def complete_single_attempt(request, opts), do: complete(request, opts)
+  end
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
@@ -740,6 +790,122 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
     assert actual == expected_snapshot,
            "signals topology not restored exactly: expected #{inspect(expected_snapshot)}, got #{inspect(actual)}"
+  end
+
+  test "security regression: receipt-authenticated live Session denies provider memory writes",
+       ctx do
+    ensure_event_registry!()
+    put_orchestrator_cap!(ctx.agent_id)
+    grant!(ctx.agent_id, "arbor://memory/add_knowledge")
+    grant!(ctx.agent_id, "arbor://memory/write/#{ctx.agent_id}")
+
+    previous_policy =
+      for app <- [:arbor_security, :arbor_trust],
+          key <- [:policy_enforcer_enabled, :approval_guard_enabled] do
+        previous = Application.fetch_env(app, key)
+        Application.put_env(app, key, false)
+        {app, key, previous}
+      end
+
+    on_exit(fn ->
+      Enum.each(previous_policy, fn
+        {app, key, {:ok, value}} -> Application.put_env(app, key, value)
+        {app, key, :error} -> Application.delete_env(app, key)
+      end)
+    end)
+
+    assert {:ok, _index} =
+             Memory.init_for_agent(ctx.agent_id,
+               backend: :ets,
+               embedding_provider: PrivateMemoryEmbedding
+             )
+
+    on_exit(fn -> assert :ok = Memory.cleanup_for_agent(ctx.agent_id) end)
+    assert {:ok, %{entry_count: 0}} = Memory.index_stats(ctx.agent_id)
+
+    assert {:ok, %{stored: true, indexed: true}} =
+             ActionsExecutor.execute_structured(
+               "memory_remember",
+               %{content: "unrestricted memory control sentinel", type: "fact"},
+               ".",
+               agent_id: ctx.agent_id,
+               signer: ctx.agent_signer
+             )
+
+    assert {:ok, %{entry_count: 1}} = Memory.index_stats(ctx.agent_id)
+
+    session_id = collision_resistant_session_id()
+    root = track_session_log_root!(session_id)
+    File.mkdir_p!(root)
+    turn_path = Path.join(root, "private-memory-turn.dot")
+
+    File.write!(turn_path, """
+    digraph PrivateMemoryTurn {
+      start [shape=Mdiamond]
+      call [type="compute", simulate="false", prompt="Continue the private turn",
+        use_tools="true", tools="memory_remember", max_turns="2",
+        memory_write_policy="allow"]
+      done [shape=Msquare]
+      start -> call -> done
+    }
+    """)
+
+    previous_client = Arbor.LLM.Client.default_client()
+
+    previous_recipient =
+      Application.fetch_env(:arbor_orchestrator, :_private_memory_test_recipient)
+
+    Application.put_env(:arbor_orchestrator, :_private_memory_test_recipient, self())
+
+    client =
+      Arbor.LLM.Client.new(default_provider: "lm_studio")
+      |> Arbor.LLM.Client.register_adapter(PrivateMemoryToolAdapter)
+
+    Arbor.LLM.Client.set_default_client(client)
+
+    on_exit(fn ->
+      Arbor.LLM.Client.set_default_client(previous_client)
+
+      case previous_recipient do
+        {:ok, value} ->
+          Application.put_env(:arbor_orchestrator, :_private_memory_test_recipient, value)
+
+        :error ->
+          Application.delete_env(:arbor_orchestrator, :_private_memory_test_recipient)
+      end
+    end)
+
+    {:ok, session} =
+      Session.start_link(
+        session_id: session_id,
+        agent_id: ctx.agent_id,
+        turn_dot: turn_path,
+        signer: ctx.agent_signer,
+        config: %{"llm_provider" => "lm_studio", "llm_model" => "test", "stream" => false},
+        adapters: %{
+          ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
+          append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
+        }
+      )
+
+    on_exit(fn -> if Process.alive?(session), do: GenServer.stop(session) end)
+    assert {:ok, _stats} = before_stats = Memory.knowledge_stats(ctx.agent_id)
+    assert {:ok, %{entry_count: 1}} = before_index = Memory.index_stats(ctx.agent_id)
+
+    assert {:ok, _response} =
+             Session.send_authenticated_message(
+               session,
+               user_message!(ctx.human_id, "private input"),
+               issue_receipt!(ctx.human_id, ctx.resource),
+               15_000
+             )
+
+    assert_received {:private_memory_tool_result, result}
+    assert inspect(result) =~ "private_turn_memory_write_denied"
+    assert_received {:private_memory_provider_opts, provider_opts}
+    refute Keyword.has_key?(provider_opts, :memory_write_policy)
+    assert Memory.knowledge_stats(ctx.agent_id) == before_stats
+    assert Memory.index_stats(ctx.agent_id) == before_index
   end
 
   describe "security regression: signals topology ownership restore" do

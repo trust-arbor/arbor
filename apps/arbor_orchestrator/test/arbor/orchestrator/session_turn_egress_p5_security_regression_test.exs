@@ -1074,7 +1074,13 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
         turn_user_message: UserMessage.from_string("ok"),
         phase: :processing,
         turn_task_ref: make_ref(),
-        turn_caller_ref: make_ref()
+        turn_caller_ref: make_ref(),
+        # A public success requires an acknowledged transcript pair. Keep this
+        # lifecycle test independent of a live Repo while honoring that contract.
+        adapters: %{
+          ensure_session: fn id, _agent, [] -> {:ok, %{id: id}} end,
+          append_session_entries: fn _id, [_user, _assistant] -> {:ok, 2} end
+        }
       )
 
     assert {:ok, run} =
