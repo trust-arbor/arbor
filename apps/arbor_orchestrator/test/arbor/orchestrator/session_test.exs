@@ -188,8 +188,8 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       # turn.dot defines: start, classify, check_auth, recall, select_mode,
       # build_prompt, call_llm, format, format_error, update_memory,
-      # checkpoint, done = 12 nodes
-      assert map_size(graph.nodes) == 12
+      # done = 11 nodes; Session owns optional checkpoint persistence.
+      assert map_size(graph.nodes) == 11
 
       # Verify key nodes exist
       assert Map.has_key?(graph.nodes, "start")
@@ -238,8 +238,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert graph.nodes["update_memory"].attrs["type"] == "exec"
       assert graph.nodes["update_memory"].attrs["action"] == "session_memory.update"
 
-      assert graph.nodes["checkpoint"].attrs["type"] == "exec"
-      assert graph.nodes["checkpoint"].attrs["action"] == "session_memory.checkpoint"
+      refute Map.has_key?(graph.nodes, "checkpoint")
     end
 
     @tag :spike

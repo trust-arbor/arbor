@@ -109,18 +109,17 @@ defmodule Arbor.Actions.SessionMemoryTest do
   end
 
   describe "Checkpoint — run" do
-    test "returns last_checkpoint turn count" do
-      assert {:ok, %{last_checkpoint: 5}} =
-               SessionMemory.Checkpoint.run(
+    test "checkpoint retirement regression: public dispatch cannot claim a successful checkpoint" do
+      assert {:error, :session_checkpoint_retired} =
+               Arbor.Actions.execute_action(
+                 SessionMemory.Checkpoint,
                  %{session_id: "sess_1", turn_count: 5, snapshot: %{}},
                  %{}
                )
     end
 
-    test "raises without session_id" do
-      assert_raise ArgumentError, ~r/session_id/, fn ->
-        SessionMemory.Checkpoint.run(%{}, %{})
-      end
+    test "retired direct action fails explicitly even without legacy parameters" do
+      assert {:error, :session_checkpoint_retired} = SessionMemory.Checkpoint.run(%{}, %{})
     end
   end
 

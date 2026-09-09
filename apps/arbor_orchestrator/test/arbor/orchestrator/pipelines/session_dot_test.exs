@@ -52,7 +52,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
 
     test "has all expected nodes", %{graph: graph} do
       expected = ~w(start classify check_auth recall select_mode build_prompt
-                    call_llm format format_error update_memory checkpoint done)
+                    call_llm format format_error update_memory done)
 
       for node_id <- expected do
         assert Map.has_key?(graph.nodes, node_id),
@@ -66,8 +66,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
         "recall" => "session_memory.recall",
         "select_mode" => "session.mode_select",
         "build_prompt" => "session_llm.build_prompt",
-        "update_memory" => "session_memory.update",
-        "checkpoint" => "session_memory.checkpoint"
+        "update_memory" => "session_memory.update"
       }
 
       for {node_id, expected_action} <- exec_actions do
@@ -106,6 +105,11 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
       assert Enum.any?(error_edges, &(&1.to == "update_memory"))
     end
 
+    test "returns to the Session owner without a graph checkpoint", %{graph: graph} do
+      assert Enum.map(edges_from(graph, "update_memory"), & &1.to) == ["done"]
+      refute Map.has_key?(graph.nodes, "checkpoint")
+    end
+
     test "all nodes reachable from start", %{graph: graph} do
       reachable = reachable_from(graph, "start")
 
@@ -117,6 +121,15 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
 
     test "done is terminal (no outgoing edges)", %{graph: graph} do
       assert edges_from(graph, "done") == []
+    end
+  end
+
+  describe "optional session/bdi-cycle.dot example" do
+    test "remains explicitly parseable without the retired checkpoint action" do
+      graph = parse_pipeline("session/bdi-cycle.dot")
+      refute Map.has_key?(graph.nodes, "checkpoint")
+      assert Enum.map(edges_from(graph, "prune_intents"), & &1.to) == ["done"]
+      assert MapSet.member?(reachable_from(graph, "start"), "done")
     end
   end
 
