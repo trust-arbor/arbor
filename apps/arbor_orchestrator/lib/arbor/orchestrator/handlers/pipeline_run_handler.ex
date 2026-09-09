@@ -101,6 +101,7 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
       :logs_root,
       :on_event,
       :authorization,
+      :memory_write_policy,
       :authorizer,
       :signer,
       :signing_authority,

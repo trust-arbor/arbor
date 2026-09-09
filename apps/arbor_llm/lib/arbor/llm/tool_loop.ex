@@ -86,6 +86,8 @@ defmodule Arbor.LLM.ToolLoop do
 
   alias Arbor.LLM.Message
 
+  alias Arbor.LLM.ProviderRegistry
+
   alias Arbor.LLM.Request
 
   alias Arbor.LLM.ResponseBudget
@@ -112,6 +114,8 @@ defmodule Arbor.LLM.ToolLoop do
           {:ok, PipelineResponse.t()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do
     with :ok <- validate_credential_exclusivity(opts),
+         :ok <-
+           validate_memory_write_runtime(client, request, Keyword.get(opts, :memory_write_policy)),
          {:ok, identity} <- execution_identity(opts),
          {:ok, tool_taint} <- normalize_tool_taint(opts),
          {:ok, steer_check} <- normalize_steer_check(opts),
@@ -155,6 +159,23 @@ defmodule Arbor.LLM.ToolLoop do
         {:error, _} = error ->
           error
       end
+    end
+  end
+
+  # The legacy "acp" provider launches native tools through Client, even when
+  # the runtime label is "arbor". Provider and client stay unchanged throughout
+  # this loop, including correction and wrap-up requests; provider fallbacks
+  # enter run/3 again and must pass this admission before any adapter call.
+  defp validate_memory_write_runtime(_client, _request, nil), do: :ok
+
+  defp validate_memory_write_runtime(client, request, _restricted) do
+    provider = if is_nil(request.provider), do: client.default_provider, else: request.provider
+
+    if (is_atom(provider) or is_binary(provider)) and
+         ProviderRegistry.normalize(provider) == "acp" do
+      {:error, :memory_write_policy_runtime_unsupported}
+    else
+      :ok
     end
   end
 
@@ -561,6 +582,7 @@ defmodule Arbor.LLM.ToolLoop do
         |> maybe_put_executor_opt(:author_id, Keyword.get(opts, :author_id))
         |> maybe_put_executor_opt(:task_id, Keyword.get(opts, :task_id))
         |> maybe_put_executor_opt(:session_id, Keyword.get(opts, :session_id))
+        |> maybe_put_executor_opt(:memory_write_policy, Keyword.get(opts, :memory_write_policy))
 
       {:ok, %{execution_principal: execution_principal, executor_opts: executor_opts}}
     end
@@ -640,6 +662,7 @@ defmodule Arbor.LLM.ToolLoop do
         :execution_manifest_digest,
         :pinned_action_bindings,
         :pinned_handler_bindings,
+        :memory_write_policy,
         :signing_authority
       ],
       executor_opts,
@@ -1065,7 +1088,14 @@ defmodule Arbor.LLM.ToolLoop do
   # APIs are used so one approval covers at most one real outbound attempt.
   defp call_llm(client, request, opts, tool_taint) do
     # Never forward process-local controls into Client/adapters.
-    client_opts = Keyword.drop(opts, [:llm_call_authorizer, :on_steer_check, :tool_taint])
+    client_opts =
+      Keyword.drop(opts, [
+        :llm_call_authorizer,
+        :on_steer_check,
+        :tool_taint,
+        :memory_write_policy
+      ])
+
     single_attempt? = Keyword.has_key?(opts, :llm_call_authorizer)
 
     case Keyword.get(opts, :stream_callback) do

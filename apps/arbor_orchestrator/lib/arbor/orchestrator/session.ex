@@ -2283,6 +2283,7 @@ defmodule Arbor.Orchestrator.Session do
           |> Keyword.put(:initial_taint, initial_taint)
           |> Keyword.put(:frozen_egress_route, route)
           |> Keyword.put(:turn_egress_authorizer, authorizer)
+          |> freeze_memory_write_policy(turn_authority)
           |> maybe_put_provider_route_input(route_input)
 
         {:ok,
@@ -2326,6 +2327,14 @@ defmodule Arbor.Orchestrator.Session do
   catch
     _, _ -> :ok
   end
+
+  # Receipt-authenticated private turns may contain human-owned data. Until
+  # Memory admits scoped writes, keep this restriction in runtime opts only.
+  # Graph values, node attributes and model arguments cannot supply or clear it.
+  defp freeze_memory_write_policy(opts, %TurnAuthority{}),
+    do: Keyword.put(opts, :memory_write_policy, :deny)
+
+  defp freeze_memory_write_policy(opts, nil), do: opts
 
   defp maybe_put_provider_route_input(opts, nil), do: opts
 

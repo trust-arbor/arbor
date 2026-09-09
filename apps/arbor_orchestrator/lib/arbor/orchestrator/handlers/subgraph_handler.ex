@@ -299,6 +299,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
       :pinned_action_bindings,
       :pinned_handler_bindings,
       :pinned_node_bindings,
+      :memory_write_policy,
       :resumable
     ]
 

@@ -182,8 +182,23 @@ defmodule Arbor.Actions.SessionMemory do
         turn_data: [type: :map, required: false, doc: "Turn data with memory notes"]
       ]
 
+    alias Arbor.Actions.MemoryWritePolicy
+    alias Arbor.Actions.SessionMemory
+
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
+      with :ok <- MemoryWritePolicy.check(__MODULE__, params, context) do
+        if Map.get(context, :memory_write_policy) == :deny do
+          # Admission proved every note alias empty. Do not call the Memory
+          # bridge: the normal private turn graph has no memory producer yet.
+          {:ok, %{memory_updated: false}}
+        else
+          index_notes(params)
+        end
+      end
+    end
+
+    defp index_notes(params) do
       agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
 
       unless agent_id do
@@ -192,7 +207,7 @@ defmodule Arbor.Actions.SessionMemory do
 
       turn_data = params[:turn_data] || params["turn_data"] || params["session.turn_data"] || %{}
 
-      Arbor.Actions.SessionMemory.bridge(
+      SessionMemory.bridge(
         Arbor.Memory,
         :index_memory_notes,
         [agent_id, turn_data],

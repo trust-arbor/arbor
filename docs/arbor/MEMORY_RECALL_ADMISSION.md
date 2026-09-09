@@ -58,12 +58,17 @@ Separate AgentSeed characterization observes its actual DateTime metadata
 rejection through `Memory.index`; absent recall is not evidence of that failure
 once recognized conversations are deliberately withheld.
 
-M1b must establish trusted source ownership and the policy for tool-derived
-writes. The intended admission mechanism reuses source-owned exact ordinary
-capabilities and an admitted durable owner stamp outside arbitrary metadata.
-Private-turn writes must inherit that scope or remain unavailable; changing
-`type` to `fact` must not become a declassification mechanism. Caller-provided
-owner labels and taint digests alone are insufficient owner proof.
+M1b1 adds the [private-turn write restriction](PRIVATE_TURN_MEMORY_WRITES.md):
+unsupported tool-derived writes are denied before effects. Changing `type` to
+`fact` must not become a declassification mechanism. It does not enable a
+scoped writer or change this reader policy.
+
+M1b2 must establish trusted source ownership and positive read admission.
+Ordinary capabilities remain necessary, but their observable IDs are not
+caller credentials. The admission mechanism needs receipt-derived live proof
+and a SystemAuthority attestation of the exact durable record outside arbitrary
+metadata. Caller-provided owner labels, agent-key signatures and taint digests
+alone are insufficient owner proof.
 
 M2's automatic Session conversation indexing follows M1b. AgentSeed timestamp
 normalization, restored host writes, new authority descriptors and expanded

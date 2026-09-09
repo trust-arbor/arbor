@@ -1471,6 +1471,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
             |> maybe_put_terminal_tools(terminal_tools)
             |> Keyword.merge(credential_opts)
             |> Keyword.merge(authority_opts)
+            |> Keyword.merge(Keyword.take(opts, [:memory_write_policy]))
             |> maybe_put_provider_usage_context(opts)
             |> maybe_add_stream_callback(on_stream)
             |> maybe_put_llm_call_authorizer(opts)
@@ -1786,7 +1787,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:client, client)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
       |> maybe_put_route_authorizer(context, call_opts)
+      |> maybe_restrict_memory_write_runtime(call_opts)
       |> strip_turn_private_opts()
+      |> Keyword.delete(:memory_write_policy)
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1814,7 +1817,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:callbacks, callbacks)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
       |> maybe_put_route_authorizer(context, call_opts)
+      |> maybe_restrict_memory_write_runtime(call_opts)
       |> strip_turn_private_opts()
+      |> Keyword.delete(:memory_write_policy)
 
     run_id = Keyword.get(call_opts, :run_id)
 
@@ -1838,6 +1843,35 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
       true ->
         dispatch_opts
+    end
+  end
+
+  # Native tool runtimes and the legacy ACP provider adapter do not carry the
+  # Actions memory-write restriction. Keep their launch closed across fallback.
+  defp maybe_restrict_memory_write_runtime(dispatch_opts, engine_opts) do
+    case Keyword.get(engine_opts, :memory_write_policy) do
+      nil ->
+        dispatch_opts
+
+      _restricted ->
+        existing = Keyword.get(dispatch_opts, :route_authorizer)
+
+        Keyword.put(dispatch_opts, :route_authorizer, fn route ->
+          authorize_memory_write_runtime(route, existing)
+        end)
+    end
+  end
+
+  defp authorize_memory_write_runtime(route, existing) do
+    case TurnEgress.project_dispatch_route(route) do
+      {:ok, %{provider: "acp"}} ->
+        {:error, :memory_write_policy_runtime_unsupported}
+
+      {:ok, %{runtime: "arbor"}} ->
+        if is_function(existing, 1), do: existing.(route), else: :allow
+
+      _ ->
+        {:error, :memory_write_policy_runtime_unsupported}
     end
   end
 

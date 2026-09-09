@@ -86,6 +86,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.Coding.ValidationRuntimeAdmissionCore
   alias Arbor.Actions.Config
   alias Arbor.Actions.Egress
+  alias Arbor.Actions.MemoryWritePolicy
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Common.{SafePath, SensitiveData}
@@ -1395,7 +1396,8 @@ defmodule Arbor.Actions do
 
   def authorize_and_execute(agent_id, action_module, params, context)
       when is_binary(agent_id) and is_map(context) do
-    with :ok <- validate_authorization_principal(agent_id),
+    with :ok <- MemoryWritePolicy.check(action_module, params, context),
+         :ok <- validate_authorization_principal(agent_id),
          {:ok, bound_context} <- bind_authenticated_principal(context, agent_id),
          :ok <- require_authenticated_principal(action_module, agent_id, bound_context),
          {:ok, bound_context} <-
@@ -2037,9 +2039,11 @@ defmodule Arbor.Actions do
   # External callers MUST use authorize_and_execute/4 instead.
   @spec execute_action(module(), map(), map()) :: {:ok, any()} | {:error, term()}
   def execute_action(action_module, params, context \\ %{}) do
-    with_execution_binding(action_module, context, fn ->
-      do_execute_action(action_module, params, context)
-    end)
+    with :ok <- MemoryWritePolicy.check(action_module, params, context) do
+      with_execution_binding(action_module, context, fn ->
+        do_execute_action(action_module, params, context)
+      end)
+    end
   end
 
   defp do_execute_action(action_module, params, context) do

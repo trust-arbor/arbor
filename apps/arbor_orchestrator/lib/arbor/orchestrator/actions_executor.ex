@@ -235,6 +235,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     :on_event,
     :logs_root,
     :resumable,
+    :memory_write_policy,
     :max_depth
   ]
 
@@ -357,6 +358,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 |> maybe_put_context(:caller_id, caller_id || agent_id)
                 |> maybe_put_context(:author_id, author_id)
                 |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
+                |> maybe_put_context(
+                  :memory_write_policy,
+                  Keyword.get(opts, :memory_write_policy)
+                )
                 |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
                 |> maybe_put_context(:pinned_action_binding, pinned_binding)
                 |> maybe_put_context(:pinned_action_name, name)
