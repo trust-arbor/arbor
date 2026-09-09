@@ -17,6 +17,7 @@ defmodule Arbor.Memory.IndexOps do
     EmbeddingEvidence,
     Index,
     IndexSupervisor,
+    RecallAdmissionCore,
     Signals,
     StrictEmbeddingInput,
     StrictVectorSeam
@@ -427,7 +428,9 @@ defmodule Arbor.Memory.IndexOps do
                 provenance_status: provenance_status
               }
 
-              {:cont, {:ok, [result | acc]}}
+              # Every row still passes the strict checks above, including rows
+              # omitted from the reply. Later malformed rows remain errors.
+              {:cont, {:ok, RecallAdmissionCore.prepend_if_admissible(view, result, acc)}}
           end
 
         _ ->

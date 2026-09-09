@@ -58,6 +58,7 @@ defmodule Arbor.Memory.Index do
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Memory.EmbeddingEvidence
   alias Arbor.Memory.Index.Input
+  alias Arbor.Memory.RecallAdmissionCore
   alias Arbor.Memory.StrictEmbeddingInput
   alias Arbor.Memory.StrictVectorSeam
 
@@ -67,6 +68,7 @@ defmodule Arbor.Memory.Index do
 
   @type entry_id :: String.t()
   @type entry :: %{
+          optional(:recall_admission) => :exclude_conversation,
           id: entry_id(),
           content: String.t(),
           embedding: [float()],
@@ -427,15 +429,19 @@ defmodule Arbor.Memory.Index do
 
     case :ets.lookup(state.table, canonical_id) do
       [{^canonical_id, entry}] ->
-        # Update access time and count
-        updated_entry = %{
-          entry
-          | accessed_at: DateTime.utc_now(),
-            access_count: entry.access_count + 1
-        }
+        if RecallAdmissionCore.admissible?(entry) do
+          # Only disclosed entries count as accessed. Exclusion preserves storage.
+          updated_entry = %{
+            entry
+            | accessed_at: DateTime.utc_now(),
+              access_count: entry.access_count + 1
+          }
 
-        :ets.insert(state.table, {canonical_id, updated_entry})
-        {:reply, {:ok, updated_entry}, state}
+          :ets.insert(state.table, {canonical_id, updated_entry})
+          {:reply, {:ok, updated_entry}, state}
+        else
+          {:reply, {:error, :not_found}, state}
+        end
 
       [] ->
         {:reply, {:error, :not_found}, state}
@@ -1600,8 +1606,13 @@ defmodule Arbor.Memory.Index do
     matches
     |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
       case validate_one_match(state, item, expected_category, descriptor, for_cache?) do
-        {:ok, result} -> {:cont, {:ok, [result | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, result} ->
+          # Validate even excluded rows, and keep walking so a malformed later
+          # row cannot be hidden by this read-admission policy.
+          {:cont, {:ok, RecallAdmissionCore.prepend_if_admissible(item.match, result, acc)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
     |> case do
@@ -1758,7 +1769,9 @@ defmodule Arbor.Memory.Index do
   end
 
   defp score_entry(entry, evidence, type_filter, threshold, acc) do
-    if compatible_entry_descriptor?(entry, evidence) and matches_type_filter?(entry, type_filter) do
+    if RecallAdmissionCore.admissible?(entry) and
+         compatible_entry_descriptor?(entry, evidence) and
+         matches_type_filter?(entry, type_filter) do
       similarity = cosine_similarity(evidence.vector, entry.embedding)
 
       if similarity >= threshold do
@@ -2614,23 +2627,26 @@ defmodule Arbor.Memory.Index do
              {:ok, vector} <- VectorRecord.normalize_vector(vector) do
           now = DateTime.utc_now()
 
-          {:ok,
-           %{
-             id: source_key,
-             content: content,
-             embedding: vector,
-             metadata: normalize_metadata(atomize_metadata_keys(metadata)),
-             indexed_at: now,
-             accessed_at: now,
-             access_count: 0,
-             model_id: model_id,
-             dimensions: dimensions,
-             encoding: encoding,
-             category: view_field(view, :category),
-             taint: view_field(view, :taint),
-             provenance_status: provenance_status,
-             model_evidence: {:model_id, model_id}
-           }}
+          entry = %{
+            id: source_key,
+            content: content,
+            embedding: vector,
+            metadata: normalize_metadata(atomize_metadata_keys(metadata)),
+            indexed_at: now,
+            accessed_at: now,
+            access_count: 0,
+            model_id: model_id,
+            dimensions: dimensions,
+            encoding: encoding,
+            category: view_field(view, :category),
+            taint: view_field(view, :taint),
+            provenance_status: provenance_status,
+            model_evidence: {:model_id, model_id}
+          }
+
+          # Preserve restrictive evidence from before metadata key normalization.
+          # This cache-local marker is never serialized or used as owner proof.
+          {:ok, RecallAdmissionCore.preserve_classification(view, entry)}
         else
           _invalid -> {:error, :malformed_persistence_result}
         end

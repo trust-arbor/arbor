@@ -26,6 +26,7 @@ defmodule Arbor.Memory.Retrieval do
   alias Arbor.Memory.{
     EmbeddingEvidence,
     Index.Input,
+    RecallAdmissionCore,
     StrictEmbeddingInput,
     StrictVectorSeam,
     TokenBudget
@@ -292,7 +293,9 @@ defmodule Arbor.Memory.Retrieval do
                 indexed_at: DateTime.utc_now()
               }
 
-              {:cont, {:ok, [result | acc]}}
+              # Filtering follows validation and does not stop validation of the
+              # remaining backend result set.
+              {:cont, {:ok, RecallAdmissionCore.prepend_if_admissible(view, result, acc)}}
           end
 
         _ ->
