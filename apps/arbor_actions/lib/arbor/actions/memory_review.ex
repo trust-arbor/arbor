@@ -7,7 +7,7 @@ defmodule Arbor.Actions.MemoryReview do
   | Action | Description |
   |--------|-------------|
   | `ReviewQueue` | List, approve, or reject pending facts and learnings |
-  | `ReviewSuggestions` | Review subconscious insight suggestions |
+  | `ReviewSuggestions` | List pending insight proposals with reviewable IDs |
   | `AcceptSuggestion` | Accept a suggestion, integrating it into knowledge |
   | `RejectSuggestion` | Reject a suggestion, removing from queue |
   """
@@ -156,10 +156,10 @@ defmodule Arbor.Actions.MemoryReview do
 
   defmodule ReviewSuggestions do
     @moduledoc """
-    Review subconscious insight suggestions.
+    List pending insight proposals for review.
 
-    These are behavior patterns detected by the InsightDetector
-    that have not yet been added to knowledge.
+    Each suggestion ID can be passed to `AcceptSuggestion` or `RejectSuggestion`.
+    Listing reads the existing queue; it does not detect or queue new insights.
 
     ## Parameters
 
@@ -171,7 +171,7 @@ defmodule Arbor.Actions.MemoryReview do
     use Jido.Action,
       name: "memory_review_suggestions",
       description:
-        "Review subconscious insight suggestions — behavior patterns detected but not yet in knowledge. Optional: limit (default 10).",
+        "List pending insight proposals with IDs for accept/reject. Does not generate new suggestions. Optional: limit (default 10).",
       category: "memory_review",
       tags: ["memory", "review", "suggestions", "insights"],
       schema: [
@@ -191,20 +191,16 @@ defmodule Arbor.Actions.MemoryReview do
       Actions.emit_started(__MODULE__, params)
 
       with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
-           :ok <- MemoryHelpers.ensure_memory(agent_id) do
-        opts = [max_suggestions: params[:limit] || 10]
-        suggestions = Arbor.Memory.detect_insights(agent_id, opts)
-
-        # detect_insights returns a list directly (not {:ok, ...})
-        suggestions = if is_list(suggestions), do: suggestions, else: []
-
+           :ok <- MemoryHelpers.ensure_memory(agent_id),
+           {:ok, suggestions} <-
+             Arbor.Memory.get_proposals(agent_id, type: :insight, limit: params[:limit] || 10) do
         formatted =
           Enum.map(suggestions, fn s ->
             %{
-              id: s[:id],
-              type: s[:type],
-              content: s[:content] || s[:description],
-              confidence: s[:confidence]
+              id: s.id,
+              type: s.type,
+              content: s.content,
+              confidence: s.confidence
             }
           end)
 
