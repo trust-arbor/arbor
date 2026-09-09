@@ -4,6 +4,26 @@ defmodule Arbor.Agent.SessionConfigTest do
 
   alias Arbor.Agent.SessionConfig
 
+  describe "build/2 — scoped transcript recovery" do
+    test "defaults to lazy engagement recovery without an aggregate startup checkpoint" do
+      opts = SessionConfig.build("agent_recovery_default", context_management: :none)
+
+      assert opts[:config]["recover_session"] == true
+      refute Keyword.has_key?(opts, :checkpoint)
+    end
+
+    test "passes an explicit recovery opt-out to Session" do
+      opts =
+        SessionConfig.build("agent_recovery_disabled",
+          recover_session: false,
+          context_management: :none
+        )
+
+      assert opts[:config]["recover_session"] == false
+      refute Keyword.has_key?(opts, :checkpoint)
+    end
+  end
+
   describe "build/2 — LLM config" do
     test "puts llm_provider when given a :provider atom" do
       opts = SessionConfig.build("agent_test", provider: :anthropic, recover_session: false)
@@ -42,7 +62,10 @@ defmodule Arbor.Agent.SessionConfigTest do
 
       # the compactor derives the window from the model (opus-4-6 = 200k * 0.75 = 150k)
       compactor = Arbor.Agent.ContextCompactor.new(compactor_opts)
-      assert compactor.effective_window == Arbor.Common.ModelProfile.effective_window("claude-opus-4-6")
+
+      assert compactor.effective_window ==
+               Arbor.Common.ModelProfile.effective_window("claude-opus-4-6")
+
       refute compactor.effective_window == 75_000
     end
   end

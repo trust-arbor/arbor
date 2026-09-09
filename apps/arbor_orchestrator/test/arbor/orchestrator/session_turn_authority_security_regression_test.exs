@@ -1847,7 +1847,7 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
       assert logs_artifacts != [], "expected Engine log artifacts under session log root"
       refute term_contains_forbidden?(logs_artifacts, forbidden, allow_turn_authority?: false)
 
-      # Drive the real Session completion path (admission → apply/checkpoint/signal).
+      # Drive the real Session completion path (admission → append/adopt/signal).
       assert {:noreply, after_success} =
                Session.handle_info(
                  {:turn_result, turn_token, received_msg, engine_outcome},
@@ -1856,8 +1856,13 @@ defmodule Arbor.Orchestrator.SessionTurnAuthoritySecurityRegressionTest do
 
       assert after_success.turn_count == 1
 
-      assert_receive {:checkpoint_saved, ckpt_session_id, checkpoint_data}, 5_000
-      assert ckpt_session_id == started.session_id
+      # Automatic snapshot adapters are retired; the explicit export codec must
+      # still exclude the turn's authority when a caller deliberately uses it.
+      refute_receive {:checkpoint_saved, _, _}, 100
+
+      checkpoint_data =
+        Arbor.Orchestrator.Session.Persistence.extract_checkpoint_data(after_success)
+
       assert is_map(checkpoint_data)
       refute term_contains_forbidden?(checkpoint_data, forbidden, allow_turn_authority?: false)
 
