@@ -1,9 +1,15 @@
 defmodule Arbor.Orchestrator.Session.Persistence do
   @moduledoc """
-  Checkpoint management and session entry persistence.
+  Session transcript persistence and explicit checkpoint import/export.
 
-  Handles saving/restoring checkpoints, persisting turn and heartbeat entries
-  to the session store, and seeding the compactor from restored checkpoint data.
+  Persistence's session transcript store owns automatic conversation recovery.
+  Session restores only the selected named engagement and rebuilds its compactor.
+  Volatile turn state is not a recoverable snapshot; Engine job recovery and
+  agent-owned memory have separate owners.
+
+  Explicit checkpoint codec/import helpers remain available to callers. The
+  former `checkpoint_save` adapter is retired: detached whole-state writes had
+  no production reader or stale-save fence and must not compete with transcripts.
 
   Successful turn commits use `persist_turn_entries/5`, which awaits one
   acknowledged user/assistant pair. Partial and cancelled turns use
@@ -120,24 +126,10 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     end)
   end
 
-  # ── Session checkpoint persistence ────────────────────────────────
+  # ── Explicit checkpoint codec (no automatic snapshot writer) ──────
 
-  @doc false
-  def maybe_checkpoint(state) do
-    checkpoint_fn = get_in(state, [Access.key(:adapters), Access.key(:checkpoint_save)])
-
-    if is_function(checkpoint_fn, 2) and should_checkpoint?(state) do
-      case extract_checkpoint_data(state) do
-        data when is_map(data) ->
-          Task.start(fn -> save_checkpoint(checkpoint_fn, state.session_id, data) end)
-
-        {:error, _reason} ->
-          Logger.warning("[Session] Checkpoint construction failed")
-      end
-    end
-
-    state
-  end
+  @doc "Compatibility no-op: acknowledged transcripts are the automatic recovery source."
+  def maybe_checkpoint(state), do: state
 
   @doc false
   def extract_checkpoint_data(state) do
@@ -159,12 +151,6 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     else
       {:error, _reason} -> {:error, :checkpoint_provenance_unavailable}
     end
-  end
-
-  @doc false
-  def should_checkpoint?(state) do
-    interval = get_in(state, [Access.key(:config), Access.key(:checkpoint_interval)]) || 1
-    rem(ContextBuilder.get_turn_count(state), max(interval, 1)) == 0
   end
 
   # ── Compactor seeding from checkpoint ─────────────────────────────
@@ -229,18 +215,6 @@ defmodule Arbor.Orchestrator.Session.Persistence do
       "current_engagement_id" => engagement_id,
       "session_id" => Map.get(state, :session_id)
     }
-  end
-
-  defp save_checkpoint(checkpoint_fn, session_id, data) do
-    case checkpoint_fn.(session_id, data) do
-      :ok -> :ok
-      {:ok, _receipt} -> :ok
-      _other -> Logger.warning("[Session] Checkpoint save failed")
-    end
-  rescue
-    _ -> Logger.warning("[Session] Checkpoint save failed")
-  catch
-    _, _ -> Logger.warning("[Session] Checkpoint save failed")
   end
 
   defp drop_active_engagement_stash(state) do
@@ -719,9 +693,14 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   taint-status fields alongside role and content. Used by the Session on the
   first switch to an engagement, so a resumed conversation is not empty after a
   restart. Best-effort: returns `[]` if the store is unavailable or on any error.
+  `config["recover_session"] == false` disables this read. The unscoped default
+  engagement is never restored from the aggregate display projection.
   """
   @spec load_engagement_transcript(map(), String.t() | nil) :: [map()]
   def load_engagement_transcript(_state, nil), do: []
+
+  def load_engagement_transcript(%{config: %{"recover_session" => false}}, _engagement_id),
+    do: []
 
   def load_engagement_transcript(state, engagement_id) do
     load_messages = get_load_session_messages_fn(state)

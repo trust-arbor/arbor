@@ -8,13 +8,11 @@ defmodule Arbor.Agent.SessionConfig do
   (legacy path).
   """
 
-  require Logger
-
   @doc """
   Build session init options from agent opts.
 
   Resolves tool names, builds LLM config, sets DOT paths,
-  and optionally adds compactor and checkpoint recovery.
+  and optionally adds a compactor and scoped transcript recovery.
 
   ## Options
 
@@ -31,7 +29,8 @@ defmodule Arbor.Agent.SessionConfig do
   - `:tenant_context` — multi-user context
   - `:context_management` — :none, :heuristic, or :full (default: :full)
   - `:heartbeat_dot` — override heartbeat DOT path
-  - `:recover_session` — whether to load saved session entries (default: true)
+  - `:recover_session` — whether Session may lazily restore the active engagement's
+    transcript from Persistence (default: true). Startup never aggregates engagements.
   """
   @spec build(String.t(), keyword()) :: keyword()
   def build(agent_id, opts) do
@@ -57,6 +56,7 @@ defmodule Arbor.Agent.SessionConfig do
       |> maybe_put("llm_model", Keyword.get(opts, :model))
       |> maybe_put("llm_runtime", runtime)
       |> maybe_put("llm_fallback_chain", fallback_chain)
+      |> Map.put("recover_session", Keyword.get(opts, :recover_session, true))
       |> maybe_put("system_prompt", Keyword.get(opts, :system_prompt))
       |> maybe_put("tools", tool_names)
       |> maybe_put("max_tokens", Keyword.get(opts, :max_tokens))
@@ -90,13 +90,10 @@ defmodule Arbor.Agent.SessionConfig do
         config -> Keyword.put(base, :compactor, config)
       end
 
-    # Optionally recover saved session entries from Postgres
-    if Keyword.get(opts, :recover_session, true) do
-      session_id = "agent-session-#{agent_id}"
-      recover_session(base, session_id)
-    else
-      base
-    end
+    # Session restores the requested engagement through the Persistence facade
+    # only after a turn selects that scope. An aggregate startup checkpoint would
+    # mix conversations and lose their durable provenance.
+    base
   end
 
   # ── Tool name resolution ─────────────────────────────────────────
@@ -193,42 +190,6 @@ defmodule Arbor.Agent.SessionConfig do
     else
       nil
     end
-  end
-
-  # ── Session recovery ─────────────────────────────────────────────
-
-  defp recover_session(base, session_id) do
-    session_store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(session_store) and
-         function_exported?(session_store, :load_entries_by_session_id, 1) and
-         apply(session_store, :available?, []) do
-      entries = apply(session_store, :load_entries_by_session_id, [session_id])
-
-      if is_list(entries) and entries != [] do
-        # Convert Ecto structs to message maps for the session checkpoint
-        messages =
-          Enum.map(entries, fn entry ->
-            %{
-              "role" => entry.role || entry.entry_type,
-              "content" => entry.content || ""
-            }
-          end)
-
-        Logger.info("[SessionConfig] Recovered #{length(messages)} messages for #{session_id}")
-        Keyword.put(base, :checkpoint, %{messages: messages})
-      else
-        base
-      end
-    else
-      base
-    end
-  rescue
-    e ->
-      Logger.debug("[SessionConfig] Session recovery failed: #{Exception.message(e)}")
-      base
-  catch
-    :exit, _ -> base
   end
 
   # ── Helpers ──────────────────────────────────────────────────────
