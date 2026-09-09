@@ -96,6 +96,7 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Orchestrator.Session.ContextBuilder
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
+  alias Arbor.Orchestrator.Session.PrivateMemory
   alias Arbor.Orchestrator.Session.TurnEgress
 
   # ── Contract module availability (runtime bridge) ──────────────────
@@ -176,6 +177,9 @@ defmodule Arbor.Orchestrator.Session do
     # Process-local authenticated-turn identity (nil for direct/unauthenticated sends).
     # Never enters Engine values, checkpoints, signals, or public errors.
     turn_authority: nil,
+    # Pending and active receipt-derived memory admissions, owned by this process.
+    # Kept separate from TurnAuthority and stripped from every public projection.
+    private_memory_admissions: %{},
     # VP-05D2A1P5: private process-local fence for the active turn-egress authorizer.
     # Deactivated before kill/revoke on every terminal path. Never public.
     turn_egress_fence: nil,
@@ -1133,6 +1137,7 @@ defmodule Arbor.Orchestrator.Session do
     end)
 
     %{state | turn_queue: kept}
+    |> PrivateMemory.prune()
   end
 
   defp do_cancel_active_turn(state, reason, reply \\ {:error, :cancelled}) do
@@ -1169,12 +1174,12 @@ defmodule Arbor.Orchestrator.Session do
       task_cancelled?(state, user_message_task_id(user_message)) ->
         safe_reply(from, {:error, :cancelled})
         send(self(), :drain_queue)
-        {:noreply, state}
+        {:noreply, PrivateMemory.close(state, turn_authority)}
 
       not caller_alive?(from) ->
         # Dead queued caller: never prepare/issue disclosure.
         send(self(), :drain_queue)
-        {:noreply, state}
+        {:noreply, PrivateMemory.close(state, turn_authority)}
 
       true ->
         start_turn(user_message, turn_authority, from, state)
@@ -1318,7 +1323,24 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
+  def format_status(status) when is_map(status) do
+    projected =
+      case Map.get(status, :state) do
+        %__MODULE__{} = state -> public_state_projection(state)
+        _ -> :redacted
+      end
+
+    status
+    |> Map.put(:state, projected)
+    |> Map.put(:message, :redacted)
+    |> Map.put(:reason, :redacted)
+    |> Map.put(:log, :redacted)
+  end
+
+  @impl true
   def terminate(_reason, state) do
+    PrivateMemory.close_all(state)
+
     # Orderly shutdown: fence/kill/revoke any active authority-bearing turn.
     if state.turn_in_flight do
       _ = cleanup_turn_terminal(state, kill_task?: true)
@@ -1351,6 +1373,12 @@ defmodule Arbor.Orchestrator.Session do
     task_pid = state.turn_task_pid
 
     TurnEgress.deactivate_fence(state.turn_egress_fence)
+
+    state =
+      if Keyword.get(opts, :close_memory?, true),
+        do: PrivateMemory.close(state, state.turn_authority),
+        else: state
+
     lifecycle_probe(:fence_deactivated, %{task_alive?: task_alive?(task_pid)})
 
     try do
@@ -1657,7 +1685,7 @@ defmodule Arbor.Orchestrator.Session do
         steering_byte_count: state.steering_byte_count + acc.boundary_byte_count
     }
 
-    {messages, new_state}
+    {messages, PrivateMemory.prune(new_state)}
   end
 
   defp scan_steering_queue([], _state, _engagement_id, acc), do: acc
@@ -1947,8 +1975,9 @@ defmodule Arbor.Orchestrator.Session do
   defp complete_turn_success(user_message, result, state) do
     completed = Map.get(result.context, "__completed_nodes__", [])
 
-    # Fence/revoke before reply/reset so a late wave cannot authorize.
-    state = cleanup_turn_terminal(state, kill_task?: false)
+    # Fence/revoke Engine disclosure before commit. Session retains its own
+    # memory admission until the acknowledged commit boundary, outside the task.
+    state = cleanup_turn_terminal(state, kill_task?: false, close_memory?: false)
     state = transition_phase(state, :processing, :complete, :idle)
 
     case Builders.apply_turn_result(state, user_message.content, result,
@@ -1963,6 +1992,8 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp complete_turn_commit_acknowledged(user_message, result, state, new_state, completed) do
+    new_state = PrivateMemory.close(new_state, new_state.turn_authority)
+
     new_state =
       new_state
       |> persist_discovered_tools(result)
@@ -2031,6 +2062,7 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   defp complete_turn_commit_failed(state, persist_reason) do
+    state = PrivateMemory.close(state, state.turn_authority)
     Logger.warning("[Session] Turn commit failed for #{state.agent_id} reason=#{persist_reason}")
 
     emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
@@ -2179,6 +2211,34 @@ defmodule Arbor.Orchestrator.Session do
   # task). On auth failure the caller is told and the session stays idle.
   # `turn_authority` is process-local only and never enters builders/engine.
   defp start_turn(user_message, turn_authority, from, state) do
+    case revalidate_private_engagement(user_message, turn_authority, state) do
+      :ok ->
+        case do_start_turn(user_message, turn_authority, from, state) do
+          {:noreply, %{turn_in_flight: true}} = started ->
+            started
+
+          {:noreply, refused_state} ->
+            {:noreply, PrivateMemory.close(refused_state, turn_authority)}
+        end
+
+      {:error, _} ->
+        safe_reply(from, {:error, :private_memory_admission_unavailable})
+        {:noreply, PrivateMemory.close(state, turn_authority)}
+    end
+  end
+
+  defp revalidate_private_engagement(_message, nil, _state), do: :ok
+
+  defp revalidate_private_engagement(message, authority, state) do
+    # Queue residence is not current proof of private ownership. Revalidate
+    # before switching transcripts or activating the broker admission.
+    case bind_authenticated_engagement(message, authority, state) do
+      {:ok, ^message} -> :ok
+      _ -> {:error, :private_memory_admission_unavailable}
+    end
+  end
+
+  defp do_start_turn(user_message, turn_authority, from, state) do
     state = maybe_switch_engagement(state, user_message.engagement_id)
 
     if caller_alive?(from) do
@@ -2190,21 +2250,7 @@ defmodule Arbor.Orchestrator.Session do
 
           case prepare_live_turn(user_message, turn_authority, turn_token, state) do
             {:ok, prepared} ->
-              case do_send_message_async(
-                     user_message,
-                     prepared.authority,
-                     from,
-                     state,
-                     prepared
-                   ) do
-                {:noreply, _} = ok ->
-                  ok
-
-                {:error, reason} ->
-                  cleanup_prepared_partial(prepared)
-                  safe_reply(from, {:error, reason})
-                  {:noreply, state}
-              end
+              launch_prepared_turn(user_message, from, state, prepared)
 
             {:error, reason} ->
               safe_reply(from, {:error, reason})
@@ -2221,6 +2267,18 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  defp launch_prepared_turn(user_message, from, state, prepared) do
+    case do_send_message_async(user_message, prepared.authority, from, state, prepared) do
+      {:noreply, _} = started ->
+        started
+
+      {:error, reason} ->
+        cleanup_prepared_partial(prepared)
+        safe_reply(from, {:error, reason})
+        {:noreply, state}
+    end
+  end
+
   defp caller_alive?({pid, _tag}) when is_pid(pid), do: Process.alive?(pid)
   defp caller_alive?(_), do: false
 
@@ -2230,6 +2288,12 @@ defmodule Arbor.Orchestrator.Session do
   # Any fault after disclosure issue deactivates the fence and revokes the cap.
   defp prepare_live_turn(user_message, turn_authority, turn_token, state)
        when is_reference(turn_token) do
+    with :ok <- PrivateMemory.activate(state, user_message, turn_authority) do
+      do_prepare_live_turn(user_message, turn_authority, turn_token, state)
+    end
+  end
+
+  defp do_prepare_live_turn(user_message, turn_authority, turn_token, state) do
     pre_values =
       state
       |> Builders.build_turn_values(user_message.content)
@@ -2361,26 +2425,16 @@ defmodule Arbor.Orchestrator.Session do
 
   # Receipt-authenticated ingress: consume one-use receipt, bind principal,
   # resolve the principal's source-owned engagement, and allocate TurnAuthority.
-  # Receipt never enters state/queue.
+  # Receipt never enters state/queue. Its opaque pending memory admission stays
+  # in a private Session map until turn activation or queue/terminal cleanup.
   # Caller-supplied engagement_id is a route claim — reject before consume.
   defp handle_authenticated_message(message, receipt, from, state) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
          :ok <- reject_authenticated_engagement_route(user_message),
          {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
-         {:ok, authority} <- exchange_receipt_for_authority(valid_receipt, user_message, state),
-         {:ok, user_message} <- bind_authenticated_engagement(user_message, authority, state) do
-      if task_cancelled?(state, user_message_task_id(user_message)) do
-        {:reply, {:error, :cancelled}, state}
-      else
-        if state.turn_in_flight do
-          case enqueue_turn(state, {user_message, authority, from}) do
-            {:ok, queued_state} -> {:noreply, queued_state}
-            {:error, :turn_queue_full} -> {:reply, {:error, :turn_queue_full}, state}
-          end
-        else
-          start_turn(user_message, authority, from, state)
-        end
-      end
+         {:ok, authority, admission} <-
+           PrivateMemory.exchange(valid_receipt, user_message, state) do
+      bind_and_admit_private_turn(user_message, authority, admission, from, state)
     else
       {:error, :unauthenticated} ->
         best_effort_discard_receipt(receipt)
@@ -2389,6 +2443,45 @@ defmodule Arbor.Orchestrator.Session do
       {:error, _} ->
         best_effort_discard_receipt(receipt)
         {:reply, {:error, :unauthenticated}, state}
+    end
+  end
+
+  defp bind_and_admit_private_turn(user_message, authority, admission, from, state) do
+    case bind_authenticated_engagement(user_message, authority, state) do
+      {:ok, user_message} ->
+        state = PrivateMemory.retain(state, authority, admission)
+        admit_authenticated_turn(user_message, authority, from, state)
+
+      {:error, _} ->
+        PrivateMemory.close_admission(admission)
+        {:reply, {:error, :unauthenticated}, state}
+    end
+  rescue
+    _ ->
+      PrivateMemory.close_admission(admission)
+      {:reply, {:error, :unauthenticated}, state}
+  catch
+    _, _ ->
+      PrivateMemory.close_admission(admission)
+      {:reply, {:error, :unauthenticated}, state}
+  end
+
+  defp admit_authenticated_turn(user_message, authority, from, state) do
+    cond do
+      task_cancelled?(state, user_message_task_id(user_message)) ->
+        {:reply, {:error, :cancelled}, PrivateMemory.close(state, authority)}
+
+      state.turn_in_flight ->
+        case enqueue_turn(state, {user_message, authority, from}) do
+          {:ok, queued_state} ->
+            {:noreply, queued_state}
+
+          {:error, :turn_queue_full} ->
+            {:reply, {:error, :turn_queue_full}, PrivateMemory.close(state, authority)}
+        end
+
+      true ->
+        start_turn(user_message, authority, from, state)
     end
   end
 
@@ -2427,35 +2520,6 @@ defmodule Arbor.Orchestrator.Session do
   # Reject any non-nil engagement_id before receipt exchange / turn routing.
   defp reject_authenticated_engagement_route(%UserMessage{engagement_id: nil}), do: :ok
   defp reject_authenticated_engagement_route(%UserMessage{}), do: {:error, :unauthenticated}
-
-  defp exchange_receipt_for_authority(receipt, user_message, state) do
-    resource = "arbor://chat/agent/" <> state.agent_id
-
-    case Arbor.Security.consume_delivery_receipt(receipt, resource, :chat) do
-      {:ok, principal} when is_binary(principal) ->
-        if principal == user_message.sender_id do
-          turn_id = Identifiers.generate_id("turn_")
-
-          case TurnAuthority.new(
-                 turn_id: turn_id,
-                 authenticated_principal_id: principal,
-                 disclosure_capability_id: nil
-               ) do
-            {:ok, authority} -> {:ok, authority}
-            {:error, _} -> {:error, :unauthenticated}
-          end
-        else
-          # Receipt already consumed — destructive; cannot retry with corrected claim.
-          {:error, :unauthenticated}
-        end
-
-      {:error, _} ->
-        {:error, :unauthenticated}
-
-      _ ->
-        {:error, :unauthenticated}
-    end
-  end
 
   defp bind_authenticated_engagement(user_message, authority, state) do
     principal = authority.authenticated_principal_id
@@ -2513,6 +2577,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_caller_ref: nil,
         turn_timeout_ref: nil,
         turn_authority: nil,
+        private_memory_admissions: %{},
         turn_egress_fence: nil,
         turn_token: nil,
         steering_boundaries: nil,
@@ -2565,6 +2630,7 @@ defmodule Arbor.Orchestrator.Session do
         streaming_buffer: nil,
         turn_timeout_ref: nil
     }
+    |> PrivateMemory.prune()
   end
 
   defp cancel_turn_timeout(%{turn_timeout_ref: ref}) when is_reference(ref) do

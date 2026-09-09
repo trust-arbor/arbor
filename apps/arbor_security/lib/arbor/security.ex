@@ -341,6 +341,37 @@ defmodule Arbor.Security do
   # strip. Explicitly forbidden (among others): :identity_verified,
   # :verify_identity (caller), :task_id, :principal_scope.
   @issue_session_mode_keys [:session_token]
+
+  @doc "Exchange an exact authenticated chat receipt for a pending, caller-owned memory admission."
+  defdelegate exchange_private_memory_receipt(receipt, agent_id, sender_id, context),
+    to: Arbor.Security.PrivateMemory,
+    as: :exchange
+
+  @doc "Activate a pending admission once, binding immutable engagement provenance."
+  defdelegate activate_private_memory_admission(admission, engagement_id),
+    to: Arbor.Security.PrivateMemory,
+    as: :activate
+
+  @doc "Check live receipt-derived pair scope and current chat and memory capabilities."
+  defdelegate authorize_private_memory_turn(admission, operation),
+    to: Arbor.Security.PrivateMemory,
+    as: :authorize
+
+  @doc "Close a memory admission. Only its owning process may close an active token."
+  defdelegate close_private_memory_admission(admission),
+    to: Arbor.Security.PrivateMemory,
+    as: :close
+
+  @doc "Attest one closed private memory record using admitted ownership and the persisted system root."
+  defdelegate attest_private_memory_record(admission, descriptor),
+    to: Arbor.Security.PrivateMemory,
+    as: :attest
+
+  @doc "Verify historical private record authenticity; this does not authorize a current read."
+  defdelegate verify_private_memory_record(descriptor, stamp),
+    to: Arbor.Security.PrivateMemory,
+    as: :verify
+
   @issue_signed_mode_keys [:signed_request, :signer, :session_id, :expected_resource]
   @issue_admitted_opts [:session_token, :signed_request, :signer, :session_id, :expected_resource]
   @max_issue_human_principal_bytes 256

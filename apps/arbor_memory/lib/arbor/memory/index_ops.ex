@@ -179,7 +179,8 @@ defmodule Arbor.Memory.IndexOps do
     end
   end
 
-  defp execute_or_reconcile(seam, agent_id, operation),
+  @doc false
+  def execute_or_reconcile(seam, agent_id, operation),
     do: execute_or_reconcile(seam, agent_id, operation, 1)
 
   defp execute_or_reconcile(seam, agent_id, operation, retries_left) do

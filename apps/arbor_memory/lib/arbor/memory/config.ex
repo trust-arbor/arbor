@@ -26,6 +26,12 @@ defmodule Arbor.Memory.Config do
   @default_async_writer_max_children 256
   @max_async_writer_max_children 4096
 
+  # Source-owned configuration only. Private Memory callers cannot select a
+  # security provider, persistence seam, or an owner through operation options.
+  def private_memory_security do
+    Application.get_env(@app, :private_memory_security, Arbor.Security)
+  end
+
   @type event_log_target :: %{name: atom(), backend: module(), opts: keyword()}
 
   @type mutation_admission_target :: %{

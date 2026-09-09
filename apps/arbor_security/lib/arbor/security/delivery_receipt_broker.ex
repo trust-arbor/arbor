@@ -8,6 +8,9 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   use GenServer
 
   alias Arbor.Contracts.Security.DeliveryReceipt
+  alias Arbor.Security.Config
+  alias Arbor.Security.Contracts.PrivateMemoryAdmission
+  alias Arbor.Security.PrivateMemory
 
   @token_bytes 32
   @default_ttl_ms 30_000
@@ -87,6 +90,18 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     safe_call(server, :stats)
   end
 
+  def memory_exchange(token, agent_id, sender_id, context),
+    do: safe_call(__MODULE__, {:memory_exchange, token, agent_id, sender_id, context})
+
+  def memory_activate(token, engagement_id),
+    do: safe_call(__MODULE__, {:memory_activate, token, engagement_id})
+
+  def memory_scope(token), do: safe_call(__MODULE__, {:memory_scope, token})
+  def memory_close(token), do: safe_call(__MODULE__, {:memory_close, token})
+
+  def memory_attestation_scope(token, owner),
+    do: safe_call(__MODULE__, {:memory_attestation_scope, token, owner})
+
   defp safe_call(server, request) do
     GenServer.call(server, request)
   catch
@@ -113,6 +128,9 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:ok,
      %{
        entries: %{},
+       memory_admissions: %{},
+       memory_monitors: %{},
+       memory_ttl_ms: Config.private_memory_admission_ttl_ms(),
        ttl_ms: ttl_ms,
        max_entries: max_entries,
        cleanup_interval_ms: cleanup_interval_ms,
@@ -197,6 +215,79 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
     {:reply, :ok, state}
   end
 
+  def handle_call({:memory_exchange, token, agent_id, sender_id, context}, {owner, _}, state) do
+    {entry, entries} = Map.pop(state.entries, token)
+    state = prune_memory_admissions(%{state | entries: entries})
+    resource = "arbor://chat/agent/" <> agent_id
+    now = state.clock.()
+
+    case entry do
+      %{principal_id: ^sender_id, resource_uri: ^resource, action: :chat, expires_at_ms: expiry}
+      when expiry > now ->
+        if map_size(state.memory_admissions) < state.max_entries do
+          create_memory_admission(state, owner, agent_id, sender_id, context, now)
+        else
+          {:reply, {:error, :broker_full}, state}
+        end
+
+      _ ->
+        {:reply, {:error, :invalid_memory_admission}, state}
+    end
+  end
+
+  def handle_call({:memory_activate, token, engagement_id}, {owner, _}, state) do
+    state = prune_memory_admissions(state)
+
+    with {:ok, %{status: :pending} = entry} <- memory_entry(state, token, owner),
+         true <- PrivateMemory.scalar?(engagement_id) do
+      entry = %{
+        entry
+        | status: :active,
+          scope: Map.put(entry.scope, :engagement_id, engagement_id)
+      }
+
+      {:reply, :ok, put_in(state, [:memory_admissions, token], entry)}
+    else
+      _ -> {:reply, {:error, :invalid_memory_admission}, state}
+    end
+  end
+
+  def handle_call({:memory_scope, token}, {owner, _}, state) do
+    state = prune_memory_admissions(state)
+
+    reply =
+      case memory_entry(state, token, owner) do
+        {:ok, %{status: :active, scope: scope}} -> {:ok, scope}
+        _ -> {:error, :invalid_memory_admission}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:memory_close, token}, {owner, _}, state) do
+    state = prune_memory_admissions(state)
+
+    case Map.get(state.memory_admissions, token) do
+      nil -> {:reply, :ok, state}
+      %{owner: ^owner} -> {:reply, :ok, remove_memory_admission(state, token)}
+      _ -> {:reply, {:error, :invalid_memory_admission}, state}
+    end
+  end
+
+  def handle_call({:memory_attestation_scope, token, owner}, {caller, _}, state) do
+    state = prune_memory_admissions(state)
+
+    reply =
+      with true <- caller == Process.whereis(Arbor.Security.SystemAuthority),
+           {:ok, %{status: :active, scope: scope}} <- memory_entry(state, token, owner) do
+        {:ok, scope}
+      else
+        _ -> {:error, :invalid_memory_admission}
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call(:stats, _from, state) do
     stats =
       Map.merge(state.stats, %{
@@ -208,9 +299,16 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
 
   @impl true
   def handle_info(:cleanup, state) do
-    state = prune_expired(state)
+    state = state |> prune_expired() |> prune_memory_admissions()
     schedule_cleanup(state.cleanup_interval_ms)
     {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.get(state.memory_monitors, ref) do
+      nil -> {:noreply, state}
+      token -> {:noreply, remove_memory_admission(state, token)}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -229,6 +327,70 @@ defmodule Arbor.Security.DeliveryReceiptBroker do
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------
+
+  defp create_memory_admission(state, owner, agent_id, human_id, context, now) do
+    token = :crypto.strong_rand_bytes(@token_bytes)
+
+    if Map.has_key?(state.memory_admissions, token) do
+      {:reply, {:error, :receipt_issue_failed}, state}
+    else
+      ref = Process.monitor(owner)
+      scope = Map.merge(context, %{agent_id: agent_id, human_id: human_id})
+
+      entry = %{
+        owner: owner,
+        monitor: ref,
+        scope: scope,
+        status: :pending,
+        expires_at_ms: now + state.memory_ttl_ms
+      }
+
+      {:ok, admission} = PrivateMemoryAdmission.new(token)
+
+      state =
+        state
+        |> put_in([:memory_admissions, token], entry)
+        |> put_in([:memory_monitors, ref], token)
+
+      {:reply, {:ok, admission}, state}
+    end
+  end
+
+  defp memory_entry(state, token, owner) do
+    case Map.get(state.memory_admissions, token) do
+      %{owner: ^owner} = entry ->
+        if Process.alive?(owner), do: {:ok, entry}, else: {:error, :invalid_memory_admission}
+
+      _ ->
+        {:error, :invalid_memory_admission}
+    end
+  end
+
+  defp remove_memory_admission(state, token) do
+    case Map.pop(state.memory_admissions, token) do
+      {nil, _} ->
+        state
+
+      {entry, admissions} ->
+        Process.demonitor(entry.monitor, [:flush])
+
+        %{
+          state
+          | memory_admissions: admissions,
+            memory_monitors: Map.delete(state.memory_monitors, entry.monitor)
+        }
+    end
+  end
+
+  defp prune_memory_admissions(state) do
+    now = state.clock.()
+
+    Enum.reduce(state.memory_admissions, state, fn {token, entry}, acc ->
+      if entry.expires_at_ms <= now or not Process.alive?(entry.owner),
+        do: remove_memory_admission(acc, token),
+        else: acc
+    end)
+  end
 
   defp mint_receipt(state, principal_id, resource_uri, action, now) do
     do_mint(state, principal_id, resource_uri, action, now, @max_token_attempts)

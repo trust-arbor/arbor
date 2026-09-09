@@ -2,10 +2,10 @@ defmodule Arbor.Memory.RecallAdmissionCore do
   @moduledoc """
   Pure exclusion policy for recognized conversation records on interactive reads.
 
-  Conversation ownership has not yet been admitted by a trusted writer. All
-  recognized conversations are therefore withheld, including records carrying
-  claimed owners, public visibility or verified taint provenance. Other records
-  passing this policy are not thereby proven safe to share.
+  General readers withhold all recognized conversations, including records
+  carrying claimed owners, public visibility or verified taint provenance.
+  Private owner reads use a separate admission boundary. Other records passing
+  this policy are not thereby proven safe to share.
 
   Callers validate storage envelopes before applying this policy. It neither
   validates records nor changes the stored data.
@@ -39,11 +39,21 @@ defmodule Arbor.Memory.RecallAdmissionCore do
   end
 
   defp body_conversation?(body) when is_map(body) do
-    metadata_conversation?(Map.get(body, :metadata)) or
+    private_record_marker?(body) or
+      metadata_conversation?(Map.get(body, :metadata)) or
       metadata_conversation?(Map.get(body, "metadata"))
   end
 
   defp body_conversation?(_body), do: false
+
+  # Presence is restrictive evidence only, never positive ownership authority.
+  # A still-marked private body cannot be downgraded by changing its category.
+  defp private_record_marker?(body) do
+    Enum.any?(
+      [:conversation_scope, "conversation_scope", :owner_stamp, "owner_stamp"],
+      &Map.has_key?(body, &1)
+    )
+  end
 
   defp metadata_conversation?(metadata) when is_map(metadata) do
     conversation?(Map.get(metadata, :type)) or

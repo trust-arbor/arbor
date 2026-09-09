@@ -35,11 +35,16 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Config
+  alias Arbor.Security.Contracts.PrivateMemoryAdmission
+  alias Arbor.Security.Contracts.PrivateMemoryRecord
+  alias Arbor.Security.DeliveryReceiptBroker
+  alias Arbor.Security.PrivateMemory
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.SigningKeyStore
 
   @key_store_name :arbor_security_signing_keys
+  @max_memory_attestations 64
 
   # V3 stores the encrypted private keypair and non-secret public metadata in
   # one acknowledged AuthorityStore record under this logical id.
@@ -91,6 +96,20 @@ defmodule Arbor.Security.SystemAuthority do
   @spec public_key() :: binary()
   def public_key do
     GenServer.call(__MODULE__, :public_key)
+  end
+
+  @doc false
+  def attest_private_memory_record(admission, descriptor),
+    do: private_memory_call({:attest_private_memory_record, admission, descriptor})
+
+  @doc false
+  def verify_private_memory_record(descriptor, stamp),
+    do: private_memory_call({:verify_private_memory_record, descriptor, stamp})
+
+  defp private_memory_call(request) do
+    GenServer.call(__MODULE__, request, Config.private_memory_attestation_timeout_ms() + 1_000)
+  catch
+    :exit, _ -> {:error, :memory_attestation_unavailable}
   end
 
   @doc """
@@ -185,6 +204,8 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def init(_opts) do
+    Process.flag(:trap_exit, true)
+
     case Config.system_authority_mode() do
       :persistent ->
         init_persistent()
@@ -206,7 +227,7 @@ defmodule Arbor.Security.SystemAuthority do
 
         case register_public_identity(identity) do
           :ok ->
-            {:ok, %{identity: identity}}
+            {:ok, %{identity: identity, private_memory_root_ready: durable_root_store?()}}
 
           {:error, reason} ->
             {:stop, {:authority_registration_failed, reason}}
@@ -242,7 +263,7 @@ defmodule Arbor.Security.SystemAuthority do
     case Identity.generate() do
       {:ok, identity} ->
         :ok = Registry.register(Identity.public_only(identity))
-        {:ok, %{identity: identity}}
+        {:ok, %{identity: identity, private_memory_root_ready: false}}
 
       {:error, reason} ->
         {:stop, {:failed_to_generate_identity, reason}}
@@ -256,23 +277,35 @@ defmodule Arbor.Security.SystemAuthority do
       :ok ->
         Logger.info("[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}")
 
-        register_generated_identity(identity)
+        register_generated_identity(identity, true)
 
       {:error, :store_unavailable} ->
         Logger.info("[SystemAuthority] Generated in-memory keypair: #{identity.agent_id}")
 
-        register_generated_identity(identity)
+        register_generated_identity(identity, false)
 
       {:error, reason} ->
         {:stop, {:failed_to_persist_identity, reason}}
     end
   end
 
-  defp register_generated_identity(identity) do
+  defp register_generated_identity(identity, persisted?) do
     case register_public_identity(identity) do
-      :ok -> {:ok, %{identity: identity}}
-      {:error, reason} -> {:stop, {:authority_registration_failed, reason}}
+      :ok ->
+        {:ok,
+         %{identity: identity, private_memory_root_ready: persisted? and durable_root_store?()}}
+
+      {:error, reason} ->
+        {:stop, {:authority_registration_failed, reason}}
     end
+  end
+
+  defp durable_root_store? do
+    AuthorityStore.durability_class(name: @key_store_name) == :node_restart
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   @impl true
@@ -294,6 +327,35 @@ defmodule Arbor.Security.SystemAuthority do
     signature = Crypto.sign(payload, identity.private_key)
 
     {:reply, {:ok, Map.put(receipt, :signature, signature)}, state}
+  end
+
+  def handle_call(
+        {:attest_private_memory_record, admission, descriptor},
+        {owner, _} = from,
+        state
+      ) do
+    with true <- Map.get(state, :private_memory_root_ready, false),
+         true <- map_size(Map.get(state, :memory_attestations, %{})) < @max_memory_attestations,
+         {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(token, owner),
+         :ok <- PrivateMemoryRecord.admit(descriptor),
+         true <- PrivateMemoryRecord.scope_matches?(descriptor, scope) do
+      start_memory_attestation(state, from, token, scope, descriptor)
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :memory_attestation_unavailable}, state}
+    end
+  end
+
+  def handle_call({:verify_private_memory_record, descriptor, stamp}, _from, state) do
+    reply =
+      if Map.get(state, :private_memory_root_ready, false) do
+        PrivateMemoryRecord.verify(descriptor, stamp, state.identity)
+      else
+        {:error, :memory_attestation_unavailable}
+      end
+
+    {:reply, reply, state}
   end
 
   @impl true
@@ -365,6 +427,124 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
+  @impl true
+  def handle_info({:private_memory_authorized, reference, worker, result}, state) do
+    case Map.get(Map.get(state, :memory_attestations, %{}), reference) do
+      %{worker: ^worker} = job ->
+        reply = finish_memory_attestation(state, job, result)
+        complete_memory_attestation(state, reference, reply)
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:private_memory_deadline, reference}, state),
+    do: complete_memory_attestation(state, reference, {:error, :memory_attestation_unavailable})
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    case Enum.find(Map.get(state, :memory_attestations, %{}), fn {_ref, job} ->
+           monitor in [job.worker_monitor, job.owner_monitor]
+         end) do
+      {reference, _job} ->
+        complete_memory_attestation(state, reference, {:error, :memory_attestation_unavailable})
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:EXIT, _worker, _reason}, state), do: {:noreply, state}
+  def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    Enum.each(Map.get(state, :memory_attestations, %{}), fn {_ref, job} ->
+      cleanup_memory_attestation(job)
+    end)
+
+    :ok
+  end
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    Map.new(status, fn
+      {:state, _} -> {:state, %{system_authority: :redacted}}
+      {key, _} when key in [:message, :reason, :log] -> {key, :redacted}
+      entry -> entry
+    end)
+  end
+
+  # Normal capability authorization verifies signatures through this GenServer.
+  # A bounded linked worker keeps the root responsive during that check; only
+  # this owner retains the key and performs the eventual signature.
+  defp start_memory_attestation(state, {owner, _} = from, token, scope, descriptor) do
+    root = self()
+    reference = make_ref()
+
+    {worker, worker_monitor} =
+      :erlang.spawn_opt(
+        fn ->
+          result = PrivateMemory.authorize_scope(scope, :write)
+          send(root, {:private_memory_authorized, reference, self(), result})
+        end,
+        [:link, :monitor]
+      )
+
+    timeout = Config.private_memory_attestation_timeout_ms()
+
+    job = %{
+      from: from,
+      owner: owner,
+      token: token,
+      scope: scope,
+      descriptor: descriptor,
+      issuer_id: state.identity.agent_id,
+      worker: worker,
+      worker_monitor: worker_monitor,
+      owner_monitor: Process.monitor(owner),
+      deadline: System.monotonic_time(:millisecond) + timeout,
+      timer: Process.send_after(self(), {:private_memory_deadline, reference}, timeout)
+    }
+
+    pending = Map.put(Map.get(state, :memory_attestations, %{}), reference, job)
+    {:noreply, Map.put(state, :memory_attestations, pending)}
+  end
+
+  defp finish_memory_attestation(state, job, :ok) do
+    with true <- System.monotonic_time(:millisecond) < job.deadline,
+         true <- state.identity.agent_id == job.issuer_id,
+         true <- Map.get(state, :private_memory_root_ready, false),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(job.token, job.owner),
+         true <- scope == job.scope do
+      PrivateMemoryRecord.sign(job.descriptor, state.identity)
+    else
+      _ -> {:error, :memory_attestation_unavailable}
+    end
+  end
+
+  defp finish_memory_attestation(_state, _job, error), do: error
+
+  defp complete_memory_attestation(state, reference, reply) do
+    case Map.pop(Map.get(state, :memory_attestations, %{}), reference) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {job, pending} ->
+        cleanup_memory_attestation(job)
+        GenServer.reply(job.from, reply)
+        {:noreply, Map.put(state, :memory_attestations, pending)}
+    end
+  end
+
+  defp cleanup_memory_attestation(job) do
+    Process.cancel_timer(job.timer)
+    if Process.alive?(job.worker), do: Process.exit(job.worker, :kill)
+    Process.unlink(job.worker)
+    Process.demonitor(job.worker_monitor, [:flush])
+    Process.demonitor(job.owner_monitor, [:flush])
+  end
+
   defp rotate_identity(old_identity, new_identity, state) do
     with :ok <- register_public_identity(new_identity),
          :ok <- maybe_persist_rotation(new_identity) do
@@ -373,7 +553,15 @@ defmodule Arbor.Security.SystemAuthority do
         new_agent_id: new_identity.agent_id
       }
 
-      {:reply, {:ok, result}, %{state | identity: new_identity}}
+      state =
+        Map.merge(state, %{
+          identity: new_identity,
+          private_memory_root_ready:
+            Config.system_authority_mode() == :persistent and
+              durable_root_store?()
+        })
+
+      {:reply, {:ok, result}, state}
     else
       {:error, :outcome_unknown} ->
         # The bundle may have committed. Stop after replying so supervision

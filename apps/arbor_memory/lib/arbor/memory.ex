@@ -72,6 +72,7 @@ defmodule Arbor.Memory do
     IntentStore,
     KnowledgeGraph,
     KnowledgeOps,
+    PrivateConversations,
     Provenance,
     SessionOps,
     Signals,
@@ -182,6 +183,60 @@ defmodule Arbor.Memory do
   defdelegate search_embeddings(agent_id, query_embedding, opts \\ []), to: IndexOps
   defdelegate embedding_stats(agent_id), to: IndexOps
   defdelegate warm_index_cache(agent_id, opts \\ []), to: IndexOps
+
+  @doc """
+  Store a private conversation for the owner of an active, caller-bound admission.
+
+  `embedding_result` must contain a precomputed vector and its provider/model
+  descriptor. This operation never calls an embedding provider. The only option
+  is the source-owned `:source_id`, required for idempotent committed-pair writes.
+  Ownership is derived from Security; caller metadata cannot select it.
+  """
+  @spec index_private_conversation(term(), String.t(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def index_private_conversation(admission, content, embedding_result, opts) do
+    PrivateConversations.index(
+      admission,
+      content,
+      embedding_result,
+      opts,
+      &authorize_private_memory_scope/2
+    )
+  end
+
+  @doc """
+  Recall private conversations using an active, caller-bound admission.
+
+  Accepts only a precomputed query embedding result and `:limit` / `:threshold`
+  options. The owner is the authenticated agent/human pair, across engagements.
+  Persisted records must verify against the current persisted system root.
+  SQLite's local cosine fallback examines at most 1,000 records in that owner's
+  namespace; it never sends text or vectors to an embedding provider.
+  """
+  @spec recall_private_conversations(term(), map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def recall_private_conversations(admission, embedding_result, opts \\ []) do
+    PrivateConversations.recall(
+      admission,
+      embedding_result,
+      opts,
+      &authorize_private_memory_scope/2
+    )
+  end
+
+  defp authorize_private_memory_scope(scope, operation) do
+    case authorize_self_scoped_memory(
+           scope.agent_id,
+           Atom.to_string(operation),
+           scope.agent_id,
+           session_id: scope.session_id,
+           task_id: scope.turn_id
+         ) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+      _ -> {:error, :private_memory_unauthorized}
+    end
+  end
 
   # ============================================================================
   # Knowledge Graph Operations (delegated to KnowledgeOps)

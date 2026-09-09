@@ -26,6 +26,23 @@ defmodule Arbor.Security.Config do
   """
 
   @app :arbor_security
+
+  @doc false
+  def private_memory_admission_ttl_ms do
+    case Application.get_env(@app, :private_memory_admission_ttl_ms, 900_000) do
+      ttl when is_integer(ttl) and ttl in 1..3_600_000 -> ttl
+      _ -> 900_000
+    end
+  end
+
+  @doc false
+  def private_memory_attestation_timeout_ms do
+    case Application.get_env(@app, :private_memory_attestation_timeout_ms, 5_000) do
+      timeout when is_integer(timeout) and timeout in 1..30_000 -> timeout
+      _ -> 5_000
+    end
+  end
+
   @default_consensus_module Module.concat(["Arbor", "Consensus"])
   @default_interaction_router Module.concat(["Arbor", "Comms", "InteractionRouter"])
   @default_signing_authority_bootstrap_grace_ms 60_000
