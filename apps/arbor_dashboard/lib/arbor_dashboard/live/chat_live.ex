@@ -388,9 +388,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("approve-tool", %{"id" => proposal_id}, socket) do
-    actor_id = approval_actor_id(socket)
-
-    case safe_answer_approval(proposal_id, :approve, actor_id) do
+    case safe_answer_approval(proposal_id, :approve, socket) do
       :ok ->
         {:noreply, drop_approval(socket, proposal_id)}
 
@@ -412,7 +410,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     # a single-click silent escalation.
     case Arbor.Dashboard.Cores.AutoPromoteGate.authorize(actor_id, agent_id) do
       :ok ->
-        case safe_answer_approval(proposal_id, :approve, actor_id) do
+        case safe_answer_approval(proposal_id, :approve, socket) do
           :ok ->
             Arbor.Trust.Store.always_allow(agent_id, resource)
 
@@ -438,9 +436,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   def handle_event("deny-tool", %{"id" => proposal_id}, socket) do
-    actor_id = approval_actor_id(socket)
-
-    case safe_answer_approval(proposal_id, :deny, actor_id) do
+    case safe_answer_approval(proposal_id, :deny, socket) do
       :ok ->
         {:noreply, drop_approval(socket, proposal_id)}
 
@@ -584,9 +580,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp interaction_pubsub, do: Arbor.Comms.PubSub
 
   defp answer_interaction(socket, request_id, decision) do
-    actor_id = approval_actor_id(socket)
-
-    case safe_answer_approval(request_id, decision, actor_id) do
+    case safe_answer_approval(request_id, decision, socket) do
       :ok ->
         {:noreply, drop_approval(socket, request_id)}
 
@@ -1908,11 +1902,15 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Approval Helpers ──────────────────────────────────────────────
 
-  defp safe_answer_approval(proposal_id, decision, actor_id) do
+  defp safe_answer_approval(proposal_id, decision, socket) do
     safe_orchestration_call(:answer_approval, [
       proposal_id,
       decision,
-      [caller_id: actor_id, note: "Answered from dashboard chat"]
+      [
+        caller_id: socket.assigns[:current_agent_id],
+        session_token: socket.assigns[:session_token],
+        note: "Answered from dashboard chat"
+      ]
     ])
   end
 

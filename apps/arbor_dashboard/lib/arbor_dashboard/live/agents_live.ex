@@ -12,7 +12,9 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   import Arbor.Web.Components
 
   alias Arbor.Agent.{Executor, Lifecycle, Manager, ReasoningLoop}
-  alias Arbor.Web.Helpers
+  alias Arbor.Dashboard.Components.GraduationComponent
+  alias Arbor.Trust
+  alias Arbor.Web.{Helpers, SignalLive}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -32,8 +34,11 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       )
       |> stream_configure(:agents, dom_id: &"agent-#{&1.agent_id}")
       |> stream(:agents, profiles)
+      |> GraduationComponent.mount()
 
     socket = subscribe_signals(socket, "agent.*", &reload_agents/1)
+    # Both subscriptions share the existing debounced reload hook.
+    socket = if connected?(socket), do: SignalLive.subscribe_raw(socket, "trust.*"), else: socket
 
     {:ok, socket}
   end
@@ -48,16 +53,42 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       running_ids: safe_running_ids()
     )
     |> stream(:agents, profiles, reset: true)
+    |> reload_graduations()
   end
 
   @impl true
   def handle_event("select-agent", %{"id" => agent_id}, socket) do
     detail = safe_load_detail(agent_id)
-    {:noreply, assign(socket, selected_agent: agent_id, agent_detail: detail)}
+
+    socket =
+      socket
+      |> assign(selected_agent: agent_id, agent_detail: detail)
+      |> GraduationComponent.mount(agent_id)
+      |> reload_graduations()
+
+    {:noreply, socket}
   end
 
   def handle_event("close-detail", _params, socket) do
-    {:noreply, assign(socket, selected_agent: nil, agent_detail: nil)}
+    {:noreply,
+     socket |> assign(selected_agent: nil, agent_detail: nil) |> GraduationComponent.mount()}
+  end
+
+  def handle_event("graduation:refresh", _params, socket) do
+    {:noreply, reload_graduations(socket)}
+  end
+
+  def handle_event("graduation:" <> operation, params, socket)
+      when operation in ["accept", "decline"] do
+    operation = if operation == "accept", do: :accept, else: :decline
+    result = decide_graduation(socket, operation, params)
+
+    socket =
+      socket
+      |> GraduationComponent.update_decision(operation, result)
+      |> reload_graduations()
+
+    {:noreply, socket}
   end
 
   def handle_event("chat-agent", %{"id" => agent_id}, socket) do
@@ -90,6 +121,51 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
       |> stream(:agents, profiles, reset: true)
 
     {:noreply, socket}
+  end
+
+  defp reload_graduations(%{assigns: %{selected_agent: nil}} = socket), do: socket
+
+  defp reload_graduations(socket) do
+    result =
+      with {:ok, target, opts} <- graduation_identity(socket) do
+        safe_graduation_call(fn -> Trust.list_graduations(target, opts) end)
+      end
+
+    GraduationComponent.update_result(socket, result)
+  end
+
+  defp decide_graduation(socket, operation, %{"prefix" => prefix, "suggestion_id" => id}) do
+    with {:ok, target, opts} <- graduation_identity(socket) do
+      opts = Keyword.put(opts, :suggestion_id, id)
+
+      safe_graduation_call(fn ->
+        case operation do
+          :accept -> Trust.accept_graduation(target, prefix, opts)
+          :decline -> Trust.decline_graduation(target, prefix, opts)
+        end
+      end)
+    end
+  end
+
+  defp decide_graduation(_socket, _operation, _params), do: {:error, :invalid_graduation_options}
+
+  defp graduation_identity(socket) do
+    case {socket.assigns.selected_agent, socket.assigns[:current_agent_id],
+          socket.assigns[:session_token]} do
+      {target, actor, token} when is_binary(target) and is_binary(actor) and is_binary(token) ->
+        {:ok, target, [caller_id: actor, session_token: token]}
+
+      _ ->
+        {:error, :graduation_authority_required}
+    end
+  end
+
+  defp safe_graduation_call(callback) do
+    callback.()
+  rescue
+    _ -> {:error, :graduation_unavailable}
+  catch
+    :exit, _ -> {:error, :graduation_unavailable}
   end
 
   @impl true
@@ -441,6 +517,8 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
               </div>
             </div>
           </div>
+
+          <GraduationComponent.graduation_panel review={@graduation_review} />
 
           <%!-- Model config (from ConfigCore.show_config CRC convert) --%>
           <div :if={detail.model_summary} style="margin-bottom: 1.5rem;">
