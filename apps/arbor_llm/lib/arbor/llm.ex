@@ -2,6 +2,7 @@ defmodule Arbor.LLM do
   @moduledoc false
 
   alias Arbor.LLM.AbortError
+  alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
 
   alias Arbor.LLM.Boundary
 
@@ -335,6 +336,10 @@ defmodule Arbor.LLM do
 
   def embed_batch(_provider, _model, _texts, _opts),
     do: {:error, :invalid_embedding_request}
+
+  @doc "Refuse compositions that cannot prove a fresh default embedding dispatch."
+  @spec validate_live_embedding_pipeline() :: :ok | {:error, atom()}
+  def validate_live_embedding_pipeline, do: ReqLLMAdapter.validate_live_embedding_pipeline()
 
   defp do_generate(opts) do
     with :ok <- validate_public_options(opts),

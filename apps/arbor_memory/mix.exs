@@ -34,6 +34,8 @@ defmodule ArborMemory.MixProject do
       {:arbor_persistence, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
+      {:arbor_llm, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
       {:jason, "~> 1.4"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

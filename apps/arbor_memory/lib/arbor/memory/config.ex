@@ -32,6 +32,8 @@ defmodule Arbor.Memory.Config do
     Application.get_env(@app, :private_memory_security, Arbor.Security)
   end
 
+  def hybrid_knowledge_search, do: Application.get_env(@app, :hybrid_knowledge_search, false)
+
   @type event_log_target :: %{name: atom(), backend: module(), opts: keyword()}
 
   @type mutation_admission_target :: %{

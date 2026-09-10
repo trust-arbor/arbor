@@ -164,6 +164,18 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
     {:ok, results}
   end
 
+  @doc false
+  def hybrid_scores(query, query_vector, node, node_vector, semantic_weight) do
+    semantic = cosine_similarity(query_vector, node_vector) |> max(-1.0) |> min(1.0)
+    keyword = compute_keyword_score(query, node)
+
+    %{
+      semantic: semantic,
+      keyword: keyword,
+      combined: semantic_weight * semantic + (1.0 - semantic_weight) * keyword
+    }
+  end
+
   # ============================================================================
   # Cascade Recall (Spreading Activation)
   # ============================================================================

@@ -66,6 +66,8 @@ defmodule Arbor.Memory do
     GoalIntentOps,
     GoalStore,
     GraphOps,
+    HybridSearch,
+    HybridSearchCore,
     IdentityOps,
     IndexOps,
     IndexSupervisor,
@@ -584,6 +586,32 @@ defmodule Arbor.Memory do
     case authorize_self_scoped_memory(caller_id, "search", agent_id) do
       :ok -> search_knowledge(agent_id, query, opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
+    end
+  end
+
+  @doc """
+  Explicit experimental hybrid search of an agent's authoritative knowledge graph.
+
+  Requires current `arbor://memory/search` authority and separate egress approval.
+  Disabled unless source-owned `:hybrid_knowledge_search` configuration is enabled.
+  No tool or private Session wiring is implied. Returns measured results with
+  unchanged source nodes and provenance; no quality or human-ownership guarantee.
+  """
+  @spec authorize_hybrid_search(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def authorize_hybrid_search(caller_id, agent_id, query, opts \\ []) do
+    with :ok <- HybridSearchCore.validate_request(caller_id, agent_id, query, opts) do
+      authorize = fn ->
+        case authorize_self_scoped_memory(caller_id, "search", agent_id) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:unauthorized, reason}}
+          _ -> {:error, :hybrid_search_authorization_refused}
+        end
+      end
+
+      with :ok <- authorize.() do
+        HybridSearch.search(caller_id, agent_id, query, opts, authorize)
+      end
     end
   end
 

@@ -371,6 +371,25 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
+  @doc false
+  def validate_live_embedding_pipeline do
+    case admit_live_embedding_pipeline(true) do
+      {:ok, _pipeline} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp admit_live_embedding_pipeline(nil), do: {:ok, nil}
+
+  defp admit_live_embedding_pipeline(true) do
+    case pipeline() do
+      @default_pipeline -> {:ok, @default_pipeline}
+      _ -> {:error, :live_embedding_pipeline_unsupported}
+    end
+  end
+
+  defp admit_live_embedding_pipeline(_), do: {:error, :invalid_live_embedding_requirement}
+
   @impl true
   @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
           {:ok, Arbor.LLM.ProviderAdapter.embed_batch_result()} | {:error, term()}
@@ -378,11 +397,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     opts = OpenCodeZen.carry_probe_authorization(opts)
 
     with {:ok, opts, _timeout} <- Deadline.normalize_transport_options(opts),
-         {:ok, receipt} <- Deadline.receipt(opts) do
+         {:ok, receipt} <- Deadline.receipt(opts),
+         {require_live, opts} = Keyword.pop(opts, :require_live_pipeline),
+         {:ok, frozen_pipeline} <- admit_live_embedding_pipeline(require_live) do
       Deadline.run(
         fn ->
           with :ok <- Boundary.embedding_inputs(texts) do
-            do_embed_request(texts, model, opts)
+            do_embed_request(texts, model, opts, frozen_pipeline)
           end
         end,
         receipt,
@@ -391,7 +412,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_embed_request(texts, model, opts) do
+  defp do_embed_request(texts, model, opts, frozen_pipeline) do
     with :ok <- validate_embedding_ingress(texts, model, opts) do
       arbor_provider = resolve_embed_provider(opts, model)
 
@@ -401,8 +422,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
         true ->
           case build_embed_model_spec(arbor_provider, model) do
-            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts, model)
-            {:error, _} = err -> err
+            {:ok, model_spec} ->
+              do_embed(arbor_provider, model_spec, texts, opts, model, frozen_pipeline)
+
+            {:error, _} = err ->
+              err
           end
       end
     end
@@ -433,8 +457,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp do_embed(arbor_provider, model_spec, texts, opts, model) do
+  defp do_embed(arbor_provider, model_spec, texts, opts, model, frozen_pipeline) do
     {usage_context, opts} = pop_provider_usage_context(opts)
+
+    usage_context =
+      if frozen_pipeline,
+        do: Map.put(usage_context || %{}, :live_embedding_pipeline, frozen_pipeline),
+        else: usage_context
 
     with {:ok, req_opts} <- validated_embed_opts(arbor_provider, model, opts) do
       case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
@@ -1179,16 +1208,23 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       |> maybe_put_provider_usage_context(usage_context)
       |> maybe_put_fixture_scope(fixture_scope)
 
+    live_pipeline = Map.get(call.metadata, :live_embedding_pipeline)
+
+    # The live embedding restriction also prevents a retry callback from
+    # replacing a failed dispatch result, and suppresses provider-installed
+    # Req retries through the existing single-attempt contract.
     call =
-      if single_attempt? do
+      if single_attempt? or not is_nil(live_pipeline) do
         Call.assign(call, :single_attempt, true)
       else
         call
       end
 
-    # The named composition was validated before any provider work. Keep
-    # that selected sequence for this call even if operator config changes.
-    selected_pipeline = if fixture_scope, do: @default_pipeline, else: pipeline()
+    # Named completion and live-only embedding admission each freeze the
+    # source default for this call; operator config changes affect later calls.
+    selected_pipeline =
+      live_pipeline || if(fixture_scope, do: @default_pipeline, else: pipeline())
+
     Pipeline.through(call, selected_pipeline)
   end
 
