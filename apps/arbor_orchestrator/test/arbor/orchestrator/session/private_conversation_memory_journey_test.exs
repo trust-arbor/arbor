@@ -2,6 +2,10 @@ Code.require_file(
   Path.expand("../../../../../arbor_security/test/support/oidc_test_helper.ex", __DIR__)
 )
 
+Code.require_file(
+  Path.expand("../../../../../arbor_memory/test/support/private_snapshot_fixture.ex", __DIR__)
+)
+
 defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   use ExUnit.Case, async: false
 
@@ -10,6 +14,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   alias Arbor.Orchestrator.Session
   alias Arbor.Persistence.Repo
   alias Arbor.Security
+  alias Arbor.Memory.Test.PrivateSnapshotFixture, as: SnapshotFixture
 
   @moduletag :integration
   @moduletag :database
@@ -80,7 +85,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     {:ok, fixture_root: root, repo_supervisor: repo_supervisor}
   end
 
-  setup ctx do
+  setup do
     set_env(:arbor_security, :identity_verification, true)
     set_env(:arbor_security, :policy_enforcer_enabled, false)
     set_env(:arbor_security, :approval_guard_enabled, false)
@@ -94,7 +99,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     set_env(:arbor_persistence, :vector_store_repo, Repo)
     set_env(:arbor_orchestrator, :_private_memory_journey_observer, self())
     set_env(:arbor_orchestrator, :preprocessor_enabled, false)
-    persistent_root!(ctx.fixture_root)
+    snapshot_fixture = SnapshotFixture.start!()
 
     endpoint = embedding_endpoint!()
     # ReqLLM endpoint ownership uses the canonical ProviderRegistry config.
@@ -123,7 +128,9 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
     owner = owner!()
     session_id = "private-journey-#{System.unique_integer([:positive])}"
-    {:ok, owner: owner, session_id: session_id, endpoint: endpoint}
+
+    {:ok,
+     owner: owner, session_id: session_id, endpoint: endpoint, snapshot_fixture: snapshot_fixture}
   end
 
   test "authenticated real turn.dot commits a signed pair, indexes it, and recalls after cold SQLite and a new engagement",
@@ -440,6 +447,80 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     assert Arbor.Persistence.load_recent_session_messages(ctx.session_id) == []
   end
 
+  test "two authenticated focus interactions produce a corrected private prompt after cold reconstruction",
+       ctx do
+    session = start_session!(ctx, ctx.owner, ctx.session_id)
+    declaration = "Remember my current focus: observatory calibration"
+    correction = "Correction: my current focus is: telescope alignment"
+    assert {:ok, first} = turn(session, ctx.owner, declaration)
+    assert first.metadata.relationship_memory == %{status: "saved", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert {:ok, second} = turn(session, ctx.owner, correction)
+    assert second.metadata.relationship_memory == %{status: "saved", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 4
+    assert :ok = GenServer.stop(session)
+    assert :ok = SnapshotFixture.restart_store!(ctx.snapshot_fixture)
+    assert :ok = SnapshotFixture.restart_root!(ctx.snapshot_fixture)
+    replace_engagement!(ctx.owner)
+
+    # Disable semantic recall for this request so the observed focus can only
+    # come from the verified relationship snapshot, with no retained transcript.
+    query = "What should we focus on now?"
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :fail_content, query))
+    later = start_session!(ctx, ctx.owner, ctx.session_id <> "-later")
+    assert Session.get_state(later).messages == []
+    assert {:ok, third} = turn(later, ctx.owner, query)
+    assert third.metadata.relationship_memory.status == "not_requested"
+    assert_receive {:model_request, messages, _}
+    user = Enum.find(Enum.reverse(messages), &(&1.role == :user))
+    assert Arbor.LLM.Message.text(user) =~ "## Private relationship context"
+    assert Arbor.LLM.Message.text(user) =~ "User-stated current focus: telescope alignment"
+    refute inspect(messages) =~ "observatory calibration"
+    refute_received {:model_request, _, _}
+    assert :ok = GenServer.stop(later)
+
+    for other <- [owner!(ctx.owner.agent, nil), owner!(nil, ctx.owner.human)] do
+      foreign = start_session!(ctx, other, "focus-foreign-#{System.unique_integer([:positive])}")
+      assert {:ok, _} = turn(foreign, other, query)
+      assert_receive {:model_request, messages, _}
+      refute inspect(messages) =~ "telescope alignment"
+      refute inspect(messages) =~ "Private relationship context"
+      assert :ok = GenServer.stop(foreign)
+    end
+
+    assert {:ok, false} = Arbor.Memory.relationships_absent?(ctx.owner.agent.agent_id)
+    assert :ok = Arbor.Memory.delete_all_relationships(ctx.owner.agent.agent_id)
+    assert {:ok, true} = Arbor.Memory.relationships_absent?(ctx.owner.agent.agent_id)
+    admission = SnapshotFixture.admission!(ctx.owner)
+
+    assert {:ok, %{relationship: %{}, fence: :not_found}} =
+             Arbor.Memory.get_private_relationship(admission)
+  end
+
+  test "post-ACK relationship status is independent of vector failure and a rejected correction never retries transcript",
+       ctx do
+    session = start_session!(ctx, ctx.owner, ctx.session_id)
+    directive = "Remember my current focus: mirror polishing"
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :fail_content, directive))
+    assert {:ok, response} = turn(session, ctx.owner, directive)
+    assert response.metadata.conversation_memory.status == "pending"
+    assert response.metadata.relationship_memory == %{status: "saved", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 2
+
+    assert {:ok, conflict} =
+             turn(session, ctx.owner, "Remember my current focus: silent replacement")
+
+    assert conflict.metadata.relationship_memory == %{status: "conflict", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert length(Arbor.Persistence.load_recent_session_messages(ctx.session_id)) == 4
+    admission = SnapshotFixture.admission!(ctx.owner)
+
+    assert {:ok, %{relationship: %{"current_focus" => "mirror polishing"}}} =
+             Arbor.Memory.get_private_relationship(admission)
+  end
+
   defp await_idle(session, attempts \\ 100)
   defp await_idle(_session, 0), do: flunk("Session did not finish its cancelled index stage")
 
@@ -559,51 +640,12 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     engagement
   end
 
-  defp persistent_root!(root) do
-    previous_mode = Application.fetch_env(:arbor_security, :system_authority_mode)
-    previous_key = Application.fetch_env(:arbor_security, :master_key_path)
-    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
-    directory = Path.join(root, "root-#{System.unique_integer([:positive])}")
-    Application.put_env(:arbor_security, :master_key_path, Path.join(directory, "master.key"))
-    stop_root_store!()
-
-    assert {:ok, store} =
-             Arbor.Security.AuthorityStore.start_link(
-               name: :arbor_security_signing_keys,
-               backend: Arbor.Security.Store.JSONFile,
-               backend_opts: [base_dir: Path.join(directory, "store")],
-               namespace: "signing_keys",
-               hydration_limit: 100
-             )
-
-    Process.unlink(store)
-    restart_root!()
-
-    on_exit(fn ->
-      restore_env(:arbor_security, :system_authority_mode, previous_mode)
-      restore_env(:arbor_security, :master_key_path, previous_key)
-      stop_root_store!()
-      Arbor.Security.TestBootstrap.restore_supervised_tree!()
-    end)
-  end
-
   defp restart_root! do
     assert :ok =
              Supervisor.terminate_child(Arbor.Security.Supervisor, Arbor.Security.SystemAuthority)
 
     assert {:ok, _} =
              Supervisor.restart_child(Arbor.Security.Supervisor, Arbor.Security.SystemAuthority)
-  end
-
-  defp stop_root_store! do
-    for operation <- [:terminate_child, :delete_child] do
-      case apply(Supervisor, operation, [Arbor.Security.Supervisor, :arbor_security_signing_keys]) do
-        :ok -> :ok
-        {:error, :not_found} -> :ok
-      end
-    end
-
-    if pid = Process.whereis(:arbor_security_signing_keys), do: GenServer.stop(pid)
   end
 
   defp set_env(app, key, value) do
@@ -617,9 +659,6 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
       end
     end)
   end
-
-  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
-  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
 
   defp embedding_endpoint! do
     observer = self()

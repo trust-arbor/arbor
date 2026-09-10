@@ -8,12 +8,30 @@ defmodule Arbor.Memory.RelationshipCleanupTest do
   alias Arbor.Contracts.Security.Taint
   alias Arbor.Memory
   alias Arbor.Memory.{Provenance, Relationship}
+  alias Arbor.Persistence
+  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Persistence.QueryableStore.Postgres
 
   @moduletag :integration
   @moduletag :database
   @moduletag spec: "VP-05D2C3I0A"
 
   setup do
+    # Full cleanup proves the private inventory empty through the same real
+    # Repo and shared Sandbox as the legacy relationship rows.
+    start_supervised!(
+      {BufferedStore,
+       name: :arbor_memory_durable,
+       backend: Postgres,
+       backend_opts: [repo: Repo],
+       collection: "relationship_cleanup_#{System.unique_integer([:positive])}",
+       write_mode: :sync,
+       ack_mode: :backend}
+    )
+
+    assert {:ok, {:backend, :node_restart}} =
+             Persistence.buffered_store_authority_mode(:arbor_memory_durable)
+
     for agent <- ~w(cleanup_agent_a cleanup_agent_b) do
       :ok = Memory.delete_all_relationships(agent)
       :ok = Provenance.delete_agent(agent)

@@ -765,6 +765,93 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     {admission, descriptor, agent, human.identity}
   end
 
+  test "private relationship snapshot purpose survives root restart and rejects forged issuer, scope and content" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record, agent, _human} = private_memory_fixture!()
+    descriptor = relationship_descriptor!(record)
+    assert {:ok, stamp} = Security.attest_private_relationship_snapshot(admission, descriptor)
+    assert :ok = Security.verify_private_relationship_snapshot(descriptor, stamp)
+    assert {:error, _} = Security.verify_private_memory_record(record, stamp)
+
+    for {key, value} <- descriptor do
+      replacement = if is_integer(value), do: value + 1, else: value <> "_changed"
+
+      assert {:error, _} =
+               Security.verify_private_relationship_snapshot(
+                 Map.put(descriptor, key, replacement),
+                 stamp
+               )
+    end
+
+    payload =
+      "arbor.private-relationship-snapshot.v1\0" <>
+        agent.agent_id <> "\0" <> stamp["descriptor_digest"]
+
+    forged = %{
+      stamp
+      | "issuer_id" => agent.agent_id,
+        "signature" => Base.encode64(Crypto.sign(payload, agent.private_key))
+    }
+
+    assert {:error, _} = Security.verify_private_relationship_snapshot(descriptor, forged)
+    assert :ok = Security.close_private_memory_admission(admission)
+    restart_system_authority!()
+    assert :ok = Security.verify_private_relationship_snapshot(descriptor, stamp)
+    assert {:error, _} = Security.attest_private_relationship_snapshot(admission, descriptor)
+  end
+
+  test "direct root relationship signing requires exact caller and current write authority" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record, agent, _human} = private_memory_fixture!()
+    descriptor = relationship_descriptor!(record)
+
+    copied =
+      Task.async(fn ->
+        SystemAuthority.attest_private_relationship_snapshot(admission, descriptor)
+      end)
+
+    assert {:error, _} = Task.await(copied)
+
+    assert {:error, _} =
+             SystemAuthority.attest_private_relationship_snapshot(
+               admission,
+               Map.put(descriptor, "turn_id", "forged_turn")
+             )
+
+    assert {:ok, _} = SystemAuthority.attest_private_relationship_snapshot(admission, descriptor)
+
+    assert {:ok, caps} = Security.list_capabilities(agent.agent_id)
+
+    for cap <- caps,
+        String.starts_with?(cap.resource_uri, "arbor://memory/write/"),
+        do: Security.revoke(cap.id)
+
+    assert {:error, _} =
+             SystemAuthority.attest_private_relationship_snapshot(admission, descriptor)
+  end
+
+  defp relationship_descriptor!(record) do
+    assert {:ok, bytes} =
+             Arbor.Contracts.Security.TaintEnvelope.canonical_json([
+               record["agent_id"],
+               record["human_id"]
+             ])
+
+    key = Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
+    record
+    |> Map.take(~w(agent_id human_id engagement_id session_id turn_id))
+    |> Map.merge(%{
+      "namespace" => "private_relationships",
+      "key" => key,
+      "id" => "memory:private_relationships:" <> key,
+      "body_digest" => String.duplicate("a", 64),
+      "snapshot_revision" => 1
+    })
+  end
+
   test "private transcript source uses a distinct persisted-root purpose and later indexing retains original scope" do
     Application.put_env(:arbor_security, :system_authority_mode, :persistent)
     restart_system_authority!()

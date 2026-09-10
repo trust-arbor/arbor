@@ -18,6 +18,8 @@ defmodule Arbor.Memory.RelationshipMutationAdmissionSecurityRegressionTest do
   alias Arbor.Memory.Test.MutationAdmissionFakeBackend, as: Fake
   alias Arbor.Memory.TestBootstrap.AdmissionBackend
   alias Arbor.Persistence
+  alias Arbor.Persistence.BufferedStore
+  alias Arbor.Persistence.QueryableStore.Postgres
 
   @moduletag :integration
   @moduletag :database
@@ -134,6 +136,7 @@ defmodule Arbor.Memory.RelationshipMutationAdmissionSecurityRegressionTest do
 
     assert {:ok, %Relationship{id: id}} = RelationshipStore.get(agent_id, row.id)
     assert id == row.id
+
     assert {:ok, %Relationship{name: "TrackedPeer"}} =
              RelationshipStore.get_by_name(agent_id, "TrackedPeer")
 
@@ -145,6 +148,7 @@ defmodule Arbor.Memory.RelationshipMutationAdmissionSecurityRegressionTest do
     other_id = unique_agent("tracked_open")
     other_row = seed_row(other_id, "OpenTrackedPeer")
     caller_id = other_row.id
+
     assert {:ok, %Relationship{id: ^caller_id}} =
              RelationshipStore.get_with_tracking(other_id, caller_id)
 
@@ -268,9 +272,7 @@ defmodule Arbor.Memory.RelationshipMutationAdmissionSecurityRegressionTest do
         assert {:ok, _fence} = MutationAdmission.drain(agent_id)
 
       {:DOWN, ^mon, :process, _pid, reason} ->
-        flunk(
-          "operation completed before acquire ownership acknowledgement: #{inspect(reason)}"
-        )
+        flunk("operation completed before acquire ownership acknowledgement: #{inspect(reason)}")
     after
       2_000 ->
         case Task.yield(task, 0) do
@@ -306,6 +308,21 @@ defmodule Arbor.Memory.RelationshipMutationAdmissionSecurityRegressionTest do
   test "delete_all and absence stay usable, exact-agent, and root-free after drain", %{
     cell: _cell
   } do
+    # This test covers full cleanup, including an authoritative empty private
+    # inventory. DatabaseCase shares its real Sandbox connection with this owner.
+    start_supervised!(
+      {BufferedStore,
+       name: :arbor_memory_durable,
+       backend: Postgres,
+       backend_opts: [repo: Repo],
+       collection: "relationship_cleanup_#{System.unique_integer([:positive])}",
+       write_mode: :sync,
+       ack_mode: :backend}
+    )
+
+    assert {:ok, {:backend, :node_restart}} =
+             Persistence.buffered_store_authority_mode(:arbor_memory_durable)
+
     agent_id = unique_agent("cleanup_a")
     other_id = unique_agent("cleanup_b")
     seed_row(agent_id, "CleanupA1")
