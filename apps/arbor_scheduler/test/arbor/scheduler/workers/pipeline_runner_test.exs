@@ -15,8 +15,18 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
       test_pid = Application.fetch_env!(:arbor_scheduler, :pipeline_runner_test_pid)
       identity_registered? = match?({:ok, _}, Arbor.Security.lookup_public_key(agent_id))
       send(test_pid, {:run_file_as, path, agent_id, authority, opts, identity_registered?})
-      {:ok, %{status: :completed}}
+      outcome = Application.get_env(:arbor_scheduler, :pipeline_runner_test_outcome, :success)
+
+      {:ok,
+       %{
+         run_id: "scheduler-test",
+         completed_nodes: ["start", "done"],
+         context: %{},
+         final_outcome: struct(Arbor.Orchestrator.Engine.Outcome, status: outcome)
+       }}
     end
+
+    defdelegate classify_run_result(result), to: Arbor.Orchestrator
   end
 
   defmodule LegacyFacadeStub do
@@ -47,6 +57,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
     restore_env(:pipeline_roots)
     restore_env(:orchestrator_module)
     restore_env(:pipeline_runner_test_pid)
+    restore_env(:pipeline_runner_test_outcome)
     restore_env(:pipeline_runner_workdir_replacement)
 
     Application.put_env(:arbor_scheduler, :pipeline_roots, %{"test" => root})
@@ -62,6 +73,27 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
   end
 
   describe "exact attestation execution" do
+    for status <- [:partial_success, :retry, :fail, :skipped] do
+      test "security regression: #{status} Engine result is not reported completed", %{
+        issuer: issuer,
+        root: root
+      } do
+        status = unquote(status)
+        %{dot: dot} = write_attested_pipeline(root, "outcome_#{status}", issuer)
+        Application.put_env(:arbor_scheduler, :pipeline_runner_test_outcome, status)
+
+        assert {:discard, {:pipeline_outcome, ^status}} = PipelineRunner.perform(job(dot, %{}))
+        assert_receive {:run_file_as, _, agent_id, _, _, true}
+        assert {:error, :not_found} = Arbor.Security.lookup_public_key(agent_id)
+      end
+    end
+
+    test "security regression: unknown Engine outcome fails closed", %{issuer: issuer, root: root} do
+      %{dot: dot} = write_attested_pipeline(root, "invalid_outcome", issuer)
+      Application.put_env(:arbor_scheduler, :pipeline_runner_test_outcome, :unknown)
+      assert {:discard, :invalid_run_result} = PipelineRunner.perform(job(dot, %{}))
+    end
+
     test "security regression: exact graph, path, workdir, and args call run_file_as/4", %{
       issuer: issuer,
       root: root
