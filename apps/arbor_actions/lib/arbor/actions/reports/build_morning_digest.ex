@@ -23,6 +23,7 @@ defmodule Arbor.Actions.Reports.BuildMorningDigest do
     ]
 
   alias Arbor.Actions
+  alias Arbor.Actions.Config
   alias Arbor.Actions.File, as: FileActions
   alias Arbor.Actions.Reports.DigestCore
   alias Arbor.Common.SafePath
@@ -33,7 +34,8 @@ defmodule Arbor.Actions.Reports.BuildMorningDigest do
 
   @impl true
   def run(params, context) do
-    with {:ok, _principal} <- Actions.authorized_principal(context, __MODULE__),
+    with {:ok, principal} <- Actions.authorized_principal(context, __MODULE__),
+         :ok <- routine_entry(context, principal),
          {:ok, plan} <- DigestCore.new(params, Date.utc_today()),
          {:ok, workdir} <- canonical_workdir(context),
          {:ok, reports} <- read_reports(plan.inputs, workdir, context),
@@ -142,11 +144,44 @@ defmodule Arbor.Actions.Reports.BuildMorningDigest do
     with {:ok, path} <- SafePath.resolve_within(relative, workdir),
          :ok <- canonical_parent(path, workdir),
          :ok <- regular_or_absent(path),
-         {:ok, ^path} <- FileActions.authorize_file_op(context, path, operation) do
+         {:ok, ^path} <- FileActions.authorize_file_op(context, path, operation),
+         :ok <-
+           routine_effect(context, %{
+             principal: context.agent_id,
+             operation: operation,
+             path: path
+           }) do
       {:ok, path}
     else
       {:ok, _other_path} -> {:error, :report_path_changed}
       {:error, _} = error -> error
+    end
+  end
+
+  defp routine_entry(context, principal) do
+    scheduler = Config.scheduler_module()
+
+    with {:ok, required?} <- scheduler.routine_effect_requirement(principal) do
+      case {required?, Map.fetch(context, :routine_effect_token)} do
+        {true, :error} ->
+          {:error, :routine_effect_token_required}
+
+        {false, :error} ->
+          :ok
+
+        {_, {:ok, token}} ->
+          scheduler.authorize_routine_effect(token, %{principal: principal, operation: :enter})
+      end
+    end
+  end
+
+  defp routine_effect(context, effect) do
+    case Map.fetch(context, :routine_effect_token) do
+      :error ->
+        :ok
+
+      {:ok, token} ->
+        Config.scheduler_module().authorize_routine_effect(token, effect)
     end
   end
 

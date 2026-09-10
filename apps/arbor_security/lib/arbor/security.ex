@@ -177,6 +177,80 @@ defmodule Arbor.Security do
   @source_owned_egress_opt :source_owned_exact_egress_expectation
 
   @doc """
+  Exercise one source-selected ordinary grant for a concrete resource.
+
+  The caller must already own authenticated execution authority. This function
+  does not authenticate an external caller: a capability id and payload digest
+  are public provenance, not bearer authority. It accepts no generic options.
+
+  The exact current stored capability must match the principal and lowercase
+  SHA-256 of `Capability.signing_payload/1`, cover the concrete resource, and
+  carry a current SystemAuthority signature. Only nondelegated, unscoped grants
+  with no constraints or max-use limit are supported. Revocation, replacement,
+  expiry, inactive identity, and unsupported shapes deny without selecting
+  another covering grant or requesting approval.
+
+  Normal authorization checks, FileGuard, events, and receipts still run.
+  The caller separately intersects current owner trust policy at each effect.
+  """
+  @spec authorize_source_owned_selected_ordinary_capability(
+          String.t(),
+          String.t(),
+          :execute,
+          String.t(),
+          String.t()
+        ) :: {:ok, :authorized} | {:error, :invalid_request | :unauthorized}
+  def authorize_source_owned_selected_ordinary_capability(
+        principal_id,
+        resource_uri,
+        action,
+        capability_id,
+        expected_digest
+      ) do
+    with :ok <-
+           validate_selected_capability_request(
+             principal_id,
+             resource_uri,
+             action,
+             capability_id,
+             expected_digest
+           ),
+         :ok <- require_exact_active_identity(principal_id),
+         {:ok, :authorized} <-
+           check_if_principal_has_capability_for_resource_action(
+             principal_id,
+             resource_uri,
+             action,
+             verify_identity: false,
+             exact_capability_id: capability_id,
+             source_owned_selected_ordinary_digest: expected_digest
+           ) do
+      {:ok, :authorized}
+    else
+      {:error, :invalid_request} = error -> error
+      _denied -> {:error, :unauthorized}
+    end
+  rescue
+    _ -> {:error, :unauthorized}
+  catch
+    _, _ -> {:error, :unauthorized}
+  end
+
+  defp validate_selected_capability_request(principal, uri, action, capability_id, digest) do
+    with true <- bounded_exact_scalar?(principal),
+         true <- is_binary(uri) and byte_size(uri) <= 4096,
+         {:ok, %CapabilityUri{wildcard: :none} = parsed} <- CapabilityUri.parse(uri),
+         true <- CapabilityUri.canonical(parsed) == uri,
+         true <- action == :execute and canonical_exact_capability_id?(capability_id),
+         true <- is_binary(digest) and byte_size(digest) == 64,
+         true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, digest) do
+      :ok
+    else
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  @doc """
   Exercise one exact, signed ordinary capability from source-owned code.
 
   This narrow facade accepts no generic authorization options and never returns

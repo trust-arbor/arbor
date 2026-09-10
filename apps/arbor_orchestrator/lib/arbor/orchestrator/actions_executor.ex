@@ -249,6 +249,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                           "signer",
                           "signedrequest",
                           "signingauthority",
+                          "routineeffecttoken",
+                          "routinerequest",
                           "identityprivatekey",
                           "authorizer",
                           "authcontext",
@@ -329,7 +331,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             with {:ok, nested_engine_opts} <-
                    nested_engine_opts(opts, action_module, boundary_ref),
                  {:ok, signed_request} <-
-                   sign_for_action(opts, signed_request, signer, action_module, params) do
+                   sign_for_action(opts, signed_request, signer, action_module, params),
+                 {:ok, routine_request} <-
+                   prepare_routine_request(action_module, params, agent_id, boundary_ref) do
               # An authority is process-local input only. The action receives the
               # signed request, never the opaque authority or a closure capturing it.
               legacy_signer =
@@ -349,6 +353,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
               context =
                 %{auth_context: auth_context, workdir: workdir}
+                |> maybe_put_context(:routine_request, routine_request)
+                |> put_routine_effect_token(opts, action_module)
                 |> Map.merge(execution_binding_context)
                 |> maybe_put_context(:server, workspace_registry_server)
                 |> maybe_put_approval_timeout(opts, execution_binding_context)
@@ -1555,13 +1561,35 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       authority? and legacy? ->
         {:error, :mixed_signing_credentials}
 
+      authority? and not valid_routine_runtime_option?(opts) ->
+        {:error, :invalid_routine_effect_token}
+
       authority? and
           (credential_bearing_term?(args) or
-             credential_bearing_term?(Keyword.delete(opts, :signing_authority))) ->
+             credential_bearing_term?(
+               Keyword.drop(opts, [:signing_authority, :routine_effect_token])
+             )) ->
         {:error, :caller_supplied_signing_credentials}
 
       true ->
         :ok
+    end
+  end
+
+  # Only this exact source-owned top-level option is exempt from credential
+  # traversal. Model arguments, aliases and nested option maps remain denied.
+  defp valid_routine_runtime_option?(opts) do
+    case Keyword.get_values(opts, :routine_effect_token) do
+      [] ->
+        true
+
+      [%{lease: lease, token: token} = reference]
+      when map_size(reference) == 2 and is_binary(lease) and byte_size(lease) == 30 and
+             is_binary(token) and byte_size(token) == 43 ->
+        true
+
+      _ ->
+        false
     end
   end
 
@@ -1659,6 +1687,30 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         end
     end
   end
+
+  defp prepare_routine_request(module, params, principal, boundary) do
+    case Arbor.Actions.prepare_routine_request(module, params, principal) do
+      :not_a_routine_action ->
+        {:ok, nil}
+
+      {:ok, request} ->
+        with {:ok, proof} <- sign_at_signing_boundary(boundary, request.payload) do
+          {:ok, %{operation: request.operation, value: request.value, proof: proof}}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp put_routine_effect_token(context, opts, Arbor.Actions.Reports.BuildMorningDigest) do
+    case Keyword.fetch(opts, :routine_effect_token) do
+      {:ok, token} -> Map.put(context, :routine_effect_token, token)
+      :error -> context
+    end
+  end
+
+  defp put_routine_effect_token(context, _opts, _module), do: context
 
   defp signing_boundary_loop(authority, owner, token) do
     owner_monitor = Process.monitor(owner)

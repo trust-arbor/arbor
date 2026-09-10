@@ -50,6 +50,8 @@ defmodule Arbor.Actions.MixProject do
       # Legal: actions (L6) may depend on lower levels only.
       {:arbor_comms, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
+      # Owner-bound routine scheduling and its private effect gate (L5).
+      {:arbor_scheduler, in_umbrella: true},
       # jido_action version pinned in root mix.exs
       {:jido_action, "~> 2.0", override: true},
       {:jido_browser, "~> 1.0"},

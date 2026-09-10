@@ -256,6 +256,20 @@ defmodule Arbor.Security.CapabilityStore do
     :throw, _ -> {:error, :capability_store_unavailable}
   end
 
+  @doc false
+  @spec get_valid_selected_ordinary(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, Capability.t()} | {:error, atom()}
+  def get_valid_selected_ordinary(capability_id, principal_id, resource_uri, digest) do
+    GenServer.call(
+      __MODULE__,
+      {:get_valid_selected_ordinary, capability_id, principal_id, resource_uri, digest}
+    )
+  rescue
+    _ -> {:error, :capability_store_unavailable}
+  catch
+    _, _ -> {:error, :capability_store_unavailable}
+  end
+
   # ===========================================================================
   # Acknowledged exact mutation client API (Phase 4C C3A).
   #
@@ -679,6 +693,35 @@ defmodule Arbor.Security.CapabilityStore do
   catch
     :exit, _ -> {:reply, {:error, :exact_capability_validation_unavailable}, state}
     :throw, _ -> {:reply, {:error, :exact_capability_validation_unavailable}, state}
+  end
+
+  @impl true
+  def handle_call(
+        {:get_valid_selected_ordinary, capability_id, principal_id, resource_uri, digest},
+        _from,
+        state
+      ) do
+    result =
+      with %Capability{} = cap <- Map.get(state.by_id, capability_id),
+           true <-
+             selected_ordinary_capability_valid?(
+               cap,
+               capability_id,
+               principal_id,
+               resource_uri,
+               digest,
+               DateTime.utc_now()
+             ) do
+        {:ok, cap}
+      else
+        _ -> {:error, :selected_capability_rejected}
+      end
+
+    {:reply, result, state}
+  rescue
+    _ -> {:reply, {:error, :selected_capability_rejected}, state}
+  catch
+    _, _ -> {:reply, {:error, :selected_capability_rejected}, state}
   end
 
   @impl true
@@ -1277,6 +1320,37 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp exact_scope_matches?(_cap, _scope_context), do: false
+
+  defp selected_ordinary_capability_valid?(
+         %Capability{
+           parent_capability_id: nil,
+           delegation_chain: [],
+           session_id: nil,
+           task_id: nil,
+           principal_scope: nil,
+           max_uses: nil,
+           constraints: constraints
+         } = cap,
+         capability_id,
+         principal_id,
+         resource_uri,
+         digest,
+         now
+       )
+       when is_map(constraints) and map_size(constraints) == 0 do
+    cap.id == capability_id and cap.principal_id == principal_id and
+      not disclosure_namespaced?(cap) and Capability.grants_access?(cap, resource_uri) and
+      current_at?(cap, now) and selected_payload_digest(cap) == digest and
+      authority_signature_ok?(cap)
+  end
+
+  defp selected_ordinary_capability_valid?(_cap, _id, _principal, _uri, _digest, _now),
+    do: false
+
+  defp selected_payload_digest(cap) do
+    :crypto.hash(:sha256, Capability.signing_payload(cap))
+    |> Base.encode16(case: :lower)
+  end
 
   defp exact_delegation_chain_valid?(%{parent_capability_id: nil, delegation_chain: []}), do: true
 

@@ -90,13 +90,18 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Common.{SafePath, SensitiveData}
-  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.AppleContainerUnitIdentity
+  alias Arbor.Contracts.Coding.PendingApprovalResourceId
   alias Arbor.Contracts.Coding.ReconciliationDecision
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
-  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Signals
+
+  @doc false
+  defdelegate prepare_routine_request(module, params, principal),
+    to: Arbor.Actions.Scheduler,
+    as: :prepare_request
 
   @behaviour Arbor.Common.CapabilityProviders.ActionCapabilityURI
 
@@ -2393,7 +2398,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.File.Search
       ],
       reports: [
-        Arbor.Actions.Reports.BuildMorningDigest
+        Arbor.Actions.Reports.BuildMorningDigest,
+        Arbor.Actions.Scheduler.EnqueueRoutine,
+        Arbor.Actions.Scheduler.ListRoutines,
+        Arbor.Actions.Scheduler.CancelRoutine
       ],
       git: [
         Arbor.Actions.Git.Status,

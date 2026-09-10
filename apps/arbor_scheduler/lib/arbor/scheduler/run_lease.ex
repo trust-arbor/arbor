@@ -7,6 +7,8 @@ defmodule Arbor.Scheduler.RunLease do
 
   alias __MODULE__.Store
 
+  alias Arbor.Scheduler.OwnedRoutines
+
   @call_timeout 30_000
 
   @type id :: String.t()
@@ -55,6 +57,41 @@ defmodule Arbor.Scheduler.RunLease do
   def open_authority(lease_id, identity, security),
     do: Store.open_authority(lease_id, identity, security)
 
+  def bind_routine(lease_id, binding), do: Store.bind_routine(lease_id, binding)
+
+  def authorize_routine_effect(%{lease: lease, token: token} = reference, effect)
+      when map_size(reference) == 2 and is_binary(lease) and byte_size(lease) == 30 and
+             is_binary(token) and byte_size(token) == 43 do
+    case call(lease, {:routine_effect, token, effect}) do
+      :ok -> :ok
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :routine_effect_unavailable}
+    end
+  rescue
+    _ -> {:error, :routine_effect_unavailable}
+  catch
+    _, _ -> {:error, :routine_effect_unavailable}
+  end
+
+  def authorize_routine_effect(_, _), do: {:error, :invalid_routine_effect_token}
+
+  def routine_requirement(principal) do
+    Store.routine_requirement(principal)
+  rescue
+    _ -> {:error, :routine_lease_unavailable}
+  catch
+    _, _ -> {:error, :routine_lease_unavailable}
+  end
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.put(:state, %{lease: :owned})
+    |> Map.put(:reason, :redacted)
+    |> Map.put(:log, :redacted)
+  end
+
   def revoke(nil), do: :ok
   def revoke(lease_id), do: call(lease_id, :revoke)
 
@@ -100,6 +137,36 @@ defmodule Arbor.Scheduler.RunLease do
   @impl true
   def handle_call(:revoke, from, state) do
     begin_cleanup(%{state | waiters: [from | state.waiters]})
+  end
+
+  def handle_call({:routine_effect, token, effect}, _from, state) do
+    result =
+      with {:ok, binding} <- current_routine_binding(state.lease_id, token),
+           :ok <- OwnedRoutines.check_effect(binding, effect),
+           {:ok, ^binding} <- current_routine_binding(state.lease_id, token) do
+        :ok
+      else
+        {:error, _} = error -> error
+        _ -> {:error, :routine_lease_not_current}
+      end
+
+    {:reply, result, state}
+  end
+
+  defp current_routine_binding(lease_id, token) do
+    with {:ok,
+          %{
+            status: :active,
+            owner: owner,
+            expires_at: expires_at,
+            routine_binding: %{token: ^token} = binding
+          }} <- Store.fetch_for_lease(lease_id),
+         true <- Process.alive?(owner),
+         true <- System.monotonic_time(:millisecond) < expires_at do
+      {:ok, binding}
+    else
+      _ -> {:error, :routine_lease_not_current}
+    end
   end
 
   @impl true
@@ -239,7 +306,7 @@ defmodule Arbor.Scheduler.RunLease do
          {:ok, pid} <- await_pid(lease_id, 50) do
       GenServer.call(pid, message, @call_timeout)
     else
-      {:error, :lease_not_found} -> :ok
+      {:error, :lease_not_found} -> absent_lease_result(message)
       {:error, reason} -> {:error, reason}
     end
   catch
@@ -252,7 +319,7 @@ defmodule Arbor.Scheduler.RunLease do
   defp recover_call(lease_id, message, attempts, reason) do
     case Store.exists?(lease_id) do
       false ->
-        :ok
+        absent_lease_result(message)
 
       true ->
         Process.sleep(10)
@@ -262,6 +329,11 @@ defmodule Arbor.Scheduler.RunLease do
         {:error, {:lease_unavailable, {reason, store_reason}}}
     end
   end
+
+  # Cleanup is idempotent; effect admission is never successful without a
+  # current owned lease. Both initial lookup and owner-death retry use this.
+  defp absent_lease_result(:revoke), do: :ok
+  defp absent_lease_result(_), do: {:error, :routine_lease_not_current}
 
   defp ensure_lease_process(lease_id) do
     case whereis(lease_id) do
@@ -642,6 +714,8 @@ defmodule Arbor.Scheduler.RunLease do
 
     use GenServer
 
+    alias Arbor.Scheduler.RunLease.StateOwner
+
     @default_retry_base_ms 25
     @default_retry_max_ms 1_000
     @default_max_attempts 5
@@ -663,6 +737,11 @@ defmodule Arbor.Scheduler.RunLease do
 
     def open_authority(id, identity, security),
       do: GenServer.call(__MODULE__, {:open_authority, id, identity, security}, 30_000)
+
+    def bind_routine(id, binding), do: GenServer.call(__MODULE__, {:bind_routine, id, binding})
+
+    def routine_requirement(principal),
+      do: GenServer.call(__MODULE__, {:routine_requirement, principal})
 
     def begin_cleanup(id), do: GenServer.call(__MODULE__, {:begin_cleanup, id})
     def cleanup_snapshot(id), do: GenServer.call(__MODULE__, {:snapshot, id})
@@ -733,6 +812,36 @@ defmodule Arbor.Scheduler.RunLease do
       else
         create_lease(table, id, owner, opts, state)
       end
+    end
+
+    def handle_call({:bind_routine, id, binding}, {caller, _tag}, %{table: table} = state) do
+      result =
+        with {:ok, lease} <- active_owner_lease(table, id, caller),
+             nil <- Map.get(lease, :routine_binding),
+             true <- is_map(binding) and binding.execution_principal == lease.agent_id do
+          put(table, id, Map.put(lease, :routine_binding, binding))
+          :ok
+        else
+          _ -> {:error, :routine_lease_binding_denied}
+        end
+
+      {:reply, result, state}
+    end
+
+    def handle_call({:routine_requirement, principal}, _from, state) do
+      result =
+        case StateOwner.all_leases() do
+          {:ok, leases} ->
+            {:ok,
+             Enum.any?(leases, fn lease ->
+               lease.agent_id == principal and is_map(Map.get(lease, :routine_binding))
+             end)}
+
+          _ ->
+            {:error, :routine_lease_unavailable}
+        end
+
+      {:reply, result, state}
     end
 
     def handle_call({:fetch, id}, {caller, _tag}, %{table: table} = state) do

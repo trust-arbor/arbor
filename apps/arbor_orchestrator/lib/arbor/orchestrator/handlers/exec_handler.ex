@@ -285,7 +285,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
             |> maybe_put_param_taint(param_taint, context_keys)
             |> maybe_put_execution_binding(authority)
             |> maybe_put_nested_engine_controls(opts, authority)
-            |> Keyword.merge(Keyword.take(opts, [:memory_write_policy]))
+            |> Keyword.merge(Keyword.take(opts, [:memory_write_policy, :routine_effect_token]))
             |> maybe_put_approval_timeout(opts)
             |> maybe_put_execution_id(opts)
             |> maybe_put_transcript_sink(opts)

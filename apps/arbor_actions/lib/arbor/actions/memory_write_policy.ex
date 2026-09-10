@@ -38,7 +38,12 @@ defmodule Arbor.Actions.MemoryWritePolicy do
     Arbor.Actions.SessionMemory.Checkpoint
   ]
 
-  @other_writers [Arbor.Actions.Skill.Activate, Arbor.Actions.Skill.Deactivate]
+  @other_writers [
+    Arbor.Actions.Skill.Activate,
+    Arbor.Actions.Skill.Deactivate,
+    Arbor.Actions.Scheduler.EnqueueRoutine,
+    Arbor.Actions.Scheduler.CancelRoutine
+  ]
   @uncontained_launches [
     Arbor.Actions.Agent.SpawnWorker,
     Arbor.Actions.Pipeline.Run,

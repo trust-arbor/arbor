@@ -40,6 +40,33 @@ defmodule Arbor.Scheduler do
 
   alias Arbor.Scheduler.Workers.PipelineRunner
 
+  @doc "Canonical bytes for a closed owner-bound enqueue/list/cancel request. No authorization is conferred."
+  defdelegate routine_request_payload(operation, value),
+    to: Arbor.Scheduler.Cores.RoutineCore,
+    as: :payload
+
+  @doc "Prepare an exact routine intent from the current catalog and held caps; the result still requires the owner's signature."
+  defdelegate prepare_routine_intent(principal, routine, scheduled_at, request_id),
+    to: Arbor.Scheduler.OwnedRoutines,
+    as: :prepare
+
+  @doc "Enqueue one exact owner-signed routine. Caller-supplied ownership fields are not accepted."
+  defdelegate enqueue_routine(intent, proof), to: Arbor.Scheduler.OwnedRoutines, as: :enqueue
+
+  @doc "List bounded, signature-verified projections belonging to the freshly authenticated caller."
+  defdelegate list_owned_routines(filters, proof), to: Arbor.Scheduler.OwnedRoutines, as: :list
+
+  @doc "Cancel the authenticated owner's exact stored job. Previously admitted effects are not rolled back."
+  defdelegate cancel_owned_routine(id, proof), to: Arbor.Scheduler.OwnedRoutines, as: :cancel
+
+  @doc false
+  defdelegate authorize_routine_effect(token, effect), to: Arbor.Scheduler.RunLease
+
+  @doc false
+  defdelegate routine_effect_requirement(principal),
+    to: Arbor.Scheduler.RunLease,
+    as: :routine_requirement
+
   @doc """
   Build the Oban changeset for a pipeline job WITHOUT inserting it.
 

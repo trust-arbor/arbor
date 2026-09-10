@@ -10,6 +10,9 @@ defmodule Arbor.Actions.Config do
 
   @type provider :: :github | :gitlab | :gitea
 
+  def scheduler_module,
+    do: Application.get_env(:arbor_actions, :scheduler_module, Arbor.Scheduler)
+
   @provider_env %{
     github: ["GITHUB_TOKEN", "GH_TOKEN"],
     gitlab: ["GITLAB_TOKEN"],

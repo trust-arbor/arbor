@@ -371,18 +371,24 @@ defmodule Arbor.Security.AuthDecision do
   # preloaded fallback. It must linearize id selection and validation inside
   # CapabilityStore so revocation cannot be hidden by another covering cap.
   defp find_exact_capability(%AuthContext{} = auth, resource_uri, capability_id, opts) do
-    scope_context = [
-      session_id: Keyword.get(opts, :session_id),
-      task_id: Keyword.get(opts, :task_id),
-      principal_scope: Keyword.get(opts, :principal_scope)
-    ]
+    result =
+      case Keyword.get_values(opts, :source_owned_selected_ordinary_digest) do
+        [] ->
+          find_exact_stored_capability(auth, resource_uri, capability_id, opts)
 
-    case CapabilityStore.get_valid_exact_ordinary(
-           capability_id,
-           auth.principal_id,
-           resource_uri,
-           scope_context
-         ) do
+        [digest] when is_binary(digest) ->
+          CapabilityStore.get_valid_selected_ordinary(
+            capability_id,
+            auth.principal_id,
+            resource_uri,
+            digest
+          )
+
+        _ ->
+          {:error, :invalid_selected_capability}
+      end
+
+    case result do
       {:ok, cap} -> {:ok, cap, auth}
       _ -> {:error, :unauthorized, auth}
     end
@@ -390,6 +396,21 @@ defmodule Arbor.Security.AuthDecision do
     _ -> {:error, :unauthorized, auth}
   catch
     _, _ -> {:error, :unauthorized, auth}
+  end
+
+  defp find_exact_stored_capability(auth, resource_uri, capability_id, opts) do
+    scope_context = [
+      session_id: Keyword.get(opts, :session_id),
+      task_id: Keyword.get(opts, :task_id),
+      principal_scope: Keyword.get(opts, :principal_scope)
+    ]
+
+    CapabilityStore.get_valid_exact_ordinary(
+      capability_id,
+      auth.principal_id,
+      resource_uri,
+      scope_context
+    )
   end
 
   defp exact_capability_id(opts) when is_list(opts) do
