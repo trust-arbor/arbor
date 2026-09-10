@@ -333,7 +333,7 @@
     {
       "source_ordinal": 28,
       "slug": "hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
-      "title": "Hysun's estimates run 2–4x conservative; the real constraint is decision bandwidth, not implementation speed.",
+      "title": "Hysun's estimates run 2\u20134x conservative; the real constraint is decision bandwidth, not implementation speed.",
       "topic": "testing-live-runtime",
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-hysun-s-estimates-run-2-4x-conservative-the-real-constraint-is-decision-bandwidth-not-implementation-speed",
@@ -362,7 +362,7 @@
       "destination": "CLAUDE.md",
       "anchor": "applied-learning-don-t-prematurely-cap-max-tokens",
       "source_date": "2026-07-01",
-      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` → `session.max_tokens`); prefer leaving it unset over guessing a low number.",
+      "source_incident": "verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config[\"max_tokens\"]` \u2192 `session.max_tokens`); prefer leaving it unset over guessing a low number.",
       "content_sha256": "3dbb4dbbc6bba30169343fa26a1772fe2f11eddfa848e9869dfb011e62b9dc3a",
       "always_loaded": true
     },
@@ -861,7 +861,7 @@
     {
       "source_ordinal": 72,
       "slug": "trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
-      "title": "Trust-policy rules match by URI PREFIX, not glob — never write `/",
+      "title": "Trust-policy rules match by URI PREFIX, not glob \u2014 never write `/",
       "topic": "security-gates",
       "destination": ".claude/skills/agent-security-gates.md",
       "anchor": "applied-learning-trust-policy-rules-match-by-uri-prefix-not-glob-never-write",
@@ -3471,7 +3471,7 @@
       "anchor": "applied-learning-test-pure-consumers-with-the-exact-producer-envelope-not-a-convenient-synthetic-shape",
       "source_date": "2026-07-14",
       "source_incident": "found 2026-07-14 composing the Phase 6 projection boundary).",
-      "content_sha256": "56a1a79e204277eb66b37945b9026edcbedbdcb90a2cd0b097afb2f1fae6ad05",
+      "content_sha256": "4c19543ce36960109537a9fa9c6f4ad4e1a547bcc01fc673ad160d891ffc524e",
       "always_loaded": false
     },
     {
@@ -6341,7 +6341,7 @@
       "anchor": "applied-learning-aggregate-tests-must-own-dependency-availability-and-global-process-lifecycle",
       "source_date": "2026-07-24",
       "source_incident": "found 2026-07-24 after the aggregate software-factory gate exposed Trust-dependent Gateway decisions and a dispatcher `:already_started` race).",
-      "content_sha256": "3d87c89f5710e864c007780ff339279d9c42876f012374e022e03553e21a103f",
+      "content_sha256": "dfff977ece8fc6612271a7c4130b207eeb100c4f4ecfd6eac8fbeae4cbdb3c12",
       "always_loaded": false
     },
     {
