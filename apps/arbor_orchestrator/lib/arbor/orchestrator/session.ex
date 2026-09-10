@@ -86,6 +86,7 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Contracts.Comms.Engagement
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.SteeringMessage
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
@@ -180,6 +181,9 @@ defmodule Arbor.Orchestrator.Session do
     # Pending and active receipt-derived memory admissions, owned by this process.
     # Kept separate from TurnAuthority and stripped from every public projection.
     private_memory_admissions: %{},
+    # Source-owned route, recovery sources and stage correlation. Never public
+    # or checkpointed; only the admission map above contains opaque handles.
+    private_memory_turn: nil,
     # VP-05D2A1P5: private process-local fence for the active turn-egress authorizer.
     # Deactivated before kill/revoke on every terminal path. Never public.
     turn_egress_fence: nil,
@@ -1005,6 +1009,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_user_message: user_message,
         turn_taint_evidence: prepared.turn_taint_evidence,
         turn_authority: turn_authority,
+        private_memory_turn: prepared.private_memory_turn,
         turn_egress_fence: fence,
         turn_token: turn_token,
         steer_froms: [],
@@ -1140,7 +1145,14 @@ defmodule Arbor.Orchestrator.Session do
     |> PrivateMemory.prune()
   end
 
-  defp do_cancel_active_turn(state, reason, reply \\ {:error, :cancelled}) do
+  defp do_cancel_active_turn(state, reason, reply \\ {:error, :cancelled})
+
+  defp do_cancel_active_turn(%{private_memory_turn: %{stage: :index}} = state, _reason, _reply) do
+    {:noreply, state} = finish_private_index(state, {:error, :cancelled}, true)
+    state
+  end
+
+  defp do_cancel_active_turn(state, reason, reply) do
     new_state = transition_phase(state, :processing, :complete, :idle)
     # Fence → kill (await DOWN) → revoke, then finalize/reply/reset so the
     # task cannot authorize another wave during partial persistence.
@@ -1187,11 +1199,27 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info(
+        {:private_memory_embedding_result, token, stage, worker, result},
+        %{private_memory_turn: %{stage: stage}, turn_task_pid: worker} = state
+      ) do
+    if matching_turn_token?(state, token) do
+      case stage do
+        :preflight -> finish_private_preflight(state, result)
+        :index -> finish_private_index(state, result, false)
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:private_memory_embedding_result, _, _, _, _}, state), do: {:noreply, state}
+
+  def handle_info(
         {:turn_result, token, %Arbor.Contracts.Session.UserMessage{} = user_message,
          {:ok, result}},
         state
       ) do
-    if matching_turn_token?(state, token) do
+    if matching_engine_turn_token?(state, token) do
       # Engine.run/2 returning {:ok, run_result} only proves an envelope was
       # produced. Admit only :success / :partial_success before apply/checkpoint/
       # success signals; all other final outcomes fail closed with a bounded error.
@@ -1210,7 +1238,7 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   def handle_info({:turn_result, token, _user_message, {:error, reason}}, state) do
-    if matching_turn_token?(state, token) do
+    if matching_engine_turn_token?(state, token) do
       # Elixir-level Engine errors (and rescued crashes) continue on the ordinary
       # failure path — reason may still be Engine-shaped for those cases.
       complete_turn_error(state, reason)
@@ -1227,6 +1255,12 @@ defmodule Arbor.Orchestrator.Session do
   # mistaken for a successfully completed turn task or silently ignored.
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
+      ref == state.turn_task_ref and private_memory_stage?(state, :index) ->
+        finish_private_index(state, {:error, :worker_down}, false)
+
+      ref == state.turn_task_ref and private_memory_stage?(state, :preflight) ->
+        finish_private_preflight(state, {:error, :worker_down})
+
       ref == state.turn_task_ref and reason == :normal ->
         {:noreply, %{state | turn_task_ref: nil}}
 
@@ -1301,6 +1335,21 @@ defmodule Arbor.Orchestrator.Session do
   # Hung-task safety net: if the turn task neither completed nor crashed within
   # the timeout, preserve the partial as :interrupted (reason :timeout), kill the
   # task, and unblock the session. Only acts if `ref` is still the active turn.
+  def handle_info(
+        {:turn_timeout, ref},
+        %{turn_task_ref: ref, private_memory_turn: %{stage: :index}} = state
+      )
+      when not is_nil(ref), do: finish_private_index(state, {:error, :timeout}, true)
+
+  def handle_info(
+        {:turn_timeout, ref},
+        %{turn_task_ref: ref, private_memory_turn: %{stage: :preflight}} = state
+      )
+      when not is_nil(ref) do
+    kill_task_and_await_down(state)
+    finish_private_preflight(state, {:error, :timeout})
+  end
+
   def handle_info({:turn_timeout, ref}, %{turn_task_ref: ref} = state) when not is_nil(ref) do
     Logger.warning("[Session] Turn timed out for #{state.agent_id}; preserving partial")
     new_state = transition_phase(state, :processing, :complete, :idle)
@@ -1367,6 +1416,11 @@ defmodule Arbor.Orchestrator.Session do
        do: true
 
   defp matching_turn_token?(_state, _token), do: false
+
+  defp matching_engine_turn_token?(state, token),
+    do:
+      matching_turn_token?(state, token) and not private_memory_stage?(state, :preflight) and
+        not private_memory_stage?(state, :index)
 
   defp cleanup_turn_terminal(state, opts) when is_list(opts) do
     kill_task? = Keyword.get(opts, :kill_task?, false)
@@ -1513,6 +1567,9 @@ defmodule Arbor.Orchestrator.Session do
   # Nil-authority: deactivate fence (task-owned waves cannot authorize), detach
   # monitors, and leave the task running only before any steering was accepted.
   # Authority-bearing or steering-influenced turns are fenced/killed before reset.
+  defp handle_caller_down(%{private_memory_turn: %{stage: :index}} = state),
+    do: finish_private_index(state, {:error, :caller_down}, true)
+
   defp handle_caller_down(state) do
     Logger.info(
       "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
@@ -1984,7 +2041,7 @@ defmodule Arbor.Orchestrator.Session do
            user_message: user_message
          ) do
       {:ok, new_state} ->
-        complete_turn_commit_acknowledged(user_message, result, state, new_state, completed)
+        start_private_index(user_message, result, state, new_state, completed)
 
       {:error, persist_reason} ->
         complete_turn_commit_failed(state, persist_reason)
@@ -2051,7 +2108,11 @@ defmodule Arbor.Orchestrator.Session do
          text: response,
          tool_history: tool_history,
          tool_rounds: tool_rounds,
-         usage: usage
+         usage: usage,
+         metadata: %{
+           conversation_memory:
+             Map.get(new_state.private_memory_turn || %{}, :index_status, %{status: "disabled"})
+         }
        })}
 
     reply_turn(state, reply)
@@ -2066,7 +2127,13 @@ defmodule Arbor.Orchestrator.Session do
     Logger.warning("[Session] Turn commit failed for #{state.agent_id} reason=#{persist_reason}")
 
     emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
-    reply_turn(state, steering_aware_failure_reply(state, {:error, :turn_commit_failed}))
+
+    failure =
+      if persist_reason == :private_memory_source_unavailable,
+        do: :private_memory_source_unavailable,
+        else: :turn_commit_failed
+
+    reply_turn(state, steering_aware_failure_reply(state, {:error, failure}))
     reset_and_drain(state)
   end
 
@@ -2252,6 +2319,17 @@ defmodule Arbor.Orchestrator.Session do
             {:ok, prepared} ->
               launch_prepared_turn(user_message, from, state, prepared)
 
+            {:embed, turn, texts} ->
+              start_private_preflight(
+                user_message,
+                turn_authority,
+                from,
+                state,
+                turn_token,
+                turn,
+                texts
+              )
+
             {:error, reason} ->
               safe_reply(from, {:error, reason})
               {:noreply, state}
@@ -2279,6 +2357,158 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  defp start_private_preflight(message, authority, from, state, token, turn, texts) do
+    state = transition_phase(state, :idle, :input_received, :processing)
+    turn = Map.put(turn, :stage, :preflight)
+    remaining = max(turn.deadline - System.monotonic_time(:millisecond), 0)
+
+    {pid, ref} =
+      PrivateMemory.start_embedding(self(), token, :preflight, turn.route, texts, remaining)
+
+    {:noreply,
+     %{
+       state
+       | turn_in_flight: true,
+         turn_from: from,
+         turn_task_pid: pid,
+         turn_task_ref: ref,
+         turn_caller_ref: Process.monitor(elem(from, 0)),
+         turn_started_at: System.monotonic_time(),
+         turn_user_message: message,
+         turn_authority: authority,
+         turn_token: token,
+         private_memory_turn: turn,
+         streaming_buffer: nil,
+         turn_timeout_ref: Process.send_after(self(), {:turn_timeout, ref}, remaining + 1_000)
+     }}
+  end
+
+  defp finish_private_preflight(state, result) do
+    cancel_turn_timeout(state)
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+
+    turn =
+      PrivateMemory.finish_preflight(state, state.private_memory_turn, result)
+      |> Map.delete(:stage)
+
+    message = state.turn_user_message
+    authority = state.turn_authority
+    from = state.turn_from
+    token = state.turn_token
+    state = transition_phase(state, :processing, :complete, :idle)
+
+    state = %{
+      state
+      | private_memory_turn: turn,
+        turn_in_flight: false,
+        turn_task_pid: nil,
+        turn_task_ref: nil,
+        turn_caller_ref: nil,
+        turn_timeout_ref: nil
+    }
+
+    with true <- caller_alive?(from),
+         :ok <- revalidate_private_engagement(message, authority, state),
+         {:ok, _} <-
+           Arbor.Security.authorize_private_memory_turn(PrivateMemory.current(state), :read),
+         {:ok, prepared} <- do_prepare_live_turn(message, authority, token, state) do
+      launch_prepared_turn(message, from, state, prepared)
+    else
+      _ ->
+        safe_reply(from, {:error, :private_memory_admission_unavailable})
+        reset_and_drain(PrivateMemory.close(state, authority))
+    end
+  end
+
+  defp private_memory_stage?(%{private_memory_turn: %{stage: stage}}, stage), do: true
+  defp private_memory_stage?(_state, _stage), do: false
+
+  defp start_private_index(message, result, old_state, state, completed) do
+    preparation =
+      if match?(%{status: "enabled"}, state.private_memory_turn) and
+           not caller_alive?(state.turn_from),
+         do: {:done, %{status: "pending"}},
+         else: PrivateMemory.prepare_committed_index(state)
+
+    case preparation do
+      {:embed, turn, texts} ->
+        completion = %{message: message, result: result, completed: completed}
+        turn = turn |> Map.put(:stage, :index) |> Map.put(:completion, completion)
+        remaining = max(turn.deadline - System.monotonic_time(:millisecond), 0)
+        cancel_turn_timeout(state)
+
+        {pid, ref} =
+          PrivateMemory.start_embedding(
+            self(),
+            state.turn_token,
+            :index,
+            turn.route,
+            texts,
+            remaining
+          )
+
+        caller_ref =
+          if caller_alive?(state.turn_from),
+            do: Process.monitor(elem(state.turn_from, 0)),
+            else: nil
+
+        {:noreply,
+         %{
+           state
+           | private_memory_turn: turn,
+             turn_task_pid: pid,
+             turn_task_ref: ref,
+             turn_caller_ref: caller_ref,
+             streaming_buffer: nil,
+             turn_timeout_ref: Process.send_after(self(), {:turn_timeout, ref}, remaining + 1_000)
+         }}
+
+      {:done, status} ->
+        turn =
+          Map.put(
+            state.private_memory_turn || %{},
+            :index_status,
+            Map.put(status, :transcript, "committed")
+          )
+
+        complete_turn_commit_acknowledged(
+          message,
+          result,
+          old_state,
+          %{state | private_memory_turn: turn},
+          completed
+        )
+    end
+  end
+
+  defp finish_private_index(state, result, kill?) do
+    if kill?, do: kill_task_and_await_down(state)
+    cancel_turn_timeout(state)
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+    completion = state.private_memory_turn.completion
+
+    status =
+      PrivateMemory.finish_committed_index(state, result) |> Map.put(:transcript, "committed")
+
+    turn =
+      state.private_memory_turn
+      |> Map.delete(:stage)
+      |> Map.delete(:completion)
+      |> Map.put(:index_status, status)
+
+    state = %{state | private_memory_turn: turn}
+
+    complete_turn_commit_acknowledged(
+      completion.message,
+      completion.result,
+      state,
+      state,
+      completion.completed
+    )
+  end
+
   defp caller_alive?({pid, _tag}) when is_pid(pid), do: Process.alive?(pid)
   defp caller_alive?(_), do: false
 
@@ -2289,7 +2519,16 @@ defmodule Arbor.Orchestrator.Session do
   defp prepare_live_turn(user_message, turn_authority, turn_token, state)
        when is_reference(turn_token) do
     with :ok <- PrivateMemory.activate(state, user_message, turn_authority) do
-      do_prepare_live_turn(user_message, turn_authority, turn_token, state)
+      case PrivateMemory.prepare_turn(state, user_message, turn_authority) do
+        {:ok, turn} ->
+          do_prepare_live_turn(user_message, turn_authority, turn_token, %{
+            state
+            | private_memory_turn: turn
+          })
+
+        other ->
+          other
+      end
     end
   end
 
@@ -2299,12 +2538,16 @@ defmodule Arbor.Orchestrator.Session do
       |> Builders.build_turn_values(user_message.content)
       |> maybe_put_user_message_task_id(user_message)
 
-    final_values = maybe_preprocess(pre_values, user_message.content)
+    final_values =
+      pre_values
+      |> maybe_preprocess(user_message.content)
+      |> put_private_recall(turn_authority, state.private_memory_turn)
 
     initial_taint =
       pre_values
       |> TurnEgress.derive_initial_taint(final_values)
       |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
+      |> put_private_recall_taint(turn_authority)
 
     turn_taint_evidence =
       PersistenceCore.build_partial_turn_evidence(
@@ -2358,7 +2601,8 @@ defmodule Arbor.Orchestrator.Session do
            turn_token: turn_token,
            engine_opts: engine_opts,
            turn_taint_evidence: turn_taint_evidence,
-           values: final_values
+           values: final_values,
+           private_memory_turn: state.private_memory_turn
          }}
       rescue
         _ ->
@@ -2391,6 +2635,21 @@ defmodule Arbor.Orchestrator.Session do
   catch
     _, _ -> :ok
   end
+
+  defp put_private_recall(values, nil, _turn), do: values
+
+  defp put_private_recall(values, %TurnAuthority{}, turn),
+    do: Map.put(values, "session.private_recalled_memories", Map.get(turn || %{}, :recall, []))
+
+  defp put_private_recall_taint(taint, nil), do: taint
+
+  defp put_private_recall_taint(taint, %TurnAuthority{}),
+    do:
+      Map.put(
+        taint,
+        "session.private_recalled_memories",
+        TaintEnvelope.missing_fallback()
+      )
 
   # Receipt-authenticated private turns may contain human-owned data. Until
   # Memory admits scoped writes, keep this restriction in runtime opts only.
@@ -2578,6 +2837,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_timeout_ref: nil,
         turn_authority: nil,
         private_memory_admissions: %{},
+        private_memory_turn: nil,
         turn_egress_fence: nil,
         turn_token: nil,
         steering_boundaries: nil,
@@ -2622,6 +2882,7 @@ defmodule Arbor.Orchestrator.Session do
         turn_user_message: nil,
         turn_taint_evidence: nil,
         turn_authority: nil,
+        private_memory_turn: nil,
         turn_egress_fence: nil,
         turn_token: nil,
         steering_boundaries: MapSet.new(),

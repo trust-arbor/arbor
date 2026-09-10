@@ -372,6 +372,21 @@ defmodule Arbor.Security do
     to: Arbor.Security.PrivateMemory,
     as: :verify
 
+  @doc "Attest a closed transcript source before append; the stamp does not prove commit."
+  defdelegate attest_private_memory_source(admission, descriptor),
+    to: Arbor.Security.PrivateMemory,
+    as: :attest_source
+
+  @doc "Verify historical transcript source provenance against the current persisted root."
+  defdelegate verify_private_memory_source(descriptor, stamp),
+    to: Arbor.Security.PrivateMemory,
+    as: :verify_source
+
+  @doc "Attest a vector record for a verified original source using current same-owner admission."
+  defdelegate attest_private_memory_record_from_source(admission, descriptor, source, stamp),
+    to: Arbor.Security.PrivateMemory,
+    as: :attest_record_from_source
+
   @issue_signed_mode_keys [:signed_request, :signer, :session_id, :expected_resource]
   @issue_admitted_opts [:session_token, :signed_request, :signer, :session_id, :expected_resource]
   @max_issue_human_principal_bytes 256

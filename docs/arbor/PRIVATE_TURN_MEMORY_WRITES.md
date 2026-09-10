@@ -1,8 +1,9 @@
 # Private-turn memory writes
 
-SU-3/M1b1 contains writes from receipt-authenticated private Session turns while
-human-scoped Memory storage and retrieval are being qualified. It does not
-enable automatic conversation indexing or establish owner-positive recall.
+SU-3/M1b1 contains tool writes from receipt-authenticated private Session turns.
+M1b2 and M2 provide a separate Session-owned storage/read route described in
+[private conversation memory](PRIVATE_CONVERSATION_MEMORY.md). Tool mutations
+remain denied even when that optional route is enabled.
 
 ## Source boundary
 
@@ -27,8 +28,13 @@ also fail closed.
 The denied operations include semantic/KG writes, connections and reflection,
 identity and cognitive changes, mixed review-and-approval operations,
 relationship writes, and code-pattern writes. Pipeline actions that write the
-same stores are subject to the same restriction. Pure reads retain their
-existing behavior. The production Session memory-update step may complete as an
+same stores are subject to the same restriction. Generic semantic recall
+(`memory.recall` and `memory_recall`) is also refused because it can embed a
+private query through an unqualified provider. This returns
+`:private_turn_memory_query_denied` before any action/provider effect. Literal
+non-query readers retain their existing behavior. The protected Session recall
+step uses only precomputed Session-scoped data, with no generic query fallback.
+The production Session memory-update step may complete as an
 explicit no-op when it has no notes; it must not report a successful write or
 call the Memory writer in that case.
 
@@ -52,7 +58,7 @@ does it constitute a policy for every file, network destination or external
 agent. A caller-controlled callback, capability ID or principal label would not
 be sufficient evidence for a future public scoped Memory API.
 
-## Next ownership slice
+## Independent ownership proofs
 
 Positive scoped reads require two independent proofs:
 
@@ -72,6 +78,9 @@ read authority. Expiry of the original writing turn must not destroy historical
 proof; a valid historical stamp must not grant a future reader permission.
 Unsealed or forged records remain unavailable in the private scoped lane.
 
-M1b1 deliberately grants no exception to its write restriction. Replace a
-denial with a scoped operation only when owner-positive, cross-owner-negative,
-forgery, stale-turn and cold-storage behavior is covered through public APIs.
+The Session-owned private-memory route supplies these two proofs without
+granting an exception to the tool-write restriction. Its source signature uses
+a distinct root purpose and survives the writing turn, while every recovery,
+read and write still requires a fresh current admission. Owner-positive,
+cross-owner-negative, forgery, stale-turn and cold-storage acceptance is
+exercised through the public APIs and the real Session turn graph.

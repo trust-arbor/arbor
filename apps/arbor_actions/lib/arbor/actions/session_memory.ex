@@ -72,10 +72,22 @@ defmodule Arbor.Actions.SessionMemory do
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
         recall_type: [type: :string, required: false, doc: "Type: goals/intents/beliefs/query"],
-        query: [type: :string, required: false, doc: "Query for default recall"]
+        query: [type: :string, required: false, doc: "Query for default recall"],
+        private_recalled_memories: [
+          type: {:list, :map},
+          required: false,
+          doc: "Session-precomputed private recall data; never an authority selector"
+        ]
       ]
 
     @impl true
+    def run(params, %{memory_write_policy: :deny}) do
+      # Source-only runtime policy chooses this path. Model parameters cannot
+      # re-enable generic query embedding or agent-wide belief/goal recall.
+      memories = params[:private_recalled_memories] || []
+      {:ok, %{recalled_memories: memories}}
+    end
+
     def run(params, _context) do
       agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
 

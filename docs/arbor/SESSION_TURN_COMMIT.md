@@ -8,16 +8,44 @@ malformed results, exceptions and expired completion evidence fail closed as
 `{:error, :turn_commit_failed}` at the Session boundary.
 
 Messages, working memory, turn count, compaction, the completed-turn checkpoint
-and success signals are adopted only after acknowledgement. Authority cleanup
-precedes the commit wait. The failure path does not invoke partial finalization
+and success signals are adopted only after acknowledgement. Engine disclosure
+authority cleanup precedes the commit wait; an enabled private-memory Session
+retains its separate admission through the bounded post-ACK index stage. The
+failure path does not invoke partial finalization
 and therefore does not attempt a second append. Partial/cancel persistence and
 heartbeat persistence retain their separate existing behavior.
 
 This is an acknowledgement guarantee, not a distributed transaction or
 exactly-once delivery guarantee. A database may commit before its caller loses
 the acknowledgement. Timeout, owner loss or process termination does not prove
-rollback; do not automatically replay an uncertain append. Indexing and recall
-on the authenticated Session path are separate follow-up work.
+rollback; do not automatically replay an uncertain append.
+
+## Private conversation source and indexing
+
+The optional private-memory route signs the exact source pair before append,
+using the live authenticated Session admission. The original owner, engagement,
+Session, turn and content digests are immutable provenance. Source attestation
+failure returns `:private_memory_source_unavailable` before persistence. A source
+signature proves identity and content; it does not establish an append or ACK.
+The default disabled configuration preserves ordinary chat without automatic
+private embedding or indexing.
+
+After ACK, a bounded embedding worker runs outside the Session mailbox. The
+Session retains its admission and stage correlation until it either indexes
+the strict record or finishes as committed/pending. The public successful reply
+includes `metadata.conversation_memory` with `status: "indexed"` or `"pending"`
+and `transcript: "committed"`. Cancellation, caller loss or provider failure at
+this stage cannot cause partial finalization or a second transcript append.
+Session death ends the worker and its live authority; the committed source can
+be recovered by a later current-admitted turn.
+
+Recovery observes complete consecutive user/assistant pairs with identical
+source proofs in the latest 1,000 rows of the same stable Session ID. It verifies
+the original signature and current owner pair before embedding at most five
+pending pairs. This can recover a lost ACK only when the committed pair is
+actually present. It is not cross-Session-ID backlog replay or a retry of an
+uncertain append. See [private conversation memory](PRIVATE_CONVERSATION_MEMORY.md)
+for route qualification, limits and historical-root policy.
 
 ## Lifetime and Deadline
 

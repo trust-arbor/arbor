@@ -298,6 +298,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
            user_sent_at: user_sent_at,
            assistant_completed_at: assistant_completed_at,
            engagement_id: Map.get(state, :current_engagement_id),
+           private_memory_source: Keyword.get(opts, :private_memory_source),
            turn_count: ContextBuilder.get_turn_count(state)
          }) do
       {:ok, [_, _] = entries} -> {:ok, entries}
@@ -743,6 +744,17 @@ defmodule Arbor.Orchestrator.Session.Persistence do
       fun when is_function(fun, 2) -> fun
       _other -> &Arbor.Persistence.load_recent_session_messages/2
     end
+  end
+
+  @doc false
+  def load_private_memory_sources(state) do
+    # Recovery spans engagements only within this stable Session id. Use the
+    # same source-owned transcript reader as ordinary restoration.
+    get_load_session_messages_fn(state).(state.session_id, limit: 1_000)
+  rescue
+    _ -> {:error, :private_memory_recovery_unavailable}
+  catch
+    _, _ -> {:error, :private_memory_recovery_unavailable}
   end
 
   @doc false

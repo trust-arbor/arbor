@@ -5,6 +5,7 @@ defmodule Arbor.Security.PrivateMemory do
   alias Arbor.Security
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.Contracts.PrivateMemoryRecord
+  alias Arbor.Security.Contracts.PrivateMemorySource
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.SystemAuthority
 
@@ -93,6 +94,40 @@ defmodule Arbor.Security.PrivateMemory do
   def verify(descriptor, stamp) do
     with :ok <- PrivateMemoryRecord.admit(descriptor),
          do: SystemAuthority.verify_private_memory_record(descriptor, stamp)
+  end
+
+  def attest_source(admission, descriptor) do
+    with {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_scope(token),
+         :ok <- PrivateMemorySource.admit(descriptor),
+         true <- PrivateMemorySource.scope_matches?(descriptor, scope) do
+      SystemAuthority.attest_private_memory_source(admission, descriptor)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_memory_source}
+    end
+  end
+
+  def verify_source(descriptor, stamp) do
+    with :ok <- PrivateMemorySource.admit(descriptor),
+         do: SystemAuthority.verify_private_memory_source(descriptor, stamp)
+  end
+
+  def attest_record_from_source(admission, descriptor, source, stamp) do
+    with {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_scope(token),
+         true <- PrivateMemorySource.binds_record?(source, descriptor),
+         true <- PrivateMemorySource.pair_matches?(source, scope) do
+      SystemAuthority.attest_private_memory_record_from_source(
+        admission,
+        descriptor,
+        source,
+        stamp
+      )
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_memory_source}
+    end
   end
 
   def scalar?(value) when is_binary(value) do

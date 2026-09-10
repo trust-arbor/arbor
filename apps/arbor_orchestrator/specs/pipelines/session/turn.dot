@@ -43,7 +43,7 @@ digraph SessionTurn {
     type="exec",
     target="action",
     action="session_memory.recall",
-    context_keys="session.agent_id,session.query",
+    context_keys="session.agent_id,session.query,session.private_recalled_memories",
     output_prefix="session"
   ]
 

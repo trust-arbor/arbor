@@ -204,6 +204,29 @@ defmodule Arbor.Memory do
     )
   end
 
+  @doc "Prepare a signed original transcript pair before append. This does not attest commit."
+  def prepare_private_conversation_source(admission, pair),
+    do: PrivateConversations.prepare_source(admission, pair, &authorize_private_memory_scope/2)
+
+  @doc "Verify an original source and return its verified existing row or pending embedding text."
+  def prepare_private_conversation_index(admission, source),
+    do:
+      PrivateConversations.prepare_source_index(
+        admission,
+        source,
+        &authorize_private_memory_scope/2
+      )
+
+  @doc "Index an observed committed source using a strict precomputed vector and original provenance."
+  def index_private_conversation_source(admission, source, embedding_result),
+    do:
+      PrivateConversations.index_source(
+        admission,
+        source,
+        embedding_result,
+        &authorize_private_memory_scope/2
+      )
+
   @doc """
   Recall private conversations using an active, caller-bound admission.
 

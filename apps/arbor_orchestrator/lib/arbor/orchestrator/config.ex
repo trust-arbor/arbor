@@ -42,6 +42,10 @@ defmodule Arbor.Orchestrator.Config do
 
   @app :arbor_orchestrator
 
+  @doc "Source-owned private conversation memory route; unset means explicitly disabled."
+  def private_conversation_memory,
+    do: Application.get_env(@app, :private_conversation_memory, false)
+
   # Consolidated onto LM Studio (one provider, one model) for accessibility — users
   # without multi-model VRAM run the whole preprocessor on a single ~4.2GB model.
   # `gemma-4-e4b-it-qat` won the 2026-06-25 sweep: lowest false-negatives on the

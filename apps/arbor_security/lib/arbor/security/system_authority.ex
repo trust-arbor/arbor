@@ -37,6 +37,7 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.Config
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.Contracts.PrivateMemoryRecord
+  alias Arbor.Security.Contracts.PrivateMemorySource
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.PrivateMemory
   alias Arbor.Security.Crypto
@@ -105,6 +106,21 @@ defmodule Arbor.Security.SystemAuthority do
   @doc false
   def verify_private_memory_record(descriptor, stamp),
     do: private_memory_call({:verify_private_memory_record, descriptor, stamp})
+
+  @doc false
+  def attest_private_memory_source(admission, descriptor),
+    do: private_memory_call({:attest_private_memory_source, admission, descriptor})
+
+  @doc false
+  def verify_private_memory_source(descriptor, stamp),
+    do: private_memory_call({:verify_private_memory_source, descriptor, stamp})
+
+  @doc false
+  def attest_private_memory_record_from_source(admission, descriptor, source, stamp),
+    do:
+      private_memory_call(
+        {:attest_private_memory_record_from_source, admission, descriptor, source, stamp}
+      )
 
   defp private_memory_call(request) do
     GenServer.call(__MODULE__, request, Config.private_memory_attestation_timeout_ms() + 1_000)
@@ -358,6 +374,58 @@ defmodule Arbor.Security.SystemAuthority do
     {:reply, reply, state}
   end
 
+  def handle_call(
+        {:attest_private_memory_source, admission, descriptor},
+        {owner, _} = from,
+        state
+      ) do
+    with true <- Map.get(state, :private_memory_root_ready, false),
+         true <- map_size(Map.get(state, :memory_attestations, %{})) < @max_memory_attestations,
+         {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(token, owner),
+         :ok <- PrivateMemorySource.admit(descriptor),
+         true <- PrivateMemorySource.scope_matches?(descriptor, scope) do
+      start_memory_attestation(state, from, token, scope, descriptor, :source)
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :memory_attestation_unavailable}, state}
+    end
+  end
+
+  def handle_call({:verify_private_memory_source, descriptor, stamp}, _from, state) do
+    reply =
+      if Map.get(state, :private_memory_root_ready, false),
+        do: PrivateMemorySource.verify(descriptor, stamp, state.identity),
+        else: {:error, :memory_attestation_unavailable}
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:attest_private_memory_record_from_source, admission, descriptor, source, stamp},
+        {owner, _} = from,
+        state
+      ) do
+    with true <- Map.get(state, :private_memory_root_ready, false),
+         true <- map_size(Map.get(state, :memory_attestations, %{})) < @max_memory_attestations,
+         {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(token, owner),
+         true <- PrivateMemorySource.binds_record?(source, descriptor),
+         true <- PrivateMemorySource.pair_matches?(source, scope) do
+      start_memory_attestation(
+        state,
+        from,
+        token,
+        scope,
+        descriptor,
+        {:from_source, source, stamp}
+      )
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :memory_attestation_unavailable}, state}
+    end
+  end
+
   @impl true
   def handle_call(:public_key, _from, %{identity: identity} = state) do
     {:reply, identity.public_key, state}
@@ -478,14 +546,16 @@ defmodule Arbor.Security.SystemAuthority do
   # Normal capability authorization verifies signatures through this GenServer.
   # A bounded linked worker keeps the root responsive during that check; only
   # this owner retains the key and performs the eventual signature.
-  defp start_memory_attestation(state, {owner, _} = from, token, scope, descriptor) do
+  defp start_memory_attestation(state, from, token, scope, descriptor, purpose \\ :record)
+
+  defp start_memory_attestation(state, {owner, _} = from, token, scope, descriptor, purpose) do
     root = self()
     reference = make_ref()
 
     {worker, worker_monitor} =
       :erlang.spawn_opt(
         fn ->
-          result = PrivateMemory.authorize_scope(scope, :write)
+          result = authorize_memory_attestation(scope, purpose)
           send(root, {:private_memory_authorized, reference, self(), result})
         end,
         [:link, :monitor]
@@ -499,6 +569,7 @@ defmodule Arbor.Security.SystemAuthority do
       token: token,
       scope: scope,
       descriptor: descriptor,
+      purpose: purpose,
       issuer_id: state.identity.agent_id,
       worker: worker,
       worker_monitor: worker_monitor,
@@ -517,13 +588,49 @@ defmodule Arbor.Security.SystemAuthority do
          true <- Map.get(state, :private_memory_root_ready, false),
          {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(job.token, job.owner),
          true <- scope == job.scope do
-      PrivateMemoryRecord.sign(job.descriptor, state.identity)
+      sign_memory_attestation(job, scope, state.identity)
     else
       _ -> {:error, :memory_attestation_unavailable}
     end
   end
 
   defp finish_memory_attestation(_state, _job, error), do: error
+
+  defp authorize_memory_attestation(scope, {:from_source, source, stamp}) do
+    with :ok <- PrivateMemory.authorize_scope(scope, :write),
+         do: PrivateMemory.verify_source(source, stamp)
+  end
+
+  defp authorize_memory_attestation(scope, _purpose),
+    do: PrivateMemory.authorize_scope(scope, :write)
+
+  defp sign_memory_attestation(%{purpose: :source, descriptor: descriptor}, scope, identity) do
+    if PrivateMemorySource.scope_matches?(descriptor, scope),
+      do: PrivateMemorySource.sign(descriptor, identity),
+      else: {:error, :invalid_memory_source}
+  end
+
+  defp sign_memory_attestation(
+         %{purpose: {:from_source, source, stamp}, descriptor: descriptor},
+         scope,
+         identity
+       ) do
+    # Recheck the original proof against this exact root after the correlated
+    # worker returns. No public verification call re-enters this GenServer.
+    with true <- PrivateMemorySource.pair_matches?(source, scope),
+         true <- PrivateMemorySource.binds_record?(source, descriptor),
+         :ok <- PrivateMemorySource.verify(source, stamp, identity) do
+      PrivateMemoryRecord.sign(descriptor, identity)
+    else
+      _ -> {:error, :invalid_memory_source}
+    end
+  end
+
+  defp sign_memory_attestation(%{purpose: :record, descriptor: descriptor}, scope, identity) do
+    if PrivateMemoryRecord.scope_matches?(descriptor, scope),
+      do: PrivateMemoryRecord.sign(descriptor, identity),
+      else: {:error, :invalid_memory_record}
+  end
 
   defp complete_memory_attestation(state, reference, reply) do
     case Map.pop(Map.get(state, :memory_attestations, %{}), reference) do

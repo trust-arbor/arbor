@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   alias Arbor.Orchestrator.Session.ContextBuilder
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
+  alias Arbor.Orchestrator.Session.PrivateMemory
   alias Arbor.Orchestrator.Session.ResultProcessor
 
   # ── Compactor initialization ─────────────────────────────────────────
@@ -350,17 +351,32 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     # ── Imperative shell ─────────────────────────────────────────────────────
     # Persist first; adopt messages/WM/turn count and compact only after ack.
-    case Persistence.persist_turn_entries(
-           state,
-           commit.user_msg,
-           commit.assistant_message,
-           result,
-           user_sent_at: commit.user_sent_at,
-           assistant_completed_at: commit.assistant_completed_at
-         ) do
-      {:ok, 2} ->
-        {:ok, adopt_turn_commit(state, commit)}
+    with {:ok, source} <-
+           PrivateMemory.prepare_commit(
+             state,
+             message,
+             commit.assistant_message.content
+           ),
+         {:ok, 2} <-
+           Persistence.persist_turn_entries(
+             state,
+             commit.user_msg,
+             commit.assistant_message,
+             result,
+             user_sent_at: commit.user_sent_at,
+             assistant_completed_at: commit.assistant_completed_at,
+             private_memory_source: source
+           ) do
+      state = adopt_turn_commit(state, commit)
+      turn = Map.get(state, :private_memory_turn)
 
+      state =
+        if is_map(turn),
+          do: Map.put(state, :private_memory_turn, Map.put(turn, :source, source)),
+          else: state
+
+      {:ok, state}
+    else
       {:error, reason} ->
         {:error, reason}
     end

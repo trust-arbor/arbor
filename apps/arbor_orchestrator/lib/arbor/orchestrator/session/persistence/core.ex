@@ -11,6 +11,7 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
   alias Arbor.Contracts.Security.{Taint, TaintEnvelope}
   alias Arbor.Contracts.Session.AssistantMessage
   alias Arbor.Orchestrator.DurableJson
+  alias Arbor.Orchestrator.Session.PrivateMemory.Core, as: PrivateMemoryCore
 
   @admitted_statuses [:success, :partial_success]
   @user_context_keys ["session.input", "session.query"]
@@ -90,7 +91,17 @@ defmodule Arbor.Orchestrator.Session.Persistence.Core do
           )
       }
 
-      {:ok, [user_entry, assistant_entry]}
+      proof =
+        PrivateMemoryCore.proof(Map.get(params, :private_memory_source))
+
+      entries =
+        Enum.map([user_entry, assistant_entry], fn entry ->
+          if proof,
+            do: put_in(entry, [:metadata, "private_memory_source"], proof),
+            else: entry
+        end)
+
+      {:ok, entries}
     else
       _ -> {:error, :durable_provenance_unavailable}
     end

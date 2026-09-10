@@ -4,7 +4,8 @@ defmodule Arbor.Actions.MemoryWritePolicy do
 
   The runtime context may add `memory_write_policy: :deny`; parameters never
   relax it. This is containment, not ownership or permission to read private
-  data. Absent/nil policy preserves existing authorization. Unknown nonnil
+  data. Generic semantic recall is also refused because its query embedding
+  does not prove the Session's selected local route. Absent/nil policy preserves existing authorization. Unknown nonnil
   policies fail closed, including on otherwise read-only actions.
 
   Memory families default to denied so a new action cannot silently acquire
@@ -27,7 +28,6 @@ defmodule Arbor.Actions.MemoryWritePolicy do
   ]
 
   @read_actions [
-    Arbor.Actions.Memory.Recall,
     Arbor.Actions.Memory.LoadWorking,
     Arbor.Actions.MemoryIdentity.ReadSelf,
     Arbor.Actions.MemoryIdentity.IntrospectMemory,
@@ -56,7 +56,7 @@ defmodule Arbor.Actions.MemoryWritePolicy do
   @note_keys [:memory_notes, "memory_notes", "session.memory_notes"]
   @denied {:error, :private_turn_memory_write_denied}
 
-  @spec check(module(), map(), map()) :: :ok | {:error, :private_turn_memory_write_denied}
+  @spec check(module(), map(), map()) :: :ok | {:error, atom()}
   def check(action_module, params, context) do
     case Map.get(context, :memory_write_policy) do
       nil -> :ok
@@ -68,6 +68,9 @@ defmodule Arbor.Actions.MemoryWritePolicy do
   defp check_restricted(Arbor.Actions.SessionMemory.Update, params) do
     if empty_update?(params), do: :ok, else: @denied
   end
+
+  defp check_restricted(Arbor.Actions.Memory.Recall, _params),
+    do: {:error, :private_turn_memory_query_denied}
 
   defp check_restricted(action_module, _params) when action_module in @read_actions, do: :ok
 

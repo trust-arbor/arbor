@@ -9,6 +9,7 @@ defmodule Arbor.Memory.PrivateConversations do
   alias Arbor.Contracts.Persistence.{VectorMatch, VectorReceipt, VectorRecord}
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Memory.{Config, Embedding, EmbeddingEvidence, IndexOps, StrictVectorSeam}
+  alias Arbor.Memory.PrivateConversationSource
 
   @scope_keys [:agent_id, :human_id, :engagement_id, :session_id, :turn_id]
   @body_keys ["content", "metadata", "source_id", "conversation_scope", "owner_stamp"]
@@ -60,6 +61,82 @@ defmodule Arbor.Memory.PrivateConversations do
     end
   end
 
+  def prepare_source(admission, pair, authorize) do
+    with :ok <- PrivateConversationSource.validate_pair(pair),
+         {:ok, scope} <- admitted_scope(admission, :write),
+         :ok <- authorize.(scope, :write),
+         {:ok, source} <- PrivateConversationSource.build(scope, pair),
+         {:ok, stamp} <-
+           security_call(:attest_private_memory_source, [admission, source["descriptor"]]),
+         :ok <- security_call(:verify_private_memory_source, [source["descriptor"], stamp]) do
+      {:ok, Map.put(source, "stamp", stamp)}
+    end
+  end
+
+  def prepare_source_index(admission, source, authorize) do
+    with {:ok, scope, content} <- verified_source(admission, source, authorize),
+         descriptor <- source["descriptor"] do
+      case vector_call(fn ->
+             StrictVectorSeam.resolve().fetch(
+               scope.agent_id,
+               descriptor["source_namespace"],
+               descriptor["source_key"],
+               []
+             )
+           end) do
+        {:ok, view} ->
+          with {:ok, view} <- verified_source_view(view, scope, source),
+               do: {:ok, {:indexed, view.source_key}}
+
+        {:error, :not_found} ->
+          {:ok, {:pending, content}}
+
+        {:error, _} = error ->
+          error
+
+        _ ->
+          {:error, :malformed_persistence_result}
+      end
+    end
+  end
+
+  def index_source(admission, source, embedding_result, authorize) do
+    with {:ok, _original, _content} <- PrivateConversationSource.admit(source),
+         {:ok, evidence} <- embedding_evidence(embedding_result),
+         {:ok, scope, content} <- verified_source(admission, source, authorize),
+         {:ok, unsigned} <-
+           unsigned_input(scope, source["descriptor"]["source_id"], content, evidence) do
+      unsigned = Map.put(unsigned, :source, source)
+      insert_or_replay(StrictVectorSeam.resolve(), admission, scope, unsigned)
+    end
+  end
+
+  defp verified_source(admission, source, authorize) do
+    with {:ok, original, content} <- PrivateConversationSource.admit(source),
+         {:ok, current} <- admitted_scope(admission, :write),
+         :ok <- authorize.(current, :write),
+         true <- original.agent_id == current.agent_id and original.human_id == current.human_id,
+         :ok <-
+           security_call(:verify_private_memory_source, [source["descriptor"], source["stamp"]]) do
+      {:ok, original, content}
+    else
+      false -> {:error, :private_memory_source_owner_mismatch}
+      error -> error
+    end
+  end
+
+  defp verified_source_view(view, scope, source) do
+    with {:ok, view} <- verified_view(view, scope),
+         {:ok, record} <- descriptor(view, scope),
+         expected <- Map.take(source["descriptor"], Map.keys(record)),
+         true <- Map.take(record, Map.keys(expected)) === expected do
+      {:ok, view}
+    else
+      false -> {:error, :private_memory_source_conflict}
+      error -> error
+    end
+  end
+
   defp admitted_scope(admission, operation) do
     with {:ok, scope} <- security_call(:authorize_private_memory_turn, [admission, operation]),
          true <- is_map(scope),
@@ -74,12 +151,7 @@ defmodule Arbor.Memory.PrivateConversations do
   defp unsigned_input(scope, source_id, content, evidence) do
     with {:ok, namespace} <- namespace(scope),
          {:ok, id} <- entry_id(scope, source_id) do
-      body = %{
-        "content" => content,
-        "metadata" => %{"type" => "conversation"},
-        "source_id" => source_id,
-        "conversation_scope" => string_scope(scope)
-      }
+      body = PrivateConversationSource.body(scope, source_id, content)
 
       input = %{
         kind: :insert,
@@ -129,7 +201,7 @@ defmodule Arbor.Memory.PrivateConversations do
 
   defp insert(seam, admission, scope, unsigned) do
     with {:ok, descriptor} <- descriptor(unsigned.view, scope),
-         {:ok, stamp} <- security_call(:attest_private_memory_record, [admission, descriptor]),
+         {:ok, stamp} <- attest_record(admission, descriptor, unsigned),
          :ok <- security_call(:verify_private_memory_record, [descriptor, stamp]),
          input <- %{
            unsigned.input
@@ -164,8 +236,19 @@ defmodule Arbor.Memory.PrivateConversations do
     end
   end
 
+  defp attest_record(admission, descriptor, %{source: source}) do
+    security_call(
+      :attest_private_memory_record_from_source,
+      [admission, descriptor, source["descriptor"], source["stamp"]]
+    )
+  end
+
+  defp attest_record(admission, descriptor, _unsigned),
+    do: security_call(:attest_private_memory_record, [admission, descriptor])
+
   defp replay_result(view, scope, unsigned) do
     with {:ok, view} <- verified_view(view, scope),
+         :ok <- replay_source(view, scope, unsigned),
          true <- view.id == unsigned.view.id,
          true <- view.body["source_id"] == unsigned.input.payload["source_id"],
          true <- view.body["content"] == unsigned.input.payload["content"],
@@ -177,6 +260,12 @@ defmodule Arbor.Memory.PrivateConversations do
       error -> error
     end
   end
+
+  defp replay_source(view, scope, %{source: source}) do
+    with {:ok, _view} <- verified_source_view(view, scope, source), do: :ok
+  end
+
+  defp replay_source(_view, _scope, _unsigned), do: :ok
 
   defp search(seam, scope, evidence, query_opts) do
     with {:ok, namespace} <- namespace(scope) do
@@ -335,13 +424,11 @@ defmodule Arbor.Memory.PrivateConversations do
   end
 
   defp namespace(scope) do
-    with {:ok, digest} <- VectorRecord.payload_digest([scope.agent_id, scope.human_id]),
-         do: {:ok, "private_conversation_" <> digest}
+    PrivateConversationSource.namespace(scope)
   end
 
   defp entry_id(scope, source_id) do
-    with {:ok, digest} <- VectorRecord.payload_digest([scope.agent_id, scope.human_id, source_id]),
-         do: {:ok, "private_mem_" <> digest}
+    PrivateConversationSource.entry_id(scope, source_id)
   end
 
   defp string_scope(scope), do: Map.new(@scope_keys, &{Atom.to_string(&1), Map.fetch!(scope, &1)})
