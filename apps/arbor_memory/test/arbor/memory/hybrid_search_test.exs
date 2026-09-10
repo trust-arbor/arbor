@@ -309,6 +309,60 @@ defmodule Arbor.Memory.HybridSearchTest do
     assert_receive {:embedding_http, _, "POST", _}
   end
 
+  test "public hybrid scoring does not award keyword matches to substrings", ctx do
+    contents = ["Ann", "Anna", "A channel carries packets.", "A process cannot continue."]
+
+    ids =
+      Map.new(contents, fn content ->
+        assert {:ok, id} = Memory.add_knowledge(ctx.agent, %{type: :fact, content: content})
+        {content, id}
+      end)
+
+    # The fixture gives every input the same vector. This isolates keyword
+    # membership at the real HTTP/result boundary, without a quality claim.
+    Application.put_env(
+      :arbor_memory,
+      :hybrid_knowledge_search,
+      Keyword.put(route(), :min_score, 0.85)
+    )
+
+    before = durable_record(ctx.agent)
+    assert {:ok, %{results: [result]}} = search(ctx, "Ann", min_score: 0)
+    assert result.id == ids["Ann"]
+    assert result.scores.keyword == 1.0
+    assert_in_delta result.scores.semantic, 1.0, 0.00001
+    assert_receive {:embedding_http, _, "POST", %{"input" => ["Ann" | embedded]}}
+    assert Enum.sort(embedded) == Enum.sort(contents)
+
+    # Existing substring and exact-name APIs deliberately retain their own
+    # contracts; neither becomes a semantic name resolver through this fix.
+    assert {:ok, substring} = Memory.search_knowledge(ctx.agent, "Ann")
+    assert MapSet.new(substring, & &1.id) == MapSet.new(Map.values(ids))
+    assert {:ok, exact} = Memory.find_knowledge_by_name(ctx.agent, "ANN")
+    assert exact == ids["Ann"]
+    assert durable_record(ctx.agent) == before
+  end
+
+  test "public hybrid keywords normalize Unicode and punctuation without rewriting HTTP input",
+       ctx do
+    query = "CAFE\u0301, SQL-safe!"
+    content = "Café SQL safe."
+    assert {:ok, id} = Memory.add_knowledge(ctx.agent, %{type: :fact, content: content})
+
+    Application.put_env(
+      :arbor_memory,
+      :hybrid_knowledge_search,
+      Keyword.put(route(), :min_score, 0.85)
+    )
+
+    before = durable_record(ctx.agent)
+    assert {:ok, %{results: [result]}} = search(ctx, query)
+    assert result.id == id
+    assert result.scores.keyword == 1.0
+    assert_receive {:embedding_http, _, "POST", %{"input" => [^query, ^content]}}
+    assert durable_record(ctx.agent) == before
+  end
+
   test "oversized result payload refuses publication without dropping provenance", ctx do
     assert {:ok, _} =
              Memory.add_knowledge(ctx.agent, %{
