@@ -2392,6 +2392,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.File.Edit,
         Arbor.Actions.File.Search
       ],
+      reports: [
+        Arbor.Actions.Reports.BuildMorningDigest
+      ],
       git: [
         Arbor.Actions.Git.Status,
         Arbor.Actions.Git.Diff,

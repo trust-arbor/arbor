@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Unsupported reference: morning_digest.dot now invokes the bounded Jido action.
+# This script is not a scheduled execution path or an authorized migration step.
 # Morning digest — meta-pipeline that consolidates today's overnight reports.
 #
 # Globs every report at ~/.arbor/reports/*/YYYY-MM-DD.md (skipping the

@@ -16,7 +16,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
 
   require Logger
 
-  alias Arbor.Scheduler.{CapsFile, PipelinePaths, RunIdentity}
+  alias Arbor.Scheduler.{CapsFile, Config, PipelinePaths, RunIdentity}
 
   @workdir_not_supplied :__scheduler_workdir_not_supplied__
 
@@ -31,6 +31,12 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       {:ok, _result} ->
         Logger.info("[Scheduler] Pipeline completed: #{path}")
         :ok
+
+      {:error, {:pipeline_outcome, status}} ->
+        {:discard, {:pipeline_outcome, status}}
+
+      {:error, :invalid_run_result} ->
+        {:discard, :invalid_run_result}
 
       {:error, :pipeline_not_found} ->
         Logger.error("[Scheduler] Pipeline file not found: #{path}")
@@ -82,6 +88,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       {:error, {:caps_file_invalid, _}} = error -> error
       {:error, :orchestrator_unavailable} = error -> error
       {:error, :orchestrator_run_file_as_unavailable} = error -> error
+      {:error, :orchestrator_result_classifier_unavailable} = error -> error
       {:error, reason} -> {:error, {:attestation_rejected, reason}}
     end
   rescue
@@ -136,8 +143,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   end
 
   defp orchestrator_module do
-    orchestrator =
-      Application.get_env(:arbor_scheduler, :orchestrator_module, Arbor.Orchestrator)
+    orchestrator = Config.orchestrator()
 
     cond do
       not Code.ensure_loaded?(orchestrator) ->
@@ -145,6 +151,9 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
 
       not function_exported?(orchestrator, :run_file_as, 4) ->
         {:error, :orchestrator_run_file_as_unavailable}
+
+      not function_exported?(orchestrator, :classify_run_result, 1) ->
+        {:error, :orchestrator_result_classifier_unavailable}
 
       true ->
         {:ok, orchestrator}
@@ -165,17 +174,20 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
             # reviewed run. run_file_as/4 independently rechecks the expected
             # graph hash while reading the DOT for Engine execution.
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
-            apply(orchestrator, :run_file_as, [
-              paths.path,
-              handle.agent_id,
-              handle.signing_authority,
-              [
-                graph_hash: attestation.graph_hash,
-                workdir: canonical_workdir,
-                initial_values: attestation.initial_args,
-                author_id: attestation.issuer_id
-              ]
-            ])
+            result =
+              apply(orchestrator, :run_file_as, [
+                paths.path,
+                handle.agent_id,
+                handle.signing_authority,
+                [
+                  graph_hash: attestation.graph_hash,
+                  workdir: canonical_workdir,
+                  initial_values: attestation.initial_args,
+                  author_id: attestation.issuer_id
+                ]
+              ])
+
+            admit_execution_result(orchestrator, result)
           else
             {:error, reason} -> {:error, {:attestation_rejected, reason}}
           end
@@ -187,6 +199,23 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
         {:error, {:attestation_rejected, {:run_identity_failed, reason}}}
     end
   end
+
+  defp admit_execution_result(orchestrator, {:ok, envelope}) do
+    case orchestrator.classify_run_result(envelope) do
+      {:ok, :success} ->
+        {:ok, envelope}
+
+      {:error, {:pipeline_outcome, status}}
+      when status in [:partial_success, :retry, :fail, :skipped] ->
+        {:error, {:pipeline_outcome, status}}
+
+      _ ->
+        {:error, :invalid_run_result}
+    end
+  end
+
+  defp admit_execution_result(_orchestrator, {:error, _} = error), do: error
+  defp admit_execution_result(_orchestrator, _result), do: {:error, :invalid_run_result}
 
   defp revalidate_paths(expected) do
     case PipelinePaths.resolve_pipeline(expected.path) do

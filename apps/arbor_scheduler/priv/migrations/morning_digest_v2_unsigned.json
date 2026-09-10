@@ -1,0 +1,33 @@
+{
+  "status": "unsigned_review_only",
+  "manifest_version_to_prepare": 2,
+  "pipeline_root": "scheduler_priv",
+  "pipeline_path": "morning_digest.dot",
+  "graph_hash": "f4f85d816d26befcd5ab2140ed6bfcf443e19cb650d0fa91c9075918c8b6b605",
+  "workdir": null,
+  "issuer_id": null,
+  "initial_args": {
+    "reports_directory": "reports",
+    "topics": ["upstream-deps", "upstream-deps-summary"]
+  },
+  "required_action_resource": "arbor://action/reports/build_morning_digest",
+  "filesystem_requirements_relative_to_workdir": [
+    {"operation": "read", "path": "reports/upstream-deps/**"},
+    {"operation": "read", "path": "reports/upstream-deps-summary/**"},
+    {"operation": "write", "path": "reports/morning-digest/**"}
+  ],
+  "runner_lobby_resource": "arbor://orchestrator/execute",
+  "date_semantics": "Current UTC date at action execution; no caller-supplied date",
+  "required_existing_directories": [
+    "reports/upstream-deps",
+    "reports/upstream-deps-summary",
+    "reports/morning-digest"
+  ],
+  "limits": {"input_bytes_per_file": 262144, "output_bytes": 1048576, "input_topics": 2},
+  "unresolved": [
+    "Select the deployment and canonical existing data workdir",
+    "Review exact absolute filesystem capability URIs against issuer enrollment",
+    "Review current owner authority before enabling an owner-bound routine",
+    "Prepare and review a new exact version 2 manifest; no signing or grants were performed"
+  ]
+}

@@ -63,6 +63,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Checkpoint
+  alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
@@ -76,6 +77,39 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Validation.Validator
 
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
+
+  @doc """
+  Classify an Engine result envelope for callers that require complete success.
+
+  An `{:ok, envelope}` transport result does not establish pipeline success.
+  Pass the envelope itself here. Partial, failed, retry and skipped outcomes
+  remain explicit refusals; missing or untyped outcomes are invalid results.
+  This function is pure and starts no services.
+  """
+  @spec classify_run_result(term()) ::
+          {:ok, :success}
+          | {:error, {:pipeline_outcome, :partial_success | :retry | :fail | :skipped}}
+          | {:error, :invalid_run_result}
+  def classify_run_result(%{
+        run_id: run_id,
+        final_outcome: %Outcome{status: status},
+        completed_nodes: nodes,
+        context: context
+      })
+      when is_binary(run_id) and run_id != "" and is_list(nodes) and is_map(context) do
+    case status do
+      :success ->
+        {:ok, :success}
+
+      status when status in [:partial_success, :retry, :fail, :skipped] ->
+        {:error, {:pipeline_outcome, status}}
+
+      _ ->
+        {:error, :invalid_run_result}
+    end
+  end
+
+  def classify_run_result(_result), do: {:error, :invalid_run_result}
   @type run_credential :: function() | SigningAuthority.t()
 
   @doc "Parse a DOT source string into a Graph struct."
