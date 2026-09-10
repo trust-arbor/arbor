@@ -21,6 +21,58 @@ defmodule Arbor.Dashboard.Cores.SignalsCore do
 
   alias Arbor.Web.Helpers
 
+  # Dashboard coverage is independent of icon availability. Signals accepts
+  # open-ended categories; this catalog covers the supported Arbor emitters
+  # and the existing dashboard categories, not every arbitrary custom topic.
+  @supported_categories [
+    :action,
+    :activity,
+    :agent,
+    :ai,
+    :bridge,
+    :checkpoint,
+    :comms,
+    :consensus,
+    :debug,
+    :demo,
+    :gateway,
+    :historian,
+    :identity,
+    :interaction,
+    :llm,
+    :memory,
+    :monitor,
+    :network,
+    :orchestrator,
+    :persistence,
+    :remediation,
+    :sandbox,
+    :security,
+    :shell,
+    :signal,
+    :skill,
+    :system,
+    :task,
+    :tool_authorization,
+    :trust,
+    :voice,
+    :web
+  ]
+  @attention_limit 20
+
+  @doc "Dashboard-supported categories, excluding the configured restricted topics."
+  @spec supported_categories([atom()]) :: [atom()]
+  def supported_categories(restricted), do: @supported_categories -- restricted
+
+  @doc "Retain recent failed message deliveries for the current viewer, newest first."
+  @spec track_attention([map()], map()) :: [map()]
+  def track_attention(recent, %{category: :comms, type: :message_failed} = signal) do
+    [signal | Enum.reject(recent, &(&1.id == signal.id))]
+    |> Enum.take(@attention_limit)
+  end
+
+  def track_attention(recent, _signal), do: recent
+
   # ===========================================================================
   # Convert
   # ===========================================================================

@@ -12,6 +12,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   import Arbor.Web.Components
   import Arbor.Web.Helpers
 
+  alias Arbor.Dashboard.Cores.SignalsCore
   alias Arbor.Signals.Config, as: SignalsConfig
   alias Arbor.Web.{Helpers, Icons, SignalLive}
 
@@ -19,21 +20,18 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    # Subscribe individually: a wildcard overlaps privileged topics, and this
+    # dashboard has no subscription principal. Icons are presentation only.
+    subscribed_categories = SignalsCore.supported_categories(SignalsConfig.restricted_topics())
+
     {signals, stats} =
       if connected?(socket) do
         stats = safe_stats()
         Process.send_after(self(), :refresh_stats, @stats_refresh_interval)
-        {safe_recent(limit: 50), stats}
+        {safe_recent(limit: 50, category: subscribed_categories), stats}
       else
         {[], default_stats()}
       end
-
-    # Subscribe to each non-restricted category individually.
-    # "*" is rejected because it overlaps restricted topics (security, identity)
-    # and the dashboard has no principal_id yet (needs auth first).
-    restricted = SignalsConfig.restricted_topics()
-    all_categories = Map.keys(Icons.category_icons())
-    subscribed_categories = all_categories -- restricted
 
     socket =
       socket
@@ -44,6 +42,8 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         active_categories: MapSet.new(subscribed_categories),
         paused: false,
         buffered_signals: [],
+        attention_signals:
+          Enum.reduce(Enum.reverse(signals), [], &SignalsCore.track_attention(&2, &1)),
         subscribed_categories: subscribed_categories,
         filter_open: false,
         time_filter: :all,
@@ -69,6 +69,9 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   @max_buffer 1000
 
   def handle_info({:signal_received, signal}, socket) do
+    socket =
+      update(socket, :attention_signals, &SignalsCore.track_attention(&1, signal))
+
     if socket.assigns.paused do
       buffer = socket.assigns.buffered_signals
 
@@ -116,22 +119,25 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   end
 
   def handle_event("toggle-category", %{"category" => category}, socket) do
-    cat = String.to_existing_atom(category)
-    active = socket.assigns.active_categories
+    case Enum.find(socket.assigns.subscribed_categories, &(Atom.to_string(&1) == category)) do
+      nil ->
+        {:noreply, socket}
 
-    active =
-      if MapSet.member?(active, cat),
-        do: MapSet.delete(active, cat),
-        else: MapSet.put(active, cat)
+      cat ->
+        active = socket.assigns.active_categories
 
-    signals = reload_signals(active, socket.assigns.time_filter, socket.assigns.agent_filter)
+        active =
+          if MapSet.member?(active, cat),
+            do: MapSet.delete(active, cat),
+            else: MapSet.put(active, cat)
 
-    socket =
-      socket
-      |> assign(:active_categories, active)
-      |> stream(:signals, signals, reset: true)
+        signals = reload_signals(active, socket.assigns.time_filter, socket.assigns.agent_filter)
 
-    {:noreply, socket}
+        {:noreply,
+         socket
+         |> assign(:active_categories, active)
+         |> stream(:signals, signals, reset: true)}
+    end
   end
 
   def handle_event("filter-select-all", _params, socket) do
@@ -205,8 +211,11 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     signal =
       try do
         case Arbor.Signals.get_signal(signal_id) do
-          {:ok, s} -> s
-          _ -> nil
+          {:ok, s} ->
+            if s.category in socket.assigns.subscribed_categories, do: s
+
+          _ ->
+            nil
         end
       rescue
         _ -> nil
@@ -238,6 +247,20 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
         </button>
       </:actions>
     </.dashboard_header>
+
+    <section :if={@attention_signals != []} id="signals-attention" class="aw-card" role="status">
+      <h2>Needs attention</h2>
+      <p>Recent message delivery failures. Open a signal to inspect its channel and reason.</p>
+      <button
+        :for={signal <- @attention_signals}
+        id={"attention-#{signal.id}"}
+        phx-click="select-signal"
+        phx-value-id={signal.id}
+        class="aw-btn aw-btn-warning"
+      >
+        comms.message_failed · {format_time(signal.timestamp)} · {format_signal_data(signal.data)}
+      </button>
+    </section>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
       <.stat_card
@@ -413,7 +436,7 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
     if MapSet.size(active_categories) == 0 do
       []
     else
-      safe_recent(limit: 50)
+      safe_recent(limit: 50, category: MapSet.to_list(active_categories))
       |> Enum.filter(fn s ->
         MapSet.member?(active_categories, s.category) &&
           matches_time?(s, time_filter) &&
@@ -423,8 +446,6 @@ defmodule Arbor.Dashboard.Live.SignalsLive do
   end
 
   # Display formatters and filter predicates delegate to SignalsCore.
-  alias Arbor.Dashboard.Cores.SignalsCore
-
   defp time_label(filter), do: SignalsCore.time_label(filter)
   defp matches_time?(signal, filter), do: SignalsCore.matches_time?(signal, filter)
   defp matches_agent?(signal, agent_id), do: SignalsCore.matches_agent?(signal, agent_id)
