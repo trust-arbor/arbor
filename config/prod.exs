@@ -45,6 +45,10 @@ config :arbor_scheduler, Oban,
   notifier: prod_oban_notifier
 
 config :arbor_memory,
+  # The historical backend name supports the selected Repo adapter: SQLite by
+  # default, PostgreSQL only with ARBOR_DB=postgres. Critical Memory mutations
+  # use the owner's acknowledged APIs; ordinary async writes keep their policy.
+  persistence_backend: Arbor.Persistence.QueryableStore.Postgres,
   embedding_dedup_enabled: true,
   maintenance_archive_target: [
     name: :memory_events_durable,
@@ -54,5 +58,23 @@ config :arbor_memory,
   # VP-05D2C3I1A — durable mutation admission (QueryableStore Record authority)
   mutation_admission_backend: Arbor.Persistence.QueryableStore.Postgres,
   mutation_admission_backend_opts: [repo: Arbor.Persistence.Repo]
+
+# Keep current-run lifecycle and Engine checkpoints on the same selected Repo.
+# Backend observations remain authoritative; these classes never elevate an
+# unavailable or weaker store. Credentials and database paths stay runtime-owned.
+config :arbor_orchestrator, :run_journal,
+  backend: Arbor.Persistence.QueryableStore.Postgres,
+  store_name: :arbor_pipeline_run_lifecycle,
+  backend_opts: [repo: Arbor.Persistence.Repo],
+  start_store: false,
+  durability_class: :node_restart
+
+config :arbor_orchestrator, :engine_checkpoints,
+  store: Arbor.Persistence.QueryableStore.Postgres,
+  store_name: :arbor_orchestrator_checkpoints,
+  store_opts: [repo: Arbor.Persistence.Repo],
+  start_store: false,
+  store_child_opts: [],
+  durability_class: :node_restart
 
 import_config "provider_route_profile.exs"
