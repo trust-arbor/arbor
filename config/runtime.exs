@@ -89,6 +89,118 @@ if config_env() != :test do
 end
 
 # ============================================================================
+# Experimental hybrid memory search (explicit operator opt-in, dev/prod only)
+# ============================================================================
+# Persistent environment activation requires the strict selector. Programmatic
+# application configuration remains unchanged when the flag is unset. Runtime
+# Memory/LLM owners still validate endpoint trust, loopback, current capability,
+# selector response and live composition; this loader confers none of them.
+if config_env() != :test do
+  case System.get_env("ARBOR_HYBRID_MEMORY_ENABLED") do
+    nil ->
+      :ok
+
+    "false" ->
+      config :arbor_memory, :hybrid_knowledge_search, false
+
+    "true" ->
+      hybrid_memory_provider =
+        case System.get_env("ARBOR_HYBRID_MEMORY_PROVIDER") do
+          provider when provider in ["ollama", "lm_studio"] -> provider
+          _ -> raise "ARBOR_HYBRID_MEMORY_PROVIDER must be ollama or lm_studio"
+        end
+
+      hybrid_selector_provider =
+        case System.get_env("ARBOR_HYBRID_MEMORY_SELECTOR_PROVIDER") do
+          "lm_studio" -> "lm_studio"
+          _ -> raise "ARBOR_HYBRID_MEMORY_SELECTOR_PROVIDER must be lm_studio"
+        end
+
+      hybrid_memory_label = fn name, max_bytes ->
+        value = System.get_env(name)
+
+        if is_binary(value) and byte_size(value) in 1..max_bytes and String.valid?(value) and
+             String.trim(value) == value do
+          value
+        else
+          raise "#{name} must be a nonempty UTF-8 value without surrounding whitespace (at most #{max_bytes} bytes)"
+        end
+      end
+
+      hybrid_memory_integer = fn name, default, maximum ->
+        value = System.get_env(name) || Integer.to_string(default)
+
+        parsed = if byte_size(value) <= 12, do: Integer.parse(value), else: :error
+
+        case parsed do
+          {integer, ""} when integer >= 1 and integer <= maximum -> integer
+          _ -> raise "#{name} must be an integer between 1 and #{maximum}"
+        end
+      end
+
+      hybrid_memory_unit = fn name, default ->
+        value = System.get_env(name) || default
+
+        parsed =
+          if byte_size(value) <= 64 do
+            try do
+              Float.parse(value)
+            rescue
+              ArgumentError -> :error
+            end
+          else
+            :error
+          end
+
+        case parsed do
+          {number, ""} when number >= 0 and number <= 1 -> number
+          _ -> raise "#{name} must be a finite number between 0 and 1"
+        end
+      end
+
+      config :arbor_memory, :hybrid_knowledge_search,
+        enabled: true,
+        provider: hybrid_memory_provider,
+        model: hybrid_memory_label.("ARBOR_HYBRID_MEMORY_MODEL", 256),
+        base_url: hybrid_memory_label.("ARBOR_HYBRID_MEMORY_BASE_URL", 4_096),
+        timeout_ms: hybrid_memory_integer.("ARBOR_HYBRID_MEMORY_TIMEOUT_MS", 10_000, 30_000),
+        min_cosine: hybrid_memory_unit.("ARBOR_HYBRID_MEMORY_MIN_COSINE", "0.7"),
+        min_score: hybrid_memory_unit.("ARBOR_HYBRID_MEMORY_MIN_SCORE", "0.6"),
+        semantic_weight: hybrid_memory_unit.("ARBOR_HYBRID_MEMORY_SEMANTIC_WEIGHT", "0.7"),
+        selector: [
+          provider: hybrid_selector_provider,
+          model: hybrid_memory_label.("ARBOR_HYBRID_MEMORY_SELECTOR_MODEL", 256),
+          base_url: hybrid_memory_label.("ARBOR_HYBRID_MEMORY_SELECTOR_BASE_URL", 4_096),
+          timeout_ms:
+            hybrid_memory_integer.("ARBOR_HYBRID_MEMORY_SELECTOR_TIMEOUT_MS", 20_000, 20_000),
+          candidate_limit: hybrid_memory_integer.("ARBOR_HYBRID_MEMORY_CANDIDATE_LIMIT", 8, 8)
+        ]
+
+    _ ->
+      raise "ARBOR_HYBRID_MEMORY_ENABLED must be true or false"
+  end
+end
+
+# An explicit provider endpoint is separate from the hybrid route: selecting a
+# search URL must not silently add it to the provider's trusted endpoints.
+if config_env() != :test do
+  case System.get_env("ARBOR_LM_STUDIO_BASE_URL") do
+    nil ->
+      :ok
+
+    url when is_binary(url) and byte_size(url) in 1..4_096 ->
+      if String.valid?(url) and String.trim(url) == url do
+        config :arbor_orchestrator, :lm_studio, base_url: url
+      else
+        raise "ARBOR_LM_STUDIO_BASE_URL must be a nonempty UTF-8 URL without surrounding whitespace (at most 4096 bytes)"
+      end
+
+    _ ->
+      raise "ARBOR_LM_STUDIO_BASE_URL must be a nonempty UTF-8 URL without surrounding whitespace (at most 4096 bytes)"
+  end
+end
+
+# ============================================================================
 # Production security authority state root
 # ============================================================================
 # Explicit absolute path only. Full durable Security boots fail closed at

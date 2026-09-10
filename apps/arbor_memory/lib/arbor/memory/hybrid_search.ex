@@ -4,7 +4,7 @@ defmodule Arbor.Memory.HybridSearch do
   alias Arbor.{AI, LLM, Trust}
   alias Arbor.Contracts.Persistence.VectorRecord
   alias Arbor.Contracts.Security.TaintEnvelope
-  alias Arbor.Memory.{Config, HybridSearchCore, KnowledgeGraphStore}
+  alias Arbor.Memory.{Config, HybridSearchCore, HybridSelectionCore, KnowledgeGraphStore}
   alias Arbor.Memory.KnowledgeGraph.Codec
 
   @route_keys [
@@ -15,7 +15,8 @@ defmodule Arbor.Memory.HybridSearch do
     :timeout_ms,
     :min_cosine,
     :min_score,
-    :semantic_weight
+    :semantic_weight,
+    :selector
   ]
 
   def search(caller, agent, query, opts, reauthorize) do
@@ -23,6 +24,7 @@ defmodule Arbor.Memory.HybridSearch do
 
     with {:ok, route} <- route(),
          :ok <- LLM.validate_live_embedding_pipeline(),
+         :ok <- validate_selector_pipeline(route.selector),
          {:ok, snapshot} <- KnowledgeGraphStore.get_snapshot(agent),
          {:ok, digest} <- snapshot_digest(snapshot),
          {:ok, nodes, bytes} <- HybridSearchCore.candidates(snapshot, query, opts) do
@@ -77,12 +79,81 @@ defmodule Arbor.Memory.HybridSearch do
            ),
          {:ok, vectors} <- HybridSearchCore.embeddings(batch, ctx.route, length(ctx.nodes) + 1),
          :ok <- recheck(ctx),
-         {:ok, _remaining} <- remaining(ctx) do
-      ranked =
-        HybridSearchCore.rank(ctx.snapshot, ctx.nodes, ctx.query, vectors, ctx.route, ctx.opts)
-
-      result(ctx, ranked, Map.get(batch, :usage, %{}))
+         {:ok, _remaining} <- remaining(ctx),
+         {:ok, ranked, selection} <- select_results(ctx, vectors) do
+      result(ctx, ranked, Map.get(batch, :usage, %{}), selection)
     end
+  end
+
+  defp validate_selector_pipeline(nil), do: :ok
+  defp validate_selector_pipeline(_selector), do: LLM.validate_live_completion_pipeline()
+
+  defp select_results(%{route: %{selector: nil}} = ctx, vectors) do
+    ranked =
+      HybridSearchCore.rank(ctx.snapshot, ctx.nodes, ctx.query, vectors, ctx.route, ctx.opts)
+
+    {:ok, ranked, nil}
+  end
+
+  defp select_results(ctx, vectors) do
+    selector = ctx.route.selector
+    opts = Keyword.put(ctx.opts, :limit, selector.candidate_limit)
+
+    candidates =
+      HybridSearchCore.rank(ctx.snapshot, ctx.nodes, ctx.query, vectors, ctx.route, opts)
+
+    select_candidates(ctx, candidates, selector)
+  end
+
+  defp select_candidates(_ctx, [], selector) do
+    {:ok, [], selection_measurement(selector, [], [], %{}, 0)}
+  end
+
+  defp select_candidates(ctx, candidates, selector) do
+    started = System.monotonic_time(:millisecond)
+
+    with {:ok, input} <- HybridSelectionCore.input(ctx.query, candidates),
+         {:ok, taint} <- HybridSearchCore.egress_taint(ctx.snapshot, ctx.nodes),
+         :ok <- authorize_egress(ctx.caller, selector, taint),
+         :ok <- recheck(ctx),
+         {:ok, remaining} <- remaining(ctx),
+         {:ok, response} <-
+           LLM.generate(
+             provider: selector.provider,
+             model: selector.model,
+             system: HybridSelectionCore.system_prompt(),
+             prompt: input,
+             provider_options: %{response_format: HybridSelectionCore.response_format(candidates)},
+             temperature: 0.0,
+             require_live_pipeline: true,
+             timeout_ms: min(remaining, selector.timeout_ms),
+             max_response_bytes: HybridSelectionCore.response_bytes(),
+             client_opts: [
+               base_url: selector.base_url,
+               req_http_options: [retry: false, redirect: false]
+             ]
+           ),
+         {:ok, selected} <-
+           HybridSelectionCore.select(response, candidates, Keyword.get(ctx.opts, :limit, 10)),
+         :ok <- recheck(ctx),
+         {:ok, _remaining} <- remaining(ctx) do
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      {:ok, selected,
+       selection_measurement(selector, candidates, selected, response.usage, elapsed)}
+    end
+  end
+
+  defp selection_measurement(selector, candidates, selected, usage, elapsed) do
+    %{
+      provider: selector.provider,
+      model: selector.model,
+      prompt_version: HybridSelectionCore.prompt_version(),
+      candidate_ids: Enum.map(candidates, & &1.id),
+      selected_ids: Enum.map(selected, & &1.id),
+      usage: usage,
+      elapsed_ms: elapsed
+    }
   end
 
   defp authorize_egress(caller, route, taint) do
@@ -115,7 +186,7 @@ defmodule Arbor.Memory.HybridSearch do
     end
   end
 
-  defp result(ctx, results, usage) do
+  defp result(ctx, results, usage, selection \\ nil) do
     route = ctx.route
 
     value = %{
@@ -136,6 +207,11 @@ defmodule Arbor.Memory.HybridSearch do
         usage: usage
       }
     }
+
+    value =
+      if selection,
+        do: put_in(value, [:measurement, :selection], selection),
+        else: value
 
     maximum = HybridSearchCore.limits().result_bytes
 
@@ -183,7 +259,8 @@ defmodule Arbor.Memory.HybridSearch do
          cosine <- Keyword.get(opts, :min_cosine),
          score <- Keyword.get(opts, :min_score),
          weight <- Keyword.get(opts, :semantic_weight, 0.7),
-         true <- Enum.all?([cosine, score, weight], &HybridSearchCore.unit?/1) do
+         true <- Enum.all?([cosine, score, weight], &HybridSearchCore.unit?/1),
+         {:ok, selector} <- resolve_selector(Keyword.get(opts, :selector)) do
       {:ok,
        %{
          provider: provider,
@@ -192,7 +269,45 @@ defmodule Arbor.Memory.HybridSearch do
          timeout_ms: timeout,
          min_cosine: cosine,
          min_score: score,
-         semantic_weight: weight
+         semantic_weight: weight,
+         selector: selector
+       }}
+    else
+      _ -> {:error, :invalid_hybrid_search_configuration}
+    end
+  end
+
+  defp resolve_selector(nil), do: {:ok, nil}
+
+  defp resolve_selector(opts) do
+    with true <-
+           HybridSearchCore.options?(opts, [
+             :provider,
+             :model,
+             :base_url,
+             :timeout_ms,
+             :candidate_limit
+           ]),
+         # This first qualified selector route is LM Studio. A loopback Ollama
+         # endpoint can proxy a cloud-model tag and does not prove local inference.
+         "lm_studio" <- Keyword.get(opts, :provider),
+         model <- Keyword.get(opts, :model),
+         true <- HybridSearchCore.label?(model, 256) and String.trim(model) == model,
+         {:ok, base} <-
+           LLM.validate_endpoint(Keyword.get(opts, :base_url), {:req_llm_base, "lm_studio"}),
+         true <- loopback?(base),
+         :on_host <- AI.egress_tier_for("lm_studio", base),
+         timeout <- Keyword.get(opts, :timeout_ms, 20_000),
+         true <- is_integer(timeout) and timeout in 1..20_000,
+         limit <- Keyword.get(opts, :candidate_limit, 8),
+         true <- is_integer(limit) and limit in 1..8 do
+      {:ok,
+       %{
+         provider: "lm_studio",
+         model: model,
+         base_url: base,
+         timeout_ms: timeout,
+         candidate_limit: limit
        }}
     else
       _ -> {:error, :invalid_hybrid_search_configuration}

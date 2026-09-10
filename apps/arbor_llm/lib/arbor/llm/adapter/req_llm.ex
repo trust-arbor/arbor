@@ -68,6 +68,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Plugs.Usage
   alias Arbor.LLM.Request
+  alias Arbor.LLM.LiveCompletionFormat
   alias Arbor.LLM.Response
   alias Arbor.LLM.RequestTimeoutError
 
@@ -125,6 +126,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       else: {:error, :eval_fixture_unsupported_pipeline}
   end
 
+  @doc false
+  def validate_live_completion_pipeline do
+    if pipeline() == @default_pipeline,
+      do: :ok,
+      else: {:error, :live_completion_pipeline_unsupported}
+  end
+
   @impl true
   @spec complete(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
   def complete(request, opts \\ [])
@@ -171,8 +179,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp do_complete(request, opts, single_attempt? \\ false) do
     {usage_context, opts} = pop_provider_usage_context(opts)
     {fixture_name, opts} = Keyword.pop(opts, :eval_fixture_set)
+    {live_requirement, opts} = Keyword.pop(opts, :require_live_pipeline)
 
-    with {:ok, fixture_scope} <- resolve_fixture_scope(fixture_name, request.provider),
+    with {:ok, live_pipeline} <-
+           admit_live_completion_pipeline(live_requirement, request, fixture_name, opts),
+         request <- normalize_live_completion_format(request, live_pipeline),
+         {:ok, fixture_scope} <- resolve_fixture_scope(fixture_name, request.provider),
          {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- completion_req_opts(request, opts, fixture_scope),
@@ -183,11 +195,54 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
              req_opts,
              usage_context,
              single_attempt?,
-             fixture_scope
-           ) do
+             fixture_scope,
+             live_pipeline
+           ),
+         :ok <- validate_live_completion_result(resp, live_pipeline) do
       {:ok, translate_response(resp, request)}
     end
   end
+
+  defp admit_live_completion_pipeline(nil, _request, _fixture, _opts), do: {:ok, nil}
+
+  defp admit_live_completion_pipeline(
+         true,
+         %Request{tools: [], tool_choice: nil} = request,
+         nil,
+         opts
+       ) do
+    if LiveCompletionFormat.valid?(request.provider_options) and
+         not Keyword.has_key?(opts, :provider_options) do
+      case pipeline() do
+        @default_pipeline -> {:ok, @default_pipeline}
+        _ -> {:error, :live_completion_pipeline_unsupported}
+      end
+    else
+      {:error, :live_completion_configuration_unsupported}
+    end
+  end
+
+  defp admit_live_completion_pipeline(true, _request, _fixture, _opts),
+    do: {:error, :live_completion_configuration_unsupported}
+
+  defp admit_live_completion_pipeline(_invalid, _request, _fixture, _opts),
+    do: {:error, :invalid_live_completion_requirement}
+
+  defp normalize_live_completion_format(request, nil), do: request
+
+  defp normalize_live_completion_format(request, _pipeline),
+    do: %{request | provider_options: LiveCompletionFormat.req_options(request.provider_options)}
+
+  defp validate_live_completion_result(_response, nil), do: :ok
+
+  defp validate_live_completion_result(%ReqLLM.Response{finish_reason: :stop} = response, _live) do
+    if ReqLLM.Response.tool_calls(response) == [],
+      do: :ok,
+      else: {:error, :invalid_live_completion_result}
+  end
+
+  defp validate_live_completion_result(_response, _live),
+    do: {:error, :invalid_live_completion_result}
 
   @impl true
   @spec stream(Request.t(), keyword()) :: Enumerable.t() | {:error, term()}
@@ -1170,13 +1225,22 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   # ── Dispatch ────────────────────────────────────────────────────────
 
-  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt?, fixture_scope) do
+  defp call_req_llm(
+         model_spec,
+         messages,
+         opts,
+         usage_context,
+         single_attempt?,
+         fixture_scope,
+         completion_pipeline
+       ) do
     run_pipeline_call(
       :complete,
       {model_spec, messages, opts},
       usage_context,
       single_attempt?,
-      fixture_scope
+      fixture_scope,
+      completion_pipeline
     )
     |> Map.fetch!(:result)
   end
@@ -1200,13 +1264,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
          request,
          usage_context,
          single_attempt? \\ false,
-         fixture_scope \\ nil
+         fixture_scope \\ nil,
+         completion_pipeline \\ nil
        ) do
     call =
       operation
       |> Call.new(request)
       |> maybe_put_provider_usage_context(usage_context)
       |> maybe_put_fixture_scope(fixture_scope)
+      |> Call.assign(:live_completion, not is_nil(completion_pipeline))
 
     live_pipeline = Map.get(call.metadata, :live_embedding_pipeline)
 
@@ -1214,7 +1280,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # replacing a failed dispatch result, and suppresses provider-installed
     # Req retries through the existing single-attempt contract.
     call =
-      if single_attempt? or not is_nil(live_pipeline) do
+      if single_attempt? or not is_nil(live_pipeline) or not is_nil(completion_pipeline) do
         Call.assign(call, :single_attempt, true)
       else
         call
@@ -1223,7 +1289,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     # Named completion and live-only embedding admission each freeze the
     # source default for this call; operator config changes affect later calls.
     selected_pipeline =
-      live_pipeline || if(fixture_scope, do: @default_pipeline, else: pipeline())
+      completion_pipeline || live_pipeline ||
+        if(fixture_scope, do: @default_pipeline, else: pipeline())
 
     Pipeline.through(call, selected_pipeline)
   end

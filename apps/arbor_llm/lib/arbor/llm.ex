@@ -12,7 +12,9 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.Eval.ProviderResolver
 
+  alias Arbor.LLM.LiveCompletionFormat
   alias Arbor.LLM.Message
+  alias Arbor.LLM.ProviderRegistry
 
   alias Arbor.LLM.NoObjectGeneratedError
 
@@ -313,7 +315,7 @@ defmodule Arbor.LLM do
       when (is_atom(provider) or is_binary(provider)) and is_binary(model) and is_list(opts) do
     with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
       with_timeout(opts, fn _receipt ->
-        canonical = Arbor.LLM.ProviderRegistry.normalize(provider)
+        canonical = ProviderRegistry.normalize(provider)
 
         adapter_opts =
           opts
@@ -341,39 +343,91 @@ defmodule Arbor.LLM do
   @spec validate_live_embedding_pipeline() :: :ok | {:error, atom()}
   def validate_live_embedding_pipeline, do: ReqLLMAdapter.validate_live_embedding_pipeline()
 
+  @doc "Refuse compositions that cannot prove a fresh, tool-free completion dispatch."
+  @spec validate_live_completion_pipeline() :: :ok | {:error, atom()}
+  def validate_live_completion_pipeline, do: ReqLLMAdapter.validate_live_completion_pipeline()
+
   defp do_generate(opts) do
     with :ok <- validate_public_options(opts),
          :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts),
          {:ok, client_opts} <-
-           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])) do
-      client = Keyword.get(opts, :client) || Client.default_client()
-      tools = Keyword.get(opts, :tools, [])
-
-      if tools == [] do
-        Client.complete(client, request, client_opts)
+           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])),
+         {:ok, live?} <- live_completion_requirement(opts, client_opts, request) do
+      if live? do
+        # The restriction selects the LLM-owned transport, never an ambient
+        # Client adapter or middleware supplied outside this admission.
+        ReqLLMAdapter.complete(request, Keyword.put(client_opts, :require_live_pipeline, true))
       else
-        tool_opts =
-          opts
-          |> Keyword.take([
-            :max_tool_rounds,
-            :max_steps,
-            :max_step_timeout_ms,
-            :parallel_tool_execution,
-            :on_step,
-            :stop_when,
-            :retry,
-            :sleep_fn,
-            :tool_hooks,
-            :validate_tool_call,
-            :repair_tool_call,
-            :abort?
-          ])
-          |> Keyword.merge(client_opts)
-
-        Client.generate_with_tools(client, request, tools, tool_opts)
+        ordinary_generate(opts, request, client_opts)
       end
     end
+  end
+
+  defp ordinary_generate(opts, request, client_opts) do
+    client = Keyword.get(opts, :client) || Client.default_client()
+    tools = Keyword.get(opts, :tools, [])
+
+    if tools == [] do
+      Client.complete(client, request, client_opts)
+    else
+      tool_opts =
+        opts
+        |> Keyword.take([
+          :max_tool_rounds,
+          :max_steps,
+          :max_step_timeout_ms,
+          :parallel_tool_execution,
+          :on_step,
+          :stop_when,
+          :retry,
+          :sleep_fn,
+          :tool_hooks,
+          :validate_tool_call,
+          :repair_tool_call,
+          :abort?
+        ])
+        |> Keyword.merge(client_opts)
+
+      Client.generate_with_tools(client, request, tools, tool_opts)
+    end
+  end
+
+  defp live_completion_requirement(opts, client_opts, request) do
+    top = Keyword.get_values(opts, :require_live_pipeline)
+    nested = Keyword.get_values(client_opts, :require_live_pipeline)
+
+    cond do
+      nested != [] ->
+        {:error, :invalid_live_completion_requirement}
+
+      top in [[], [nil]] ->
+        {:ok, false}
+
+      top != [true] ->
+        {:error, :invalid_live_completion_requirement}
+
+      unsupported_live_configuration?(opts, client_opts, request) ->
+        {:error, :live_completion_configuration_unsupported}
+
+      not is_binary(request.provider) or request.provider == "" ->
+        {:error, :live_completion_explicit_provider_required}
+
+      not ProviderRegistry.known?(request.provider) ->
+        {:error, :live_completion_provider_unsupported}
+
+      true ->
+        {:ok, true}
+    end
+  end
+
+  defp unsupported_live_configuration?(opts, client_opts, request) do
+    request.tools != [] or request.tool_choice != nil or Keyword.get(opts, :client) != nil or
+      Keyword.get(opts, :eval_fixture_set) != nil or
+      Keyword.get(client_opts, :eval_fixture_set) != nil or
+      not LiveCompletionFormat.valid?(request.provider_options) or
+      length(Keyword.get_values(opts, :provider_options)) > 1 or
+      Keyword.has_key?(client_opts, :provider_options)
   end
 
   @spec stream(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
@@ -390,7 +444,8 @@ defmodule Arbor.LLM do
          :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts),
          {:ok, client_opts} <-
-           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])) do
+           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])),
+         :ok <- refuse_live_completion_stream(opts, client_opts) do
       client = Keyword.get(opts, :client) || Client.default_client()
       tools = Keyword.get(opts, :tools, [])
       stream_opts = stream_tool_opts(opts, client_opts)
@@ -403,6 +458,13 @@ defmodule Arbor.LLM do
           other
       end
     end
+  end
+
+  defp refuse_live_completion_stream(opts, nested) do
+    if Enum.any?(Keyword.get_values(opts, :require_live_pipeline), &(!is_nil(&1))) or
+         Enum.any?(Keyword.get_values(nested, :require_live_pipeline), &(!is_nil(&1))),
+       do: {:error, :live_completion_stream_unsupported},
+       else: :ok
   end
 
   @spec generate_object(generate_opts()) :: {:ok, map()} | {:error, term()}

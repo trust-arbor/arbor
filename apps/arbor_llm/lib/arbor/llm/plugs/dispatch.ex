@@ -33,7 +33,8 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   def call(%Call{result: nil, operation: op, request: req, assigns: assigns} = call) do
     single_attempt? = Map.get(assigns, :single_attempt) == true
-    %{call | result: do_dispatch(op, req, single_attempt?)}
+    live_completion? = Map.get(assigns, :live_completion) == true
+    %{call | result: do_dispatch(op, req, single_attempt?, live_completion?)}
   end
 
   # Already has a result — short-circuited by an upstream plug.
@@ -41,7 +42,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   # ── Operation-specific dispatch ────────────────────────────────────
 
-  defp do_dispatch(:complete, {model_spec, messages, opts}, single_attempt?) do
+  defp do_dispatch(:complete, {model_spec, messages, opts}, single_attempt?, live_completion?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, 16_777_216)
     anonymous? = Keyword.get(opts, :arbor_anonymous_auth) == true
 
@@ -52,6 +53,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
          {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts),
          request <- ResponseBudget.apply_req_receipt(request, maximum),
          request <- maybe_disable_req_retry(request, single_attempt?),
+         request <- maybe_disable_redirects(request, live_completion?),
          request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
            Req.request(request) do
@@ -80,6 +82,14 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     :exit, reason -> {:error, exit_for(reason)}
     kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
+
+  defp do_dispatch(operation, request, single_attempt?, _live_completion?),
+    do: do_dispatch(operation, request, single_attempt?)
+
+  defp maybe_disable_redirects(request, true),
+    do: Req.Request.merge_options(request, redirect: false)
+
+  defp maybe_disable_redirects(request, false), do: request
 
   defp do_dispatch(:stream, {model_spec, messages, opts}, _single_attempt?) do
     maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
