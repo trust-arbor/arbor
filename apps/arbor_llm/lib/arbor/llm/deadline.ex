@@ -194,20 +194,105 @@ defmodule Arbor.LLM.Deadline do
 
     {pid, monitor_ref} =
       spawn_monitor(fn ->
-        Process.put(@worker_key, receipt.deadline_ms)
-        result = safely_apply(fun)
-        completed_mono = System.monotonic_time(:millisecond)
-
-        send(reply_alias, {operation_ref, result, completed_mono, self()})
-
-        receive do
-          {^operation_ref, :ack, ^caller} -> :ok
-        after
-          5_000 -> :ok
-        end
+        run_owner_guard(caller, reply_alias, operation_ref, receipt, fun)
       end)
 
     await_receipt(pid, monitor_ref, reply_alias, operation_ref, receipt, timeout_error)
+  end
+
+  # The guard owns the operation through a link, and monitors the facade caller.
+  # It never runs provider code. Caller or guard death therefore cannot detach
+  # an in-flight operation. The caller itself need not trap exits.
+  defp run_owner_guard(caller, reply_alias, operation_ref, receipt, fun) do
+    Process.flag(:trap_exit, true)
+    owner_monitor = Process.monitor(caller)
+    guard = self()
+
+    worker =
+      spawn_link(fn ->
+        Process.put(@worker_key, receipt.deadline_ms)
+        result = safely_apply(fun)
+
+        send(
+          guard,
+          {operation_ref, :completed, self(), result, System.monotonic_time(:millisecond)}
+        )
+      end)
+
+    await_owned_operation(caller, owner_monitor, worker, reply_alias, operation_ref, receipt)
+  end
+
+  defp await_owned_operation(caller, owner_monitor, worker, reply_alias, operation_ref, receipt) do
+    remaining = max(receipt.deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^operation_ref, :completed, ^worker, result, completed_mono} ->
+        case await_operation_completion(caller, owner_monitor, worker, operation_ref) do
+          :ok ->
+            send(reply_alias, {operation_ref, result, completed_mono, self()})
+            await_owner_ack(caller, owner_monitor, operation_ref)
+
+          :cancelled ->
+            :ok
+        end
+
+      {:DOWN, ^owner_monitor, :process, ^caller, _reason} ->
+        reap_operation(worker)
+
+      {^operation_ref, :cancel, ^caller} ->
+        reap_operation(worker)
+
+      {:EXIT, ^worker, reason} ->
+        exit(reason)
+    after
+      remaining ->
+        reap_operation(worker)
+        await_owner_ack(caller, owner_monitor, operation_ref)
+    end
+  end
+
+  defp await_operation_completion(caller, owner_monitor, worker, operation_ref) do
+    receive do
+      {:EXIT, ^worker, :normal} ->
+        :ok
+
+      {:EXIT, ^worker, reason} ->
+        exit(reason)
+
+      {:DOWN, ^owner_monitor, :process, ^caller, _reason} ->
+        reap_operation(worker)
+        :cancelled
+
+      {^operation_ref, :cancel, ^caller} ->
+        reap_operation(worker)
+        :cancelled
+    after
+      1_000 ->
+        reap_operation(worker)
+        exit(:deadline_cleanup_failed)
+    end
+  end
+
+  defp await_owner_ack(caller, owner_monitor, operation_ref) do
+    receive do
+      {^operation_ref, :ack, ^caller} -> :ok
+      {^operation_ref, :cancel, ^caller} -> :ok
+      {:DOWN, ^owner_monitor, :process, ^caller, _reason} -> :ok
+    after
+      1_000 -> :ok
+    end
+  end
+
+  defp reap_operation(worker) do
+    if Process.alive?(worker), do: Process.exit(worker, :kill)
+
+    receive do
+      {:EXIT, ^worker, _reason} -> :ok
+    after
+      # Killing this guard also kills its linked operation if a VM scheduler
+      # has not yet delivered EXIT. No detached operation is allowed to live.
+      1_000 -> Process.exit(self(), :kill)
+    end
   end
 
   defp await_receipt(pid, monitor_ref, reply_alias, operation_ref, receipt, timeout_error) do
@@ -222,7 +307,7 @@ defmodule Arbor.LLM.Deadline do
           await_down(pid, monitor_ref)
           unwrap(result)
         else
-          terminate_and_await(pid, monitor_ref)
+          terminate_and_await(pid, monitor_ref, operation_ref)
           {:error, timeout_error}
         end
 
@@ -232,14 +317,21 @@ defmodule Arbor.LLM.Deadline do
     after
       remaining ->
         :erlang.unalias(reply_alias)
-        terminate_and_await(pid, monitor_ref)
+        terminate_and_await(pid, monitor_ref, operation_ref)
         {:error, timeout_error}
     end
   end
 
-  defp terminate_and_await(pid, monitor_ref) do
-    if Process.alive?(pid), do: Process.exit(pid, :kill)
-    await_down(pid, monitor_ref)
+  defp terminate_and_await(pid, monitor_ref, operation_ref) do
+    send(pid, {operation_ref, :cancel, self()})
+
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      1_000 ->
+        if Process.alive?(pid), do: Process.exit(pid, :kill)
+        await_down(pid, monitor_ref)
+    end
   end
 
   defp await_down(pid, monitor_ref) do
