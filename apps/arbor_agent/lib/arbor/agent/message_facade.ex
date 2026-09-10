@@ -680,7 +680,7 @@ defmodule Arbor.Agent.MessageFacade do
       content_parts: r.content_parts,
       discovered_tools: r.discovered_tools,
       raw: nil,
-      metadata: %{}
+      metadata: project_auth_metadata(r.metadata)
     }
 
     with :ok <- type_check_projected(projected),
@@ -692,6 +692,53 @@ defmodule Arbor.Agent.MessageFacade do
   end
 
   defp admit_auth_response(_other, _secrets), do: :reject
+
+  # Session reports these outcomes only after its transcript acknowledgement.
+  # Expose the closed status vocabulary, never record ids, scope, provenance,
+  # arbitrary provider metadata, or raw response data. This remains subject to
+  # the same call-local secret scan as the rest of the projected response.
+  defp project_auth_metadata(metadata) do
+    %{}
+    |> project_memory_ack(metadata, :conversation_memory,
+      statuses: ["indexed", "pending", "disabled", "unavailable"],
+      optional_transcript: false
+    )
+    |> project_memory_ack(metadata, :relationship_memory,
+      statuses: ["saved", "unchanged", "not_requested", "conflict", "unavailable"],
+      optional_transcript: true
+    )
+  end
+
+  defp project_memory_ack(projected, metadata, key, opts) do
+    with {:ok, memory} <- unique_metadata_field(metadata, key),
+         {:ok, status} <- unique_metadata_field(memory, :status),
+         true <- status in opts[:statuses],
+         {:ok, acknowledgement} <- project_transcript(memory, status, opts[:optional_transcript]) do
+      Map.put(projected, key, acknowledgement)
+    else
+      _ -> projected
+    end
+  end
+
+  defp project_transcript(memory, status, optional?) do
+    case unique_metadata_field(memory, :transcript) do
+      {:ok, "committed"} -> {:ok, %{status: status, transcript: "committed"}}
+      :missing when optional? and status == "not_requested" -> {:ok, %{status: status}}
+      _ -> :error
+    end
+  end
+
+  # Never resolve conflicting atom/string aliases by selecting one assertion.
+  defp unique_metadata_field(map, key) when is_map(map) do
+    case {Map.fetch(map, key), Map.fetch(map, Atom.to_string(key))} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      {:error, :error} -> :missing
+      _ -> :error
+    end
+  end
+
+  defp unique_metadata_field(_other, _key), do: :error
 
   defp type_check_projected(%PipelineResponse{} = r) do
     cond do
