@@ -335,10 +335,10 @@ defmodule Arbor.Memory.GraphOps do
   end
 
   @doc """
-  Find a knowledge node by name (case-insensitive exact match).
+  Find a knowledge node by full content, explicit metadata name, or alias.
 
-  Useful for deduplication — check if a node with this name exists
-  before creating a new one.
+  Matching is case-insensitive and exact. Multiple matching nodes return
+  `{:error, :ambiguous}` instead of selecting an arbitrary node.
 
   ## Examples
 

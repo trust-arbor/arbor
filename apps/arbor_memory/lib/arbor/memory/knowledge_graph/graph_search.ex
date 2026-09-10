@@ -50,23 +50,53 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   end
 
   @doc """
-  Find a node by its content (exact match, case-insensitive).
+  Resolve an explicitly named node by case-insensitive exact matching.
+
+  Matches full content for compatibility, `metadata.name`, or a string in
+  `metadata.aliases`. Both atom and string metadata keys are accepted. Multiple
+  distinct matching nodes are ambiguous; no substring or semantic guess is made.
   """
   @spec find_by_name(KnowledgeGraph.t(), String.t()) ::
-          {:ok, KnowledgeGraph.node_id()} | {:error, :not_found}
+          {:ok, KnowledgeGraph.node_id()} | {:error, :not_found | :ambiguous | :invalid_name}
   def find_by_name(graph, name) do
-    name_lower = String.downcase(name)
-
-    result =
-      Enum.find(graph.nodes, fn {_id, node} ->
-        String.downcase(node.content) == name_lower
-      end)
-
-    case result do
-      {node_id, _node} -> {:ok, node_id}
-      nil -> {:error, :not_found}
+    case normalize_entity_name(name) do
+      nil -> {:error, :invalid_name}
+      normalized -> resolve_exact_entity(graph, normalized)
     end
   end
+
+  defp resolve_exact_entity(graph, normalized) do
+    matches =
+      graph.nodes
+      |> Enum.filter(fn {_id, node} -> exact_entity_match?(node, normalized) end)
+      |> Enum.take(2)
+
+    case matches do
+      [{id, _node}] -> {:ok, id}
+      [] -> {:error, :not_found}
+      _ambiguous -> {:error, :ambiguous}
+    end
+  end
+
+  defp exact_entity_match?(node, normalized) do
+    normalize_entity_name(node.content) == normalized or
+      Enum.any?(explicit_entity_names(node.metadata), &(normalize_entity_name(&1) == normalized))
+  end
+
+  defp explicit_entity_names(metadata) when is_map(metadata) do
+    [Map.get(metadata, :name), Map.get(metadata, "name")] ++
+      entity_aliases(Map.get(metadata, :aliases)) ++ entity_aliases(Map.get(metadata, "aliases"))
+  end
+
+  defp explicit_entity_names(_metadata), do: []
+  defp entity_aliases(aliases) when is_list(aliases), do: aliases
+  defp entity_aliases(_aliases), do: []
+
+  defp normalize_entity_name(name) when is_binary(name) do
+    if String.valid?(name) and String.trim(name) != "", do: String.downcase(name)
+  end
+
+  defp normalize_entity_name(_name), do: nil
 
   @doc """
   Substring search across node content (case-insensitive).

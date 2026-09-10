@@ -34,7 +34,7 @@ defmodule Arbor.Memory.KnowledgeOps do
   @doc "Search knowledge graph by content."
   defdelegate search_knowledge(agent_id, query, opts \\ []), to: GraphOps
 
-  @doc "Find a knowledge node by name (case-insensitive exact match)."
+  @doc "Resolve full content or explicit metadata names/aliases; reject ambiguous exact matches."
   defdelegate find_knowledge_by_name(agent_id, name), to: GraphOps
 
   @doc "Get all pending proposals (facts and learnings awaiting approval)."

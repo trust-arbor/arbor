@@ -81,7 +81,9 @@ defmodule Arbor.Actions.Memory do
     Store information in the knowledge graph.
 
     Adds a knowledge node with the given type and content. Optionally links
-    to existing nodes by entity name.
+    to existing nodes by exact content, explicit metadata name, or alias.
+    `linked_count` counts acknowledged links; `entity_links` reports unresolved,
+    failed, and duplicate targets without claiming those writes succeeded.
 
     ## Parameters
 
@@ -153,7 +155,8 @@ defmodule Arbor.Actions.Memory do
 
         case result do
           {:ok, node_id, outcome} ->
-            linked = maybe_link_entities(agent_id, node_id, params[:entities] || [])
+            {linked, entity_links} =
+              maybe_link_entities(agent_id, node_id, params[:entities] || [])
 
             already_existed =
               case outcome do
@@ -181,6 +184,7 @@ defmodule Arbor.Actions.Memory do
                stored: true,
                indexed: indexed,
                linked_count: linked,
+               entity_links: entity_links,
                already_existed: already_existed,
                outcome: outcome
              }}
@@ -225,20 +229,47 @@ defmodule Arbor.Actions.Memory do
       :exit, _ -> false
     end
 
-    defp maybe_link_entities(_agent_id, _node_id, []), do: 0
-
     defp maybe_link_entities(agent_id, node_id, entities) do
-      Enum.count(entities, fn entity_name ->
-        case Arbor.Memory.find_knowledge_by_name(agent_id, entity_name) do
-          {:ok, entity_id} ->
-            Arbor.Memory.link_knowledge(agent_id, node_id, entity_id, :related_to)
-            true
+      {count, reports, _seen} =
+        Enum.reduce(entities, {0, [], MapSet.new()}, fn name, {count, reports, seen} ->
+          case Arbor.Memory.find_knowledge_by_name(agent_id, name) do
+            {:ok, target_id} ->
+              link_resolved_entity(agent_id, node_id, name, target_id, count, reports, seen)
 
-          _ ->
-            false
-        end
-      end)
+            {:error, reason} ->
+              status =
+                if reason in [:not_found, :ambiguous, :invalid_name],
+                  do: :unresolved,
+                  else: :failed
+
+              report = %{entity: name, status: status, reason: link_reason(reason)}
+              {count, [report | reports], seen}
+          end
+        end)
+
+      {count, Enum.reverse(reports)}
     end
+
+    defp link_resolved_entity(agent_id, node_id, name, target_id, count, reports, seen) do
+      report = %{entity: name, target_id: target_id, relationship: :related_to}
+
+      if MapSet.member?(seen, target_id) do
+        {count, [Map.put(report, :status, :duplicate) | reports], seen}
+      else
+        seen = MapSet.put(seen, target_id)
+
+        case Arbor.Memory.link_knowledge(agent_id, node_id, target_id, :related_to) do
+          :ok ->
+            {count + 1, [Map.put(report, :status, :linked) | reports], seen}
+
+          {:error, reason} ->
+            failed = Map.merge(report, %{status: :failed, reason: link_reason(reason)})
+            {count, [failed | reports], seen}
+        end
+      end
+    end
+
+    defp link_reason(reason), do: inspect(reason, limit: 10, printable_limit: 256)
   end
 
   # ============================================================================
