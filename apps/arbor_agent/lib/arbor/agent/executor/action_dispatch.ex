@@ -9,6 +9,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   require Logger
 
+  alias Arbor.Agent.Config
+
   # ── Public API ──
 
   @doc """
@@ -34,7 +36,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     # Check hardcoded dispatch mappings first (compound names like
     # :proposal_submit that find_action_module cannot discover,
     # and inline-handled actions like :proposal_status), then fall back
-    # to naming convention discovery.
+    # to the Actions catalog and then naming convention discovery.
     case hardcoded_canonical_name(action) do
       {:ok, _} = result ->
         result
@@ -57,8 +59,9 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @doc """
   Resolve an action atom to its concrete module, if discoverable.
 
-  Returns `{:ok, module}` when a matching action module is found via naming
-  convention, or `:error` for inline-handled actions and unknown names.
+  Returns `{:ok, module}` when the public Actions catalog recognizes the name,
+  or when legacy naming convention discovery finds a runnable module. Returns
+  `:error` for inline-handled actions and unknown names.
 
   ## Examples
 
@@ -312,33 +315,36 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   defp hardcoded_canonical_name(:proposal_status), do: {:ok, "proposal.status"}
   defp hardcoded_canonical_name(_), do: :error
 
-  # Find an action module from a string action name (dotted or underscore format)
-  # e.g., "memory.remember" -> Arbor.Actions.Memory.Remember
+  # The catalog owns canonical aliases and Jido names, including compound
+  # categories such as MemoryReview. Keep convention lookup for legacy actions
+  # that have not joined the catalog; it never replaces runtime authorization.
   defp find_action_module_from_string(action_str) when is_binary(action_str) do
+    catalog_action_module(action_str) || legacy_action_module(action_str)
+  end
+
+  defp find_action_module(action),
+    do: find_action_module_from_string(Atom.to_string(action))
+
+  defp catalog_action_module(action_str) do
+    case safe_call(fn -> Config.actions_module().name_to_module(action_str) end) do
+      {:ok, module} -> if runnable_action?(module), do: module
+      _ -> nil
+    end
+  end
+
+  defp legacy_action_module(action_str) do
     candidates = [
       build_action_module_name(action_str),
       build_action_module_from_dotted(action_str)
     ]
 
-    Enum.find(candidates, fn mod ->
-      mod && Code.ensure_loaded?(mod) && function_exported?(mod, :run, 2)
-    end)
+    Enum.find(candidates, &runnable_action?/1)
   end
 
-  # Try to find an action module by naming convention
-  # e.g., :file_read -> Arbor.Actions.File.Read
-  defp find_action_module(action) do
-    action_str = Atom.to_string(action)
+  defp runnable_action?(module) when is_atom(module) and not is_nil(module),
+    do: Code.ensure_loaded?(module) and function_exported?(module, :run, 2)
 
-    candidates = [
-      build_action_module_name(action_str),
-      build_action_module_from_dotted(action_str)
-    ]
-
-    Enum.find(candidates, fn mod ->
-      mod && Code.ensure_loaded?(mod) && function_exported?(mod, :run, 2)
-    end)
-  end
+  defp runnable_action?(_), do: false
 
   # M12: Use String.to_existing_atom to prevent atom table exhaustion
   defp build_action_module_name(action_str) do

@@ -50,6 +50,13 @@ defmodule Arbor.Agent.Config do
   # Terminal artifact publication may write a bounded file and is mandatory for
   # executors that opt in, so it gets a larger but still finite deadline.
   @default_executor_finalization_timeout_ms 2_000
+
+  @doc "Public Actions facade used to resolve executor action names."
+  @spec actions_module() :: module()
+  def actions_module do
+    Application.get_env(@app, :actions_module, Arbor.Actions)
+  end
+
   @doc """
   Default executor used for plain string tasks and legacy maps without `kind`.
 
