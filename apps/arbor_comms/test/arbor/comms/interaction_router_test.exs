@@ -58,6 +58,60 @@ defmodule Arbor.Comms.InteractionRouterTest do
     :ok
   end
 
+  test "security regression: answered approval evidence retains original scope, ignoring responder metadata" do
+    attrs = %{
+      kind: :approval,
+      agent_id: "agent_evidence",
+      user_id: "human_target",
+      resource_uri: "arbor://code/write/exact/file.ex",
+      description: "Approve exact scope"
+    }
+
+    assert {:ok, id} = InteractionRouter.request(attrs, adapter_map: %{})
+    assert :not_found = Arbor.Comms.get_answered_approval(id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(id, :approved, %{
+               agent_id: "agent_forged",
+               resource_uri: "arbor://shell/exec",
+               actor: "human_forged",
+               from: "human_forged",
+               verified_human: true
+             })
+
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+
+    assert evidence == %{
+             source: :interaction,
+             request_id: id,
+             agent_id: attrs.agent_id,
+             principal_id: attrs.agent_id,
+             resource_uri: attrs.resource_uri,
+             decision: :approve
+           }
+
+    assert {:error, {:already_terminal, :responded}} =
+             Arbor.Comms.respond_to_interaction(id, :rejected)
+
+    assert {:ok, ^evidence} = Arbor.Comms.get_answered_approval(id)
+  end
+
+  test "abandoned and non-approval interactions cannot become approval evidence" do
+    for kind <- [:approval, :clarification] do
+      assert {:ok, id} =
+               InteractionRouter.request(
+                 %{kind: kind, agent_id: "agent_evidence", user_id: "none", description: "test"},
+                 adapter_map: %{}
+               )
+
+      if kind == :approval,
+        do: assert(:ok = Arbor.Comms.abandon_interaction(id, :test_cleanup)),
+        else: assert(:ok = Arbor.Comms.respond_to_interaction(id, :approved))
+
+      assert :not_found = Arbor.Comms.get_answered_approval(id)
+    end
+  end
+
   describe "request/2 (non-blocking)" do
     test "returns {:ok, request_id} immediately", %{pubsub: _} do
       assert {:ok, request_id} =

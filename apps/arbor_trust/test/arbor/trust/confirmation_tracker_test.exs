@@ -499,7 +499,11 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       graduated: false,
       locked: false,
       last_confirmation: nil,
-      graduated_at: nil
+      graduated_at: nil,
+      unknown_approvals: 0,
+      unknown_rejections: 0,
+      verified_human_approvals: 0,
+      human_streak: 0
     }
   end
 end

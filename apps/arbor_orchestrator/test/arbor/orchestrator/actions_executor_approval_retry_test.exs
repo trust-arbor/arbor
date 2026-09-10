@@ -19,6 +19,17 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     @moduledoc false
   end
 
+  defmodule ApprovalSource do
+    @behaviour Arbor.Trust.Contracts.ApprovalEvidenceProvider
+
+    def answered_approval(:interaction, id) do
+      case Arbor.Comms.get_answered_approval(id) do
+        {:ok, record} -> {:ok, record}
+        _ -> {:error, :approval_evidence_unavailable}
+      end
+    end
+  end
+
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
     ensure_action_registry_started!()
@@ -57,7 +68,11 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   end
 
   setup do
+    start_supervised!(Arbor.Trust.ConfirmationTracker)
+
     previous = %{
+      approval_evidence_provider: Application.get_env(:arbor_trust, :approval_evidence_provider),
+      graduation_thresholds: Application.get_env(:arbor_trust, :graduation_thresholds),
       approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
       policy_module: Application.get_env(:arbor_trust, :policy_module),
       consensus_module: Application.get_env(:arbor_security, :consensus_module),
@@ -71,6 +86,12 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     }
 
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+    Application.put_env(:arbor_trust, :approval_evidence_provider, ApprovalSource)
+
+    Application.put_env(:arbor_trust, :graduation_thresholds, %{
+      Arbor.Actions.canonical_uri_for(Arbor.Actions.Session.Classify, %{}) => 3
+    })
+
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
     Application.put_env(:arbor_security, :consensus_module, ConsensusStub)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
@@ -81,6 +102,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 2_000)
 
     on_exit(fn ->
+      restore_env(:arbor_trust, :approval_evidence_provider, previous.approval_evidence_provider)
+      restore_env(:arbor_trust, :graduation_thresholds, previous.graduation_thresholds)
       restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
       restore_env(:arbor_trust, :policy_module, previous.policy_module)
       restore_env(:arbor_security, :consensus_module, previous.consensus_module)
@@ -147,6 +170,21 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert {:ok, result} = Task.await(first, 3_000)
     assert Jason.decode!(result)["input_type"] == "query"
 
+    first_evidence = Arbor.Trust.confirmation_status(agent_id, resource_uri)
+    assert first_evidence.approvals == 1
+    assert first_evidence.unknown_approvals == 1
+    assert first_evidence.human_streak == 0
+
+    assert {:ok, :duplicate} =
+             Arbor.Trust.record_approval_answer(:interaction, first_request.request_id, %{
+               agent_id: agent_id,
+               principal_id: agent_id,
+               resource_uri: resource_uri,
+               decision: :approve
+             })
+
+    assert Arbor.Trust.confirmation_status(agent_id, resource_uri) == first_evidence
+
     assert {:ok, capabilities} = Arbor.Security.list_capabilities(agent_id)
 
     exact_caps = Enum.filter(capabilities, &(&1.resource_uri == resource_uri))
@@ -169,6 +207,41 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert {:error, message} = Task.await(second, 3_000)
     assert message =~ "denied by the operator"
     assert message =~ second_request.request_id
+    final_evidence = Arbor.Trust.confirmation_status(agent_id, resource_uri)
+    assert final_evidence.approvals == 1
+    assert final_evidence.rejections == 1
+    assert final_evidence.unknown_rejections == 1
+    assert final_evidence.streak == 0
+  end
+
+  test "security regression: three unverified legacy answers cannot satisfy human graduation" do
+    agent_id = "agent_unknown_streak_#{System.unique_integer([:positive])}"
+    resource_uri = Arbor.Actions.canonical_uri_for(Arbor.Actions.Session.Classify, %{})
+    assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+
+    for _ <- 1..3 do
+      execution =
+        Task.async(fn ->
+          ActionsExecutor.execute("session_classify", %{"input" => "hello"}, File.cwd!(),
+            agent_id: agent_id
+          )
+        end)
+
+      request = await_pending_request(agent_id)
+
+      assert :ok =
+               Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+                 actor: "human_forged",
+                 verified_human: true
+               })
+
+      assert {:ok, _result} = Task.await(execution, 3_000)
+    end
+
+    # Existing public API, so this exposes the old wake-path graduation even
+    # when the new status/evidence API is absent on the parent revision.
+    refute Arbor.Trust.graduated?(agent_id, resource_uri)
   end
 
   test "security regression: immediate answer without sleep is observed (no subscribe race)" do

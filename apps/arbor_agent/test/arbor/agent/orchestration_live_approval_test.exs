@@ -18,6 +18,8 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
 
   setup do
     original_config = snapshot_config()
+    start_supervised!(Arbor.Trust.ConfirmationTracker)
+    Application.put_env(:arbor_trust, :approval_evidence_provider, Arbor.Agent.ApprovalEvidence)
 
     # This test uses synthetic local identities and no signed request; pin the
     # full auth posture it needs instead of inheriting suite-global state.
@@ -65,7 +67,8 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     {:ok, agent_id: agent_id, operator_id: operator_id, tmp_dir: tmp_dir}
   end
 
-  test "gated operations enter the shared queue and approve/deny/rework resolve them", ctx do
+  test "security regression: winning approvals feed one exact confirmation and rejections reset it",
+       ctx do
     cases = [
       {:approve, :approved, "approved after inspection"},
       {:deny, :rejected, "not the requested file"},
@@ -132,6 +135,18 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
                  note: note
                )
 
+      evidence = Arbor.Trust.confirmation_status(ctx.agent_id, "arbor://fs/write")
+      assert evidence.approvals == 1
+      assert evidence.unknown_approvals == 1
+      assert evidence.verified_human_approvals == 0
+      assert evidence.streak == if(decision == :approve, do: 1, else: 0)
+      assert evidence.rejections == Enum.find_index(cases, &(elem(&1, 0) == decision))
+
+      assert {:error, :not_found} =
+               Orchestration.answer_approval(approval_id, decision, caller_id: ctx.operator_id)
+
+      assert Arbor.Trust.confirmation_status(ctx.agent_id, "arbor://fs/write") == evidence
+
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(
                  caller_id: ctx.operator_id,
@@ -145,6 +160,52 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
 
       refute File.exists?(file_path)
     end
+  end
+
+  test "security regression: real interaction answers feed unknown streaks and ignore fabricated human metadata",
+       ctx do
+    if Process.whereis(Arbor.Comms.PubSub) == nil do
+      start_supervised!({Phoenix.PubSub, name: Arbor.Comms.PubSub})
+    end
+
+    if Process.whereis(Arbor.Comms.InteractionRegistry) == nil do
+      start_supervised!(Arbor.Comms.InteractionRegistry)
+    end
+
+    resource = "arbor://code/write/exact/file.ex"
+
+    for decision <- [:approve, :approve, :approve, :rework] do
+      assert {:ok, request} =
+               Arbor.Contracts.Comms.Interaction.new(%{
+                 kind: :approval,
+                 agent_id: ctx.agent_id,
+                 user_id: ctx.operator_id,
+                 resource_uri: resource,
+                 description: "Record one approval answer",
+                 metadata: %{verified_human: true, actor: "human_forged"}
+               })
+
+      assert {:ok, _} = Arbor.Comms.InteractionRegistry.put(request)
+
+      assert :ok =
+               Orchestration.answer_approval(request.request_id, decision,
+                 caller_id: ctx.operator_id
+               )
+
+      assert {:error, :not_found} =
+               Orchestration.answer_approval(request.request_id, decision,
+                 caller_id: ctx.operator_id
+               )
+    end
+
+    status = Arbor.Trust.confirmation_status(ctx.agent_id, "arbor://code/write")
+    assert status.approvals == 3
+    assert status.unknown_approvals == 3
+    assert status.rejections == 1
+    assert status.streak == 0
+    assert status.human_streak == 0
+    assert status.verified_human_approvals == 0
+    refute Arbor.Trust.graduated?(ctx.agent_id, resource)
   end
 
   # Canonical bootstrap: it freezes the authority root and starts the whole
@@ -187,6 +248,7 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
       {:arbor_trust, :approval_guard_enabled},
       {:arbor_trust, :policy_module},
       {:arbor_trust, :policy_enforcer_enabled},
+      {:arbor_trust, :approval_evidence_provider},
       {:arbor_security, :approval_guard_enabled},
       {:arbor_security, :consensus_escalation_enabled},
       {:arbor_security, :consensus_module},

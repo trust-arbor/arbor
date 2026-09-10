@@ -145,6 +145,93 @@ defmodule Arbor.Agent.Executor.ParkTest do
     refute_received {:awaited, _, _}
   end
 
+  test "security regression: real legacy approval wake records unknown evidence once", %{
+    agent_id: agent_id
+  } do
+    for child <- [
+          {Phoenix.PubSub, name: Arbor.Comms.PubSub},
+          Arbor.Comms.InteractionRegistry
+        ] do
+      name =
+        case child do
+          {Phoenix.PubSub, opts} -> opts[:name]
+          module -> module
+        end
+
+      if Process.whereis(name) == nil, do: start_supervised!(child)
+    end
+
+    start_supervised!(Arbor.Trust.ConfirmationTracker)
+    resource = "arbor://agent/action/park_probe_unknown_action"
+    previous_provider = Application.fetch_env(:arbor_trust, :approval_evidence_provider)
+    previous_thresholds = Application.fetch_env(:arbor_trust, :graduation_thresholds)
+    Application.put_env(:arbor_trust, :approval_evidence_provider, Arbor.Agent.ApprovalEvidence)
+    Application.put_env(:arbor_trust, :graduation_thresholds, %{resource => 3})
+    Application.put_env(:arbor_agent, :executor_interaction_await, Arbor.Comms)
+
+    on_exit(fn ->
+      for {key, previous} <- [
+            approval_evidence_provider: previous_provider,
+            graduation_thresholds: previous_thresholds
+          ] do
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_trust, key, value)
+          :error -> Application.delete_env(:arbor_trust, key)
+        end
+      end
+    end)
+
+    assert {:ok, interaction} =
+             Arbor.Contracts.Comms.Interaction.new(%{
+               kind: :approval,
+               agent_id: agent_id,
+               user_id: "human_unverified",
+               resource_uri: resource,
+               description: "Approval wake evidence"
+             })
+
+    assert {:ok, _} = Arbor.Comms.InteractionRegistry.put(interaction)
+
+    :persistent_term.put(@script_key, [
+      {:ok, :pending_approval, interaction.request_id},
+      {:ok, :authorized}
+    ])
+
+    {:ok, _pid} = Executor.start(agent_id, approval_timeout_ms: 2_000)
+    assert :ok = Executor.execute(agent_id, act_intent("int_real_approval"))
+
+    wait_until(fn ->
+      {:ok, status} = Executor.status(agent_id)
+      if status.awaiting_count == 1, do: {:ok, status}, else: :retry
+    end)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(interaction.request_id, :approved, %{
+               actor: "human_unverified",
+               verified_human: true
+             })
+
+    wait_until(fn ->
+      {:ok, status} = Executor.status(agent_id)
+      if status.awaiting_count == 0, do: {:ok, status}, else: :retry
+    end)
+
+    evidence = Arbor.Trust.confirmation_status(agent_id, resource)
+    assert evidence.approvals == 1
+    assert evidence.unknown_approvals == 1
+    assert evidence.verified_human_approvals == 0
+
+    assert {:ok, :duplicate} =
+             Arbor.Trust.record_approval_answer(:interaction, interaction.request_id, %{
+               agent_id: agent_id,
+               principal_id: agent_id,
+               resource_uri: resource,
+               decision: :approve
+             })
+
+    assert Arbor.Trust.confirmation_status(agent_id, resource) == evidence
+  end
+
   defp act_intent(id) do
     Intent.action(:park_probe_unknown_action, %{path: "/tmp/park"},
       id: id,
