@@ -153,11 +153,15 @@ defmodule Arbor.Trust.Store do
   @doc """
   Update a profile with a function.
   """
-  @spec update_profile(String.t(), (Profile.t() -> Profile.t())) ::
+  @spec update_profile(String.t(), (Profile.t() -> Profile.t() | {:error, term()})) ::
           {:ok, Profile.t()} | {:error, :not_found | term()}
   def update_profile(agent_id, update_fn) when is_function(update_fn, 1) do
     GenServer.call(__MODULE__, {:update_profile, agent_id, update_fn})
   end
+
+  @impl true
+  def format_status(status) when is_map(status),
+    do: status |> Map.put(:state, :redacted) |> Map.put(:message, :redacted)
 
   @doc """
   Freeze a trust profile.
@@ -299,25 +303,9 @@ defmodule Arbor.Trust.Store do
   def handle_call({:update_profile, agent_id, update_fn}, _from, state) do
     case get_profile_from_cache(agent_id, state) do
       {:ok, profile} ->
-        updated = update_fn.(profile)
-        updated = %{updated | updated_at: DateTime.utc_now()}
-
-        case persist_profile(updated, state) do
-          :ok ->
-            :ok = put_profile_in_cache(updated, state)
-            clear_failed_deletion(agent_id)
-            emit_distributed_signal(:profile_updated, agent_id)
-
-            # Sync policy-minted capabilities if authorization standing changed.
-            if profile.rules != updated.rules or profile.baseline != updated.baseline do
-              sync_capabilities_async(agent_id)
-            end
-
-            new_stats = update_stats(state.cache_stats, :writes, 1)
-            {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
-
-          {:error, _} = error ->
-            {:reply, error, state}
+        case update_fn.(profile) do
+          %Profile{} = updated -> commit_profile_update(profile, updated, state)
+          {:error, _} = error -> {:reply, error, state}
         end
 
       {:error, :not_found} = error ->
@@ -413,6 +401,28 @@ defmodule Arbor.Trust.Store do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # Private functions
+
+  defp commit_profile_update(profile, updated, state) do
+    updated = %{updated | updated_at: DateTime.utc_now()}
+    agent_id = profile.agent_id
+
+    case persist_profile(updated, state) do
+      :ok ->
+        :ok = put_profile_in_cache(updated, state)
+        clear_failed_deletion(agent_id)
+        emit_distributed_signal(:profile_updated, agent_id)
+
+        if profile.rules != updated.rules or profile.baseline != updated.baseline do
+          sync_capabilities_async(agent_id)
+        end
+
+        new_stats = update_stats(state.cache_stats, :writes, 1)
+        {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
 
   defp put_profile_in_cache(profile, state) do
     :ets.insert(state.profiles_table, {profile.agent_id, profile})

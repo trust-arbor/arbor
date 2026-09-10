@@ -640,6 +640,39 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Check current human authority for graduation evidence or an explicit decision.
+
+  Uses existing target-scoped trust resources and refuses further approval
+  requirements without escalating back into Trust or an approval owner.
+  """
+  @spec authorize_trust_graduation(String.t(), String.t(), String.t(), :read | :accept | :decline) ::
+          :ok | {:error, :graduation_authority_required}
+  def authorize_trust_graduation(actor_id, target_agent, token, operation) do
+    with true <- is_binary(target_agent) and byte_size(target_agent) in 1..256,
+         true <- Regex.match?(~r/\Aagent_[A-Za-z0-9][A-Za-z0-9._-]*\z/, target_agent),
+         prefix when is_binary(prefix) <- graduation_authority_prefix(operation),
+         :authorized <-
+           AuthDecision.check(actor_id, prefix <> "/" <> target_agent, :execute,
+             session_token: token
+           ) do
+      :ok
+    else
+      _ -> {:error, :graduation_authority_required}
+    end
+  rescue
+    _ -> {:error, :graduation_authority_required}
+  catch
+    _, _ -> {:error, :graduation_authority_required}
+  end
+
+  defp graduation_authority_prefix(:read), do: "arbor://trust/read"
+
+  defp graduation_authority_prefix(operation) when operation in [:accept, :decline],
+    do: "arbor://trust/auto_promote"
+
+  defp graduation_authority_prefix(_operation), do: nil
+
+  @doc """
   Record a durable security event for an answered approval request.
 
   External approval surfaces should use this facade instead of writing directly

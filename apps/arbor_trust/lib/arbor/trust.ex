@@ -45,6 +45,7 @@ defmodule Arbor.Trust do
     ApprovalGuard,
     Authority,
     CapabilityEnforcementMatrix,
+    ConfirmationTracker,
     Manager,
     PolicyEnforcer,
     ProfileExitAudit,
@@ -453,7 +454,7 @@ defmodule Arbor.Trust do
     as: :status
 
   @doc "Record a successful approval for an agent's capability use."
-  @spec record_approval(String.t(), String.t()) :: :ok | {:graduation_suggested, String.t()}
+  @spec record_approval(String.t(), String.t()) :: :ok
   defdelegate record_approval(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
 
   @doc "Record a rejection for an agent's capability use."
@@ -466,29 +467,39 @@ defmodule Arbor.Trust do
 
   ADVISORY ONLY — this does NOT grant authorization. Earned autonomy is
   suggestion-only (TRUST-6, 2026-06-14): a human must accept a suggestion via
-  `accept_graduation/2`, which records it as a persisted profile rule.
+  `accept_graduation/3`, which records it as a persisted profile rule.
   Authorization reads the profile (`Policy.effective_mode/3`), never this flag.
   """
   @spec graduated?(String.t(), String.t()) :: boolean()
   defdelegate graduated?(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
 
   @doc """
-  Accept a graduation suggestion: promote a URI prefix to auto-approve for the
-  agent by recording it as a profile rule (`rules[prefix] => :auto`). This is the
-  human-in-the-loop acceptance — earned autonomy is NEVER applied without it.
-
-  Persists via the trust profile (survives restarts). The security ceiling still
-  caps the effective mode, so accepting a graduation on an always-locked or egress
-  URI does NOT bypass it — `effective_mode` takes the most restrictive of
-  rule/ceiling/model.
+  Retired unverified acceptance API. Always refuses without changing a profile.
+  Use `accept_graduation/3` with current human proof and the exact pending suggestion.
   """
   @spec accept_graduation(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
-  def accept_graduation(agent_id, uri_prefix)
-      when is_binary(agent_id) and is_binary(uri_prefix) do
-    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-      %{profile | rules: Map.put(profile.rules || %{}, uri_prefix, :auto)}
-    end)
-  end
+  def accept_graduation(_agent_id, _uri_prefix), do: {:error, :human_acceptance_required}
+
+  @doc "Read tracked graduation evidence with current scoped human read authority."
+  defdelegate list_graduations(agent_id, opts), to: Arbor.Trust.ConfirmationTracker
+
+  @doc "Read current eligibility and the exact pending suggestion without changing its revision."
+  defdelegate graduation_status(agent_id, uri_prefix, opts), to: Arbor.Trust.ConfirmationTracker
+
+  @doc """
+  Accept an exact current suggestion with caller_id, session_token and suggestion_id.
+
+  Current human authority, profile, eligibility and ceilings are checked again
+  at the serialized write boundary. Only an acknowledged Store update consumes
+  the suggestion. A Store call exit reports `:graduation_store_outcome_unknown`;
+  it does not imply that a dispatched backend write was rolled back.
+  """
+  def accept_graduation(agent_id, uri_prefix, opts),
+    do: ConfirmationTracker.decide_graduation(agent_id, uri_prefix, :accept, opts)
+
+  @doc "Decline an exact current suggestion and lock further suggestions for its prefix."
+  def decline_graduation(agent_id, uri_prefix, opts),
+    do: ConfirmationTracker.decide_graduation(agent_id, uri_prefix, :decline, opts)
 
   @doc """
   Install an exact-prefix trust rule on an existing principal profile.

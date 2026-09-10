@@ -11,9 +11,10 @@ defmodule Arbor.Trust.ConfirmationTracker do
   ## Graduation Logic
 
   - Each (agent_id, uri_prefix) pair has a streak counter
-  - Approvals increment the streak; rejections reset it to 0
-  - When the streak reaches the graduation threshold, emits a
-    `:graduation_suggested` signal instead of auto-promoting
+  - Only source-verified human approvals increment the qualifying streak;
+    rejection or an unknown responder resets that streak
+  - A current eligible profile and human streak produce an exact, revision-bound
+    `:graduation_suggested` signal; no authority changes automatically
   - The user can lock any URI prefix to suppress suggestions
   - Trust demotions reset all confirmation history via `reset/1`
 
@@ -53,7 +54,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
   that is correct: re-accumulating a streak after a reboot is harmless.
 
   The **earned result** does not live here. When a human accepts a graduation
-  suggestion (`Arbor.Trust.accept_graduation/2`), it is recorded as a profile
+  suggestion (`Arbor.Trust.accept_graduation/3`), it is recorded as a profile
   rule (`rules[prefix] => :auto`) on the agent's trust profile, which already
   persists. So earned autonomy survives restarts via the profile — there is no
   separate persistence mechanism here to protect.
@@ -70,8 +71,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
   alias Arbor.Trust.ApprovalEvidenceCore
   alias Arbor.Trust.CapabilityRiskProfiles
   alias Arbor.Trust.Config
-
-  require Logger
+  alias Arbor.Trust.{GraduationCore, PolicyHost, Store}
 
   @table :arbor_confirmation_tracker
   @fallback_threshold 5
@@ -92,14 +92,39 @@ defmodule Arbor.Trust.ConfirmationTracker do
     GenServer.call(__MODULE__, {:record_approval_answer, source, request_id, expected})
   end
 
+  @doc false
+  def list_graduations(agent_id, opts), do: call_graduation({:list_graduations, agent_id, opts})
+
+  @doc false
+  def graduation_status(agent_id, prefix, opts),
+    do: call_graduation({:graduation_status, agent_id, prefix, opts})
+
+  @doc false
+  def decide_graduation(agent_id, prefix, operation, opts),
+    do: call_graduation({:decide_graduation, agent_id, prefix, operation, opts})
+
+  defp call_graduation(message) do
+    GenServer.call(__MODULE__, message, 10_000)
+  catch
+    :exit, _ -> graduation_call_exit(message)
+  end
+
+  defp graduation_call_exit({:decide_graduation, _, _, :accept, _}),
+    do: {:error, :graduation_store_outcome_unknown}
+
+  defp graduation_call_exit(_message), do: {:error, :graduation_unavailable}
+
+  @impl true
+  def format_status(status) when is_map(status),
+    do: status |> Map.put(:state, :redacted) |> Map.put(:message, :redacted)
+
   @doc """
   Record a successful approval for an agent's capability use.
 
-  Increments the streak counter. If the streak reaches the graduation
-  threshold, emits a `:graduation_suggested` signal and returns
-  `{:graduation_suggested, uri_prefix}`.
+  Advisory compatibility API. No verified responder or winning request is
+  supplied, so this never creates a graduation suggestion.
   """
-  @spec record_approval(String.t(), String.t()) :: :ok | {:graduation_suggested, String.t()}
+  @spec record_approval(String.t(), String.t()) :: :ok
   def record_approval(agent_id, resource_uri) do
     GenServer.call(__MODULE__, {:record_approval, agent_id, resource_uri})
   end
@@ -230,113 +255,83 @@ defmodule Arbor.Trust.ConfirmationTracker do
   end
 
   def handle_call({:record_approval, agent_id, resource_uri}, _from, state) do
-    uri_prefix = resolve_tracking_prefix(resource_uri)
+    record_answer_evidence(%{
+      agent_id: agent_id,
+      resource_uri: resource_uri,
+      decision: :approve,
+      source: :legacy,
+      request_id: nil
+    })
 
-    if is_nil(uri_prefix) do
-      {:reply, :ok, state}
-    else
-      entry = get_or_create(agent_id, uri_prefix)
-      threshold = threshold_for(uri_prefix)
-
-      updated =
-        %{
-          entry
-          | approvals: entry.approvals + 1,
-            streak: entry.streak + 1,
-            last_confirmation: DateTime.utc_now()
-        }
-
-      # Check graduation
-      {updated, just_graduated} =
-        if should_graduate?(updated, threshold) do
-          Logger.info(
-            "[ConfirmationTracker] URI prefix #{uri_prefix} reached graduation threshold " <>
-              "for agent #{agent_id} (streak: #{updated.streak}, threshold: #{threshold})",
-            agent_id: agent_id,
-            uri_prefix: uri_prefix
-          )
-
-          {%{updated | graduated: true, graduated_at: DateTime.utc_now()}, not entry.graduated}
-        else
-          {updated, false}
-        end
-
-      :ets.insert(@table, {{agent_id, uri_prefix}, updated})
-
-      reply =
-        if just_graduated do
-          # Emit graduation suggestion signal
-          safe_emit(:graduation_suggested, %{
-            agent_id: agent_id,
-            uri_prefix: uri_prefix,
-            current_mode: :ask,
-            suggested_mode: :allow,
-            streak: updated.streak,
-            threshold: threshold
-          })
-
-          {:graduation_suggested, uri_prefix}
-        else
-          :ok
-        end
-
-      safe_emit(:confirmation_recorded, %{
-        agent_id: agent_id,
-        uri_prefix: uri_prefix,
-        action: :approval,
-        streak: updated.streak,
-        graduated: updated.graduated
-      })
-
-      {:reply, reply, state}
-    end
+    {:reply, :ok, state}
   end
 
   def handle_call({:record_rejection, agent_id, resource_uri}, _from, state) do
-    uri_prefix = resolve_tracking_prefix(resource_uri)
+    record_answer_evidence(%{
+      agent_id: agent_id,
+      resource_uri: resource_uri,
+      decision: :deny,
+      source: :legacy,
+      request_id: nil
+    })
 
-    if is_nil(uri_prefix) do
-      {:reply, :ok, state}
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:list_graduations, agent_id, opts}, _from, state) do
+    case authorize_graduation(agent_id, :read, opts) do
+      {:ok, _proof} ->
+        rows = :ets.match_object(@table, {{agent_id, :_}, :_})
+
+        statuses =
+          Enum.map(rows, fn {{_, prefix}, entry} -> show_graduation(agent_id, prefix, entry) end)
+
+        {:reply, {:ok, Enum.sort_by(statuses, & &1.uri_prefix)}, state}
+
+      error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:graduation_status, agent_id, prefix, opts}, _from, state) do
+    with true <- GraduationCore.valid_prefix?(prefix),
+         {:ok, _proof} <- authorize_graduation(agent_id, :read, opts) do
+      {:reply, {:ok, show_graduation(agent_id, prefix, get_or_create(agent_id, prefix))}, state}
     else
-      entry = get_or_create(agent_id, uri_prefix)
-      was_graduated = entry.graduated
+      false -> {:reply, {:error, :invalid_graduation_prefix}, state}
+      error -> {:reply, error, state}
+    end
+  end
 
-      updated =
-        %{
-          entry
-          | rejections: entry.rejections + 1,
-            streak: 0,
-            graduated: false,
-            graduated_at: nil,
-            last_confirmation: DateTime.utc_now()
-        }
+  def handle_call({:decide_graduation, agent_id, prefix, operation, opts}, _from, state) do
+    entry = get_or_create(agent_id, prefix)
 
-      :ets.insert(@table, {{agent_id, uri_prefix}, updated})
+    with true <- GraduationCore.valid_prefix?(prefix),
+         {:ok, proof} <- authorize_graduation(agent_id, operation, opts),
+         {profile, eligibility} <- graduation_inputs(agent_id, prefix, entry),
+         {:ok, updated, effects} <-
+           GraduationCore.decide(entry, proof.suggestion_id, eligibility, profile, operation),
+         :ok <- perform_graduation_effects(effects, agent_id, prefix, entry, profile, proof) do
+      :ets.insert(@table, {{agent_id, prefix}, updated})
 
-      if was_graduated do
-        Logger.info(
-          "[ConfirmationTracker] URI prefix #{uri_prefix} reverted from graduated " <>
-            "for agent #{agent_id} (rejection)",
-          agent_id: agent_id,
-          uri_prefix: uri_prefix
-        )
-      end
-
-      safe_emit(:confirmation_recorded, %{
+      safe_emit(:graduation_decided, %{
         agent_id: agent_id,
-        uri_prefix: uri_prefix,
-        action: :rejection,
-        streak: 0,
-        was_graduated: was_graduated
+        uri_prefix: prefix,
+        suggestion_id: proof.suggestion_id,
+        decision: operation,
+        actor_id: proof.caller_id
       })
 
       {:reply, :ok, state}
+    else
+      false -> {:reply, {:error, :invalid_graduation_prefix}, state}
+      error -> {:reply, error, state}
     end
   end
 
   def handle_call({:revert_to_gated, agent_id, uri_prefix}, _from, state) do
     entry = get_or_create(agent_id, uri_prefix)
-    updated = %{entry | graduated: false, graduated_at: nil, streak: 0}
+    updated = entry |> GraduationCore.invalidate() |> Map.merge(%{streak: 0, human_streak: 0})
     :ets.insert(@table, {{agent_id, uri_prefix}, updated})
 
     safe_emit(:graduation_reverted, %{agent_id: agent_id, uri_prefix: uri_prefix})
@@ -346,7 +341,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   def handle_call({:lock_gated, agent_id, uri_prefix}, _from, state) do
     entry = get_or_create(agent_id, uri_prefix)
-    updated = %{entry | locked: true, graduated: false, graduated_at: nil}
+    updated = entry |> GraduationCore.invalidate() |> Map.put(:locked, true)
     :ets.insert(@table, {{agent_id, uri_prefix}, updated})
 
     safe_emit(:prefix_locked, %{agent_id: agent_id, uri_prefix: uri_prefix})
@@ -356,7 +351,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   def handle_call({:unlock_gated, agent_id, uri_prefix}, _from, state) do
     entry = get_or_create(agent_id, uri_prefix)
-    updated = %{entry | locked: false}
+    updated = entry |> GraduationCore.invalidate() |> Map.put(:locked, false)
     :ets.insert(@table, {{agent_id, uri_prefix}, updated})
 
     safe_emit(:prefix_unlocked, %{agent_id: agent_id, uri_prefix: uri_prefix})
@@ -419,7 +414,10 @@ defmodule Arbor.Trust.ConfirmationTracker do
       unknown_approvals: 0,
       unknown_rejections: 0,
       verified_human_approvals: 0,
-      human_streak: 0
+      human_streak: 0,
+      revision: 0,
+      suggestion_id: nil,
+      suggestion_profile_updated_at: nil
     }
   end
 
@@ -470,6 +468,8 @@ defmodule Arbor.Trust.ConfirmationTracker do
             last_confirmation: DateTime.utc_now()
           })
 
+        updated = updated |> GraduationCore.invalidate() |> maybe_suggest(record.agent_id, prefix)
+
         :ets.insert(@table, {{record.agent_id, prefix}, updated})
 
         emit_answer_evidence(record, prefix, updated, approved?, human?)
@@ -485,19 +485,108 @@ defmodule Arbor.Trust.ConfirmationTracker do
       action: if(approved?, do: :approval, else: :rejection),
       responder: if(human?, do: :verified_human, else: :unknown),
       streak: updated.streak,
-      graduated: false
+      graduated: updated.graduated
     })
   end
 
-  defp should_graduate?(entry, threshold) do
-    cond do
-      threshold == :never -> false
-      threshold == 0 -> true
-      entry.locked -> false
-      entry.graduated -> false
-      entry.streak >= threshold -> true
-      true -> false
+  defp authorize_graduation(agent_id, operation, opts) do
+    with {:ok, proof} <- GraduationCore.valid_options(opts, operation),
+         :ok <-
+           Arbor.Security.authorize_trust_graduation(
+             proof.caller_id,
+             agent_id,
+             proof.session_token,
+             operation
+           ) do
+      {:ok, proof}
     end
+  end
+
+  defp graduation_inputs(agent_id, prefix, entry) do
+    case Store.get_profile(agent_id) do
+      {:ok, profile} -> {profile, profile_eligibility(profile, prefix, entry)}
+      _ -> {nil, GraduationCore.unavailable(:profile_unavailable, threshold_for(prefix))}
+    end
+  catch
+    :exit, _ -> {nil, GraduationCore.unavailable(:profile_unavailable, threshold_for(prefix))}
+  end
+
+  defp profile_eligibility(profile, prefix, entry) do
+    threshold = threshold_for(prefix)
+
+    with {:ok, policy} <- PolicyHost.snapshot(),
+         capability when not is_nil(capability) <-
+           Enum.find(policy.capability_profiles, &(&1.uri_prefix == prefix)) do
+      GraduationCore.eligibility(
+        entry,
+        prefix,
+        profile,
+        policy,
+        threshold,
+        CapabilityRiskProfiles.graduation_threshold(capability),
+        capability
+      )
+    else
+      _ -> GraduationCore.unavailable(:policy_unavailable, threshold)
+    end
+  end
+
+  defp show_graduation(agent_id, prefix, entry) do
+    {_profile, eligibility} = graduation_inputs(agent_id, prefix, entry)
+    GraduationCore.show(agent_id, prefix, entry, eligibility)
+  end
+
+  defp maybe_suggest(entry, agent_id, prefix) do
+    {profile, eligibility} = graduation_inputs(agent_id, prefix, entry)
+    id = "graduation_" <> Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+    updated = GraduationCore.suggest(entry, eligibility, profile, id, DateTime.utc_now())
+
+    if updated.graduated,
+      do:
+        safe_emit(
+          :graduation_suggested,
+          GraduationCore.show(agent_id, prefix, updated, eligibility)
+        )
+
+    updated
+  end
+
+  defp perform_graduation_effects([], _agent_id, _prefix, _entry, _profile, _proof), do: :ok
+
+  defp perform_graduation_effects(
+         [:persist_auto_rule],
+         agent_id,
+         prefix,
+         entry,
+         expected_profile,
+         proof
+       ) do
+    result =
+      Store.update_profile(agent_id, fn profile ->
+        with true <- profile == expected_profile,
+             :ok <-
+               Arbor.Security.authorize_trust_graduation(
+                 proof.caller_id,
+                 agent_id,
+                 proof.session_token,
+                 :accept
+               ),
+             eligibility <- profile_eligibility(profile, prefix, entry),
+             {:ok, _, [:persist_auto_rule]} <-
+               GraduationCore.decide(entry, proof.suggestion_id, eligibility, profile, :accept) do
+          %{profile | rules: Map.put(profile.rules, prefix, :auto)}
+        else
+          false -> {:error, :profile_changed}
+          {:error, _} = error -> error
+        end
+      end)
+
+    case result do
+      {:ok, _profile} -> :ok
+      {:error, _} = error -> error
+    end
+  catch
+    :exit, _ -> {:error, :graduation_store_outcome_unknown}
   end
 
   defp configured_thresholds do
