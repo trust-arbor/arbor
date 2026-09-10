@@ -474,15 +474,19 @@ defmodule Arbor.Agent do
 
   - `:ok` on success
   - `{:error, {:unauthorized, reason}}` if caller lacks capability
+  - `{:ok, :pending_approval, proposal_id}` without stopping the agent if approval is required
   - `{:error, :not_found}` if agent is not running
   """
   @spec authorize_stop(String.t(), String.t(), keyword()) ::
-          :ok | {:error, {:unauthorized, term()} | :not_found}
+          :ok
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | :not_found}
   def authorize_stop(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/stop/#{agent_id}"
 
     case authorize(caller_id, resource, :stop, opts) do
       :ok -> stop(agent_id)
+      {:ok, :pending_approval, _proposal_id} = pending -> pending
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
@@ -491,6 +495,8 @@ defmodule Arbor.Agent do
   Create an agent with authorization check.
 
   Verifies the caller has the `arbor://agent/lifecycle/create` capability.
+  Pending approval is returned to the caller without creating an agent.
+  An unavailable security service denies the operation.
 
   ## Parameters
 
@@ -499,7 +505,9 @@ defmodule Arbor.Agent do
   - `opts` - Options passed to `create_agent/2`
   """
   @spec authorize_create(String.t(), String.t(), keyword()) ::
-          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+          {:ok, term()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
   def authorize_create(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/lifecycle/create"
     # `:signed_request` (if forwarded by the gateway) gates the create; the
@@ -508,6 +516,7 @@ defmodule Arbor.Agent do
 
     case authorize(caller_id, resource, :create, signed_request: auth) do
       :ok -> create_agent(agent_id, create_opts)
+      {:ok, :pending_approval, _proposal_id} = pending -> pending
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
@@ -517,6 +526,7 @@ defmodule Arbor.Agent do
 
   Verifies the caller has the `arbor://agent/lifecycle/destroy` capability.
   This is a high-privilege operation that deletes all agent data.
+  Pending approval and unavailable security never permit deletion.
 
   ## Parameters
 
@@ -524,12 +534,15 @@ defmodule Arbor.Agent do
   - `agent_id` - The agent to destroy
   """
   @spec authorize_destroy(String.t(), String.t()) ::
-          :ok | {:error, {:unauthorized, term()} | term()}
+          :ok
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
   def authorize_destroy(caller_id, agent_id) do
     resource = "arbor://agent/lifecycle/destroy"
 
     case authorize(caller_id, resource, :destroy) do
       :ok -> destroy_agent(agent_id)
+      {:ok, :pending_approval, _proposal_id} = pending -> pending
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
@@ -538,6 +551,8 @@ defmodule Arbor.Agent do
   Restore an agent with authorization check.
 
   Verifies the caller has the `arbor://agent/lifecycle/restore` capability.
+  Pending approval is returned without reading or migrating a stored profile.
+  An unavailable security service denies the operation.
 
   ## Parameters
 
@@ -545,12 +560,15 @@ defmodule Arbor.Agent do
   - `agent_id` - The agent to restore
   """
   @spec authorize_restore(String.t(), String.t(), keyword()) ::
-          {:ok, term()} | {:error, {:unauthorized, term()} | term()}
+          {:ok, term()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:unauthorized, term()} | term()}
   def authorize_restore(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/lifecycle/restore"
 
     case authorize(caller_id, resource, :restore, opts) do
       :ok -> restore_agent(agent_id)
+      {:ok, :pending_approval, _proposal_id} = pending -> pending
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
@@ -886,18 +904,17 @@ defmodule Arbor.Agent do
   # Private helpers
   # ===========================================================================
 
-  # Shared authorization helper for new lifecycle wrappers.
-  # Guards against CapabilityStore not running (e.g., in unit tests
-  # that don't start the full security supervision tree).
+  # Only an affirmative authorization permits a lifecycle effect. Pending
+  # approval stays pending; missing security infrastructure is a denial.
   defp authorize(caller_id, resource, action, opts \\ []) do
     if security_available?() do
       case Arbor.Security.authorize(caller_id, resource, action, auth_opts(opts)) do
         {:ok, :authorized} -> :ok
-        {:ok, :pending_approval, _proposal_id} -> :ok
+        {:ok, :pending_approval, _proposal_id} = pending -> pending
         {:error, reason} -> {:error, reason}
       end
     else
-      :ok
+      {:error, :security_unavailable}
     end
   end
 
