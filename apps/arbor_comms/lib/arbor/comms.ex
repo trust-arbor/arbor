@@ -28,6 +28,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
   alias Arbor.Comms.EngagementStore
+  alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRegistry.DurableLifecycleCore
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
@@ -326,6 +327,18 @@ defmodule Arbor.Comms do
           {:ok, %{response: term(), metadata: map()}} | :not_found
   def get_interaction_response(request_id) when is_binary(request_id) do
     InteractionRouter.get_response(request_id)
+  end
+
+  @doc """
+  Read the original scope and winning decision of a retained approval answer.
+
+  Request scope comes from the interaction authority's original request, never
+  response metadata. Legacy answers contain no verified responder identity.
+  Pending, expired, abandoned and non-approval interactions are not evidence.
+  """
+  @spec get_answered_approval(String.t()) :: {:ok, map()} | :not_found
+  def get_answered_approval(request_id) when is_binary(request_id) do
+    InteractionRegistry.get_answered_approval(request_id)
   end
 
   # -- Channels (unified message containers) --

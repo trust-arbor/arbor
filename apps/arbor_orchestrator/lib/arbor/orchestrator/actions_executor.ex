@@ -810,7 +810,14 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             )
 
           {:ok, :approved} ->
-            track_approval(agent_id, action_module)
+            track_approval_answer(
+              agent_id,
+              action_module,
+              params,
+              proposal_id,
+              :consensus,
+              :approve
+            )
 
             retry_execution(
               agent_id,
@@ -877,7 +884,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     case normalized do
       {:ok, :approve} ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
-        track_approval(agent_id, action_module)
+        track_approval_answer(agent_id, action_module, params, request_id, backend, :approve)
 
         retry_execution(
           agent_id,
@@ -891,7 +898,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         )
 
       {:ok, :rework, note} ->
-        track_rejection(agent_id, action_module)
+        track_approval_answer(agent_id, action_module, params, request_id, backend, :rework)
         note_suffix = if note != "", do: " Note: #{note}", else: ""
 
         {:error,
@@ -899,7 +906,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
            " Request ID: #{request_id}.#{note_suffix}"}
 
       {:ok, :deny, note} ->
-        track_rejection(agent_id, action_module)
+        track_approval_answer(agent_id, action_module, params, request_id, backend, :deny)
         note_suffix = if note != "", do: " Note: #{note}", else: ""
 
         {:error,
@@ -1112,20 +1119,19 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     :exit, _ -> {:error, :approval_retry_signing_failed}
   end
 
-  # Record approval/rejection through the public trust facade. The tracker may
-  # not be running in standalone/test slices, so tracking remains best-effort.
-  defp track_approval(agent_id, action_module) do
-    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-    Arbor.Trust.record_approval(agent_id, resource)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
+  # The answer facade and this waiter can race. Trust re-reads the committed
+  # owner answer and deduplicates its exact request/scope, never the tool name.
+  defp track_approval_answer(agent_id, action_module, params, request_id, backend, decision) do
+    with {:ok, resource} <- action_authorization_resource(action_module, params) do
+      source = if backend == :consensus, do: :consensus, else: :interaction
 
-  defp track_rejection(agent_id, action_module) do
-    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-    Arbor.Trust.record_rejection(agent_id, resource)
+      Arbor.Trust.record_approval_answer(source, request_id, %{
+        agent_id: agent_id,
+        principal_id: agent_id,
+        resource_uri: resource,
+        decision: decision
+      })
+    end
   rescue
     _ -> :ok
   catch

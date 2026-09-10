@@ -433,6 +433,25 @@ defmodule Arbor.Trust do
 
   # -- ConfirmationTracker (confirm-then-automate) --
 
+  @doc """
+  Record one committed approval answer, re-reading its source authority.
+
+  `expected` must contain exactly `:agent_id`, `:principal_id`, `:resource_uri`
+  and `:decision`. These are comparisons, not authority. No responder class,
+  actor, human flag or token is accepted. Legacy answers are unknown-responder
+  evidence and do not satisfy the human graduation threshold.
+  """
+  @spec record_approval_answer(:interaction | :consensus, String.t(), map()) ::
+          {:ok, :recorded | :duplicate} | {:error, atom()}
+  defdelegate record_approval_answer(source, request_id, expected),
+    to: Arbor.Trust.ConfirmationTracker
+
+  @doc "Read advisory confirmation counters for an exact tracking prefix."
+  @spec confirmation_status(String.t(), String.t()) :: map()
+  defdelegate confirmation_status(agent_id, uri_prefix),
+    to: Arbor.Trust.ConfirmationTracker,
+    as: :status
+
   @doc "Record a successful approval for an agent's capability use."
   @spec record_approval(String.t(), String.t()) :: :ok | {:graduation_suggested, String.t()}
   defdelegate record_approval(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker

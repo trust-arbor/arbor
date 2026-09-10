@@ -29,6 +29,7 @@ defmodule Arbor.Agent.Executor do
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Executor.{ActionDispatch, DecideCore}
+  alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Memory.{Intent, Percept}
   alias Arbor.Contracts.Security.SandboxLevel
 
@@ -518,6 +519,7 @@ defmodule Arbor.Agent.Executor do
     case Map.get(awaiting_approval(state), intent_id) do
       %{request_id: ^request_id, intent: intent, waiter_mon: mon} = parked ->
         if is_reference(mon), do: Process.demonitor(mon, [:flush])
+        record_approval_answer(state.agent_id, request_id, parked.resource, result)
 
         state = drop_awaiting(state, intent_id)
         start_time = Map.get(parked, :started_at_mono, System.monotonic_time(:millisecond))
@@ -531,6 +533,32 @@ defmodule Arbor.Agent.Executor do
       _other ->
         state
     end
+  end
+
+  defp record_approval_answer(agent_id, request_id, resource, {:ok, response, metadata}) do
+    case ApprovalAnswer.normalize(response, metadata) do
+      {:ok, :approve} -> record_answer_decision(agent_id, request_id, resource, :approve)
+      {:ok, decision, _note} -> record_answer_decision(agent_id, request_id, resource, decision)
+      _ -> :ok
+    end
+  end
+
+  defp record_approval_answer(agent_id, request_id, resource, {:ok, response}),
+    do: record_approval_answer(agent_id, request_id, resource, {:ok, response, %{}})
+
+  defp record_approval_answer(_agent_id, _request_id, _resource, _result), do: :ok
+
+  defp record_answer_decision(agent_id, request_id, resource, decision) do
+    Arbor.Trust.record_approval_answer(:interaction, request_id, %{
+      agent_id: agent_id,
+      principal_id: agent_id,
+      resource_uri: resource,
+      decision: decision
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp retry_after_approval(%Intent{} = intent, state, start_time) do

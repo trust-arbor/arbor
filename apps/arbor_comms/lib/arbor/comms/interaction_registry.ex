@@ -361,6 +361,15 @@ defmodule Arbor.Comms.InteractionRegistry do
   def observe_durable(_request_id, _agent_id, _operation_id, _owner_deadline_unix_ms),
     do: {:error, :invalid_options}
 
+  @doc "Read original approval scope and its retained winning answer from the authority."
+  @spec get_answered_approval(String.t()) :: {:ok, map()} | :not_found
+  def get_answered_approval(request_id) when is_binary(request_id) do
+    case with_authority(request_id, :answered_approval, [request_id]) do
+      {:ok, %{} = evidence} -> {:ok, evidence}
+      _ -> :not_found
+    end
+  end
+
   @doc "Return the authoritative first terminal transition for an interaction."
   @spec get_terminal(String.t()) :: {:ok, map()} | :not_found
   def get_terminal(request_id) when is_binary(request_id) do

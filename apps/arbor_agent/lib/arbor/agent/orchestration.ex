@@ -1828,6 +1828,8 @@ defmodule Arbor.Agent.Orchestration do
   defp blocked_mode?(_), do: false
 
   defp record_answer(%PendingApproval{} = approval, decision, caller_id, opts) do
+    record_confirmation(approval, decision)
+
     data = [
       resource_uri: approval.resource_uri,
       agent_id: approval.agent_id,
@@ -1846,6 +1848,21 @@ defmodule Arbor.Agent.Orchestration do
       data
     ])
     |> normalize_audit_result()
+  end
+
+  # The backend transition already won. Tracking is advisory and cannot undo
+  # that answer, including when the subsequent audit delivery is unavailable.
+  defp record_confirmation(approval, decision) do
+    Arbor.Trust.record_approval_answer(approval.source, approval.id, %{
+      agent_id: approval.agent_id,
+      principal_id: approval.principal_id,
+      resource_uri: approval.resource_uri,
+      decision: decision
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp matches_filters?(%PendingApproval{} = approval, opts) do

@@ -75,6 +75,10 @@ defmodule Arbor.Trust.Config do
   @spec pubsub() :: module()
   def pubsub, do: get(:pubsub, Arbor.Core.PubSub)
 
+  @doc "Owner-read adapter for answered approval evidence; absent standalone wiring denies recording."
+  @spec approval_evidence_provider() :: module() | nil
+  def approval_evidence_provider, do: get(:approval_evidence_provider, nil)
+
   @doc "Get capability templates."
   @spec capability_templates() :: map()
   def capability_templates, do: get(:capability_templates, @default_capability_templates)

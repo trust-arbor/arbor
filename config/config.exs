@@ -433,6 +433,7 @@ config :arbor_kernel,
 # Full-profile action-namespace projection. Atom only; activation_only must
 # not invoke or load this module. arbor_trust must not depend on arbor_actions.
 config :arbor_trust, action_profile_provider: Arbor.Actions
+config :arbor_trust, approval_evidence_provider: Arbor.Agent.ApprovalEvidence
 
 # Dashboard chat model configuration
 config :arbor_dashboard,

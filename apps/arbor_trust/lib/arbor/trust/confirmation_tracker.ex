@@ -35,6 +35,18 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   ## Storage & persistence (TRUST-6, 2026-06-14)
 
+  Request-keyed observations use the same owner as these counters. Their
+  bounded replay set is retained across per-agent resets; restarting the
+  tracker loses counters and replay state together. This is an advisory
+  process lifetime, not a durable approval audit.
+
+  The source-revalidated answer API currently records only unknown-responder
+  evidence. Metadata claiming an actor or human is not authentication, so
+  these answers do not satisfy a human graduation threshold. Legacy two-argument
+  counter APIs remain advisory compatibility surfaces, not verified evidence.
+  Even an accepted profile rule cannot relax the current default write
+  ceilings, which continue to require approval.
+
   This tracker holds only the **transient** streak counters in ETS — the
   bookkeeping *toward* a suggestion. It does NOT persist across restarts, and
   that is correct: re-accumulating a streak after a reboot is harmless.
@@ -54,7 +66,9 @@ defmodule Arbor.Trust.ConfirmationTracker do
   use GenServer
 
   alias Arbor.Contracts.Security.CapabilityUri
+  alias Arbor.Trust.ApprovalEvidenceCore
   alias Arbor.Trust.CapabilityRiskProfiles
+  alias Arbor.Trust.Config
 
   require Logger
 
@@ -70,6 +84,11 @@ defmodule Arbor.Trust.ConfirmationTracker do
   """
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc false
+  def record_approval_answer(source, request_id, expected) do
+    GenServer.call(__MODULE__, {:record_approval_answer, source, request_id, expected})
   end
 
   @doc """
@@ -193,10 +212,22 @@ defmodule Arbor.Trust.ConfirmationTracker do
   @impl true
   def init(_opts) do
     table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    {:ok, %{table: table}}
+    {:ok, %{table: table, answers: ApprovalEvidenceCore.new()}}
   end
 
   @impl true
+  def handle_call({:record_approval_answer, source, request_id, expected}, _from, state) do
+    with {:ok, expected} <- ApprovalEvidenceCore.validate_expected(source, request_id, expected),
+         {:ok, record} <- read_answered_approval(source, request_id),
+         :ok <- ApprovalEvidenceCore.validate_record(expected, record),
+         {:ok, disposition, answers} <- ApprovalEvidenceCore.admit(state.answers, record) do
+      if disposition == :recorded, do: record_unknown_answer(record)
+      {:reply, {:ok, disposition}, %{state | answers: answers}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:record_approval, agent_id, resource_uri}, _from, state) do
     uri_prefix = resolve_tracking_prefix(resource_uri)
 
@@ -383,8 +414,69 @@ defmodule Arbor.Trust.ConfirmationTracker do
       graduated: false,
       locked: false,
       last_confirmation: nil,
-      graduated_at: nil
+      graduated_at: nil,
+      unknown_approvals: 0,
+      unknown_rejections: 0,
+      verified_human_approvals: 0,
+      human_streak: 0
     }
+  end
+
+  defp read_answered_approval(source, request_id) do
+    provider = Config.approval_evidence_provider()
+
+    if is_atom(provider) and not is_nil(provider) and Code.ensure_loaded?(provider) and
+         function_exported?(provider, :answered_approval, 2) do
+      case provider.answered_approval(source, request_id) do
+        {:ok, record} when is_map(record) -> {:ok, record}
+        _ -> {:error, :approval_evidence_unavailable}
+      end
+    else
+      {:error, :approval_evidence_unavailable}
+    end
+  rescue
+    _ -> {:error, :approval_evidence_unavailable}
+  catch
+    _, _ -> {:error, :approval_evidence_unavailable}
+  end
+
+  # A committed answer is useful evidence even when its responder lacks an
+  # owner-bound human proof. It cannot satisfy the human graduation threshold.
+  defp record_unknown_answer(record) do
+    case resolve_tracking_prefix(record.resource_uri) do
+      nil ->
+        :ok
+
+      prefix ->
+        entry = get_or_create(record.agent_id, prefix)
+        approved? = record.decision == :approve
+
+        updated =
+          Map.merge(entry, %{
+            approvals: entry.approvals + if(approved?, do: 1, else: 0),
+            rejections: entry.rejections + if(approved?, do: 0, else: 1),
+            unknown_approvals: entry.unknown_approvals + if(approved?, do: 1, else: 0),
+            unknown_rejections: entry.unknown_rejections + if(approved?, do: 0, else: 1),
+            streak: if(approved?, do: entry.streak + 1, else: 0),
+            human_streak: 0,
+            graduated: false,
+            graduated_at: nil,
+            last_confirmation: DateTime.utc_now()
+          })
+
+        :ets.insert(@table, {{record.agent_id, prefix}, updated})
+
+        safe_emit(:confirmation_recorded, %{
+          agent_id: record.agent_id,
+          uri_prefix: prefix,
+          source: record.source,
+          request_id: record.request_id,
+          action: if(approved?, do: :approval, else: :rejection),
+          responder: :unknown,
+          streak: updated.streak,
+          graduated: false
+        })
+    end
   end
 
   defp should_graduate?(entry, threshold) do

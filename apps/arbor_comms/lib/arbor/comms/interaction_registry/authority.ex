@@ -99,6 +99,10 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
   @spec terminal(String.t()) :: {:ok, map()} | :not_found
   def terminal(request_id) when is_binary(request_id), do: call({:terminal, request_id})
 
+  @spec answered_approval(String.t()) :: {:ok, map()} | :not_found
+  def answered_approval(request_id) when is_binary(request_id),
+    do: call({:answered_approval, request_id})
+
   @spec status(String.t()) :: {:ok, :pending | terminal_status()} | :not_found
   def status(request_id) when is_binary(request_id), do: call({:status, request_id})
 
@@ -292,6 +296,25 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       case Map.get(state.entries, request_id) do
         %{status: status} -> {:ok, status}
         nil -> :not_found
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:answered_approval, request_id}, _from, state) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    reply =
+      case Map.get(state.entries, request_id) do
+        %{
+          status: :responded,
+          interaction: %Interaction{kind: :approval} = interaction,
+          terminal: terminal
+        } ->
+          project_answered_approval(request_id, interaction, terminal)
+
+        _ ->
+          :not_found
       end
 
     {:reply, reply, state}
@@ -2283,6 +2306,43 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     Logger.warning(
       "[InteractionRegistry.Authority] terminal mirror failed for #{request_id}: #{inspect(reason)}"
     )
+  end
+
+  defp project_answered_approval(request_id, interaction, terminal) do
+    case ApprovalAnswer.normalize(terminal.response, terminal.metadata) do
+      {:ok, :approve} ->
+        approval_evidence(request_id, interaction, :approve)
+
+      {:ok, decision, _note} when decision in [:deny, :rework] ->
+        approval_evidence(request_id, interaction, decision)
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp approval_evidence(request_id, interaction, decision) do
+    {:ok,
+     %{
+       source: :interaction,
+       request_id: request_id,
+       agent_id: interaction.agent_id,
+       principal_id:
+         original_approval_field(interaction.metadata, :principal_id) || interaction.agent_id,
+       resource_uri:
+         interaction.resource_uri || original_approval_field(interaction.metadata, :resource_uri),
+       decision: decision
+     }}
+  end
+
+  defp original_approval_field(metadata, key) do
+    case {Map.fetch(metadata, key), Map.fetch(metadata, Atom.to_string(key))} do
+      {{:ok, value}, {:ok, value}} -> value
+      {{:ok, _}, {:ok, _}} -> :invalid_aliased_scope
+      {{:ok, value}, :error} -> value
+      {:error, {:ok, value}} -> value
+      {:error, :error} -> nil
+    end
   end
 
   defp approval_decision(%Interaction{kind: :approval}, response, metadata) do
