@@ -65,6 +65,11 @@ defmodule Arbor.Actions.SessionLlm do
         turn_count: [type: :integer, required: false, doc: "Turn number"],
         messages: [type: {:list, :map}, required: false, doc: "Conversation history"],
         percepts: [type: {:list, :map}, required: false, doc: "Percepts for followup"],
+        private_relationship: [
+          type: :map,
+          required: false,
+          doc: "Verified admitted-pair focus projection"
+        ],
         recalled_memories: [
           type: {:list, :map},
           required: false,
@@ -146,6 +151,7 @@ defmodule Arbor.Actions.SessionLlm do
         params[:private_goal_context] || params["private_goal_context"] ||
           params["session.private_goal_context"] || ""
 
+      relationship = get_map(params, :private_relationship, "session.private_relationship")
       timestamped = inject_timestamps(messages)
 
       # Re-establish the migration-lost memory-in-turn wiring (2026-07-04 memory-system audit): the
@@ -162,7 +168,11 @@ defmodule Arbor.Actions.SessionLlm do
       # system message: a leading second one is rejected outright by
       # OpenAI-compatible providers.
       section =
-        [private_goals, format_recalled_memories(recalled)]
+        [
+          private_goals,
+          format_recalled_memories(recalled),
+          format_private_relationship(relationship)
+        ]
         |> Enum.filter(&(is_binary(&1) and &1 != ""))
         |> Enum.join("\n\n")
 
@@ -436,6 +446,18 @@ defmodule Arbor.Actions.SessionLlm do
         nil -> nil
       end
     end
+
+    defp format_private_relationship(%{"current_focus" => focus, "source_kind" => kind} = value)
+         when is_binary(focus) and byte_size(focus) in 1..512 and
+                kind in ["user_declared", "user_corrected"] do
+      if map_size(value) == 2 and String.valid?(focus) do
+        "## Private relationship context\nUser-stated current focus: " <> focus
+      else
+        ""
+      end
+    end
+
+    defp format_private_relationship(_), do: ""
 
     defp format_recalled_memories([]), do: ""
 

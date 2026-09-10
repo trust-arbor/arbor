@@ -42,6 +42,12 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
 
       pending = select_pending(admission, sources, deadline)
 
+      relationship =
+        case Memory.get_private_relationship(admission) do
+          {:ok, snapshot} -> snapshot
+          _ -> %{relationship: %{}, fence: nil}
+        end
+
       turn = %{
         status: "enabled",
         recall: [],
@@ -49,7 +55,9 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
         pending: pending,
         deadline: deadline,
         query: user_message.content,
-        source: nil
+        source: nil,
+        relationship: relationship.relationship,
+        relationship_fence: relationship.fence
       }
 
       with {:ok, ^scope} <- Security.authorize_private_memory_turn(admission, :read),
@@ -126,12 +134,62 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
     end
   end
 
+  # A relationship update belongs only to this live, acknowledged turn. It is
+  # independent of vector indexing; historical conversation recovery never
+  # replays directives against a newer relationship snapshot.
+  def apply_committed_relationship(state, caller_alive?) do
+    turn = state.private_memory_turn || %{}
+    deadline = System.monotonic_time(:millisecond) + Map.get(turn, :remaining_ms, 0)
+
+    status =
+      case turn do
+        %{status: "enabled", source: source, relationship_fence: fence}
+        when is_map(source) and not is_nil(fence) ->
+          if caller_alive? and System.monotonic_time(:millisecond) < deadline do
+            case Memory.apply_private_relationship_source(current(state), source, fence) do
+              {:ok, outcome} when outcome in [:saved, :unchanged, :not_requested] ->
+                Atom.to_string(outcome)
+
+              {:error, reason}
+              when reason in [
+                     :private_relationship_conflict,
+                     :private_relationship_correction_required,
+                     :private_relationship_missing
+                   ] ->
+                "conflict"
+
+              _ ->
+                "unavailable"
+            end
+          else
+            "unavailable"
+          end
+
+        %{status: "enabled"} ->
+          "unavailable"
+
+        _ ->
+          "not_requested"
+      end
+
+    turn =
+      turn
+      |> Map.put(:post_ack_deadline, deadline)
+      |> Map.put(:relationship_status, %{status: status, transcript: "committed"})
+
+    %{state | private_memory_turn: turn}
+  end
+
   def prepare_committed_index(state) do
     case Map.get(state, :private_memory_turn) do
       %{status: "enabled", source: source} = turn when is_map(source) ->
-        deadline = System.monotonic_time(:millisecond) + turn.remaining_ms
+        deadline =
+          Map.get_lazy(turn, :post_ack_deadline, fn ->
+            System.monotonic_time(:millisecond) + turn.remaining_ms
+          end)
 
-        with {:ok, scope} <- Security.authorize_private_memory_turn(current(state), :write),
+        with true <- System.monotonic_time(:millisecond) < deadline,
+             {:ok, scope} <- Security.authorize_private_memory_turn(current(state), :write),
              :ok <- Embedding.authorize(turn.route, scope),
              {:ok, {:pending, content}} <-
                Memory.prepare_private_conversation_index(current(state), source),

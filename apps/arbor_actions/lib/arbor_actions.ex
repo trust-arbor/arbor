@@ -3797,12 +3797,13 @@ defmodule Arbor.Actions do
     Arbor.Actions.Pipeline.Run => "arbor://action/pipeline/run",
     Arbor.Actions.Pipeline.Validate => "arbor://action/pipeline/validate",
 
-    # Persistence/relationship — arbor://persistence/{operation}
-    Arbor.Actions.Relationship.Get => "arbor://persistence/read",
-    Arbor.Actions.Relationship.Save => "arbor://persistence/write",
-    Arbor.Actions.Relationship.Moment => "arbor://persistence/write",
-    Arbor.Actions.Relationship.Browse => "arbor://persistence/read",
-    Arbor.Actions.Relationship.Summarize => "arbor://persistence/read",
+    # Relationships are Memory operations. Their durable backend does not
+    # require a second, unrelated persistence capability family.
+    Arbor.Actions.Relationship.Get => "arbor://memory/read",
+    Arbor.Actions.Relationship.Save => "arbor://memory/write",
+    Arbor.Actions.Relationship.Moment => "arbor://memory/write",
+    Arbor.Actions.Relationship.Browse => "arbor://memory/read",
+    Arbor.Actions.Relationship.Summarize => "arbor://memory/read",
 
     # Docs — arbor://code/read
     Arbor.Actions.Docs.Lookup => "arbor://code/read",

@@ -432,6 +432,14 @@ defmodule Arbor.Memory do
   defdelegate model_context_size(model_id), to: SessionOps
   defdelegate get_relationship(agent_id, relationship_id), to: SessionOps
   defdelegate get_relationship_by_name(agent_id, name), to: SessionOps
+  @doc "Read the admitted pair's verified private relationship projection and exact update fence."
+  defdelegate get_private_relationship(admission), to: Arbor.Memory.PrivateRelationships, as: :get
+
+  @doc "Apply an explicit focus directive from this admitted turn's committed transcript source."
+  defdelegate apply_private_relationship_source(admission, source, expected_fence),
+    to: Arbor.Memory.PrivateRelationships,
+    as: :apply_source
+
   defdelegate get_primary_relationship(agent_id), to: SessionOps
   defdelegate save_relationship(agent_id, relationship), to: SessionOps
   defdelegate add_moment(agent_id, relationship_id, summary, opts \\ []), to: SessionOps

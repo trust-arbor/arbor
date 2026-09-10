@@ -34,9 +34,6 @@ defmodule Arbor.Actions.MemoryWritePolicy do
     Arbor.Actions.MemoryReview.ReviewSuggestions,
     Arbor.Actions.MemoryCode.ListCode,
     Arbor.Actions.MemoryCode.ViewCode,
-    Arbor.Actions.Relationship.Get,
-    Arbor.Actions.Relationship.Browse,
-    Arbor.Actions.Relationship.Summarize,
     Arbor.Actions.SessionMemory.Recall,
     Arbor.Actions.SessionMemory.Checkpoint
   ]
@@ -71,6 +68,14 @@ defmodule Arbor.Actions.MemoryWritePolicy do
 
   defp check_restricted(Arbor.Actions.Memory.Recall, _params),
     do: {:error, :private_turn_memory_query_denied}
+
+  defp check_restricted(action_module, _params)
+       when action_module in [
+              Arbor.Actions.Relationship.Get,
+              Arbor.Actions.Relationship.Browse,
+              Arbor.Actions.Relationship.Summarize
+            ],
+       do: {:error, :private_turn_relationship_read_denied}
 
   defp check_restricted(action_module, _params) when action_module in @read_actions, do: :ok
 

@@ -48,6 +48,10 @@ defmodule Arbor.Actions.Relationship do
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles, do: %{name: :data}
 
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: MemoryHelpers.self_scoped_resource("read", context)
+
     @impl true
     def run(params, context) do
       Actions.emit_started(__MODULE__, params)
@@ -142,6 +146,10 @@ defmodule Arbor.Actions.Relationship do
         uncertainties: :data
       }
     end
+
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: MemoryHelpers.self_scoped_resource("write", context)
 
     @impl true
     def run(params, context) do
@@ -243,6 +251,10 @@ defmodule Arbor.Actions.Relationship do
       %{name: :data, summary: :data, emotional_markers: :data, salience: :data}
     end
 
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: MemoryHelpers.self_scoped_resource("write", context)
+
     @impl true
     def run(params, context) do
       Actions.emit_started(__MODULE__, params)
@@ -324,6 +336,10 @@ defmodule Arbor.Actions.Relationship do
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles, do: %{limit: :data, sort_by: :control}
 
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: MemoryHelpers.self_scoped_resource("read", context)
+
     @impl true
     def run(params, context) do
       Actions.emit_started(__MODULE__, params)
@@ -397,6 +413,10 @@ defmodule Arbor.Actions.Relationship do
 
     @spec taint_roles() :: %{atom() => :control | :data}
     def taint_roles, do: %{name: :data, format: :control}
+
+    @doc false
+    def self_scoped_resource(_params, context),
+      do: MemoryHelpers.self_scoped_resource("read", context)
 
     @impl true
     def run(params, context) do

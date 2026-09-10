@@ -2134,7 +2134,11 @@ defmodule Arbor.Orchestrator.Session do
          usage: usage,
          metadata: %{
            conversation_memory:
-             Map.get(new_state.private_memory_turn || %{}, :index_status, %{status: "disabled"})
+             Map.get(new_state.private_memory_turn || %{}, :index_status, %{status: "disabled"}),
+           relationship_memory:
+             Map.get(new_state.private_memory_turn || %{}, :relationship_status, %{
+               status: "not_requested"
+             })
          }
        })}
 
@@ -2448,6 +2452,8 @@ defmodule Arbor.Orchestrator.Session do
   defp private_memory_stage?(_state, _stage), do: false
 
   defp start_private_index(message, result, old_state, state, completed) do
+    state = PrivateMemory.apply_committed_relationship(state, caller_alive?(state.turn_from))
+
     preparation =
       if match?(%{status: "enabled"}, state.private_memory_turn) and
            not caller_alive?(state.turn_from),
@@ -2663,18 +2669,21 @@ defmodule Arbor.Orchestrator.Session do
 
   defp put_private_recall(values, nil, _turn), do: values
 
-  defp put_private_recall(values, %TurnAuthority{}, turn),
-    do: Map.put(values, "session.private_recalled_memories", Map.get(turn || %{}, :recall, []))
+  defp put_private_recall(values, %TurnAuthority{}, turn) do
+    values
+    |> Map.put("session.private_recalled_memories", Map.get(turn || %{}, :recall, []))
+    |> Map.put("session.private_relationship", Map.get(turn || %{}, :relationship, %{}))
+  end
 
   defp put_private_recall_taint(taint, nil), do: taint
 
-  defp put_private_recall_taint(taint, %TurnAuthority{}),
-    do:
-      Map.put(
-        taint,
-        "session.private_recalled_memories",
-        TaintEnvelope.missing_fallback()
-      )
+  defp put_private_recall_taint(taint, %TurnAuthority{}) do
+    envelope = TaintEnvelope.missing_fallback()
+
+    taint
+    |> Map.put("session.private_recalled_memories", envelope)
+    |> Map.put("session.private_relationship", envelope)
+  end
 
   # Receipt-authenticated private turns may contain human-owned data. Until
   # Memory admits scoped writes, keep this restriction in runtime opts only.

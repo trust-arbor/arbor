@@ -7,6 +7,7 @@ defmodule Arbor.Security.PrivateMemory do
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.Contracts.PrivateMemoryRecord
   alias Arbor.Security.Contracts.PrivateMemorySource
+  alias Arbor.Security.Contracts.PrivateRelationshipSnapshot
   alias Arbor.Security.DeliveryReceiptBroker
   alias Arbor.Security.SystemAuthority
 
@@ -95,6 +96,23 @@ defmodule Arbor.Security.PrivateMemory do
   def verify(descriptor, stamp) do
     with :ok <- PrivateMemoryRecord.admit(descriptor),
          do: SystemAuthority.verify_private_memory_record(descriptor, stamp)
+  end
+
+  def attest_relationship_snapshot(admission, descriptor) do
+    with {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_scope(token),
+         :ok <- PrivateRelationshipSnapshot.admit(descriptor),
+         true <- PrivateRelationshipSnapshot.scope_matches?(descriptor, scope) do
+      SystemAuthority.attest_private_relationship_snapshot(admission, descriptor)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_private_relationship_snapshot}
+    end
+  end
+
+  def verify_relationship_snapshot(descriptor, stamp) do
+    with :ok <- PrivateRelationshipSnapshot.admit(descriptor),
+         do: SystemAuthority.verify_private_relationship_snapshot(descriptor, stamp)
   end
 
   def attest_source(admission, descriptor) do

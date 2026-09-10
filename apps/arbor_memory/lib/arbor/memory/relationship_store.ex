@@ -14,7 +14,7 @@ defmodule Arbor.Memory.RelationshipStore do
   remain root-free.
   """
 
-  alias Arbor.Memory.{Events, MutationAdmission, Relationship, Signals}
+  alias Arbor.Memory.{Events, MutationAdmission, PrivateRelationships, Relationship, Signals}
   alias Arbor.Persistence
 
   require Logger
@@ -138,7 +138,9 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec delete_all(String.t()) :: :ok | {:error, term()}
   def delete_all(agent_id) do
-    Persistence.delete_all_relationships(agent_id)
+    with {:ok, private} <- PrivateRelationships.inventory(agent_id),
+         :ok <- Persistence.delete_all_relationships(agent_id),
+         do: PrivateRelationships.delete_inventory(private)
   end
 
   @doc """
@@ -146,7 +148,9 @@ defmodule Arbor.Memory.RelationshipStore do
   """
   @spec absent?(String.t()) :: {:ok, true} | {:ok, false} | {:error, term()}
   def absent?(agent_id) do
-    Persistence.relationships_absent?(agent_id)
+    with {:ok, private} <- PrivateRelationships.inventory(agent_id),
+         {:ok, legacy_absent} <- Persistence.relationships_absent?(agent_id),
+         do: {:ok, private == [] and legacy_absent}
   end
 
   # ============================================================================

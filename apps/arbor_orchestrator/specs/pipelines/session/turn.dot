@@ -62,7 +62,7 @@ digraph SessionTurn {
     target="action",
     action="session_llm.build_prompt",
     param.mode="turn",
-    context_keys="session.messages,session.agent_id,session.goals,session.active_intents,session.cognitive_mode,session.recalled_memories,session.private_goal_context",
+    context_keys="session.messages,session.agent_id,session.goals,session.active_intents,session.cognitive_mode,session.recalled_memories,session.private_goal_context,session.private_relationship",
     output_prefix="session"
   ]
 
