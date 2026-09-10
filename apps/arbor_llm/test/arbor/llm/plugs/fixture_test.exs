@@ -394,6 +394,83 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       refute File.exists?(Fixture.path_for(call))
     end
 
+    test "preserves the real ReqLLM canonical usage schema including tool, image and billing details" do
+      call = Call.new(:complete, {"openai:canonical-usage", [], []})
+
+      usage =
+        ReqLLM.Usage.normalize(%{
+          input_tokens: 8,
+          output_tokens: 3,
+          total_tokens: 11,
+          cached_tokens: 2,
+          reasoning_tokens: 1,
+          tool_usage: %{
+            "file_search" => %{"count" => 1, "unit" => "query"},
+            web_search: %{count: 2, unit: :call}
+          },
+          image_usage: %{generated: %{count: 1, size_class: "1024x1024:standard"}}
+        })
+
+      billing = %{
+        tokens: 0.03,
+        tools: 0.02,
+        images: 0.01,
+        storage: 0.0,
+        total: 0.06,
+        input_cost: 0.02,
+        output_cost: 0.01,
+        reasoning_cost: 0.005,
+        line_items: [
+          %{
+            id: "token.input",
+            count: 8,
+            cost: 0.02,
+            kind: :tokens,
+            component: "token.input",
+            quantity: 8
+          }
+        ]
+      }
+
+      usage =
+        Map.merge(usage, %{
+          cost: billing,
+          input_cost: 0.02,
+          output_cost: 0.01,
+          reasoning_cost: 0.005,
+          total_cost: 0.06
+        })
+
+      assert :ok = Fixture.save(call, {:ok, req_response("usage", usage: usage)})
+      assert {:ok, {:ok, response}, _} = Fixture.load(call)
+      assert response.usage == usage
+    end
+
+    test "security regression: malformed canonical usage never publishes a fixture" do
+      call = Call.new(:complete, {"openai:malformed-canonical-usage", [], []})
+
+      for usage <- [
+            %{cache_creation_tokens: -1},
+            %{reasoning: 1_000_000_001},
+            %{reasoning_cost: 1_000_001.0},
+            %{input_includes_cached: "true"},
+            %{tool_usage: %{web_search: %{count: 1_000_000_001, unit: :call}}},
+            %{tool_usage: %{web_search: %{unit: :call}}},
+            %{tool_usage: %{web_search: %{count: 1, unit: :unknown}}},
+            %{tool_usage: %{web_search: %{count: 1, unit: :call, secret: "hidden"}}},
+            %{tool_usage: %{unreviewed_tool: %{count: 1, unit: :call}}},
+            %{image_usage: %{generated: %{count: 1, size_class: String.duplicate("x", 257)}}},
+            %{image_usage: %{generated: %{count: -1}}},
+            %{cost: %{total: 0.1}},
+            %{tool_usage: %{web_search: %{count: 1, unit: :call}}, provider_secret: 1}
+          ] do
+        assert {:error, {:invalid_fixture, _}} =
+                 Fixture.save(call, {:ok, req_response("invalid", usage: usage)})
+
+        refute File.exists?(Fixture.path_for(call))
+      end
+    end
+
     test "rejects oversized and count-excess complete response collections without publication" do
       cases = [
         {
