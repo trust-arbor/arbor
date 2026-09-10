@@ -102,6 +102,11 @@ defmodule Arbor.Consensus.Coordinator do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  @impl true
+  def format_status(status) when is_map(status) do
+    status |> Map.put(:state, :redacted) |> Map.put(:message, :redacted)
+  end
+
   @doc """
   Submit a proposal for consensus evaluation.
   """
@@ -634,14 +639,15 @@ defmodule Arbor.Consensus.Coordinator do
          :ok <- ensure_authorization_request(proposal),
          :ok <- ensure_pending_authorization_request(proposal),
          :ok <- ensure_not_blocked_authorization_approval(proposal, normalized_decision),
-         :ok <- check_approval_answer_authorization(actor_id, proposal) do
+         {:ok, verified_human_id} <- check_approval_answer_proof(actor_id, proposal, opts) do
       {state, status} =
         answer_authorization_request_proposal(
           state,
           proposal,
           normalized_decision,
           actor_id,
-          opts
+          opts,
+          verified_human_id
         )
 
       {:reply, status, state}
@@ -871,6 +877,45 @@ defmodule Arbor.Consensus.Coordinator do
   def evaluate_force_authorization({:error, reason}, actor_id) do
     Logger.warning("Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}")
     {:error, {:unauthorized, :consensus_admin_required}}
+  end
+
+  defp check_approval_answer_proof(actor_id, proposal, opts) do
+    case Keyword.get_values(opts, :session_token) do
+      [] ->
+        case check_approval_answer_authorization(actor_id, proposal) do
+          :ok -> {:ok, nil}
+          error -> error
+        end
+
+      [token] ->
+        with {:ok, identity} <- PendingApprovalIdentity.from_consensus_proposal(proposal),
+             :ok <- authorize_human_answer(identity, actor_id, token) do
+          {:ok, actor_id}
+        else
+          _ -> {:error, {:unauthorized, :approval_answer_required}}
+        end
+
+      _ ->
+        {:error, {:unauthorized, :approval_answer_required}}
+    end
+  end
+
+  defp authorize_human_answer(identity, actor_id, token) do
+    task = identity["task_id"]
+
+    task_scope =
+      if task, do: [{"arbor://approval/answer/task/#{task}", [task_id: task]}], else: []
+
+    scopes =
+      task_scope ++
+        Enum.map(
+          [identity["agent_id"], identity["principal_id"]],
+          &{"arbor://approval/answer/#{&1}", []}
+        ) ++ [{"arbor://approval/answer", []}]
+
+    if Enum.any?(Enum.uniq(scopes), fn {uri, opts} ->
+         Arbor.Security.authorize_approval_answer(actor_id, uri, token, opts) == :ok
+       end), do: :ok, else: {:error, :approval_answer_required}
   end
 
   defp check_approval_answer_authorization(actor_id, proposal) do
@@ -1113,7 +1158,14 @@ defmodule Arbor.Consensus.Coordinator do
   defp normalize_approval_answer(:rework), do: {:ok, :rework}
   defp normalize_approval_answer(_), do: {:error, :invalid_decision}
 
-  defp answer_authorization_request_proposal(state, proposal, decision, actor_id, opts) do
+  defp answer_authorization_request_proposal(
+         state,
+         proposal,
+         decision,
+         actor_id,
+         opts,
+         verified_human_id
+       ) do
     proposal_id = proposal.id
     state = kill_active_council(state, proposal_id)
 
@@ -1137,6 +1189,13 @@ defmodule Arbor.Consensus.Coordinator do
       answered_at: Keyword.get(opts, :answered_at, DateTime.utc_now()),
       decided_at: DateTime.utc_now()
     }
+
+    # Live, owner-produced evidence only. Never included in persisted events;
+    # recovery without this winning transition's proof downgrades to unknown.
+    decision_record =
+      if is_binary(verified_human_id),
+        do: Map.put(decision_record, :verified_human_id, verified_human_id),
+        else: decision_record
 
     state = %{
       state

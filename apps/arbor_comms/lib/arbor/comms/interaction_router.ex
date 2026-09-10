@@ -137,7 +137,21 @@ defmodule Arbor.Comms.InteractionRouter do
   def respond(request_id, response, metadata \\ %{}) when is_binary(request_id) do
     metadata = if is_map(metadata), do: metadata, else: %{}
 
-    case InteractionRegistry.resolve(request_id, response: response, metadata: metadata) do
+    request_id
+    |> InteractionRegistry.resolve(response: response, metadata: metadata)
+    |> publish_response(request_id, response, metadata)
+  end
+
+  @doc false
+  def respond_authenticated(request_id, response, metadata, actor_id, session_token)
+      when is_binary(request_id) and is_map(metadata) do
+    request_id
+    |> InteractionRegistry.resolve_authenticated(response, metadata, actor_id, session_token)
+    |> publish_response(request_id, response, metadata)
+  end
+
+  defp publish_response(result, request_id, response, metadata) do
+    case result do
       {:ok, interaction} ->
         emit_signal(:resolved, interaction, %{response: response, metadata: metadata})
         broadcast_response(interaction, response, metadata)

@@ -1750,15 +1750,36 @@ defmodule Arbor.Agent.Orchestration do
 
     metadata = interaction_answer_metadata(decision, caller_id, opts)
 
-    opts
-    |> interaction_backend()
-    |> apply_if_exported(:respond_to_interaction, [id, response, metadata])
-    |> normalize_backend_result()
+    case session_token_entries(opts) do
+      [] ->
+        opts
+        |> interaction_backend()
+        |> apply_if_exported(:respond_to_interaction, [id, response, metadata])
+        |> normalize_backend_result()
+
+      [token] ->
+        opts
+        |> interaction_backend()
+        |> apply_if_exported(:respond_to_interaction_authenticated, [
+          id,
+          response,
+          metadata,
+          caller_id,
+          token
+        ])
+        |> normalize_backend_result()
+
+      _ ->
+        {:error, :invalid_session_token}
+    end
   end
 
   defp dispatch_answer(%PendingApproval{source: :consensus, id: id}, decision, caller_id, opts) do
     metadata = answer_metadata(decision, caller_id, opts)
-    metadata_opts = Map.to_list(metadata)
+
+    metadata_opts =
+      Map.to_list(metadata) ++ Enum.map(session_token_entries(opts), &{:session_token, &1})
+
     consensus = consensus_module(opts)
 
     cond do
@@ -1771,6 +1792,9 @@ defmodule Arbor.Agent.Orchestration do
           metadata_opts
         ])
         |> normalize_backend_result()
+
+      session_token_entries(opts) != [] ->
+        {:error, :authenticated_approval_backend_unavailable}
 
       decision == :approve ->
         consensus
@@ -2090,6 +2114,14 @@ defmodule Arbor.Agent.Orchestration do
   # Absent vs exactly one atom/string session_token. Alias duplicates and every
   # malformed present value fail closed before grants/TaskStore/audit.
   @max_session_token_bytes 4096
+
+  defp session_token_entries(opts) do
+    case parse_session_token_opt(opts) do
+      :absent -> []
+      {:ok, token} -> [token]
+      {:error, _} -> [nil, nil]
+    end
+  end
 
   defp security_auth_opts(opts) do
     case parse_session_token_opt(opts) do

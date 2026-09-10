@@ -590,6 +590,56 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Verify a human's current explicit authority to answer a pending approval.
+
+  The owning transition supplies the original request's scoped approval URI.
+  This narrow decision requires a matching active human session proof and
+  refuses capabilities that themselves require approval. It never escalates,
+  preventing recursion into the approval owner, and grants no new authority.
+  Only an optional exact `:task_id` constraint is accepted.
+  """
+  @spec authorize_approval_answer(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, :approval_answer_required}
+  def authorize_approval_answer(actor_id, resource_uri, session_token, opts \\ []) do
+    with true <- valid_approval_answer_options?(resource_uri, opts),
+         :authorized <-
+           AuthDecision.check(
+             actor_id,
+             resource_uri,
+             :execute,
+             Keyword.put(opts, :session_token, session_token)
+           ) do
+      :ok
+    else
+      _ -> {:error, :approval_answer_required}
+    end
+  rescue
+    _ -> {:error, :approval_answer_required}
+  catch
+    _, _ -> {:error, :approval_answer_required}
+  end
+
+  defp valid_approval_answer_options?(resource_uri, opts) do
+    is_binary(resource_uri) and byte_size(resource_uri) <= 512 and
+      Regex.match?(
+        ~r/\Aarbor:\/\/approval\/answer(?:\/[A-Za-z0-9][A-Za-z0-9._-]*|\/task\/[A-Za-z0-9][A-Za-z0-9._-]*)?\z/,
+        resource_uri
+      ) and
+      is_list(opts) and Keyword.keyword?(opts) and
+      case opts do
+        [] ->
+          true
+
+        [task_id: task_id] ->
+          is_binary(task_id) and byte_size(task_id) in 1..256 and
+            resource_uri == "arbor://approval/answer/task/#{task_id}"
+
+        _ ->
+          false
+      end
+  end
+
+  @doc """
   Record a durable security event for an answered approval request.
 
   External approval surfaces should use this facade instead of writing directly

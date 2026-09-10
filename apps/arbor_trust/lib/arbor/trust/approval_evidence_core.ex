@@ -28,12 +28,23 @@ defmodule Arbor.Trust.ApprovalEvidenceCore do
   end
 
   def validate_record(expected, record) when is_map(record) do
-    if map_size(record) == length(@record_fields) and record == expected,
+    if valid_responder?(record) and Map.drop(record, [:verified_human_id]) == expected,
       do: :ok,
       else: {:error, :approval_evidence_mismatch}
   end
 
   def validate_record(_expected, _record), do: {:error, :approval_evidence_mismatch}
+
+  defp valid_responder?(record) do
+    case Map.fetch(record, :verified_human_id) do
+      :error ->
+        map_size(record) == length(@record_fields)
+
+      {:ok, human_id} ->
+        map_size(record) == length(@record_fields) + 1 and valid_string?(human_id) and
+          String.starts_with?(human_id, "human_")
+    end
+  end
 
   def admit(answers, record) do
     key = {record.source, record.request_id}

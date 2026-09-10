@@ -295,6 +295,23 @@ defmodule Arbor.Comms do
     InteractionRouter.respond(request_id, response, metadata)
   end
 
+  @doc "Answer an approval with human proof checked by its winning transition owner."
+  def respond_to_interaction_authenticated(
+        request_id,
+        response,
+        metadata,
+        actor_id,
+        session_token
+      ) do
+    InteractionRouter.respond_authenticated(
+      request_id,
+      response,
+      metadata,
+      actor_id,
+      session_token
+    )
+  end
+
   @doc """
   Abandon a pending interaction with an explicit lifecycle reason.
 

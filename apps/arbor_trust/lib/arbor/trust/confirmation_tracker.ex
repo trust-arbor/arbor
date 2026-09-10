@@ -40,9 +40,10 @@ defmodule Arbor.Trust.ConfirmationTracker do
   tracker loses counters and replay state together. This is an advisory
   process lifetime, not a durable approval audit.
 
-  The source-revalidated answer API currently records only unknown-responder
-  evidence. Metadata claiming an actor or human is not authentication, so
-  these answers do not satisfy a human graduation threshold. Legacy two-argument
+  The source-revalidated answer API admits human evidence only when the
+  winning owner verified that responder's live session proof and current
+  approval authority. Legacy and recovered answers remain unknown; caller
+  metadata cannot upgrade them. Legacy two-argument
   counter APIs remain advisory compatibility surfaces, not verified evidence.
   Even an accepted profile rule cannot relax the current default write
   ceilings, which continue to require approval.
@@ -221,7 +222,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
          {:ok, record} <- read_answered_approval(source, request_id),
          :ok <- ApprovalEvidenceCore.validate_record(expected, record),
          {:ok, disposition, answers} <- ApprovalEvidenceCore.admit(state.answers, record) do
-      if disposition == :recorded, do: record_unknown_answer(record)
+      if disposition == :recorded, do: record_answer_evidence(record)
       {:reply, {:ok, disposition}, %{state | answers: answers}}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -442,7 +443,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   # A committed answer is useful evidence even when its responder lacks an
   # owner-bound human proof. It cannot satisfy the human graduation threshold.
-  defp record_unknown_answer(record) do
+  defp record_answer_evidence(record) do
     case resolve_tracking_prefix(record.resource_uri) do
       nil ->
         :ok
@@ -450,15 +451,20 @@ defmodule Arbor.Trust.ConfirmationTracker do
       prefix ->
         entry = get_or_create(record.agent_id, prefix)
         approved? = record.decision == :approve
+        human? = Map.has_key?(record, :verified_human_id)
 
         updated =
           Map.merge(entry, %{
             approvals: entry.approvals + if(approved?, do: 1, else: 0),
             rejections: entry.rejections + if(approved?, do: 0, else: 1),
-            unknown_approvals: entry.unknown_approvals + if(approved?, do: 1, else: 0),
-            unknown_rejections: entry.unknown_rejections + if(approved?, do: 0, else: 1),
+            unknown_approvals:
+              entry.unknown_approvals + if(approved? and not human?, do: 1, else: 0),
+            unknown_rejections:
+              entry.unknown_rejections + if(not approved? and not human?, do: 1, else: 0),
+            verified_human_approvals:
+              entry.verified_human_approvals + if(approved? and human?, do: 1, else: 0),
             streak: if(approved?, do: entry.streak + 1, else: 0),
-            human_streak: 0,
+            human_streak: if(approved? and human?, do: entry.human_streak + 1, else: 0),
             graduated: false,
             graduated_at: nil,
             last_confirmation: DateTime.utc_now()
@@ -466,17 +472,21 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
         :ets.insert(@table, {{record.agent_id, prefix}, updated})
 
-        safe_emit(:confirmation_recorded, %{
-          agent_id: record.agent_id,
-          uri_prefix: prefix,
-          source: record.source,
-          request_id: record.request_id,
-          action: if(approved?, do: :approval, else: :rejection),
-          responder: :unknown,
-          streak: updated.streak,
-          graduated: false
-        })
+        emit_answer_evidence(record, prefix, updated, approved?, human?)
     end
+  end
+
+  defp emit_answer_evidence(record, prefix, updated, approved?, human?) do
+    safe_emit(:confirmation_recorded, %{
+      agent_id: record.agent_id,
+      uri_prefix: prefix,
+      source: record.source,
+      request_id: record.request_id,
+      action: if(approved?, do: :approval, else: :rejection),
+      responder: if(human?, do: :verified_human, else: :unknown),
+      streak: updated.streak,
+      graduated: false
+    })
   end
 
   defp should_graduate?(entry, threshold) do

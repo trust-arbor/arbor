@@ -130,6 +130,15 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       when is_binary(request_id) and is_map(metadata),
       do: call({:respond, request_id, response, metadata})
 
+  @doc false
+  def respond_authenticated(request_id, response, metadata, actor_id, session_token),
+    do: call({:respond_authenticated, request_id, response, metadata, actor_id, session_token})
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    status |> Map.put(:state, :redacted) |> Map.put(:message, :redacted)
+  end
+
   @spec abandon(String.t(), atom() | String.t()) ::
           {:ok, Interaction.t() | :already_abandoned}
           | {:error, {:already_terminal, terminal_status()} | term()}
@@ -310,8 +319,8 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
           status: :responded,
           interaction: %Interaction{kind: :approval} = interaction,
           terminal: terminal
-        } ->
-          project_answered_approval(request_id, interaction, terminal)
+        } = entry ->
+          project_answered_approval(request_id, interaction, terminal, entry)
 
         _ ->
           :not_found
@@ -382,6 +391,33 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:respond_authenticated, request_id, response, metadata, actor_id, token},
+        from,
+        state
+      ) do
+    state = state |> expire_due_pending() |> prune_terminals()
+
+    with %{status: :pending, interaction: %Interaction{kind: :approval} = interaction} <-
+           Map.get(state.entries, request_id),
+         decision when decision in [:approved, :rejected] <-
+           approval_decision(interaction, response, metadata),
+         {:ok, identity} <- PendingApprovalIdentity.from_interaction(interaction),
+         :ok <- authorize_human_answer(identity, actor_id, token) do
+      case handle_call({:respond, request_id, response, metadata}, from, state) do
+        {:reply, {:ok, _} = reply, next_state} ->
+          entry = Map.fetch!(next_state.entries, request_id)
+          entry = Map.put(entry, :verified_human_id, actor_id)
+          {:reply, reply, %{next_state | entries: Map.put(next_state.entries, request_id, entry)}}
+
+        other ->
+          other
+      end
+    else
+      _ -> {:reply, {:error, :approval_answer_required}, state}
+    end
   end
 
   def handle_call({:respond, request_id, response, metadata}, _from, state) do
@@ -2308,17 +2344,44 @@ defmodule Arbor.Comms.InteractionRegistry.Authority do
     )
   end
 
-  defp project_answered_approval(request_id, interaction, terminal) do
-    case ApprovalAnswer.normalize(terminal.response, terminal.metadata) do
-      {:ok, :approve} ->
-        approval_evidence(request_id, interaction, :approve)
+  defp project_answered_approval(request_id, interaction, terminal, entry) do
+    result =
+      case ApprovalAnswer.normalize(terminal.response, terminal.metadata) do
+        {:ok, :approve} ->
+          approval_evidence(request_id, interaction, :approve)
 
-      {:ok, decision, _note} when decision in [:deny, :rework] ->
-        approval_evidence(request_id, interaction, decision)
+        {:ok, decision, _note} when decision in [:deny, :rework] ->
+          approval_evidence(request_id, interaction, decision)
+
+        _ ->
+          :not_found
+      end
+
+    case {result, Map.get(entry, :verified_human_id)} do
+      {{:ok, evidence}, human_id} when is_binary(human_id) ->
+        {:ok, Map.put(evidence, :verified_human_id, human_id)}
 
       _ ->
-        :not_found
+        result
     end
+  end
+
+  defp authorize_human_answer(identity, actor_id, token) do
+    task = identity["task_id"]
+
+    task_scope =
+      if task, do: [{"arbor://approval/answer/task/#{task}", [task_id: task]}], else: []
+
+    scopes =
+      task_scope ++
+        Enum.map(
+          [identity["agent_id"], identity["principal_id"]],
+          &{"arbor://approval/answer/#{&1}", []}
+        ) ++ [{"arbor://approval/answer", []}]
+
+    if Enum.any?(Enum.uniq(scopes), fn {uri, opts} ->
+         Arbor.Security.authorize_approval_answer(actor_id, uri, token, opts) == :ok
+       end), do: :ok, else: {:error, :approval_answer_required}
   end
 
   defp approval_evidence(request_id, interaction, decision) do

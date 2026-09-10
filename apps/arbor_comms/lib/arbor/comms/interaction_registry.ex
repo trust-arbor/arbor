@@ -175,6 +175,18 @@ defmodule Arbor.Comms.InteractionRegistry do
     with_authority(request_id, :respond, [request_id, response, metadata])
   end
 
+  @doc false
+  def resolve_authenticated(request_id, response, metadata, actor_id, session_token)
+      when is_binary(request_id) and is_map(metadata) do
+    with_authority(request_id, :respond_authenticated, [
+      request_id,
+      response,
+      metadata,
+      actor_id,
+      session_token
+    ])
+  end
+
   @doc """
   Atomically abandon a pending interaction with an explicit reason.
 

@@ -28,15 +28,22 @@ defmodule Arbor.Agent.ApprovalEvidence do
       metadata = proposal.metadata || %{}
       context = proposal.context || %{}
 
-      {:ok,
-       %{
-         source: :consensus,
-         request_id: request_id,
-         agent_id: proposal.proposer,
-         principal_id: value(metadata, :principal_id) || proposal.proposer,
-         resource_uri: value(metadata, :resource_uri) || value(context, :resource_uri),
-         decision: requested
-       }}
+      evidence = %{
+        source: :consensus,
+        request_id: request_id,
+        agent_id: proposal.proposer,
+        principal_id: value(metadata, :principal_id) || proposal.proposer,
+        resource_uri: value(metadata, :resource_uri) || value(context, :resource_uri),
+        decision: requested
+      }
+
+      case decision[:verified_human_id] do
+        human_id when is_binary(human_id) ->
+          {:ok, Map.put(evidence, :verified_human_id, human_id)}
+
+        _ ->
+          {:ok, evidence}
+      end
     else
       _ -> {:error, :approval_evidence_unavailable}
     end
