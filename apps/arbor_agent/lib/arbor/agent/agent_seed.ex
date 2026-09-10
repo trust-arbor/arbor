@@ -65,6 +65,7 @@ defmodule Arbor.Agent.AgentSeed do
           prepare_query: 2,
           prepare_query: 3,
           finalize_query: 3,
+          conversation_memory_status: 0,
           seed_emit_signal: 2,
           execute_seed_action: 4,
           seed_memory_stats: 1,
@@ -230,13 +231,15 @@ defmodule Arbor.Agent.AgentSeed do
   - `:enhance_prompt` — Whether to add timing and self-knowledge context to the prompt.
     Defaults to `true`. Set to `false` when the caller handles context injection separately
     (e.g., APIAgent uses the split stable/volatile prompt builders).
+  - `:recall_memories` — Whether to perform host recall. Defaults to `true`.
+    Session wrappers disable this because Session owns turn retrieval.
   """
   @spec prepare_query(String.t(), map(), keyword()) :: {String.t(), [map()], map()}
   def prepare_query(prompt, state, opts \\ []) do
     state = TimingContext.on_user_message(state)
 
     recalled =
-      if state.memory_initialized do
+      if state.memory_initialized and Keyword.get(opts, :recall_memories, true) do
         recall_memories(state.id, prompt)
       else
         []
@@ -251,8 +254,10 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   @doc """
-  Finalize a query by indexing the response, updating working memory,
-  consolidating, and updating the context window.
+  Finalize host timing, working memory, consolidation, and context-window state.
+
+  Automatic semantic conversation writes require authenticated Session ownership
+  and are unavailable on direct hosts. This function does not attempt indexing.
 
   Returns updated state.
   """
@@ -262,13 +267,15 @@ defmodule Arbor.Agent.AgentSeed do
     response_text = PipelineResponse.content(response_text)
     state = TimingContext.on_agent_output(state)
 
-    if state.memory_initialized do
-      index_response(state.id, prompt, response_text)
-    end
-
     state = update_working_memory(state, prompt, response_text)
     state = maybe_consolidate(state)
     add_to_context_window(state, prompt, response_text)
+  end
+
+  @doc "The direct host's automatic semantic conversation-write status."
+  @spec conversation_memory_status() :: map()
+  def conversation_memory_status do
+    %{status: "unavailable", reason: "authenticated_session_required"}
   end
 
   # ============================================================================
@@ -550,35 +557,6 @@ defmodule Arbor.Agent.AgentSeed do
     :exit, reason ->
       Logger.warning("Memory recall timeout or exit: #{inspect(reason)}")
       []
-  end
-
-  defp index_response(agent_id, prompt, response_text) do
-    content = "Q: #{String.slice(prompt, 0..200)}\nA: #{String.slice(response_text, 0..500)}"
-
-    metadata = %{
-      type: :conversation,
-      timestamp: DateTime.utc_now(),
-      prompt_length: String.length(prompt),
-      response_length: String.length(response_text)
-    }
-
-    case Arbor.Memory.index(agent_id, content, metadata) do
-      {:ok, entry_id} ->
-        Logger.debug("Indexed conversation", agent_id: agent_id, entry_id: entry_id)
-        :ok
-
-      {:error, reason} ->
-        Logger.debug("Failed to index response: #{inspect(reason)}")
-        :error
-    end
-  rescue
-    e ->
-      Logger.warning("Error indexing response: #{Exception.message(e)}")
-      :error
-  catch
-    :exit, reason ->
-      Logger.warning("Memory index timeout or exit: #{inspect(reason)}")
-      :error
   end
 
   defp update_working_memory(state, prompt, response) do

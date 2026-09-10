@@ -62,9 +62,9 @@ defmodule Arbor.Agent.Claude do
   @doc """
   Send a query to Claude and get a response.
 
-  Before sending the query, relevant memories are recalled and can be
-  included in the context. After receiving the response, important facts
-  are indexed to memory.
+  Host recall is reported separately from generated text. Automatic semantic
+  conversation writes require authenticated Session ownership and are unavailable
+  here; responses report this in `:conversation_memory`.
 
   ## Options
 
@@ -72,7 +72,9 @@ defmodule Arbor.Agent.Claude do
   - `:capture_thinking` - Extract thinking from session file (default: true for opus)
   - `:timeout` - Response timeout in ms
   - `:recall_memories` - Whether to recall memories (default: true)
-  - `:index_response` - Whether to index response facts (default: true)
+  - `:index_response` - Deprecated compatibility flag for host finalization
+    (default: true). `false` still suppresses working-memory, consolidation,
+    output-timing and context-window updates; it cannot enable semantic indexing.
   """
   @spec query(t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def query(agent, prompt, opts \\ []) do
@@ -320,13 +322,11 @@ defmodule Arbor.Agent.Claude do
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
     # Seed: prepare query (recall memories, add timing/self-knowledge)
-    {enhanced_prompt, recalled, state} = prepare_query(prompt, state)
-
-    recalled = if recall, do: recalled, else: []
+    {enhanced_prompt, recalled, state} = prepare_query(prompt, state, recall_memories: recall)
 
     case execute_query(enhanced_prompt, model, capture, state, opts) do
       {:ok, response, new_state} ->
-        # Seed: finalize query (index, update WM, consolidate, context window)
+        # Seed: retain local timing, working memory, consolidation and context.
         new_state =
           if index do
             finalize_query(prompt, response.text, new_state)
@@ -350,8 +350,7 @@ defmodule Arbor.Agent.Claude do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    {enhanced_prompt, recalled, state} = prepare_query(prompt, state)
-    recalled = if recall, do: recalled, else: []
+    {enhanced_prompt, recalled, state} = prepare_query(prompt, state, recall_memories: recall)
 
     if recalled != [], do: callback.({:memories, recalled})
 
@@ -411,7 +410,11 @@ defmodule Arbor.Agent.Claude do
         maybe_record_thinking(state.id, thinking)
         emit_query_completed(state.id, model, thinking)
 
-        enhanced_response = %{response | thinking: thinking}
+        enhanced_response =
+          response
+          |> Map.put(:thinking, thinking)
+          |> Map.put(:conversation_memory, conversation_memory_status())
+
         new_state = update_state_after_query(state, session_id, thinking)
         {:ok, enhanced_response, new_state}
 

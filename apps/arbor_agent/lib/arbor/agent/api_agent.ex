@@ -68,15 +68,19 @@ defmodule Arbor.Agent.APIAgent do
   @doc """
   Send a query to the API agent and get a response.
 
-  Before sending the query, relevant memories are recalled and included
-  in the context. A rich system prompt is built from the agent's memory
-  subsystems. After receiving the response, important facts are indexed.
+  Session owns retrieval for Session-backed queries. Direct queries report host
+  recall separately from the generated text; it is not injected into the prompt
+  by this wrapper. Direct automatic conversation indexing is unavailable until
+  authenticated Session ownership exists, reported in `:conversation_memory`.
 
   ## Options
 
   - `:timeout` - Response timeout in ms (default: 600_000 / 10 minutes)
-  - `:recall_memories` - Whether to recall memories (default: true)
-  - `:index_response` - Whether to index response facts (default: true)
+  - `:recall_memories` - Direct-host recall (default: true). Session-backed
+    queries leave retrieval to Session.
+  - `:index_response` - Deprecated compatibility flag for host finalization
+    (default: true). `false` still suppresses working-memory, consolidation,
+    output-timing and context-window updates; it cannot enable semantic indexing.
   """
   @spec query(t(), String.t() | Arbor.Contracts.Session.UserMessage.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -286,25 +290,25 @@ defmodule Arbor.Agent.APIAgent do
   # ============================================================================
 
   # Extract the bare-string content from either a UserMessage envelope or a
-  # plain string. The session-query path uses this to feed prepare_query and
-  # finalize_query (which need string content) while still passing the typed
-  # value down to the Session GenServer for end-to-end timestamp threading.
+  # plain string. The session-query path uses this for host timing and local
+  # finalization while passing the typed value to Session for timestamp threading.
   defp message_content(%Arbor.Contracts.Session.UserMessage{content: c}), do: c
   defp message_content(content) when is_binary(content), do: content
   defp message_content(other), do: inspect(other)
 
   defp handle_session_query(message, opts, state, session_pid) do
     # `message` may be a bare string OR an Arbor.Contracts.Session.UserMessage —
-    # extract content for memory recall/indexing (which need the string), but
+    # extract content for local finalization, but
     # pass the original typed value through to Session so the user_sent_at
     # timestamp from the transport adapter is preserved end-to-end.
     content = message_content(message)
 
-    recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    {_enhanced_prompt, recalled, state} = prepare_query(content, state, enhance_prompt: false)
-    recalled = if recall, do: recalled, else: []
+    # Session owns retrieval and committed conversation persistence. Retain only
+    # the existing host timing/finalization bookkeeping around that call.
+    {_enhanced_prompt, recalled, state} =
+      prepare_query(content, state, enhance_prompt: false, recall_memories: false)
 
     timeout = Keyword.get(opts, :timeout, 600_000)
 
@@ -356,8 +360,8 @@ defmodule Arbor.Agent.APIAgent do
     recall = Keyword.get(opts, :recall_memories, true) and state.memory_initialized
     index = Keyword.get(opts, :index_response, true) and state.memory_initialized
 
-    {enhanced_prompt, recalled, state} = prepare_query(content, state, enhance_prompt: false)
-    recalled = if recall, do: recalled, else: []
+    {enhanced_prompt, recalled, state} =
+      prepare_query(content, state, enhance_prompt: false, recall_memories: recall)
 
     case execute_query(enhanced_prompt, state, opts) do
       {:ok, response, new_state} ->
@@ -385,6 +389,7 @@ defmodule Arbor.Agent.APIAgent do
             response
             |> Map.put(:recalled_memories, recalled)
             |> Map.put(:session_id, nil)
+            |> Map.put(:conversation_memory, conversation_memory_status())
 
           new_state = %{new_state | recalled_memories: recalled}
 
