@@ -1,7 +1,7 @@
 // Session Turn Pipeline — Single User Message Processing
 //
 // Processes one user message through the full agent turn lifecycle:
-//   classify -> authorize -> recall -> mode select -> build prompt -> LLM -> memory
+//   classify -> authorize -> recall -> mode select -> build prompt -> LLM -> response
 // Session owns the acknowledged transcript append and optional checkpoint adapter
 // after this graph returns. A graph result does not claim a durable Session checkpoint.
 //
@@ -98,14 +98,11 @@ digraph SessionTurn {
     expression="I cannot process that request: {value}"
   ]
 
-  // -- Post-response: memory update ----------------------------------
-  update_memory [
-    type="exec",
-    target="action",
-    action="session_memory.update",
-    context_keys="session.agent_id,session.turn_data,session.response",
-    output_prefix="session"
-  ]
+  // Ordinary turns return plain chat text and tool results. They do not parse
+  // the heartbeat JSON contract or produce session.turn_data. Model-authored
+  // working-memory notes belong to heartbeat's explicit cognitive contract.
+  // Session owns transcript/conversation commits after this graph succeeds;
+  // private-turn tool write restrictions remain enforced by the Actions facade.
 
   // -- Exit ----------------------------------------------------------
   done [shape=Msquare]
@@ -124,9 +121,7 @@ digraph SessionTurn {
   // Core processing pipeline
   recall -> select_mode -> build_prompt -> call_llm -> format
 
-  // Post-response pipeline (both paths converge at update_memory)
-  format -> update_memory
-  format_error -> update_memory
-
-  update_memory -> done
+  // Both response paths finish without an orphan model-note write.
+  format -> done
+  format_error -> done
 }

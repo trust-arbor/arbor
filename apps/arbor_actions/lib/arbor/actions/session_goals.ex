@@ -372,7 +372,11 @@ defmodule Arbor.Actions.SessionGoals do
 
     ## Returns
 
-    `%{identity_stored: true}`
+    Counts of admitted, skipped and failed insights. An admitted identity update
+    owns asynchronous persistence; `identity_persistence: "unconfirmed"` does not
+    claim backend completion. Any write error is returned after processing the
+    remaining insights. Supported categories: capability, skill, personality,
+    trait, value and preference; confidence must be a number between 0 and 1.
     """
     use Jido.Action,
       name: "session_goals_store_identity",
@@ -380,12 +384,21 @@ defmodule Arbor.Actions.SessionGoals do
       description: "Store identity insights from LLM self-discovery",
       schema: [
         agent_id: [type: :string, required: true, doc: "Agent ID"],
+        identity_insights: [
+          type: {:list, :map},
+          required: false,
+          doc: "Identity insights supplied by the heartbeat graph"
+        ],
         insights: [
           type: {:list, :map},
           required: false,
           doc: "Identity insight maps"
         ]
       ]
+
+    alias Arbor.Actions.SessionMemory
+
+    @categories ~w(capability skill personality trait value preference)a
 
     @impl true
     def run(params, _context) do
@@ -397,33 +410,87 @@ defmodule Arbor.Actions.SessionGoals do
 
       insights =
         List.wrap(
-          params[:insights] || params["insights"] ||
-            params["session.identity_insights"] || []
+          params[:identity_insights] || params["identity_insights"] ||
+            params["session.identity_insights"] || params[:insights] || params["insights"] || []
         )
 
-      try do
-        Enum.each(insights, fn insight ->
-          category = insight["category"] || insight[:category]
-          content = insight["content"] || insight[:content]
-          confidence = insight["confidence"] || insight[:confidence] || 0.5
-
-          if category && content do
-            cat_atom =
-              if is_atom(category), do: category, else: String.to_existing_atom(category)
-
-            Arbor.Actions.SessionMemory.bridge(
-              Arbor.Memory,
-              :add_insight,
-              [agent_id, content, cat_atom, [confidence: confidence]],
-              :ok
-            )
-          end
+      result =
+        insights
+        |> Enum.with_index()
+        |> Enum.reduce(empty_result(), fn {insight, index}, result ->
+          store_insight(agent_id, insight, index, result)
         end)
-      rescue
-        _ -> :ok
-      end
 
-      {:ok, %{identity_stored: true}}
+      result =
+        Map.put(
+          result,
+          :identity_persistence,
+          if(result.identity_admitted_count > 0,
+            do: "unconfirmed",
+            else: "not_requested"
+          )
+        )
+
+      if result.identity_error_count == 0,
+        do: {:ok, result},
+        else: {:error, {:identity_store_failed, result}}
+    end
+
+    defp store_insight(agent_id, insight, index, result) do
+      case validate_insight(insight) do
+        {:ok, content, category, confidence} ->
+          case SessionMemory.bridge(
+                 Arbor.Memory,
+                 :add_insight,
+                 [agent_id, content, category, [confidence: confidence]],
+                 {:error, :memory_unavailable}
+               ) do
+            {:ok, _stored} ->
+              %{result | identity_admitted_count: result.identity_admitted_count + 1}
+
+            {:error, reason} ->
+              add_error(result, index, reason)
+
+            _ ->
+              add_error(result, index, :invalid_result)
+          end
+
+        :skip ->
+          %{result | identity_skipped_count: result.identity_skipped_count + 1}
+      end
+    end
+
+    defp validate_insight(insight) when is_map(insight) do
+      category = insight["category"] || insight[:category]
+      content = insight["content"] || insight[:content]
+      confidence = Map.get(insight, "confidence", Map.get(insight, :confidence, 0.5))
+      category = Enum.find(@categories, &(category in [&1, Atom.to_string(&1)]))
+
+      if category && is_binary(content) && String.trim(content) != "" &&
+           is_number(confidence) && confidence >= 0 && confidence <= 1,
+         do: {:ok, content, category, confidence},
+         else: :skip
+    end
+
+    defp validate_insight(_), do: :skip
+
+    defp empty_result do
+      %{
+        identity_admitted_count: 0,
+        identity_skipped_count: 0,
+        identity_error_count: 0,
+        identity_errors: []
+      }
+    end
+
+    defp add_error(result, index, reason) do
+      error = %{index: index, reason: inspect(reason, limit: 10, printable_limit: 256)}
+
+      %{
+        result
+        | identity_error_count: result.identity_error_count + 1,
+          identity_errors: result.identity_errors ++ [error]
+      }
     end
   end
 

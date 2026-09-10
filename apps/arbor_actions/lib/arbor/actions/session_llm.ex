@@ -55,6 +55,7 @@ defmodule Arbor.Actions.SessionLlm do
         active_intents: [type: {:list, :map}, required: false, doc: "Active intents"],
         recent_thinking: [type: {:list, :map}, required: false, doc: "Recent thoughts"],
         recent_percepts: [type: {:list, :map}, required: false, doc: "Recent percepts"],
+        self_knowledge: [type: :string, required: false, doc: "Current self-knowledge summary"],
         cognitive_mode: [type: :string, required: false, doc: "Cognitive mode"],
         turn_count: [type: :integer, required: false, doc: "Turn number"],
         messages: [type: {:list, :map}, required: false, doc: "Conversation history"],
@@ -89,7 +90,9 @@ defmodule Arbor.Actions.SessionLlm do
       thoughts = get_list(params, :recent_thinking, "session.recent_thinking")
       percepts = get_list(params, :recent_percepts, "session.recent_percepts")
       suggestions = get_list(params, :background_suggestions, "session.background_suggestions")
-      self_knowledge = params[:self_knowledge] || params["session.self_knowledge"]
+
+      self_knowledge =
+        params[:self_knowledge] || params["self_knowledge"] || params["session.self_knowledge"]
 
       mode =
         params[:cognitive_mode] || params["cognitive_mode"] || params["session.cognitive_mode"] ||
@@ -218,7 +221,7 @@ defmodule Arbor.Actions.SessionLlm do
       - "decompositions": list of {goal_id, intentions: [{action, description}]} where action must be a canonical name like "file.read" or "shell.execute"
       - "concerns": list of current concerns (strings)
       - "curiosity": list of things you're curious about (strings)
-      - "identity_insights": list of {category, content, confidence} self-discoveries
+      - "identity_insights": list of {category, content, confidence} self-discoveries; category must be capability/skill/personality/trait/value/preference, content nonempty, confidence a number from 0 to 1
       - "proposal_decisions": list of {proposal_id, decision} where decision is accept/reject/defer for items already in the queue
       - "proposals": list of {kind, content} — authored submissions. For a bug-fix analysis use kind "fix" (function name, root cause, recommended change). Put analysis here; use "actions" and "decompositions" for work that must execute this beat.
       """

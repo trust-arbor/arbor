@@ -190,7 +190,7 @@ defmodule Arbor.Actions.SessionMemory do
       with :ok <- MemoryWritePolicy.check(__MODULE__, params, context) do
         if Map.get(context, :memory_write_policy) == :deny do
           # Admission proved every note alias empty. Do not call the Memory
-          # bridge: the normal private turn graph has no memory producer yet.
+          # bridge for compatibility calls carrying no writable notes.
           {:ok, %{memory_updated: false}}
         else
           index_notes(params)
@@ -207,14 +207,21 @@ defmodule Arbor.Actions.SessionMemory do
 
       turn_data = params[:turn_data] || params["turn_data"] || params["session.turn_data"] || %{}
 
-      SessionMemory.bridge(
-        Arbor.Memory,
-        :index_memory_notes,
-        [agent_id, turn_data],
-        :ok
-      )
+      case SessionMemory.bridge(
+             Arbor.Memory,
+             :index_memory_notes,
+             [agent_id, turn_data],
+             {:error, :memory_unavailable}
+           ) do
+        {:ok, %{updated: updated} = report} ->
+          {:ok, %{memory_updated: updated, memory_notes_result: report}}
 
-      {:ok, %{memory_updated: true}}
+        {:error, reason} ->
+          {:error, {:memory_update_failed, reason}}
+
+        _ ->
+          {:error, {:memory_update_failed, :invalid_result}}
+      end
     end
   end
 
@@ -333,7 +340,10 @@ defmodule Arbor.Actions.SessionMemory do
 
   defmodule UpdateWorkingMemory do
     @moduledoc """
-    Add memory notes, concerns, and curiosity to working memory.
+    Add memory notes, concerns, and curiosity in one validated working-memory save.
+
+    Returns `wm_updated` and a `working_memory_result` report. Empty/invalid items
+    are skipped; failed reads or saves return an error without claiming an update.
 
     ## Parameters
 
@@ -359,6 +369,8 @@ defmodule Arbor.Actions.SessionMemory do
         curiosity: [type: {:list, :string}, required: false, doc: "Curiosity strings"]
       ]
 
+    alias Arbor.Actions.SessionMemory
+
     @impl true
     def run(params, _context) do
       agent_id = params[:agent_id] || params["agent_id"] || params["session.agent_id"]
@@ -367,55 +379,22 @@ defmodule Arbor.Actions.SessionMemory do
         raise ArgumentError, "agent_id is required"
       end
 
-      memory_notes = extract_list(params, :memory_notes)
-      concerns = extract_list(params, :concerns)
-      curiosity = extract_list(params, :curiosity)
-      wm_mod = Arbor.Memory.WorkingMemory
+      case SessionMemory.bridge(
+             Arbor.Memory,
+             :apply_working_memory_updates,
+             [agent_id, params],
+             {:error, :memory_unavailable}
+           ) do
+        {:ok, %{updated: updated} = report} ->
+          {:ok, %{wm_updated: updated, working_memory_result: report}}
 
-      wm =
-        Arbor.Actions.SessionMemory.bridge(Arbor.Memory, :load_working_memory, [agent_id], nil)
+        {:error, reason} ->
+          {:error, {:working_memory_update_failed, reason}}
 
-      if wm && Code.ensure_loaded?(wm_mod) do
-        wm
-        |> apply_notes(wm_mod, memory_notes)
-        |> apply_items(wm_mod, :add_concern, concerns)
-        |> apply_items(wm_mod, :add_curiosity, curiosity)
-        |> then(fn updated ->
-          Arbor.Actions.SessionMemory.bridge(
-            Arbor.Memory,
-            :save_working_memory,
-            [agent_id, updated],
-            :ok
-          )
-        end)
+        _ ->
+          {:error, {:working_memory_update_failed, :invalid_result}}
       end
-
-      {:ok, %{wm_updated: true}}
     end
-
-    defp extract_list(params, key) do
-      string_key = to_string(key)
-
-      List.wrap(params[key] || params[string_key] || params["session.#{string_key}"] || [])
-    end
-
-    defp apply_notes(wm, wm_mod, notes) do
-      Enum.reduce(notes, wm, fn note, acc ->
-        case note_text(note) do
-          text when is_binary(text) and text != "" -> apply(wm_mod, :add_thought, [acc, text])
-          _ -> acc
-        end
-      end)
-    end
-
-    defp apply_items(wm, wm_mod, fun, items) do
-      Enum.reduce(items, wm, fn item, acc -> apply(wm_mod, fun, [acc, item]) end)
-    end
-
-    defp note_text(note) when is_binary(note), do: note
-    defp note_text(%{"text" => t}) when is_binary(t), do: t
-    defp note_text(%{text: t}) when is_binary(t), do: t
-    defp note_text(_), do: nil
   end
 
   defmodule BackgroundChecks do

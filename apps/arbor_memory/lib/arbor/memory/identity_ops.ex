@@ -53,6 +53,10 @@ defmodule Arbor.Memory.IdentityOps do
   @doc """
   Add a self-insight for an agent.
 
+  Self-knowledge categories return save/admission errors. Their successful result
+  acknowledges a local update and owned asynchronous persistence, not confirmed
+  backend completion.
+
   Maps category to the appropriate SelfKnowledge function:
   - `:capability` / `:skill` -> `SelfKnowledge.add_capability/4`
   - `:personality` / `:trait` -> `SelfKnowledge.add_trait/4`
@@ -79,20 +83,17 @@ defmodule Arbor.Memory.IdentityOps do
     case category do
       cat when cat in [:capability, :skill] ->
         updated = SelfKnowledge.add_capability(sk, content, confidence, evidence)
-        IdentityConsolidator.save_self_knowledge(agent_id, updated)
-        {:ok, updated}
+        save_insight(agent_id, updated)
 
       cat when cat in [:personality, :trait] ->
         trait_atom = safe_insight_atom(content)
         updated = SelfKnowledge.add_trait(sk, trait_atom, confidence, evidence)
-        IdentityConsolidator.save_self_knowledge(agent_id, updated)
-        {:ok, updated}
+        save_insight(agent_id, updated)
 
       :value ->
         value_atom = safe_insight_atom(content)
         updated = SelfKnowledge.add_value(sk, value_atom, confidence, evidence)
-        IdentityConsolidator.save_self_knowledge(agent_id, updated)
-        {:ok, updated}
+        save_insight(agent_id, updated)
 
       _other ->
         # Fall back to storing as a knowledge node
@@ -102,6 +103,13 @@ defmodule Arbor.Memory.IdentityOps do
           relevance: confidence,
           metadata: %{category: category, evidence: evidence}
         })
+    end
+  end
+
+  defp save_insight(agent_id, updated) do
+    case IdentityConsolidator.save_self_knowledge(agent_id, updated) do
+      :ok -> {:ok, updated}
+      {:error, _reason} = error -> error
     end
   end
 

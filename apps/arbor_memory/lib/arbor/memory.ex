@@ -348,49 +348,32 @@ defmodule Arbor.Memory do
   defdelegate load_working_memory(agent_id, opts \\ []), to: SessionOps
 
   @doc """
-  Index memory notes from LLM turn output into working memory as thoughts.
+  Apply model-authored notes to working memory as thoughts, not semantic facts.
 
-  Accepts a turn data map (which may contain "memory_notes" or "session.memory_notes")
-  or a list of note strings/maps directly.
+  Accepts a turn map containing `memory_notes` (including the `session.` prefix),
+  a list of note strings/maps, or nil. Reports actual applied transformations,
+  skipped invalid/empty inputs, and storage errors. Normal working-memory
+  retention still applies; `applied_count` is not a retained-row count.
   """
-  @spec index_memory_notes(String.t(), map() | list()) :: :ok
-  def index_memory_notes(agent_id, turn_data_or_notes) do
-    notes =
-      case turn_data_or_notes do
-        notes when is_list(notes) ->
-          notes
+  @spec index_memory_notes(String.t(), term()) ::
+          {:ok, Arbor.Memory.WorkingMemoryUpdates.report()}
+          | {:error, Arbor.Memory.WorkingMemoryUpdates.report()}
+  defdelegate index_memory_notes(agent_id, turn_data_or_notes),
+    to: Arbor.Memory.WorkingMemoryUpdates,
+    as: :index_notes
 
-        data when is_map(data) ->
-          Map.get(data, "session.memory_notes") ||
-            Map.get(data, "memory_notes") ||
-            Map.get(data, :memory_notes, [])
-      end
+  @doc """
+  Apply validated model notes, concerns and curiosity in one working-memory save.
 
-    case List.wrap(notes) do
-      [] ->
-        :ok
-
-      note_list ->
-        wm = load_working_memory(agent_id)
-        wm_mod = Arbor.Memory.WorkingMemory
-
-        updated_wm =
-          Enum.reduce(note_list, wm, fn note, acc ->
-            text =
-              case note do
-                s when is_binary(s) -> s
-                %{"text" => t} when is_binary(t) -> t
-                %{text: t} when is_binary(t) -> t
-                _ -> nil
-              end
-
-            if text && text != "", do: apply(wm_mod, :add_thought, [acc, text]), else: acc
-          end)
-
-        save_working_memory(agent_id, updated_wm)
-        :ok
-    end
-  end
+  Empty or wholly invalid inputs perform no read or write. A failed authoritative
+  read is never replaced with a fresh value, and save failures are returned.
+  """
+  @spec apply_working_memory_updates(String.t(), map()) ::
+          {:ok, Arbor.Memory.WorkingMemoryUpdates.report()}
+          | {:error, Arbor.Memory.WorkingMemoryUpdates.report()}
+  defdelegate apply_working_memory_updates(agent_id, updates),
+    to: Arbor.Memory.WorkingMemoryUpdates,
+    as: :apply_updates
 
   defdelegate delete_working_memory(agent_id), to: SessionOps
   defdelegate export_working_memory_provenance_snapshot(agent_id), to: SessionOps
