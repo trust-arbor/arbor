@@ -1,10 +1,10 @@
 defmodule Arbor.Agent.AgentSeedMemoryIndexingTest do
   @moduledoc """
-  Characterizes the existing AgentSeed conversation-indexing failure.
+  Direct host finalization cannot produce unowned semantic conversations.
 
-  This is not producer acceptance: DateTime normalization remains deferred until
-  host writes have qualified ownership. Observe the real facade call and return,
-  because conversation recall is deliberately excluded by M1a even when stored.
+  The previous writer attempted a write and swallowed DateTime metadata rejection.
+  Explicit unavailability now removes that producer while retaining local effects.
+  The ordinary Memory write control remains separate from host authorization.
   """
 
   use ExUnit.Case, async: false
@@ -48,7 +48,7 @@ defmodule Arbor.Agent.AgentSeedMemoryIndexingTest do
     %{agent_id: agent_id}
   end
 
-  test "producer characterization: finalize_query submits DateTime metadata and swallows its rejection",
+  test "host finalization does not attempt automatic unowned conversation indexing",
        %{agent_id: agent_id} do
     assert {:ok, %{entry_count: 0}} = Memory.index_stats(agent_id)
 
@@ -65,22 +65,19 @@ defmodule Arbor.Agent.AgentSeedMemoryIndexingTest do
     {finalized, events} =
       observe_finalize_query("My preferred editor is Vim.", "I will remember that.", state)
 
-    assert [
-             {:call, {Memory, :index, [^agent_id, content, metadata]}},
-             {:return_from, @index_mfa, {:error, {:invalid_legacy_embedding, :invalid_metadata}}}
-           ] = events
+    assert events == []
 
-    assert content == "Q: My preferred editor is Vim.\nA: I will remember that."
-    assert %{type: :conversation, timestamp: %DateTime{}} = metadata
+    assert AgentSeed.conversation_memory_status() == %{
+             status: "unavailable",
+             reason: "authenticated_session_required"
+           }
+
     assert finalized.memory_initialized
     assert finalized.responded_to_last_user_message
     assert {:ok, %{entry_count: 0}} = Memory.index_stats(agent_id)
 
-    # Same observed producer payload, with only its timestamp made JSON-clean.
-    # This proves the index can write; it does not enable the production writer
-    # or treat an absent conversation recall as proof of failed indexing.
-    control_metadata = Map.update!(metadata, :timestamp, &DateTime.to_iso8601/1)
-    assert {:ok, entry_id} = Memory.index(agent_id, content, control_metadata)
+    # A functioning store is not authority for a direct host conversation write.
+    assert {:ok, entry_id} = Memory.index(agent_id, "ordinary store control", %{type: :fact})
     assert is_binary(entry_id)
     assert {:ok, %{entry_count: 1}} = Memory.index_stats(agent_id)
   end
