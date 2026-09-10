@@ -188,7 +188,7 @@ defmodule Arbor.Orchestrator.EngineDiskNodeRecoverySupport do
   end
 
   defp boot!(source_root) do
-    check!(Repo.__adapter__() == Ecto.Adapters.SQLite3, :compiled_sqlite_adapter)
+    check!(apply(Repo, :__adapter__, []) == Ecto.Adapters.SQLite3, :compiled_sqlite_adapter)
     {:ok, _} = Application.ensure_all_started(:arbor_persistence)
     {:ok, _} = Supervisor.start_child(Arbor.Persistence.Supervisor, Repo)
     migrations = Path.join(source_root, "apps/arbor_persistence/priv/repo/migrations")

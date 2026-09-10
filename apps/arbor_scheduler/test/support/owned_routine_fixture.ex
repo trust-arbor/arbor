@@ -12,6 +12,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   alias Arbor.Security.{Crypto, IssuerRegistry}
   alias Arbor.Trust
   alias Arbor.Trust.PolicyHost
+  alias Ecto.Adapters.Postgres
 
   # This compiled fixture also accompanies the test-only parent revision,
   # where the new routine APIs are intentionally absent. Runtime apply keeps
@@ -139,6 +140,62 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     %{sql_root: root, repo_supervisor: supervisor}
   end
 
+  # This opt-in lane owns a newly created database on a disposable test server.
+  # It never opens or clears the configured development/test database.
+  def start_postgres_sql! do
+    assert System.get_env("ARBOR_OWNED_SCHEDULER_POSTGRES_TEST") == "1"
+    assert apply(Repo, :__adapter__, []) == Postgres
+    assert Process.whereis(Repo) == nil
+    assert {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
+
+    name = "arbor_owned_scheduler_#{System.unique_integer([:positive])}"
+    root = Path.join(System.tmp_dir!(), name)
+    File.mkdir_p!(root)
+    {:ok, root} = SafePath.resolve_real(root)
+
+    opts =
+      Application.fetch_env!(:arbor_persistence, Repo)
+      |> Keyword.put(:database, name)
+      |> Keyword.put(:pool, DBConnection.ConnectionPool)
+      |> Keyword.put(:pool_size, 4)
+
+    assert :ok = Postgres.storage_up(opts)
+    env(:arbor_persistence, Repo, opts)
+
+    supervisor =
+      start_supervised!(%{
+        id: :owned_routine_repo,
+        start: {Supervisor, :start_link, [[{Repo, opts}], [strategy: :one_for_one]]}
+      })
+
+    on_exit(fn ->
+      if Process.alive?(supervisor), do: Supervisor.stop(supervisor)
+      assert :ok = Postgres.storage_down(opts)
+      File.rm_rf!(root)
+    end)
+
+    for {version, file, module} <- [
+          {20_260_602_000_001, "20260602000001_add_oban_jobs.exs",
+           Arbor.Persistence.Repo.Migrations.AddObanJobs},
+          {20_260_909_000_001, "20260909000001_unique_owned_routine_requests.exs",
+           Arbor.Persistence.Repo.Migrations.UniqueOwnedRoutineRequests}
+        ] do
+      Code.require_file(Path.join(@migrations, file))
+      assert :ok = Ecto.Migrator.up(Repo, version, module, log: false)
+    end
+
+    if Process.whereis(Arbor.Orchestrator.EventRegistry) == nil,
+      do: start_supervised!({Registry, keys: :duplicate, name: Arbor.Orchestrator.EventRegistry})
+
+    %{
+      sql_root: root,
+      repo_supervisor: supervisor,
+      oban_engine: Oban.Engines.Basic,
+      oban_prefix: "public",
+      oban_testing: :disabled
+    }
+  end
+
   def start!(ctx) do
     Repo.delete_all(Oban.Job)
     workdir = Path.join(ctx.sql_root, "case_#{System.unique_integer([:positive])}")
@@ -172,7 +229,9 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
         do: env(app, key, value)
 
     engine =
-      if Map.has_key?(ctx, :oban_insert_variant), do: InsertResultEngine, else: Oban.Engines.Lite
+      if Map.has_key?(ctx, :oban_insert_variant),
+        do: InsertResultEngine,
+        else: Map.get(ctx, :oban_engine, Oban.Engines.Lite)
 
     oban =
       start_supervised!(
@@ -180,11 +239,11 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
          name: @oban,
          repo: Repo,
          engine: engine,
-         prefix: false,
+         prefix: Map.get(ctx, :oban_prefix, false),
          notifier: Oban.Notifiers.PG,
          queues: false,
          plugins: false,
-         testing: :manual}
+         testing: Map.get(ctx, :oban_testing, :manual)}
       )
 
     install_policy!(workdir)
