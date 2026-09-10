@@ -58,6 +58,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.ContentPart
   alias Arbor.LLM.Deadline
   alias Arbor.LLM.Endpoint
+  alias Arbor.LLM.Eval.FixtureSet
   alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
   alias Arbor.LLM.Message
   alias Arbor.LLM.PostProcessors
@@ -108,6 +109,22 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     contract
   end
 
+  @default_pipeline [
+    Arbor.LLM.Plugs.ResponseLimit,
+    Arbor.LLM.Plugs.EvalReplay,
+    Arbor.LLM.Plugs.Dispatch,
+    Arbor.LLM.Plugs.RateLimitBackoff,
+    Arbor.LLM.Plugs.EvalRecord,
+    Arbor.LLM.Plugs.Usage
+  ]
+
+  @doc false
+  def validate_eval_fixture_pipeline do
+    if pipeline() == @default_pipeline,
+      do: :ok,
+      else: {:error, :eval_fixture_unsupported_pipeline}
+  end
+
   @impl true
   @spec complete(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
   def complete(request, opts \\ [])
@@ -153,12 +170,21 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp do_complete(request, opts, single_attempt? \\ false) do
     {usage_context, opts} = pop_provider_usage_context(opts)
+    {fixture_name, opts} = Keyword.pop(opts, :eval_fixture_set)
 
-    with {:ok, model_spec} <- build_model_spec(request),
+    with {:ok, fixture_scope} <- resolve_fixture_scope(fixture_name, request.provider),
+         {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
-         {:ok, req_opts} <- validated_req_opts(request, opts),
+         {:ok, req_opts} <- completion_req_opts(request, opts, fixture_scope),
          {:ok, %ReqLLM.Response{} = resp} <-
-           call_req_llm(model_spec, messages, req_opts, usage_context, single_attempt?) do
+           call_req_llm(
+             model_spec,
+             messages,
+             req_opts,
+             usage_context,
+             single_attempt?,
+             fixture_scope
+           ) do
       {:ok, translate_response(resp, request)}
     end
   end
@@ -797,6 +823,27 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end
 
+  # Replay is a closed local read: provider readiness is irrelevant, and both
+  # a miss and an invalid fixture halt before Dispatch. Record retains all
+  # ordinary provider admission and transport checks.
+  defp completion_req_opts(request, opts, %{mode: :replay}) do
+    request
+    |> build_req_opts(opts)
+    |> maybe_mark_anonymous(request.provider)
+    |> validate_base_url_opt(request.provider)
+  end
+
+  defp completion_req_opts(request, opts, _scope), do: validated_req_opts(request, opts)
+
+  defp resolve_fixture_scope(nil, _provider), do: {:ok, nil}
+
+  defp resolve_fixture_scope(name, provider) do
+    with {:ok, scope} <- FixtureSet.resolve(name),
+         :ok <- validate_eval_fixture_pipeline() do
+      {:ok, Map.put(scope, :provider, provider)}
+    end
+  end
+
   defp validated_req_opts(request, opts) do
     # Strip private attribution before any provider option assembly.
     opts = Keyword.delete(opts, :provider_usage_context)
@@ -1094,8 +1141,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   # ── Dispatch ────────────────────────────────────────────────────────
 
-  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt?) do
-    run_pipeline(:complete, {model_spec, messages, opts}, usage_context, single_attempt?)
+  defp call_req_llm(model_spec, messages, opts, usage_context, single_attempt?, fixture_scope) do
+    run_pipeline_call(
+      :complete,
+      {model_spec, messages, opts},
+      usage_context,
+      single_attempt?,
+      fixture_scope
+    )
+    |> Map.fetch!(:result)
   end
 
   # Single entry point for all four dispatch operations. Each call
@@ -1104,19 +1158,26 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # no upstream plug short-circuited. The pipeline is configurable
   # so tests can swap in record-only, replay-only, or transparent
   # variants without touching the adapter.
-  defp run_pipeline(operation, request, usage_context, single_attempt? \\ false) do
-    run_pipeline_call(operation, request, usage_context, single_attempt?)
+  defp run_pipeline(operation, request, usage_context) do
+    run_pipeline_call(operation, request, usage_context)
     |> Map.fetch!(:result)
   end
 
   # Private provider_usage_context is merged into Call metadata only — never
   # into the request tuple that Dispatch forwards to ReqLLM.
   # Single-attempt policy is a direct private boolean + Call.assign, never opts.
-  defp run_pipeline_call(operation, request, usage_context, single_attempt? \\ false) do
+  defp run_pipeline_call(
+         operation,
+         request,
+         usage_context,
+         single_attempt? \\ false,
+         fixture_scope \\ nil
+       ) do
     call =
       operation
       |> Call.new(request)
       |> maybe_put_provider_usage_context(usage_context)
+      |> maybe_put_fixture_scope(fixture_scope)
 
     call =
       if single_attempt? do
@@ -1125,8 +1186,16 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         call
       end
 
-    Pipeline.through(call, pipeline())
+    # The named composition was validated before any provider work. Keep
+    # that selected sequence for this call even if operator config changes.
+    selected_pipeline = if fixture_scope, do: @default_pipeline, else: pipeline()
+    Pipeline.through(call, selected_pipeline)
   end
+
+  defp maybe_put_fixture_scope(call, nil), do: call
+
+  defp maybe_put_fixture_scope(call, scope),
+    do: Call.put_metadata(call, %{eval_fixture: scope})
 
   defp pop_provider_usage_context(opts) when is_list(opts) do
     case Keyword.pop(opts, :provider_usage_context) do
@@ -1163,23 +1232,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp pipeline do
-    Application.get_env(:arbor_llm, :pipeline, [
-      # Default production pipeline:
-      #   1. Dispatch — call req_llm and stamp the result.
-      #   2. RateLimitBackoff — on HTTP 429 / rate-limit errors, sleep
-      #      for retry-after (or exponential backoff) and re-invoke
-      #      Dispatch up to N times before bubbling up. Composes with
-      #      Dispatch.dispatch/2's fallback chain: backoff handles
-      #      "same path, wait a moment" and fallback handles "this
-      #      path is exhausted, try a different one."
-      #
-      # Tests override via app config to insert Replay, Record,
-      # StalenessWarn, etc.
-      Arbor.LLM.Plugs.ResponseLimit,
-      Arbor.LLM.Plugs.Dispatch,
-      Arbor.LLM.Plugs.RateLimitBackoff,
-      Arbor.LLM.Plugs.Usage
-    ])
+    Application.get_env(:arbor_llm, :pipeline, @default_pipeline)
   end
 
   # ── Translation: ReqLLM → Arbor ─────────────────────────────────────

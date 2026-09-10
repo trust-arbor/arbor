@@ -9,6 +9,8 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.Deadline
 
+  alias Arbor.LLM.Eval.ProviderResolver
+
   alias Arbor.LLM.Message
 
   alias Arbor.LLM.NoObjectGeneratedError
@@ -78,7 +80,14 @@ defmodule Arbor.LLM do
           {:ok, %{provider: String.t(), source: :oauth | :catalog, adapter_module: module()}}
           | {:error, term()}
   def resolve_eval_transport(provider),
-    do: Arbor.LLM.Eval.ProviderResolver.resolve_transport(provider)
+    do: ProviderResolver.resolve_transport(provider)
+
+  @doc "Resolve a supported named-fixture transport without availability probes."
+  @spec resolve_eval_fixture_transport(String.t()) ::
+          {:ok, %{provider: String.t(), source: :registry, adapter_module: module()}}
+          | {:error, term()}
+  def resolve_eval_fixture_transport(provider),
+    do: ProviderResolver.resolve_fixture_transport(provider)
 
   @doc """
   Fails closed unless an eval provider is currently ready to create a persisted run.
@@ -88,7 +97,7 @@ defmodule Arbor.LLM do
   """
   @spec preflight_eval_provider(String.t(), keyword()) :: :ok | {:error, term()}
   def preflight_eval_provider(provider, opts \\ []),
-    do: Arbor.LLM.Eval.ProviderResolver.preflight(provider, opts)
+    do: ProviderResolver.preflight(provider, opts)
 
   @doc """
   Local subscription-OAuth readiness for one exact route ID (`openai_oauth` / `xai_oauth`).

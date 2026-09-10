@@ -2,7 +2,7 @@ defmodule Arbor.LLM.Eval.ProviderResolver do
   @moduledoc false
 
   alias Arbor.Contracts.LLM.OAuthHealth
-  alias Arbor.LLM.{ExternalTerm, ProviderCatalog}
+  alias Arbor.LLM.{ExternalTerm, ProviderCatalog, ProviderRegistry}
 
   @oauth_adapter Arbor.LLM.Adapter.OAuthResponses
 
@@ -33,6 +33,25 @@ defmodule Arbor.LLM.Eval.ProviderResolver do
 
         %{source: :catalog} ->
           {:ok, Map.take(entry, [:provider, :source, :adapter_module])}
+      end
+    end
+  end
+
+  @doc false
+  @spec resolve_fixture_transport(String.t()) ::
+          {:ok, %{provider: String.t(), source: :registry, adapter_module: module()}}
+          | {:error, term()}
+  def resolve_fixture_transport(provider) do
+    with :ok <- validate_provider(provider) do
+      canonical = ProviderRegistry.normalize(provider)
+
+      # Registry cloud/local/keyless entries all use the generic ReqLLM
+      # adapter in ProviderCatalog. OAuth and ACP are separate transports;
+      # named fixtures must not consult their readiness or a cold catalog.
+      if provider not in OAuthHealth.routes() and ProviderRegistry.known?(canonical) do
+        {:ok, %{provider: canonical, source: :registry, adapter_module: Arbor.LLM.Adapter.ReqLLM}}
+      else
+        {:error, :eval_fixture_adapter_unsupported}
       end
     end
   end

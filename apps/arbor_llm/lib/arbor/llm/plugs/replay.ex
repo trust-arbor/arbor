@@ -3,7 +3,8 @@ defmodule Arbor.LLM.Plugs.Replay do
   Short-circuit plug — looks up a fixture for the call and, if one
   exists, fills in `:result` and halts the pipeline. If no fixture
   exists, passes through unchanged so downstream plugs (typically
-  `Plugs.Dispatch`) can handle the real call.
+  `Plugs.Dispatch`) can handle the real call. Explicit named eval replay
+  instead halts with `{:eval_fixture_not_found, name}` on a miss.
 
   When this plug halts, it records the fixture's path and recording
   timestamp in `call.metadata`:
@@ -42,7 +43,7 @@ defmodule Arbor.LLM.Plugs.Replay do
         |> Call.halt()
 
       :not_found ->
-        call
+        missing_fixture(call)
 
       {:error, reason} ->
         call
@@ -54,4 +55,12 @@ defmodule Arbor.LLM.Plugs.Replay do
 
   # Result already set by an earlier plug — pass through.
   def call(%Call{} = call), do: call
+
+  defp missing_fixture(%Call{metadata: %{eval_fixture: %{mode: :replay, set: name}}} = call) do
+    call
+    |> Map.put(:result, {:error, {:eval_fixture_not_found, name}})
+    |> Call.halt()
+  end
+
+  defp missing_fixture(call), do: call
 end

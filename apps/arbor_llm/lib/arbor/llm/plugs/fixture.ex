@@ -33,7 +33,8 @@ defmodule Arbor.LLM.Plugs.Fixture do
   signatures, encrypted reasoning details, and other provider internals do not.
   New v2 writes require canonical atom-keyed live usage; string-keyed usage is
   rejected because replay reconstructs the adapter-visible usage map with atom
-  keys.
+  keys. Known ReqLLM token aliases, cache/reasoning flags, and closed tool,
+  image, and billing usage schemas are preserved; unknown fields fail closed.
   Loaded complete fixtures reconstruct a minimal `%ReqLLM.Response{}` so the
   adapter's existing translation path remains the single response boundary.
 
@@ -47,6 +48,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   alias Arbor.LLM.Boundary
   alias Arbor.LLM.Deadline
   alias Arbor.LLM.OwnedStream
+  alias Arbor.LLM.Plugs.FixtureUsage
   alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.StreamEvent
 
@@ -78,6 +80,15 @@ defmodule Arbor.LLM.Plugs.Fixture do
     {"cached_tokens", :cached_tokens},
     {"cache_write_tokens", :cache_write_tokens},
     {"reasoning_tokens", :reasoning_tokens},
+    {"reasoning", :reasoning},
+    {"cached_input", :cached_input},
+    {"cache_creation", :cache_creation},
+    {"cache_creation_tokens", :cache_creation_tokens},
+    {"input_includes_cached", :input_includes_cached},
+    {"add_reasoning_to_cost", :add_reasoning_to_cost},
+    {"tool_usage", :tool_usage},
+    {"image_usage", :image_usage},
+    {"cost", :cost},
     {"prompt_tokens", :prompt_tokens},
     {"completion_tokens", :completion_tokens},
     {"cache_read_tokens", :cache_read_tokens},
@@ -86,9 +97,24 @@ defmodule Arbor.LLM.Plugs.Fixture do
     {"total", :total},
     {"input_cost", :input_cost},
     {"output_cost", :output_cost},
+    {"reasoning_cost", :reasoning_cost},
     {"total_cost", :total_cost}
   ]
   @usage_atom_keys Enum.map(@usage_fields, &elem(&1, 1))
+  @legacy_usage_fields Enum.reject(@usage_fields, fn {_wire, key} ->
+                         key in [
+                           :reasoning,
+                           :cached_input,
+                           :cache_creation,
+                           :cache_creation_tokens,
+                           :input_includes_cached,
+                           :add_reasoning_to_cost,
+                           :tool_usage,
+                           :image_usage,
+                           :cost,
+                           :reasoning_cost
+                         ]
+                       end)
   @finish_reasons %{
     "stop" => :stop,
     "length" => :length,
@@ -105,8 +131,11 @@ defmodule Arbor.LLM.Plugs.Fixture do
   @doc "Compute the on-disk path for a call's fixture."
   @spec path_for(Call.t()) :: String.t()
   def path_for(%Call{} = call) do
-    Path.join(fixtures_root(), request_hash(call) <> ".json")
+    Path.join(fixtures_root(call), request_hash(call) <> ".json")
   end
+
+  defp fixtures_root(%Call{metadata: %{eval_fixture: %{path: path}}}), do: path
+  defp fixtures_root(%Call{}), do: fixtures_root()
 
   @doc "Resolved fixtures root — operator-overridable via app config."
   @spec fixtures_root() :: String.t()
@@ -147,6 +176,38 @@ defmodule Arbor.LLM.Plugs.Fixture do
   so identical-shape calls match across sessions.
   """
   @spec request_hash(Call.t()) :: String.t()
+  def request_hash(%Call{
+        operation: :complete,
+        request: {model, messages, opts},
+        metadata: %{eval_fixture: %{provider: provider}}
+      }) do
+    # A separate namespace preserves all legacy fixture keys. Retain every
+    # generation option, including future additions; drop only known transport
+    # and receipt options. A tighter replay budget must select the same record.
+    generation_opts =
+      opts
+      |> Keyword.drop([
+        :signed_request,
+        :base_url,
+        :provider,
+        :api_key,
+        :req_http_options,
+        :receive_timeout,
+        :max_response_bytes,
+        :max_output_bytes,
+        :arbor_max_response_bytes,
+        :arbor_anonymous_auth
+      ])
+      |> Enum.sort()
+
+    canonical =
+      {:named_eval_complete_v1, provider, normalize_model_spec(model),
+       normalize_messages(messages), generation_opts}
+
+    :crypto.hash(:sha256, :erlang.term_to_binary(canonical, [:deterministic]))
+    |> Base.encode16(case: :lower)
+  end
+
   def request_hash(%Call{operation: op, request: req}) do
     canonical = canonicalize(op, req)
     payload = :erlang.term_to_binary(canonical, [:deterministic])
@@ -743,7 +804,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
             {:cont, {:ok, acc}}
 
           {:ok, value} ->
-            case bounded_usage_value(atom_key, value) do
+            case encode_usage_value(atom_key, value) do
               {:ok, value} -> {:cont, {:ok, Map.put(acc, wire_key, value)}}
               :error -> {:halt, {:error, {:complete_response_invalid, {:usage, atom_key}}}}
             end
@@ -765,6 +826,10 @@ defmodule Arbor.LLM.Plugs.Fixture do
               :cached_tokens,
               :cache_write_tokens,
               :reasoning_tokens,
+              :reasoning,
+              :cached_input,
+              :cache_creation,
+              :cache_creation_tokens,
               :prompt_tokens,
               :completion_tokens,
               :cache_read_tokens,
@@ -774,7 +839,8 @@ defmodule Arbor.LLM.Plugs.Fixture do
             ] and is_integer(value) and value >= 0 and value <= @max_usage_token,
        do: {:ok, value}
 
-  defp bounded_usage_value(key, value) when key in [:input_cost, :output_cost, :total_cost] do
+  defp bounded_usage_value(key, value)
+       when key in [:input_cost, :output_cost, :reasoning_cost, :total_cost] do
     cond do
       is_integer(value) and value >= 0 and value <= @max_usage_cost ->
         {:ok, value * 1.0}
@@ -787,7 +853,21 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
+  defp bounded_usage_value(key, value)
+       when key in [:input_includes_cached, :add_reasoning_to_cost] and is_boolean(value),
+       do: {:ok, value}
+
   defp bounded_usage_value(_key, _value), do: :error
+
+  defp encode_usage_value(key, value) when key in [:tool_usage, :image_usage, :cost],
+    do: FixtureUsage.encode(key, value)
+
+  defp encode_usage_value(key, value), do: bounded_usage_value(key, value)
+
+  defp decode_usage_value(key, value) when key in [:tool_usage, :image_usage, :cost],
+    do: FixtureUsage.decode(key, value)
+
+  defp decode_usage_value(key, value), do: bounded_usage_value(key, value)
 
   defp bounded_response_string(nil, _field), do: {:ok, ""}
 
@@ -1298,7 +1378,9 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp deserialize_usage(usage, mode) when is_map(usage) and mode in [:v2, :legacy] do
     with :ok <- validate_usage_keys(usage, mode) do
-      Enum.reduce_while(@usage_fields, %{}, fn {wire_key, atom_key}, acc ->
+      fields = if mode == :v2, do: @usage_fields, else: @legacy_usage_fields
+
+      Enum.reduce_while(fields, %{}, fn {wire_key, atom_key}, acc ->
         case Map.fetch(usage, wire_key) do
           :error ->
             {:cont, acc}
@@ -1307,7 +1389,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
             {:cont, acc}
 
           {:ok, value} ->
-            case bounded_usage_value(atom_key, value) do
+            case decode_usage_value(atom_key, value) do
               {:ok, value} -> {:cont, Map.put(acc, atom_key, value)}
               :error -> {:halt, :invalid_usage}
             end

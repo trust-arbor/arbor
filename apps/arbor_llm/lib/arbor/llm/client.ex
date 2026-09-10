@@ -1520,6 +1520,11 @@ defmodule Arbor.LLM.Client do
     end
   end
 
+  @doc "Resolve the actual adapter for a request without invoking transport."
+  @spec adapter_for(t(), Request.t()) :: {:ok, module()} | {:error, term()}
+  def adapter_for(%__MODULE__{} = client, %Request{} = request),
+    do: resolve_adapter(client, request)
+
   defp resolve_adapter(%__MODULE__{adapters: adapters}, %Request{provider: provider})
        when is_binary(provider) do
     # Fold provider-name spellings (e.g. "lmstudio" → "lm_studio") onto

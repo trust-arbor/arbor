@@ -11,6 +11,11 @@ defmodule Arbor.LLM.Eval.Subject do
   subscription-OAuth route resolver. OAuth routes must be locally ready before
   transport begins.
 
+  `:fixture_set` explicitly selects an operator-configured named fixture set
+  for a non-streaming ReqLLM run. Named runs return bounded `:usage` alongside
+  the ordinary output fields. Replay never falls through to a provider; missing
+  or invalid fixtures return errors. See `docs/arbor/NAMED_EVAL_FIXTURES.md`.
+
   `:max_tokens` is forwarded only when the caller supplies a positive signed
   64-bit protocol integer; it remains unset by default.
   All runs have a 16 MiB output ceiling. Streaming runs additionally have an
@@ -30,6 +35,9 @@ defmodule Arbor.LLM.Eval.Subject do
     ResponseBudget,
     StreamEvent
   }
+
+  alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
+  alias Arbor.LLM.Eval.FixtureSet
 
   @default_provider "lm_studio"
   @default_timeout 60_000
@@ -58,7 +66,7 @@ defmodule Arbor.LLM.Eval.Subject do
     with :ok <- validate_opts(opts),
          {:ok, {prompt, system}} <- parse_input(input),
          {:ok, config} <- parse_options(opts),
-         {:ok, transport} <- resolve_transport(config.provider, opts) do
+         {:ok, transport} <- resolve_transport(config.provider, opts, config.fixture_set) do
       request = %Request{
         provider: config.provider,
         model: config.model,
@@ -68,10 +76,12 @@ defmodule Arbor.LLM.Eval.Subject do
         provider_options: build_provider_options(config.provider)
       }
 
-      if config.stream? do
-        run_streaming(transport, request, config)
-      else
-        run_complete(transport, request, config)
+      with :ok <- validate_fixture_transport(transport, request, config.fixture_set) do
+        if config.stream? do
+          run_streaming(transport, request, config)
+        else
+          run_complete(transport, request, config)
+        end
       end
     end
   end
@@ -92,6 +102,8 @@ defmodule Arbor.LLM.Eval.Subject do
          {:ok, timeout} <-
            bounded_positive_integer(opts, :timeout, @default_timeout, @max_timeout),
          {:ok, stream?} <- boolean_option(opts, :stream, false),
+         {:ok, fixture_set} <- FixtureSet.selection(opts),
+         :ok <- validate_fixture_operation(fixture_set, stream?),
          {:ok, max_stream_events} <-
            bounded_positive_integer(
              opts,
@@ -114,6 +126,7 @@ defmodule Arbor.LLM.Eval.Subject do
          max_tokens: max_tokens,
          timeout: timeout,
          stream?: stream?,
+         fixture_set: fixture_set,
          max_stream_events: max_stream_events,
          max_output_bytes: max_output_bytes
        }}
@@ -192,16 +205,21 @@ defmodule Arbor.LLM.Eval.Subject do
     end
   end
 
-  defp resolve_transport(provider, opts) do
+  defp resolve_transport(provider, opts, fixture_set) do
     case Keyword.get(opts, :client) do
-      nil -> resolve_default_transport(provider)
+      nil -> resolve_default_transport(provider, fixture_set)
       %Client{} = client -> {:ok, {:client, client}}
       _other -> {:error, "invalid client: expected an Arbor.LLM.Client struct"}
     end
   end
 
-  defp resolve_default_transport(provider) do
-    case Arbor.LLM.resolve_eval_transport(provider) do
+  defp resolve_default_transport(provider, fixture_set) do
+    resolution =
+      if fixture_set,
+        do: Arbor.LLM.resolve_eval_fixture_transport(provider),
+        else: Arbor.LLM.resolve_eval_transport(provider)
+
+    case resolution do
       {:ok, %{adapter_module: adapter, provider: resolved_provider}} ->
         client =
           Client.new(
@@ -220,16 +238,40 @@ defmodule Arbor.LLM.Eval.Subject do
     end
   end
 
+  defp validate_fixture_operation(nil, _stream?), do: :ok
+
+  defp validate_fixture_operation(_name, false),
+    do: ReqLLMAdapter.validate_eval_fixture_pipeline()
+
+  defp validate_fixture_operation(_name, true), do: {:error, :eval_fixture_stream_unsupported}
+
+  defp validate_fixture_transport(_transport, _request, nil), do: :ok
+
+  defp validate_fixture_transport({:client, %Client{middleware: []} = client}, request, _name) do
+    case Client.adapter_for(client, request) do
+      {:ok, ReqLLMAdapter} -> :ok
+      {:ok, _adapter} -> {:error, :eval_fixture_adapter_unsupported}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_fixture_transport(_transport, _request, _name),
+    do: {:error, :eval_fixture_middleware_unsupported}
+
   defp run_complete(transport, request, config) do
     start_time = System.monotonic_time(:millisecond)
     deadline_ms = start_time + config.timeout
 
     Arbor.LLM.run_until_deadline(
       fn ->
-        case complete(transport, request,
-               receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
-               max_response_bytes: config.max_output_bytes
-             ) do
+        transport_opts =
+          [
+            receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
+            max_response_bytes: config.max_output_bytes
+          ]
+          |> maybe_put_fixture_selection(config.fixture_set)
+
+        case complete(transport, request, transport_opts) do
           {:ok, response} ->
             duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -247,7 +289,8 @@ defmodule Arbor.LLM.Eval.Subject do
                  tokens_generated: estimate_tokens(text, response),
                  model: config.model,
                  provider: config.provider
-               }}
+               }
+               |> maybe_put_fixture_usage(response, config.fixture_set)}
             end
 
           {:error, reason} ->
@@ -266,6 +309,14 @@ defmodule Arbor.LLM.Eval.Subject do
   catch
     kind, reason -> {:error, {:transport_exception, {kind, bounded_external_reason(reason)}}}
   end
+
+  defp maybe_put_fixture_selection(opts, nil), do: opts
+  defp maybe_put_fixture_selection(opts, name), do: Keyword.put(opts, :eval_fixture_set, name)
+
+  defp maybe_put_fixture_usage(output, _response, nil), do: output
+
+  defp maybe_put_fixture_usage(output, response, _name),
+    do: Map.put(output, :usage, map_value(response, :usage, %{}))
 
   defp log_empty_response(response, provider, model, duration_ms) do
     usage = map_value(response, :usage, %{})
