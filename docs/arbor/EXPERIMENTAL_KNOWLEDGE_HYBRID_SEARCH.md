@@ -111,14 +111,33 @@ measurement: ...}}`. Each entry contains the exact node `id`, durable JSON
 codec tags. Source confidence and taint are not replaced by similarity scores.
 
 Scoring is deliberately experimental. Semantic score is cosine similarity,
-clamped to [-1, 1]; keyword score is the fraction of whitespace-separated query
-terms appearing as case-insensitive substrings. The combined score is
+clamped to [-1, 1]. Keyword score is the fraction of distinct query tokens also
+present as whole tokens in the content. Both sides use Unicode lowercase and NFC
+normalization. A token begins with a Unicode letter or number and continues
+through letters, numbers and combining marks. Punctuation, including hyphens,
+underscores and apostrophes, separates tokens. Repeating a query token cannot
+increase its weight; a query with no tokens has keyword score zero. There is no
+stemming, stopword list, language-specific segmentation or name inference.
+The combined score is
 `semantic_weight * semantic + (1 - semantic_weight) * keyword`. The default
 weight is 0.7 (keyword 0.3); operator configuration may choose [0, 1]. Both the
 cosine and combined floors must pass. Results sort by combined score descending,
 then ID. Measurements record selected model/provider, dimensions, both weights,
 applied floors, corpus digest, eligible count, input bytes, elapsed milliseconds,
 and actual bounded provider usage. No defaults constitute a quality claim.
+
+The whole-token correction prevents incidental keyword boosts such as `Ann`
+matching `Anna`, `channel` or `cannot`. It changes only this explicit hybrid
+score; legacy substring recall, legacy semantic search and exact name/alias
+resolution retain their contracts. It does not establish a relevance cutoff or
+make semantic similarity an entity-identity check. The
+[2026-09-10 local model comparison](evals/ollama-embedding-comparison-2026-09-10.md)
+measured the earlier substring keyword formula; its cosine rankings remain
+applicable, but its hybrid scores describe that recorded revision. Even without
+the erroneous keyword boost, the measured false-name cosine exceeds the intended
+transaction passage's cosine. Topical-negative abstention and a useful acceptance
+selector remain open and require independent validation; lowering global cutoffs
+or relabeling every result as a candidate does not complete that work.
 
 ## Qualification and model-quality protocol
 

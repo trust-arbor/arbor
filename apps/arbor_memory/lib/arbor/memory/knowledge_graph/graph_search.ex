@@ -167,7 +167,7 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   @doc false
   def hybrid_scores(query, query_vector, node, node_vector, semantic_weight) do
     semantic = cosine_similarity(query_vector, node_vector) |> max(-1.0) |> min(1.0)
-    keyword = compute_keyword_score(query, node)
+    keyword = compute_hybrid_keyword_score(query, node)
 
     %{
       semantic: semantic,
@@ -900,6 +900,30 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
     else
       keyword_score
     end
+  end
+
+  # Explicit hybrid search measures coverage of distinct whole query tokens.
+  # Unicode letters/numbers start a token; combining marks may continue it.
+  # All punctuation (including hyphens, underscores and apostrophes) separates
+  # tokens. This is lexical matching, with no stemming or entity inference.
+  # Keep the legacy semantic/substring search score below unchanged.
+  defp compute_hybrid_keyword_score(query, node) do
+    query_tokens = hybrid_tokens(query)
+    content_tokens = hybrid_tokens(node.content)
+
+    if MapSet.size(query_tokens) == 0 do
+      0.0
+    else
+      MapSet.size(MapSet.intersection(query_tokens, content_tokens)) / MapSet.size(query_tokens)
+    end
+  end
+
+  defp hybrid_tokens(text) do
+    normalized = text |> String.downcase() |> String.normalize(:nfc)
+
+    ~r/[\p{L}\p{N}][\p{L}\p{M}\p{N}]*/u
+    |> Regex.scan(normalized)
+    |> MapSet.new(fn [token] -> token end)
   end
 
   defp compute_keyword_score(query, node) do
