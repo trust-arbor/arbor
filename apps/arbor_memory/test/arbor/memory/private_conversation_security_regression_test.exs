@@ -284,6 +284,130 @@ defmodule Arbor.Memory.PrivateConversationSecurityRegressionTest do
     assert_in_delta similarity, 1.0, 0.000001
   end
 
+  test "signed transcript source survives root restart and preserves original provenance during later indexing",
+       ctx do
+    fixture_root = persistent_root!()
+    Application.put_env(:arbor_memory, :private_memory_security, Security)
+
+    assert {:ok, source} =
+             Memory.prepare_private_conversation_source(
+               ctx.admission,
+               %{user: "Remember the violet observatory", assistant: "The observatory is violet."}
+             )
+
+    assert :ok = Security.verify_private_memory_source(source["descriptor"], source["stamp"])
+    assert StrictSeam.records() == %{}
+
+    assert {:ok, {:pending, content}} =
+             Memory.prepare_private_conversation_index(ctx.admission, source)
+
+    assert content ==
+             "User: Remember the violet observatory\nAssistant: The observatory is violet."
+
+    original_scope =
+      Map.take(source["descriptor"], ~w(agent_id human_id engagement_id session_id turn_id))
+
+    durable_source = source |> Jason.encode!() |> Jason.decode!()
+    assert :ok = Security.close_private_memory_admission(ctx.admission)
+
+    replace_root_store!(fixture_root)
+    restart_root!()
+    fresh = admission(ctx.owner, "engagement-new", "session-new")
+
+    assert {:ok, {:pending, ^content}} =
+             Memory.prepare_private_conversation_index(fresh, durable_source)
+
+    assert {:ok, id} =
+             Memory.index_private_conversation_source(fresh, durable_source, embedding())
+
+    row = StrictSeam.records()[id]
+    assert row.payload["body"]["conversation_scope"] == original_scope
+
+    assert {:ok, {:indexed, ^id}} =
+             Memory.prepare_private_conversation_index(fresh, durable_source)
+
+    assert {:ok, ^id} =
+             Memory.index_private_conversation_source(fresh, durable_source, embedding())
+
+    assert StrictSeam.records()[id] == row
+
+    assert {:ok, [%{id: ^id, content: ^content}]} =
+             Memory.recall_private_conversations(fresh, embedding())
+
+    refute_receive {:embedding_provider_called, _}
+  end
+
+  test "signed source rejects foreign pairs, copied admissions, changed content and forged scope before storage",
+       ctx do
+    persistent_root!()
+    Application.put_env(:arbor_memory, :private_memory_security, Security)
+
+    assert {:ok, source} =
+             Memory.prepare_private_conversation_source(
+               ctx.admission,
+               %{user: "Original private text", assistant: "Original answer"}
+             )
+
+    baseline_calls = StrictSeam.calls()
+    other_human = pair(ctx.owner.agent_id)
+    other_agent = pair(nil, ctx.owner.human)
+
+    for token <- [admission(other_human), admission(other_agent)] do
+      assert {:error, :private_memory_source_owner_mismatch} =
+               Memory.prepare_private_conversation_index(token, source)
+
+      assert {:error, :private_memory_source_owner_mismatch} =
+               Memory.index_private_conversation_source(token, source, embedding())
+    end
+
+    assert {:error, _} =
+             Task.async(fn ->
+               Memory.prepare_private_conversation_index(ctx.admission, source)
+             end)
+             |> Task.await()
+
+    for changed <- [
+          Map.put(source, "assistant_content", "Tampered answer"),
+          put_in(source, ["descriptor", "human_id"], other_human.human.id),
+          put_in(source, ["stamp", "signature"], Base.encode64(<<0::512>>)),
+          Map.put(source, "owner", ctx.owner.human.id)
+        ] do
+      assert {:error, _} = Memory.prepare_private_conversation_index(ctx.admission, changed)
+
+      assert {:error, _} =
+               Memory.index_private_conversation_source(ctx.admission, changed, embedding())
+    end
+
+    assert StrictSeam.calls() == baseline_calls
+    assert StrictSeam.records() == %{}
+  end
+
+  test "source presence checks verify durable row content and root stamp before claiming indexed",
+       ctx do
+    persistent_root!()
+    Application.put_env(:arbor_memory, :private_memory_security, Security)
+
+    assert {:ok, source} =
+             Memory.prepare_private_conversation_source(
+               ctx.admission,
+               %{user: "Stored source", assistant: "Stored response"}
+             )
+
+    assert {:ok, id} =
+             Memory.index_private_conversation_source(ctx.admission, source, embedding())
+
+    original = StrictSeam.records()[id]
+    forged_body = Map.put(original.payload["body"], "content", "Rehashed forged row")
+    StrictSeam.put(reencode(original, %{payload: forged_body}))
+    assert {:error, _} = Memory.prepare_private_conversation_index(ctx.admission, source)
+
+    assert {:error, _} =
+             Memory.index_private_conversation_source(ctx.admission, source, embedding())
+
+    assert {:error, _} = Memory.recall_private_conversations(ctx.admission, embedding())
+    assert map_size(StrictSeam.records()) == 1
+  end
+
   test "same-source replay preserves first sealed provenance across fresh turns; conflicting content or vectors reject",
        ctx do
     assert {:ok, id} = write(ctx.admission, "acknowledged pair", "stable-source")

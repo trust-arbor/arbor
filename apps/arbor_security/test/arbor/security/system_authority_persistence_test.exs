@@ -679,6 +679,153 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     {admission, descriptor, agent, human.identity}
   end
 
+  test "private transcript source uses a distinct persisted-root purpose and later indexing retains original scope" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record, agent, human} = private_memory_fixture!()
+    {source, record} = source_descriptors(record)
+    assert {:ok, stamp} = Security.attest_private_memory_source(admission, source)
+    assert {:ok, ^stamp} = Security.attest_private_memory_source(admission, source)
+    assert :ok = Security.verify_private_memory_source(source, stamp)
+    assert {:error, _} = Security.verify_private_memory_record(record, stamp)
+    assert :ok = Security.close_private_memory_admission(admission)
+    restart_system_authority!()
+    assert :ok = Security.verify_private_memory_source(source, stamp)
+
+    fresh = source_admission!(agent, human)
+    assert {:error, _} = Security.attest_private_memory_source(fresh, source)
+    assert {:error, _} = Security.attest_private_memory_record(fresh, record)
+
+    assert {:ok, record_stamp} =
+             Security.attest_private_memory_record_from_source(fresh, record, source, stamp)
+
+    assert :ok = Security.verify_private_memory_record(record, record_stamp)
+    assert {:error, _} = Security.verify_private_memory_source(source, record_stamp)
+    assert :ok = Security.close_private_memory_admission(fresh)
+  end
+
+  test "direct root source APIs require exact caller, content binding and current capability checks" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record, agent, _human} = private_memory_fixture!()
+    {source, record} = source_descriptors(record)
+    assert {:ok, stamp} = Security.attest_private_memory_source(admission, source)
+
+    copied = Task.async(fn -> SystemAuthority.attest_private_memory_source(admission, source) end)
+    assert {:error, _} = Task.await(copied)
+
+    assert {:error, _} =
+             SystemAuthority.attest_private_memory_source(
+               admission,
+               Map.put(source, "human_id", "human_forged")
+             )
+
+    for changed <- [
+          Map.put(record, "body_digest", String.duplicate("b", 64)),
+          Map.put(record, "engagement_id", "engagement_forged")
+        ] do
+      assert {:error, _} =
+               SystemAuthority.attest_private_memory_record_from_source(
+                 admission,
+                 changed,
+                 source,
+                 stamp
+               )
+    end
+
+    assert {:error, _} =
+             SystemAuthority.attest_private_memory_record_from_source(
+               admission,
+               record,
+               source,
+               Map.put(stamp, "signature", Base.encode64(<<0::512>>))
+             )
+
+    assert {:ok, _} =
+             SystemAuthority.attest_private_memory_record_from_source(
+               admission,
+               record,
+               source,
+               stamp
+             )
+
+    assert {:ok, caps} = Arbor.Security.CapabilityStore.list_for_principal(agent.agent_id)
+
+    for cap <- caps,
+        cap.resource_uri == "arbor://memory/write/" <> agent.agent_id do
+      assert :ok = Security.revoke(cap.id)
+    end
+
+    assert {:error, _} = SystemAuthority.attest_private_memory_source(admission, source)
+
+    assert {:error, _} =
+             SystemAuthority.attest_private_memory_record_from_source(
+               admission,
+               record,
+               source,
+               stamp
+             )
+
+    # Historical verification remains valid; it grants no current admission.
+    assert :ok = Security.verify_private_memory_source(source, stamp)
+  end
+
+  defp source_descriptors(record) do
+    alias Arbor.Contracts.Persistence.VectorRecord
+    scope = Map.take(record, ~w(agent_id human_id engagement_id session_id turn_id))
+    source_id = "session_turn:" <> scope["turn_id"]
+    {:ok, pair_hash} = VectorRecord.payload_digest([scope["agent_id"], scope["human_id"]])
+
+    {:ok, row_hash} =
+      VectorRecord.payload_digest([scope["agent_id"], scope["human_id"], source_id])
+
+    body = %{
+      "content" => "User: source text\nAssistant: source answer",
+      "metadata" => %{"type" => "conversation"},
+      "source_id" => source_id,
+      "conversation_scope" => scope
+    }
+
+    {:ok, body_digest} = VectorRecord.payload_digest(body)
+
+    source =
+      Map.merge(scope, %{
+        "source_id" => source_id,
+        "id" => "private_mem_" <> row_hash,
+        "source_namespace" => "private_conversation_" <> pair_hash,
+        "source_key" => "private_mem_" <> row_hash,
+        "body_digest" => body_digest,
+        "user_role" => "user",
+        "assistant_role" => "assistant",
+        "user_content_digest" =>
+          Base.encode16(:crypto.hash(:sha256, "source text"), case: :lower),
+        "assistant_content_digest" =>
+          Base.encode16(:crypto.hash(:sha256, "source answer"), case: :lower)
+      })
+
+    {source, Map.merge(record, Map.take(source, Map.keys(record)))}
+  end
+
+  defp source_admission!(agent, human) do
+    resource = "arbor://chat/agent/" <> agent.agent_id
+    assert {:ok, signed} = SignedRequest.sign(resource, human.agent_id, human.private_key)
+
+    assert {:ok, receipt} =
+             Security.authorize_and_issue_delivery_receipt(human.agent_id, resource, :chat,
+               signed_request: signed,
+               expected_resource: resource
+             )
+
+    assert {:ok, admission} =
+             Security.exchange_private_memory_receipt(receipt, agent.agent_id, human.agent_id, %{
+               session_id: Identifiers.generate_id("session_"),
+               turn_id: Identifiers.generate_id("turn_")
+             })
+
+    assert :ok = Security.activate_private_memory_admission(admission, "engagement_later")
+    admission
+  end
+
   defp put_legacy_split!(private_identity, public_identity) do
     assert :ok = put_legacy_private(private_identity)
     assert {:ok, _stored} = put_legacy_metadata(public_identity)

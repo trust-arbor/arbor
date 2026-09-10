@@ -13,9 +13,13 @@ case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
   "external" ->
     files = Enum.filter(System.argv(), &String.contains?(&1, ".exs"))
 
-    unless match?([_], files) and
-             String.ends_with?(hd(files), "session/self_knowledge_chain_test.exs") do
-      raise "ARBOR_TEST_MEMORY_AUTHORITY=external requires the standalone self_knowledge_chain_test.exs selector"
+    allowed = [
+      "session/self_knowledge_chain_test.exs",
+      "session/private_conversation_memory_journey_test.exs"
+    ]
+
+    unless match?([_], files) and Enum.any?(allowed, &String.ends_with?(hd(files), &1)) do
+      raise "ARBOR_TEST_MEMORY_AUTHORITY=external requires one approved standalone Memory authority selector"
     end
 
     Arbor.Memory.TestBootstrap.start!(authority: false)

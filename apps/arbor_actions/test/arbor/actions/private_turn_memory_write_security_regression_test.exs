@@ -149,7 +149,7 @@ defmodule Arbor.Actions.PrivateTurnMemoryWriteSecurityRegressionTest do
                agent_id,
                Actions.Memory.Recall,
                %{query: "private code", limit: 10},
-               Map.put(context, :memory_write_policy, :deny)
+               context
              )
 
     assert Enum.any?(results, &(&1.content == params.content))
@@ -182,6 +182,105 @@ defmodule Arbor.Actions.PrivateTurnMemoryWriteSecurityRegressionTest do
 
     assert {:ok, reflections} = Memory.reflection_history(agent_id)
     assert Enum.any?(reflections, &(&1.prompt == params.prompt))
+  end
+
+  test "security regression: private Session recall consumes precomputed data without generic query embedding",
+       ctx do
+    assert {:ok, _} = Memory.index(ctx.agent_id, "ordinary agent-wide recall control")
+    context = Map.put(ctx.context, :allow_pipeline_internal, true)
+    private = [%{id: "verified-private-row", content: "private precomputed recall"}]
+
+    params = %{
+      agent_id: ctx.agent_id,
+      query: "private query must stay local",
+      private_recalled_memories: private
+    }
+
+    {result, calls} =
+      observe_calls(
+        fn ->
+          Actions.authorize_and_execute(
+            ctx.agent_id,
+            Actions.SessionMemory.Recall,
+            params,
+            Map.put(context, :memory_write_policy, :deny)
+          )
+        end,
+        [{Memory, :recall, 2}, {Memory, :recall, 3}, {LocalEmbedding, :embed, 1}]
+      )
+
+    assert {:ok, %{recalled_memories: ^private}} = result
+    assert calls == []
+
+    assert {:ok, %{recalled_memories: ordinary}} =
+             Actions.authorize_and_execute(
+               ctx.agent_id,
+               Actions.SessionMemory.Recall,
+               params,
+               context
+             )
+
+    assert Enum.any?(ordinary, &(&1.content == "ordinary agent-wide recall control"))
+    refute Enum.any?(ordinary, &(&1.content == "private precomputed recall"))
+  end
+
+  test "security regression: missing private preflight never falls back to generic beliefs or query recall",
+       ctx do
+    context = Map.merge(ctx.context, %{allow_pipeline_internal: true, memory_write_policy: :deny})
+
+    for type <- ["query", "beliefs", "goals", "intents"] do
+      {result, calls} =
+        observe_calls(
+          fn ->
+            Actions.authorize_and_execute(
+              ctx.agent_id,
+              Actions.SessionMemory.Recall,
+              %{agent_id: ctx.agent_id, query: "private query", recall_type: type},
+              context
+            )
+          end,
+          [{Actions.SessionMemory, :bridge, 4}]
+        )
+
+      assert result == {:ok, %{recalled_memories: []}}
+      assert calls == []
+    end
+  end
+
+  test "security regression: generic semantic recall aliases cannot send private queries to an unqualified provider",
+       ctx do
+    specs =
+      for name <- ["memory.recall", "memory_recall"],
+          do: %{type: name, query: "private query sentinel", memory_write_policy: "allow"}
+
+    {results, calls} =
+      observe_calls(
+        fn ->
+          Actions.execute_batch(specs,
+            agent_id: ctx.agent_id,
+            context: Map.put(ctx.context, :memory_write_policy, :deny)
+          )
+        end,
+        [
+          {Actions.Memory.Recall, :run, 2},
+          {Memory, :authorize_recall, 4},
+          {Memory, :recall, 3},
+          {LocalEmbedding, :embed, 1}
+        ]
+      )
+
+    assert Enum.map(results, &elem(&1, 1)) ==
+             List.duplicate({:error, :private_turn_memory_query_denied}, 2)
+
+    assert calls == []
+
+    assert {:ok, _} =
+             Actions.authorize_and_execute(
+               ctx.agent_id,
+               Actions.Memory.LoadWorking,
+               %{},
+               Map.put(ctx.context, :memory_write_policy, :deny)
+             )
   end
 
   test "security regression: system facade execution cannot bypass an inherited write restriction",
