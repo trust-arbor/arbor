@@ -457,6 +457,34 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
 
       assert_received {:answer_approval, "prop_orchestration", :approve, opts}
       assert Keyword.fetch!(opts, :caller_id) == "human_dashboard"
+      assert Keyword.fetch!(opts, :session_token) == nil
+    end
+
+    @tag :fast
+    test "answer events forward only Nav identity and token, including legacy card events", %{
+      conn: conn
+    } do
+      conn =
+        init_test_session(conn, %{"agent_id" => "human_socket", "session_token" => "socket-token"})
+
+      {:ok, view, _} = live(conn, "/chat")
+
+      for {event, decision} <- [
+            {"approve-tool", :approve},
+            {"deny-tool", :deny},
+            {"approve-interaction", :approve},
+            {"reject-interaction", :deny}
+          ] do
+        render_click(view, event, %{
+          "id" => event,
+          "caller_id" => "human_forged",
+          "session_token" => "forged-token"
+        })
+
+        assert_received {:answer_approval, ^event, ^decision, opts}
+        assert Keyword.fetch!(opts, :caller_id) == "human_socket"
+        assert Keyword.fetch!(opts, :session_token) == "socket-token"
+      end
     end
 
     @tag :fast
