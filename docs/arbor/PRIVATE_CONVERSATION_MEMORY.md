@@ -76,9 +76,24 @@ the existing exact trusted-proxy endpoint list. The legacy LLM `lm_studio_base_u
 setting alone does not configure that boundary.
 The source selects the model and exact URL, checks the public on-host egress
 classification and current egress policy, then uses `Arbor.LLM.embed_batch`.
-Requests disable redirects and retries. No cloud, hash or generic Memory
-embedding fallback is allowed. Model/provider fields supplied with a vector are
-data, not evidence of local transport.
+Enabled private memory requires the exact stock ReqLLM pipeline. A custom
+Record/Replay/replacement composition returns
+`:private_memory_embedding_pipeline_unsupported` before the turn starts; the
+operator's list is never silently changed. Disabled private memory and ordinary
+LLM calls retain their existing pipeline behavior. The adapter revalidates the
+source-owned `require_live_pipeline: true` restriction at each embedding
+admission and captures the approved sequence for that call. A later incompatible
+configuration makes a query stage unavailable or leaves a committed source
+pending; it cannot replace the active call's sequence.
+
+Requests disable redirects. The existing single-attempt Call contract disables
+Req retries after provider preparation and prevents RateLimitBackoff redispatch,
+including its configured callback. A source HTTP 429 therefore leaves the
+acknowledged transcript pair pending without accepting replacement vectors or
+appending it again. A later admitted turn may recover the original pair through
+a fresh successful HTTP batch. No cloud, hash or generic Memory embedding
+fallback is allowed. Model/provider fields supplied with a vector are data,
+not evidence of local transport.
 
 The timeout defaults to 10 seconds and may be set to at most 30 seconds. Query,
 recovery and post-commit embedding share a 30-second provider budget, excluding

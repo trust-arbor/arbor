@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.Session.PrivateMemory.Embedding do
   @moduledoc false
 
+  alias Arbor.{AI, LLM, Trust}
   alias Arbor.Contracts.Persistence.VectorRecord
   alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Orchestrator.Config
@@ -25,7 +26,7 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory.Embedding do
   end
 
   def authorize(route, scope) do
-    case Arbor.Trust.authorize_egress(scope.agent_id, :on_host,
+    case Trust.authorize_egress(scope.agent_id, :on_host,
            egress_taint: TaintEnvelope.missing_fallback(),
            egress_destination: route.base_url,
            egress_provider: route.provider,
@@ -42,25 +43,32 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory.Embedding do
 
   # All arguments originate in the Session shell. No admission or owner-selector
   # field is passed to the LLM worker. The facade owns the actual deadline.
+  # Enabled route validation is diagnostic; adapter admission revalidates and
+  # captures the live single-attempt composition before provider preparation.
   def run(route, texts, remaining_ms) do
     with :ok <- validate_texts(texts),
          true <- is_integer(remaining_ms) and remaining_ms > 0,
          {:ok, base_url} <-
-           Arbor.LLM.validate_endpoint(route.base_url, {:req_llm_base, route.provider}),
+           LLM.validate_endpoint(route.base_url, {:req_llm_base, route.provider}),
          true <- base_url == route.base_url,
          true <- loopback?(route.base_url),
-         :on_host <- Arbor.AI.egress_tier_for(route.provider, route.base_url),
+         :on_host <- AI.egress_tier_for(route.provider, route.base_url),
          {:ok, result} <-
-           Arbor.LLM.embed_batch(route.provider, route.model, texts,
+           LLM.embed_batch(route.provider, route.model, texts,
              base_url: route.base_url,
              timeout_ms: min(route.timeout_ms, remaining_ms),
              max_response_bytes: @max_response_bytes,
-             req_http_options: [retry: false, redirect: false]
+             req_http_options: [retry: false, redirect: false],
+             require_live_pipeline: true
            ),
          {:ok, embeddings} <- associated_embeddings(result, route, length(texts)) do
       {:ok, embeddings}
     else
-      _ -> {:error, :private_memory_embedding_unavailable}
+      {:error, :live_embedding_pipeline_unsupported} ->
+        {:error, :private_memory_embedding_pipeline_unsupported}
+
+      _ ->
+        {:error, :private_memory_embedding_unavailable}
     end
   rescue
     _ -> {:error, :private_memory_embedding_unavailable}
@@ -77,12 +85,17 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory.Embedding do
          timeout <- Keyword.get(opts, :timeout_ms, 10_000),
          true <- is_integer(timeout) and timeout in 1..30_000,
          {:ok, base_url} <-
-           Arbor.LLM.validate_endpoint(Keyword.get(opts, :base_url), {:req_llm_base, provider}),
+           LLM.validate_endpoint(Keyword.get(opts, :base_url), {:req_llm_base, provider}),
          true <- loopback?(base_url),
-         :on_host <- Arbor.AI.egress_tier_for(provider, base_url) do
+         :on_host <- AI.egress_tier_for(provider, base_url),
+         :ok <- LLM.validate_live_embedding_pipeline() do
       {:ok, %{provider: provider, model: model, base_url: base_url, timeout_ms: timeout}}
     else
-      _ -> {:error, :private_memory_configuration_unavailable}
+      {:error, :live_embedding_pipeline_unsupported} ->
+        {:error, :private_memory_embedding_pipeline_unsupported}
+
+      _ ->
+        {:error, :private_memory_configuration_unavailable}
     end
   end
 
