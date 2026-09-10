@@ -92,6 +92,8 @@ The installed model templates are plain prompt passthrough. The prefixed profile
 is an experiment with a prospective input contract; current private/hybrid
 configuration has no prefix option. No extra title or label was supplied.
 
+The following table also uses cosine-only ranking, before cutoff filtering.
+
 | Model | Prefixed correct first result | Prefixed relevant within first 3 |
 | --- | ---: | ---: |
 | `nomic-embed-text:latest` | 18/21 | 19/21 |
