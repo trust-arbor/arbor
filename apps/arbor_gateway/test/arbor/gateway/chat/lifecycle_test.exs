@@ -11,9 +11,19 @@
 defmodule Arbor.Gateway.Chat.LifecycleTest.FakeAgent do
   # authorize_create/3 — gates on the GENERIC create cap, then "creates".
   # "human_ok" is authorized; anyone else is denied.
+  def authorize_create("human_pending", display_name, opts) do
+    send(self_pid(), {:pending_authorization, :create, display_name, opts})
+    {:ok, :pending_approval, Application.get_env(:arbor_gateway, :lifecycle_pending_id)}
+  end
+
   def authorize_create("human_ok", display_name, opts) do
     send(self_pid(), {:authorize_create, display_name, opts})
     {:ok, %{agent_id: "agent_new123", display_name: display_name}}
+  end
+
+  def authorize_create("human_legacy", display_name, opts) do
+    send(self_pid(), {:authorize_create, display_name, opts})
+    {:ok, %{agent_id: "agent_new123", display_name: display_name}, :legacy_identity}
   end
 
   def authorize_create(_principal, _display_name, _opts),
@@ -23,6 +33,11 @@ defmodule Arbor.Gateway.Chat.LifecycleTest.FakeAgent do
   # form mirrors the real Arbor.Agent facade, which takes `opts` (the gateway
   # forwards the verified `:signed_request` there); we capture opts so a test can
   # assert the threading.
+  def authorize_restore("human_pending", id, opts) do
+    send(self_pid(), {:pending_authorization, :restore, id, opts})
+    {:ok, :pending_approval, Application.get_env(:arbor_gateway, :lifecycle_pending_id)}
+  end
+
   def authorize_restore("human_ok", id, opts) do
     send(self_pid(), {:authorize_restore, id, opts})
     {:ok, %{agent_id: id}}
@@ -32,6 +47,11 @@ defmodule Arbor.Gateway.Chat.LifecycleTest.FakeAgent do
   def authorize_restore(_principal, _id, _opts), do: {:error, {:unauthorized, :no_capability}}
 
   # authorize_stop/3 — gate + stop for /stop (arity-3 mirrors the real facade).
+  def authorize_stop("human_pending", id, opts) do
+    send(self_pid(), {:pending_authorization, :stop, id, opts})
+    {:ok, :pending_approval, Application.get_env(:arbor_gateway, :lifecycle_pending_id)}
+  end
+
   def authorize_stop("human_ok", id, opts) do
     send(self_pid(), {:authorize_stop, id, opts})
     :ok
@@ -96,23 +116,28 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
   # endpoints must forward exactly this into the capability check's opts.
   @sentinel_signed_request :sentinel_verified_signed_request
 
+  @proposal_id "prop_0123456789abcdef"
+
   setup do
-    Application.put_env(:arbor_gateway, :chat_agent_facade, FakeAgent)
-    Application.put_env(:arbor_gateway, :chat_lifecycle, FakeLifecycle)
-    Application.put_env(:arbor_gateway, :chat_template_store, FakeTemplateStore)
-    Application.put_env(:arbor_gateway, :chat_llm_defaults, FakeLLMDefaults)
-    Application.put_env(:arbor_gateway, :lifecycle_test_pid, self())
+    overrides = [
+      chat_agent_facade: FakeAgent,
+      chat_lifecycle: FakeLifecycle,
+      chat_template_store: FakeTemplateStore,
+      chat_llm_defaults: FakeLLMDefaults,
+      lifecycle_test_pid: self(),
+      lifecycle_pending_id: @proposal_id
+    ]
+
+    previous =
+      Enum.map(overrides, fn {key, _} -> {key, Application.fetch_env(:arbor_gateway, key)} end)
+
+    Enum.each(overrides, fn {key, value} -> Application.put_env(:arbor_gateway, key, value) end)
 
     on_exit(fn ->
-      for k <- [
-            :chat_agent_facade,
-            :chat_lifecycle,
-            :chat_template_store,
-            :chat_llm_defaults,
-            :lifecycle_test_pid
-          ] do
-        Application.delete_env(:arbor_gateway, k)
-      end
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_gateway, key, value)
+        {key, :error} -> Application.delete_env(:arbor_gateway, key)
+      end)
     end)
 
     :ok
@@ -132,6 +157,82 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     # sentinel so tests can assert the threading end-to-end.
     |> assign(:signed_request, @sentinel_signed_request)
     |> Router.call(@opts)
+  end
+
+  describe "security regression: pending lifecycle authorization" do
+    for operation <- [:create, :start, :stop] do
+      test "public #{operation} returns approval-required without continuation" do
+        assert {:error, 403, "approval required: " <> @proposal_id} =
+                 lifecycle_request(unquote(operation), "human_pending",
+                   signed_request: @sentinel_signed_request
+                 )
+
+        assert_pending_gate(unquote(operation))
+        refute_lifecycle_continuation()
+      end
+
+      test "HTTP #{operation} returns structured 403 without continuation" do
+        {path, body} = lifecycle_http_request(unquote(operation))
+        conn = post_json(path, "human_pending", body)
+
+        assert conn.status == 403
+
+        assert Jason.decode!(conn.resp_body) == %{
+                 "error" => "approval required: " <> @proposal_id
+               }
+
+        assert_pending_gate(unquote(operation))
+        refute_lifecycle_continuation()
+      end
+    end
+
+    test "malformed or oversized proposal IDs remain bounded refusals" do
+      for proposal_id <- [nil, %{"unexpected" => "data"}, "", <<255>>, String.duplicate("x", 257)],
+          operation <- [:create, :start, :stop] do
+        Application.put_env(:arbor_gateway, :lifecycle_pending_id, proposal_id)
+
+        assert {:error, 403, "approval required"} =
+                 lifecycle_request(operation, "human_pending",
+                   signed_request: @sentinel_signed_request
+                 )
+
+        assert_pending_gate(operation)
+        refute_lifecycle_continuation()
+      end
+    end
+  end
+
+  defp lifecycle_request(:create, principal, opts),
+    do: Lifecycle.create(principal, %{"template" => "researcher"}, opts)
+
+  defp lifecycle_request(:start, principal, opts),
+    do: Lifecycle.start(principal, "agent_existing", opts)
+
+  defp lifecycle_request(:stop, principal, opts),
+    do: Lifecycle.stop(principal, "agent_running", opts)
+
+  defp lifecycle_http_request(:create), do: {"/agents", %{"template" => "researcher"}}
+  defp lifecycle_http_request(:start), do: {"/agents/agent_existing/start", %{}}
+  defp lifecycle_http_request(:stop), do: {"/agents/agent_running/stop", %{}}
+
+  defp assert_pending_gate(operation) do
+    {gate, target} =
+      case operation do
+        :create -> {:create, "Rita"}
+        :start -> {:restore, "agent_existing"}
+        :stop -> {:stop, "agent_running"}
+      end
+
+    assert_received {:pending_authorization, ^gate, ^target, opts}
+    assert opts[:signed_request] == @sentinel_signed_request
+    refute_received {:pending_authorization, _, _, _}
+  end
+
+  defp refute_lifecycle_continuation do
+    refute_received {:authorize_create, _, _}
+    refute_received {:authorize_restore, _, _}
+    refute_received {:authorize_stop, _, _}
+    refute_received {:lifecycle_start, _, _}
   end
 
   describe "Lifecycle.create/3 (unit)" do
@@ -156,6 +257,15 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
       # And then the agent was started with the principal_id too.
       assert_received {:lifecycle_start, "agent_new123", start_opts}
       assert start_opts[:principal_id] == "human_ok"
+    end
+
+    test "legacy profile and identity success still starts after affirmative authorization" do
+      assert {:ok, %{"agent_id" => "agent_new123", "running" => true}} =
+               Lifecycle.create("human_legacy", %{"template" => "researcher"})
+
+      assert_received {:authorize_create, "Rita", _}
+      assert_received {:lifecycle_start, "agent_new123", opts}
+      assert opts[:principal_id] == "human_legacy"
     end
 
     test "defaults display_name from the template character name" do
