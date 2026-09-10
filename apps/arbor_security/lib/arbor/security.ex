@@ -387,6 +387,16 @@ defmodule Arbor.Security do
     to: Arbor.Security.PrivateMemory,
     as: :attest_record_from_source
 
+  @doc "Attest a closed private goal snapshot with current receipt-derived write authority."
+  defdelegate attest_private_goal_snapshot(admission, descriptor),
+    to: Arbor.Security.PrivateMemory,
+    as: :attest_goal_snapshot
+
+  @doc "Verify private goal snapshot origin under the persisted current root; not read authority."
+  defdelegate verify_private_goal_snapshot(descriptor, stamp),
+    to: Arbor.Security.PrivateMemory,
+    as: :verify_goal_snapshot
+
   @issue_signed_mode_keys [:signed_request, :signer, :session_id, :expected_resource]
   @issue_admitted_opts [:session_token, :signed_request, :signer, :session_id, :expected_resource]
   @max_issue_human_principal_bytes 256

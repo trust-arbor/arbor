@@ -50,6 +50,11 @@ defmodule Arbor.Actions.SessionLlm do
         mode: [type: :string, required: true, doc: "heartbeat, followup, or turn"],
         goals: [type: {:list, :map}, required: false, doc: "Active goals"],
         working_memory: [type: :map, required: false, doc: "Working memory"],
+        private_goal_context: [
+          type: :string,
+          required: false,
+          doc: "Session-admitted private goal context"
+        ],
         knowledge_graph: [type: {:list, :map}, required: false, doc: "KG nodes"],
         pending_proposals: [type: {:list, :map}, required: false, doc: "Pending proposals"],
         active_intents: [type: {:list, :map}, required: false, doc: "Active intents"],
@@ -136,6 +141,11 @@ defmodule Arbor.Actions.SessionLlm do
     defp build_turn(params) do
       messages = get_list(params, :messages, "session.messages")
       recalled = get_list(params, :recalled_memories, "session.recalled_memories")
+
+      private_goals =
+        params[:private_goal_context] || params["private_goal_context"] ||
+          params["session.private_goal_context"] || ""
+
       timestamped = inject_timestamps(messages)
 
       # Re-establish the migration-lost memory-in-turn wiring (2026-07-04 memory-system audit): the
@@ -151,13 +161,19 @@ defmodule Arbor.Actions.SessionLlm do
       # (goals, WM, KG, timing — changes each query)"). It also keeps exactly one
       # system message: a leading second one is rejected outright by
       # OpenAI-compatible providers.
+      section =
+        [private_goals, format_recalled_memories(recalled)]
+        |> Enum.filter(&(is_binary(&1) and &1 != ""))
+        |> Enum.join("\n\n")
+
       final_messages =
-        case format_recalled_memories(recalled) do
+        case section do
           "" -> timestamped
           section -> prepend_to_last_user(timestamped, section)
         end
 
-      {:ok, %{user_prompt: List.last(timestamped)["content"] || "", messages: final_messages}}
+      last_user = Enum.find(Enum.reverse(final_messages), &(&1["role"] == "user")) || %{}
+      {:ok, %{user_prompt: last_user["content"] || "", messages: final_messages}}
     end
 
     # --- Context assembly ---

@@ -3,6 +3,7 @@ defmodule Arbor.Security.PrivateMemory do
 
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Security
+  alias Arbor.Security.Contracts.PrivateGoalSnapshot
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.Contracts.PrivateMemoryRecord
   alias Arbor.Security.Contracts.PrivateMemorySource
@@ -128,6 +129,23 @@ defmodule Arbor.Security.PrivateMemory do
       {:error, _} = error -> error
       _ -> {:error, :invalid_memory_source}
     end
+  end
+
+  def attest_goal_snapshot(admission, descriptor) do
+    with {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_scope(token),
+         :ok <- PrivateGoalSnapshot.admit(descriptor),
+         true <- PrivateGoalSnapshot.scope_matches?(descriptor, scope) do
+      SystemAuthority.attest_private_goal_snapshot(admission, descriptor)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_private_goal_snapshot}
+    end
+  end
+
+  def verify_goal_snapshot(descriptor, stamp) do
+    with :ok <- PrivateGoalSnapshot.admit(descriptor),
+         do: SystemAuthority.verify_private_goal_snapshot(descriptor, stamp)
   end
 
   def scalar?(value) when is_binary(value) do

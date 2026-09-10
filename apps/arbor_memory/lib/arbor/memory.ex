@@ -325,6 +325,9 @@ defmodule Arbor.Memory do
 
   defdelegate add_goal(agent_id, goal), to: GoalIntentOps
   defdelegate get_active_goals(agent_id), to: GoalIntentOps
+  defdelegate put_private_goal(admission, goal_id, attrs), to: GoalStore
+  defdelegate get_private_active_goals(admission), to: GoalStore
+  defdelegate private_goal_context(admission, model), to: GoalStore
   defdelegate get_all_goals(agent_id), to: GoalIntentOps
   defdelegate get_goal(agent_id, goal_id), to: GoalIntentOps
   defdelegate update_goal_progress(agent_id, goal_id, progress), to: GoalIntentOps

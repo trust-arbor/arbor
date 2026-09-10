@@ -514,6 +514,18 @@ defmodule Arbor.Memory.MemoryStore do
   def load_tainted_authoritative_with_status(_namespace, _key),
     do: critical_error(:invalid_request)
 
+  @doc false
+  def require_node_restart_authority do
+    case Persistence.buffered_store_authority_mode(@store_name) do
+      {:ok, {:backend, :node_restart}} -> :ok
+      _ -> critical_error(:insufficient_durability)
+    end
+  rescue
+    _ -> critical_error(:durable_unavailable)
+  catch
+    _, _ -> critical_error(:durable_unavailable)
+  end
+
   @doc """
   Return a bounded authoritative tainted inventory for one memory namespace.
 
@@ -622,6 +634,22 @@ defmodule Arbor.Memory.MemoryStore do
 
   def delete_tainted_authoritative(_namespace, _key),
     do: critical_error(:invalid_request)
+
+  @doc false
+  def compare_and_delete_tainted(namespace, key, %Record{} = expected) do
+    with :ok <- validate_critical_namespace(namespace),
+         :ok <- validate_critical_key(key),
+         :ok <- ensure_critical_authority(),
+         physical <- composite_key(namespace, key),
+         true <- current_namespaced_record?(expected, physical) do
+      acknowledged_compare_and_delete(physical, expected)
+    else
+      {:error, _} = error -> error
+      _ -> critical_error(:invalid_record)
+    end
+  end
+
+  def compare_and_delete_tainted(_, _, _), do: critical_error(:invalid_request)
 
   @doc """
   Delete a record.

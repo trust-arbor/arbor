@@ -245,6 +245,14 @@ defmodule Arbor.Orchestrator.Session.PrivateMemory do
   end
 
   @doc false
+  def goal_context(state, %TurnAuthority{turn_id: turn_id}, model) do
+    case Map.fetch(admissions(state), turn_id) do
+      {:ok, admission} -> Arbor.Memory.private_goal_context(admission, model)
+      :error -> {:error, :private_memory_admission_unavailable}
+    end
+  end
+
+  @doc false
   def close(state, %TurnAuthority{turn_id: turn_id}) do
     {admission, remaining} = Map.pop(admissions(state), turn_id)
     close_admission(admission)

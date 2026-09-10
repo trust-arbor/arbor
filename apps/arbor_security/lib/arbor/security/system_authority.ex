@@ -35,6 +35,7 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Config
+  alias Arbor.Security.Contracts.PrivateGoalSnapshot
   alias Arbor.Security.Contracts.PrivateMemoryAdmission
   alias Arbor.Security.Contracts.PrivateMemoryRecord
   alias Arbor.Security.Contracts.PrivateMemorySource
@@ -121,6 +122,14 @@ defmodule Arbor.Security.SystemAuthority do
       private_memory_call(
         {:attest_private_memory_record_from_source, admission, descriptor, source, stamp}
       )
+
+  @doc false
+  def attest_private_goal_snapshot(admission, descriptor),
+    do: private_memory_call({:attest_private_goal_snapshot, admission, descriptor})
+
+  @doc false
+  def verify_private_goal_snapshot(descriptor, stamp),
+    do: private_memory_call({:verify_private_goal_snapshot, descriptor, stamp})
 
   defp private_memory_call(request) do
     GenServer.call(__MODULE__, request, Config.private_memory_attestation_timeout_ms() + 1_000)
@@ -426,6 +435,35 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
+  def handle_call(
+        {:attest_private_goal_snapshot, admission, descriptor},
+        {owner, _} = from,
+        state
+      ) do
+    with true <- Map.get(state, :private_memory_root_ready, false),
+         true <- map_size(Map.get(state, :memory_attestations, %{})) < @max_memory_attestations,
+         {:ok, token} <- PrivateMemoryAdmission.token(admission),
+         {:ok, scope} <- DeliveryReceiptBroker.memory_attestation_scope(token, owner),
+         :ok <- PrivateGoalSnapshot.admit(descriptor),
+         true <- PrivateGoalSnapshot.scope_matches?(descriptor, scope) do
+      start_memory_attestation(state, from, token, scope, descriptor, :goal_snapshot)
+    else
+      {:error, _} = error -> {:reply, error, state}
+      _ -> {:reply, {:error, :memory_attestation_unavailable}, state}
+    end
+  end
+
+  def handle_call({:verify_private_goal_snapshot, descriptor, stamp}, _from, state) do
+    reply =
+      if Map.get(state, :private_memory_root_ready, false) do
+        PrivateGoalSnapshot.verify(descriptor, stamp, state.identity)
+      else
+        {:error, :memory_attestation_unavailable}
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_call(:public_key, _from, %{identity: identity} = state) do
     {:reply, identity.public_key, state}
@@ -624,6 +662,12 @@ defmodule Arbor.Security.SystemAuthority do
     else
       _ -> {:error, :invalid_memory_source}
     end
+  end
+
+  defp sign_memory_attestation(%{purpose: :goal_snapshot} = job, scope, identity) do
+    if PrivateGoalSnapshot.scope_matches?(job.descriptor, scope),
+      do: PrivateGoalSnapshot.sign(job.descriptor, identity),
+      else: {:error, :invalid_private_goal_snapshot}
   end
 
   defp sign_memory_attestation(%{purpose: :record, descriptor: descriptor}, scope, identity) do

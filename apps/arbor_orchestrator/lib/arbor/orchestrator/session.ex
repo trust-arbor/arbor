@@ -339,6 +339,24 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
+  Explicitly replace one private goal using a fresh authenticated delivery receipt.
+
+  The exact UserMessage supplies the claimed sender for broker comparison; it is
+  not appended to chat history. Session resolves the private engagement, activates
+  the admission, writes the closed goal attributes in its own process, and closes
+  the admission. Busy/legacy sessions refuse the update and spend the receipt.
+  No proof or caller scope is forwarded to the Engine or a model.
+
+  Attributes are exactly the string keys description, priority (0..100), progress
+  (0..1), and status (active/achieved/abandoned). An acknowledged success is a
+  backend CAS receipt; :outcome_unknown does not mean the operation rolled back.
+  The call inherits the configured backend's execution bound.
+  """
+  def update_private_goal(session, request, receipt, goal_id, attrs) do
+    GenServer.call(session, {:update_private_goal, request, receipt, goal_id, attrs}, :infinity)
+  end
+
+  @doc """
   Send a user message authenticated by a one-use Security delivery receipt.
 
   Accepts only an exact `%UserMessage{}` (native key set) and opaque
@@ -772,6 +790,11 @@ defmodule Arbor.Orchestrator.Session do
     :exit, _ ->
       best_effort_discard_receipt(receipt)
       {:reply, {:error, :unauthenticated}, state}
+  end
+
+  def handle_call({:update_private_goal, message, receipt, goal_id, attrs}, _from, state) do
+    reply = update_authenticated_private_goal(message, receipt, goal_id, attrs, state)
+    {:reply, reply, state}
   end
 
   # STEERING: one process-local callback is bound to the exact live turn and
@@ -2542,12 +2565,14 @@ defmodule Arbor.Orchestrator.Session do
       pre_values
       |> maybe_preprocess(user_message.content)
       |> put_private_recall(turn_authority, state.private_memory_turn)
+      |> put_private_goal_context(turn_authority, state)
 
     initial_taint =
       pre_values
       |> TurnEgress.derive_initial_taint(final_values)
       |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
       |> put_private_recall_taint(turn_authority)
+      |> put_private_goal_taint(turn_authority)
 
     turn_taint_evidence =
       PersistenceCore.build_partial_turn_evidence(
@@ -2681,6 +2706,70 @@ defmodule Arbor.Orchestrator.Session do
 
   defp map_prepare_error(reason) when is_atom(reason), do: :turn_preparation_refused
   defp map_prepare_error(_), do: :turn_preparation_refused
+
+  defp put_private_goal_context(values, nil, _state), do: values
+
+  defp put_private_goal_context(values, %TurnAuthority{} = authority, state) do
+    # Agent-global stores do not prove ownership by the current human. The
+    # private projection is installed after preprocessing, from live admission.
+    omitted =
+      ~w(session.goals session.working_memory session.self_knowledge session.active_intents
+      session.knowledge_graph session.pending_proposals session.recent_thinking
+      session.recent_percepts session.background_suggestions session.recalled_memories)
+
+    section =
+      case PrivateMemory.goal_context(state, authority, values["session.llm_model"] || "unknown") do
+        {:ok, text} when is_binary(text) -> text
+        _ -> ""
+      end
+
+    values
+    |> Map.drop(omitted)
+    |> Map.put("session.private_goal_context", section)
+  end
+
+  defp put_private_goal_taint(taint, nil), do: taint
+
+  defp put_private_goal_taint(taint, %TurnAuthority{}),
+    do:
+      Map.put(
+        taint,
+        "session.private_goal_context",
+        TaintEnvelope.missing_fallback()
+      )
+
+  defp update_authenticated_private_goal(message, receipt, goal_id, attrs, state) do
+    with {:ok, user_message} <- canonicalize_authenticated_user_message(message),
+         :ok <- reject_authenticated_engagement_route(user_message),
+         {:ok, valid_receipt} <- DeliveryReceipt.canonicalize(receipt),
+         {:ok, authority, admission} <- PrivateMemory.exchange(valid_receipt, user_message, state) do
+      try do
+        with :ok <- private_goal_update_available(state),
+             {:ok, bound_message} <- bind_authenticated_engagement(user_message, authority, state),
+             :ok <-
+               Arbor.Security.activate_private_memory_admission(
+                 admission,
+                 bound_message.engagement_id
+               ) do
+          Arbor.Memory.put_private_goal(admission, goal_id, attrs)
+        end
+      after
+        PrivateMemory.close_admission(admission)
+      end
+    else
+      _ ->
+        best_effort_discard_receipt(receipt)
+        {:error, :unauthenticated}
+    end
+  rescue
+    _ -> {:error, :private_goal_update_unavailable}
+  catch
+    _, _ -> {:error, :private_goal_update_unavailable}
+  end
+
+  defp private_goal_update_available(%{execution_mode: :legacy}), do: {:error, :legacy_mode}
+  defp private_goal_update_available(%{turn_in_flight: true}), do: {:error, :busy}
+  defp private_goal_update_available(_state), do: :ok
 
   # Receipt-authenticated ingress: consume one-use receipt, bind principal,
   # resolve the principal's source-owned engagement, and allocate TurnAuthority.

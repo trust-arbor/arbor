@@ -26,7 +26,7 @@ defmodule Arbor.Memory.GoalStore do
   alias Arbor.Contracts.Memory.Goal
   alias Arbor.Contracts.Persistence.Record
   alias Arbor.Contracts.Security.{Taint, TaintedValue, TaintEnvelope}
-  alias Arbor.Memory.{MemoryStore, Proposal, Provenance, Signals}
+  alias Arbor.Memory.{MemoryStore, PrivateGoals, Proposal, Provenance, Signals}
   alias Arbor.Memory.MutationAdmission
   alias Arbor.Memory.MutationAdmission.{Lease, OwnerRoots}
   alias Arbor.Memory.Proposal.Core, as: ProposalCore
@@ -35,6 +35,16 @@ defmodule Arbor.Memory.GoalStore do
 
   @ets_table :arbor_memory_goals
   @namespace "goals"
+
+  @doc "Write a receipt-owned private goal without populating the agent-global goal projection."
+  defdelegate put_private_goal(admission, goal_id, attrs), to: PrivateGoals, as: :put
+
+  @doc "Read current active goals for a live receipt-owned agent/human pair."
+  defdelegate get_private_active_goals(admission), to: PrivateGoals, as: :active
+
+  @doc "Render admitted private goals within the existing model-relative goal token budget."
+  defdelegate private_goal_context(admission, model), to: PrivateGoals, as: :context
+
   @goal_fields [
     :id,
     :description,
@@ -2772,7 +2782,9 @@ defmodule Arbor.Memory.GoalStore do
   defp delete_agent_content_after_disarm(agent_id, state) do
     with {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records) do
+         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records),
+         {:ok, private_records} <- PrivateGoals.inventory(agent_id),
+         :ok <- PrivateGoals.delete_inventory(private_records) do
       case delete_goal_content_records(agent_id, goal_ids, state) do
         {:ok, state} ->
           finalize_goal_content_clear(agent_id, state)
@@ -2806,8 +2818,9 @@ defmodule Arbor.Memory.GoalStore do
     with true <- valid_identifier?(agent_id),
          {:ok, records} <- load_authoritative_goal_records(agent_id),
          :ok <- bounded_authoritative_records(records),
-         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records) do
-      durable_absent? = goal_ids == []
+         {:ok, goal_ids} <- validate_authoritative_goal_inventory(agent_id, records),
+         {:ok, private_records} <- PrivateGoals.inventory(agent_id) do
+      durable_absent? = goal_ids == [] and private_records == []
       projected_absent? = MapSet.size(projected_ids_for_agent(state, agent_id)) == 0
       deferred_absent? = not convergence_pending?(state, agent_id)
 
