@@ -120,6 +120,56 @@ No deployment has been selected, signed, enrolled, migrated or enabled by this
 packet. PostgreSQL DDL follows the existing adapter contracts but the supplied
 isolated journey targets SQLite.
 
+### Persistent isolated one-shot configuration
+
+The dev/prod runtime loader accepts these two explicit settings after its existing
+dotenv loading:
+
+```dotenv
+ARBOR_OWNED_DIGEST_ENABLED=true
+ARBOR_OWNED_DIGEST_ROOT=/absolute/operator-owned/dedicated-root
+```
+
+Prepare the dedicated root separately. It and every ancestor must already be
+canonical, nonsymlink directories; the path is limited to 2–2,048 ASCII bytes
+using the workdir alphabet above. These children must already exist:
+
+- Directories: `pipelines`, `logs`, `reports/upstream-deps`,
+  `reports/upstream-deps-summary`, `reports/morning-digest`.
+- Regular nonsymlink files: `pipelines/morning_digest.dot` and
+  `pipelines/morning_digest.caps.json`.
+
+The bridge selects that DOT file as `morning_digest_pipeline`, the `logs` child
+as `routine_logs_root`, and registers the `pipelines` child under the reserved
+`pipeline_roots` key `laptop_digest_verification`. It adds only the URI-prefix
+ceiling `arbor://fs/write` followed by the exact absolute
+`reports/morning-digest` path with mode `:allow`. Existing root entries and ceiling
+overrides remain intact; conflicting values for these exact reserved entries
+refuse startup. Global write ceilings and bundled cron configuration are unchanged.
+Use a separate copy of the graph and manifest: signing the bundled manifest in
+place can make the existing bundled cron executable.
+
+The v2 signed manifest must name the dedicated root as its workdir. The manifest
+remains the workdir authority; there is no separate runtime workdir override.
+Configuration checks filesystem shape only, without reading, signing or trusting
+the manifest contents. The existing catalog, issuer, owner and effect gates still
+apply. No files, grants, enrollment or jobs are created by this bridge. The
+filesystem checks describe startup observations, not descriptor-bound protection
+against later concurrent directory replacement.
+
+Prepare a fresh, absent current-UTC-date output and enqueue one explicitly signed
+job through the public protocol above. This setting introduces no cadence.
+Preserve a committed job ID and inspect it after an ambiguous result; do not
+blindly repeat a potentially completed write. A standing schedule and permission
+to overwrite previously produced reports need separate review.
+
+The Trust policy owner freezes ceilings for the BEAM lifetime, so activating or
+removing this ceiling requires a managed BEAM restart. An unset flag or exact
+`false` emits no settings and preserves programmatic configuration; it does not
+cancel jobs, revoke grants or undo a ceiling supplied elsewhere. Tests ignore this
+environment surface entirely, including malformed values loaded by dotenv. Invalid
+opt-in values refuse configuration without echoing their contents.
+
 ## Qualification boundary
 
 `owned_routine_security_regression_test.exs` uses a private SQLite database with

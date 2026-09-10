@@ -938,3 +938,105 @@ brave_key = System.get_env("BRAVE_SEARCH_API_KEY") || System.get_env("BRAVE_API_
 if brave_key do
   config :jido_browser, brave_api_key: brave_key
 end
+
+# ============================================================================
+# Isolated owner-bound morning digest (explicit operator opt-in, dev/prod only)
+# ============================================================================
+# This selects existing consumers only. The signed manifest owns the workdir;
+# issuer enrollment, owner grants, signed enqueue and cancellation stay separate.
+# Unset/false emits no settings and does not cancel jobs or revoke prior policy.
+if config_env() != :test do
+  case System.get_env("ARBOR_OWNED_DIGEST_ENABLED") do
+    disabled when disabled in [nil, "false"] ->
+      :ok
+
+    "true" ->
+      digest_root = System.get_env("ARBOR_OWNED_DIGEST_ROOT")
+
+      unless is_binary(digest_root) and byte_size(digest_root) in 2..2_048 and
+               Regex.match?(~r/\A\/[A-Za-z0-9_.\/-]+\z/, digest_root) and
+               Path.expand(digest_root) == digest_root do
+        raise "ARBOR_OWNED_DIGEST_ROOT must be a bounded canonical absolute ASCII directory path"
+      end
+
+      # lstat every component: checking only the leaf misses symlink ancestors.
+      digest_directory? = fn directory ->
+        directory
+        |> Path.split()
+        |> Enum.reduce_while("", fn segment, parent ->
+          current = if parent == "", do: segment, else: Path.join(parent, segment)
+
+          case File.lstat(current) do
+            {:ok, %{type: :directory}} -> {:cont, current}
+            _ -> {:halt, false}
+          end
+        end)
+        |> is_binary()
+      end
+
+      digest_directories = [
+        digest_root,
+        Path.join(digest_root, "pipelines"),
+        Path.join(digest_root, "logs"),
+        Path.join(digest_root, "reports/upstream-deps"),
+        Path.join(digest_root, "reports/upstream-deps-summary"),
+        Path.join(digest_root, "reports/morning-digest")
+      ]
+
+      unless Enum.all?(digest_directories, digest_directory?) do
+        raise "ARBOR_OWNED_DIGEST_ROOT requires existing directories without symlink components"
+      end
+
+      digest_pipeline_root = Path.join(digest_root, "pipelines")
+      digest_pipeline = Path.join(digest_pipeline_root, "morning_digest.dot")
+      digest_manifest = Path.join(digest_pipeline_root, "morning_digest.caps.json")
+
+      unless Enum.all?([digest_pipeline, digest_manifest], fn file ->
+               match?({:ok, %{type: :regular}}, File.lstat(file))
+             end) do
+        raise "ARBOR_OWNED_DIGEST_ROOT requires regular nonsymlink graph and manifest files"
+      end
+
+      # Config merges maps by replacement. Extend the already-evaluated reader
+      # map, falling back to application config when this reader has no setting.
+      digest_current_config = fn app, key ->
+        case Keyword.fetch(read_config(app) || [], key) do
+          {:ok, value} -> value
+          :error -> Application.get_env(app, key, %{})
+        end
+      end
+
+      digest_extend_map = fn existing, key, value ->
+        unless is_map(existing) and not is_struct(existing) and
+                 (not Map.has_key?(existing, key) or Map.get(existing, key) == value) do
+          raise "ARBOR_OWNED_DIGEST_ENABLED conflicts with existing roots or ceiling configuration"
+        end
+
+        Map.put(existing, key, value)
+      end
+
+      digest_roots =
+        digest_extend_map.(
+          digest_current_config.(:arbor_scheduler, :pipeline_roots),
+          "laptop_digest_verification",
+          digest_pipeline_root
+        )
+
+      digest_ceilings =
+        digest_extend_map.(
+          digest_current_config.(:arbor_trust, :security_ceilings),
+          "arbor://fs/write" <> Path.join(digest_root, "reports/morning-digest"),
+          :allow
+        )
+
+      config :arbor_scheduler,
+        morning_digest_pipeline: digest_pipeline,
+        routine_logs_root: Path.join(digest_root, "logs"),
+        pipeline_roots: digest_roots
+
+      config :arbor_trust, :security_ceilings, digest_ceilings
+
+    _ ->
+      raise "ARBOR_OWNED_DIGEST_ENABLED must be true or false"
+  end
+end
