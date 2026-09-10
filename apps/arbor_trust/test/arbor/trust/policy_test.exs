@@ -302,21 +302,21 @@ defmodule Arbor.Trust.PolicyTest do
   describe "earned autonomy: accept_graduation/2 + revoke_graduation/2 (TRUST-6)" do
     setup :start_infrastructure
 
-    test "accepting a graduation records a profile rule -> effective_mode :auto",
+    test "security regression: accepting without current human proof leaves the profile unchanged",
          %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       uri = "arbor://memory/read/notes"
 
-      # A human accepts the suggestion -> persisted profile rule.
-      assert {:ok, _profile} = Arbor.Trust.accept_graduation(agent_id, uri)
-      assert Policy.effective_mode(agent_id, uri) == :auto
+      assert {:error, :human_acceptance_required} = Arbor.Trust.accept_graduation(agent_id, uri)
+      assert {:ok, profile} = Arbor.Trust.get_trust_profile(agent_id)
+      refute Map.has_key?(profile.rules, uri)
     end
 
     test "revoking removes the graduation rule from the profile", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
       uri = "arbor://config/set/risky"
 
-      {:ok, _} = Arbor.Trust.accept_graduation(agent_id, uri)
+      {:ok, _} = Arbor.Trust.set_rule(agent_id, uri, :auto)
       {:ok, profile} = Arbor.Trust.get_trust_profile(agent_id)
       assert Map.get(profile.rules, uri) == :auto
 
@@ -325,12 +325,13 @@ defmodule Arbor.Trust.PolicyTest do
       refute Map.has_key?(profile.rules, uri)
     end
 
-    test "the security ceiling caps an accepted graduation — shell stays gated",
+    test "security regression: legacy acceptance cannot add a rule for a never-graduate resource",
          %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
-      # Even if a human accepts a graduation for an always-locked URI, the
-      # ceiling wins (most_restrictive). Earned autonomy can NEVER unlock shell.
-      assert {:ok, _} = Arbor.Trust.accept_graduation(agent_id, "arbor://shell/exec/ls")
+      # The legacy acceptance path cannot manufacture a human decision or rule.
+      assert {:error, :human_acceptance_required} =
+               Arbor.Trust.accept_graduation(agent_id, "arbor://shell/exec/ls")
+
       assert Policy.effective_mode(agent_id, "arbor://shell/exec/ls") in [:ask, :block]
     end
   end

@@ -39,7 +39,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
     signer = fn _resource -> {:ok, %{signature: "test-fresh-fs-read"}} end
 
     {:ok, _profile} = Arbor.Trust.create_trust_profile(principal)
-    {:ok, _profile} = Arbor.Trust.accept_graduation(principal, "arbor://fs/read")
+    {:ok, _profile} = Arbor.Trust.set_rule(principal, "arbor://fs/read", :auto)
 
     granted = []
 

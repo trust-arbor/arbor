@@ -88,28 +88,29 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "graduation" do
-    test "suggests graduation after reaching threshold (code/write: 3)", %{agent_id: agent_id} do
+    test "security regression: unverified approvals cannot satisfy the human threshold", %{
+      agent_id: agent_id
+    } do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
       assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
-      # Third approval triggers graduation suggestion
-      assert {:graduation_suggested, "arbor://code/write"} =
+
+      assert :ok =
                ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "returns :ok (not suggestion) on subsequent approvals after graduation", %{
+    test "unverified approvals remain advisory above the threshold", %{
       agent_id: agent_id
     } do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      {:graduation_suggested, _} = ConfirmationTracker.record_approval(agent_id, uri)
+      :ok = ConfirmationTracker.record_approval(agent_id, uri)
 
-      # Already graduated — returns :ok
       assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
     end
 
@@ -138,21 +139,21 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
     end
 
     @tag spec: "TRUST-7"
-    test "rejection reverts existing graduation", %{agent_id: agent_id} do
+    test "rejection leaves unverified approvals unqualified", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
-      # Graduate first
+      # Advisory confirmations carry no verified human proof.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
 
       # Rejection reverts graduation
       ConfirmationTracker.record_rejection(agent_id, uri)
       refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "graduated_at timestamp is set on graduation", %{agent_id: agent_id} do
+    test "unverified approvals never set a graduation timestamp", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       ConfirmationTracker.record_approval(agent_id, uri)
@@ -160,7 +161,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       ConfirmationTracker.record_approval(agent_id, uri)
 
       status = ConfirmationTracker.status(agent_id, "arbor://code/write")
-      assert %DateTime{} = status.graduated_at
+      assert is_nil(status.graduated_at)
     end
   end
 
@@ -213,7 +214,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.status(agent_id, "arbor://code/write").locked
     end
 
-    test "unlocking allows graduation again", %{agent_id: agent_id} do
+    test "unlocking does not manufacture human evidence", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       ConfirmationTracker.lock_gated(agent_id, "arbor://code/write")
@@ -223,17 +224,17 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "locking reverts existing graduation", %{agent_id: agent_id} do
+    test "locking keeps unverified approvals unqualified", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
-      # Graduate first
+      # Advisory confirmations carry no verified human proof.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
 
       # Lock reverts graduation
       ConfirmationTracker.lock_gated(agent_id, "arbor://code/write")
@@ -246,14 +247,14 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "revert_to_gated/2" do
-    test "reverts graduated capability back to gated", %{agent_id: agent_id} do
+    test "reverting clears advisory progress without qualifying it", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
-      # Graduate
+      # Accumulate advisory confirmations.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
 
       # Revert
       ConfirmationTracker.revert_to_gated(agent_id, "arbor://code/write")
@@ -395,7 +396,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "per-prefix graduation thresholds" do
-    test "network-egress action profiles require 5 approvals", %{agent_id: agent_id} do
+    test "network-egress threshold does not qualify unverified answers", %{agent_id: agent_id} do
       uri = "arbor://action/github/pr/#{agent_id}"
 
       for _ <- 1..4 do
@@ -404,13 +405,13 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
 
       refute ConfirmationTracker.graduated?(agent_id, uri)
 
-      assert {:graduation_suggested, "arbor://action/github/pr"} =
+      assert :ok =
                ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "configured non-profiled prefix can require 10 approvals", %{agent_id: agent_id} do
+    test "configured non-profiled threshold remains advisory", %{agent_id: agent_id} do
       Application.put_env(:arbor_trust, :graduation_thresholds, %{"arbor://config" => 10})
 
       uri = "arbor://config/write/self/setting"
@@ -421,10 +422,10 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
 
       refute ConfirmationTracker.graduated?(agent_id, uri)
 
-      assert {:graduation_suggested, "arbor://config"} =
+      assert :ok =
                ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert ConfirmationTracker.graduated?(agent_id, uri)
+      refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
     test "critical profiles never graduate", %{agent_id: agent_id} do
@@ -444,45 +445,45 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "graduation_suggested signal" do
-    test "emits graduation_suggested on first graduation", %{agent_id: agent_id} do
+    test "unverified approvals do not return a graduation suggestion", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
-      # Record enough to graduate
+      # Cross the numeric threshold without verified human proof.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
       result = ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert {:graduation_suggested, "arbor://code/write"} = result
+      assert :ok = result
     end
 
-    test "does not emit again after already graduated", %{agent_id: agent_id} do
+    test "further unverified approvals stay advisory", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      {:graduation_suggested, _} = ConfirmationTracker.record_approval(agent_id, uri)
+      :ok = ConfirmationTracker.record_approval(agent_id, uri)
 
       # Subsequent approvals don't re-suggest
       assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
       assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
     end
 
-    test "re-suggests after rejection and re-graduation", %{agent_id: agent_id} do
+    test "unverified approvals after rejection still cannot suggest", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
-      # Graduate
+      # Accumulate advisory confirmations.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
-      {:graduation_suggested, _} = ConfirmationTracker.record_approval(agent_id, uri)
+      :ok = ConfirmationTracker.record_approval(agent_id, uri)
 
       # Reject (reverts graduation)
       ConfirmationTracker.record_rejection(agent_id, uri)
 
-      # Re-graduate — should suggest again
+      # Further advisory confirmations remain unqualified.
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
 
-      assert {:graduation_suggested, "arbor://code/write"} =
+      assert :ok =
                ConfirmationTracker.record_approval(agent_id, uri)
     end
   end
@@ -503,7 +504,10 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       unknown_approvals: 0,
       unknown_rejections: 0,
       verified_human_approvals: 0,
-      human_streak: 0
+      human_streak: 0,
+      revision: 0,
+      suggestion_id: nil,
+      suggestion_profile_updated_at: nil
     }
   end
 end
