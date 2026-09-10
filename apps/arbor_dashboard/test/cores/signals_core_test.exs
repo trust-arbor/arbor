@@ -5,6 +5,20 @@ defmodule Arbor.Dashboard.Cores.SignalsCoreTest do
 
   @moduletag :fast
 
+  test "attention retains twenty distinct message failures, newest first" do
+    failures =
+      for id <- 1..25, do: %{id: "failure_#{id}", category: :comms, type: :message_failed}
+
+    recent = Enum.reduce(failures, [], &SignalsCore.track_attention(&2, &1))
+    assert length(recent) == 20
+    assert hd(recent).id == "failure_25"
+    assert List.last(recent).id == "failure_6"
+    assert SignalsCore.track_attention(recent, hd(recent)) == recent
+
+    assert SignalsCore.track_attention(recent, %{category: :comms, type: :message_sent}) ==
+             recent
+  end
+
   defp sample_signal do
     %{
       id: "sig_001",
