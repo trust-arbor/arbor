@@ -86,6 +86,7 @@ defmodule Arbor.Agent.Executor.ParkTest do
     {:ok, _pid} = Executor.start(agent_id, approval_timeout_ms: 500)
     intent = act_intent("int_park_grant")
     assert :ok = Executor.execute(agent_id, intent)
+    assert_park_admitted(agent_id)
 
     assert_receive {:awaited, "irq_park_grant", ^agent_id}, 500
 
@@ -107,6 +108,7 @@ defmodule Arbor.Agent.Executor.ParkTest do
     {:ok, _pid} = Executor.start(agent_id, approval_timeout_ms: 500)
     intent = act_intent("int_park_deny")
     assert :ok = Executor.execute(agent_id, intent)
+    assert_park_admitted(agent_id)
 
     assert_receive {:awaited, "irq_park_deny", ^agent_id}, 500
 
@@ -131,6 +133,7 @@ defmodule Arbor.Agent.Executor.ParkTest do
     {:ok, _pid} = Executor.start(agent_id, approval_timeout_ms: 500)
     intent = act_intent("int_park_again")
     assert :ok = Executor.execute(agent_id, intent)
+    assert_park_admitted(agent_id)
 
     assert_receive {:awaited, "irq_park_again", ^agent_id}, 500
 
@@ -230,6 +233,12 @@ defmodule Arbor.Agent.Executor.ParkTest do
              })
 
     assert Arbor.Trust.confirmation_status(agent_id, resource) == evidence
+  end
+
+  defp assert_park_admitted(agent_id) do
+    # Same-sender ordering includes action discovery before timing the parked wait.
+    assert {:ok, status} = Executor.status(agent_id)
+    assert status.stats.intents_parked == 1
   end
 
   defp act_intent(id) do
