@@ -2,8 +2,8 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
   @moduledoc """
   Runs the production turn's blocked-input tail and an explicit legacy graph.
 
-  Classification is a deterministic dependency fixture. Memory update and the
-  retained checkpoint syscall use the real Actions facade. These tests prove
+  Classification is a deterministic dependency fixture. The retained checkpoint
+  syscall uses the real Actions facade. These tests prove
   graph retirement and truthful results, not Session restart durability.
   """
   use ExUnit.Case, async: true
@@ -69,10 +69,10 @@ defmodule Arbor.Orchestrator.Pipelines.SessionCheckpointRetirementTest do
     assert {:ok, result} = Orchestrator.run(File.read!(@turn_path), opts)
     assert result.final_outcome.status == :success
     assert "format_error" in result.completed_nodes
-    assert "update_memory" in result.completed_nodes
+    refute "update_memory" in result.completed_nodes
     assert List.last(result.completed_nodes) == "done"
     refute "checkpoint" in result.completed_nodes
-    assert result.context["session.memory_updated"] == false
+    refute Map.has_key?(result.context, "session.memory_updated")
     refute Map.has_key?(result.context, "session.last_checkpoint")
     assert result.context["session.response"] =~ "test classification"
   end

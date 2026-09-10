@@ -6,7 +6,24 @@
 # explicitly with `--include distributed`.
 # Memory stores + durable knowledge-graph authority — cross_session_memory_test
 # calls Arbor.Memory.init_for_agent/1, which fails closed without the authority.
-Arbor.Memory.TestBootstrap.start!()
+case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
+  nil ->
+    Arbor.Memory.TestBootstrap.start!()
+
+  "external" ->
+    files = Enum.filter(System.argv(), &String.contains?(&1, ".exs"))
+
+    unless match?([_], files) and
+             String.ends_with?(hd(files), "session/self_knowledge_chain_test.exs") do
+      raise "ARBOR_TEST_MEMORY_AUTHORITY=external requires the standalone self_knowledge_chain_test.exs selector"
+    end
+
+    Arbor.Memory.TestBootstrap.start!(authority: false)
+
+  other ->
+    raise "invalid ARBOR_TEST_MEMORY_AUTHORITY: #{inspect(other)}"
+end
+
 :ok = Arbor.Security.TestBootstrap.start!()
 
 ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio, :distributed])

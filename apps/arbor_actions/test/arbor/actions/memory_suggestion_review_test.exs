@@ -155,6 +155,36 @@ defmodule Arbor.Actions.MemorySuggestionReviewTest do
     assert snapshot(agent_id) == before
   end
 
+  test "public tool discovery and name resolution expose the queued suggestion reader" do
+    assert ReviewSuggestions in Actions.exposed_actions()
+    assert Enum.any?(Actions.all_tools(), &(&1[:name] == "memory_review_suggestions"))
+
+    for name <- ["memory_review_suggestions", "memory_review.review_suggestions"] do
+      assert {:ok, ReviewSuggestions} = Actions.name_to_module(name)
+    end
+  end
+
+  test "security regression: read-only authority cannot approve a queued suggestion" do
+    agent_id = init_agent("reader")
+    assert {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://memory/read")
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    context = %{agent_id: agent_id}
+    proposal = propose(agent_id, :insight, "read-only proposal fixture")
+    before = snapshot(agent_id)
+
+    assert {:ok, %{suggestions: [%{id: id}]}} =
+             dispatch(agent_id, ReviewSuggestions, %{}, context)
+
+    assert id == proposal.id
+
+    for action <- [AcceptSuggestion, RejectSuggestion] do
+      assert {:error, _reason} =
+               dispatch(agent_id, action, %{suggestion_id: id}, context)
+    end
+
+    assert snapshot(agent_id) == before
+  end
+
   defp init_agent(label) do
     agent_id = "agent_suggestion_#{label}_#{System.unique_integer([:positive])}"
     assert {:ok, nil} = Memory.init_for_agent(agent_id, index_enabled: false, auto_embed: false)

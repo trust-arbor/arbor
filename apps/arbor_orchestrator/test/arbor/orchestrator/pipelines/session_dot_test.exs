@@ -52,7 +52,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
 
     test "has all expected nodes", %{graph: graph} do
       expected = ~w(start classify check_auth recall select_mode build_prompt
-                    call_llm format format_error update_memory done)
+                    call_llm format format_error done)
 
       for node_id <- expected do
         assert Map.has_key?(graph.nodes, node_id),
@@ -65,8 +65,7 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
         "classify" => "session.classify",
         "recall" => "session_memory.recall",
         "select_mode" => "session.mode_select",
-        "build_prompt" => "session_llm.build_prompt",
-        "update_memory" => "session_memory.update"
+        "build_prompt" => "session_llm.build_prompt"
       }
 
       for {node_id, expected_action} <- exec_actions do
@@ -95,18 +94,14 @@ defmodule Arbor.Orchestrator.Pipelines.SessionDotTest do
       assert "context.session.input_type=blocked" in conditions
     end
 
-    test "both paths converge at update_memory", %{graph: graph} do
-      # Normal path: format -> update_memory
-      format_edges = edges_from(graph, "format")
-      assert Enum.any?(format_edges, &(&1.to == "update_memory"))
-
-      # Error path: format_error -> update_memory
-      error_edges = edges_from(graph, "format_error")
-      assert Enum.any?(error_edges, &(&1.to == "update_memory"))
+    test "plain response paths finish without an orphan note writer", %{graph: graph} do
+      assert Enum.map(edges_from(graph, "format"), & &1.to) == ["done"]
+      assert Enum.map(edges_from(graph, "format_error"), & &1.to) == ["done"]
+      refute Map.has_key?(graph.nodes, "update_memory")
     end
 
     test "returns to the Session owner without a graph checkpoint", %{graph: graph} do
-      assert Enum.map(edges_from(graph, "update_memory"), & &1.to) == ["done"]
+      assert Enum.map(edges_from(graph, "format"), & &1.to) == ["done"]
       refute Map.has_key?(graph.nodes, "checkpoint")
     end
 

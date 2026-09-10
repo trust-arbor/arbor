@@ -79,8 +79,8 @@ defmodule Arbor.Actions.SessionMemoryTest do
   end
 
   describe "Update — run" do
-    test "returns success even when facade unavailable" do
-      assert {:ok, %{memory_updated: true}} =
+    test "unrecognized note fields are an explicit no-op" do
+      assert {:ok, %{memory_updated: false, memory_notes_result: %{applied_count: 0}}} =
                SessionMemory.Update.run(
                  %{agent_id: "test", turn_data: %{"notes" => ["test"]}},
                  %{}

@@ -310,12 +310,12 @@ defmodule Arbor.Actions.SessionGoalsTest do
   end
 
   describe "StoreIdentity — run" do
-    test "returns success even when facades unavailable" do
+    test "reports admitted identity work without claiming persistence completion" do
       insights = [
         %{"category" => "trait", "content" => "curious", "confidence" => 0.8}
       ]
 
-      assert {:ok, %{identity_stored: true}} =
+      assert {:ok, %{identity_admitted_count: 1, identity_persistence: "unconfirmed"}} =
                SessionGoals.StoreIdentity.run(
                  %{agent_id: "test", insights: insights},
                  %{}
@@ -323,7 +323,7 @@ defmodule Arbor.Actions.SessionGoalsTest do
     end
 
     test "handles empty insights" do
-      assert {:ok, %{identity_stored: true}} =
+      assert {:ok, %{identity_admitted_count: 0, identity_skipped_count: 0}} =
                SessionGoals.StoreIdentity.run(
                  %{agent_id: "test", insights: []},
                  %{}
@@ -333,7 +333,7 @@ defmodule Arbor.Actions.SessionGoalsTest do
     test "skips insights missing category or content" do
       insights = [%{"category" => "trait"}, %{"content" => "curious"}]
 
-      assert {:ok, %{identity_stored: true}} =
+      assert {:ok, %{identity_admitted_count: 0, identity_skipped_count: 2}} =
                SessionGoals.StoreIdentity.run(
                  %{agent_id: "test", insights: insights},
                  %{}
