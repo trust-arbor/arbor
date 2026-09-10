@@ -67,7 +67,48 @@ config :arbor_orchestrator, :private_conversation_memory,
   timeout_ms: 10_000
 ```
 
-This example is not deployment enablement. The exact endpoint must also be
+Dev and production also accept an explicit environment configuration after the
+existing dotenv loader runs. `ARBOR_PRIVATE_MEMORY_ENABLED` accepts only `true`
+or `false`. Unset emits no override, so an existing application configuration is
+preserved and the normal default stays disabled. Explicit `false` disables the
+route without requiring its other variables. Test configuration ignores this
+environment bridge, including values loaded from a development `.env`; tests
+may still inject their own application configuration.
+
+When enabled, `ARBOR_PRIVATE_MEMORY_PROVIDER` must be `ollama` or `lm_studio`,
+and `ARBOR_PRIVATE_MEMORY_MODEL` and `ARBOR_PRIVATE_MEMORY_BASE_URL` are required.
+There is no implicit model or endpoint selection. The optional
+`ARBOR_PRIVATE_MEMORY_TIMEOUT_MS` defaults to `10000` and accepts integers from
+`1` through `30000`. Invalid flag, provider, required label or timeout values
+stop runtime configuration with an error naming the variable, without echoing
+its contents. Endpoint syntax, trust, literal loopback and pipeline admission
+remain enforced by the existing Session/LLM route checks.
+
+For the operator-selected laptop candidate, the settings are:
+
+```dotenv
+ARBOR_PRIVATE_MEMORY_ENABLED=true
+ARBOR_PRIVATE_MEMORY_PROVIDER=ollama
+ARBOR_PRIVATE_MEMORY_MODEL=embeddinggemma:latest
+ARBOR_PRIVATE_MEMORY_BASE_URL=http://127.0.0.1:11434/v1
+ARBOR_PRIVATE_MEMORY_TIMEOUT_MS=30000
+ARBOR_OLLAMA_CHAT_BASE_URL=http://127.0.0.1:11434/v1
+```
+
+The last variable configures the existing canonical Ollama ProviderRegistry
+endpoint to match the private route. It also selects the ordinary Ollama text
+generation endpoint; it is not a separate private-memory trust allowlist. The
+native `arbor_ai` embedding endpoint uses the separate existing
+`ARBOR_OLLAMA_BASE_URL` setting without `/v1`. The private route above uses
+`Arbor.LLM.embed_batch` and the `/v1` endpoint. For LM Studio, configure its
+canonical application provider endpoint separately as described below. This
+bridge neither edits endpoint trust nor changes the LLM plug pipeline.
+
+Changing the configured model does not reindex or rewrite previously stored
+rows. They retain their recorded provider/model identity. A model change needs
+its own compatibility and migration review; this setting is not a backfill tool.
+
+These examples are not deployment enablement. The exact endpoint must also be
 trusted by the LLM endpoint policy. Only `:ollama` and `:lm_studio` with a literal
 loopback address (127/8 or `::1`) are supported; hostname aliases are rejected.
 The URL must also be trusted by the canonical ProviderRegistry configuration

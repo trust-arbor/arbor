@@ -34,6 +34,61 @@ if File.exists?(dotenv_path) do
 end
 
 # ============================================================================
+# Private conversation memory (explicit operator opt-in, dev/prod only)
+# ============================================================================
+# The Session still admits the exact endpoint, loopback transport, model shape
+# and stock embedding pipeline. This bridge does not confer endpoint trust.
+# Tests ignore this surface, including values loaded by the existing dotenv
+# loader. An unset flag emits no setting, preserving application configuration.
+if config_env() != :test do
+  case System.get_env("ARBOR_PRIVATE_MEMORY_ENABLED") do
+    nil ->
+      :ok
+
+    "false" ->
+      config :arbor_orchestrator, :private_conversation_memory, false
+
+    "true" ->
+      private_memory_provider =
+        case System.get_env("ARBOR_PRIVATE_MEMORY_PROVIDER") do
+          "ollama" -> :ollama
+          "lm_studio" -> :lm_studio
+          _ -> raise "ARBOR_PRIVATE_MEMORY_PROVIDER must be ollama or lm_studio"
+        end
+
+      private_memory_label = fn name, max_bytes ->
+        value = System.get_env(name)
+
+        if is_binary(value) and byte_size(value) in 1..max_bytes and String.valid?(value) and
+             String.trim(value) == value do
+          value
+        else
+          raise "#{name} must be a nonempty UTF-8 value without surrounding whitespace (at most #{max_bytes} bytes)"
+        end
+      end
+
+      private_memory_model = private_memory_label.("ARBOR_PRIVATE_MEMORY_MODEL", 256)
+      private_memory_base_url = private_memory_label.("ARBOR_PRIVATE_MEMORY_BASE_URL", 4_096)
+
+      private_memory_timeout =
+        case Integer.parse(System.get_env("ARBOR_PRIVATE_MEMORY_TIMEOUT_MS") || "10000") do
+          {timeout, ""} when timeout in 1..30_000 -> timeout
+          _ -> raise "ARBOR_PRIVATE_MEMORY_TIMEOUT_MS must be an integer between 1 and 30000"
+        end
+
+      config :arbor_orchestrator, :private_conversation_memory,
+        enabled: true,
+        provider: private_memory_provider,
+        model: private_memory_model,
+        base_url: private_memory_base_url,
+        timeout_ms: private_memory_timeout
+
+    _ ->
+      raise "ARBOR_PRIVATE_MEMORY_ENABLED must be true or false"
+  end
+end
+
+# ============================================================================
 # Production security authority state root
 # ============================================================================
 # Explicit absolute path only. Full durable Security boots fail closed at
