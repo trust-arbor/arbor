@@ -1,0 +1,42 @@
+{
+  "intents": [
+    {
+      "id": "intent_legacy",
+      "type": "think",
+      "action": null,
+      "params": {},
+      "reasoning": "Synthetic historical reasoning",
+      "goal_id": "goal_legacy",
+      "confidence": 0.5,
+      "urgency": 50,
+      "created_at": "2026-07-28T12:00:00Z",
+      "metadata": {},
+      "capability": null,
+      "op": null,
+      "target": null
+    }
+  ],
+  "percepts": [
+    {
+      "id": "percept_legacy",
+      "type": "action_result",
+      "intent_id": "intent_legacy",
+      "outcome": "success",
+      "data": {
+        "synthetic": true
+      },
+      "error": null,
+      "duration_ms": 5,
+      "created_at": "2026-07-28T12:00:00Z",
+      "metadata": {},
+      "summary": "Synthetic result"
+    }
+  ],
+  "statuses": {
+    "intent_legacy": {
+      "status": "locked",
+      "locked_at": "2026-07-28T12:00:00Z",
+      "retry_count": 3
+    }
+  }
+}

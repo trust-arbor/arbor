@@ -1,0 +1,19 @@
+{
+  "id": "goal_legacy",
+  "description": "Synthetic historical accumulation goal",
+  "type": "achieve",
+  "status": "active",
+  "priority": 50,
+  "parent_id": null,
+  "progress": 0.25,
+  "created_at": "2026-07-28T12:00:00Z",
+  "achieved_at": null,
+  "deadline": "2026-12-01T00:00:00Z",
+  "success_criteria": "Preserve representative formats",
+  "notes": [
+    "Original note"
+  ],
+  "assigned_by": null,
+  "metadata": {},
+  "referenced_date": null
+}
