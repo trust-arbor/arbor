@@ -568,6 +568,92 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
     end
   end
 
+  test "private goal security regression: purpose-specific root seal binds scope, identity and logical revision" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record_descriptor, agent, _human} = private_memory_fixture!()
+    descriptor = goal_descriptor(record_descriptor)
+
+    assert {:ok, stamp} = Security.attest_private_goal_snapshot(admission, descriptor)
+    assert :ok = Security.verify_private_goal_snapshot(descriptor, stamp)
+
+    for {key, value} <- [
+          {"human_id", "human_forged"},
+          {"session_id", "session_forged"},
+          {"body_digest", String.duplicate("f", 64)},
+          {"snapshot_revision", 2},
+          {"key", String.duplicate("f", 64)}
+        ] do
+      assert {:error, _} =
+               Security.verify_private_goal_snapshot(Map.put(descriptor, key, value), stamp)
+    end
+
+    # A holder of the agent key cannot impersonate the root's purpose-specific signer.
+    payload =
+      "arbor.private-goal-snapshot.v1\0" <> agent.agent_id <> "\0" <> stamp["descriptor_digest"]
+
+    forged = %{
+      stamp
+      | "issuer_id" => agent.agent_id,
+        "signature" => Base.encode64(Crypto.sign(payload, agent.private_key))
+    }
+
+    assert {:error, _} = Security.verify_private_goal_snapshot(descriptor, forged)
+
+    assert {:ok, conversation_stamp} =
+             Security.attest_private_memory_record(admission, record_descriptor)
+
+    assert {:error, _} = Security.verify_private_goal_snapshot(descriptor, conversation_stamp)
+
+    assert :ok = Security.close_private_memory_admission(admission)
+    restart_system_authority!()
+    assert :ok = Security.verify_private_goal_snapshot(descriptor, stamp)
+    assert {:error, _} = Security.attest_private_goal_snapshot(admission, descriptor)
+  end
+
+  test "private goal security regression: direct root signing rejects copied admission and revoked write authority" do
+    Application.put_env(:arbor_security, :system_authority_mode, :persistent)
+    restart_system_authority!()
+    {admission, record_descriptor, agent, _human} = private_memory_fixture!()
+    descriptor = goal_descriptor(record_descriptor)
+    assert {:ok, _} = SystemAuthority.attest_private_goal_snapshot(admission, descriptor)
+
+    assert {:error, _} =
+             Task.async(fn -> Security.attest_private_goal_snapshot(admission, descriptor) end)
+             |> Task.await()
+
+    assert {:ok, caps} = Security.list_capabilities(agent.agent_id)
+    Enum.each(caps, &Security.revoke(&1.id))
+
+    assert {:error, :invalid_memory_admission} =
+             GenServer.call(
+               SystemAuthority,
+               {:attest_private_goal_snapshot, admission, descriptor}
+             )
+
+    assert :ok = Security.close_private_memory_admission(admission)
+  end
+
+  defp goal_descriptor(record_descriptor) do
+    scope = Map.take(record_descriptor, ~w(agent_id human_id engagement_id session_id turn_id))
+
+    {:ok, bytes} =
+      Arbor.Contracts.Security.TaintEnvelope.canonical_json([
+        scope["agent_id"],
+        scope["human_id"]
+      ])
+
+    key = Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
+    Map.merge(scope, %{
+      "namespace" => "private_goals",
+      "key" => key,
+      "id" => "memory:private_goals:" <> key,
+      "body_digest" => String.duplicate("a", 64),
+      "snapshot_revision" => 1
+    })
+  end
+
   defp await_memory_job!(attempts \\ 200)
   defp await_memory_job!(0), do: flunk("private memory authorization worker did not start")
 
