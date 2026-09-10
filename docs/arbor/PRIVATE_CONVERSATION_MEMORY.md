@@ -98,9 +98,10 @@ ARBOR_OLLAMA_CHAT_BASE_URL=http://127.0.0.1:11434/v1
 The last variable configures the existing canonical Ollama ProviderRegistry
 endpoint to match the private route. It also selects the ordinary Ollama text
 generation endpoint; it is not a separate private-memory trust allowlist. The
-native `arbor_ai` embedding endpoint uses the separate existing
-`ARBOR_OLLAMA_BASE_URL` setting without `/v1`. The private route above uses
-`Arbor.LLM.embed_batch` and the `/v1` endpoint. For LM Studio, configure its
+`arbor_ai` compatibility adapter uses the separate existing
+`ARBOR_OLLAMA_BASE_URL` setting, which may be a bare daemon URL. That adapter
+appends `/v1` and also calls `Arbor.LLM.embed_batch`; its current HTTP transport
+is `/v1/embeddings`. For LM Studio, configure its
 canonical application provider endpoint separately as described below. This
 bridge neither edits endpoint trust nor changes the LLM plug pipeline.
 

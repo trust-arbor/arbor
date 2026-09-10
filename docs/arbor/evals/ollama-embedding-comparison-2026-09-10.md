@@ -53,7 +53,12 @@ incorrectly matches `Ann` against text containing that substring.
 
 ### Acceptance is a separate unresolved issue
 
-Applying the current 70% semantic / 30% keyword ranking leaves first-result
+The hybrid figures below use the substring keyword formula at the recorded
+source revision. The subsequent whole-token keyword repair changes that formula;
+it does not change these measured cosine-only rankings or establish an acceptance
+policy. See the [current scoring contract](../EXPERIMENTAL_KNOWLEDGE_HYBRID_SEARCH.md).
+
+Applying that 70% semantic / 30% keyword ranking leaves first-result
 counts unchanged. Before cutoff filtering, relevant-within-three counts become
 19/21 for Nomic, 21/21 for EmbeddingGemma, and 20/21 for mxbai.
 
