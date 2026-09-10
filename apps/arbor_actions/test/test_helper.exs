@@ -8,7 +8,26 @@ end
 # Memory stores + durable knowledge-graph authority. Five memory-backed action
 # test modules call Arbor.Memory.init_for_agent/1, which fails closed without
 # the authority. See Arbor.Memory.TestBootstrap for why this is not inline.
-:ok = Arbor.Memory.TestBootstrap.start!()
+memory_authority_opts =
+  case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
+    nil ->
+      []
+
+    "external" ->
+      selectors = Enum.filter(System.argv(), &String.contains?(&1, ".exs"))
+      expected = "arbor/actions/memory_entity_links_persistence_test.exs"
+
+      if length(selectors) == 1 and String.ends_with?(hd(selectors), expected) do
+        [authority: false]
+      else
+        raise "external memory authority requires only memory_entity_links_persistence_test.exs"
+      end
+
+    _invalid ->
+      raise "invalid ARBOR_TEST_MEMORY_AUTHORITY test marker"
+  end
+
+:ok = Arbor.Memory.TestBootstrap.start!(memory_authority_opts)
 
 # Test-only Linux baseline materializer Agent + shared WorkspaceLeaseRegistry
 # rewire. Production Application starts the registry with Arbor.Shell; tests
