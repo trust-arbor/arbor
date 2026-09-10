@@ -30,6 +30,15 @@ agent; Session human metadata never changes ownership. A directly authenticated
 human principal can sign the same public protocol. Copying an owner ID, capability
 ID, request ID, or an old operation proof cannot authenticate a new request.
 
+Persisted owner proofs use a closed version-2 wire map with a base64 payload.
+The payload's signed domain and operation separators remain the original NUL
+bytes after decoding; storing those bytes directly as JSON text is unsupported
+by PostgreSQL `jsonb`. Decoding checks canonical base64 and both encoded and
+decoded size limits before verifying the original signature. Exact legacy
+five-field raw-payload proofs remain readable for existing SQLite rows; reads
+do not rewrite them, and all new enqueues write version 2. This changes storage
+encoding, not the external `SignedRequest` API or the authority it proves.
+
 The tool adapters are `scheduler_enqueue_routine`, `scheduler_list_routines`, and
 `scheduler_cancel_routine` (also ordinary canonical dot aliases). The existing
 ActionsExecutor source signing boundary signs a second, operation-specific
