@@ -589,6 +589,46 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
     end
   end
 
+  defp public_authenticated_response_with_metadata!(caller, metadata) do
+    target = "agent_msgfacade_ack_#{System.unique_integer([:positive])}"
+    resource = "arbor://chat/agent/#{target}"
+    track_grant!(caller, resource)
+    register_agent_only(target)
+
+    reply = %PipelineResponse{
+      content: "acknowledged-reply",
+      raw: %{private: "discard-raw"},
+      metadata: metadata
+    }
+
+    {:ok, session_pid} =
+      FakeAuthSession.start_link(self(), fn _from_pid, {_tag, _message, receipt} ->
+        assert {:ok, ^caller} = Security.consume_delivery_receipt(receipt, resource, :chat)
+        {:ok, reply}
+      end)
+
+    insert_fake_session!(target, session_pid)
+
+    Application.put_env(
+      :arbor_agent,
+      :orchestrator_session_module,
+      Arbor.Agent.MessageFacadeSecurityRegressionTest.SessionBridge
+    )
+
+    assert {:ok, token} = SessionToken.generate(caller)
+
+    assert {:ok, %PipelineResponse{} = response} =
+             Arbor.Agent.send_message_response(caller, target, build_route_free_message(caller),
+               timeout: 5_000,
+               session_token: token
+             )
+
+    assert response.content == "acknowledged-reply"
+    assert response.raw == nil
+    assert_no_secret_leak(response, [token, "discard-raw"])
+    response
+  end
+
   # ---------------------------------------------------------------------------
   # A. Real Security + Manager authorized exact envelope (ordinary path)
   # ---------------------------------------------------------------------------
@@ -905,6 +945,145 @@ defmodule Arbor.Agent.MessageFacadeSecurityRegressionTest do
       assert response.content == "structured-ok"
       assert response.tool_rounds == 1
       refute Map.has_key?(Map.from_struct(response), :text)
+    end
+
+    for status <- ["indexed", "pending", "disabled", "unavailable"] do
+      test "public authenticated response retains #{status} conversation acknowledgement without private metadata" do
+        caller = register_active_human!()
+        status = unquote(status)
+
+        response =
+          public_authenticated_response_with_metadata!(caller, %{
+            conversation_memory: %{
+              status: status,
+              transcript: "committed",
+              id: "private-record-id",
+              human_id: caller,
+              receipt: "discard-private-receipt"
+            },
+            other: "discard-other-metadata"
+          })
+
+        assert response.metadata == %{
+                 conversation_memory: %{status: status, transcript: "committed"}
+               }
+
+        assert_no_secret_leak(response, [
+          "private-record-id",
+          caller,
+          "discard-private-receipt",
+          "discard-other-metadata"
+        ])
+      end
+    end
+
+    test "public authenticated response admits string-key conversation acknowledgement" do
+      caller = register_active_human!()
+
+      response =
+        public_authenticated_response_with_metadata!(caller, %{
+          "conversation_memory" => %{"status" => "indexed", "transcript" => "committed"}
+        })
+
+      assert response.metadata == %{
+               conversation_memory: %{status: "indexed", transcript: "committed"}
+             }
+    end
+
+    for status <- ["saved", "unchanged", "not_requested", "conflict", "unavailable"] do
+      test "public authenticated response retains #{status} relationship acknowledgement beside conversation status" do
+        caller = register_active_human!()
+        status = unquote(status)
+
+        response =
+          public_authenticated_response_with_metadata!(caller, %{
+            conversation_memory: %{status: "indexed", transcript: "committed"},
+            relationship_memory: %{
+              status: status,
+              transcript: "committed",
+              current_focus: "discard-private-focus",
+              source_proof: "discard-source-proof",
+              human_id: caller
+            }
+          })
+
+        assert response.metadata == %{
+                 conversation_memory: %{status: "indexed", transcript: "committed"},
+                 relationship_memory: %{status: status, transcript: "committed"}
+               }
+
+        assert_no_secret_leak(response, ["discard-private-focus", "discard-source-proof", caller])
+      end
+    end
+
+    test "public authenticated response retains unrequested relationship status without inventing transcript acknowledgement" do
+      caller = register_active_human!()
+
+      response =
+        public_authenticated_response_with_metadata!(caller, %{
+          "relationship_memory" => %{"status" => "not_requested"}
+        })
+
+      assert response.metadata == %{relationship_memory: %{status: "not_requested"}}
+    end
+
+    test "security regression: invalid relationship acknowledgement cannot replace a valid conversation status" do
+      caller = register_active_human!()
+      valid = %{status: "indexed", transcript: "committed"}
+
+      for relationship <- [
+            nil,
+            %{status: :saved},
+            %{status: "unknown"},
+            %{status: "saved"},
+            %{status: "unchanged"},
+            %{status: "conflict"},
+            %{status: "unavailable"},
+            %{status: "saved", transcript: "pending"},
+            %{"status" => "conflict", status: "saved"},
+            %{"transcript" => "pending", status: "saved", transcript: "committed"}
+          ] do
+        response =
+          public_authenticated_response_with_metadata!(caller, %{
+            conversation_memory: valid,
+            relationship_memory: relationship
+          })
+
+        assert response.metadata == %{conversation_memory: valid}
+      end
+    end
+
+    test "security regression: malformed or ambiguous conversation metadata cannot assert an acknowledgement" do
+      caller = register_active_human!()
+      valid = %{status: "indexed", transcript: "committed"}
+
+      for metadata <- [
+            nil,
+            %{conversation_memory: nil},
+            %{conversation_memory: %{status: "indexed"}},
+            %{conversation_memory: %{status: :indexed, transcript: "committed"}},
+            %{conversation_memory: %{status: "unknown", transcript: "committed"}},
+            %{conversation_memory: %{status: "indexed", transcript: "pending"}},
+            %{conversation_memory: %{status: "indexed", transcript: :committed}},
+            %{"conversation_memory" => valid, conversation_memory: valid},
+            %{
+              conversation_memory: %{
+                "status" => "pending",
+                status: "indexed",
+                transcript: "committed"
+              }
+            },
+            %{
+              conversation_memory: %{
+                "transcript" => "pending",
+                status: "indexed",
+                transcript: "committed"
+              }
+            }
+          ] do
+        response = public_authenticated_response_with_metadata!(caller, metadata)
+        assert response.metadata == %{}
+      end
     end
 
     test "security regression: non-nil engagement_id rejected before receipt issuance" do
