@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "scope": "Synthetic agent-global knowledge; no private human records",
+  "quality_status": "Unmeasured labels; deterministic wiring axes are not semantic quality evidence",
+  "documents": [
+    {
+      "id": "supervisor",
+      "content": "A one_for_one supervisor relaunches the failed worker and leaves sibling processes running.",
+      "wiring_axis": 0
+    },
+    {
+      "id": "parameters",
+      "content": "Bind values using parameterized database statements.",
+      "wiring_axis": 1
+    },
+    {
+      "id": "transaction",
+      "content": "Transactions commit changes atomically or roll back the operation.",
+      "wiring_axis": 2
+    },
+    {
+      "id": "picnic",
+      "content": "The supervisor organizes a family picnic each spring.",
+      "wiring_axis": 3
+    },
+    {
+      "id": "backup",
+      "content": "Schedule database backups every night.",
+      "wiring_axis": 4
+    },
+    {
+      "id": "all_hands",
+      "content": "All hands attend the updates meeting on Mondays.",
+      "wiring_axis": 5
+    },
+    {
+      "id": "anna",
+      "content": "Anna reviews synthetic project proposals.",
+      "wiring_axis": 6
+    }
+  ],
+  "queries": [
+    {
+      "id": "restart",
+      "query": "restart only crashed child",
+      "relevant_ids": [
+        "supervisor"
+      ],
+      "wiring_axis": 0
+    },
+    {
+      "id": "injection",
+      "query": "avoid SQL injection",
+      "relevant_ids": [
+        "parameters"
+      ],
+      "wiring_axis": 1
+    },
+    {
+      "id": "atomic",
+      "query": "all-or-nothing updates",
+      "relevant_ids": [
+        "transaction"
+      ],
+      "wiring_axis": 2
+    },
+    {
+      "id": "irrelevant",
+      "query": "What color are ripe bananas?",
+      "relevant_ids": [],
+      "wiring_axis": 7
+    },
+    {
+      "id": "partial_name",
+      "query": "Ann",
+      "relevant_ids": [],
+      "wiring_axis": 7
+    }
+  ]
+}
