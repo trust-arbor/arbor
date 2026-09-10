@@ -1,9 +1,14 @@
+Code.require_file(
+  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+)
+
 defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
   use ExUnit.Case, async: false
 
   @moduletag :integration
 
   alias Arbor.Agent.Orchestration
+  alias Arbor.Security.TestSupport.ApprovalAnswerFixture, as: ApprovalFixture
 
   defmodule GatedPolicy do
     def confirmation_mode(_principal, _uri, _opts), do: :gated
@@ -206,6 +211,55 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     assert status.human_streak == 0
     assert status.verified_human_approvals == 0
     refute Arbor.Trust.graduated?(ctx.agent_id, resource)
+  end
+
+  test "human SessionToken travels through Orchestration and winning Comms answer into exact Trust evidence" do
+    ctx = ApprovalFixture.setup!()
+
+    if Process.whereis(Arbor.Comms.PubSub) == nil,
+      do: start_supervised!({Phoenix.PubSub, name: Arbor.Comms.PubSub})
+
+    if Process.whereis(Arbor.Comms.InteractionRegistry) == nil,
+      do: start_supervised!(Arbor.Comms.InteractionRegistry)
+
+    ApprovalFixture.grant!(ctx.human_id, "arbor://approval/read")
+    ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
+    resource = "arbor://code/write/exact/file.ex"
+
+    for {decision, count, streak} <- [{:approve, 1, 1}, {:approve, 2, 2}, {:rework, 2, 0}] do
+      assert {:ok, request} =
+               Arbor.Contracts.Comms.Interaction.new(%{
+                 kind: :approval,
+                 agent_id: ctx.agent_id,
+                 user_id: ctx.human_id,
+                 resource_uri: resource,
+                 description: "Human reviews exact write",
+                 metadata: %{actor: "human_forged", verified_human_id: "human_forged"}
+               })
+
+      assert {:ok, _} = Arbor.Comms.InteractionRegistry.put(request)
+
+      assert :ok =
+               Orchestration.answer_approval(request.request_id, decision,
+                 caller_id: ctx.human_id,
+                 session_token: ctx.token
+               )
+
+      assert {:ok, evidence} = Arbor.Comms.get_answered_approval(request.request_id)
+      assert evidence.verified_human_id == ctx.human_id
+
+      status = Arbor.Trust.confirmation_status(ctx.agent_id, "arbor://code/write")
+      assert status.approvals == count
+      assert status.verified_human_approvals == count
+      assert status.unknown_approvals == 0
+      assert status.human_streak == streak
+      expected = Map.take(evidence, [:agent_id, :principal_id, :resource_uri, :decision])
+
+      assert {:ok, :duplicate} =
+               Arbor.Trust.record_approval_answer(:interaction, request.request_id, expected)
+
+      assert Arbor.Trust.confirmation_status(ctx.agent_id, "arbor://code/write") == status
+    end
   end
 
   # Canonical bootstrap: it freezes the authority root and starts the whole

@@ -1,3 +1,7 @@
+Code.require_file(
+  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+)
+
 defmodule Arbor.Comms.InteractionRouterTest do
   @moduledoc """
   Tests for `Arbor.Comms.InteractionRouter` Phase 1.
@@ -21,6 +25,7 @@ defmodule Arbor.Comms.InteractionRouterTest do
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.PresenceTracker
   alias Arbor.Contracts.Comms.Interaction
+  alias Arbor.Security.TestSupport.ApprovalAnswerFixture, as: ApprovalFixture
 
   # A dummy in-process adapter that records calls to a test pid.
   defmodule TestAdapter do
@@ -56,6 +61,157 @@ defmodule Arbor.Comms.InteractionRouterTest do
     InteractionRegistry.reset()
     Phoenix.PubSub.subscribe(pubsub, "interaction:agent:test_agent")
     :ok
+  end
+
+  test "authenticated winning transition records human proof before publishing the response" do
+    ctx = ApprovalFixture.setup!()
+    ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
+
+    attrs = %{
+      kind: :approval,
+      agent_id: ctx.agent_id,
+      user_id: ctx.human_id,
+      resource_uri: "arbor://code/write/exact.ex",
+      description: "Review exact write"
+    }
+
+    assert {:ok, id} = Arbor.Comms.request_interaction(attrs, adapter_map: %{})
+
+    :ok =
+      Phoenix.PubSub.subscribe(
+        pubsub_server(),
+        Interaction.response_topic_for_agent(ctx.agent_id)
+      )
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{verified_human_id: "human_forged", actor: "human_forged"},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert_receive {:interaction_response, _}
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+    assert evidence.verified_human_id == ctx.human_id
+    assert evidence.agent_id == ctx.agent_id
+    assert evidence.resource_uri == attrs.resource_uri
+    refute inspect(evidence) =~ ctx.token
+
+    other = ApprovalFixture.human!()
+    ApprovalFixture.grant!(other, "arbor://approval/answer/#{ctx.agent_id}")
+    {:ok, other_token} = Arbor.Security.SessionToken.generate(other)
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :rejected,
+               %{},
+               other,
+               other_token
+             )
+
+    assert {:ok, ^evidence} = Arbor.Comms.get_answered_approval(id)
+    refute_receive {:interaction_response, _}
+  end
+
+  test "security regression: malformed or revoked human proof cannot win or leave responder evidence" do
+    ctx = ApprovalFixture.setup!()
+    cap = ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
+
+    assert {:ok, id} =
+             Arbor.Comms.request_interaction(
+               %{
+                 kind: :approval,
+                 agent_id: ctx.agent_id,
+                 user_id: ctx.human_id,
+                 resource_uri: "arbor://code/write/exact.ex",
+                 description: "Review exact write"
+               },
+               adapter_map: %{}
+             )
+
+    assert {:ok, other_id} =
+             Arbor.Comms.request_interaction(
+               %{
+                 kind: :approval,
+                 agent_id: ctx.agent_id <> "_other",
+                 user_id: ctx.human_id,
+                 resource_uri: "arbor://code/write/other.ex",
+                 description: "Different original agent"
+               },
+               adapter_map: %{}
+             )
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               other_id,
+               :approved,
+               %{agent_id: ctx.agent_id, principal_id: ctx.agent_id},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert :not_found = Arbor.Comms.get_answered_approval(other_id)
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{},
+               ctx.human_id,
+               "forged"
+             )
+
+    assert :not_found = Arbor.Comms.get_answered_approval(id)
+    assert :ok = Arbor.Security.revoke(cap.id)
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert :not_found = Arbor.Comms.get_answered_approval(id)
+    assert :ok = Arbor.Comms.respond_to_interaction(id, :rejected)
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+    refute Map.has_key?(evidence, :verified_human_id)
+  end
+
+  test "security regression: later valid proof cannot classify an already answered legacy request" do
+    ctx = ApprovalFixture.setup!()
+    ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
+
+    assert {:ok, id} =
+             Arbor.Comms.request_interaction(
+               %{
+                 kind: :approval,
+                 agent_id: ctx.agent_id,
+                 user_id: ctx.human_id,
+                 resource_uri: "arbor://code/write/exact.ex",
+                 description: "Review exact write"
+               },
+               adapter_map: %{}
+             )
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(id, :approved, %{verified_human_id: ctx.human_id})
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+    refute Map.has_key?(evidence, :verified_human_id)
   end
 
   test "security regression: answered approval evidence retains original scope, ignoring responder metadata" do

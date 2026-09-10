@@ -68,7 +68,7 @@ defmodule Arbor.Trust.ApprovalEvidenceSecurityRegressionTest do
                Trust.record_approval_answer(:interaction, id, Map.put(expected, key, forged))
     end
 
-    for key <- [:human, :verified_human, :responder, :actor, :session_token] do
+    for key <- [:human, :verified_human, :verified_human_id, :responder, :actor, :session_token] do
       assert {:error, :invalid_approval_evidence} =
                Trust.record_approval_answer(:interaction, id, Map.put(expected, key, true))
     end
@@ -103,6 +103,46 @@ defmodule Arbor.Trust.ApprovalEvidenceSecurityRegressionTest do
     assert :ok = ConfirmationTracker.reset(ctx.agent_id)
     assert {:ok, :duplicate} = Trust.record_approval_answer(:interaction, approved_id, approved)
     assert Trust.confirmation_status(ctx.agent_id, @prefix).approvals == 0
+  end
+
+  test "owner-qualified human evidence counts once; unknown answers and rejection break its streak",
+       ctx do
+    for index <- 1..2 do
+      {id, expected} = committed!(ctx.agent_id, "human_#{index}", :approve)
+      qualify_source!(id)
+      assert {:ok, :recorded} = Trust.record_approval_answer(:interaction, id, expected)
+      assert {:ok, :duplicate} = Trust.record_approval_answer(:interaction, id, expected)
+    end
+
+    assert Trust.confirmation_status(ctx.agent_id, @prefix).human_streak == 2
+    assert Trust.confirmation_status(ctx.agent_id, @prefix).verified_human_approvals == 2
+
+    {id, expected} = committed!(ctx.agent_id, "unknown_break", :approve)
+    assert {:ok, :recorded} = Trust.record_approval_answer(:interaction, id, expected)
+    assert Trust.confirmation_status(ctx.agent_id, @prefix).human_streak == 0
+    qualify_source!(id)
+
+    assert {:error, :approval_evidence_mismatch} =
+             Trust.record_approval_answer(:interaction, id, expected)
+
+    assert Trust.confirmation_status(ctx.agent_id, @prefix).verified_human_approvals == 2
+
+    {id, expected} = committed!(ctx.agent_id, "human_denied", :deny)
+    qualify_source!(id)
+    assert {:ok, :recorded} = Trust.record_approval_answer(:interaction, id, expected)
+    status = Trust.confirmation_status(ctx.agent_id, @prefix)
+    assert status.human_streak == 0
+    assert status.rejections == 1
+    assert status.unknown_rejections == 0
+  end
+
+  defp qualify_source!(id) do
+    Agent.update(Source, fn rows ->
+      update_in(
+        rows[{:interaction, id}],
+        &Map.put(&1, :verified_human_id, "human_verified_fixture")
+      )
+    end)
   end
 
   test "missing or unavailable source refuses caller-authored approvals", ctx do

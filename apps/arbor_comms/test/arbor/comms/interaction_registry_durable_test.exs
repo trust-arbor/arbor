@@ -1,3 +1,7 @@
+Code.require_file(
+  Path.expand("../../../../arbor_security/test/support/approval_answer_fixture.ex", __DIR__)
+)
+
 defmodule Arbor.Comms.InteractionRegistryDurableTest do
   use ExUnit.Case, async: false
 
@@ -11,6 +15,7 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
   alias Arbor.Contracts.Coding.PendingApprovalIdentity
   alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Security.TestSupport.ApprovalAnswerFixture, as: ApprovalFixture
   alias __MODULE__.Backend
   alias __MODULE__.ProcessLifetimeBackend
 
@@ -127,6 +132,52 @@ defmodule Arbor.Comms.InteractionRegistryDurableTest do
     end)
 
     {:ok, path: path}
+  end
+
+  test "security regression: cold durable answer never reconstructs human proof from persisted metadata" do
+    ctx = ApprovalFixture.setup!()
+    ApprovalFixture.grant!(ctx.human_id, "arbor://approval/answer/#{ctx.agent_id}")
+
+    assert {:ok, id} =
+             Arbor.Comms.request_interaction(
+               %{
+                 kind: :approval,
+                 agent_id: ctx.agent_id,
+                 user_id: ctx.human_id,
+                 resource_uri: "arbor://code/write/exact.ex",
+                 description: "Review durable approval"
+               },
+               durability: :node_restart
+             )
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{verified_human_id: ctx.human_id},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert {:ok, %{verified_human_id: human}} = Arbor.Comms.get_answered_approval(id)
+    assert human == ctx.human_id
+
+    restart_authority()
+
+    assert {:ok, evidence} = Arbor.Comms.get_answered_approval(id)
+    assert evidence.decision == :approve
+    refute Map.has_key?(evidence, :verified_human_id)
+
+    assert {:error, _} =
+             Arbor.Comms.respond_to_interaction_authenticated(
+               id,
+               :approved,
+               %{},
+               ctx.human_id,
+               ctx.token
+             )
+
+    assert {:ok, ^evidence} = Arbor.Comms.get_answered_approval(id)
   end
 
   test "the facade exposes durable readiness and rejects unsupported durability" do
