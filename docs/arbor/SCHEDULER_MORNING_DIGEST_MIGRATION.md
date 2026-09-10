@@ -47,10 +47,12 @@ pipeline outcomes; malformed results are discarded as `:invalid_run_result`.
 Ordinary infrastructure errors retain their existing retry behavior. No arbitrary
 `{:ok, map}` establishes completion.
 
-S1/S2 remain independent work: authenticated owner-bound enqueue/list/cancel,
-closed signed job intent, current capability/policy intersection and revocation
-at delayed execution, and cancellation acknowledgement. S0 does not claim that
-the current issuer-minted run identity is restricted by a scheduling owner.
+The follow-up S1/S2 implementation now provides authenticated owner-bound
+enqueue/list/cancel, signed job intent, acknowledged SQL uniqueness and current
+owner capability/policy checks at delayed file effects. See
+[Owned scheduled routines](OWNED_SCHEDULED_ROUTINES.md) for its supported digest
+scope, validation and deployment requirements. These guarantees belong to that
+follow-up; the S0 evidence below covers the digest action and outcome classifier.
 
 Validation is through temporary-root public Actions tests, provider-free real
 `run_file_as` tests using the exact reference graph, pure outcome-classifier
