@@ -11,6 +11,8 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
   alias Arbor.Contracts.Security.{Identity, SignedRequest}
   alias Arbor.Contracts.Session.UserMessage
+  alias Arbor.LLM.Call
+  alias Arbor.LLM.Plugs.{Dispatch, Replay}
   alias Arbor.Orchestrator.Session
   alias Arbor.Persistence.Repo
   alias Arbor.Security
@@ -42,6 +44,25 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
     end
 
     def complete_single_attempt(request, opts), do: complete(request, opts)
+  end
+
+  defmodule FixtureEmbeddingDispatch do
+    use Arbor.LLM.Plug
+
+    def call(%Call{request: {_model, texts, _opts}} = call) do
+      observer = Application.fetch_env!(:arbor_orchestrator, :_private_memory_journey_observer)
+      send(observer, {:replacement_embedding_dispatch, texts})
+
+      indexed =
+        Enum.with_index(texts, fn _text, index ->
+          %{index: index, embedding: [1.0 | List.duplicate(0.0, 767)]}
+        end)
+
+      %{
+        call
+        | result: {:ok, indexed, %{prompt_tokens: length(texts), total_tokens: length(texts)}}
+      }
+    end
   end
 
   setup_all do
@@ -229,6 +250,133 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
     assert length(rows) == 2
     assert length(Enum.uniq_by(rows, & &1.source_key)) == 2
+  end
+
+  test "source HTTP 429 leaves one acknowledged pair pending and cold recovery indexes once",
+       ctx do
+    observer = self()
+
+    append = fn uuid, entries ->
+      result = Arbor.Persistence.append_session_entries(uuid, entries)
+      send(observer, {:observed_append, uuid, result})
+      result
+    end
+
+    set_env(:arbor_llm, :rate_limit_backoff_dispatch_fn, &FixtureEmbeddingDispatch.call/1)
+
+    set_env(:arbor_llm, :rate_limit_backoff_sleep_fn, fn _ ->
+      send(observer, :replacement_embedding_sleep)
+    end)
+
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :rate_limit_sources, true))
+
+    first = start_session!(ctx, ctx.owner, ctx.session_id, append_session_entries: append)
+    assert {:ok, response} = turn(first, ctx.owner, @sentinel)
+    assert response.metadata.conversation_memory == %{status: "pending", transcript: "committed"}
+    assert_receive {:model_request, _, _}
+    assert_receive {:observed_append, session_uuid, {:ok, 2}}
+
+    assert {:ok, %{id: ^session_uuid}} =
+             Arbor.Persistence.ensure_session(ctx.session_id, ctx.owner.agent.agent_id)
+
+    refute_receive {:observed_append, _, _}
+    refute_receive {:replacement_embedding_dispatch, _}
+    refute_receive :replacement_embedding_sleep
+
+    [query_request, [source_text]] = drain_embeddings()
+    assert_receive {:source_rate_limited, [^source_text]}
+    refute_receive {:source_rate_limited, _}
+    assert query_request == [@sentinel]
+    assert String.starts_with?(source_text, "User: ")
+    assert source_text =~ @sentinel
+    original_pair = Arbor.Persistence.load_recent_session_messages(ctx.session_id, limit: 1_000)
+    assert [user, assistant] = original_pair
+    original_proof = user.metadata["private_memory_source"]
+    assert original_proof == assistant.metadata["private_memory_source"]
+    descriptor = original_proof["descriptor"]
+    assert {:ok, []} = Arbor.Persistence.list_vector_records(ctx.owner.agent.agent_id, limit: 100)
+    assert :ok = GenServer.stop(first)
+
+    # Close/reopen the real private SQLite owner, then admit a new Session turn.
+    # No whole-BEAM or physical-host restart is claimed.
+    assert :ok = Supervisor.terminate_child(ctx.repo_supervisor, Repo)
+    assert {:ok, _repo} = Supervisor.restart_child(ctx.repo_supervisor, Repo)
+    Agent.update(ctx.endpoint.state, &Map.put(&1, :rate_limit_sources, false))
+    second = start_session!(ctx, ctx.owner, ctx.session_id, append_session_entries: append)
+
+    assert {:ok, recovered_response} =
+             turn(second, ctx.owner, "Recover the committed observatory passphrase")
+
+    assert recovered_response.metadata.conversation_memory.status == "indexed"
+    assert_receive {:model_request, messages, _}
+    assert inspect(messages) =~ @sentinel
+    assert_receive {:observed_append, ^session_uuid, {:ok, 2}}
+    refute_receive {:observed_append, _, _}
+    refute_receive {:replacement_embedding_dispatch, _}
+    refute_receive :replacement_embedding_sleep
+
+    messages = Arbor.Persistence.load_recent_session_messages(ctx.session_id, limit: 1_000)
+    assert length(messages) == 4
+    assert Enum.take(messages, 2) == original_pair
+
+    assert {:ok, original_record} =
+             Arbor.Persistence.fetch_vector_record(
+               ctx.owner.agent.agent_id,
+               descriptor["source_namespace"],
+               descriptor["source_key"]
+             )
+
+    assert original_record.payload["body"]["conversation_scope"]["turn_id"] ==
+             descriptor["turn_id"]
+
+    assert {:ok, records} =
+             Arbor.Persistence.list_vector_records(ctx.owner.agent.agent_id, limit: 100)
+
+    assert length(records) == 2
+    assert length(Enum.uniq_by(records, & &1.source_key)) == 2
+    assert Enum.count(records, &(&1.id == original_record.id)) == 1
+    assert Enum.count(drain_embeddings(), &Enum.member?(&1, source_text)) == 1
+  end
+
+  test "security regression: private enabled turn explicitly refuses custom embedding composition before HTTP model or append",
+       ctx do
+    observer = self()
+
+    append = fn uuid, entries ->
+      send(observer, :custom_composition_append_attempted)
+      Arbor.Persistence.append_session_entries(uuid, entries)
+    end
+
+    for pipeline <- [
+          [FixtureEmbeddingDispatch],
+          [Replay, Dispatch]
+        ] do
+      previous = Application.fetch_env(:arbor_llm, :pipeline)
+      Application.put_env(:arbor_llm, :pipeline, pipeline)
+
+      try do
+        session_id = "custom-composition-#{System.unique_integer([:positive])}"
+        session = start_session!(ctx, ctx.owner, session_id, append_session_entries: append)
+
+        assert {:error, :private_memory_embedding_pipeline_unsupported} =
+                 turn(session, ctx.owner, "No unproved private embeddings")
+
+        refute Session.get_state(session).turn_in_flight
+        assert Application.get_env(:arbor_llm, :pipeline) == pipeline
+        assert Arbor.Persistence.load_recent_session_messages(session_id) == []
+
+        assert {:ok, []} =
+                 Arbor.Persistence.list_vector_records(ctx.owner.agent.agent_id, limit: 100)
+
+        assert drain_embeddings() == []
+        refute_receive {:model_request, _, _}
+        refute_receive {:replacement_embedding_dispatch, _}
+        refute_receive :custom_composition_append_attempted
+        assert :ok = GenServer.stop(session)
+      after
+        restore_env(:arbor_llm, :pipeline, previous)
+      end
+    end
   end
 
   test "unknown append outcome recovers only an observed complete committed pair and never retries the append",
@@ -651,18 +799,19 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
   defp set_env(app, key, value) do
     old = Application.fetch_env(app, key)
     Application.put_env(app, key, value)
-
-    on_exit(fn ->
-      case old do
-        {:ok, value} -> Application.put_env(app, key, value)
-        :error -> Application.delete_env(app, key)
-      end
-    end)
+    on_exit(fn -> restore_env(app, key, old) end)
   end
+
+  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
 
   defp embedding_endpoint! do
     observer = self()
-    {:ok, state} = Agent.start_link(fn -> %{fail_content: nil, hold_sources: false} end)
+
+    {:ok, state} =
+      Agent.start_link(fn ->
+        %{fail_content: nil, hold_sources: false, rate_limit_sources: false}
+      end)
 
     {:ok, listener} =
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
@@ -707,21 +856,27 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
       end
     end
 
-    failure = Agent.get(state, & &1.fail_content)
+    fixture = Agent.get(state, & &1)
 
-    if failure && Enum.any?(texts, &String.contains?(&1, failure)) do
-      send_json(socket, 400, %{"error" => %{"message" => "fixture embedding unavailable"}})
-    else
-      data =
-        Enum.with_index(texts, fn _text, index ->
-          %{"index" => index, "embedding" => [1.0 | List.duplicate(0.0, 767)]}
-        end)
+    cond do
+      fixture.rate_limit_sources and Enum.any?(texts, &String.starts_with?(&1, "User: ")) ->
+        :ok = send_json(socket, 429, %{"error" => %{"message" => "fixture source rate limit"}})
+        send(observer, {:source_rate_limited, texts})
 
-      send_json(socket, 200, %{
-        "model" => "private-journey-embedding",
-        "data" => data,
-        "usage" => %{"prompt_tokens" => length(texts), "total_tokens" => length(texts)}
-      })
+      fixture.fail_content && Enum.any?(texts, &String.contains?(&1, fixture.fail_content)) ->
+        send_json(socket, 400, %{"error" => %{"message" => "fixture embedding unavailable"}})
+
+      true ->
+        data =
+          Enum.with_index(texts, fn _text, index ->
+            %{"index" => index, "embedding" => [1.0 | List.duplicate(0.0, 767)]}
+          end)
+
+        send_json(socket, 200, %{
+          "model" => "private-journey-embedding",
+          "data" => data,
+          "usage" => %{"prompt_tokens" => length(texts), "total_tokens" => length(texts)}
+        })
     end
   end
 
