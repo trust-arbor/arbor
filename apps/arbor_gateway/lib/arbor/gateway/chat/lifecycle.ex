@@ -27,7 +27,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   collaborators are config-resolved so tests can inject fakes.
 
   Every public function returns a `{:ok, map}` (string-keyed, JSON-ready) or a
-  `{:error, status, message}` tuple the router renders directly.
+  `{:error, status, message}` tuple the router renders directly. Pending
+  authorization returns HTTP 403 with an approval-required message; it never
+  continues to create, start, or report a completed stop.
   """
 
   require Logger
@@ -87,6 +89,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
           {:error, status, msg} -> {:error, status, msg}
         end
 
+      {:ok, {:ok, :pending_approval, proposal_id}} ->
+        approval_required(proposal_id)
+
       {:ok, {:error, {:unauthorized, reason}}} ->
         unauthorized(reason)
 
@@ -119,6 +124,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
       {:ok, :ok} ->
         {:ok, %{"agent_id" => id, "running" => false}}
 
+      {:ok, {:ok, :pending_approval, proposal_id}} ->
+        approval_required(proposal_id)
+
       {:ok, {:error, {:unauthorized, reason}}} ->
         unauthorized(reason)
 
@@ -137,6 +145,7 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
 
   defp do_create(principal, display_name, create_opts) do
     case bridge_call(agent_facade(), :authorize_create, [principal, display_name, create_opts]) do
+      {:ok, {:ok, :pending_approval, proposal_id}} -> approval_required(proposal_id)
       {:ok, {:ok, profile}} -> {:ok, profile}
       {:ok, {:ok, profile, _identity}} -> {:ok, profile}
       {:ok, {:error, {:unauthorized, reason}}} -> unauthorized(reason)
@@ -225,6 +234,18 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   defp profile_agent_id(id) when is_binary(id), do: id
 
   defp unauthorized(reason), do: {:error, 403, "unauthorized: #{inspect(reason)}"}
+
+  # The Security facade's proposal IDs are strings. Render only a bounded valid
+  # ID; a malformed collaborator result still refuses the operation without
+  # serializing arbitrary data or confusing the pending tuple with a profile.
+  defp approval_required(proposal_id)
+       when is_binary(proposal_id) and byte_size(proposal_id) in 1..256 do
+    if String.valid?(proposal_id),
+      do: {:error, 403, "approval required: " <> proposal_id},
+      else: approval_required(nil)
+  end
+
+  defp approval_required(_proposal_id), do: {:error, 403, "approval required"}
 
   # Resolve a user-typed token (full id, unique prefix, display_name, or alias) to
   # a full agent_id, scoped to the principal's authorized agents — so /start and
