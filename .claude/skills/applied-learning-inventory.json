@@ -6380,7 +6380,7 @@
       "anchor": "applied-learning-persistence-record-logical-ids-are-global-across-the-shared-records-table",
       "source_date": "2026-07-26",
       "source_incident": "found 2026-07-26 when a fresh coding agent survived in trust state but its agent profile disappeared on restart).",
-      "content_sha256": "6171a787b2054a2859706abba74bc60ee378ffffd9e36d3eed46367f47b220b6",
+      "content_sha256": "4480f59ccea77bdaab2847370dbad7c6598e59d08b0a342887870b7d6a374149",
       "always_loaded": false
     },
     {

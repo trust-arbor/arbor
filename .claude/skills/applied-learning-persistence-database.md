@@ -32,6 +32,11 @@ trust, profile, user-config, or memory namespaces causes cross-namespace
 backend: CAS and record-incarnation semantics require it to preserve the
 caller's logical identity (found 2026-07-26 when a fresh coding agent survived
 in trust state but its agent profile disappeared on restart).
+For pre-write owner seals, do not guess backend incarnation fields: a CAS after
+a tombstone may allocate its new generation only when the backend acknowledges.
+Sign the exact domain identity/body and a logical revision, retain the observed
+Record as the live CAS fence, and state that an authentic cold snapshot does not
+prove freshness against offline rollback (private goals/relationships, 2026-09-09).
 
 <!-- applied-learning: run-postgres-specific-tests-with-the-postgres-test-adapter -->
 <a id="applied-learning-run-postgres-specific-tests-with-the-postgres-test-adapter"></a>
