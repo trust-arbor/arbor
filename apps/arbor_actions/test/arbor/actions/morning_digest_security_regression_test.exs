@@ -13,6 +13,9 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
   @resource "arbor://action/reports/build_morning_digest"
 
   setup do
+    if Process.whereis(Arbor.Scheduler.RunLeaseSupervisor) == nil,
+      do: start_supervised!(Arbor.Scheduler.RunLeaseSupervisor)
+
     temporary = Path.join(System.tmp_dir!(), "arbor-digest-#{System.unique_integer([:positive])}")
 
     for topic <- ["upstream-deps", "upstream-deps-summary", "morning-digest"] do
@@ -149,6 +152,35 @@ defmodule Arbor.Actions.MorningDigestSecurityRegressionTest do
              execute(fixture, %{@params | topics: ["private"]})
 
     assert {:error, :canonical_workdir_required} = execute(%{fixture | workdir: nil})
+  end
+
+  test "security regression: a supplied absent or malformed routine token cannot authorize digest I/O",
+       fixture do
+    for token <- [
+          nil,
+          %{},
+          %{lease: "lease_" <> String.duplicate("a", 24), token: String.duplicate("b", 43)}
+        ] do
+      {:ok, proof} =
+        SignedRequest.sign(@resource, fixture.identity.agent_id, fixture.identity.private_key)
+
+      assert {:error, _} =
+               Actions.authorize_and_execute(
+                 fixture.identity.agent_id,
+                 BuildMorningDigest,
+                 @params,
+                 %{
+                   signed_request: proof,
+                   workdir: fixture.workdir,
+                   taint_policy: :permissive,
+                   allow_pipeline_internal: true,
+                   routine_effect_token: token
+                 }
+               )
+
+      refute File.exists?(report(fixture, "morning-digest"))
+      assert File.ls!(Path.dirname(report(fixture, "morning-digest"))) == []
+    end
   end
 
   defp execute(fixture, params \\ @params, pipeline_internal? \\ true) do
