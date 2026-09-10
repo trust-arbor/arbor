@@ -109,9 +109,12 @@ trailing directory wildcard. Required directories are:
 - `reports/upstream-deps-summary`
 - `reports/morning-digest`
 
-The manifest and original owner need the exact report action, orchestrator lobby,
-two scoped read grants and one scoped output write grant. The effective owner
-policy must explicitly permit the exact output directory. Default write `:ask`
+The manifest and issuer envelope need the exact report action, two scoped read
+grants and one scoped output write grant. The original owner additionally needs
+the orchestrator lobby (`arbor://orchestrator/execute`); the execution identity
+receives that implicit lobby separately, so it need not be repeated in the
+manifest. The effective owner policy must explicitly permit the exact output
+directory. Default write `:ask`
 remains a refusal; caps-file metadata is not standing owner consent. The execution
 also retains its normal ephemeral capabilities. `routine_logs_root` can select a
 source-owned log directory; no runtime credential is accepted in intent options.
