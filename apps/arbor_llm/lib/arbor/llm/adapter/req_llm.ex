@@ -917,7 +917,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   @doc """
-  Translate Arbor tool maps (OpenAI nested format) into the
+  Translate Arbor tool maps (canonical facade or OpenAI nested format) into the
   `%ReqLLM.Tool{}` struct list req_llm expects.
 
   req_llm's per-provider `prepare_request` calls
@@ -943,6 +943,18 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       [] -> nil
       list -> list
     end
+  end
+
+  defp translate_tool(%{name: name, input_schema: schema} = tool)
+       when is_binary(name) and is_map(schema) do
+    translate_tool(%{
+      "type" => "function",
+      "function" => %{
+        "name" => name,
+        "description" => Map.get(tool, :description),
+        "parameters" => schema
+      }
+    })
   end
 
   defp translate_tool(%{"type" => "function", "function" => function}) when is_map(function) do

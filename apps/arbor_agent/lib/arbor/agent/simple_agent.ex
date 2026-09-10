@@ -22,6 +22,8 @@ defmodule Arbor.Agent.SimpleAgent do
   """
 
   alias Arbor.Agent.ContextCompactor
+  alias Arbor.LLM
+  alias Arbor.LLM.{Message, Response, Tool}
 
   require Logger
 
@@ -79,6 +81,7 @@ defmodule Arbor.Agent.SimpleAgent do
           turns: non_neg_integer(),
           tool_calls: [tool_entry()],
           model: String.t(),
+          usage: map(),
           status: :completed | :max_turns | :context_overflow
         }
 
@@ -90,6 +93,8 @@ defmodule Arbor.Agent.SimpleAgent do
     * `:model` - Model ID (default: `"openai/gpt-oss-120b:free"`)
     * `:provider` - Provider atom (default: `:openrouter`)
     * `:max_turns` - Maximum LLM round-trips (default: 25)
+    * `:timeout` - Deadline in milliseconds for each loop model call (LLM facade default)
+    * `:max_response_bytes` - Narrow the LLM facade's response ceiling for each loop model call
     * `:tools` - List of action modules (default: 12 coding tools)
     * `:tool_preset` - Preset tool set: `:coding`, `:memory`, `:relational`, `:all` (overrides `:tools`)
     * `:system_prompt` - Override system prompt
@@ -98,6 +103,11 @@ defmodule Arbor.Agent.SimpleAgent do
     * `:context_management` - Context management mode: `:none`, `:heuristic`, `:full` (default: `:none`)
     * `:effective_window` - Override effective context window in tokens
     * `:enable_llm_compaction` - Enable LLM narrative summaries (default: false)
+
+  Model calls use `Arbor.LLM` and its configured default client. The loop owns
+  tool execution; the facade performs one model step per turn. `usage` adds
+  numeric counters from completed model calls and retains the latest value for
+  provider detail fields. Compaction calls are not included in these counters.
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(task, opts \\ []) do
@@ -126,7 +136,7 @@ defmodule Arbor.Agent.SimpleAgent do
         default_system_prompt(working_dir)
       end)
 
-    # Build tools in ReqLLM format via Jido.AI.ToolAdapter
+    # Describe tools without giving the LLM facade ownership of their execution.
     tools = build_tools(action_modules)
 
     messages = [
@@ -152,11 +162,12 @@ defmodule Arbor.Agent.SimpleAgent do
       turn: 0,
       max_turns: max_turns,
       model: model,
-      model_spec: build_model_spec(provider, model),
       provider: provider,
+      llm_opts: Keyword.take(opts, [:timeout, :max_response_bytes]),
       working_dir: working_dir,
       agent_id: agent_id,
       tool_history: [],
+      usage: %{},
       compactor: compactor
     }
 
@@ -180,6 +191,7 @@ defmodule Arbor.Agent.SimpleAgent do
 
     case llm_call(messages_for_llm, tools, state) do
       {:ok, response} ->
+        state = %{state | usage: merge_usage(state.usage, response.usage)}
         classified = classify_response(response)
 
         case classified.type do
@@ -264,12 +276,37 @@ defmodule Arbor.Agent.SimpleAgent do
   # ── LLM Call ──────────────────────────────────────────────────────
 
   defp llm_call(messages, tools, state) do
-    opts =
-      [tools: tools, max_tokens: 16_384, temperature: 0.3]
-      |> maybe_add_api_key(state.provider)
-
-    ReqLLM.Generation.generate_text(state.model_spec, messages, opts)
+    LLM.generate(
+      state.llm_opts ++
+        [
+          provider: to_string(state.provider),
+          model: state.model,
+          messages: Enum.map(messages, &to_llm_message/1),
+          tools: tools,
+          max_tool_rounds: 0,
+          max_tokens: 16_384,
+          temperature: 0.3
+        ]
+    )
   end
+
+  defp to_llm_message(%{role: :assistant} = message) do
+    content =
+      [%{kind: :text, text: Map.get(message, :content) || ""}] ++
+        Map.get(message, :tool_calls, [])
+
+    %Message{role: :assistant, content: content}
+  end
+
+  defp to_llm_message(%{role: :tool} = message) do
+    %Message{
+      role: :tool,
+      content: message.content,
+      metadata: Map.take(message, [:tool_call_id, :name])
+    }
+  end
+
+  defp to_llm_message(message), do: %Message{role: message.role, content: message.content}
 
   # ── Tool Execution ───────────────────────────────────────────────
 
@@ -358,47 +395,22 @@ defmodule Arbor.Agent.SimpleAgent do
 
   # ── Response Classification ──────────────────────────────────────
 
-  defp classify_response(response) do
-    # Use Jido.AI.Helpers if available, otherwise inline classification
-    helpers_mod = Module.concat([:Jido, :AI, :Helpers])
+  defp classify_response(%Response{} = response) do
+    tool_calls =
+      Enum.filter(response.content_parts, fn
+        %{kind: :tool_call} -> true
+        _ -> false
+      end)
 
-    if Code.ensure_loaded?(helpers_mod) and
-         function_exported?(helpers_mod, :classify_llm_response, 1) do
-      apply(helpers_mod, :classify_llm_response, [response])
-    else
-      # Inline fallback — use struct dot-access (not get_in, which needs Access)
-      message = Map.get(response, :message)
-      tool_calls = if message, do: Map.get(message, :tool_calls) || [], else: []
-
-      type =
-        cond do
-          tool_calls != [] -> :tool_calls
-          Map.get(response, :finish_reason) == :tool_calls -> :tool_calls
-          true -> :final_answer
-        end
-
-      content = if message, do: Map.get(message, :content)
-
-      text =
-        case content do
-          nil -> nil
-          c when is_binary(c) -> c
-          parts when is_list(parts) -> extract_text_parts(parts)
-          _ -> nil
-        end
-
-      %{type: type, text: text, tool_calls: tool_calls}
-    end
-  end
-
-  defp extract_text_parts(parts) do
-    parts
-    |> Enum.filter(fn
-      %{type: :text} -> true
-      %{type: "text"} -> true
-      _ -> false
-    end)
-    |> Enum.map_join("", fn part -> Map.get(part, :text, "") end)
+    %{
+      type:
+        if(tool_calls != [] or response.finish_reason == :tool_calls,
+          do: :tool_calls,
+          else: :final_answer
+        ),
+      text: response.text,
+      tool_calls: tool_calls
+    }
   end
 
   # ── Tool Building ───────────────────────────────────────────────
@@ -406,26 +418,33 @@ defmodule Arbor.Agent.SimpleAgent do
   defp build_tools(action_modules) do
     adapter_mod = Module.concat([:Jido, :AI, :ToolAdapter])
 
-    if Code.ensure_loaded?(adapter_mod) do
-      apply(adapter_mod, :from_actions, [action_modules])
-    else
-      Enum.map(action_modules, fn mod ->
-        if function_exported?(mod, :to_tool, 0) do
-          mod.to_tool()
-        end
-      end)
-      |> Enum.reject(&is_nil/1)
-    end
+    definitions =
+      if Code.ensure_loaded?(adapter_mod) do
+        apply(adapter_mod, :from_actions, [action_modules])
+      else
+        Enum.map(action_modules, fn mod ->
+          if function_exported?(mod, :to_tool, 0) do
+            mod.to_tool()
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+      end
+
+    Enum.map(definitions, fn definition ->
+      %Tool{
+        name: definition.name,
+        description: definition.description,
+        input_schema:
+          Map.get(definition, :parameter_schema) || Map.get(definition, :parameters_schema) || %{}
+      }
+    end)
   end
 
   # ── Helpers ──────────────────────────────────────────────────────
 
-  # ToolCall struct accessors — handles both ReqLLM.ToolCall (function.name/arguments)
-  # and plain maps (name/arguments) from classify_llm_response
-  defp tc_name(%{function: %{name: name}}), do: name
+  # The LLM facade returns canonical tool-call content parts.
   defp tc_name(%{name: name}), do: name
 
-  defp tc_args(%{function: %{arguments: args}}), do: ensure_map(args)
   defp tc_args(%{arguments: args}), do: ensure_map(args)
 
   defp ensure_map(args) when is_map(args), do: args
@@ -439,15 +458,6 @@ defmodule Arbor.Agent.SimpleAgent do
 
   defp ensure_map(_), do: %{}
 
-  defp build_model_spec(provider, model) do
-    %LLMDB.Model{
-      provider: provider,
-      model: model,
-      id: model
-    }
-    |> Map.put(:base_url, nil)
-  end
-
   defp default_system_prompt(working_dir) do
     """
     You are a coding agent. You have tools to read, write, edit, and search files, \
@@ -459,22 +469,14 @@ defmodule Arbor.Agent.SimpleAgent do
     """
   end
 
-  defp maybe_add_api_key(opts, provider) do
-    key_var =
-      case provider do
-        :openrouter -> "OPENROUTER_API_KEY"
-        :anthropic -> "ANTHROPIC_API_KEY"
-        :openai -> "OPENAI_API_KEY"
-        :google -> "GOOGLE_API_KEY"
-        :gemini -> "GEMINI_API_KEY"
-        _ -> nil
+  defp merge_usage(previous, current) do
+    Map.merge(previous, current, fn _key, old, new ->
+      cond do
+        is_number(old) and is_number(new) -> old + new
+        is_nil(new) -> old
+        true -> new
       end
-
-    case key_var && System.get_env(key_var) do
-      nil -> opts
-      "" -> opts
-      key -> Keyword.put(opts, :api_key, key)
-    end
+    end)
   end
 
   defp build_result(text, state, status) do
@@ -483,6 +485,7 @@ defmodule Arbor.Agent.SimpleAgent do
       turns: state.turn,
       tool_calls: state.tool_history,
       model: state.model,
+      usage: state.usage,
       status: status
     }
 
