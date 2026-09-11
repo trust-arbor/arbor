@@ -36,9 +36,16 @@ Arbor.Orchestrator.conformance_matrix()
 
 ## Architecture
 
-Zero in-umbrella dependencies. External deps: `jason`, `ex_doc`, `dialyxir`.
+`arbor_orchestrator` is an L7 umbrella app. It depends downward on
+`arbor_actions`, `arbor_security`, `arbor_ai`, `arbor_memory`, `arbor_trust`,
+`arbor_shell`, `arbor_comms`, `arbor_llm`, `arbor_persistence`, and
+`arbor_kernel_runtime`. Only `arbor_commands`, `arbor_voice`, and
+`arbor_dashboard` sit above it.
 
-The app is intentionally standalone — it can be used independently or integrated into the Arbor umbrella without introducing dependency cycles.
+The engine walks a compiled DOT graph node-by-node, dispatching each node to
+its typed handler. `Engine.run/2` returning `{:ok, run_result}` means execution
+produced a result envelope — callers must inspect `run_result.final_outcome.status`
+and admit only `:success` or an explicitly supported `:partial_success`.
 
 ## Specs
 
