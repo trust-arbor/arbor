@@ -812,13 +812,7 @@ defmodule Arbor.LLM.OAuth.Responses do
                ),
              :ok <- bounded_terminal_detail(reasoning_tokens, output_tokens, :reasoning_tokens),
              :ok <- validate_openai_terminal_usage_extensions(usage, backend),
-             :ok <-
-               validate_xai_terminal_usage_extensions(
-                 usage,
-                 backend,
-                 input_tokens,
-                 output_tokens
-               ) do
+             :ok <- validate_xai_terminal_usage_extensions(usage, backend) do
           {:ok,
            compact_usage(
              input_tokens,
@@ -846,8 +840,8 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   defp validate_openai_terminal_usage_extensions(_usage, _backend), do: :ok
 
-  defp validate_xai_terminal_usage_extensions(usage, :xai, input_tokens, output_tokens) do
-    with :ok <- validate_xai_context_details(usage, input_tokens, output_tokens),
+  defp validate_xai_terminal_usage_extensions(usage, :xai) do
+    with :ok <- validate_xai_context_details(usage),
          :ok <- validate_xai_counter(usage, "cost_in_usd_ticks"),
          :ok <- validate_xai_counter(usage, "num_server_side_tools_used"),
          :ok <- validate_xai_counter(usage, "num_sources_used") do
@@ -855,16 +849,20 @@ defmodule Arbor.LLM.OAuth.Responses do
     end
   end
 
-  defp validate_xai_terminal_usage_extensions(_usage, _backend, _input_tokens, _output_tokens),
-    do: :ok
+  defp validate_xai_terminal_usage_extensions(_usage, _backend), do: :ok
 
-  defp validate_xai_context_details(usage, input_tokens, output_tokens) do
+  # xAI's live-context counters are independent of cumulative billing usage. Validate
+  # their bounds, then discard them without changing the canonical billing evidence.
+  defp validate_xai_context_details(usage) do
     case Map.fetch(usage, "context_details") do
       :error ->
         :ok
 
-      {:ok, %{"input_tokens" => ^input_tokens, "output_tokens" => ^output_tokens} = details}
-      when map_size(details) == 2 ->
+      {:ok, %{"input_tokens" => input_tokens, "output_tokens" => output_tokens} = details}
+      when map_size(details) == 2 and
+             is_integer(input_tokens) and input_tokens >= 0 and input_tokens <= @max_token_count and
+             is_integer(output_tokens) and output_tokens >= 0 and
+             output_tokens <= @max_token_count ->
         :ok
 
       {:ok, _details} ->

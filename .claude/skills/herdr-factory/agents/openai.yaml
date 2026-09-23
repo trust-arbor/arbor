@@ -1,0 +1,4 @@
+interface:
+  display_name: "Herdr Factory"
+  short_description: "Operate factory panes and inspect council responses"
+  default_prompt: "Use $herdr-factory to observe this Arbor factory run in Herdr and explain council disagreements."

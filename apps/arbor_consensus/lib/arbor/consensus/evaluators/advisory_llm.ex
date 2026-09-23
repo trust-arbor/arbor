@@ -60,9 +60,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   The vote field is `:approve` for ordinary advisory analysis — the value
   is in the `reasoning` field. When `proposal.context` carries
   `evaluation_protocol: "design_review"` (or `:design_review`), each seat
-  must emit a structured verdict (`approve` | `rework`) plus concrete
-  concerns. A missing or malformed verdict is mapped to `:reject` with the
-  parse problem as the concern — never `:approve`.
+  must emit a structured verdict (`approve` | `rework`), a non-empty rationale,
+  and concrete concerns. A missing or malformed verdict or rationale is mapped
+  to `:reject` with the parse problem as the concern — never `:approve`.
+  The complete design-review JSON is retained in `reasoning` and the consultation log.
   """
 
   @behaviour Arbor.Contracts.Consensus.Evaluator
@@ -691,11 +692,19 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp design_review_system_override do
     """
     OUTPUT CONTRACT OVERRIDE FOR DESIGN REVIEW
-    Ignore any generic response format above. Your entire response MUST be exactly one valid JSON object with no Markdown fence, prose, or extra fields:
-    {"verdict":"approve","concerns":[]}
-    The verdict value MUST be exactly "approve" or "rework". For rework, concerns MUST contain concrete in-scope blocking omissions.
+    Ignore any generic response format above.
+    #{design_review_response_contract()}
 
     Approve when the design has no blocking omission within the frozen task, success criteria, constraints, non-goals, and cited architecture. A rework concern is valid only when it identifies the exact in-scope requirement or architecture reference and the concrete design omission that prevents satisfying it. Enhancements, general hardening, and new platform features outside that frozen packet are nonblocking and MUST NOT appear in concerns. Do not turn acceptance evidence or manager-observed verification into a new product protocol unless the frozen packet explicitly requires implementation of that protocol.
+    """
+    |> String.trim()
+  end
+
+  defp design_review_response_contract do
+    """
+    Your entire response MUST be exactly one valid JSON object with no Markdown fence, surrounding prose, or extra fields:
+    {"verdict":"approve","rationale":"Explain why this design merits the verdict.","concerns":[]}
+    The verdict value MUST be exactly "approve" or "rework". For BOTH verdicts, rationale MUST be a non-empty string giving a concise, evidence-based justification: name the relevant design choices and frozen requirements, explain why they are satisfied or blocked, and note material assumptions or limitations. Do not merely repeat the verdict or the example rationale. For rework, concerns MUST contain concrete in-scope blocking omissions.
     """
     |> String.trim()
   end
@@ -1052,9 +1061,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     if design_review_protocol?(proposal) do
       """
       ### Design-review verdict
-      Reply with exactly one JSON object and no other fields or prose:
-      {"verdict":"approve","concerns":[]}
-      The verdict value must be exactly "approve" or "rework". For rework, concerns must contain concrete in-scope blocking omissions.
+      #{design_review_response_contract()}
       Rework only for a concrete omission within the frozen packet. Approve when there is no in-scope blocker. Do not deny or expand the task.
       """
     else
@@ -1065,9 +1072,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   defp research_response_schema(proposal) do
     if design_review_protocol?(proposal) do
       """
-      Respond with exactly one JSON object and no other fields or prose:
-      {"verdict":"approve","concerns":[]}
-      The verdict value must be exactly "approve" or "rework". For rework, concerns must contain concrete in-scope blocking omissions.
+      #{design_review_response_contract()}
       Rework only for a concrete omission within the frozen packet. Approve when there is no in-scope blocker. Do not deny or expand the task.
       """
     else
@@ -1178,22 +1183,34 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   end
 
   defp admit_design_review_json(json, text) do
-    case {normalize_design_review_verdict(json), normalize_design_review_concerns(json)} do
-      {{:ok, :approve}, {:ok, concerns}} ->
-        {:approve, concerns, parse_advisory_response(text)}
-
-      {{:ok, :rework}, {:ok, concerns}} ->
-        {:reject, concerns, parse_advisory_response(text)}
-
-      {{:ok, _verdict}, :error} ->
+    case {normalize_design_review_verdict(json), normalize_design_review_concerns(json),
+          valid_design_review_rationale?(json)} do
+      {{:ok, _verdict}, :error, _} ->
         :malformed_concerns
 
-      {:error, _} ->
+      {:error, _, _} ->
         malformed_design_review(
           "#{@malformed_design_review_verdict}: missing or invalid verdict",
           text
         )
+
+      {{:ok, _verdict}, {:ok, _concerns}, false} ->
+        malformed_design_review(
+          "malformed design-review rationale: expected a non-empty string",
+          text
+        )
+
+      {{:ok, verdict}, {:ok, concerns}, true} ->
+        # Keep the complete verdict and rationale together for observers and
+        # downstream consumers, even if a seat adds an advisory analysis field.
+        vote = if verdict == :approve, do: :approve, else: :reject
+        {vote, concerns, text}
     end
+  end
+
+  defp valid_design_review_rationale?(json) do
+    rationale = Map.get(json, "rationale")
+    is_binary(rationale) and String.valid?(rationale) and String.trim(rationale) != ""
   end
 
   defp normalize_design_review_verdict(json) when is_map(json) do

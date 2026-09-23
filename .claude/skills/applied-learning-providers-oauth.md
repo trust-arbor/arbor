@@ -14,6 +14,22 @@ not retain or log it. Validate fields that contribute evidence, but do not coupl
 private structure of discarded metadata merely to appear stricter (found 2026-09-02 when every
 OpenAI OAuth reviewer failed with `invalid_terminal_usage_keys`).
 
+The same assumption recurred on 2026-09-22: all seven xAI council failures rejected
+`usage.context_details` because Arbor required its counters to equal top-level usage.
+A process-scoped, numeric-only trace of one normal council-bridge call observed billing
+input/output `655/141` versus context input/output `655/148`, with exactly the expected two
+context fields. [xAI's own client](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-sampler/src/client.rs)
+distinguishes live-context counts from cumulative billing counts. Validate context counters
+independently; neither equality nor a context-less-than-billing rule is valid. Keep canonical
+billing consistency, backend scoping, and decoder resource limits intact. This is a diagnosed
+parser defect, not evidence of invalid credentials or a rationale-contract failure. Fixed on
+2026-09-22 by validating each context counter independently against the existing token bound;
+the live-value regression fails on the old parser and passes with the fix. Malformed context,
+wrong-backend metadata, and inconsistent billing remain rejected (117 targeted tests passed).
+Use the actual caller path for a live reproduction: adding `require_live_pipeline: true` to
+the generic facade rejected this OAuth route locally with `:live_completion_provider_unsupported`
+before any network call; the ordinary council bridge reached the failing terminal validator.
+
 <!-- applied-learning: a-rotating-oauth-refresh-token-cannot-be-safely-cloned-into-two-independently-refreshing-stores -->
 <a id="applied-learning-a-rotating-oauth-refresh-token-cannot-be-safely-cloned-into-two-independently-refreshing-stores"></a>
 **A rotating OAuth refresh token cannot be safely cloned into two independently

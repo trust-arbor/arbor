@@ -271,7 +271,8 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       end)
 
       assert {:error, :api_error} =
-               AdvisoryLLM.evaluate(TestHelpers.build_proposal(%{description: "Provider failed"}),
+               AdvisoryLLM.evaluate(
+                 TestHelpers.build_proposal(%{description: "Provider failed"}),
                  :brainstorming,
                  llm_fn: error_llm_fn(),
                  consultation_id: run_id,
@@ -791,12 +792,18 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
   end
 
   describe "design-review evaluation protocol" do
-    test "requests a structured approve|rework verdict in the prompt" do
+    test "requests a structured approve|rework verdict and rationale in both prompts" do
       test_pid = self()
 
       capture_fn = fn system_prompt, user_prompt ->
         send(test_pid, {:prompts, system_prompt, user_prompt})
-        {:ok, Jason.encode!(%{"verdict" => "approve", "concerns" => []})}
+
+        {:ok,
+         Jason.encode!(%{
+           "verdict" => "approve",
+           "rationale" => "The CRC extraction keeps effects in the shell as required.",
+           "concerns" => []
+         })}
       end
 
       proposal = design_review_proposal("Should we extract a core?")
@@ -808,7 +815,14 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
       assert_receive {:prompts, system_prompt, user_prompt}
       assert system_prompt =~ "OUTPUT CONTRACT OVERRIDE FOR DESIGN REVIEW"
       assert system_prompt =~ "Ignore any generic response format above"
-      assert system_prompt =~ ~s({"verdict":"approve","concerns":[]})
+
+      for prompt <- [system_prompt, user_prompt] do
+        assert prompt =~ ~s("rationale":)
+        assert prompt =~ "For BOTH verdicts, rationale MUST be a non-empty string"
+        assert prompt =~ "concise, evidence-based justification"
+        assert prompt =~ "material assumptions or limitations"
+      end
+
       assert system_prompt =~ ~s(verdict value MUST be exactly "approve" or "rework")
       assert system_prompt =~ "frozen task, success criteria, constraints, non-goals"
       assert system_prompt =~ "new platform features outside that frozen packet are nonblocking"
@@ -825,7 +839,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
          Jason.encode!(%{
            "verdict" => "rework",
            "concerns" => ["Name the missing capability bound"],
-           "analysis" => "The design omits the fs grant"
+           "rationale" => "The design omits the fs grant required to read the scoped source tree."
          })}
       end
 
@@ -836,7 +850,67 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLMTest do
 
       assert eval.vote == :reject
       assert "Name the missing capability bound" in eval.concerns
+      assert Jason.decode!(eval.reasoning)["rationale"] =~ "omits the fs grant"
       refute eval.vote == :approve
+    end
+
+    test "preserves the complete approval rationale in reasoning and the consultation log input" do
+      rationale =
+        String.duplicate(
+          "The pure core preserves the frozen requirement — effects stay in the shell.\n",
+          50
+        )
+
+      payload =
+        Jason.encode!(%{
+          "verdict" => "approve",
+          "rationale" => rationale,
+          "concerns" => [],
+          "analysis" => "An extra field must not replace the recorded verdict and rationale."
+        })
+
+      proposal = design_review_proposal("Retain the written justification")
+
+      assert {:ok, eval} =
+               AdvisoryLLM.evaluate(proposal, :security,
+                 llm_fn: fn _, _ -> {:ok, payload} end,
+                 consultation_id: "run_design_rationale",
+                 consultation_log: __MODULE__.RecordingConsultationLog
+               )
+
+      assert eval.vote == :approve
+      assert eval.sealed
+      assert eval.reasoning == payload
+      assert Jason.decode!(eval.reasoning)["rationale"] == rationale
+      assert_received {:log_single, _, :security, ^eval, llm_meta, opts}
+      assert llm_meta.raw_response == payload
+      assert Keyword.fetch!(opts, :run_id) == "run_design_rationale"
+    end
+
+    test "security regression: missing or invalid rationale never admits a design approval" do
+      proposal = design_review_proposal("Explain the verdict")
+
+      for verdict <- ["approve", "rework"],
+          rationale <- [:missing, nil, "", " \n\t ", 42, true, false, [], %{"text" => "fine"}] do
+        response = %{
+          "verdict" => verdict,
+          "concerns" => [],
+          "analysis" => "Not a rationale field"
+        }
+
+        response =
+          if rationale == :missing, do: response, else: Map.put(response, "rationale", rationale)
+
+        payload = Jason.encode!(response)
+
+        assert {:ok, eval} =
+                 AdvisoryLLM.evaluate(proposal, :security, llm_fn: fn _, _ -> {:ok, payload} end)
+
+        assert eval.vote == :reject
+        assert eval.sealed
+        assert eval.reasoning == payload
+        assert eval.concerns == ["malformed design-review rationale: expected a non-empty string"]
+      end
     end
 
     test "a missing verdict is rework with the parse problem, never approve" do

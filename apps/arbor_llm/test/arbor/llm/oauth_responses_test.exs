@@ -229,7 +229,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         "input_tokens" => 3,
         "output_tokens" => 2,
         "total_tokens" => 5,
-        "context_details" => %{"input_tokens" => 3, "output_tokens" => 2},
+        "context_details" => %{"input_tokens" => 4, "output_tokens" => 1},
         "cost_in_usd_ticks" => 3_244_000,
         "num_server_side_tools_used" => 0,
         "num_sources_used" => 0
@@ -256,7 +256,7 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
     assert %{request: _, body: _} = Task.await(openai_server, 2_000)
 
-    malformed = put_in(terminal, ["usage", "context_details", "input_tokens"], 4)
+    malformed = put_in(terminal, ["usage", "context_details", "input_tokens"], -1)
     {malformed_url, malformed_server} = start_request_capture_server(malformed)
     configure_responses_endpoint!(%{xai: malformed_url})
 
@@ -264,6 +264,112 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
              Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
 
     assert %{request: _, body: _} = Task.await(malformed_server, 2_000)
+  end
+
+  test "regression: xAI context counters can differ from billing without replacing usage evidence",
+       %{
+         store_dir: store_dir
+       } do
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-token"))
+
+    # The first pair reproduces the numeric-only live observation from 2026-09-22.
+    # Context counters can be above or below billing counters; neither comparison is a gate.
+    for {context_input, context_output} <- [
+          {655, 148},
+          {650, 130},
+          {700, 150},
+          {0, 0},
+          {1_000_000_000, 1_000_000_000}
+        ] do
+      terminal = %{
+        "model" => "grok-4.6",
+        "usage" => %{
+          "input_tokens" => 655,
+          "output_tokens" => 141,
+          "total_tokens" => 796,
+          "context_details" => %{
+            "input_tokens" => context_input,
+            "output_tokens" => context_output
+          }
+        }
+      }
+
+      {url, server} = start_request_capture_server(terminal)
+      configure_responses_endpoint!(%{xai: url})
+
+      assert {:ok, result} = Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+      billing_usage = %{input_tokens: 655, output_tokens: 141, total_tokens: 796}
+      assert result.usage == billing_usage
+      assert result.provider_receipt.usage == billing_usage
+      assert result.provider_receipt.backend == :xai
+      refute inspect(result) =~ "context_details"
+      assert %{request: _, body: _} = Task.await(server, 2_000)
+    end
+  end
+
+  test "security regression: independent xAI context counters remain structurally bounded", %{
+    store_dir: store_dir
+  } do
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-token"))
+
+    valid_context = %{"input_tokens" => 655, "output_tokens" => 148}
+
+    invalid_contexts =
+      [
+        nil,
+        [],
+        "not-an-object",
+        %{},
+        %{"input_tokens" => 655},
+        %{"output_tokens" => 148},
+        Map.put(valid_context, "unknown", 1)
+      ] ++
+        for key <- ["input_tokens", "output_tokens"],
+            value <- [-1, 1_000_000_001, 1.5, "148", true, nil],
+            do: Map.put(valid_context, key, value)
+
+    for context <- invalid_contexts do
+      terminal = %{
+        "usage" => %{
+          "input_tokens" => 655,
+          "output_tokens" => 141,
+          "total_tokens" => 796,
+          "context_details" => context
+        }
+      }
+
+      {url, server} = start_request_capture_server(terminal)
+      configure_responses_endpoint!(%{xai: url})
+
+      assert {:error, %ResponsesFailure{backend: :xai, class: :protocol, code: :invalid_stream}} =
+               Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+      assert %{request: _, body: _} = Task.await(server, 2_000)
+    end
+  end
+
+  test "security regression: independent xAI context counters do not excuse inconsistent billing",
+       %{
+         store_dir: store_dir
+       } do
+    write_store_json(store_dir, "xai.json", oauth_store("xai", "xai-token"))
+
+    {url, server} =
+      start_request_capture_server(%{
+        "usage" => %{
+          "input_tokens" => 655,
+          "output_tokens" => 141,
+          "total_tokens" => 803,
+          "context_details" => %{"input_tokens" => 655, "output_tokens" => 148}
+        }
+      })
+
+    configure_responses_endpoint!(%{xai: url})
+
+    assert {:error, %ResponsesFailure{backend: :xai, class: :protocol, code: :invalid_stream}} =
+             Responses.complete(:xai, empty_request(), receive_timeout: 1_000)
+
+    assert %{request: _, body: _} = Task.await(server, 2_000)
   end
 
   test "OpenAI terminal usage accepts bounded attribution without retaining its content", %{

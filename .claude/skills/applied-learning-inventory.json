@@ -8851,7 +8851,7 @@
       "source_date": "2026-09-02",
       "source_incident": "found 2026-09-02 when every OpenAI OAuth reviewer failed with invalid_terminal_usage_keys",
       "always_loaded": false,
-      "content_sha256": "cfc7707cf861b015895e3474a9f4ec5592ffaedcdf0ce34c2f1cd63a56a810ca"
+      "content_sha256": "9b0565ba2396c44ff1b4cb032db974c194089b1e1d42453a29d384be5dd0255a"
     },
     {
       "source_ordinal": 717,

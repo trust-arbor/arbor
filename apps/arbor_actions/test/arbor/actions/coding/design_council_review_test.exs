@@ -406,6 +406,54 @@ defmodule Arbor.Actions.Coding.DesignCouncilReviewTest do
     Process.delete(:consult_result)
   end
 
+  test "security regression: design gate requires the AdvisoryLLM approval rationale", ctx do
+    {:ok, proposal} =
+      Arbor.Contracts.Consensus.Proposal.new(%{
+        proposer: "human",
+        topic: :advisory,
+        mode: :advisory,
+        description: "Review the design",
+        target_layer: 4,
+        context: %{"evaluation_protocol" => "design_review"}
+      })
+
+    for {rationale, expected} <- [
+          {"The CRC core is pure and the existing shell retains all side effects.", "approve"},
+          {nil, "rework"}
+        ] do
+      response = %{"verdict" => "approve", "concerns" => []}
+      response = if rationale, do: Map.put(response, "rationale", rationale), else: response
+
+      seat =
+        Arbor.Consensus.Evaluators.AdvisoryLLM.evaluate(proposal, :security,
+          llm_fn: fn _, _ -> {:ok, Jason.encode!(response)} end
+        )
+
+      evaluations =
+        Enum.map(unanimous_approve(), fn
+          {:security, _eval} -> {:security, seat_as_consult_term(seat)}
+          other -> other
+        end)
+
+      Process.put(
+        :consult_result,
+        {:ok, %{evaluations: evaluations, run_id: "run_rationale_#{expected}"}}
+      )
+
+      assert {:ok, result} = DesignCouncilReview.run(ctx.params, ctx.context)
+      assert result["checkpoint_outcome"] == expected
+      assert result["design_council_run_id"] == "run_rationale_#{expected}"
+      assert result["dispersion"]["error"] == 0
+
+      if expected == "rework" do
+        assert result["dispersion"]["reject"] == 1
+        assert result["note"] =~ "malformed design-review rationale"
+      end
+    end
+  after
+    Process.delete(:consult_result)
+  end
+
   test "end-to-end AdvisoryLLM veto-seat provider failure fails closed with veto unavailable",
        ctx do
     {:ok, proposal} =
