@@ -68,6 +68,10 @@ defmodule Arbor.LLM do
   def eval_subject(name) when is_binary(name), do: Map.get(@eval_subjects, name)
   def eval_subject(_name), do: nil
 
+  @doc "Read effective provider endpoint identity and the Ollama artifact digest where available; never performs inference."
+  def execution_provider_identity(provider, model),
+    do: Arbor.LLM.ExecutionProviderIdentity.capture(provider, model)
+
   @doc "Returns all registered LLM-owned eval subject symbolic names."
   @spec eval_subject_names() :: [String.t()]
   def eval_subject_names, do: Map.keys(@eval_subjects)

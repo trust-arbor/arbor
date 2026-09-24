@@ -78,6 +78,7 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://agent/lifecycle",
     "arbor://agent/intent",
     "arbor://agent/discover_tools",
+    "arbor://agent/security_qualification",
 
     # Chat facade — external chat clients (TUI, mobile) talking to an agent via
     # the Gateway WS API. Per-agent: arbor://chat/agent/<agent_id> (prefix match).

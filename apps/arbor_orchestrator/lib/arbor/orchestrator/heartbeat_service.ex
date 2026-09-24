@@ -379,7 +379,15 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       # Don't stack heartbeats
       state
     else
-      case authorize_orchestrator(state) do
+      admission =
+        with :ok <- authorize_orchestrator(state),
+             do:
+               Arbor.Orchestrator.SecurityQualification.admit(
+                 Map.put(session_projection(state), :turn_graph, state.heartbeat_graph),
+                 :heartbeat
+               )
+
+      case admission do
         :ok ->
           do_start_heartbeat_task(state)
 
