@@ -339,6 +339,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end
   end
 
+  @tag skip: :os.type() != {:unix, :darwin}
   test "ordinary single-command Execute still works", %{
     agent_id: agent_id,
     private_key: private_key
@@ -350,11 +351,33 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
         private_key
       )
 
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "action_capshell_mechanics_" <> Base.encode16(:crypto.strong_rand_bytes(12))
+      )
+
+    :ok = File.mkdir(root)
+    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(root)
+    on_exit(fn -> File.rm_rf!(cwd) end)
+    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+
+    if Process.whereis(Arbor.Trust.Manager) == nil do
+      start_supervised!(
+        {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
+      )
+    end
+
+    {:ok, _} = Arbor.Trust.set_rule(agent_id, "arbor://fs/read#{cwd}", :auto)
+    previous_authorizer = Application.get_env(:arbor_shell, :agent_authorizer)
+    Application.put_env(:arbor_shell, :agent_authorizer, Shell)
+    on_exit(fn -> restore(:arbor_shell, :agent_authorizer, previous_authorizer) end)
+
     assert {:ok, result} =
              Arbor.Actions.authorize_and_execute(
                agent_id,
                Shell.Execute,
-               %{command: "echo actions-single-ok", sandbox: :none},
+               %{command: "echo actions-single-ok", sandbox: :none, cwd: cwd},
                %{
                  agent_id: agent_id,
                  signed_request: signed_request,

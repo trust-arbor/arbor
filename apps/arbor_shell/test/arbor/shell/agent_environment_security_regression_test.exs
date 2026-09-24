@@ -1,3 +1,5 @@
+Code.require_file("../../support/agent_containment_fixture.exs", __DIR__)
+
 defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
   @moduledoc """
   Security regression: agent shell children must not inherit ambient VM
@@ -14,6 +16,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
   """
   use ExUnit.Case, async: false
   @moduletag :fast
+  alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
@@ -36,7 +39,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
     Application.put_env(:arbor_security, :approval_guard_enabled, false)
     Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
 
-    agent_id = "agent_env_sec_#{:erlang.unique_integer([:positive])}"
+    agent_id = ContainmentFixture.install!()
     grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
     secret_name =
@@ -62,6 +65,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
   end
 
   describe "security regression: agent child environment is deny-by-default" do
+    @tag skip: :os.type() != {:unix, :darwin}
     test "security regression: authorize_and_execute printenv cannot read ambient secret",
          %{agent_id: agent_id, secret_name: secret_name, secret_value: secret_value} do
       command = "printenv #{secret_name}"
@@ -69,7 +73,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
       # Attempt to keep ambient inheritance via sandbox:none + clear_env:false;
       # agent opts must force clearing after authorization.
       assert {:ok, result} =
-               Arbor.Shell.authorize_and_execute(agent_id, command,
+               ContainmentFixture.execute(agent_id, command,
                  sandbox: :none,
                  clear_env: false
                )
@@ -80,12 +84,13 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
       assert result.exit_code != 0
     end
 
+    @tag skip: :os.type() != {:unix, :darwin}
     test "security regression: async and streaming agent paths also clear ambient env",
          %{agent_id: agent_id, secret_name: secret_name, secret_value: secret_value} do
       command = "printenv #{secret_name}"
 
       assert {:ok, exec_id} =
-               Arbor.Shell.authorize_and_execute_async(agent_id, command,
+               ContainmentFixture.async(agent_id, command,
                  sandbox: :none,
                  clear_env: false
                )
@@ -98,7 +103,7 @@ defmodule Arbor.Shell.AgentEnvironmentSecurityRegressionTest do
       assert async_result.exit_code != 0
 
       assert {:ok, session_id} =
-               Arbor.Shell.authorize_and_execute_streaming(agent_id, command,
+               ContainmentFixture.streaming(agent_id, command,
                  sandbox: :none,
                  clear_env: false,
                  stream_to: self()

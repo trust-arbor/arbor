@@ -9,6 +9,21 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
   setup do
     if Process.whereis(Arbor.Trust.Store) == nil, do: start_supervised!(Arbor.Trust.Store)
 
+    if Process.whereis(Arbor.Trust.Manager) == nil do
+      start_supervised!(
+        {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
+      )
+    end
+
+    previous_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)
+    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+
+    on_exit(fn ->
+      if is_nil(previous_guard),
+        do: Application.delete_env(:arbor_trust, :approval_guard_enabled),
+        else: Application.put_env(:arbor_trust, :approval_guard_enabled, previous_guard)
+    end)
+
     root =
       Path.join(
         System.tmp_dir!(),
@@ -19,6 +34,26 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
     cwd = Path.join(root, "work")
     :ok = File.mkdir(cwd)
+    # Only this synthetic directory gets a test-owned write ceiling. Ordinary
+    # production fs/write remains :ask; an action's shell approval cannot grant it.
+    previous_ceilings = Application.get_env(:arbor_trust, :security_ceilings)
+
+    Application.put_env(
+      :arbor_trust,
+      :security_ceilings,
+      Map.put(previous_ceilings || %{}, "arbor://fs/write#{cwd}", :auto)
+    )
+
+    rebind_trust!()
+
+    on_exit(fn ->
+      if is_nil(previous_ceilings),
+        do: Application.delete_env(:arbor_trust, :security_ceilings),
+        else: Application.put_env(:arbor_trust, :security_ceilings, previous_ceilings)
+
+      rebind_trust!()
+    end)
+
     File.write!(Path.join(cwd, "input"), "permitted-data")
     File.write!(Path.join(root, "outside"), "outside-data")
     {:ok, identity} = Security.generate_identity(name: "synthetic-action-containment")
@@ -32,7 +67,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
           "arbor://fs/read#{cwd}",
           "arbor://fs/write#{cwd}"
         ] do
-      {:ok, _} = Trust.set_rule(identity.agent_id, resource, :allow)
+      {:ok, _} = Trust.set_rule(identity.agent_id, resource, :auto)
     end
 
     {:ok, _} = Security.grant(principal: identity.agent_id, resource: "arbor://shell/exec/**")
@@ -91,6 +126,12 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     assert {:error, _} = execute(c, "cat input")
   end
 
+  defp rebind_trust! do
+    :ok = Application.stop(:arbor_trust)
+    :ok = Arbor.Trust.PolicyHost.release_claim()
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+  end
+
   defp grant(c, operation) do
     {:ok, _} =
       Security.grant(
@@ -107,7 +148,16 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
       c.identity.agent_id,
       Actions.Shell.Execute,
       Map.merge(%{command: command, cwd: c.cwd, timeout: 5_000}, extra),
-      %{agent_id: c.identity.agent_id, signed_request: proof}
+      %{
+        agent_id: c.identity.agent_id,
+        signed_request: proof,
+        approved_invocation: %{
+          request_id: "irq_synthetic_shell_containment",
+          principal_id: c.identity.agent_id,
+          resource_uri: resource,
+          decision: :approved
+        }
+      }
     )
   end
 end

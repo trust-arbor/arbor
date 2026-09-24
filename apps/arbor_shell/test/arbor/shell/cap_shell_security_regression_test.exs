@@ -1,3 +1,5 @@
+Code.require_file("../../support/agent_containment_fixture.exs", __DIR__)
+
 defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   @moduledoc """
   Security regressions for CapShell fail-closed + authorized-compound residual
@@ -18,6 +20,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   """
   use ExUnit.Case, async: false
   @moduletag :fast
+  alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
@@ -47,7 +50,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
     Application.put_env(:arbor_security, :approval_guard_enabled, false)
     Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
 
-    agent_id = "agent_capshell_sec_#{:erlang.unique_integer([:positive])}"
+    agent_id = ContainmentFixture.install!()
     grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
     on_exit(fn ->
@@ -143,7 +146,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
                  Arbor.Shell.authorize(agent_id, command, sandbox: :none)
 
         assert {:error, {:agent_executable_not_allowed, _name}} =
-                 Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+                 ContainmentFixture.execute(agent_id, command, sandbox: :none)
       end
     end
 
@@ -215,12 +218,12 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
 
       try do
         results = [
-          Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none, env: env),
-          Arbor.Shell.authorize_and_execute_async(agent_id, command,
+          ContainmentFixture.execute(agent_id, command, sandbox: :none, env: env),
+          ContainmentFixture.async(agent_id, command,
             sandbox: :none,
             env: env
           ),
-          Arbor.Shell.authorize_and_execute_streaming(agent_id, command,
+          ContainmentFixture.streaming(agent_id, command,
             sandbox: :none,
             env: env,
             stream_to: self()
@@ -269,7 +272,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
 
       try do
         result =
-          Arbor.Shell.authorize_and_execute(agent_id, "#{fake_echo} ignored", sandbox: :none)
+          ContainmentFixture.execute(agent_id, "#{fake_echo} ignored", sandbox: :none)
 
         Process.sleep(700)
         refute File.exists?(marker), "a fake executable named echo was launched"
@@ -298,7 +301,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
         System.put_env("PATH", root <> ":" <> original_path)
 
         assert {:ok, result} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "echo pinned", sandbox: :none)
+                 ContainmentFixture.execute(agent_id, "echo pinned", sandbox: :none)
 
         assert String.trim(result.stdout) == "pinned"
         refute File.exists?(marker)
@@ -360,15 +363,15 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
 
       try do
         results = [
-          Arbor.Shell.authorize_and_execute(agent_id, command,
+          ContainmentFixture.execute(agent_id, command,
             sandbox: :none,
             timeout: 100
           ),
-          Arbor.Shell.authorize_and_execute_async(agent_id, command,
+          ContainmentFixture.async(agent_id, command,
             sandbox: :none,
             timeout: 100
           ),
-          Arbor.Shell.authorize_and_execute_streaming(agent_id, command,
+          ContainmentFixture.streaming(agent_id, command,
             sandbox: :none,
             timeout: 100,
             stream_to: self()
@@ -411,7 +414,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
 
       try do
         assert {:error, {:agent_executable_not_allowed, "find"}} =
-                 Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+                 ContainmentFixture.execute(agent_id, command, sandbox: :none)
 
         Process.sleep(300)
         refute File.exists?(marker), "generic find -exec launched a child marker process"
@@ -463,10 +466,10 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
                    Arbor.Shell.execute_compound_with_capabilities(agent_id, command)
 
           assert @unavailable =
-                   Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :basic)
+                   ContainmentFixture.execute(agent_id, command, sandbox: :basic)
 
           assert @unavailable =
-                   Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+                   ContainmentFixture.execute(agent_id, command, sandbox: :none)
 
           assert @unavailable = CapShell.run(agent_id, command)
 
@@ -500,7 +503,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
                    Arbor.Shell.execute_compound_with_capabilities(agent_id, command)
 
           assert @unavailable =
-                   Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+                   ContainmentFixture.execute(agent_id, command, sandbox: :none)
 
           assert @unavailable = CapShell.run(agent_id, command)
 
@@ -518,9 +521,10 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   end
 
   describe "ordinary single-command path preserved" do
+    @tag skip: :os.type() != {:unix, :darwin}
     test "authorized non-compound still executes", %{agent_id: agent_id} do
       assert {:ok, %{exit_code: 0, stdout: stdout}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "echo single-ok", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "echo single-ok", sandbox: :none)
 
       assert String.trim(stdout) == "single-ok"
     end
@@ -549,13 +553,13 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
                  Arbor.Shell.authorize(agent_id, command, sandbox: :none)
 
         assert @unavailable =
-                 Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+                 ContainmentFixture.execute(agent_id, command, sandbox: :none)
 
         assert @unavailable =
-                 Arbor.Shell.authorize_and_execute_async(agent_id, command, sandbox: :none)
+                 ContainmentFixture.async(agent_id, command, sandbox: :none)
 
         assert @unavailable =
-                 Arbor.Shell.authorize_and_execute_streaming(
+                 ContainmentFixture.streaming(
                    agent_id,
                    command,
                    stream_to: self(),

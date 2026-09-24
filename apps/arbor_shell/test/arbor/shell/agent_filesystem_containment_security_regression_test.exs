@@ -16,14 +16,8 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
       )
     end
 
-    def authorize_filesystem(agent, uri, operation, capability_id, _opts) do
-      Security.authorize_source_owned_exact_ordinary_capability(
-        agent,
-        uri,
-        operation,
-        capability_id,
-        %{session_id: nil, task_id: nil, principal_scope: nil, expected_egress: nil}
-      )
+    def authorize_filesystem(agent, uri, operation, _capability_id, _opts) do
+      Security.authorize(agent, uri, operation, verify_identity: false)
     end
   end
 
@@ -171,6 +165,51 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
     end
   end
 
+  @tag :qualification_identity
+  test "qualification identity binds the native bytes and loaded enforcement modules", c do
+    assert {:ok, first} = Shell.agent_execution_identity()
+    assert {:ok, ^first} = Shell.agent_execution_identity()
+    assert {:ok, encoded} = Jason.encode(first)
+    refute encoded =~ c.root
+    assert first["schema_version"] == 1
+    assert first["supported"] == (:os.type() == {:unix, :darwin})
+
+    launcher =
+      :arbor_shell |> :code.priv_dir() |> to_string() |> Path.join("arbor_shell_launcher")
+
+    assert first["launcher"]["sha256"] ==
+             Base.encode16(:crypto.hash(:sha256, File.read!(launcher)), case: :lower)
+
+    assert first["loaded_modules"]["Elixir.Arbor.Shell"] ==
+             Base.encode16(Shell.module_info(:md5), case: :lower)
+  end
+
+  @tag :qualification_identity
+  test "qualification identity fails closed when its authorizer is unavailable" do
+    Application.delete_env(:arbor_shell, :agent_authorizer)
+    assert {:error, :agent_execution_identity_unavailable} = Shell.agent_execution_identity()
+  end
+
+  test "agent environment remains cleared in every mode despite caller overrides", c do
+    grant(c, :read)
+    key = "ARBOR_SYNTHETIC_" <> Base.encode16(:crypto.strong_rand_bytes(8))
+    System.put_env(key, "synthetic-ambient")
+
+    try do
+      for mode <- [:sync, :async, :stream] do
+        if :os.type() == {:unix, :darwin} do
+          assert {:ok, "", code} = run(mode, c, "printenv #{key}")
+          assert code != 0
+        else
+          assert {:error, {:agent_containment_unavailable, :platform_not_qualified}} =
+                   run(mode, c, "printenv #{key}")
+        end
+      end
+    after
+      System.delete_env(key)
+    end
+  end
+
   test "explicit trusted host execution remains separate", c do
     assert {:ok, %{stdout: "outside-data", exit_code: 0}} =
              Shell.execute_direct("cat", [Path.join(c.root, "outside")],
@@ -190,7 +229,12 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
   end
 
   defp run(:sync, c, command) do
-    case Shell.authorize_and_execute(c.agent, command, cwd: c.cwd, timeout: 5_000) do
+    case Shell.authorize_and_execute(c.agent, command,
+           cwd: c.cwd,
+           timeout: 5_000,
+           clear_env: false,
+           sandbox: :none
+         ) do
       {:ok, r} -> {:ok, r.stdout, r.exit_code}
       other -> other
     end
@@ -198,7 +242,12 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
 
   defp run(:async, c, command) do
     with {:ok, id} <-
-           Shell.authorize_and_execute_async(c.agent, command, cwd: c.cwd, timeout: 5_000),
+           Shell.authorize_and_execute_async(c.agent, command,
+             cwd: c.cwd,
+             timeout: 5_000,
+             clear_env: false,
+             sandbox: :none
+           ),
          {:ok, r} <- Shell.get_result(id, wait: true, timeout: 7_000),
          do: {:ok, r.stdout, r.exit_code}
   end
@@ -207,7 +256,9 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
     case Shell.authorize_and_execute_streaming(c.agent, command,
            cwd: c.cwd,
            timeout: 5_000,
-           stream_to: self()
+           stream_to: self(),
+           clear_env: false,
+           sandbox: :none
          ) do
       {:ok, id} ->
         assert_receive {:port_exit, ^id, code, output}, 7_000
