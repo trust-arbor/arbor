@@ -27,7 +27,11 @@ defmodule Arbor.Security.ConfigAuditJournalModeTest do
     assert snapshot.journal_mode == :ephemeral
     assert snapshot.journal_reason == :none
     assert snapshot.root == nil
-    assert Config.audit_journal_start_opts(snapshot) == [mode: :ephemeral]
+
+    assert Config.audit_journal_start_opts(snapshot) == [
+             mode: :ephemeral,
+             capacity_profile: :operational
+           ]
   end
 
   test "activation_only forces disabled with activation_only reason and no journal root" do
@@ -70,7 +74,12 @@ defmodule Arbor.Security.ConfigAuditJournalModeTest do
     assert {:ok, snapshot} = Config.startup_store_snapshot(:test_bootstrap)
     assert snapshot.journal_mode == :durable
     assert snapshot.root == Path.expand(root)
-    assert Config.audit_journal_start_opts(snapshot) == [mode: :durable, root: Path.expand(root)]
+
+    assert Config.audit_journal_start_opts(snapshot) == [
+             mode: :durable,
+             root: Path.expand(root),
+             capacity_profile: :operational
+           ]
   end
 
   test "attacker extras cannot inject path module callback backend or name" do
@@ -94,7 +103,7 @@ defmodule Arbor.Security.ConfigAuditJournalModeTest do
     }
 
     opts = Config.audit_journal_start_opts(snapshot)
-    assert opts == [mode: :ephemeral]
+    assert opts == [mode: :ephemeral, capacity_profile: :operational]
     refute Keyword.has_key?(opts, :path)
     refute Keyword.has_key?(opts, :root)
 
@@ -107,7 +116,11 @@ defmodule Arbor.Security.ConfigAuditJournalModeTest do
       backend: :memory
     }
 
-    assert Config.audit_journal_start_opts(durable) == [mode: :durable, root: "/frozen/root"]
+    assert Config.audit_journal_start_opts(durable) == [
+             mode: :durable,
+             root: "/frozen/root",
+             capacity_profile: :operational
+           ]
   end
 
   test "malformed snapshot mode fails closed instead of returning disabled opts" do

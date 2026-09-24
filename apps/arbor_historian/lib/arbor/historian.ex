@@ -42,6 +42,7 @@ defmodule Arbor.Historian do
   @behaviour Arbor.Signals.Contracts.DurableSink
 
   alias Arbor.Historian.{
+    AuthorityAuditPuller,
     DurableSignalSink,
     QueryEngine,
     StreamContent,
@@ -52,6 +53,13 @@ defmodule Arbor.Historian do
 
   alias Arbor.Historian.QueryEngine.Aggregator
   alias Arbor.Historian.Timeline.Span
+
+  @doc "Request one bounded pull of pending Security authority audit records."
+  def flush_authority_audit do
+    AuthorityAuditPuller.flush()
+  catch
+    :exit, _ -> {:error, :audit_delivery_unavailable}
+  end
 
   # ── Authorized API (for agent callers) ──
 

@@ -58,6 +58,15 @@ defmodule Arbor.Security.AuditJournalCore do
     {:ok, empty_state()}
   end
 
+  def new(:small), do: new()
+  def new(:operational), do: {:ok, Map.put(empty_state(), "capacity_profile", "operational")}
+
+  def profile(state),
+    do: if(state["capacity_profile"] == "operational", do: :operational, else: :small)
+
+  def promote_profile(state), do: Map.put(state, "capacity_profile", "operational")
+  defp limits(state), do: AuditJournal.limits(profile(state))
+
   @spec append(term(), term()) ::
           {:ok, state()} | {:ok, state(), :idempotent} | {:error, fold_error()}
   def append(state, raw) do
@@ -78,7 +87,7 @@ defmodule Arbor.Security.AuditJournalCore do
   @spec fold(term(), term()) :: {:ok, state()} | {:error, fold_error()}
   def fold(state, records) do
     with :ok <- valid_state(state) do
-      fold_records(state, records, 0, AuditJournal.limits().max_fold_records)
+      fold_records(state, records, 0, limits(state).max_fold_records)
     end
   end
 
@@ -112,7 +121,7 @@ defmodule Arbor.Security.AuditJournalCore do
          {:ok, _terminal_manifest, _compacted} <- compact_terminals(terminal_ops) do
       projected = 1 + length(pending)
       current = state["entry_count"]
-      projected < current and projected <= AuditJournal.limits().hard_entry_cap
+      projected < current and projected <= limits(state).hard_entry_cap
     else
       _ -> false
     end
@@ -157,7 +166,7 @@ defmodule Arbor.Security.AuditJournalCore do
     with {:ok, admitted} <- map_admit(AuditJournal.admit_snapshot(snapshot)),
          {:ok, snap_size} <- snapshot_occupancy_size(admitted),
          {:ok, supplied} <- admit_pending_list(pending_records),
-         {:ok, used_entries, used_bytes} <- restore_occupancy(supplied, snap_size),
+         {:ok, used_entries, used_bytes} <- restore_occupancy(supplied, snap_size, admitted),
          :ok <- match_pending_entries(supplied, admitted) do
       finish_restore(admitted, supplied, snap_size, used_entries, used_bytes)
     end
@@ -190,11 +199,65 @@ defmodule Arbor.Security.AuditJournalCore do
     }
   end
 
+  @doc false
+  def operation(state, operation_id), do: Map.fetch(state["operations"], operation_id)
+
+  @doc false
+  def pending_intents(state) do
+    state["operations"]
+    |> Enum.filter(fn {_id, op} -> op["status"] in @pending_statuses end)
+    |> Enum.sort_by(fn {id, _op} -> id end)
+    |> Enum.map(fn {_id, op} -> Map.take(op, ["intent", "status"]) end)
+  end
+
+  @doc false
+  def delivery_batch(state) do
+    state["operations"]
+    |> Enum.filter(fn {_id, op} -> op["status"] == "effect_applied" end)
+    |> Enum.sort_by(fn {id, _op} -> id end)
+    |> Enum.map(fn {id, op} -> delivery_item(id, op) end)
+  end
+
+  @doc false
+  def acknowledgement_matches?(state, id, digest) when is_binary(digest) do
+    case operation(state, id) do
+      {:ok, op} ->
+        op["status"] in ["effect_applied", "delivered"] and operation_intent_digest(op) == digest
+
+      :error ->
+        false
+    end
+  end
+
+  def acknowledgement_matches?(_state, _id, _digest), do: false
+
+  defp delivery_item(id, op) do
+    intent = op["intent"]
+    digest = operation_intent_digest(op)
+
+    %{
+      "operation_id" => id,
+      "intent_sha256" => digest,
+      "event" => %{
+        "id" => id,
+        "stream_id" => "security:authority_mutation:" <> id,
+        "type" => intent["audit"]["event_type"],
+        "timestamp" => intent["prepared_at"],
+        "agent_id" => intent["audit"]["data"]["principal_id"],
+        "correlation_id" => intent["correlation_id"],
+        "causation_id" => intent["causation_id"],
+        "data" => %{"intent" => intent, "effect" => "applied"},
+        "metadata" => %{"audit_source" => "security.authority_journal", "intent_sha256" => digest}
+      }
+    }
+  end
+
   @spec capacity(state()) :: map()
   def capacity(state) when is_map(state) do
-    limits = AuditJournal.limits()
+    limits = limits(state)
     used_entries = Map.get(state, "entry_count", 0)
     used_bytes = Map.get(state, "byte_count", 0)
+    retained = map_size(Map.get(state, "operations", %{}))
 
     %{
       "used_entries" => used_entries,
@@ -205,6 +268,11 @@ defmodule Arbor.Security.AuditJournalCore do
       "soft_byte_cap" => limits.soft_byte_cap,
       "reserve_entries" => limits.reserve_entries,
       "reserve_bytes" => limits.reserve_bytes,
+      "retained_operation_count" => retained,
+      "retained_operation_cap" => limits.hard_entry_cap,
+      "retained_increase_operation_cap" => limits.soft_entry_cap,
+      "remaining_retained_operations" => max(0, limits.hard_entry_cap - retained),
+      "remaining_retained_increase_operations" => max(0, limits.soft_entry_cap - retained),
       "remaining_soft_entries" => max(0, limits.soft_entry_cap - used_entries),
       "remaining_soft_bytes" => max(0, limits.soft_byte_cap - used_bytes),
       "remaining_hard_entries" => max(0, limits.hard_entry_cap - used_entries),
@@ -247,6 +315,7 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp valid_state(state) when is_map(state) and not is_struct(state) do
     with true <- state["version"] == @version,
+         true <- Map.get(state, "capacity_profile", "small") in ["small", "operational"],
          true <- is_map(state["operations"]),
          true <- is_integer(state["entry_count"]) and state["entry_count"] >= 0,
          true <- is_integer(state["byte_count"]) and state["byte_count"] >= 0,
@@ -289,7 +358,7 @@ defmodule Arbor.Security.AuditJournalCore do
       {:ok, bytes} when is_binary(bytes) ->
         size = byte_size(bytes)
 
-        if size > AuditJournal.limits().max_snapshot_bytes do
+        if size > AuditJournal.limits(AuditJournal.snapshot_profile(snapshot)).max_snapshot_bytes do
           {:error, :record_too_large}
         else
           {:ok, size}
@@ -304,7 +373,7 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp transition(state, record, bytes) do
-    limits = AuditJournal.limits()
+    limits = limits(state)
 
     if byte_size(bytes) > limits.max_record_bytes do
       {:error, :record_too_large}
@@ -396,25 +465,114 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp check_capacity(state, record, bytes, limits) do
-    used_entries = state["entry_count"]
-    used_bytes = state["byte_count"]
+    {reserved_entries, reserved_bytes} = prospective_reservation(state, record)
+    used_entries = state["entry_count"] + reserved_entries
+    used_bytes = state["byte_count"] + reserved_bytes
     cost_bytes = byte_size(bytes)
+
+    retained =
+      map_size(state["operations"]) + if(record["record_type"] == "prepared", do: 1, else: 0)
 
     cond do
       cost_bytes > limits.max_record_bytes ->
         {:error, :record_too_large}
 
+      profile(state) == :operational and retained > limits.hard_entry_cap ->
+        {:error, :capacity_exhausted}
+
       used_entries + 1 > limits.hard_entry_cap or used_bytes + cost_bytes > limits.hard_byte_cap ->
         {:error, :capacity_exhausted}
 
       capacity_class(record) == :soft and
-          (used_entries + 1 > limits.soft_entry_cap or
+          ((profile(state) == :operational and retained > limits.soft_entry_cap) or
+             used_entries + 1 > limits.soft_entry_cap or
              used_bytes + cost_bytes > limits.soft_byte_cap) ->
         {:error, :soft_capacity_exhausted}
 
       true ->
         :ok
     end
+  end
+
+  # V1 records retain their historical replay rules. Every newly wired mutation
+  # uses V2 and reserves its remaining applied+delivered (or rejected) records
+  # before the authority effect. Finishing an admitted operation consumes its
+  # reservation instead of spending the reduction reserve a second time.
+  defp prospective_reservation(state, record) do
+    target = record["operation_id"]
+
+    other =
+      Enum.reduce(state["operations"], {0, 0}, fn
+        {^target, _operation}, acc ->
+          acc
+
+        {_id, operation}, acc ->
+          add_cost(acc, remaining_cost(operation["intent"], operation["status"]))
+      end)
+
+    intent =
+      case record["record_type"] do
+        "prepared" -> record["intent"]
+        _ -> get_in(state, ["operations", target, "intent"])
+      end
+
+    add_cost(other, remaining_cost(intent, record["record_type"]))
+  end
+
+  defp remaining_cost(%{"version" => 2} = intent, "prepared") do
+    {applied_entries, applied_bytes} = transition_cost(intent, "effect_applied")
+    {delivered_entries, delivered_bytes} = transition_cost(intent, "delivered")
+    {_rejected_entries, rejected_bytes} = transition_cost(intent, "effect_rejected")
+    {applied_entries + delivered_entries, max(applied_bytes + delivered_bytes, rejected_bytes)}
+  end
+
+  defp remaining_cost(%{"version" => 2} = intent, "effect_applied"),
+    do: transition_cost(intent, "delivered")
+
+  defp remaining_cost(_intent, _status), do: {0, 0}
+
+  defp transition_cost(intent, type) do
+    base = %{
+      "version" => 1,
+      "kind" => AuditJournal.record_kind(),
+      "record_type" => type,
+      "operation_id" => intent["operation_id"],
+      "occurred_at" => intent["prepared_at"]
+    }
+
+    record =
+      case type do
+        "effect_applied" ->
+          Map.put(base, "observation", %{
+            "kind" => "applied",
+            "after_fingerprint" => intent["after_fingerprint"]
+          })
+
+        "effect_rejected" ->
+          Map.put(base, "observation", %{"kind" => "rejected", "reason" => "identity_conflict"})
+
+        "delivered" ->
+          base
+      end
+
+    {:ok, bytes} = AuditJournal.canonical_record_bytes(record)
+    {1, byte_size(bytes)}
+  end
+
+  defp add_cost({entries, bytes}, {more_entries, more_bytes}),
+    do: {entries + more_entries, bytes + more_bytes}
+
+  defp reserved_cost(operations) do
+    Enum.reduce(operations, {0, 0}, fn {_id, op}, acc ->
+      add_cost(acc, remaining_cost(op["intent"], op["status"]))
+    end)
+  end
+
+  defp reserved_occupancy_exceeded?(operations, entries, bytes, limits) do
+    {reserved_entries, reserved_bytes} = reserved_cost(operations)
+
+    (limits.hard_entry_cap == 4096 and map_size(operations) > limits.hard_entry_cap) or
+      occupancy_exceeded?(entries + reserved_entries, bytes + reserved_bytes, limits)
   end
 
   defp capacity_class(%{"record_type" => "prepared", "intent" => intent}) do
@@ -491,6 +649,17 @@ defmodule Arbor.Security.AuditJournalCore do
         "terminals" => terminals
       }
 
+      snapshot =
+        if profile(state) == :operational do
+          Map.merge(snapshot, %{
+            "version" => 2,
+            "kind" => AuditJournal.operational_snapshot_kind(),
+            "capacity_profile" => "operational"
+          })
+        else
+          snapshot
+        end
+
       case map_admit(AuditJournal.admit_snapshot(snapshot)) do
         {:ok, admitted} ->
           operations = Map.merge(pending_ops, compacted_terminals)
@@ -504,7 +673,7 @@ defmodule Arbor.Security.AuditJournalCore do
 
   defp finish_compact(snapshot, pending, operations, snap_size)
        when is_integer(snap_size) and snap_size >= 0 do
-    limits = AuditJournal.limits()
+    limits = AuditJournal.limits(AuditJournal.snapshot_profile(snapshot))
     pending_n = length(pending)
 
     case sum_record_bytes(pending) do
@@ -538,7 +707,7 @@ defmodule Arbor.Security.AuditJournalCore do
          used_bytes,
          limits
        ) do
-    if occupancy_exceeded?(used_entries, used_bytes, limits) do
+    if reserved_occupancy_exceeded?(operations, used_entries, used_bytes, limits) do
       {:error, :capacity_exhausted}
     else
       next = %{
@@ -549,6 +718,11 @@ defmodule Arbor.Security.AuditJournalCore do
         "snapshot" => snapshot,
         "snapshot_bytes" => snap_size
       }
+
+      next =
+        if AuditJournal.snapshot_profile(snapshot) == :operational,
+          do: promote_profile(next),
+          else: next
 
       {:ok, next, snapshot, pending}
     end
@@ -971,7 +1145,7 @@ defmodule Arbor.Security.AuditJournalCore do
   end
 
   defp admit_pending_list(records) when is_list(records) do
-    max = AuditJournal.limits().hard_entry_cap
+    max = AuditJournal.limits(:operational).hard_entry_cap
     admit_pending_members(records, [], 0, max, MapSet.new())
   end
 
@@ -1071,13 +1245,14 @@ defmodule Arbor.Security.AuditJournalCore do
     used_entries > limits.hard_entry_cap or used_bytes > limits.hard_byte_cap
   end
 
-  defp restore_occupancy(supplied, snap_size) when is_integer(snap_size) and snap_size >= 0 do
+  defp restore_occupancy(supplied, snap_size, snapshot)
+       when is_integer(snap_size) and snap_size >= 0 do
     pending_bytes =
       Enum.reduce(supplied, 0, fn {_record, bytes}, acc -> acc + byte_size(bytes) end)
 
     used_entries = 1 + length(supplied)
     used_bytes = snap_size + pending_bytes
-    limits = AuditJournal.limits()
+    limits = AuditJournal.limits(AuditJournal.snapshot_profile(snapshot))
 
     if occupancy_exceeded?(used_entries, used_bytes, limits) do
       {:error, :capacity_exhausted}
@@ -1086,17 +1261,27 @@ defmodule Arbor.Security.AuditJournalCore do
     end
   end
 
-  defp restore_occupancy(_supplied, _snap_size), do: {:error, :malformed}
+  defp restore_occupancy(_supplied, _snap_size, _snapshot), do: {:error, :malformed}
 
   defp finish_restore(snapshot, supplied, snap_bytes, used_entries, used_bytes) do
-    with {:ok, state} <- install_terminals(empty_state(), snapshot),
+    with {:ok, initial} <- new(AuditJournal.snapshot_profile(snapshot)),
+         {:ok, state} <- install_terminals(initial, snapshot),
          {:ok, state} <- install_pending(state, supplied) do
-      {:ok,
-       state
-       |> Map.put("entry_count", used_entries)
-       |> Map.put("byte_count", used_bytes)
-       |> Map.put("snapshot", snapshot)
-       |> Map.put("snapshot_bytes", snap_bytes)}
+      if reserved_occupancy_exceeded?(
+           state["operations"],
+           used_entries,
+           used_bytes,
+           limits(state)
+         ) do
+        {:error, :capacity_exhausted}
+      else
+        {:ok,
+         state
+         |> Map.put("entry_count", used_entries)
+         |> Map.put("byte_count", used_bytes)
+         |> Map.put("snapshot", snapshot)
+         |> Map.put("snapshot_bytes", snap_bytes)}
+      end
     end
   end
 
@@ -1148,7 +1333,7 @@ defmodule Arbor.Security.AuditJournalCore do
       |> Map.get("operations", %{})
       |> Enum.sort_by(fn {operation_id, _op} -> operation_id end)
       |> Enum.filter(fn {_id, op} -> op["status"] in @pending_statuses end)
-      |> Enum.take(AuditJournal.limits().hard_entry_cap)
+      |> Enum.take(AuditJournal.limits(:operational).hard_entry_cap)
 
     {:ok, ops}
   end

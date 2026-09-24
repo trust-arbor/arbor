@@ -208,6 +208,29 @@ defmodule Arbor.Security.AuditJournalFile do
 
   def compact(_handle), do: {:error, :closed}
 
+  @doc false
+  def ensure_capacity_profile(%__MODULE__{} = handle, profile)
+      when profile in [:small, :operational] do
+    case {AuditJournalCore.profile(handle.core), profile} do
+      {same, same} ->
+        {:ok, handle}
+
+      {:small, :operational} ->
+        result =
+          case admit_compact(handle, :operational) do
+            {:ok, ctx} -> publish_compacted(handle, ctx)
+            {:error, reason} -> publish_error(handle, nil, nil, :admit, reason)
+          end
+
+        if not match?({:ok, _}, result), do: close(handle)
+        result
+
+      _ ->
+        close(handle)
+        {:error, :capacity_profile_mismatch}
+    end
+  end
+
   if Mix.env() == :test do
     @inject_key {__MODULE__, :inject}
 
@@ -317,12 +340,19 @@ defmodule Arbor.Security.AuditJournalFile do
     end
   end
 
-  defp admit_compact(%__MODULE__{} = handle) do
+  defp admit_compact(handle, profile \\ :current)
+
+  defp admit_compact(%__MODULE__{} = handle, profile) do
+    core =
+      if profile == :operational,
+        do: AuditJournalCore.promote_profile(handle.core),
+        else: handle.core
+
     with :ok <- require_compact_no_torn(handle),
          :ok <- compact_revalidate(handle),
          {:ok, source} <-
            AuditJournalFileCore.source_binding(handle.digest, handle.frames, handle.offset),
-         {:ok, compacted, snapshot, pending} <- compact_reducer(handle.core, source),
+         {:ok, compacted, snapshot, pending} <- compact_reducer(core, source),
          {:ok, bytes, expected} <- AuditJournalFileCore.encode_compacted(snapshot, pending) do
       {:ok,
        %{

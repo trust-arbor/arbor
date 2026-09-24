@@ -130,6 +130,18 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     end
   end
 
+  # Exact incarnation reads/creation use the same owner and fault controls as
+  # the existing CAS fixture. A tombstone is never collapsed into fresh absence.
+  def authoritative_entry(key, opts) do
+    case get(key, opts) do
+      {:error, :not_found} -> GenServer.call(store_name!(opts), {:authoritative_entry, key})
+      result -> result
+    end
+  end
+
+  def compare_and_create(key, expected, replacement, opts),
+    do: compare_and_swap(key, {:entry, expected}, replacement, opts)
+
   @impl true
   def list(opts) do
     :persistent_term.put(@list_calls_key, :persistent_term.get(@list_calls_key, 0) + 1)
@@ -349,6 +361,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
     {:reply, reply, state}
   end
 
+  def handle_call({:authoritative_entry, key}, _from, state),
+    do: {:reply, {:ok, Map.get(state.entries, key, :absent)}, state}
+
   def handle_call({:put, key, value}, _from, state) do
     if at_capacity?(state, key) do
       {:reply, {:error, :store_full}, state}
@@ -431,6 +446,12 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       :error ->
         {:reply, {:error, :conflict}, state}
     end
+  end
+
+  defp apply_compare_and_swap(state, key, {:entry, expected}, replacement) do
+    if Map.get(state.entries, key, :absent) == expected,
+      do: apply_compare_and_swap(state, key, :not_found, replacement),
+      else: {:error, :conflict}
   end
 
   defp apply_compare_and_swap(state, key, :not_found, replacement) do
@@ -2255,7 +2276,9 @@ defmodule Arbor.Security.TemplateAuthorityCapabilityMutationSecurityRegressionTe
       on_exit(fn -> Arbor.Signals.unsubscribe(sub) end)
 
       CASSandbox.fail_post_delete(1)
-      assert {:error, :outcome_unknown} = Security.acknowledged_revoke(id)
+      # The ordered authoritative reread proves the committed tombstone even
+      # though the backend's delete acknowledgement was lost.
+      assert {:ok, :applied, ^id} = Security.acknowledged_revoke(id)
 
       assert {:ok, :idempotent, ^id} = Security.acknowledged_revoke(id)
       assert collect_signals(ref, :store_revoke, 200) == 1

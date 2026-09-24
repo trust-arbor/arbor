@@ -22,6 +22,7 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
       assert AuditJournal.snapshot_kind() ==
                "arbor.security.audit_journal_snapshot.v1"
+
       assert AuditJournal.operations() == ["capability_grant", "capability_revoke"]
       assert AuditJournal.effect_classes() == ["authority_increase", "authority_reduce"]
       assert AuditJournal.namespaces() == ["capability"]
@@ -233,7 +234,7 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
     test "rejects unsupported version" do
       assert {:error, :unsupported_version} =
-               AuditJournal.admit_intent(Map.put(grant_facts(), "version", 2))
+               AuditJournal.admit_intent(Map.put(grant_facts(), "version", 3))
     end
 
     test "enforces max_nodes after increment: 64 nodes pass budget, 65 fail closed" do
@@ -599,7 +600,9 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
       assert {:error, :forbidden_content} =
                AuditJournal.admit_snapshot(
-                 empty_snapshot() |> Map.delete("terminals") |> Map.put("metadata", %{})
+                 empty_snapshot()
+                 |> Map.delete("terminals")
+                 |> Map.put("metadata", %{})
                )
     end
 
@@ -612,7 +615,7 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
                )
 
       assert {:error, :unsupported_version} =
-               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "version", 2))
+               AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "version", 3))
 
       assert {:error, {:invalid_field, "kind"}} =
                AuditJournal.admit_snapshot(Map.put(empty_snapshot(), "kind", "nope"))
@@ -622,7 +625,9 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
       oversized = String.duplicate("x", 32_768) <> <<0xFF>>
 
       assert {:error, :record_too_large} =
-               AuditJournal.admit_snapshot(put_in(empty_snapshot(), ["terminals", "x"], oversized))
+               AuditJournal.admit_snapshot(
+                 put_in(empty_snapshot(), ["terminals", "x"], oversized)
+               )
     end
 
     test "enforces max_nodes after increment on snapshot input" do
@@ -676,7 +681,11 @@ defmodule Arbor.Security.Contracts.AuditJournalTest do
 
       assert {:error, :invalid_field} =
                AuditJournal.admit_snapshot(
-                 put_in(empty_snapshot(), ["terminals", oid], "delivered|authority_increase|" <> sha)
+                 put_in(
+                   empty_snapshot(),
+                   ["terminals", oid],
+                   "delivered|authority_increase|" <> sha
+                 )
                )
     end
 

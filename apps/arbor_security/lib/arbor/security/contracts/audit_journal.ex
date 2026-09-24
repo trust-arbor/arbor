@@ -25,7 +25,9 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @intent_kind "arbor.security.authority_mutation_intent.v1"
   @record_kind "arbor.security.authority_mutation_record.v1"
   @snapshot_kind "arbor.security.audit_journal_snapshot.v1"
+  @operational_snapshot_kind "arbor.security.audit_journal_snapshot.v2"
   @intent_domain "arbor.security.authority_mutation_intent.v1" <> <<0>>
+  @intent_domain_v2 "arbor.security.authority_mutation_intent.v2" <> <<0>>
   @record_domain "arbor.security.authority_mutation_record.v1" <> <<0>>
 
   @operations ["capability_grant", "capability_revoke"]
@@ -57,6 +59,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   @timestamp_bytes 20
   @max_depth 4
   @max_nodes 64
+  @operational_entries 4096
+  @operational_snapshot_bytes 4 * 1024 * 1024
 
   @intent_required ~w(
     version kind operation effect_class authority_namespace authority_key
@@ -257,6 +261,26 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     }
   end
 
+  def limits(:small), do: limits()
+
+  def limits(:operational) do
+    Map.merge(limits(), %{
+      hard_entry_cap: @operational_entries,
+      reserve_entries: 1024,
+      soft_entry_cap: 3072,
+      hard_byte_cap: 16 * 1024 * 1024,
+      reserve_bytes: 4 * 1024 * 1024,
+      soft_byte_cap: 12 * 1024 * 1024,
+      max_fold_records: @operational_entries,
+      max_snapshot_bytes: @operational_snapshot_bytes
+    })
+  end
+
+  def operational_snapshot_kind, do: @operational_snapshot_kind
+
+  def snapshot_profile(%{"version" => 2, "capacity_profile" => "operational"}), do: :operational
+  def snapshot_profile(_snapshot), do: :small
+
   @spec effect_class_for(term()) :: {:ok, String.t()} | {:error, :unsupported_operation}
   def effect_class_for("capability_grant"), do: {:ok, "authority_increase"}
   def effect_class_for("capability_revoke"), do: {:ok, "authority_reduce"}
@@ -373,6 +397,23 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   # Snapshot
   # ---------------------------------------------------------------------------
 
+  defp do_admit_snapshot(%{"version" => 2} = input) do
+    keys = @snapshot_keys ++ ["capacity_profile"]
+
+    with {:ok, attrs} <- admit_object(input, keys, 6),
+         :ok <- require_exact_keys(attrs, keys),
+         {:ok, _} <- admit_exact(attrs["kind"], @operational_snapshot_kind, "kind"),
+         {:ok, _} <- admit_exact(attrs["capacity_profile"], "operational", "capacity_profile"),
+         {:ok, source} <- admit_snapshot_source(attrs["source"], :operational),
+         {:ok, pending} <- admit_pending_manifest(attrs["pending_manifest"]),
+         {:ok, terminals} <- admit_terminals(attrs["terminals"]),
+         :ok <- reject_manifest_overlap(pending, terminals),
+         {:ok, _} <- encode_snapshot(attrs) do
+      {:ok,
+       %{attrs | "source" => source, "pending_manifest" => pending, "terminals" => terminals}}
+    end
+  end
+
   defp do_admit_snapshot(input) do
     with :ok <- budget_ok(input, 0, 0),
          :ok <- snapshot_string_budget(input),
@@ -400,7 +441,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end
   end
 
-  defp admit_snapshot_source(value) do
+  defp admit_snapshot_source(value, profile \\ :small) do
     with {:ok, attrs} <-
            admit_object(value, @snapshot_source_keys, length(@snapshot_source_keys)),
          :ok <- require_exact_keys(attrs, @snapshot_source_keys),
@@ -408,7 +449,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
          {:ok, frames} <-
            admit_snapshot_frames(Map.fetch!(attrs, "committed_frames"), "committed_frames"),
          {:ok, offset} <-
-           admit_snapshot_offset(Map.fetch!(attrs, "committed_offset"), "committed_offset") do
+           admit_snapshot_offset(Map.fetch!(attrs, "committed_offset"), "committed_offset"),
+         :ok <- profile_frames_bound(frames, profile) do
       {:ok,
        %{
          "committed_digest" => digest,
@@ -418,8 +460,14 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end
   end
 
+  defp profile_frames_bound(frames, profile) do
+    if frames <= limits(profile).hard_entry_cap,
+      do: :ok,
+      else: {:error, {:invalid_field, "committed_frames"}}
+  end
+
   defp admit_snapshot_frames(value, _field)
-       when is_integer(value) and value >= 0 and value <= @hard_entry_cap,
+       when is_integer(value) and value >= 0 and value <= @operational_entries,
        do: {:ok, value}
 
   defp admit_snapshot_frames(value, _field) when is_float(value), do: {:error, :float_not_allowed}
@@ -451,7 +499,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
   defp admit_compact_map(%_{}, _parser), do: {:error, :struct_not_allowed}
 
   defp admit_compact_map(value, parser) when is_map(value) do
-    if map_size(value) > @hard_entry_cap do
+    if map_size(value) > @operational_entries do
       {:error, :malformed}
     else
       admit_compact_map_keys(value, parser)
@@ -491,7 +539,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end)
   end
 
-  defp admit_pending_compact(value) when is_binary(value) do
+  defp admit_pending_compact(value) when is_binary(value) and byte_size(value) <= 512 do
     with :ok <- require_utf8(value),
          true <- Regex.match?(@pending_compact_re, value) do
       {:ok, value}
@@ -503,7 +551,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp admit_pending_compact(_value), do: {:error, :invalid_field}
 
-  defp admit_terminal_compact(value) when is_binary(value) do
+  defp admit_terminal_compact(value) when is_binary(value) and byte_size(value) <= 512 do
     with :ok <- require_utf8(value),
          true <-
            Regex.match?(@terminal_delivered_re, value) or
@@ -654,8 +702,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     with :ok <- budget_ok(input, 0, 0),
          {:ok, attrs} <- admit_object(input, @intent_keys, @intent_max_keys),
          :ok <- require_keys(attrs, @intent_required),
-         {:ok, version} <- admit_version(Map.fetch!(attrs, "version")),
-         {:ok, kind} <- admit_exact(Map.fetch!(attrs, "kind"), @intent_kind, "kind"),
+         {:ok, version} <- admit_intent_version(Map.fetch!(attrs, "version")),
+         {:ok, kind} <- admit_exact(Map.fetch!(attrs, "kind"), intent_kind(version), "kind"),
          {:ok, operation} <- admit_operation(Map.fetch!(attrs, "operation")),
          {:ok, effect_class} <-
            admit_effect_class(Map.fetch!(attrs, "effect_class"), operation),
@@ -663,7 +711,8 @@ defmodule Arbor.Security.Contracts.AuditJournal do
          {:ok, authority_key} <- admit_authority_key(Map.fetch!(attrs, "authority_key")),
          {:ok, before_fence} <- admit_expectation(Map.fetch!(attrs, "before_fence")),
          {:ok, after_fingerprint} <- admit_expectation(Map.fetch!(attrs, "after_fingerprint")),
-         :ok <- compatible_before_after(operation, before_fence, after_fingerprint),
+         :ok <-
+           compatible_versioned_before_after(version, operation, before_fence, after_fingerprint),
          {:ok, audit} <- admit_audit(Map.fetch!(attrs, "audit"), operation, authority_key),
          {:ok, prepared_at} <- admit_timestamp(Map.fetch!(attrs, "prepared_at"), "prepared_at"),
          {:ok, optionals} <- admit_intent_optionals(attrs) do
@@ -683,7 +732,7 @@ defmodule Arbor.Security.Contracts.AuditJournal do
         |> merge_optionals(optionals)
 
       with {:ok, fact_bytes} <- encode_intent_facts(admitted) do
-        derived = derive_operation_id(fact_bytes)
+        derived = derive_operation_id(admitted, fact_bytes)
         supplied = Map.get(attrs, "operation_id", :absent)
         {:ok, Map.put(admitted, "operation_id", derived), derived, supplied}
       end
@@ -744,7 +793,22 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end)
   end
 
-  defp derive_operation_id(fact_bytes) do
+  defp admit_intent_version(2), do: {:ok, 2}
+  defp admit_intent_version(version), do: admit_version(version)
+
+  defp intent_kind(1), do: @intent_kind
+  defp intent_kind(2), do: "arbor.security.authority_mutation_intent.v2"
+
+  # V2 identity binds the mutation, not the wall clock or diagnostic lineage of
+  # a later observation. The first full canonical prepared record remains
+  # immutable; appending different bytes under this identity still conflicts.
+  defp derive_operation_id(%{"version" => 2} = intent, _fact_bytes) do
+    facts = Map.drop(intent, ["prepared_at" | @intent_optional])
+    {:ok, bytes} = encode_intent_facts(facts)
+    :crypto.hash(:sha256, @intent_domain_v2 <> bytes) |> Base.encode16(case: :lower)
+  end
+
+  defp derive_operation_id(_intent, fact_bytes) do
     :crypto.hash(:sha256, @intent_domain <> fact_bytes)
     |> Base.encode16(case: :lower)
   end
@@ -944,6 +1008,22 @@ defmodule Arbor.Security.Contracts.AuditJournal do
     end
   end
 
+  defp compatible_versioned_before_after(
+         2,
+         "capability_grant",
+         %{
+           "kind" => "live",
+           "record_id" => id,
+           "generation" => generation,
+           "revision" => revision
+         },
+         %{"kind" => "live", "record_id" => id, "generation" => generation, "revision" => next}
+       )
+       when next == revision + 1, do: :ok
+
+  defp compatible_versioned_before_after(_version, operation, before_fence, after_fingerprint),
+    do: compatible_before_after(operation, before_fence, after_fingerprint)
+
   defp compatible_before_after("capability_grant", %{"kind" => "absent"}, after_fp) do
     grant_live_successor(after_fp, 1)
   end
@@ -1095,6 +1175,15 @@ defmodule Arbor.Security.Contracts.AuditJournal do
 
   defp encode_record(%{"record_type" => "delivered"} = record) do
     encode_ordered(record, @delivered_order, @max_record_bytes, :record_too_large)
+  end
+
+  defp encode_snapshot(%{"version" => 2} = snapshot) do
+    encode_ordered(
+      snapshot,
+      @snapshot_order ++ ["capacity_profile"],
+      @operational_snapshot_bytes,
+      :record_too_large
+    )
   end
 
   defp encode_snapshot(snapshot) do

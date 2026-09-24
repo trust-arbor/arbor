@@ -112,11 +112,11 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
       {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
       {Arbor.Security.Constraint.RateLimiter, []},
+      {Arbor.Security.AuditJournalOwner,
+       Arbor.Security.Config.audit_journal_start_opts(snapshot)},
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []},
       {Arbor.Security.UriRegistry, []},
-      {Arbor.Security.AuditJournalOwner,
-       Arbor.Security.Config.audit_journal_start_opts(snapshot)},
       # Ephemeral one-use delivery receipts (same-node). Last so restart
       # loses outstanding receipts fail-closed without cascading earlier children.
       {Arbor.Security.DeliveryReceiptBroker, []}
