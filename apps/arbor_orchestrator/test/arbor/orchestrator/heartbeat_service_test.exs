@@ -115,6 +115,7 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
     {:ok, pid} =
       start_test_service(
         agent_id: agent_id,
+        identity_checker: fn _ -> true end,
         engine_runner: fn _graph, _opts ->
           send(test_pid, :unqualified_heartbeat_dispatched)
           {:ok, %{final_outcome: %{status: :success}, context: %{}}}

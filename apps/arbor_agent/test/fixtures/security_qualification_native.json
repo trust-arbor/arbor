@@ -1,0 +1,248 @@
+{
+  "fixture_only": true,
+  "containment": {
+    "launcher": {
+      "sha256": "522d948c48b70c51f8a10b9bd2358a823365819df2fdfe61684ec21589ab3c91",
+      "size_bytes": 106344
+    },
+    "loaded_modules": {
+      "Elixir.Arbor.Actions.Shell": "1d45c8988e7a54b4bfc5f2af265679f4",
+      "Elixir.Arbor.Shell": "e85aa048d1c27598be5ebc4c58017af3",
+      "Elixir.Arbor.Shell.AgentContainment": "ba2a055327b1c77b42330f63291ed5e3",
+      "Elixir.Arbor.Shell.AgentExecutionIdentity": "cf116136f4239cf52bf7dc9c0ed52284",
+      "Elixir.Arbor.Shell.ExecutablePolicy": "26657340992aa6e74bfe5d9d17d39ec7",
+      "Elixir.Arbor.Shell.Executor": "e84efb6205f3902bab4ed887c75a0f8b",
+      "Elixir.Arbor.Shell.PortSession": "a61ed8f67f5328c0ead320c567e35401",
+      "Elixir.Arbor.Shell.ProcessGroup": "c82569b1a3dfa3b1aa19b6c1047115c0",
+      "Elixir.Arbor.Shell.Sandbox": "324337a0c7c9619083c6dea30045c17e"
+    },
+    "os_family": "unix",
+    "platform": "darwin",
+    "policy_version": "agent-cwd-seatbelt-v1",
+    "schema_version": 1,
+    "supported": true
+  },
+  "rows": [
+    {
+      "mode": "agent-write",
+      "output": "allowed\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": "input",
+      "expected": "allowed",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "allowed\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "write",
+      "target": "output",
+      "expected": "allowed",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": "outside",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "write",
+      "target": "outside",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": ".ssh/id_ed25519",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": "escape",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": ".SSH/ID_ED25519",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "read",
+      "target": "protected-link",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "socket",
+      "target": "unused",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "unix_socket",
+      "target": "probe.sock",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "exec",
+      "target": "unused",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "fork",
+      "target": "unused",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "env",
+      "target": "ARBOR_SYNTHETIC_CREDENTIAL",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-read",
+      "output": "denied\n",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "readonly_write",
+      "expected": "denied",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "synthetic",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "cat",
+      "expected": "synthetic",
+      "passed": true
+    },
+    {
+      "mode": "agent-write",
+      "output": "",
+      "terminal": {
+        "reason": 0,
+        "exit_code": 0
+      },
+      "error": null,
+      "launcher_exit": 0,
+      "operation": "touch",
+      "expected": "",
+      "passed": true
+    }
+  ]
+}

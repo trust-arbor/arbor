@@ -1,7 +1,54 @@
 defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   use ExUnit.Case, async: false
   @moduletag :fast
+  if :os.type() != {:unix, :darwin},
+    do:
+      @moduletag(skip: "native handler mechanics require the qualified macOS containment backend")
 
+  defmodule FilesystemAuthorizer do
+    def authorize_filesystem(agent, uri, operation, _capability_id, _opts),
+      do: Arbor.Security.authorize(agent, uri, operation, verify_identity: false)
+  end
+
+  setup do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "handler_containment_" <> Base.encode16(:crypto.strong_rand_bytes(12))
+      )
+
+    :ok = File.mkdir(root)
+    {:ok, root} = SafePath.resolve_real(root)
+    cwd = Path.join(root, "work")
+    :ok = File.mkdir(cwd)
+    File.write!(Path.join(cwd, "fixture"), "synthetic handler input")
+    File.write!(Path.join(root, "outside"), "outside handler data")
+    {:ok, identity} = Arbor.Security.generate_identity(name: "synthetic handler containment")
+    :ok = Arbor.Security.register_identity(identity)
+
+    {:ok, _} =
+      Arbor.Security.grant(principal: identity.agent_id, resource: "arbor://fs/read#{cwd}/**")
+
+    previous = Application.get_env(:arbor_shell, :agent_authorizer)
+    Application.put_env(:arbor_shell, :agent_authorizer, FilesystemAuthorizer)
+    fixture = %{cwd: cwd, root: root, principal: identity.agent_id}
+    Process.put(:shell_fixture, fixture)
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:arbor_shell, :agent_authorizer),
+        else: Application.put_env(:arbor_shell, :agent_authorizer, previous)
+
+      {:ok, caps} = Arbor.Security.list_capabilities(identity.agent_id)
+      for cap <- caps, do: Arbor.Security.revoke(cap.id)
+      Arbor.Security.deregister_identity(identity.agent_id)
+      File.rm_rf!(root)
+    end)
+
+    fixture
+  end
+
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -15,14 +62,14 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     %Node{id: id, attrs: Map.merge(%{"type" => "shell", "sandbox" => "none"}, attrs)}
   end
 
-  # These mechanics tests exercise the execution path, not authorization.
-  # Since the phase-0 capability gate (2026-06-10) now authorizes every
-  # shell node — and Arbor.Shell IS loadable in the umbrella test build —
-  # inject an allowing authorizer so the gate is a no-op here. The gate
-  # itself is covered by the "security regression" describe block below.
+  # The command gate is independently characterized below. Native mechanics
+  # still require a real current signed filesystem grant for the source workdir.
   defp run(node, context, opts \\ []) do
-    {authority_workdir, opts} = Keyword.pop(opts, :authority_workdir, File.cwd!())
-    {authority_principal, opts} = Keyword.pop(opts, :authority_principal, "agent_shell_handler")
+    {authority_workdir, opts} =
+      Keyword.pop(opts, :authority_workdir, Process.get(:shell_fixture).cwd)
+
+    {authority_principal, opts} =
+      Keyword.pop(opts, :authority_principal, Process.get(:shell_fixture).principal)
 
     {:ok, authority} =
       RunAuthorization.new(@graph, agent_id: authority_principal, workdir: authority_workdir)
@@ -126,7 +173,9 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       outcome = run(node, context)
       assert outcome.status == :success
-      assert String.trim(outcome.context_updates["shell.cwd_test.output"]) == File.cwd!()
+
+      assert String.trim(outcome.context_updates["shell.cwd_test.output"]) ==
+               Process.get(:shell_fixture).cwd
     end
 
     test "context workdir cannot override immutable run workdir" do
@@ -135,7 +184,9 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       outcome = run(node, context)
       assert outcome.status == :success
-      assert String.trim(outcome.context_updates["shell.cwd_ctx.output"]) == File.cwd!()
+
+      assert String.trim(outcome.context_updates["shell.cwd_ctx.output"]) ==
+               Process.get(:shell_fixture).cwd
     end
 
     test "timeout produces error" do
@@ -149,7 +200,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
     test "output with multiple lines captured" do
       # Use a single command that produces multi-line output
-      node = make_node("multi", %{"command" => "ls /tmp"})
+      node = make_node("multi", %{"command" => "ls ."})
       context = Context.new()
 
       outcome = run(node, context)
@@ -292,6 +343,18 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       assert outcome.status == :success
       assert outcome.context_updates["shell.allowed.output"] =~ "authorized"
     end
+  end
+
+  test "security regression: prepared ShellHandler retains immutable filesystem scope", fixture do
+    node =
+      make_node("outside", %{"command" => "cat #{fixture.root}/outside", "cwd" => fixture.root})
+
+    outcome = run(node, Context.new(%{"session.agent_id" => "forged", "workdir" => fixture.root}))
+    assert outcome.status == :fail
+    refute Map.get(outcome.context_updates, "shell.outside.output", "") =~ "outside handler data"
+
+    assert %Outcome{status: :success} =
+             run(make_node("inside", %{"command" => "cat fixture"}), Context.new())
   end
 
   describe "idempotency/0" do

@@ -125,7 +125,7 @@ defmodule Arbor.Actions.Scheduler do
       schema: [limit: [type: :integer, default: 20], before_id: [type: :integer]]
 
     def requires_authenticated_principal?, do: true
-    def effect_class, do: :read_only
+    def effect_class, do: :read
     def run(params, context), do: Scheduler.run_request(__MODULE__, params, context)
   end
 

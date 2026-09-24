@@ -81,7 +81,7 @@ defmodule Arbor.Actions.Shell do
          # command string that produced `prepared` — never inspect/1 reconstruction
          # of argv (ShellHandler / ToolHandler already keep that original).
          {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
-      execute_prepared(command, prepared, opts)
+      execute_prepared(agent_id, command, prepared, opts)
     end
   end
 
@@ -117,10 +117,18 @@ defmodule Arbor.Actions.Shell do
     end
   end
 
-  defp execute_prepared(command, prepared, opts) when is_binary(command) and is_list(opts) do
+  @doc false
+  # Only the source-owned Shell adapter invokes this. A command grant does not
+  # imply access to files; current Trust and the exact selected fs grant apply.
+  def authorize_filesystem(agent_id, uri, operation, _capability_id, _opts) do
+    Arbor.Trust.authorize(agent_id, uri, operation, verify_identity: false)
+  end
+
+  defp execute_prepared(agent_id, command, prepared, opts)
+       when is_binary(command) and is_list(opts) do
     # Drop ambient authority/env projection options and force the closed
     # direct-executable sandbox marker so sandbox:none cannot widen after prepare.
-    # Revalidation in execute_prepared_authorized/3 ignores sandbox for binding;
+    # Revalidation in execute_prepared_authorized/4 ignores sandbox for binding;
     # prepared map identity is command + pinned executable only.
     execution_opts =
       opts
@@ -137,7 +145,7 @@ defmodule Arbor.Actions.Shell do
       ])
       |> Keyword.put(:sandbox, :basic)
 
-    Shell.execute_prepared_authorized(command, prepared, execution_opts)
+    Shell.execute_prepared_authorized(agent_id, command, prepared, execution_opts)
   end
 
   defp maybe_add_opt(opts, _key, nil), do: opts

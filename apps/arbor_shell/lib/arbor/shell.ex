@@ -11,6 +11,12 @@ defmodule Arbor.Shell do
     closed `:unit_owner` binding from source-owned validation lineage. The
     boot-pinned runtime is Apple Container in this slice.
 
+  Generic agent APIs require canonical cwd plus current signed filesystem
+  grants and the configured Trust-aware filesystem authorizer. macOS uses a
+  mandatory OS policy; other platforms refuse with
+  `{:agent_containment_unavailable, :platform_not_qualified}`. Legacy sandbox
+  options cannot disable that boundary. See `docs/arbor/AGENT_SHELL_CONTAINMENT.md`.
+
   ## Native execution (`execute/2`)
 
       {:ok, result} = Arbor.Shell.execute("ls -la", timeout: 5000)
@@ -57,6 +63,7 @@ defmodule Arbor.Shell do
   @behaviour Arbor.Contracts.API.Shell
 
   alias Arbor.Shell.{
+    AgentContainment,
     AppleContainerUnitDrainCoordinator,
     AppleContainerUnitJournal,
     CapShell,
@@ -84,6 +91,18 @@ defmodule Arbor.Shell do
   alias Arbor.Signals
 
   @default_sandbox :basic
+
+  @doc """
+  Read the current native launcher and loaded agent-enforcement identity.
+
+  Returns a JSON-clean bounded snapshot for qualification staleness checks.
+  The native digest is read from a stable opened-file/path observation; it is
+  not an execution attestation or a promise that a later launch cannot change.
+  Unavailable authorizer, modules, launcher, or an unstable read fails closed.
+  """
+  @spec agent_execution_identity() ::
+          {:ok, map()} | {:error, :agent_execution_identity_unavailable}
+  defdelegate agent_execution_identity(), to: Arbor.Shell.AgentExecutionIdentity, as: :snapshot
 
   @doc """
   Build a bounded regular-file and directory inventory of one explicit source tree.
@@ -359,8 +378,8 @@ defmodule Arbor.Shell do
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
-    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
-      execute_prepared_agent_command(command, prepared, opts)
+    authorize_and_dispatch(agent_id, command, opts, fn prepared, execution_opts ->
+      execute_prepared_agent_command(command, prepared, execution_opts)
     end)
   end
 
@@ -376,8 +395,8 @@ defmodule Arbor.Shell do
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
-    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
-      execute_prepared_agent_command_async(command, prepared, opts)
+    authorize_and_dispatch(agent_id, command, opts, fn prepared, execution_opts ->
+      execute_prepared_agent_command_async(command, prepared, execution_opts)
     end)
   end
 
@@ -387,7 +406,8 @@ defmodule Arbor.Shell do
   Runs the same injected authority check as `authorize_and_execute/3` but
   returns the decision instead of dispatching execution. Trust-aware higher
   layers may instead authorize through their own facade and route the already
-  prepared command through the trusted-system direct API.
+  prepared command through the source-owned adapter, which still admits the
+  mandatory filesystem containment policy.
 
   **Compound commands, interpreters/wrappers, noncanonical executable paths,
   and non-empty environments are rejected** before capability lookup or
@@ -583,46 +603,23 @@ defmodule Arbor.Shell do
   def start_direct_runtime(_opts), do: {:error, :invalid_direct_runtime_options}
 
   @doc false
-  @spec execute_prepared_authorized(String.t(), map(), keyword()) ::
-          {:ok, map()} | {:error, term()}
-  def execute_prepared_authorized(command, prepared, opts \\ [])
+  def execute_prepared_authorized(_command, _prepared, _opts \\ []),
+    do: {:error, :agent_authority_required}
 
-  def execute_prepared_authorized(
-        command,
-        %{
-          executable: path,
-          executable_identity: %ExecutablePolicy.Executable{path: path, name: command_name},
-          args: args,
-          command_name: command_name
-        } = prepared,
-        opts
-      )
-      when is_binary(command) and is_binary(command_name) and is_list(args) and is_list(opts) do
-    # Bind authorized command_name to the pin's name field — NOT Path.basename(path).
-    # On multi-call systems (busybox), TrustedPath resolves /bin/echo → /bin/busybox so
-    # basename(path) is "busybox" while the authorized applet name remains "echo".
-    # Pattern-match requires identity.name == command_name; re-prepare revalidates.
-    with true <- Keyword.keyword?(opts),
-         true <- Enum.all?(args, &(is_binary(&1) and not String.contains?(&1, <<0>>))),
-         true <- multi_call_safe_argv0?(command_name),
-         {:ok, ^prepared} <- prepare_agent_command(command, opts) do
-      execute_prepared_agent_command(command, prepared, opts)
+  @doc false
+  # Called after Actions consumes its process-owned invocation proof. This is a
+  # source-owned adapter seam, not an alternative external authentication API.
+  def execute_prepared_authorized(agent, command, prepared, opts) do
+    with {:ok, ^prepared} <- prepare_agent_command(command, opts),
+         true <- valid_agent_principal?(agent),
+         {:ok, plan} <- AgentContainment.admit(agent, prepared, opts) do
+      execute_prepared_agent_command(command, prepared, put_agent_containment(opts, plan))
     else
-      _other -> {:error, :invalid_prepared_shell_command}
+      false -> {:error, :invalid_agent_principal}
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_prepared_shell_command}
     end
   end
-
-  def execute_prepared_authorized(_command, _prepared, _opts),
-    do: {:error, :invalid_prepared_shell_command}
-
-  # argv0 for multi-call binaries (busybox) must be a single path component so the
-  # applet selector cannot smuggle a path. Matches ExecutablePolicy pin names.
-  defp multi_call_safe_argv0?(name)
-       when is_binary(name) and byte_size(name) > 0 and byte_size(name) <= 64 do
-    not String.contains?(name, ["/", "\\", <<0>>]) and name == Path.basename(name)
-  end
-
-  defp multi_call_safe_argv0?(_name), do: false
 
   @doc """
   Execute a descendant-spawning Mix tool via the boot-pinned validation runtime.
@@ -1221,8 +1218,8 @@ defmodule Arbor.Shell do
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for streaming execution too.
   def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
-    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
-      execute_prepared_agent_command_streaming(command, prepared, opts)
+    authorize_and_dispatch(agent_id, command, opts, fn prepared, execution_opts ->
+      execute_prepared_agent_command_streaming(command, prepared, execution_opts)
     end)
   end
 
@@ -1477,7 +1474,15 @@ defmodule Arbor.Shell do
            PortSession.validate_timeout(Keyword.get(execution_opts, :timeout, 30_000)) do
       session_opts =
         execution_opts
-        |> Keyword.take([:max_output_bytes, :cwd, :stream_to, :clear_env, :env, :stdin])
+        |> Keyword.take([
+          :max_output_bytes,
+          :cwd,
+          :stream_to,
+          :clear_env,
+          :env,
+          :stdin,
+          :agent_containment
+        ])
         |> Keyword.put(:timeout, timeout)
         |> Keyword.put(:started_at, start_time)
 
@@ -1908,12 +1913,26 @@ defmodule Arbor.Shell do
     end
   end
 
+  defp put_agent_containment(opts, plan) do
+    opts
+    |> Keyword.drop([:agent_containment, :allowed_paths, :network, :launcher])
+    |> Keyword.put(:agent_containment, plan)
+    |> Keyword.put(:cwd, plan.cwd)
+  end
+
   defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
     with {:ok, prepared} <- prepare_agent_command(command, opts) do
       case authorize_prepared_agent_command(agent_id, command, prepared, opts) do
-        {:ok, :authorized} -> execute_fn.(prepared)
-        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-        {:error, reason} -> {:error, reason}
+        {:ok, :authorized} ->
+          with {:ok, plan} <- AgentContainment.admit(agent_id, prepared, opts) do
+            execute_fn.(prepared, put_agent_containment(opts, plan))
+          end
+
+        {:ok, :pending_approval, proposal_id} ->
+          {:ok, :pending_approval, proposal_id}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end

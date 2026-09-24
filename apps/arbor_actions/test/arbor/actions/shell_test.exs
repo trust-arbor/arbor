@@ -3,6 +3,7 @@ defmodule Arbor.Actions.ShellTest do
   @moduletag :fast
 
   alias Arbor.Actions.Shell
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SignedRequest
 
   defp run_execute(params, context) do
@@ -15,6 +16,9 @@ defmodule Arbor.Actions.ShellTest do
         context
         |> Map.delete(:test_private_key)
         |> Map.put(:signed_request, signed_request)
+
+      params =
+        Map.put_new(params, :cwd, Map.get(context, :test_cwd, Process.get(:shell_test_cwd)))
 
       Arbor.Actions.authorize_and_execute(agent_id, Shell.Execute, params, context)
     end
@@ -99,10 +103,30 @@ defmodule Arbor.Actions.ShellTest do
       end
     end)
 
-    {:ok, agent_context: %{agent_id: agent_id, test_private_key: identity.private_key}}
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "action_shell_mechanics_" <> Base.encode16(:crypto.strong_rand_bytes(12))
+      )
+
+    :ok = File.mkdir(root)
+    {:ok, cwd} = SafePath.resolve_real(root)
+    {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+    Process.put(:shell_test_cwd, cwd)
+    previous_authorizer = Application.get_env(:arbor_shell, :agent_authorizer)
+    Application.put_env(:arbor_shell, :agent_authorizer, Shell)
+
+    on_exit(fn ->
+      restore(:arbor_shell, :agent_authorizer, previous_authorizer)
+      File.rm_rf!(cwd)
+    end)
+
+    {:ok,
+     agent_context: %{agent_id: agent_id, test_private_key: identity.private_key, test_cwd: cwd}}
   end
 
   describe "Execute" do
+    @describetag skip: :os.type() != {:unix, :darwin}
     test "runs a simple command", %{agent_context: context} do
       assert {:ok, result} = run_execute(%{command: "echo hello"}, context)
       assert result.exit_code == 0
@@ -140,10 +164,9 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "uses working directory", %{agent_context: context} do
-      assert {:ok, result} = run_execute(%{command: "pwd", cwd: "/tmp"}, context)
+      assert {:ok, result} = run_execute(%{command: "pwd", cwd: context.test_cwd}, context)
 
-      assert String.contains?(result.stdout, "/tmp") or
-               String.contains?(result.stdout, "/private/tmp")
+      assert String.trim(result.stdout) == context.test_cwd
     end
 
     test "rejects environment overrides at the generic agent boundary", %{
@@ -171,7 +194,7 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "context can override options", %{agent_context: agent_context} do
-      context = Map.put(agent_context, :cwd, "/tmp")
+      context = Map.put(agent_context, :cwd, agent_context.test_cwd)
       assert {:ok, result} = run_execute(%{command: "pwd"}, context)
       assert String.contains?(result.stdout, "tmp")
     end
@@ -254,7 +277,7 @@ defmodule Arbor.Actions.ShellTest do
     test "security regression: retains original command through prepared revalidation", %{
       agent_context: context
     } do
-      # execute_prepared_authorized/3 re-prepares the command string and demands
+      # execute_prepared_authorized/4 re-prepares the command string and demands
       # exact equality with the caller-supplied prepared map. Reconstructing argv
       # via inspect/1 is not a faithful inverse of prepare_agent_command/2.
       # A backslash-bearing printf operand is the behavioral proof: inspect doubles
@@ -284,6 +307,7 @@ defmodule Arbor.Actions.ShellTest do
       # prepared map → exact reprepare equality fails closed.
       assert {:error, :invalid_prepared_shell_command} =
                Arbor.Shell.execute_prepared_authorized(
+                 context.agent_id,
                  inspect_rebuilt,
                  prepared,
                  sandbox: :basic
@@ -292,6 +316,7 @@ defmodule Arbor.Actions.ShellTest do
       # Wrong command string is rejected even with a valid prepared map.
       assert {:error, :invalid_prepared_shell_command} =
                Arbor.Shell.execute_prepared_authorized(
+                 context.agent_id,
                  "printf %s other",
                  prepared,
                  sandbox: :basic
@@ -303,6 +328,7 @@ defmodule Arbor.Actions.ShellTest do
 
       assert {:error, :invalid_prepared_shell_command} =
                Arbor.Shell.execute_prepared_authorized(
+                 context.agent_id,
                  command,
                  other_prepared,
                  sandbox: :basic
@@ -315,11 +341,17 @@ defmodule Arbor.Actions.ShellTest do
       }
 
       assert {:error, :invalid_prepared_shell_command} =
-               Arbor.Shell.execute_prepared_authorized(command, forged, sandbox: :basic)
+               Arbor.Shell.execute_prepared_authorized(context.agent_id, command, forged,
+                 sandbox: :basic,
+                 cwd: context.test_cwd
+               )
 
       # Original command + its prepared map remains the authorized execution path.
       assert {:ok, result} =
-               Arbor.Shell.execute_prepared_authorized(command, prepared, sandbox: :basic)
+               Arbor.Shell.execute_prepared_authorized(context.agent_id, command, prepared,
+                 sandbox: :basic,
+                 cwd: context.test_cwd
+               )
 
       assert result.exit_code == 0
       assert result.stdout == "a\\b"
@@ -413,6 +445,7 @@ defmodule Arbor.Actions.ShellTest do
                )
     end
 
+    @tag skip: :os.type() != {:unix, :darwin}
     test "security regression: Execute does not re-auth after approved_invocation", %{
       agent_id: agent_id,
       private_key: private_key
@@ -434,6 +467,15 @@ defmodule Arbor.Actions.ShellTest do
 
       {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: echo_uri)
 
+      if Process.whereis(Arbor.Trust.Manager) == nil do
+        start_supervised!(
+          {Arbor.Trust.Manager, circuit_breaker: false, decay: false, event_store: false}
+        )
+      end
+
+      cwd = Process.get(:shell_test_cwd)
+      {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
+      {:ok, _} = Arbor.Trust.set_rule(agent_id, "arbor://fs/read#{cwd}", :auto)
       command = "echo shell-approval-ok"
 
       # No marker → gated: either pending_approval (escalated IRQ) or unauthorized.
