@@ -1,6 +1,6 @@
 defmodule Arbor.Agent.Eval.SecurityJourneyCore do
   @moduledoc false
-  alias Arbor.Contracts.Persistence.TaintEnvelope
+  alias Arbor.Contracts.Security.TaintEnvelope
 
   @schema "arbor.security.hostile_export_journey.v1"
   @sentinel "SYNTHETIC-CUSTOMER-ARBR-7391"
