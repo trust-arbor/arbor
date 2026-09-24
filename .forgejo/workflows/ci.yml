@@ -127,6 +127,24 @@ jobs:
           ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/coding_security_regression_pipeline_test.exs --timeout 120000
           ./bin/mix test apps/arbor_actions/test/arbor/actions/coding/security_regression_test.exs --only phase_d_security_regression --timeout 180000
 
+      # Deterministic agent-stack gates are required on every source change.
+      # Each command owns one app/BEAM. Linux validates generic-agent refusal;
+      # physical macOS containment and live model evidence are separately bound
+      # to the deployment profile, never inferred from this lane's green status.
+      - name: Agent-stack security regressions (required, hermetic)
+        run: |
+          set -euo pipefail
+          ./bin/mix test apps/arbor_actions/test/arbor/actions/invocation_audit_security_regression_test.exs apps/arbor_actions/test/arbor/actions/shell_filesystem_containment_security_regression_test.exs apps/arbor_actions/test/arbor/actions/skill_version_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_llm/test/arbor/llm/tool_loop_invocation_audit_security_regression_test.exs apps/arbor_llm/test/arbor/llm/execution_provider_identity_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_ai/test/arbor/ai/acp_session/handler_store_outage_security_regression_test.exs apps/arbor_ai/test/arbor/ai/skill_prompt_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_agent/test/arbor/agent/eval/agent_task_precondition_security_regression_test.exs apps/arbor_agent/test/arbor/agent/skill_prompt_version_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_historian/test/arbor/historian/security_invocation_sink_test.exs apps/arbor_historian/test/arbor/historian/security_invocation_durability_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_kernel_runtime/test/arbor/common/skill_version_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_consensus/test/arbor/consensus/evaluators/skill_prompt_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_gateway/test/arbor/gateway/skill_prompt_security_regression_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/orchestrator/security_qualification_evidence_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/session_turn_egress_p5_security_regression_test.exs apps/arbor_orchestrator/test/arbor/orchestrator/heartbeat_service_test.exs --timeout 120000
+          ./bin/mix test apps/arbor_shell/test/arbor/shell/agent_filesystem_containment_security_regression_test.exs --timeout 120000
+
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
         continue-on-error: true
