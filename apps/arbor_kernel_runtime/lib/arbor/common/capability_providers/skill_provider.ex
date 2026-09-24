@@ -13,6 +13,7 @@ defmodule Arbor.Common.CapabilityProviders.SkillProvider do
   @behaviour Arbor.Contracts.CapabilityProvider
 
   alias Arbor.Common.SkillLibrary
+  alias Arbor.Common.SkillLibrary.VersionCore
   alias Arbor.Contracts.{CapabilityDescriptor, Skill}
 
   @prompt_categories ~w(heartbeat cognitive advisory)
@@ -38,21 +39,37 @@ defmodule Arbor.Common.CapabilityProviders.SkillProvider do
   end
 
   @impl true
-  def execute(id, input, _opts) do
-    case parse_skill_id(id) do
-      {:ok, name} ->
-        case SkillLibrary.get(name) do
-          {:ok, skill} ->
-            body = maybe_render_template(skill, input)
-            {:ok, %{body: body, name: skill.name}}
+  def execute(id, input, opts) do
+    with {:ok, name} <- parse_skill_id(id),
+         true <- is_list(opts) and Keyword.keyword?(opts),
+         {:ok, skill, digest} <- approved_execution(name, Keyword.get(opts, :agent_id)) do
+      body = maybe_render_template(skill, input)
 
-          {:error, _} = err ->
-            err
-        end
-
-      :error ->
-        {:error, :not_found}
+      {:ok,
+       %{
+         body: body,
+         name: skill.name,
+         version_digest: digest,
+         taint: Map.get(skill, :taint, :untrusted),
+         provenance: Map.get(skill, :provenance)
+       }}
+    else
+      :error -> {:error, :not_found}
+      false -> {:error, :invalid_skill_context}
+      {:error, _} = error -> error
     end
+  end
+
+  defp approved_execution(name, nil) do
+    with {:ok, skill} <- SkillLibrary.get_pinned(name),
+         {:ok, version} <- VersionCore.new(skill) do
+      {:ok, skill, version.digest}
+    end
+  end
+
+  defp approved_execution(name, principal) do
+    with {:ok, version} <- SkillLibrary.resolve_approved_version(name, principal),
+         do: {:ok, version.skill, version.digest}
   end
 
   @doc false

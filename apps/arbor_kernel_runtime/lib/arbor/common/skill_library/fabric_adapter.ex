@@ -67,6 +67,7 @@ defmodule Arbor.Common.SkillLibrary.FabricAdapter do
         name: name_from_path(path),
         description: extract_description(content),
         body: String.trim(content),
+        source_bytes: content,
         tags: tags_from_path(path),
         category: "fabric",
         source: :fabric,

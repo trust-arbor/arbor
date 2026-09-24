@@ -178,6 +178,9 @@ defmodule Arbor.Actions.Config do
     Application.get_env(:arbor_actions, :security_module, Arbor.Security)
   end
 
+  @doc "Public Memory facade for action-owned skill state; never selected by action parameters."
+  def memory_module, do: Application.get_env(:arbor_actions, :memory_module, Arbor.Memory)
+
   @doc """
   Public Consensus facade used by pending-approval reconciliation settlement.
 

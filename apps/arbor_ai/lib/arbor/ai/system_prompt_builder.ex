@@ -9,7 +9,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   """
 
   alias Arbor.AI.CatalogSection
-  alias Arbor.Common.{LazyLoader, PromptSanitizer}
+  alias Arbor.Common.{LazyLoader, PromptSanitizer, SkillLibrary}
 
   # Per-section token budgets. {:fixed, N} for static sections,
   # {:min_max, min, max, pct} for dynamic sections sized to context window.
@@ -393,7 +393,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
          function_exported?(Arbor.Memory, :get_working_memory, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       wm = apply(Arbor.Memory, :get_working_memory, [agent_id])
-      format_active_skills(wm)
+      format_active_skills(wm, agent_id)
     end
   rescue
     _ -> nil
@@ -401,10 +401,11 @@ defmodule Arbor.AI.SystemPromptBuilder do
     :exit, _ -> nil
   end
 
-  defp format_active_skills(nil), do: nil
+  defp format_active_skills(nil, _agent_id), do: nil
 
-  defp format_active_skills(wm) do
-    skills = Map.get(wm, :active_skills, [])
+  defp format_active_skills(wm, agent_id) do
+    skills =
+      SkillLibrary.approved_active_skills(agent_id, Map.get(wm, :active_skills, []))
 
     if skills == [] do
       nil

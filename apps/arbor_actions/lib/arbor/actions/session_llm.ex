@@ -17,6 +17,8 @@ defmodule Arbor.Actions.SessionLlm do
   # ============================================================================
 
   defmodule BuildPrompt do
+    alias Arbor.Common.SkillLibrary
+
     @moduledoc """
     Build LLM prompt from session context sources.
 
@@ -78,11 +80,11 @@ defmodule Arbor.Actions.SessionLlm do
       ]
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       mode = params[:mode] || params["mode"] || "heartbeat"
 
       case mode do
-        "heartbeat" -> build_heartbeat(params)
+        "heartbeat" -> build_heartbeat(params, context[:agent_id])
         "followup" -> build_followup(params)
         "turn" -> build_turn(params)
         other -> {:error, "unknown build_prompt mode: #{other}"}
@@ -91,9 +93,12 @@ defmodule Arbor.Actions.SessionLlm do
 
     # --- Heartbeat mode ---
 
-    defp build_heartbeat(params) do
+    defp build_heartbeat(params, agent_id) do
       goals = get_list(params, :goals, "session.goals")
       wm = get_map(params, :working_memory, "session.working_memory")
+      entries = Map.get(wm, :active_skills, Map.get(wm, "active_skills", []))
+      approved = SkillLibrary.approved_active_skills(agent_id, entries)
+      wm = wm |> Map.delete("active_skills") |> Map.put(:active_skills, approved)
       kg = get_list(params, :knowledge_graph, "session.knowledge_graph")
       proposals = get_list(params, :pending_proposals, "session.pending_proposals")
       intents = get_list(params, :active_intents, "session.active_intents")

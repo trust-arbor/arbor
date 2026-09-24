@@ -40,6 +40,7 @@ defmodule Arbor.Actions.MemoryWritePolicy do
 
   @other_writers [
     Arbor.Actions.Skill.Activate,
+    Arbor.Actions.Skill.Compile,
     Arbor.Actions.Skill.Deactivate,
     Arbor.Actions.Scheduler.EnqueueRoutine,
     Arbor.Actions.Scheduler.CancelRoutine

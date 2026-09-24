@@ -28,6 +28,7 @@ defmodule Arbor.Contracts.Skill do
     field(:name, String.t(), enforce: true)
     field(:description, String.t(), enforce: true)
     field(:body, String.t(), default: "")
+    field(:source_bytes, String.t() | nil)
     field(:tags, [String.t()], default: [])
     field(:category, String.t() | nil)
     field(:source, atom(), default: :skill)
@@ -67,6 +68,7 @@ defmodule Arbor.Contracts.Skill do
         name: Map.fetch!(attrs, :name),
         description: Map.fetch!(attrs, :description),
         body: Map.get(attrs, :body, ""),
+        source_bytes: Map.get(attrs, :source_bytes),
         tags: Map.get(attrs, :tags, []),
         category: Map.get(attrs, :category),
         source: Map.get(attrs, :source, :skill),

@@ -394,6 +394,11 @@ defmodule Arbor.Memory.WorkingMemory do
           name: name,
           description: Map.get(skill, :description, ""),
           body: Map.get(skill, :body, ""),
+          version_digest: Map.get(skill, :version_digest),
+          approval_id: Map.get(skill, :approval_id),
+          approval_digest: Map.get(skill, :approval_digest),
+          taint: Map.get(skill, :taint),
+          provenance: Map.get(skill, :provenance),
           activated_at: DateTime.utc_now()
         }
 
@@ -1293,18 +1298,25 @@ defmodule Arbor.Memory.WorkingMemory do
     }
   end
 
-  defp serialize_active_skill(%{
-         id: id,
-         name: name,
-         description: desc,
-         body: body,
-         activated_at: at
-       }) do
+  defp serialize_active_skill(
+         %{
+           id: id,
+           name: name,
+           description: desc,
+           body: body,
+           activated_at: at
+         } = skill
+       ) do
     %{
       "id" => id,
       "name" => name,
       "description" => desc,
       "body" => body,
+      "version_digest" => Map.get(skill, :version_digest),
+      "approval_id" => Map.get(skill, :approval_id),
+      "approval_digest" => Map.get(skill, :approval_digest),
+      "taint" => Map.get(skill, :taint),
+      "provenance" => Map.get(skill, :provenance),
       "activated_at" => serialize_datetime(at)
     }
   end
@@ -1383,6 +1395,11 @@ defmodule Arbor.Memory.WorkingMemory do
       name: name,
       description: data["description"] || "",
       body: data["body"] || "",
+      version_digest: data["version_digest"],
+      approval_id: data["approval_id"],
+      approval_digest: data["approval_digest"],
+      taint: data["taint"],
+      provenance: data["provenance"],
       activated_at: parse_datetime(data["activated_at"]) || fallback_datetime
     }
   end
@@ -1394,6 +1411,11 @@ defmodule Arbor.Memory.WorkingMemory do
       name: name,
       description: data[:description] || "",
       body: data[:body] || "",
+      version_digest: data[:version_digest],
+      approval_id: data[:approval_id],
+      approval_digest: data[:approval_digest],
+      taint: data[:taint],
+      provenance: data[:provenance],
       activated_at: parse_datetime(data[:activated_at]) || fallback_datetime
     }
   end

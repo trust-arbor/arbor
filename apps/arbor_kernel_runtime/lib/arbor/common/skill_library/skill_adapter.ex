@@ -66,6 +66,7 @@ defmodule Arbor.Common.SkillLibrary.SkillAdapter do
         name: Map.get(fields, "name", name_from_path(path)),
         description: Map.get(fields, "description", ""),
         body: trimmed_body,
+        source_bytes: content,
         tags: parse_list(Map.get(fields, "tags", [])),
         category: Map.get(fields, "category"),
         source: :skill,
