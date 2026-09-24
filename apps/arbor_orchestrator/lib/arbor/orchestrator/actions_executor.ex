@@ -374,6 +374,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 # Owner-issued effect execution ID from Engine/ExecHandler opts only.
                 # Never derived here; omit when the owner did not supply one.
                 |> maybe_put_context(:execution_id, Keyword.get(opts, :execution_id))
+                |> maybe_put_context(:provider_call_id, Keyword.get(opts, :provider_call_id))
                 |> maybe_put_acp_transcript_capture(action_module, opts)
                 |> maybe_put_design_artifact_boundary(action_module, opts)
                 |> maybe_put_cross_app_static_receipt_boundary(action_module, opts)

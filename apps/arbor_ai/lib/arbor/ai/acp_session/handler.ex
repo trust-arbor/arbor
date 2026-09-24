@@ -80,13 +80,27 @@ defmodule Arbor.AI.AcpSession.Handler do
       {:ok, tool_name} ->
         resource_uri = "arbor://acp/tool/#{tool_name}"
 
-        case authorize_action(state.agent_id, resource_uri, :execute, state) do
+        decision =
+          Arbor.Security.with_invocation_audit(
+            %{
+              principal_id: state.agent_id,
+              surface: :acp_permission,
+              tool: tool_name,
+              provider_call_id: Map.get(tool_call, "toolCallId")
+            },
+            fn -> authorize_action(state.agent_id, resource_uri, :execute, state) end
+          )
+
+        case decision do
           :authorized ->
             {:ok, build_outcome(:approved, options), state}
 
           {:denied, reason} ->
             Logger.info("AcpSession.Handler: denied permission for #{tool_name}: #{reason}")
             {:ok, build_outcome(:rejected, options, reason), state}
+
+          {:error, _} ->
+            {:ok, build_outcome(:rejected, options, "durable security audit unavailable"), state}
         end
 
       {:error, :unrecognized_tool_identity} ->
@@ -234,9 +248,14 @@ defmodule Arbor.AI.AcpSession.Handler do
   Validates the path stays within `workspace_root` via SafePath, then checks
   FileGuard authorization before reading.
   """
-  def handle_file_read(_session_id, path, _opts, state) do
+  def handle_file_read(session_id, path, _opts, state) do
+    audited_file_callback(state, session_id, path, "read", fn -> do_file_read(path, state) end)
+  end
+
+  defp do_file_read(path, state) do
     with {:ok, resolved} <- validate_path(path, state.workspace_root),
-         :ok <- authorize_file(state.agent_id, resolved, :read) do
+         :ok <- authorize_file(state.agent_id, resolved, :read),
+         :ok <- Arbor.Security.admit_invocation_effect() do
       case File.read(resolved) do
         {:ok, content} -> {:ok, content, state}
         {:error, reason} -> {:error, to_string(reason), state}
@@ -251,9 +270,16 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   Same path validation and authorization as reads, with `:write` operation.
   """
-  def handle_file_write(_session_id, path, content, _opts, state) do
+  def handle_file_write(session_id, path, content, _opts, state) do
+    audited_file_callback(state, session_id, path, "write", fn ->
+      do_file_write(path, content, state)
+    end)
+  end
+
+  defp do_file_write(path, content, state) do
     with {:ok, resolved} <- validate_path(path, state.workspace_root),
-         :ok <- authorize_file(state.agent_id, resolved, :write) do
+         :ok <- authorize_file(state.agent_id, resolved, :write),
+         :ok <- Arbor.Security.admit_invocation_effect() do
       case File.write(resolved, content) do
         :ok -> {:ok, state}
         {:error, reason} -> {:error, to_string(reason), state}
@@ -265,6 +291,28 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   @doc false
   def terminate(_reason, _state), do: :ok
+
+  defp audited_file_callback(state, session_id, path, operation, fun) do
+    result =
+      Arbor.Security.with_invocation_audit(
+        %{
+          principal_id: state.agent_id,
+          surface: :acp_file,
+          tool: operation,
+          session_id: session_id,
+          destination: path
+        },
+        fun
+      )
+
+    case result do
+      {:error, :invocation_audit_unavailable} ->
+        {:error, "durable security audit unavailable", state}
+
+      other ->
+        other
+    end
+  end
 
   # -- Private --
 
@@ -304,8 +352,7 @@ defmodule Arbor.AI.AcpSession.Handler do
         {:error, reason} -> {:error, reason}
       end
     else
-      # CapabilityStore not running — permissive fallback
-      :ok
+      {:error, :security_unavailable}
     end
   rescue
     # FAIL CLOSED: a crash while checking file access must DENY, never grant.

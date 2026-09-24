@@ -119,14 +119,27 @@ defmodule Arbor.Security do
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
-  def authorize(principal_id, resource_uri, action \\ nil, opts \\ []),
-    do:
+  def authorize(principal_id, resource_uri, action \\ nil, opts \\ []) do
+    result =
       check_if_principal_has_capability_for_resource_action(
         principal_id,
         resource_uri,
         action,
         opts
       )
+
+    Arbor.Security.InvocationAudit.observe_authorization(result, principal_id, resource_uri)
+  end
+
+  @doc "Run a trusted adapter invocation with durable source-owned attempt/decision/outcome evidence. Never accepts a caller invocation id."
+  def with_invocation_audit(attributes, fun),
+    do: Arbor.Security.InvocationAudit.run(attributes, fun)
+
+  @doc "Current process-owned invocation id for correlation; nil outside an admitted invocation."
+  def current_invocation_id, do: Arbor.Security.InvocationAudit.current_id()
+
+  @doc "Durably admit the effect inside the current trusted invocation before starting it."
+  def admit_invocation_effect, do: Arbor.Security.InvocationAudit.admit_effect()
 
   @doc """
   Authorize a SELF-scoped resource, letting a capability on the canonical

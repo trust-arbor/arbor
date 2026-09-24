@@ -62,6 +62,16 @@ defmodule Arbor.Security.Config do
   @authority_root_claim_table_access if(Mix.env() == :test, do: :public, else: :protected)
   @json_file_env Arbor.Security.Store.JSONFile
   @config_env Mix.env()
+  @default_invocation_audit_mode if(@config_env == :test, do: :disabled, else: :required)
+
+  @doc "Host-owned invocation admission policy. Required mode refuses effects when durable evidence cannot be admitted."
+  def invocation_audit_mode,
+    do: Application.get_env(@app, :invocation_audit_mode, @default_invocation_audit_mode)
+
+  @doc "Upward runtime seam: sink implements persist_security_invocation/1 and acknowledges the exact event id only after durable append."
+  def invocation_audit_sink,
+    do: Application.get_env(@app, :invocation_audit_sink, Module.concat(["Arbor", "Historian"]))
+
   @repo_root Path.expand("../../../../..", __DIR__)
   @development_authority_root Path.expand(".arbor/security", @repo_root)
   @authority_root_sources [:configured, :legacy_jsonfile_base_dir, :development_default]

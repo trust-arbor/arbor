@@ -1401,6 +1401,26 @@ defmodule Arbor.Actions do
 
   def authorize_and_execute(agent_id, action_module, params, context)
       when is_binary(agent_id) and is_map(context) do
+    audit = %{
+      principal_id: agent_id,
+      surface: :action,
+      tool: action_module,
+      execution_id: Map.get(context, :execution_id),
+      session_id: Map.get(context, :session_id),
+      task_id: Map.get(context, :task_id),
+      provider_call_id: Map.get(context, :provider_call_id),
+      destination: Egress.egress_destination_for(action_module, params, context)
+    }
+
+    Arbor.Security.with_invocation_audit(audit, fn ->
+      authorize_and_execute_admitted(agent_id, action_module, params, context)
+    end)
+  end
+
+  def authorize_and_execute(_agent_id, _action_module, _params, _context),
+    do: {:error, :invalid_authorization_principal}
+
+  defp authorize_and_execute_admitted(agent_id, action_module, params, context) do
     with :ok <- MemoryWritePolicy.check(action_module, params, context),
          :ok <- validate_authorization_principal(agent_id),
          {:ok, bound_context} <- bind_authenticated_principal(context, agent_id),
@@ -1412,9 +1432,6 @@ defmodule Arbor.Actions do
       end)
     end
   end
-
-  def authorize_and_execute(_agent_id, _action_module, _params, _context),
-    do: {:error, :invalid_authorization_principal}
 
   @doc false
   @spec authorized_principal(map(), module()) :: {:ok, String.t()} | {:error, term()}
@@ -1719,7 +1736,9 @@ defmodule Arbor.Actions do
     # authenticated_principal_required?/1 remains the SignedRequest gate for
     # actions such as Shell.Execute; it does not opt out of this envelope.
     with_action_authorization(agent_id, action_module, context, fn authorized_context ->
-      execute_action(action_module, params, authorized_context)
+      with :ok <- Arbor.Security.admit_invocation_effect() do
+        execute_action(action_module, params, authorized_context)
+      end
     end)
   end
 
