@@ -14,9 +14,10 @@ execution settings, current Security/Trust/Actions policy, approved skill versio
 native containment artifact and loaded workflow/LLM/eval implementation identities.
 No caller-supplied fingerprint can override this capture.
 
-The initial qualified lane uses the Arbor runtime with one resolved route. A
-fallback chain is refused because an unmeasured fallback is not evidence for the
-primary model. ACP's external native effects require separate qualification.
+The initial qualified lane uses the Arbor runtime with one resolved route and
+preprocessing disabled. A fallback chain or enabled preprocessing is refused
+because either can invoke a model outside the measured route. ACP's external
+native effects require separate qualification.
 Unavailable owners or disabled identity, signing, constraint, delegation, egress,
 URI or durable invocation-audit enforcement make the profile unavailable.
 
@@ -75,6 +76,12 @@ revoked approval, or unavailable storage refuses execution until requalification
 An asynchronous private-memory preflight also rechecks before launching its turn.
 Revocation prevents future admission; it does not retract text or undo effects
 already admitted before revocation.
+
+This preflight observes a profile; it does not atomically freeze mutable host
+configuration through every subsequent Engine dispatch. Ordinary tool, filesystem
+and egress authorization still runs at the effect boundary. Native launcher
+identity is likewise an observation of the artifact, not a pin on all future
+launches. Neither property is a defense against arbitrary trusted-host mutation.
 
 ## Durable invocation evidence
 
