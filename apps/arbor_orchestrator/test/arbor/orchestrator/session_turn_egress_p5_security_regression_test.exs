@@ -1876,13 +1876,18 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute after_done.turn_in_flight
   end
 
-  for requirement <- [%{turn: %{run_id: "missing_qualification_run"}}, %{heartbeat: %{run_id: "wrong_source"}}] do
+  for requirement <- [
+        %{turn: %{run_id: "missing_qualification_run"}},
+        %{heartbeat: %{run_id: "wrong_source"}}
+      ] do
     @qualification_requirement requirement
     test "security regression: configured qualification #{inspect(requirement)} refuses before starting a turn",
          %{agent_id: agent_id, agent_signer: signer} do
       prior = Application.get_env(:arbor_orchestrator, :security_qualification_profiles)
-      Application.put_env(:arbor_orchestrator, :security_qualification_profiles,
-        %{agent_id => @qualification_requirement})
+
+      Application.put_env(:arbor_orchestrator, :security_qualification_profiles, %{
+        agent_id => @qualification_requirement
+      })
 
       on_exit(fn ->
         if is_nil(prior),
@@ -1890,12 +1895,21 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
           else: Application.put_env(:arbor_orchestrator, :security_qualification_profiles, prior)
       end)
 
-      state = session_state(agent_id,
-        turn_graph: hermetic_success_graph!(), signer: signer,
-        config: %{"llm_provider" => "lmstudio", "llm_model" => "local-model", "stream" => false})
+      state =
+        session_state(agent_id,
+          turn_graph: hermetic_success_graph!(),
+          signer: signer,
+          config: %{"llm_provider" => "lmstudio", "llm_model" => "local-model", "stream" => false}
+        )
+
       reply_ref = make_ref()
-      assert {:noreply, next} = Session.handle_call({:send_message, "qualification gate"},
-        {self(), reply_ref}, state)
+
+      assert {:noreply, next} =
+               Session.handle_call(
+                 {:send_message, "qualification gate"},
+                 {self(), reply_ref},
+                 state
+               )
 
       # Parent cleanup is explicit: an incorrectly started real engine task must
       # not escape the failing security assertion and contaminate later cases.
