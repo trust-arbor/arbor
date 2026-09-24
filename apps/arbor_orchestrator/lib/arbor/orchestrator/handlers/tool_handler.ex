@@ -121,7 +121,12 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
       |> Keyword.drop([:env, :allowlist, :gate_command])
       |> Keyword.put(:sandbox, :basic)
 
-    case Arbor.Shell.execute_prepared_authorized(command, prepared, execution_opts) do
+    case Arbor.Shell.execute_prepared_authorized(
+           authority.execution_principal,
+           command,
+           prepared,
+           execution_opts
+         ) do
       {:ok, result} ->
         output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
         exit_code = Map.get(result, :exit_code, 0)

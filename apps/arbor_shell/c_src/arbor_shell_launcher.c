@@ -78,6 +78,8 @@ extern char **environ;
 #define EXECUTION_TRUSTED_BUILD 2
 #define EXECUTION_OCI_PROBE 3
 #define EXECUTION_OCI_UNIT 4
+#define EXECUTION_AGENT_READ 5
+#define EXECUTION_AGENT_WRITE 6
 
 #define APPLE_CONTAINER_CLI "/usr/local/bin/container"
 #define APPLE_CONTAINER_ALIAS_PREFIX "127.0.0.1:0/arbor/"
@@ -88,6 +90,33 @@ extern char **environ;
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
+/* Generic agents have no ambient file, network, Mach, process, or credential
+ * authority. ROOT is the capability-intersected canonical workdir; EXEC is the
+ * startup-pinned utility. Parameters are argv values, never profile source.
+ * System libraries are immutable runtime input, not operator home content. */
+#define DARWIN_AGENT_PROFILE \
+  "(version 1)\n" \
+  "(deny default)\n" \
+  "(allow process-exec (literal (param \"EXEC\")))\n" \
+  "(allow file-read* (literal (param \"EXEC\")) (subpath \"/usr/lib\") (subpath \"/System/Library\"))\n" \
+  "(allow file-read-metadata (literal \"/\") (literal \"/dev\") (literal \"/private\") (literal \"/private/tmp\"))\n" \
+  "(allow file-read* (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\"))\n" \
+  "(allow file-write-data (literal \"/dev/null\"))\n" \
+  "(allow file-read* (subpath (param \"ROOT\")))\n" \
+  "(allow file-read* (literal \"/\") (subpath \"/System/Volumes/Preboot/Cryptexes/OS/System/Library\") (subpath \"/System/Volumes/Preboot/Cryptexes/OS/usr/lib\"))\n" \
+  "(allow file-read-metadata (subpath \"/System/Volumes/Preboot/Cryptexes\"))\n" \
+  "(allow file-map-executable (literal (param \"EXEC\")) (subpath \"/usr/lib\") (subpath \"/System/Library\") (subpath \"/System/Volumes/Preboot/Cryptexes/OS/System/Library\"))\n" \
+  "(allow sysctl-read)\n"
+#define DARWIN_AGENT_WRITE_PROFILE \
+  "(allow file-write* (subpath (param \"ROOT\")))\n"
+#define DARWIN_AGENT_DENIALS \
+  "(deny process-fork)\n" \
+  "(deny network*)\n" \
+  "(deny file-read* file-write* (regex #\"(^|/)([.]ssh|[.]aws|[.]azure|[.]gnupg|[.]claude|[.]codex|[.]agents|[.]config|[.]arbor|[.]git|[.]kube|[.]docker|[.]netrc|[.]npmrc|[.]pypirc|[.]env([.][^/]*)?|credentials([.][^/]*)?|secrets?([.][^/]*)?|id_rsa|id_ed25519)(/|$)\"))\n" \
+  "(deny file-read* file-write* (regex #\"/Library/(Keychains|Application Support)(/|$)\"))\n"
+static const char *g_agent_root = NULL;
+static int g_agent_write = 0;
+
 /* Residual risk: file-read*, mach-lookup, process-info*, sysctl-read, signal,
  * and posix shm/sem are intentionally broad so Mix/ERTS can start. Writes are
  * the eight -D private roots plus Hex 2.5.1 CWD unpack temps
@@ -1362,6 +1391,40 @@ static void send_terminal(uint8_t reason, int exit_code) {
   send_terminal_ex(reason, exit_code, CANCEL_SUB_NONE, 0);
 }
 
+#ifdef __APPLE__
+static void darwin_exec_agent(const char *path, char **target_argv) {
+  if (g_agent_root == NULL || g_agent_root[0] != '/' || strcmp(g_agent_root, "/") == 0 ||
+      strlen(g_agent_root) > 4096 || trusted_system_executable(DARWIN_SANDBOX_EXEC) != 0) {
+    _exit(126);
+  }
+  char root_param[4102];
+  char exec_param[4102];
+  if (snprintf(root_param, sizeof(root_param), "ROOT=%s", g_agent_root) >= (int)sizeof(root_param) ||
+      snprintf(exec_param, sizeof(exec_param), "EXEC=%s", path) >= (int)sizeof(exec_param)) {
+    _exit(126);
+  }
+  const char *profile = g_agent_write
+    ? DARWIN_AGENT_PROFILE DARWIN_AGENT_WRITE_PROFILE DARWIN_AGENT_DENIALS
+    : DARWIN_AGENT_PROFILE DARWIN_AGENT_DENIALS;
+  size_t count = 0;
+  while (target_argv[count] != NULL) count++;
+  char **sandbox_argv = calloc(count + 10, sizeof(char *));
+  if (sandbox_argv == NULL) _exit(126);
+  sandbox_argv[0] = (char *)DARWIN_SANDBOX_EXEC;
+  sandbox_argv[1] = (char *)"-D";
+  sandbox_argv[2] = root_param;
+  sandbox_argv[3] = (char *)"-D";
+  sandbox_argv[4] = exec_param;
+  sandbox_argv[5] = (char *)"-p";
+  sandbox_argv[6] = (char *)profile;
+  sandbox_argv[7] = (char *)"--";
+  sandbox_argv[8] = (char *)path;
+  for (size_t i = 1; i < count; i++) sandbox_argv[8 + i] = target_argv[i];
+  execve(DARWIN_SANDBOX_EXEC, sandbox_argv, environ);
+  _exit(126);
+}
+#endif
+
 static void child_exec(int target_fd, int cwd_fd, const char *path, char **target_argv,
                        int input_fd, int output_fd, int start_fd, int ready_fd,
                        const struct stat *expected, const char *sha256,
@@ -1424,6 +1487,8 @@ static void child_exec(int target_fd, int cwd_fd, const char *path, char **targe
     execve(path, target_argv, environ);
   } else if (execution_mode == EXECUTION_TRUSTED_BUILD) {
     darwin_exec_trusted_build(path, target_argv);
+  } else if (execution_mode == EXECUTION_AGENT_READ || execution_mode == EXECUTION_AGENT_WRITE) {
+    darwin_exec_agent(path, target_argv);
   } else {
     darwin_exec_no_fork(path, target_argv);
   }
@@ -1461,6 +1526,19 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   const char *path = argv[11];
   const char *cwd_path = argv[14];
   const char *argv0 = argv[16];
+  if (execution_mode == EXECUTION_AGENT_READ || execution_mode == EXECUTION_AGENT_WRITE) {
+#ifdef __APPLE__
+    if (cwd_path[0] != '/' || strcmp(cwd_path, "/") == 0 || strlen(cwd_path) > 4096) {
+      send_error("invalid agent workdir");
+      return 126;
+    }
+    g_agent_root = cwd_path;
+    g_agent_write = execution_mode == EXECUTION_AGENT_WRITE;
+#else
+    send_error("agent containment platform not qualified");
+    return 126;
+#endif
+  }
   /* Identity is bound to `path` (opened + verified below). argv0 may equal
    * `path` or be a single path component (busybox multi-call applet name).
    * Reject path-like argv0 other than an exact path match so a multi-call
@@ -3056,6 +3134,12 @@ static int run_kill(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   (void)signal(SIGPIPE, SIG_IGN);
+  if (argc >= 2 && strcmp(argv[1], "agent-read") == 0) {
+    return run_exec(argc, argv, EXECUTION_AGENT_READ);
+  }
+  if (argc >= 2 && strcmp(argv[1], "agent-write") == 0) {
+    return run_exec(argc, argv, EXECUTION_AGENT_WRITE);
+  }
   if (argc >= 2 && strcmp(argv[1], "exec") == 0) {
     return run_exec(argc, argv, EXECUTION_NO_FORK);
   }

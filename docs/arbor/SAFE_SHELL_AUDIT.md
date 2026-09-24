@@ -1,5 +1,13 @@
 # Safe Shell — Implementation Audit
 
+**Status note, 2026-09-24:** The historical findings below describe the audit
+revision. Generic agent shell execution now has a mandatory macOS filesystem,
+network, and process policy, and Linux generic agents refuse until equivalent
+containment is qualified. See [the current contract](AGENT_SHELL_CONTAINMENT.md)
+for exact entry points, grants, compatibility changes, and remaining trusted
+host/specialized-action boundaries. The trusted-system launcher still has the
+historical no-fork-only boundary; it must not be exposed as an agent fallback.
+
 **Date:** 2026-08-10
 **Scope:** `apps/arbor_shell` (~38.5k LOC Elixir + 43 KB C launcher) plus every safe-shell-adjacent site in the umbrella and the sibling `jido_sandbox` project.
 **Method:** Full read of the core policy/execution path, the C launcher, the Apple Container subsystem, the Linux dependency baseline subsystem, and an umbrella-wide sweep for OS-process spawn sites. Claims below carry `file:line` citations.
