@@ -1213,6 +1213,35 @@ defmodule Arbor.LLM.ToolLoop do
     _, _ -> {:error, {:llm_call_authorization_failed, :raised}}
   end
 
+  defp audited_tool_dispatch(state, tc, args, exec_opts) do
+    dispatch = fn -> state.tool_executor.execute(tc.name, args, state.workdir, exec_opts) end
+
+    case Arbor.LLM.Config.tool_invocation_auditor() do
+      :disabled ->
+        dispatch.()
+
+      module when is_atom(module) and not is_nil(module) ->
+        if Code.ensure_loaded?(module) and function_exported?(module, :with_invocation_audit, 2) do
+          apply(module, :with_invocation_audit, [
+            %{
+              principal_id: state.agent_id,
+              surface: :tool,
+              tool: tc.name,
+              session_id: Keyword.get(exec_opts, :session_id),
+              task_id: Keyword.get(exec_opts, :task_id),
+              provider_call_id: tc.id
+            },
+            dispatch
+          ])
+        else
+          {:error, :invocation_audit_unavailable}
+        end
+
+      _ ->
+        {:error, :invocation_audit_unavailable}
+    end
+  end
+
   defp execute_tools(tool_calls, state) do
     require Logger
 
@@ -1244,7 +1273,10 @@ defmodule Arbor.LLM.ToolLoop do
             maybe_add_signer(state.executor_opts, state.signer)
           end
 
-        exec_opts = put_tool_taint(exec_opts, state.tool_taint, args)
+        exec_opts =
+          exec_opts
+          |> put_tool_taint(state.tool_taint, args)
+          |> Keyword.put(:provider_call_id, tc.id)
 
         {result, duration_ms} =
           cond do
@@ -1279,7 +1311,7 @@ defmodule Arbor.LLM.ToolLoop do
               if prior_failures > 0, do: Process.sleep(retry_backoff_ms(prior_failures))
 
               start_time = System.monotonic_time(:millisecond)
-              r = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
+              r = audited_tool_dispatch(state, tc, args, exec_opts)
               {r, System.monotonic_time(:millisecond) - start_time}
           end
 

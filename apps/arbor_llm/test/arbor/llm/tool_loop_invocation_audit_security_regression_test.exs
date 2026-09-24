@@ -6,12 +6,18 @@ defmodule Arbor.LLM.ToolLoopInvocationAuditSecurityRegressionTest do
   defmodule Adapter do
     @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "invocation_audit_test"
+
     def complete(request, _opts) do
       if Enum.any?(request.messages, &(&1.role == :tool)) do
         {:ok, %Response{text: "done", finish_reason: :stop, raw: %{}}}
       else
-        {:ok, %Response{text: "", finish_reason: :tool_calls, raw: %{},
-          content_parts: [ContentPart.tool_call("provider_call_123", "synthetic_export", %{})]}}
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           raw: %{},
+           content_parts: [ContentPart.tool_call("provider_call_123", "synthetic_export", %{})]
+         }}
       end
     end
   end
@@ -32,19 +38,24 @@ defmodule Arbor.LLM.ToolLoopInvocationAuditSecurityRegressionTest do
 
   setup do
     old = Application.fetch_env(:arbor_llm, :tool_invocation_auditor)
+
     on_exit(fn ->
       case old do
         {:ok, value} -> Application.put_env(:arbor_llm, :tool_invocation_auditor, value)
         :error -> Application.delete_env(:arbor_llm, :tool_invocation_auditor)
       end
     end)
+
     :ok
   end
 
   test "security regression: non-Actions executor cannot dispatch without required durable audit" do
     Application.put_env(:arbor_llm, :tool_invocation_auditor, Auditor)
     assert {:ok, _} = run()
-    assert_receive {:audit_attempt, %{provider_call_id: "provider_call_123", tool: "synthetic_export"}}
+
+    assert_receive {:audit_attempt,
+                    %{provider_call_id: "provider_call_123", tool: "synthetic_export"}}
+
     refute_receive {:export_effect, _}
   end
 
@@ -63,11 +74,30 @@ defmodule Arbor.LLM.ToolLoopInvocationAuditSecurityRegressionTest do
 
   defp run do
     client = Client.new(default_provider: Adapter.provider()) |> Client.register_adapter(Adapter)
-    request = %Request{provider: Adapter.provider(), model: "test",
-      messages: [Message.new(:user, "use the tool")]}
-    tools = [%{"type" => "function", "function" => %{"name" => "synthetic_export",
-      "description" => "synthetic export", "parameters" => %{"type" => "object", "properties" => %{}}}}]
-    ToolLoop.run(client, request, tool_executor: Executor, tools: tools, max_turns: 3,
-      agent_id: "agent_audit_test", workdir: "/tmp")
+
+    request = %Request{
+      provider: Adapter.provider(),
+      model: "test",
+      messages: [Message.new(:user, "use the tool")]
+    }
+
+    tools = [
+      %{
+        "type" => "function",
+        "function" => %{
+          "name" => "synthetic_export",
+          "description" => "synthetic export",
+          "parameters" => %{"type" => "object", "properties" => %{}}
+        }
+      }
+    ]
+
+    ToolLoop.run(client, request,
+      tool_executor: Executor,
+      tools: tools,
+      max_turns: 3,
+      agent_id: "agent_audit_test",
+      workdir: "/tmp"
+    )
   end
 end

@@ -14,8 +14,13 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
   end
 
   setup do
-    keys = [:invocation_audit_mode, :invocation_audit_sink, :invocation_audit_test_owner,
-            :invocation_audit_test_failure]
+    keys = [
+      :invocation_audit_mode,
+      :invocation_audit_sink,
+      :invocation_audit_test_owner,
+      :invocation_audit_test_failure
+    ]
+
     previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_security, &1)})
     Application.put_env(:arbor_security, :invocation_audit_mode, :required)
     Application.put_env(:arbor_security, :invocation_audit_sink, Sink)
@@ -28,15 +33,19 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
         {key, :error} -> Application.delete_env(:arbor_security, key)
       end)
     end)
+
     :ok
   end
 
   test "security regression: public refused action has source-owned correlated attempt and outcome" do
-    result = Arbor.Actions.authorize_and_execute(
-      "agent_audit_without_grants", Arbor.Actions.File.Read,
-      %{path: "/private/synthetic-secret-value"},
-      %{invocation_id: "forged", correlation_id: "forged", password: "must-not-record"}
-    )
+    result =
+      Arbor.Actions.authorize_and_execute(
+        "agent_audit_without_grants",
+        Arbor.Actions.File.Read,
+        %{path: "/private/synthetic-secret-value"},
+        %{invocation_id: "forged", correlation_id: "forged", password: "must-not-record"}
+      )
+
     assert {:error, _} = result
     assert_receive {:audit, attempt}
     assert attempt["stage"] == "attempt"
@@ -50,9 +59,14 @@ defmodule Arbor.Actions.InvocationAuditSecurityRegressionTest do
 
   test "security regression: unavailable required audit refuses public action before authorization" do
     Application.put_env(:arbor_security, :invocation_audit_test_failure, true)
+
     assert {:error, :invocation_audit_unavailable} =
-      Arbor.Actions.authorize_and_execute(
-        "agent_audit_without_grants", Arbor.Actions.File.Read, %{path: "mix.exs"})
+             Arbor.Actions.authorize_and_execute(
+               "agent_audit_without_grants",
+               Arbor.Actions.File.Read,
+               %{path: "mix.exs"}
+             )
+
     assert_receive {:audit, %{"stage" => "attempt"}}
     refute_receive {:audit, %{"stage" => "outcome"}}
   end

@@ -778,6 +778,13 @@ defmodule Arbor.Historian do
   def persist_durable_event(stream_id, event_type, data, opts \\ []),
     do: DurableSignalSink.persist(stream_id, event_type, data, opts)
 
+  @doc "Persist a bounded source-owned invocation event; acknowledge only exact durable content."
+  def persist_security_invocation(event),
+    do: Arbor.Historian.SecurityInvocationSink.persist(event)
+
+  @doc "Read durable invocation evidence; a missing terminal outcome is indeterminate."
+  def security_invocation(id), do: Arbor.Historian.SecurityInvocationSink.read(id)
+
   # ============================================================================
   # Complete history stream content (VP-05D2C3I0C4C)
   # ============================================================================
