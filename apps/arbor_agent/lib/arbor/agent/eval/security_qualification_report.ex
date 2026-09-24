@@ -64,7 +64,7 @@ defmodule Arbor.Agent.Eval.SecurityQualificationReport do
 
     %{
       "producer" => "Arbor.Agent.Eval.SecurityQualificationReport",
-      "digest" => Persistence.eval_config_fingerprint(implementation)
+      "digest" => Persistence.eval_config_fingerprint(%{"implementation" => implementation})
     }
   end
 
