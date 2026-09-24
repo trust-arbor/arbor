@@ -52,6 +52,24 @@ defmodule Arbor.Agent do
 
   require Logger
 
+  @doc "Loaded source identity of the bounded hostile-document acceptance producer; no inference."
+  defdelegate security_qualification_producer_identity(),
+    to: Arbor.Agent.Eval.SecurityJourney,
+    as: :identity
+
+  @doc "The fixed synthetic document used by the hostile-export acceptance journey."
+  defdelegate security_qualification_fixture(), to: Arbor.Agent.Eval.SecurityJourney, as: :fixture
+
+  @doc "Run acceptance using a dedicated existing read cap and signing authority, which are consumed."
+  defdelegate run_security_qualification_journey(profile, opts),
+    to: Arbor.Agent.Eval.SecurityJourney,
+    as: :run
+
+  @doc "Compose a persisted journey and reviewed artifact observations; approval remains separate."
+  defdelegate compose_security_qualification(profile, journey_id, artifacts),
+    to: Arbor.Agent.Eval.SecurityQualificationReport,
+    as: :compose
+
   # ===========================================================================
   # Public API — Agent Lifecycle (Phase 4: Seed/Host)
   # ===========================================================================

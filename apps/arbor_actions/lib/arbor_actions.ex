@@ -1401,6 +1401,24 @@ defmodule Arbor.Actions do
 
   def authorize_and_execute(agent_id, action_module, params, context)
       when is_binary(agent_id) and is_map(context) do
+    authorize_and_execute_with_receipt(agent_id, action_module, params, context).result
+  end
+
+  def authorize_and_execute(_agent_id, _action_module, _params, _context),
+    do: {:error, :invalid_authorization_principal}
+
+  @doc """
+  Execute through the ordinary admission boundary and return its source-generated
+  invocation ID alongside the exact result. This is an observation receipt, not
+  an authorization or success acknowledgment. A nil ID means required audit never
+  admitted the callback (or audit is explicitly disabled); callers requiring durable
+  evidence must re-read the invocation through Historian. A later outcome-write
+  failure does not retract an effect that already completed.
+  """
+  def authorize_and_execute_with_receipt(agent_id, action_module, params, context \\ %{})
+
+  def authorize_and_execute_with_receipt(agent_id, action_module, params, context)
+      when is_binary(agent_id) and is_map(context) do
     audit = %{
       principal_id: agent_id,
       surface: :action,
@@ -1412,13 +1430,23 @@ defmodule Arbor.Actions do
       destination: Egress.egress_destination_for(action_module, params, context)
     }
 
-    Arbor.Security.with_invocation_audit(audit, fn ->
-      authorize_and_execute_admitted(agent_id, action_module, params, context)
-    end)
+    key = {__MODULE__, :invocation_receipt, make_ref()}
+
+    try do
+      result =
+        Arbor.Security.with_invocation_audit(audit, fn ->
+          Process.put(key, Arbor.Security.current_invocation_id())
+          authorize_and_execute_admitted(agent_id, action_module, params, context)
+        end)
+
+      %{result: result, invocation_id: Process.get(key)}
+    after
+      Process.delete(key)
+    end
   end
 
-  def authorize_and_execute(_agent_id, _action_module, _params, _context),
-    do: {:error, :invalid_authorization_principal}
+  def authorize_and_execute_with_receipt(_agent_id, _action_module, _params, _context),
+    do: %{result: {:error, :invalid_authorization_principal}, invocation_id: nil}
 
   defp authorize_and_execute_admitted(agent_id, action_module, params, context) do
     with :ok <- MemoryWritePolicy.check(action_module, params, context),
