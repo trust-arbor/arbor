@@ -1,3 +1,5 @@
+Code.require_file("../../support/agent_containment_fixture.exs", __DIR__)
+
 defmodule Arbor.Shell.AuthorizationE2ETest do
   @moduledoc """
   End-to-end tests for shell authorization flow.
@@ -7,6 +9,10 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   """
   use ExUnit.Case, async: false
   @moduletag :fast
+  if :os.type() != {:unix, :darwin},
+    do: @moduletag(skip: "positive generic-agent execution requires macOS containment")
+
+  alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
@@ -28,7 +34,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     Application.put_env(:arbor_security, :approval_guard_enabled, false)
     Application.put_env(:arbor_security, :invocation_receipts_enabled, false)
 
-    agent_id = "agent_shell_e2e_#{:erlang.unique_integer([:positive])}"
+    agent_id = ContainmentFixture.install!()
 
     on_exit(fn ->
       restore_config(:reflex_checking_enabled, prev_reflex)
@@ -49,7 +55,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     test "agent with shell capability can execute commands", %{agent_id: agent_id} do
       grant_shell_capability(agent_id, "arbor://shell/exec/echo")
 
-      result = Arbor.Shell.authorize_and_execute(agent_id, "echo hello", sandbox: :none)
+      result = ContainmentFixture.execute(agent_id, "echo hello", sandbox: :none)
 
       assert {:ok, %{exit_code: 0, stdout: stdout}} = result
       assert String.trim(stdout) == "hello"
@@ -63,7 +69,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       # access (any command) requires the `/**` form.
       grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
-      result = Arbor.Shell.authorize_and_execute(agent_id, "echo wildcard", sandbox: :none)
+      result = ContainmentFixture.execute(agent_id, "echo wildcard", sandbox: :none)
 
       assert {:ok, %{exit_code: 0, stdout: stdout}} = result
       assert String.trim(stdout) == "wildcard"
@@ -83,7 +89,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
       assert {:error, {:agent_executable_not_allowed, "git"}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "git --version", sandbox: :strict)
+               ContainmentFixture.execute(agent_id, "git --version", sandbox: :strict)
     end
 
     test "a compound command with config true fails closed without executing chained commands",
@@ -99,7 +105,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
         try do
           assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                   Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
+                   ContainmentFixture.execute(agent_id, "git --version; rm #{target}")
 
           assert File.exists?(target), "compound fail-closed must not execute chained rm"
         after
@@ -132,14 +138,14 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
         try do
           assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                   Arbor.Shell.authorize_and_execute(
+                   ContainmentFixture.execute(
                      agent_id,
                      "sleep 1; touch #{marker}",
                      sandbox: :basic
                    )
 
           assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                   Arbor.Shell.authorize_and_execute(
+                   ContainmentFixture.execute(
                      agent_id,
                      "sh -c 'sleep 1; touch #{marker}'",
                      sandbox: :none
@@ -172,7 +178,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
         try do
           assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                   Arbor.Shell.authorize_and_execute(
+                   ContainmentFixture.execute(
                      agent_id,
                      "git --version && touch #{marker}"
                    )
@@ -193,10 +199,10 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
         grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
         assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version")
+                 ContainmentFixture.execute(agent_id, "cd /tmp && git --version")
 
         assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi")
+                 ContainmentFixture.execute(agent_id, "cd /tmp && echo hi")
       end)
     end
   end
@@ -252,7 +258,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   describe "unauthorized execution" do
     test "agent without capability gets authorization error", %{agent_id: agent_id} do
       # No capability granted — should be blocked at authorization, not execution
-      result = Arbor.Shell.authorize_and_execute(agent_id, "echo blocked", sandbox: :none)
+      result = ContainmentFixture.execute(agent_id, "echo blocked", sandbox: :none)
 
       assert {:error, :unauthorized} = result
     end
@@ -264,7 +270,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       try do
         result =
-          Arbor.Shell.authorize_and_execute(agent_id, "touch #{marker}", sandbox: :none)
+          ContainmentFixture.execute(agent_id, "touch #{marker}", sandbox: :none)
 
         assert {:error, :unauthorized} = result
         # Verify the command never ran
@@ -285,21 +291,21 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       # echo should work
       assert {:ok, %{exit_code: 0}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "echo hello", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "echo hello", sandbox: :none)
 
       # rm is outside the closed executable set and is rejected before auth.
       assert {:error, {:agent_executable_not_allowed, "rm"}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "rm -rf /", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "rm -rf /", sandbox: :none)
     end
 
     test "ls capability allows ls but blocks echo", %{agent_id: agent_id} do
       grant_shell_capability(agent_id, "arbor://shell/exec/ls")
 
       assert {:ok, %{exit_code: _}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "ls /tmp", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "ls .", sandbox: :none)
 
       assert {:error, :unauthorized} =
-               Arbor.Shell.authorize_and_execute(agent_id, "echo denied", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "echo denied", sandbox: :none)
     end
 
     test "path-prefixed commands are stripped to base name", %{agent_id: agent_id} do
@@ -307,7 +313,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/echo")
 
       assert {:ok, %{exit_code: 0, stdout: stdout}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "/bin/echo path_test", sandbox: :none)
+               ContainmentFixture.execute(agent_id, "/bin/echo path_test", sandbox: :none)
 
       assert String.trim(stdout) == "path_test"
     end
@@ -321,7 +327,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     test "authorized agent can execute async commands", %{agent_id: agent_id} do
       grant_shell_capability(agent_id, "arbor://shell/exec/echo")
 
-      result = Arbor.Shell.authorize_and_execute_async(agent_id, "echo async", sandbox: :none)
+      result = ContainmentFixture.async(agent_id, "echo async", sandbox: :none)
 
       assert {:ok, exec_id} = result
       assert is_binary(exec_id)
@@ -334,7 +340,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     end
 
     test "unauthorized agent is blocked from async execution", %{agent_id: agent_id} do
-      result = Arbor.Shell.authorize_and_execute_async(agent_id, "echo blocked", sandbox: :none)
+      result = ContainmentFixture.async(agent_id, "echo blocked", sandbox: :none)
 
       assert {:error, :unauthorized} = result
     end
@@ -345,7 +351,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
 
       assert {:ok, exec_id} =
-               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 1", sandbox: :none)
+               ContainmentFixture.async(agent_id, "sleep 1", sandbox: :none)
 
       assert {:ok, execution} = Arbor.Shell.ExecutionRegistry.get(exec_id)
       assert execution.status == :running
@@ -371,7 +377,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
 
       assert {:ok, exec_id} =
-               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 5", sandbox: :none)
+               ContainmentFixture.async(agent_id, "sleep 5", sandbox: :none)
 
       assert {:ok, execution} = Arbor.Shell.ExecutionRegistry.get(exec_id)
 
@@ -393,7 +399,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
 
       assert {:ok, exec_id} =
-               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 2", sandbox: :none)
+               ContainmentFixture.async(agent_id, "sleep 2", sandbox: :none)
 
       registry = Process.whereis(Arbor.Shell.ExecutionRegistry)
 
@@ -418,7 +424,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/echo")
 
       result =
-        Arbor.Shell.authorize_and_execute_streaming(
+        ContainmentFixture.streaming(
           agent_id,
           "echo streaming",
           stream_to: self(),
@@ -434,7 +440,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
     test "unauthorized agent is blocked from streaming execution", %{agent_id: agent_id} do
       result =
-        Arbor.Shell.authorize_and_execute_streaming(
+        ContainmentFixture.streaming(
           agent_id,
           "echo blocked",
           stream_to: self(),
@@ -449,11 +455,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     } do
       grant_shell_capability(agent_id, "arbor://shell/exec/cat")
 
-      root =
-        Path.join(
-          System.tmp_dir!(),
-          "authorized_stream_cap_#{System.unique_integer([:positive])}"
-        )
+      root = Path.join(ContainmentFixture.options([])[:cwd], "stream_input")
 
       input = Path.join(root, "one_megabyte.bin")
       File.mkdir_p!(root)
@@ -461,7 +463,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       try do
         assert {:ok, session_id} =
-                 Arbor.Shell.authorize_and_execute_streaming(
+                 ContainmentFixture.streaming(
                    agent_id,
                    "cat #{input}",
                    stream_to: self(),
@@ -492,7 +494,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
 
       assert {:ok, completed_id} =
-               Arbor.Shell.authorize_and_execute_streaming(
+               ContainmentFixture.streaming(
                  agent_id,
                  "echo tracked",
                  stream_to: self(),
@@ -507,7 +509,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
              )
 
       assert {:ok, abandoned_id} =
-               Arbor.Shell.authorize_and_execute_streaming(
+               ContainmentFixture.streaming(
                  agent_id,
                  "sleep 5",
                  timeout: 100
@@ -534,7 +536,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       {:ok, before} = Arbor.Shell.list_executions()
 
       assert {:error, :invalid_stream_timeout} =
-               Arbor.Shell.authorize_and_execute_streaming(
+               ContainmentFixture.streaming(
                  agent_id,
                  "echo never",
                  stream_to: self(),

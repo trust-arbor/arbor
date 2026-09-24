@@ -1,3 +1,5 @@
+Code.require_file("../../support/agent_containment_fixture.exs", __DIR__)
+
 defmodule Arbor.Shell.PreparedAuthorizedMultiCallSecurityRegressionTest do
   @moduledoc """
   Security regression: execute_prepared_authorized binds command_name to the
@@ -14,6 +16,15 @@ defmodule Arbor.Shell.PreparedAuthorizedMultiCallSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   @moduletag :fast
+  if :os.type() != {:unix, :darwin},
+    do: @moduletag(skip: "native prepared execution awaits qualified Linux containment")
+
+  alias Arbor.Shell.TestAgentContainment, as: ContainmentFixture
+
+  setup do
+    ContainmentFixture.install!()
+    :ok
+  end
 
   setup_all do
     case Process.whereis(Arbor.Shell.ExecutablePolicy) do
@@ -65,7 +76,7 @@ defmodule Arbor.Shell.PreparedAuthorizedMultiCallSecurityRegressionTest do
     assert forged.command_name != forged.executable_identity.name
 
     assert {:error, :invalid_prepared_shell_command} =
-             Arbor.Shell.execute_prepared_authorized(command, forged, sandbox: :basic)
+             ContainmentFixture.prepared(command, forged, sandbox: :basic)
 
     # Path smuggling via path-like name is rejected by multi_call_safe_argv0?/1.
     path_like = %{
@@ -75,13 +86,13 @@ defmodule Arbor.Shell.PreparedAuthorizedMultiCallSecurityRegressionTest do
     }
 
     assert {:error, :invalid_prepared_shell_command} =
-             Arbor.Shell.execute_prepared_authorized(command, path_like, sandbox: :basic)
+             ContainmentFixture.prepared(command, path_like, sandbox: :basic)
 
     # Exact original command + its prepared map succeeds. On multi-call hosts
     # path_basename != "echo"; pre-fix Path.basename(path) == command_name
     # rejected this exact map after a successful first prepare.
     assert {:ok, result} =
-             Arbor.Shell.execute_prepared_authorized(command, prepared, sandbox: :basic)
+             ContainmentFixture.prepared(command, prepared, sandbox: :basic)
 
     assert result.exit_code == 0
     assert result.stdout =~ "multi-call-name-binding"
@@ -106,14 +117,14 @@ defmodule Arbor.Shell.PreparedAuthorizedMultiCallSecurityRegressionTest do
     assert inspect_rebuilt != command
 
     assert {:error, :invalid_prepared_shell_command} =
-             Arbor.Shell.execute_prepared_authorized(
+             ContainmentFixture.prepared(
                inspect_rebuilt,
                prepared,
                sandbox: :basic
              )
 
     assert {:ok, result} =
-             Arbor.Shell.execute_prepared_authorized(command, prepared, sandbox: :basic)
+             ContainmentFixture.prepared(command, prepared, sandbox: :basic)
 
     assert result.exit_code == 0
     assert result.stdout == "a\\b"

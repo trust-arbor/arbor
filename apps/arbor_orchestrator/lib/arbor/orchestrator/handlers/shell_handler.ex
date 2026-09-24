@@ -45,7 +45,14 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
          ],
          {:ok, prepared} <- Arbor.Shell.prepare_agent_command(command, execution_opts),
          :ok <- authorize_shell(authority, command, opts) do
-      run_authorized(node, command, prepared, on_error, execution_opts)
+      run_authorized(
+        authority.execution_principal,
+        node,
+        command,
+        prepared,
+        on_error,
+        execution_opts
+      )
     else
       {:error, {:authorization_denied, principal, reason}} ->
         %Outcome{
@@ -75,8 +82,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # --- Authorization (phase 0 capability gate) ---
 
   # Original execution path — reached ONLY after authorize_shell/4 passes.
-  defp run_authorized(node, command, prepared, on_error, opts) do
-    case run_command(command, prepared, opts) do
+  defp run_authorized(principal, node, command, prepared, on_error, opts) do
+    case run_command(principal, command, prepared, opts) do
       {:ok, output, exit_code} ->
         # Shell stdout is exposed as `shell.<id>.output` only — NOT as
         # `last_response`. `last_response` is the LLM-output convention
@@ -162,16 +169,17 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   # --- Command execution ---
 
-  defp run_command(command, prepared, opts), do: run_via_arbor_shell(command, prepared, opts)
+  defp run_command(principal, command, prepared, opts),
+    do: run_via_arbor_shell(principal, command, prepared, opts)
 
-  defp run_via_arbor_shell(command, prepared, opts) do
+  defp run_via_arbor_shell(principal, command, prepared, opts) do
     try do
       execution_opts =
         opts
         |> Keyword.drop([:env, :allowlist, :gate_command])
         |> Keyword.put(:sandbox, :basic)
 
-      case Arbor.Shell.execute_prepared_authorized(command, prepared, execution_opts) do
+      case Arbor.Shell.execute_prepared_authorized(principal, command, prepared, execution_opts) do
         {:ok, %{timed_out: true}} ->
           {:error, :timeout}
 

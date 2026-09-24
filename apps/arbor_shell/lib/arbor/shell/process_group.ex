@@ -1,10 +1,11 @@
 defmodule Arbor.Shell.ProcessGroup do
   @moduledoc false
 
+  alias Arbor.Common.SafePath
+  alias Arbor.Shell.AgentContainment
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutablePolicy.Executable
   alias Arbor.Shell.TrustedBuild.Lease
-  alias Arbor.Common.SafePath
 
   @ready 1
   @output 2
@@ -87,7 +88,7 @@ defmodule Arbor.Shell.ProcessGroup do
         ) :: {:ok, map()} | {:error, term()}
   def run_executable(executable, args, opts, start_time, timeout, max_output_bytes) do
     run_executable_with_launcher(
-      @generic_launcher_command,
+      agent_launcher_command(opts),
       executable,
       args,
       opts,
@@ -593,7 +594,7 @@ defmodule Arbor.Shell.ProcessGroup do
   def open(%Executable{} = executable, args, opts, start_time, timeout, max_output_bytes)
       when is_list(args) do
     open_with_launcher(
-      @generic_launcher_command,
+      agent_launcher_command(opts),
       executable,
       args,
       opts,
@@ -625,6 +626,24 @@ defmodule Arbor.Shell.ProcessGroup do
     )
   end
 
+  defp agent_launcher_command(opts) do
+    case Keyword.get(opts, :agent_containment) do
+      nil -> @generic_launcher_command
+      %{write: false} -> "agent-read"
+      %{write: true} -> "agent-write"
+      _ -> "invalid-agent-containment"
+    end
+  end
+
+  defp validate_agent_launcher(mode, opts, cwd) when mode in ["agent-read", "agent-write"] do
+    AgentContainment.validate_projection(Keyword.get(opts, :agent_containment), cwd)
+  end
+
+  defp validate_agent_launcher("invalid-agent-containment", _, _),
+    do: {:error, :invalid_agent_containment}
+
+  defp validate_agent_launcher(_, _, _), do: :ok
+
   defp open_with_launcher(
          launcher_command,
          %Executable{} = executable,
@@ -639,6 +658,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
     with :ok <- validate_args(args),
          {:ok, cwd} <- capture_cwd(Keyword.get(opts, :cwd)),
+         :ok <- validate_agent_launcher(launcher_command, opts, cwd.path),
          :ok <- ExecutablePolicy.verify_pinned(executable),
          {:ok, child_path} <- ExecutablePolicy.child_path(),
          {:ok, launcher} <- launcher_path(),
