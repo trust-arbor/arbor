@@ -46,6 +46,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     set_env(:arbor_orchestrator, :security_qualification_producer, EvidenceProducer)
     set_env(:arbor_orchestrator, :preprocessor_enabled, false)
     set_env(:arbor_orchestrator, :private_conversation_memory, false)
+    set_env(:arbor_llm, :tool_invocation_auditor, Arbor.Security)
     set_env(:arbor_trust, :policy_enforcer_enabled, true)
     set_env(:arbor_trust, :approval_guard_enabled, true)
 
@@ -213,6 +214,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
 
     %{
       session: session,
+      agent_id: identity.agent_id,
       run_id: run_id,
       cap: cap,
       journal_supervisor: journal_supervisor,
@@ -288,6 +290,16 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
       set_env(:arbor_trust, unquote(flag), false)
       assert_refused_without_turn(c.session)
     end
+  end
+
+  test "security regression: widening current capabilities invalidates qualification", c do
+    assert {:ok, _} =
+             Security.grant(
+               principal: c.agent_id,
+               resource: "arbor://memory/read/#{c.agent_id}"
+             )
+
+    assert_refused_without_turn(c.session)
   end
 
   test "security regression: replacing the durable authority journal with ephemeral invalidates qualification",
