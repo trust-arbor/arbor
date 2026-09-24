@@ -1076,7 +1076,7 @@ defmodule Arbor.Orchestrator.Session do
   # leaves `values` unchanged so the turn proceeds exactly as before.
   defp maybe_preprocess(values, content, config) do
     {:ok, preproc} =
-      if Config.preprocessor_enabled_for?(config),
+      if Arbor.Orchestrator.Config.preprocessor_enabled_for?(config),
         do: Arbor.Orchestrator.Preprocessor.run(content),
         else: {:ok, %{}}
 
