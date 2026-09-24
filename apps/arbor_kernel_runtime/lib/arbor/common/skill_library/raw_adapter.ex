@@ -63,6 +63,7 @@ defmodule Arbor.Common.SkillLibrary.RawAdapter do
         name: name_from_path(path),
         description: extract_description(content),
         body: String.trim(content),
+        source_bytes: content,
         tags: [],
         category: nil,
         source: :raw,

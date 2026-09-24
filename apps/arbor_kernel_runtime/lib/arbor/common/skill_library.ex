@@ -51,6 +51,32 @@ defmodule Arbor.Common.SkillLibrary do
 
   @adapters [SkillAdapter, FabricAdapter, RawAdapter]
 
+  @doc "Prepare an immutable version and exact use URI. This read does not grant approval."
+  defdelegate prepare_approval(name), to: Arbor.Common.SkillLibrary.Versions, as: :prepare
+
+  @doc "Resolve current exact approved content; a retained reference pins its original grant."
+  defdelegate resolve_approved_version(name, principal, reference \\ nil),
+    to: Arbor.Common.SkillLibrary.Versions,
+    as: :resolve
+
+  @doc "Revalidate active references and project owner content, ignoring copied prompt bodies."
+  defdelegate approved_active_skills(principal, entries),
+    to: Arbor.Common.SkillLibrary.Versions,
+    as: :active
+
+  @doc "Read a privileged builtin only when its entire version matches an operator-owned pin."
+  defdelegate get_pinned(name), to: Arbor.Common.SkillLibrary.Versions, as: :pinned
+
+  @doc "Bounded operator-visible approval status; import confirmation does not approve use."
+  defdelegate approval_status(name, principal, reference \\ nil),
+    to: Arbor.Common.SkillLibrary.Versions,
+    as: :status
+
+  @doc "Actual active approved versions and builtin-pin fingerprint for execution qualification."
+  defdelegate version_manifest(principal, entries),
+    to: Arbor.Common.SkillLibrary.Versions,
+    as: :manifest
+
   # ---------------------------------------------------------------------------
   # Public API — reads go straight to ETS
   # ---------------------------------------------------------------------------

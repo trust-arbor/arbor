@@ -61,6 +61,8 @@ defmodule Arbor.Memory do
   # `Arbor.Actions.auth_scope/1`): minted capabilities are session/task-bound.
   @auth_scope_keys [:session_id, :task_id, :principal_scope]
 
+  alias Arbor.Common.SkillLibrary
+
   alias Arbor.Memory.{
     Events,
     GoalIntentOps,
@@ -372,6 +374,28 @@ defmodule Arbor.Memory do
   # ============================================================================
 
   defdelegate get_working_memory(agent_id), to: SessionOps
+  @doc "Current approved active skill versions and builtin pins for execution qualification."
+  def skill_version_manifest(agent_id) when is_binary(agent_id) do
+    entries =
+      case get_working_memory(agent_id) do
+        %{active_skills: skills} -> skills
+        nil -> []
+        _ -> []
+      end
+
+    SkillLibrary.version_manifest(agent_id, entries)
+  rescue
+    _ -> {:error, :skill_manifest_unavailable}
+  catch
+    _, _ -> {:error, :skill_manifest_unavailable}
+  end
+
+  defdelegate new_working_memory(agent_id), to: Arbor.Memory.WorkingMemory, as: :new
+
+  defdelegate activate_working_memory_skill(wm, skill),
+    to: Arbor.Memory.WorkingMemory,
+    as: :activate_skill
+
   defdelegate save_working_memory(agent_id, working_memory), to: SessionOps
   defdelegate load_working_memory(agent_id, opts \\ []), to: SessionOps
 

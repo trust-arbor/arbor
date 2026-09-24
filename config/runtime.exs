@@ -731,7 +731,11 @@ if config_env() != :test do
   end
 
   if Code.ensure_loaded?(Arbor.Security) do
-    config :arbor_kernel, common: [skill_import_security_module: Arbor.Security]
+    config :arbor_kernel,
+      common: [
+        skill_import_security_module: Arbor.Security,
+        skill_security_module: Arbor.Security
+      ]
   end
 end
 

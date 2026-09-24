@@ -85,6 +85,7 @@ defmodule Arbor.Security.UriRegistry do
 
     # Memory facade
     "arbor://memory/read",
+    "arbor://skill/use",
     "arbor://memory/write",
     "arbor://memory/search",
     "arbor://memory/init",

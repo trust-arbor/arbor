@@ -710,7 +710,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   end
 
   defp load_from_skill_library(skill_name) do
-    case Arbor.Common.SkillLibrary.get(skill_name) do
+    case Arbor.Common.SkillLibrary.get_pinned(skill_name) do
       {:ok, skill} when is_binary(skill.body) and byte_size(skill.body) > 0 ->
         {:ok, skill.body}
 

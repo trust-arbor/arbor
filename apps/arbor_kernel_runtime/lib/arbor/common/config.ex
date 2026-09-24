@@ -44,6 +44,12 @@ defmodule Arbor.Common.Config do
   @spec skill_import_security_module() :: module() | nil
   def skill_import_security_module, do: get(:skill_import_security_module, nil)
 
+  @doc "Public Security facade for exact version approvals; nil fails closed."
+  def skill_security_module, do: get(:skill_security_module, nil)
+
+  @doc "Operator-owned name => exact version digest pins for privileged builtin prompts."
+  def trusted_skill_versions, do: get(:trusted_skill_versions, %{})
+
   @doc "Expected embedding dimensionality (default 768). Always a positive integer."
   @spec skill_embedding_dimensions() :: pos_integer()
   def skill_embedding_dimensions do

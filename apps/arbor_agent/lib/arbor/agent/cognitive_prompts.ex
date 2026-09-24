@@ -83,9 +83,9 @@ defmodule Arbor.Agent.CognitivePrompts do
   defp load_skill(name) do
     lib = Arbor.Common.SkillLibrary
 
-    if Code.ensure_loaded?(lib) and function_exported?(lib, :get, 1) and
+    if Code.ensure_loaded?(lib) and function_exported?(lib, :get_pinned, 1) and
          Process.whereis(lib) != nil do
-      case lib.get(name) do
+      case lib.get_pinned(name) do
         {:ok, skill} ->
           body = Map.get(skill, :body, "")
           if body != "", do: {:ok, body}, else: :error

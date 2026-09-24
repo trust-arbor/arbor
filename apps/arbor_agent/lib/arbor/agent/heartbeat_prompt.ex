@@ -8,13 +8,13 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   """
 
   alias Arbor.Agent.{CognitivePrompts, TimingContext}
-  alias Arbor.Common.PromptSanitizer
+  alias Arbor.Common.{PromptSanitizer, SkillLibrary}
   alias Arbor.Memory
 
   # Skill loading helper — shared by system_prompt, directive_section, response_format_section.
   defp load_skill(name, bindings \\ %{}) do
-    with true <- Process.whereis(Arbor.Common.SkillLibrary) != nil,
-         {:ok, skill} <- Arbor.Common.SkillLibrary.get(name),
+    with true <- Process.whereis(SkillLibrary) != nil,
+         {:ok, skill} <- SkillLibrary.get_pinned(name),
          body when body != "" <- Map.get(skill, :body, "") do
       if map_size(bindings) > 0 do
         {:ok, Arbor.Common.TemplateRenderer.render(body, bindings)}
@@ -464,9 +464,8 @@ defmodule Arbor.Agent.HeartbeatPrompt do
         _ -> fetch_active_skills(agent_id)
       end
 
-    case skills do
+    case SkillLibrary.approved_active_skills(agent_id, skills) do
       [] -> nil
-      nil -> nil
       list -> render_active_skills(list)
     end
   end
