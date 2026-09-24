@@ -11,7 +11,9 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
       Security.authorize(
         agent,
         "arbor://shell/exec/#{opts[:prepared_command].command_name}",
-        :execute, verify_identity: false)
+        :execute,
+        verify_identity: false
+      )
     end
 
     def authorize_filesystem(agent, uri, operation, capability_id, _opts) do
@@ -149,6 +151,24 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
 
     assert {:error, :agent_authority_required} =
              Shell.execute_prepared_authorized("cat input", prepared, cwd: c.cwd)
+  end
+
+  test "security regression: another directory grant and unsupported wildcard shapes cannot authorize cwd",
+       c do
+    for uri <- ["arbor://fs/read#{c.root}/outside/**", "arbor://fs/read#{c.cwd}/*"] do
+      {:ok, _} = Security.grant(principal: c.agent, resource: uri)
+    end
+
+    assert {:error, _} = Shell.authorize_and_execute(c.agent, "cat input", cwd: c.cwd)
+  end
+
+  test "security regression: cwd must be explicit canonical and may not be a protected directory",
+       c do
+    grant(c, :read)
+
+    for opts <- [[], [cwd: c.cwd <> "/.."], [cwd: "/"]] do
+      assert {:error, _} = Shell.authorize_and_execute(c.agent, "cat input", opts)
+    end
   end
 
   test "explicit trusted host execution remains separate", c do
