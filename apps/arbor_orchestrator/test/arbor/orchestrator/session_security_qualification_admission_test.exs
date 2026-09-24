@@ -120,6 +120,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
            "llm_fallback_chain" => [],
            "tools" => [],
            "stream" => false,
+           "preprocessor_enabled" => false,
            "recover_session" => false
          }}
       )
@@ -227,6 +228,30 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     assert_receive {:qualification_metadata_request, "GET /api/v1/models HTTP/1.1"}
     refute_received {:qualification_unexpected_http, _}
   end
+
+  test "an explicit Session preprocessing opt-out qualifies under an enabled host master", c do
+    set_env(:arbor_orchestrator, :preprocessor_enabled, true)
+    handler = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:arbor, :preprocessor, :run, :start],
+        &__MODULE__.preprocessing_started/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    assert {:ok, profile} = Session.security_qualification_profile(c.session)
+    assert profile.fingerprint == c.profile.fingerprint
+    assert {:ok, response} = Session.send_message(c.session, "qualified preprocessing opt-out")
+    assert response.content == "qualified preprocessing opt-out"
+    refute_received :qualification_preprocessing_started
+    refute_received {:qualification_unexpected_http, _}
+  end
+
+  def preprocessing_started(_event, _measurements, _metadata, owner),
+    do: send(owner, :qualification_preprocessing_started)
 
   test "security regression: revoking the exact approval refuses before the next turn", c do
     :ok = Security.revoke(c.cap.id)
