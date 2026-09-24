@@ -170,8 +170,76 @@ defmodule Arbor.Security do
       invocation_audit: Config.invocation_audit_mode(),
       invocation_sink: sink,
       audit_identity: audit_identity,
+      authority_journal: qualification_journal_identity(),
       implementations: implementations
     }
+  end
+
+  @doc """
+  Capture current permission declarations for execution qualification.
+
+  Exact qualification approvals are omitted so approval does not change its own
+  subject. Replacing an ordinary root grant with the same permissions preserves
+  the declaration identity; scope, constraints, validity and signature validity
+  remain bound. Delegated grants retain their lineage and instance identity.
+  This observation does not replace authorization at an effect boundary.
+  """
+  def execution_capability_snapshot(principal_id) when is_binary(principal_id) do
+    with {:ok, capabilities} <- list_capabilities(principal_id) do
+      declarations =
+        capabilities
+        |> Enum.reject(&qualification_approval_resource?(&1.resource_uri))
+        |> Enum.map(&qualification_capability_declaration/1)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      if :erlang.external_size(declarations) <= 1_048_576 do
+        digest = :crypto.hash(:sha256, :erlang.term_to_binary(declarations, [:deterministic]))
+
+        {:ok,
+         %{
+           "principal_id" => principal_id,
+           "permissions_digest" => "sha256:" <> Base.encode16(digest, case: :lower)
+         }}
+      else
+        {:error, :capability_profile_unavailable}
+      end
+    end
+  rescue
+    _ -> {:error, :capability_profile_unavailable}
+  catch
+    _, _ -> {:error, :capability_profile_unavailable}
+  end
+
+  def execution_capability_snapshot(_), do: {:error, :capability_profile_unavailable}
+
+  defp qualification_journal_identity do
+    case audit_journal_status() do
+      {:ok, status} -> {:ok, Map.take(status, ~w(mode durability serving poisoned torn_tail))}
+      _ -> {:error, :journal_unavailable}
+    end
+  end
+
+  defp qualification_approval_resource?(uri) when is_binary(uri),
+    do:
+      Regex.match?(
+        ~r/\Aarbor:\/\/agent\/security_qualification\/[0-9a-f]{64}\/[0-9a-f]{64}\z/,
+        uri
+      )
+
+  defp qualification_approval_resource?(_), do: false
+
+  defp qualification_capability_declaration(capability) do
+    declaration =
+      capability
+      |> Map.from_struct()
+      |> Map.drop([:issuer_signature, :signed_at])
+      |> Map.put(:valid, Capability.valid?(capability))
+      |> Map.put(:signature_valid, SystemAuthority.verify_capability_signature(capability) == :ok)
+
+    if capability.parent_capability_id == nil and capability.delegation_chain == [],
+      do: Map.drop(declaration, [:id, :granted_at]),
+      else: declaration
   end
 
   @doc """

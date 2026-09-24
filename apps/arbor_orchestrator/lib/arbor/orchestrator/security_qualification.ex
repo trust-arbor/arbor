@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
 
   @schema "arbor.security.qualification.v1"
   @checks ~w(hostile_export_journey audit_restart native_containment skill_revocation)
-  @config_keys ~w(llm_provider llm_model llm_runtime llm_fallback_chain system_prompt tools stream temperature top_p max_tokens provider_options context_management effective_window)a
+  @config_keys ~w(llm_provider llm_model llm_runtime llm_fallback_chain system_prompt tools stream temperature top_p max_tokens provider_options context_management effective_window preprocessor_enabled)a
 
   def required_checks, do: @checks
 
@@ -72,8 +72,10 @@ defmodule Arbor.Orchestrator.SecurityQualification do
     with {:ok, %{route: route}} <- TurnEgress.resolve_frozen_route(state, graph),
          true <- route.runtime == "arbor",
          true <- (config["llm_fallback_chain"] || config[:llm_fallback_chain] || []) == [],
-         true <- Config.preprocessor_enabled?() == false,
+         true <- Config.preprocessor_enabled_for?(config) == false,
          {:ok, serving} <- Arbor.LLM.execution_provider_identity(route.provider, route.model),
+         {:ok, transport} <- Arbor.LLM.stock_tool_transport_identity(route.provider),
+         true <- transport["local_endpoint"] == true,
          {:ok, skills} <- Arbor.Memory.skill_version_manifest(state.agent_id),
          {:ok, producer} <- producer_identity(),
          {:ok, containment} <- Arbor.Shell.agent_execution_identity(),
@@ -89,6 +91,8 @@ defmodule Arbor.Orchestrator.SecurityQualification do
              private_memory: Config.private_conversation_memory()
            }),
          {:ok, trust_policy} <- Arbor.Trust.execution_policy_snapshot(state.agent_id),
+         true <- trust_policy.policy_enforcer_enabled and trust_policy.approval_guard_enabled,
+         {:ok, permissions} <- Arbor.Security.execution_capability_snapshot(state.agent_id),
          security_policy = Arbor.Security.execution_policy_snapshot(),
          true <- enforcing_policy?(security_policy),
          {:ok, policy_digest} <-
@@ -105,6 +109,8 @@ defmodule Arbor.Orchestrator.SecurityQualification do
         "model" => route.model,
         "runtime" => to_string(config["llm_runtime"] || config[:llm_runtime] || route.runtime),
         "serving" => serving,
+        "tool_transport" => transport,
+        "permissions" => permissions,
         "configuration_digest" => config_digest,
         "workflow_digest" => workflow_digest,
         "policy_digest" => policy_digest,
@@ -187,6 +193,17 @@ defmodule Arbor.Orchestrator.SecurityQualification do
 
   defp enforcing_policy?(policy) do
     match?({:ok, %{"durability" => "node_restart"}}, Map.get(policy, :audit_identity)) and
+      match?(
+        {:ok,
+         %{
+           "mode" => "durable",
+           "durability" => "durable",
+           "serving" => true,
+           "poisoned" => false,
+           "torn_tail" => false
+         }},
+        Map.get(policy, :authority_journal)
+      ) and
       Enum.all?(
         [
           :identity_verification,

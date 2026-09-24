@@ -10,16 +10,21 @@ skill-version revocation. It does not replace ordinary action authorization.
 `Arbor.Orchestrator.Session.security_qualification_profile(session)` captures
 the current Session owner's profile. It includes the resolved provider and model,
 serving metadata, selected tools and loaded action implementations, DOT graph,
-execution settings, current Security/Trust/Actions policy, approved skill versions,
+execution settings, current Security/Trust/Actions policy and permission declarations, approved skill versions,
 native containment artifact and loaded workflow/LLM/eval implementation identities.
 No caller-supplied fingerprint can override this capture.
 
 The initial qualified lane uses the Arbor runtime with one resolved route and
-preprocessing disabled. A fallback chain or enabled preprocessing is refused
+preprocessing disabled for that Session (`"preprocessor_enabled" => false`).
+This opt-out preserves the host's preprocessing behavior for other sessions;
+a Session cannot override a disabled host master switch. A fallback chain or enabled preprocessing is refused
 because either can invoke a model outside the measured route. ACP's external
 native effects require separate qualification.
 Unavailable owners or disabled identity, signing, constraint, delegation, egress,
-URI or durable invocation-audit enforcement make the profile unavailable.
+URI, Trust policy/approval or durable invocation-audit enforcement make the profile
+unavailable. The actual authority journal must also be durable and serving.
+The local transport must be the stock client, adapter and plug pipeline with the
+real invocation auditor; their implementations and effective options are bound.
 
 Ollama's metadata supplies an artifact digest. LM Studio's metadata supplies the
 loaded instance, model key, selected variant, quantization and loaded configuration,
@@ -76,6 +81,17 @@ revoked approval, or unavailable storage refuses execution until requalification
 An asynchronous private-memory preflight also rechecks before launching its turn.
 Revocation prevents future admission; it does not retract text or undo effects
 already admitted before revocation.
+
+Permission declarations include scope, constraints, expiry and current validity.
+Adding wider authority invalidates earlier evidence. Exact qualification approval
+grants are excluded from that declaration digest to avoid circular approval.
+Replacing an ordinary root grant with the same declarations preserves this
+identity; its generated ID and signing/grant timestamps are bookkeeping for this
+purpose. Delegated grants retain their lineage and instance identity. A journey
+that revokes its dedicated read grant must observe the refusal before the operator
+restores an identical narrow grant and recaptures the profile. The runner never
+restores authority itself. Other authority changes, including dynamic scoped
+grants, conservatively require new qualification.
 
 This preflight observes a profile; it does not atomically freeze mutable host
 configuration through every subsequent Engine dispatch. Ordinary tool, filesystem

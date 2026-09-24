@@ -124,6 +124,12 @@ defmodule Arbor.Orchestrator.Config do
     Application.get_env(@app, :preprocessor_enabled, false)
   end
 
+  @doc "A Session can opt out of preprocessing; it cannot override the host's disabled master switch."
+  def preprocessor_enabled_for?(config) when is_map(config) do
+    enabled = Map.get(config, "preprocessor_enabled", Map.get(config, :preprocessor_enabled))
+    preprocessor_enabled?() and enabled != false
+  end
+
   @doc """
   Full preprocessor config (keyword list), merged over defaults so partial
   overrides in `config.exs` work without restating every key.
