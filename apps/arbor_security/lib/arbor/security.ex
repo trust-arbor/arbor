@@ -3087,6 +3087,27 @@ defmodule Arbor.Security do
   @spec audit_journal_pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
   def audit_journal_pending_operations, do: AuditJournalOwner.pending_operations()
 
+  @doc "Last serialized capability mutation audit status; diagnostic, not durable evidence."
+  def capability_mutation_audit_status do
+    GenServer.call(CapabilityStore, :mutation_audit_status)
+  catch
+    :exit, _ -> {:error, :capability_store_unavailable}
+  end
+
+  @doc "Source-owned Historian pull boundary; only its configured registered consumer is admitted."
+  def authority_audit_delivery_batch, do: AuditJournalOwner.delivery_batch()
+
+  @doc "Reobserve pending mutation effects at their serialized owner before audit delivery."
+  def reconcile_authority_audit do
+    GenServer.call(CapabilityStore, :reconcile_authority_audit, 30_000)
+  catch
+    :exit, _ -> {:error, :capability_store_unavailable}
+  end
+
+  @doc "Acknowledge the exact journal intent after the owning Historian consumer proves durable content."
+  def acknowledge_authority_audit(id, intent_sha256),
+    do: AuditJournalOwner.acknowledge_delivery(id, intent_sha256)
+
   @doc """
   Create a signer function for an agent.
 

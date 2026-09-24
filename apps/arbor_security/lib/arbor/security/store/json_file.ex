@@ -99,6 +99,35 @@ defmodule Arbor.Security.Store.JSONFile do
     end)
   end
 
+  @doc false
+  def authoritative_entry(key, opts \\ []) do
+    with_context(key, opts, &load_entry(&1, migrate?: true))
+  end
+
+  @doc false
+  def compare_and_create(key, expected, %Record{} = replacement, opts) do
+    with_context(key, opts, fn ctx ->
+      with false <- Revision.key_mismatch?(key, replacement),
+           true <- expected == :absent or valid_creation_tombstone?(expected),
+           {:ok, entry} <- load_entry(ctx, migrate?: true),
+           true <- entry == expected do
+        do_cas(ctx, entry, :not_found, replacement)
+      else
+        false -> {:error, :conflict}
+        {:error, _} = error -> error
+      end
+    end)
+  end
+
+  def compare_and_create(_key, _expected, _replacement, _opts),
+    do: {:error, :unsupported_value}
+
+  defp valid_creation_tombstone?({:tombstone, generation})
+       when is_integer(generation) and generation > 0 and generation < 9_007_199_254_740_991,
+       do: true
+
+  defp valid_creation_tombstone?(_), do: false
+
   @impl true
   def delete(key, opts \\ []) do
     with_context(key, opts, fn ctx ->

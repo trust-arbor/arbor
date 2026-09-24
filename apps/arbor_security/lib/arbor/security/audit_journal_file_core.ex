@@ -62,16 +62,19 @@ defmodule Arbor.Security.AuditJournalFileCore do
   def header_size, do: @header_size
 
   @spec max_payload_bytes() :: pos_integer()
-  def max_payload_bytes, do: AuditJournal.limits().max_record_bytes
+  def max_payload_bytes, do: AuditJournal.limits(:operational).max_snapshot_bytes
 
   @spec max_frame_bytes() :: pos_integer()
   def max_frame_bytes, do: @header_size + max_payload_bytes()
 
   @spec max_committed_frames() :: pos_integer()
-  def max_committed_frames, do: AuditJournal.limits().hard_entry_cap
+  def max_committed_frames, do: AuditJournal.limits(:operational).hard_entry_cap
 
   @spec max_file_bytes() :: pos_integer()
-  def max_file_bytes, do: max_committed_frames() * max_frame_bytes() + max_frame_bytes() - 1
+  def max_file_bytes,
+    do:
+      AuditJournal.limits(:operational).hard_byte_cap + max_committed_frames() * @header_size +
+        max_frame_bytes() - 1
 
   @spec genesis_digest() :: binary()
   def genesis_digest, do: @genesis_digest
@@ -456,7 +459,7 @@ defmodule Arbor.Security.AuditJournalFileCore do
   defp payload_kind(payload) when is_binary(payload) do
     case decode_json(payload) do
       {:ok, %{"kind" => kind}} ->
-        if kind == AuditJournal.snapshot_kind() do
+        if kind in [AuditJournal.snapshot_kind(), AuditJournal.operational_snapshot_kind()] do
           :snapshot
         else
           :record

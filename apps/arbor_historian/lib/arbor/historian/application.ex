@@ -23,7 +23,8 @@ defmodule Arbor.Historian.Application do
       if Application.get_env(:arbor_historian, :start_children, true) do
         [
           {Arbor.Persistence.EventLog.ETS, name: Arbor.Historian.EventLog.ETS, mode: :projection},
-          {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
+          {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry},
+          {Arbor.Historian.AuthorityAuditPuller, []}
         ]
       else
         []
