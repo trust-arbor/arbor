@@ -1074,8 +1074,11 @@ defmodule Arbor.Orchestrator.Session do
   # Run the pre-turn preprocessor when enabled; merge its output into turn values
   # under "session.preprocessor.*". Disabled-by-default and fail-open: any failure
   # leaves `values` unchanged so the turn proceeds exactly as before.
-  defp maybe_preprocess(values, content) do
-    {:ok, preproc} = Arbor.Orchestrator.Preprocessor.run(content)
+  defp maybe_preprocess(values, content, config) do
+    {:ok, preproc} =
+      if Config.preprocessor_enabled_for?(config),
+        do: Arbor.Orchestrator.Preprocessor.run(content),
+        else: {:ok, %{}}
 
     if preproc == %{} do
       values
@@ -2587,7 +2590,7 @@ defmodule Arbor.Orchestrator.Session do
 
     final_values =
       pre_values
-      |> maybe_preprocess(user_message.content)
+      |> maybe_preprocess(user_message.content, state.config)
       |> put_private_recall(turn_authority, state.private_memory_turn)
       |> put_private_goal_context(turn_authority, state)
 

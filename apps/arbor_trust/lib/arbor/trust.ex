@@ -158,6 +158,8 @@ defmodule Arbor.Trust do
       {:ok,
        %{
          host: host,
+         policy_enforcer_enabled: Arbor.Trust.Config.policy_enforcer_enabled?(),
+         approval_guard_enabled: Arbor.Trust.Config.approval_guard_enabled?(),
          profile:
            Map.take(profile, [:baseline, :rules, :model_constraints, :egress_modes, :frozen]),
          implementations: implementations
