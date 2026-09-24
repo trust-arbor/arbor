@@ -25,7 +25,7 @@ defmodule Arbor.Actions.SessionLlmSkillsTest do
   end
 
   describe "active skills in the heartbeat prompt" do
-    test "renders name, description and body under their own heading" do
+    test "unapproved working-memory entries do not render instructions" do
       prompt =
         heartbeat(%{
           active_skills: [
@@ -37,27 +37,27 @@ defmodule Arbor.Actions.SessionLlmSkillsTest do
           ]
         })
 
-      assert prompt =~ "## Active Skills"
-      assert prompt =~ "### dot-authoring"
-      assert prompt =~ "How to write pipelines"
-      assert prompt =~ "Use exec nodes."
+      refute prompt =~ "## Active Skills"
+      refute prompt =~ "### dot-authoring"
+      refute prompt =~ "How to write pipelines"
+      refute prompt =~ "Use exec nodes."
     end
 
-    test "accepts string-keyed skills from a JSON context round-trip" do
+    test "JSON context round-trip does not manufacture approval" do
       # The engine context is a JSON checkpoint boundary, so skills can arrive
       # either way depending on whether a checkpoint was replayed.
       prompt =
         heartbeat(%{"active_skills" => [%{"name" => "json-skill", "body" => "from checkpoint"}]})
 
-      assert prompt =~ "### json-skill"
-      assert prompt =~ "from checkpoint"
+      refute prompt =~ "### json-skill"
+      refute prompt =~ "from checkpoint"
     end
 
     test "skills are NOT also dumped into the working-memory blob" do
       prompt =
         heartbeat(%{active_skills: [%{name: "s", body: "B"}], focus: "shipping"})
 
-      assert prompt =~ "### s"
+      refute prompt =~ "### s"
       # The generic dump would render the skill list as inspect/1 output.
       refute prompt =~ ~s(active_skills:)
       refute prompt =~ ~s("active_skills")
@@ -75,14 +75,14 @@ defmodule Arbor.Actions.SessionLlmSkillsTest do
     test "working memory holding ONLY skills emits no empty Working Memory heading" do
       prompt = heartbeat(%{active_skills: [%{name: "only", body: "b"}]})
 
-      assert prompt =~ "## Active Skills"
+      refute prompt =~ "## Active Skills"
       refute prompt =~ "## Working Memory"
     end
 
     test "a malformed skill entry does not break the prompt" do
       prompt = heartbeat(%{active_skills: [%{name: "good", body: "ok"}, "not-a-map", nil]})
 
-      assert prompt =~ "### good"
+      refute prompt =~ "### good"
       assert is_binary(prompt)
     end
   end

@@ -113,15 +113,12 @@ defmodule Arbor.Common.CapabilityProviders.SkillProviderTest do
   end
 
   describe "execute/3" do
-    test "returns skill body" do
-      assert {:ok, %{body: body, name: "test-email-triage"}} =
-               SkillProvider.execute("skill:test-email-triage", %{}, [])
-
-      assert body =~ "email triage assistant"
+    test "unapproved execution refuses the skill body" do
+      assert {:error, _} = SkillProvider.execute("skill:test-email-triage", %{}, [])
     end
 
     test "returns error for non-existent skill" do
-      assert {:error, :not_found} = SkillProvider.execute("skill:nonexistent", %{}, [])
+      assert {:error, _} = SkillProvider.execute("skill:nonexistent", %{}, [])
     end
   end
 

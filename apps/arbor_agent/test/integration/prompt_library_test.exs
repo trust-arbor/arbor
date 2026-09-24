@@ -24,7 +24,30 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       :ets.delete(:arbor_skill_library)
     end
 
+    previous = Application.fetch_env(:arbor_kernel, :common)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, config} -> Application.put_env(:arbor_kernel, :common, config)
+        :error -> Application.delete_env(:arbor_kernel, :common)
+      end
+    end)
+
     :ok
+  end
+
+  defp pin_test_snapshots! do
+    pins =
+      Map.new(SkillLibrary.list(), fn skill ->
+        {:ok, version} = SkillLibrary.prepare_approval(skill.name)
+        {version.name, version.digest}
+      end)
+
+    Application.put_env(
+      :arbor_kernel,
+      :common,
+      Keyword.put(Application.get_env(:arbor_kernel, :common, []), :trusted_skill_versions, pins)
+    )
   end
 
   describe "heartbeat skill indexing" do
@@ -35,6 +58,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       heartbeat_skills = SkillLibrary.list(category: "heartbeat")
       names = Enum.map(heartbeat_skills, &Map.get(&1, :name))
@@ -68,6 +92,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       {:ok, skill} = SkillLibrary.get("cognitive-goal-pursuit")
       assert Map.get(skill, :version) == "1.0.0"
@@ -82,6 +107,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       {:ok, skill} = SkillLibrary.get("heartbeat-system-prompt")
       assert "nonce_preamble" in Map.get(skill, :template_vars, [])
@@ -98,6 +124,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       prompt = CognitivePrompts.prompt_for(:goal_pursuit)
       assert prompt =~ "Goal Pursuit"
@@ -132,6 +159,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       prompt = HeartbeatPrompt.system_prompt(%{})
       assert prompt =~ "autonomous AI agent"
@@ -147,6 +175,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       prompt = HeartbeatPrompt.system_prompt(%{nonce: "TEST_NONCE"})
       assert prompt =~ "TEST_NONCE"
@@ -166,6 +195,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       prompt = HeartbeatPrompt.build_prompt(%{enabled_prompt_sections: [:response_format]})
       assert prompt =~ "Response Format"
@@ -208,6 +238,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 
@@ -225,6 +256,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 
@@ -261,6 +293,7 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
       # (the 100ms timer can fire before indexing finishes), which made these
       # tests flaky in CI even with the fixtures present.
       :ok = SkillLibrary.reload()
+      pin_test_snapshots!()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 

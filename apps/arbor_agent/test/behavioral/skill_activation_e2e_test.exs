@@ -8,7 +8,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
               ↓ (loaded by)
           SkillLibrary
               ↓ (fetched by)
-      Arbor.Actions.Skill.Activate.run/2 (Jido action)
+      Activate.run/2 (Jido action)
               ↓ (persists to)
           Arbor.Memory working memory
               ↓ (read back by)
@@ -37,8 +37,10 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
 
   @moduletag :integration
 
+  alias Arbor.Actions.Skill.Activate
   alias Arbor.Agent.HeartbeatPrompt
   alias Arbor.Common.SkillLibrary
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Memory
 
   # ETS tables the heartbeat-prompt path can read from. Same set as
@@ -68,7 +70,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
   # return {:error, :not_found}. Matches the fixtures pattern prompt_library_test.exs uses.
   @skills_dir Path.expand("../fixtures/skills", __DIR__)
 
-  setup %{agent_id: agent_id} do
+  setup do
     for table <- @extra_ets_tables do
       if :ets.whereis(table) == :undefined do
         :ets.new(table, [:named_table, :public, :set])
@@ -85,6 +87,38 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
     # proceed.
     :ok = SkillLibrary.reload()
 
+    # This fixture now uses an actual active identity and an exact current-root
+    # approval; the BehavioralCase's synthetic ID/unsigned broad cap is not one.
+    {:ok, identity} = Identity.generate()
+
+    :ok =
+      Arbor.Security.register_identity(Identity.public_only(identity))
+
+    agent_id = identity.agent_id
+    previous = Application.fetch_env(:arbor_kernel, :common)
+
+    Application.put_env(
+      :arbor_kernel,
+      :common,
+      Keyword.put(
+        Application.get_env(:arbor_kernel, :common, []),
+        :skill_security_module,
+        Arbor.Security
+      )
+    )
+
+    {:ok, version} = SkillLibrary.prepare_approval(@test_skill_name)
+    {:ok, cap} = Arbor.Security.grant(principal: agent_id, resource: version.resource_uri)
+
+    on_exit(fn ->
+      Arbor.Security.revoke(cap.id)
+
+      case previous do
+        {:ok, config} -> Application.put_env(:arbor_kernel, :common, config)
+        :error -> Application.delete_env(:arbor_kernel, :common)
+      end
+    end)
+
     Memory.init_for_agent(agent_id, index_enabled: false, graph_enabled: false)
 
     on_exit(fn ->
@@ -97,7 +131,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
       end
     end)
 
-    :ok
+    %{agent_id: agent_id}
   end
 
   describe "skill activation reaches the heartbeat prompt (regression)" do
@@ -110,11 +144,11 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
              "Test fixture invariant: skill #{@test_skill_name} should have a non-empty body. " <>
                "If this skill was removed or restructured, pick a different real skill."
 
-      # 2. Activate it through Arbor.Actions.Skill.Activate.run/2 — the
+      # 2. Activate it through Activate.run/2 — the
       #    real entry point an agent would use. We're testing the chain,
       #    not bypassing it to WorkingMemory.activate_skill directly.
       assert {:ok, %{activated: true, name: @test_skill_name}} =
-               Arbor.Actions.Skill.Activate.run(
+               Activate.run(
                  %{skill_name: @test_skill_name},
                  %{agent_id: agent_id}
                )
@@ -189,7 +223,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
       # :skill/:skill_activated event. :skill is not a restricted topic, so the payload is retained
       # (not encrypted/redacted). This fails on the pre-fix code (no such event).
       assert {:ok, %{activated: true}} =
-               Arbor.Actions.Skill.Activate.run(
+               Activate.run(
                  %{skill_name: @test_skill_name},
                  %{agent_id: agent_id}
                )
@@ -270,7 +304,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
       # Activate it through the real action runtime — same chain the
       # deterministic e2e tests exercise.
       {:ok, _} =
-        Arbor.Actions.Skill.Activate.run(
+        Activate.run(
           %{skill_name: test_skill_name},
           %{agent_id: agent_id}
         )
@@ -350,7 +384,7 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
       {:ok, skill} = SkillLibrary.get(@test_skill_name)
 
       {:ok, _} =
-        Arbor.Actions.Skill.Activate.run(
+        Activate.run(
           %{skill_name: @test_skill_name},
           %{agent_id: agent_id}
         )
