@@ -36,6 +36,10 @@ defmodule Arbor.Orchestrator.SecurityQualification do
       _ ->
         {:error, :security_qualification_required}
     end
+  rescue
+    _ -> {:error, :security_qualification_required}
+  catch
+    _, _ -> {:error, :security_qualification_required}
   end
 
   def prepare(state, run_id, source \\ :turn) do
@@ -72,6 +76,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
          {:ok, skills} <- Arbor.Memory.skill_version_manifest(state.agent_id),
          {:ok, producer} <- producer_identity(),
          {:ok, containment} <- Arbor.Shell.agent_execution_identity(),
+         true <- containment["supported"] == true,
          {:ok, tools} <- tool_manifest(state),
          {:ok, workflow_digest} <- term_digest(graph),
          {:ok, config_digest} <- term_digest(select_config(config)),
@@ -188,7 +193,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
   end
 
   defp exact_approval?(cap, agent_id, uri) do
-    cap.resource_uri == uri and not is_nil(cap.signature) and
+    cap.resource_uri == uri and
       Arbor.Security.authorize_source_owned_exact_ordinary_capability(
         agent_id,
         uri,
