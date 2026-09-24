@@ -3,6 +3,7 @@ defmodule Arbor.Actions.ShellTest do
   @moduletag :fast
 
   alias Arbor.Actions.Shell
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SignedRequest
 
   defp run_execute(params, context) do
@@ -109,7 +110,7 @@ defmodule Arbor.Actions.ShellTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, cwd} = SafePath.resolve_real(root)
     {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
     Process.put(:shell_test_cwd, cwd)
     previous_authorizer = Application.get_env(:arbor_shell, :agent_authorizer)

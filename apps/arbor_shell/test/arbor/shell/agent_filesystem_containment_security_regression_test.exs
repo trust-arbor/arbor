@@ -2,6 +2,7 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
   use ExUnit.Case, async: false
   @moduletag :integration
 
+  alias Arbor.Common.SafePath
   alias Arbor.Security
   alias Arbor.Shell
 
@@ -33,7 +34,7 @@ defmodule Arbor.Shell.AgentFilesystemContainmentSecurityRegressionTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, root} = SafePath.resolve_real(root)
     cwd = Path.join(root, "work")
     :ok = File.mkdir(cwd)
     File.write!(Path.join(cwd, "input"), "permitted-data")

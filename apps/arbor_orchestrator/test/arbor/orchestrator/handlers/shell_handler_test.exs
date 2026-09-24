@@ -18,7 +18,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, root} = SafePath.resolve_real(root)
     cwd = Path.join(root, "work")
     :ok = File.mkdir(cwd)
     File.write!(Path.join(cwd, "fixture"), "synthetic handler input")
@@ -48,6 +48,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     fixture
   end
 
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node

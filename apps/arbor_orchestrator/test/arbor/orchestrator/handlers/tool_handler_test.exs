@@ -18,7 +18,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, root} = SafePath.resolve_real(root)
     cwd = Path.join(root, "work")
     :ok = File.mkdir(cwd)
     File.write!(Path.join(cwd, "fixture"), "synthetic handler input")
@@ -48,6 +48,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     fixture
   end
 
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -318,7 +319,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     {:ok, _} =
       Arbor.Security.grant(principal: principal, resource: "arbor://shell/exec/#{command_name}")
 
-    {:ok, canonical_workdir} = Arbor.Common.SafePath.resolve_real(workdir)
+    {:ok, canonical_workdir} = SafePath.resolve_real(workdir)
 
     {:ok, authority} =
       RunAuthorization.new(%{graph | compiled: true},

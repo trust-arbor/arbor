@@ -16,6 +16,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
   @moduletag :fast
 
   alias Arbor.Actions.Shell
+  alias Arbor.Common.SafePath
 
   @unavailable_tuple {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
 
@@ -358,7 +359,7 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, cwd} = SafePath.resolve_real(root)
     on_exit(fn -> File.rm_rf!(cwd) end)
     {:ok, _} = Arbor.Security.grant(principal: agent_id, resource: "arbor://fs/read#{cwd}/**")
 

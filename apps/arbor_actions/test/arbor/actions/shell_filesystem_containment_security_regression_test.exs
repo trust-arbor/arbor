@@ -2,12 +2,16 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
   use ExUnit.Case, async: false
   @moduletag :integration
   alias Arbor.Actions
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Contracts.Trust.Profile
   alias Arbor.Security
   alias Arbor.Trust
+  alias Arbor.Trust.PolicyHost
+  alias Arbor.Trust.Store
 
   setup do
-    if Process.whereis(Arbor.Trust.Store) == nil, do: start_supervised!(Arbor.Trust.Store)
+    if Process.whereis(Store) == nil, do: start_supervised!(Store)
 
     if Process.whereis(Arbor.Trust.Manager) == nil do
       start_supervised!(
@@ -31,7 +35,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
       )
 
     :ok = File.mkdir(root)
-    {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, root} = SafePath.resolve_real(root)
     cwd = Path.join(root, "work")
     :ok = File.mkdir(cwd)
     # Only this synthetic directory gets a test-owned write ceiling. Ordinary
@@ -58,8 +62,8 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
     File.write!(Path.join(root, "outside"), "outside-data")
     {:ok, identity} = Security.generate_identity(name: "synthetic-action-containment")
     :ok = Security.register_identity(identity)
-    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(identity.agent_id)
-    :ok = Arbor.Trust.Store.store_profile(profile)
+    {:ok, profile} = Profile.new(identity.agent_id)
+    :ok = Store.store_profile(profile)
 
     for resource <- [
           "arbor://shell/exec/cat",
@@ -128,7 +132,7 @@ defmodule Arbor.Actions.ShellFilesystemContainmentSecurityRegressionTest do
 
   defp rebind_trust! do
     :ok = Application.stop(:arbor_trust)
-    :ok = Arbor.Trust.PolicyHost.release_claim()
+    :ok = PolicyHost.release_claim()
     {:ok, _} = Application.ensure_all_started(:arbor_trust)
   end
 

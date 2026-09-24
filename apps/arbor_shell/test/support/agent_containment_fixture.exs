@@ -1,12 +1,16 @@
 defmodule Arbor.Shell.TestAgentContainment do
   @moduledoc false
+  alias Arbor.Common.SafePath
+  alias Arbor.Security.TestBootstrap
 
   def authorize_command(agent, _command, opts),
     do:
       Arbor.Security.authorize(
         agent,
         "arbor://shell/exec/#{opts[:prepared_command].command_name}",
-        :execute, verify_identity: false)
+        :execute,
+        verify_identity: false
+      )
 
   def authorize_filesystem(agent, uri, operation, _capability_id, _opts),
     do: Arbor.Security.authorize(agent, uri, operation, verify_identity: false)
@@ -14,7 +18,7 @@ defmodule Arbor.Shell.TestAgentContainment do
   # Fixture authority is real; only the lower-level app's Trust callback is
   # replaced. Production Trust behavior is covered by the owning Actions tests.
   def install! do
-    :ok = Arbor.Security.TestBootstrap.start!()
+    :ok = TestBootstrap.start!()
 
     root =
       Path.join(
@@ -23,7 +27,7 @@ defmodule Arbor.Shell.TestAgentContainment do
       )
 
     :ok = File.mkdir(root)
-    {:ok, cwd} = Arbor.Common.SafePath.resolve_real(root)
+    {:ok, cwd} = SafePath.resolve_real(root)
     {:ok, identity} = Arbor.Security.generate_identity(name: "synthetic shell mechanics")
     :ok = Arbor.Security.register_identity(identity)
 
