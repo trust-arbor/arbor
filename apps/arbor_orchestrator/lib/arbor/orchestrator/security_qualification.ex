@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
 
   @schema "arbor.security.qualification.v1"
   @checks ~w(hostile_export_journey audit_restart native_containment skill_revocation)
-  @config_keys ~w(llm_provider llm_model llm_runtime llm_fallback_chain system_prompt tools temperature top_p max_tokens provider_options context_management effective_window)a
+  @config_keys ~w(llm_provider llm_model llm_runtime llm_fallback_chain system_prompt tools stream temperature top_p max_tokens provider_options context_management effective_window)a
 
   def required_checks, do: @checks
 
@@ -72,6 +72,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
     with {:ok, %{route: route}} <- TurnEgress.resolve_frozen_route(state, graph),
          true <- route.runtime == "arbor",
          true <- (config["llm_fallback_chain"] || config[:llm_fallback_chain] || []) == [],
+         true <- Config.preprocessor_enabled?() == false,
          {:ok, serving} <- Arbor.LLM.execution_provider_identity(route.provider, route.model),
          {:ok, skills} <- Arbor.Memory.skill_version_manifest(state.agent_id),
          {:ok, producer} <- producer_identity(),
@@ -79,7 +80,14 @@ defmodule Arbor.Orchestrator.SecurityQualification do
          true <- containment["supported"] == true,
          {:ok, tools} <- tool_manifest(state),
          {:ok, workflow_digest} <- term_digest(graph),
-         {:ok, config_digest} <- term_digest(select_config(config)),
+         {:ok, config_digest} <-
+           term_digest(%{
+             session: select_config(config),
+             context_budgets: Config.context_budgets(),
+             context_budget_enforcement: Config.context_budget_enforcement(),
+             turn_timeout_ms: Config.turn_timeout_ms(),
+             private_memory: Config.private_conversation_memory()
+           }),
          {:ok, trust_policy} <- Arbor.Trust.execution_policy_snapshot(state.agent_id),
          security_policy = Arbor.Security.execution_policy_snapshot(),
          true <- enforcing_policy?(security_policy),
