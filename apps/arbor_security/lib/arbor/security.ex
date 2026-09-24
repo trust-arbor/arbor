@@ -151,6 +151,14 @@ defmodule Arbor.Security do
         {Atom.to_string(module), Base.encode16(module.module_info(:md5), case: :lower)}
       end)
 
+    sink = Config.invocation_audit_sink()
+
+    audit_identity =
+      if is_atom(sink) and Code.ensure_loaded?(sink) and
+           function_exported?(sink, :security_audit_identity, 0),
+         do: sink.security_audit_identity(),
+         else: {:error, :invocation_audit_unavailable}
+
     %{
       identity_verification: Config.identity_verification_enabled?(),
       capability_signing: Config.capability_signing_required?(),
@@ -160,6 +168,8 @@ defmodule Arbor.Security do
       uri_registry_enforcement:
         Application.get_env(:arbor_security, :uri_registry_enforcement, true),
       invocation_audit: Config.invocation_audit_mode(),
+      invocation_sink: sink,
+      audit_identity: audit_identity,
       implementations: implementations
     }
   end

@@ -785,6 +785,9 @@ defmodule Arbor.Historian do
   @doc "Read durable invocation evidence; a missing terminal outcome is indeterminate."
   def security_invocation(id), do: Arbor.Historian.SecurityInvocationSink.read(id)
 
+  @doc "Read source-owned invocation audit target identity; volatile backends are refused."
+  def security_audit_identity, do: Arbor.Historian.SecurityInvocationSink.identity()
+
   # ============================================================================
   # Complete history stream content (VP-05D2C3I0C4C)
   # ============================================================================

@@ -10,7 +10,7 @@ defmodule Arbor.Historian.SecurityInvocationSink do
   def persist(data) when is_map(data) do
     with :ok <- validate(data),
          {:ok, timestamp, 0} <- DateTime.from_iso8601(data["timestamp"]),
-         {:ok, target} <- Config.durable_event_log_target() do
+         {:ok, target} <- durable_target() do
       stream = stream(data["invocation_id"])
 
       submitted =
@@ -46,7 +46,7 @@ defmodule Arbor.Historian.SecurityInvocationSink do
 
   def read(id) do
     with true <- valid_id?(id),
-         {:ok, target} <- Config.durable_event_log_target(),
+         {:ok, target} <- durable_target(),
          {:ok, events} <-
            Persistence.read_stream(
              target.name,
@@ -69,6 +69,53 @@ defmodule Arbor.Historian.SecurityInvocationSink do
     _ -> {:error, :invocation_audit_unavailable}
   catch
     _, _ -> {:error, :invocation_audit_unavailable}
+  end
+
+  def identity do
+    with {:ok, target} <- durable_target() do
+      modules = [
+        __MODULE__,
+        Arbor.Historian,
+        Config,
+        target.backend,
+        Arbor.Persistence,
+        Arbor.Persistence.Event
+      ]
+
+      implementation =
+        Enum.map(Enum.uniq(modules), fn module ->
+          Code.ensure_loaded!(module)
+
+          %{
+            "module" => Atom.to_string(module),
+            "loaded_md5" => Base.encode16(module.module_info(:md5), case: :lower)
+          }
+        end)
+
+      {:ok,
+       %{
+         "schema" => "arbor.security.audit.identity.v1",
+         "durability" => "node_restart",
+         "target" => Atom.to_string(target.name),
+         "backend" => Atom.to_string(target.backend),
+         "repo" => inspect(Keyword.get(target.opts, :repo)),
+         "implementation" => implementation
+       }}
+    end
+  rescue
+    _ -> {:error, :invocation_audit_unavailable}
+  catch
+    _, _ -> {:error, :invocation_audit_unavailable}
+  end
+
+  defp durable_target do
+    with {:ok, target} <- Config.durable_event_log_target(),
+         {:ok, :node_restart} <-
+           Persistence.durability_class(target.name, target.backend, target.opts) do
+      {:ok, target}
+    else
+      _ -> {:error, :invocation_audit_unavailable}
+    end
   end
 
   defp reconcile(target, stream, submitted) do

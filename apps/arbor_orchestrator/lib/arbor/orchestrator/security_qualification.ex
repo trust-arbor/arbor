@@ -43,6 +43,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
          {:ok, profile} <- capture(state, source),
          {:ok, run} <- Persistence.get_eval_run(run_id),
          {:ok, evidence} <- EvidenceCore.new(profile, run) |> EvidenceCore.show(),
+         true <- artifact_digests_match?(evidence, profile),
          digest when is_binary(digest) <- Persistence.eval_config_fingerprint(evidence) do
       uri =
         "arbor://agent/security_qualification/" <>
@@ -157,18 +158,33 @@ defmodule Arbor.Orchestrator.SecurityQualification do
     end
   end
 
+  defp artifact_digests_match?(evidence, profile) do
+    Enum.all?(evidence["results"], fn result ->
+      metadata = result["metadata"]
+
+      matching_producer =
+        result["sample_id"] != "hostile_export_journey" or
+          metadata["producer_digest"] == profile.projection["producer"]["digest"]
+
+      matching_producer and
+        metadata["artifact_digest"] ==
+          Persistence.eval_config_fingerprint(metadata["observations"])
+    end)
+  end
+
   defp enforcing_policy?(policy) do
-    Enum.all?(
-      [
-        :identity_verification,
-        :capability_signing,
-        :constraint_enforcement,
-        :delegation_verification,
-        :egress_enforcing,
-        :uri_registry_enforcement
-      ],
-      &(Map.get(policy, &1) == true)
-    ) and policy.invocation_audit == :required
+    match?({:ok, %{"durability" => "node_restart"}}, Map.get(policy, :audit_identity)) and
+      Enum.all?(
+        [
+          :identity_verification,
+          :capability_signing,
+          :constraint_enforcement,
+          :delegation_verification,
+          :egress_enforcing,
+          :uri_registry_enforcement
+        ],
+        &(Map.get(policy, &1) == true)
+      ) and policy.invocation_audit == :required
   end
 
   defp exact_approval?(cap, agent_id, uri) do
