@@ -1876,6 +1876,41 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     refute after_done.turn_in_flight
   end
 
+  for requirement <- [%{turn: %{run_id: "missing_qualification_run"}}, %{heartbeat: %{run_id: "wrong_source"}}] do
+    @qualification_requirement requirement
+    test "security regression: configured qualification #{inspect(requirement)} refuses before starting a turn",
+         %{agent_id: agent_id, agent_signer: signer} do
+      prior = Application.get_env(:arbor_orchestrator, :security_qualification_profiles)
+      Application.put_env(:arbor_orchestrator, :security_qualification_profiles,
+        %{agent_id => @qualification_requirement})
+
+      on_exit(fn ->
+        if is_nil(prior),
+          do: Application.delete_env(:arbor_orchestrator, :security_qualification_profiles),
+          else: Application.put_env(:arbor_orchestrator, :security_qualification_profiles, prior)
+      end)
+
+      state = session_state(agent_id,
+        turn_graph: hermetic_success_graph!(), signer: signer,
+        config: %{"llm_provider" => "lmstudio", "llm_model" => "local-model", "stream" => false})
+      reply_ref = make_ref()
+      assert {:noreply, next} = Session.handle_call({:send_message, "qualification gate"},
+        {self(), reply_ref}, state)
+
+      # Parent cleanup is explicit: an incorrectly started real engine task must
+      # not escape the failing security assertion and contaminate later cases.
+      try do
+        refute next.turn_in_flight
+        assert_receive {^reply_ref, {:error, :security_qualification_required}}, 1_000
+        refute next.turn_task_pid
+      after
+        if next.turn_in_flight do
+          Session.handle_info(await_turn_result(), next)
+        end
+      end
+    end
+  end
+
   defp user_message_auth(human_id) do
     UserMessage.from_voice("hi", sender_id: human_id)
   end
