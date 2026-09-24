@@ -514,6 +514,14 @@ defmodule Arbor.Orchestrator.Session do
     GenServer.call(session, :get_state)
   end
 
+  @doc "Capture the actual current execution profile without granting qualification."
+  def security_qualification_profile(session),
+    do: GenServer.call(session, :security_qualification_profile, 30_000)
+
+  @doc "Read and validate existing eval evidence and return its exact approval URI. This never grants approval."
+  def prepare_security_qualification(session, run_id),
+    do: GenServer.call(session, {:prepare_security_qualification, run_id}, 30_000)
+
   @doc """
   Return the current execution mode.
   """
@@ -844,6 +852,14 @@ defmodule Arbor.Orchestrator.Session do
     # Public status projection: never leak TurnAuthority fields/ids to callers.
     # Internal process state (including turn_authority / queue authorities) is unchanged.
     {:reply, public_state_projection(state), state}
+  end
+
+  def handle_call(:security_qualification_profile, _from, state) do
+    {:reply, Arbor.Orchestrator.SecurityQualification.capture(state), state}
+  end
+
+  def handle_call({:prepare_security_qualification, run_id}, _from, state) do
+    {:reply, Arbor.Orchestrator.SecurityQualification.prepare(state, run_id), state}
   end
 
   # User cancellation: preserve whatever streamed as a :cancelled partial, kill the
@@ -2437,6 +2453,7 @@ defmodule Arbor.Orchestrator.Session do
 
     with true <- caller_alive?(from),
          :ok <- revalidate_private_engagement(message, authority, state),
+         :ok <- Arbor.Orchestrator.SecurityQualification.admit(state),
          {:ok, _} <-
            Arbor.Security.authorize_private_memory_turn(PrivateMemory.current(state), :read),
          {:ok, prepared} <- do_prepare_live_turn(message, authority, token, state) do
@@ -2547,7 +2564,8 @@ defmodule Arbor.Orchestrator.Session do
   # Any fault after disclosure issue deactivates the fence and revokes the cap.
   defp prepare_live_turn(user_message, turn_authority, turn_token, state)
        when is_reference(turn_token) do
-    with :ok <- PrivateMemory.activate(state, user_message, turn_authority) do
+    with :ok <- Arbor.Orchestrator.SecurityQualification.admit(state),
+         :ok <- PrivateMemory.activate(state, user_message, turn_authority) do
       case PrivateMemory.prepare_turn(state, user_message, turn_authority) do
         {:ok, turn} ->
           do_prepare_live_turn(user_message, turn_authority, turn_token, %{

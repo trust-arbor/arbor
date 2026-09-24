@@ -143,6 +143,30 @@ defmodule Arbor.Trust do
           {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, :not_found | term()}
   defdelegate get_trust_profile(agent_id), to: Manager
 
+  @doc "Capture effective owner policy for execution qualification, excluding activity counters."
+  def execution_policy_snapshot(agent_id) do
+    with {:ok, host} <- Arbor.Trust.PolicyHost.snapshot(),
+         {:ok, profile} <- Manager.get_trust_profile(agent_id) do
+      modules = Application.spec(:arbor_trust, :modules) || []
+
+      implementations =
+        Enum.map(Enum.sort(modules), fn module ->
+          Code.ensure_loaded!(module)
+          {Atom.to_string(module), Base.encode16(module.module_info(:md5), case: :lower)}
+        end)
+
+      {:ok,
+       %{
+         host: host,
+         profile:
+           Map.take(profile, [:baseline, :rules, :model_constraints, :egress_modes, :frozen]),
+         implementations: implementations
+       }}
+    else
+      _ -> {:error, :trust_policy_unavailable}
+    end
+  end
+
   @doc """
   Ensure a trust profile exists and durably apply an optional exact policy.
 

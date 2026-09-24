@@ -2138,6 +2138,23 @@ defmodule Arbor.Actions do
 
   def runtime_descriptor(_action_module), do: {:error, :invalid_action_module}
 
+  @doc "Capture action enforcement configuration and loaded implementation for qualification."
+  def execution_policy_snapshot do
+    modules = Application.spec(:arbor_actions, :modules) || []
+
+    implementations =
+      Enum.map(Enum.sort(modules), fn module ->
+        Code.ensure_loaded!(module)
+        {Atom.to_string(module), Base.encode16(module.module_info(:md5), case: :lower)}
+      end)
+
+    %{
+      default_taint_policy:
+        Application.get_env(:arbor_actions, :default_taint_policy, :permissive),
+      implementations: implementations
+    }
+  end
+
   @doc """
   Return the replay class explicitly declared by an action module or name.
 

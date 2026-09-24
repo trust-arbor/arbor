@@ -3,6 +3,15 @@ defmodule Arbor.Historian.SecurityInvocationSinkTest do
   @moduletag :fast
   alias Arbor.Persistence.EventLog.ETS
 
+  # Contract fixture for append identity tests only. Physical durability and
+  # cold restart are separately exercised with Ecto; real ETS is rejected by
+  # security_invocation_durability_security_regression_test.exs.
+  defmodule DurableContractFixture do
+    def durability_class(_opts), do: :node_restart
+    defdelegate append(stream, events, opts), to: ETS
+    defdelegate read_stream(stream, opts), to: ETS
+  end
+
   setup do
     old = Application.fetch_env(:arbor_historian, :durable_event_log_target)
     name = __MODULE__.Store
@@ -10,7 +19,7 @@ defmodule Arbor.Historian.SecurityInvocationSinkTest do
 
     Application.put_env(:arbor_historian, :durable_event_log_target, %{
       name: name,
-      backend: ETS,
+      backend: DurableContractFixture,
       opts: []
     })
 

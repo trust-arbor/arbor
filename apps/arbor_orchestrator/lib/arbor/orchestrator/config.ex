@@ -42,6 +42,30 @@ defmodule Arbor.Orchestrator.Config do
 
   @app :arbor_orchestrator
 
+  @doc "Host-owned qualification requirement by agent and turn/heartbeat source. Unconfigured agents are exploratory and unqualified."
+  def security_qualification(agent_id, source) do
+    case Application.get_env(@app, :security_qualification_profiles, %{}) do
+      profiles when is_map(profiles) ->
+        case Map.fetch(profiles, agent_id) do
+          :error -> :unqualified
+          {:ok, sources} when is_map(sources) -> Map.get(sources, source, :invalid)
+          _ -> :invalid
+        end
+
+      _ ->
+        :invalid
+    end
+  end
+
+  @doc "Runtime-only upward seam to the deployed Agent eval producer's identity."
+  def security_qualification_producer,
+    do:
+      Application.get_env(
+        @app,
+        :security_qualification_producer,
+        Module.concat(["Arbor", "Agent"])
+      )
+
   @doc "Source-owned private conversation memory route; unset means explicitly disabled."
   def private_conversation_memory,
     do: Application.get_env(@app, :private_conversation_memory, false)

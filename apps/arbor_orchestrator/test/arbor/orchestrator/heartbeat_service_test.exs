@@ -96,6 +96,44 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
     end
   end
 
+  test "security regression: a required qualification refuses before the heartbeat engine starts" do
+    agent_id = "agent_qualification_heartbeat"
+    prior = Application.get_env(:arbor_orchestrator, :security_qualification_profiles)
+
+    Application.put_env(:arbor_orchestrator, :security_qualification_profiles, %{
+      agent_id => %{heartbeat: %{run_id: "missing_heartbeat_qualification"}}
+    })
+
+    on_exit(fn ->
+      if is_nil(prior),
+        do: Application.delete_env(:arbor_orchestrator, :security_qualification_profiles),
+        else: Application.put_env(:arbor_orchestrator, :security_qualification_profiles, prior)
+    end)
+
+    test_pid = self()
+
+    {:ok, pid} =
+      start_test_service(
+        agent_id: agent_id,
+        engine_runner: fn _graph, _opts ->
+          send(test_pid, :unqualified_heartbeat_dispatched)
+          {:ok, %{final_outcome: %{status: :success}, context: %{}}}
+        end
+      )
+
+    try do
+      send(pid, :heartbeat)
+      assert eventually(fn -> HeartbeatService.get_state(pid).heartbeat_failures > 0 end)
+
+      assert HeartbeatService.get_state(pid).heartbeat_last_error ==
+               {:unauthorized, :security_qualification_required}
+
+      refute_receive :unqualified_heartbeat_dispatched
+    after
+      GenServer.stop(pid)
+    end
+  end
+
   describe "heartbeat_result handling" do
     test "the interval is a gap between beats: no timer while in flight, timer armed on completion" do
       # Regression (2026-08-27): the next beat used to be scheduled at the START

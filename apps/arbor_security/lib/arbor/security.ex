@@ -141,6 +141,39 @@ defmodule Arbor.Security do
   @doc "Durably admit the effect inside the current trusted invocation before starting it."
   def admit_invocation_effect, do: Arbor.Security.InvocationAudit.admit_effect()
 
+  @doc "Read effective security enforcement for qualification; uses frozen owner policy where applicable."
+  def execution_policy_snapshot do
+    modules = Application.spec(:arbor_security, :modules) || []
+
+    implementations =
+      Enum.map(Enum.sort(modules), fn module ->
+        Code.ensure_loaded!(module)
+        {Atom.to_string(module), Base.encode16(module.module_info(:md5), case: :lower)}
+      end)
+
+    sink = Config.invocation_audit_sink()
+
+    audit_identity =
+      if is_atom(sink) and Code.ensure_loaded?(sink) and
+           function_exported?(sink, :security_audit_identity, 0),
+         do: sink.security_audit_identity(),
+         else: {:error, :invocation_audit_unavailable}
+
+    %{
+      identity_verification: Config.identity_verification_enabled?(),
+      capability_signing: Config.capability_signing_required?(),
+      constraint_enforcement: Config.constraint_enforcement_enabled?(),
+      delegation_verification: Config.delegation_chain_verification_enabled?(),
+      egress_enforcing: EgressGate.enforcing?(),
+      uri_registry_enforcement:
+        Application.get_env(:arbor_security, :uri_registry_enforcement, true),
+      invocation_audit: Config.invocation_audit_mode(),
+      invocation_sink: sink,
+      audit_identity: audit_identity,
+      implementations: implementations
+    }
+  end
+
   @doc """
   Authorize a SELF-scoped resource, letting a capability on the canonical
   parent cover the principal's own child resource.
