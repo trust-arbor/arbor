@@ -148,9 +148,10 @@ defmodule Arbor.Trust do
     with {:ok, host} <- Arbor.Trust.PolicyHost.snapshot(),
          {:ok, profile} <- Manager.get_trust_profile(agent_id) do
       modules = Application.spec(:arbor_trust, :modules) || []
+      policy_module = Arbor.Trust.Config.policy_module()
 
       implementations =
-        Enum.map(Enum.sort(modules), fn module ->
+        Enum.map(Enum.sort(Enum.uniq([policy_module | modules])), fn module ->
           Code.ensure_loaded!(module)
           {Atom.to_string(module), Base.encode16(module.module_info(:md5), case: :lower)}
         end)
@@ -158,6 +159,7 @@ defmodule Arbor.Trust do
       {:ok,
        %{
          host: host,
+         policy_module: Atom.to_string(policy_module),
          policy_enforcer_enabled: Arbor.Trust.Config.policy_enforcer_enabled?(),
          approval_guard_enabled: Arbor.Trust.Config.approval_guard_enabled?(),
          profile:

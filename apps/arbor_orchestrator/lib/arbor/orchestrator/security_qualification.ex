@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
   Profiles without a configured requirement remain explicitly unqualified.
   """
   alias Arbor.Orchestrator.{ActionsExecutor, Config}
+  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Session.{ContextBuilder, TurnEgress}
   alias Arbor.Orchestrator.SecurityQualification.EvidenceCore
   alias Arbor.Persistence
@@ -82,6 +83,13 @@ defmodule Arbor.Orchestrator.SecurityQualification do
          true <- containment["supported"] == true,
          {:ok, tools} <- tool_manifest(state),
          {:ok, workflow_digest} <- term_digest(graph),
+         {:ok, action_catalog} <- ActionCatalog.snapshot(),
+         {:ok, {_manifest, execution_digest}} <-
+           ExecutionManifest.build(
+             graph,
+             action_catalog,
+             String.replace_prefix(workflow_digest, "sha256:", "")
+           ),
          {:ok, config_digest} <-
            term_digest(%{
              session: select_config(config),
@@ -113,6 +121,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
         "permissions" => permissions,
         "configuration_digest" => config_digest,
         "workflow_digest" => workflow_digest,
+        "execution_manifest_digest" => execution_digest,
         "policy_digest" => policy_digest,
         "skills_digest" => skill_digest,
         "tools" => tools,
