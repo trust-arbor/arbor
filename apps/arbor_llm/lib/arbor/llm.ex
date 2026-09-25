@@ -28,6 +28,8 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.Retry
 
+  alias Arbor.LLM.StockToolTransport
+
   alias Arbor.LLM.Tool
 
   @eval_subjects %{
@@ -62,6 +64,15 @@ defmodule Arbor.LLM do
   }
 
   @type generate_opts :: keyword()
+
+  @doc """
+  Observe the current stock tool-capable Client/ReqLLM composition without inference.
+  Custom adapters, middleware, and plug pipelines are refused. This is a current
+  source-owned configuration identity, not proof that a provider request occurred.
+  Callers record the actual request outcome separately and recheck after a run.
+  """
+  def stock_tool_transport_identity(provider),
+    do: StockToolTransport.identity(provider)
 
   @doc "Returns an LLM-owned eval subject from the closed symbolic catalog."
   @spec eval_subject(String.t()) :: module() | nil
