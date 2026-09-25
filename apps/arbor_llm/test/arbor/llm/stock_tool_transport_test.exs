@@ -37,7 +37,7 @@ defmodule Arbor.LLM.StockToolTransportTest do
     })
 
     Application.put_env(:arbor_orchestrator, :lm_studio, base_url: "http://127.0.0.1:1234/v1")
-    Client.set_default_client(Client.new())
+    Client.set_default_client(Client.new(adapters: %{"lm_studio" => LLM.Adapter.ReqLLM}))
 
     on_exit(fn ->
       Client.set_default_client(old_client)
@@ -75,7 +75,7 @@ defmodule Arbor.LLM.StockToolTransportTest do
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
     Client.set_default_client(Client.new(middleware: [fn _, _ -> {:ok, :fake} end]))
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
-    Client.set_default_client(Client.new())
+    Client.set_default_client(Client.new(adapters: %{"lm_studio" => LLM.Adapter.ReqLLM}))
     Application.put_env(:arbor_llm, :pipeline, [Plugs.Dispatch, Plugs.ResponseLimit])
     assert {:error, _} = LLM.stock_tool_transport_identity("lmstudio")
   end

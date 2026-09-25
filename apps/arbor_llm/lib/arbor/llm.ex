@@ -28,6 +28,8 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.Retry
 
+  alias Arbor.LLM.StockToolTransport
+
   alias Arbor.LLM.Tool
 
   @eval_subjects %{
@@ -70,7 +72,7 @@ defmodule Arbor.LLM do
   Callers record the actual request outcome separately and recheck after a run.
   """
   def stock_tool_transport_identity(provider),
-    do: Arbor.LLM.StockToolTransport.identity(provider)
+    do: StockToolTransport.identity(provider)
 
   @doc "Returns an LLM-owned eval subject from the closed symbolic catalog."
   @spec eval_subject(String.t()) :: module() | nil

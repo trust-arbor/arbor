@@ -1,7 +1,7 @@
 defmodule Arbor.LLM.StockToolTransport do
   @moduledoc false
-  alias Arbor.LLM.{Client, Config, ProviderRegistry, Request}
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
+  alias Arbor.LLM.{Client, Config, ProviderRegistry, Request}
 
   @pipeline [
     Arbor.LLM.Plugs.ResponseLimit,

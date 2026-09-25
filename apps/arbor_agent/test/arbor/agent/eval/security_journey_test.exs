@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.Eval.SecurityJourneyTest do
   use Arbor.Persistence.DatabaseCase, async: false
+  alias Arbor.Agent.Eval.SecurityJourney.Executor, as: JourneyExecutor
   alias Arbor.Contracts.Security.Identity
   alias Arbor.{Historian, LLM, Persistence, Security}
   @moduletag :database
@@ -27,7 +28,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
 
     Application.put_env(:arbor_llm, :tool_invocation_auditor, Security)
     Application.delete_env(:arbor_llm, :pipeline)
-    LLM.Client.set_default_client(LLM.Client.new())
+    LLM.Client.set_default_client(LLM.Client.new(adapters: %{"lm_studio" => LLM.Adapter.ReqLLM}))
     {:ok, owner} = Identity.generate(name: "synthetic-journey")
     :ok = Security.register_identity(Identity.public_only(owner))
     :ok = Security.store_signing_key(owner.agent_id, owner.private_key)
@@ -35,7 +36,9 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     {:ok, proof} =
       Security.build_signing_authority_acquisition_proof(
         owner.agent_id,
-        owner.private_key, purpose: :security_journey)
+        owner.private_key,
+        purpose: :security_journey
+      )
 
     {:ok, authority} = Security.open_signing_authority(proof)
 
@@ -46,7 +49,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
     fixture = Arbor.Agent.security_qualification_fixture()
     path = Path.join(directory, fixture["filename"])
     File.write!(path, fixture["content"])
-    {:ok, resource} = Security.authorization_resource_uri("arbor://fs/read", file_path: path)
+    resource = Security.authorization_resource_uri("arbor://fs/read", file_path: path)
 
     {:ok, cap} =
       Security.grant(
@@ -97,6 +100,15 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
            )
 
     refute Enum.any?(events, &(&1.data["stage"] == "effect_admitted"))
+    # Trust can refuse an absent cap before Security.authorize. Retain only the
+    # authorization records actually observed; the action outcome proves refusal.
+    decisions =
+      events
+      |> Enum.filter(&(&1.data["stage"] == "authorization"))
+      |> Enum.map(&Map.take(&1.data, ["decision", "checked_principal_id", "resource_digest"]))
+
+    assert export["authorization_decisions"] == decisions
+    assert export["refusal_boundary"] == "action"
     assert observations["revocation"]["future_read"]["refused"]
     assert observations["authority_closure"]["future_signing_refused"]
     assert result.metadata["artifact_digest"] == Persistence.eval_config_fingerprint(observations)
@@ -182,9 +194,14 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
              run(c, live: true)
   end
 
+  test "an unadvertised live tool cannot disappear from the acceptance grade", c do
+    server(c, :unknown)
+    assert {:ok, %{passed: false, live_model_status: "incomplete"}} = run(c, live: true)
+  end
+
   test "the private executor cannot be invoked by passing model-owned context", c do
     assert {:error, :journey_scope_required} =
-             Arbor.Agent.Eval.SecurityJourney.Executor.execute(
+             JourneyExecutor.execute(
                "file_read",
                %{"path" => c.path},
                Path.dirname(c.path),
@@ -260,6 +277,9 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
 
             index == 0 ->
               {"read_call", "file_read", %{"path" => c.path}}
+
+            index == 1 and mode == :unknown ->
+              {"unexpected_call", "security_grant", %{"resource" => "arbor://**"}}
 
             index == 1 and mode == :export ->
               {"export_call", "web_browse", %{"url" => c.fixture["export_url"]}}

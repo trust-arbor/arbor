@@ -6,9 +6,10 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
   Authority closure proves future signing refusal, not in-flight cancellation.
   The supplied profile is evidence input; operator approval remains separate.
   """
-  alias Arbor.Agent.Eval.SecurityJourneyCore, as: Core
-  alias Arbor.Contracts.Security.{AuthContext, Capability, Taint}
   alias Arbor.{Actions, Historian, LLM, Persistence, Security}
+  alias Arbor.Agent.Eval.SecurityJourneyCore, as: Core
+  alias Arbor.Common.Sanitizers
+  alias Arbor.Contracts.Security.{AuthContext, Capability, Taint}
 
   @producer "Arbor.Agent.Eval.SecurityJourney"
   @option_keys ~w(agent_id signing_authority read_capability_id fixture_path live timeout_ms)a
@@ -113,7 +114,8 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
   end
 
   defp read_cap(principal, path, id) do
-    with {:ok, uri} <- Security.authorization_resource_uri("arbor://fs/read", file_path: path),
+    with uri when is_binary(uri) <-
+           Security.authorization_resource_uri("arbor://fs/read", file_path: path),
          {:ok, caps} <- Security.list_capabilities(principal),
          cap when not is_nil(cap) <- Enum.find(caps, &(&1.id == id and &1.resource_uri == uri)),
          {:ok, :authorized} <-
@@ -181,13 +183,14 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
     start = System.monotonic_time(:millisecond)
 
     with {:ok, delivery, _} <- invoke(setup, run_id, "file_read", %{path: setup.path}),
-         true <- delivery["delivered"],
+         :ok <- require_delivery(delivery),
          {:ok, export, _} <- invoke(setup, run_id, "web_browse", %{url: fixture()["export_url"]}),
          live = live_phase(setup, run_id),
          :ok <- Security.revoke(setup.read_cap.id),
          {:ok, future, _} <- invoke(setup, run_id, "file_read", %{path: setup.path}),
-         :ok <- Security.close_signing_authority(setup.authority),
-         future_sign = Security.sign_with_authority(setup.authority, "arbor://fs/read") do
+         :ok <- Security.close_signing_authority(setup.authority) do
+      future_sign = Security.sign_with_authority(setup.authority, "arbor://fs/read")
+
       observations = %{
         "schema" => Core.schema(),
         "profile_fingerprint" => setup.profile.fingerprint,
@@ -211,7 +214,18 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
 
       persist_result(setup, run_id, observations, System.monotonic_time(:millisecond) - start)
     else
-      _ -> fail_run(run_id, :journey_incomplete)
+      {:error, {:fixture_not_delivered, observation}} ->
+        _ =
+          Persistence.compare_and_set_eval_run_status(run_id, "running", %{
+            status: "failed",
+            error: "fixture_not_delivered",
+            metadata: %{"delivery" => observation}
+          })
+
+        {:error, {:fixture_not_delivered, run_id, observation}}
+
+      _ ->
+        fail_run(run_id, :journey_incomplete)
     end
   rescue
     _ -> fail_run(run_id, :journey_interrupted)
@@ -219,21 +233,21 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
     _, _ -> fail_run(run_id, :journey_interrupted)
   end
 
+  defp require_delivery(%{"delivered" => true}), do: :ok
+  defp require_delivery(observation), do: {:error, {:fixture_not_delivered, observation}}
+
   defp invoke(setup, run_id, name, params) do
     {:ok, module} = Actions.name_to_module(name)
     resource = Actions.canonical_uri_for(module, params)
 
-    with {:ok, signed} <- Security.sign_with_authority(setup.authority, resource) do
+    with {:ok, taint} <- parameter_taint(setup, name),
+         {:ok, signed} <- Security.sign_with_authority(setup.authority, resource) do
       context = %{
         signed_request: signed,
         auth_context: AuthContext.new(setup.principal, signed_request: signed),
         execution_id: run_id,
         workspace: Path.dirname(setup.path),
-        taint:
-          if(name == "web_browse",
-            do: %Taint{level: :untrusted, sensitivity: :internal},
-            else: :trusted
-          )
+        taint: taint
       }
 
       receipt =
@@ -250,10 +264,30 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
     end
   end
 
+  defp parameter_taint(setup, "file_read") do
+    with {:ok, path, taint} <-
+           Sanitizers.sanitize(
+             :path_traversal,
+             setup.path,
+             %Taint{level: :trusted, sensitivity: :internal},
+             allowed_root: Path.dirname(setup.path)
+           ),
+         true <- path == setup.path do
+      {:ok, taint}
+    else
+      _ -> {:error, :fixture_path_changed}
+    end
+  end
+
+  defp parameter_taint(_setup, "web_browse"),
+    do: {:ok, %Taint{level: :untrusted, sensitivity: :internal}}
+
   defmodule Executor do
     @moduledoc false
+    alias Arbor.Agent.Eval.SecurityJourney
+
     def execute(name, args, _workdir, opts),
-      do: Arbor.Agent.Eval.SecurityJourney.dispatch_tool(name, args, opts)
+      do: SecurityJourney.dispatch_tool(name, args, opts)
   end
 
   @active {__MODULE__, :active}
@@ -313,6 +347,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
 
     authorizer = fn current, _taint ->
       if current.provider == request.provider and current.model == request.model and
+           current.tools == request.tools and
            LLM.Client.default_client() == client and
            LLM.stock_tool_transport_identity(current.provider) == {:ok, setup.transport},
          do: :allow,
@@ -340,6 +375,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
               tool_executor: Executor,
               workdir: Path.dirname(setup.path),
               max_turns: 3,
+              tool_taint: %Taint{level: :untrusted, sensitivity: :internal},
               llm_call_authorizer: authorizer,
               max_response_bytes: 65_536,
               req_http_options: [retry: false, redirect: false]
@@ -354,7 +390,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
 
     observations = collect(reference, [])
     stable = LLM.stock_tool_transport_identity(projection["provider"]) == {:ok, setup.transport}
-    good_result = match?({:ok, _}, result) and stable
+    good_result = match?({:ok, %{finish_reason: :stop}}, result) and stable
 
     %{
       "status" => Core.live_status(good_result, observations),
