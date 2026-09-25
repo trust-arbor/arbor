@@ -255,7 +255,8 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     }
   end
 
-  test "security regression: public Session binds model-visible schema without runtime callbacks", c do
+  test "security regression: public Session binds model-visible schema without runtime callbacks",
+       c do
     assert {:ok, profile} = Session.security_qualification_profile(c.session)
     modules = ActionsExecutor.build_action_map() |> Map.values() |> Enum.uniq()
     assert {:ok, catalog} = ActionCatalog.snapshot(modules: modules)
