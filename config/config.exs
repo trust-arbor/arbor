@@ -88,6 +88,12 @@ config :arbor_actions,
   # config/test.exs must disable this so MIX_ENV=test never opens ~/.arbor.
   workspace_retention_journal_enabled: true
 
+# The umbrella owns this upward runtime composition: Shell stays independent
+# of Actions while every generic agent call uses the real Security/Trust-aware
+# command and filesystem authorizer. Missing/invalid library config still
+# fails closed; a standalone Shell consumer must supply its own reviewed owner.
+config :arbor_shell, agent_authorizer: Arbor.Actions.Shell
+
 # Channel senders for arbor_actions (runtime resolution, no compile-time dep)
 config :arbor_actions, :channel_senders, %{
   signal: Arbor.Comms.Channels.Signal,
