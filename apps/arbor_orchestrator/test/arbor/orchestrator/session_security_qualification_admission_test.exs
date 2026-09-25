@@ -7,8 +7,12 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
   """
   use Arbor.Persistence.DatabaseCase, async: false
 
+  alias Arbor.Common.ComputeRegistry
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
+  alias Arbor.LLM.Client
   alias Arbor.Orchestrator.Session
+  alias Arbor.Orchestrator.Handlers.{LlmHandler, RoutingHandler}
   alias Arbor.Persistence
   alias Arbor.Security
   alias Arbor.Security.AuditJournalOwner
@@ -29,7 +33,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
          %{"kind" => "admission_test_fixture", "digest" => "sha256:" <> String.duplicate("c", 64)}}
   end
 
-  setup do
+  setup context do
     for {key, value} <- [
           identity_verification: true,
           capability_signing_required: true,
@@ -68,12 +72,15 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     :ok = File.chmod(root, 0o700)
     dot_path = Path.join(root, "turn.dot")
 
+    {compute_branch, compute_purpose} = optional_compute_branch(context)
+
     File.write!(dot_path, """
     digraph QualificationAdmission {
       start [shape=Mdiamond]
       echo [type="transform", transform="identity", source_key="session.input", output_key="session.response"]
       done [shape=Msquare]
       start -> echo -> done
+      #{compute_branch}
     }
     """)
 
@@ -83,6 +90,16 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     endpoint = metadata_server!()
     set_env(:arbor_orchestrator, :lm_studio, base_url: endpoint <> "/v1")
     set_env(:arbor_llm, :lm_studio_base_url, endpoint <> "/v1")
+
+    previous_client = Client.default_client()
+    on_exit(fn -> Client.set_default_client(previous_client) end)
+
+    Client.from_env(
+      adapters: %{"lm_studio" => ReqLLMAdapter},
+      discover_local: false,
+      discover_acp: false
+    )
+    |> Client.set_default_client()
 
     {:ok, identity} = Security.generate_identity(name: "synthetic qualification admission")
     :ok = Security.register_identity(identity)
@@ -146,6 +163,11 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
              Security.audit_journal_status()
 
     assert {:ok, _} = Arbor.LLM.execution_provider_identity("lmstudio", "qualification-model")
+
+    assert {:ok, %{"local_endpoint" => true}} =
+             Arbor.LLM.stock_tool_transport_identity("lmstudio")
+
+    assert {:ok, _} = Security.execution_capability_snapshot(identity.agent_id)
 
     descriptor_failures =
       for module <-
@@ -218,6 +240,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
       run_id: run_id,
       cap: cap,
       journal_supervisor: journal_supervisor,
+      compute_purpose: compute_purpose,
       profile: profile,
       approval_uri: prepared.approval_uri
     }
@@ -302,6 +325,35 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     assert_refused_without_turn(c.session)
   end
 
+  test "security regression: selected Trust policy implementation invalidates prepared evidence",
+       c do
+    before = Session.get_state(c.session)
+    set_env(:arbor_trust, :policy_module, Arbor.Trust.ApprovalContext)
+
+    assert {:error, :security_qualification_required} =
+             Session.prepare_security_qualification(c.session, c.run_id)
+
+    assert Session.get_state(c.session).turn_count == before.turn_count
+    refute_received {:qualification_unexpected_http, _}
+  end
+
+  @tag compute_delegate: true
+  test "security regression: selected compute delegate invalidates prepared evidence", c do
+    assert {:ok, response} = Session.send_message(c.session, "the compute branch stays unused")
+    assert response.content == "the compute branch stays unused"
+    before = Session.get_state(c.session)
+    assert {:ok, LlmHandler} = ComputeRegistry.resolve_stable(c.compute_purpose)
+    :ok = ComputeRegistry.deregister(c.compute_purpose)
+    :ok = ComputeRegistry.register(c.compute_purpose, RoutingHandler)
+    assert {:ok, RoutingHandler} = ComputeRegistry.resolve_stable(c.compute_purpose)
+
+    assert {:error, :security_qualification_required} =
+             Session.prepare_security_qualification(c.session, c.run_id)
+
+    assert Session.get_state(c.session).turn_count == before.turn_count
+    refute_received {:qualification_unexpected_http, _}
+  end
+
   test "security regression: replacing the durable authority journal with ephemeral invalidates qualification",
        c do
     :ok = Supervisor.terminate_child(c.journal_supervisor, AuditJournalOwner)
@@ -338,6 +390,24 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
       end
     end)
   end
+
+  defp optional_compute_branch(%{compute_delegate: true}) do
+    if Process.whereis(ComputeRegistry) == nil, do: start_supervised!(ComputeRegistry)
+    purpose = "qualification_" <> Base.encode16(:crypto.strong_rand_bytes(10), case: :lower)
+    :ok = ComputeRegistry.register(purpose, LlmHandler)
+
+    on_exit(fn ->
+      if Process.whereis(ComputeRegistry), do: ComputeRegistry.deregister(purpose)
+    end)
+
+    {"""
+     dormant [type="compute", purpose="#{purpose}", use_tools="true"]
+     echo -> dormant [condition="context.run_compute=true"]
+     dormant -> done
+     """, purpose}
+  end
+
+  defp optional_compute_branch(_context), do: {"", nil}
 
   # Test lifecycle only: suspend the helper-owned child without deleting its
   # original spec. The test owns a real journal supervisor and private files;
