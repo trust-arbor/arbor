@@ -1060,10 +1060,10 @@ defmodule Arbor.Security.Config do
         [mode: :disabled, reason: :disabled]
 
       {:ephemeral, :none, _root} ->
-        [mode: :ephemeral]
+        [mode: :ephemeral, capacity_profile: :operational]
 
       {:durable, :none, root} when is_binary(root) and byte_size(root) > 0 ->
-        [mode: :durable, root: root]
+        [mode: :durable, root: root, capacity_profile: :operational]
 
       _other ->
         raise ArgumentError, "invalid audit journal snapshot"
@@ -1088,6 +1088,15 @@ defmodule Arbor.Security.Config do
       _invalid ->
         @default_audit_journal_call_timeout_ms
     end
+  end
+
+  @doc false
+  def authority_audit_consumer_name do
+    Application.get_env(
+      @app,
+      :authority_audit_consumer_name,
+      Arbor.Historian.AuthorityAuditPuller
+    )
   end
 
   defp enforcement_toggle(key, default) do

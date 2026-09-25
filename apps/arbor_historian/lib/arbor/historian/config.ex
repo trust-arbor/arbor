@@ -33,6 +33,9 @@ defmodule Arbor.Historian.Config do
 
   @type event_log_target :: %{name: atom(), backend: module(), opts: keyword()}
 
+  @doc false
+  def security_module, do: Application.get_env(@app, :security_module, Arbor.Security)
+
   @spec durable_event_log_target() ::
           {:ok, event_log_target()} | {:error, :durable_unavailable}
   def durable_event_log_target do

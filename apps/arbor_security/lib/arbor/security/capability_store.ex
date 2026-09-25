@@ -24,6 +24,7 @@ defmodule Arbor.Security.CapabilityStore do
   alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore.Serializer
+  alias Arbor.Security.CapabilityMutationAudit
   alias Arbor.Security.AuthorityStore
   alias Arbor.Security.Config
   alias Arbor.Security.RevocationFence
@@ -90,7 +91,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec put(Capability.t()) :: {:ok, :stored} | {:error, term()}
   def put(%Capability{} = cap) do
-    GenServer.call(__MODULE__, {:put, cap})
+    mutation_call({:put, cap})
   end
 
   @doc """
@@ -125,7 +126,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec revoke(String.t()) :: :ok | {:error, :not_found}
   def revoke(capability_id) do
-    GenServer.call(__MODULE__, {:revoke, capability_id})
+    mutation_call({:revoke, capability_id})
   end
 
   @doc """
@@ -133,7 +134,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec revoke_all(String.t()) :: {:ok, non_neg_integer()}
   def revoke_all(principal_id) do
-    GenServer.call(__MODULE__, {:revoke_all, principal_id})
+    mutation_call({:revoke_all, principal_id})
   end
 
   @doc """
@@ -146,7 +147,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec cascade_revoke(String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
   def cascade_revoke(capability_id) do
-    GenServer.call(__MODULE__, {:cascade_revoke, capability_id})
+    mutation_call({:cascade_revoke, capability_id})
   end
 
   @doc """
@@ -156,7 +157,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec increment_usage(String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
   def increment_usage(capability_id) do
-    GenServer.call(__MODULE__, {:increment_usage, capability_id})
+    mutation_call({:increment_usage, capability_id})
   end
 
   @doc """
@@ -167,7 +168,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec revoke_by_session(String.t()) :: {:ok, non_neg_integer()}
   def revoke_by_session(session_id) do
-    GenServer.call(__MODULE__, {:revoke_by_scope, :session_id, session_id})
+    mutation_call({:revoke_by_scope, :session_id, session_id})
   end
 
   @doc """
@@ -178,7 +179,7 @@ defmodule Arbor.Security.CapabilityStore do
   """
   @spec revoke_by_task(String.t()) :: {:ok, non_neg_integer()}
   def revoke_by_task(task_id) do
-    GenServer.call(__MODULE__, {:revoke_by_scope, :task_id, task_id})
+    mutation_call({:revoke_by_scope, :task_id, task_id})
   end
 
   @doc """
@@ -304,7 +305,7 @@ defmodule Arbor.Security.CapabilityStore do
     if Process.whereis(__MODULE__) == nil do
       {:error, :capability_store_unavailable}
     else
-      GenServer.call(__MODULE__, {:acknowledged_put, cap}, acknowledged_call_timeout_ms())
+      mutation_call({:acknowledged_put, cap}, acknowledged_call_timeout_ms())
     end
   rescue
     _ -> {:error, :outcome_unknown}
@@ -336,8 +337,7 @@ defmodule Arbor.Security.CapabilityStore do
     if Process.whereis(__MODULE__) == nil do
       {:error, :capability_store_unavailable}
     else
-      GenServer.call(
-        __MODULE__,
+      mutation_call(
         {:acknowledged_revoke, capability_id},
         acknowledged_call_timeout_ms()
       )
@@ -458,8 +458,7 @@ defmodule Arbor.Security.CapabilityStore do
     if Process.whereis(__MODULE__) == nil do
       {:error, :capability_store_unavailable}
     else
-      GenServer.call(
-        __MODULE__,
+      mutation_call(
         {:acknowledged_revoke, capability_id, fence},
         acknowledged_call_timeout_ms()
       )
@@ -476,6 +475,13 @@ defmodule Arbor.Security.CapabilityStore do
   def acknowledged_revoke(_capability_id, _fence), do: {:error, :invalid_request}
 
   defp acknowledged_call_timeout_ms, do: 5_000
+
+  # Capture provenance before crossing the owner mailbox. Caller metadata and
+  # mutation options never select this identifier; it grants no authority.
+  defp mutation_call(message, timeout \\ 5_000) do
+    correlation = Arbor.Security.current_invocation_id()
+    GenServer.call(__MODULE__, {:audited_mutation, correlation, message}, timeout)
+  end
 
   # Server callbacks
 
@@ -534,6 +540,12 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   @impl true
+  def handle_call({:audited_mutation, correlation, message}, from, state) do
+    CapabilityMutationAudit.with_correlation(correlation, fn ->
+      handle_call(message, from, state)
+    end)
+  end
+
   def handle_call({:put, cap}, _from, state) do
     case migrate_state(state) do
       {:ok, state} ->
@@ -542,6 +554,21 @@ defmodule Arbor.Security.CapabilityStore do
       {:error, reason} ->
         {:stop, reason, {:error, :capability_store_unavailable}, state}
     end
+  end
+
+  def handle_call(:mutation_audit_status, _from, state) do
+    {:reply, {:ok, CapabilityMutationAudit.last_status()}, state}
+  end
+
+  def handle_call(:reconcile_authority_audit, {pid, _tag}, state) do
+    consumer = Config.authority_audit_consumer_name()
+
+    reply =
+      if is_atom(consumer) and not is_nil(consumer) and pid == Process.whereis(consumer),
+        do: CapabilityMutationAudit.reconcile(),
+        else: {:error, :unauthorized_audit_consumer}
+
+    {:reply, reply, state}
   end
 
   @impl true
@@ -944,10 +971,15 @@ defmodule Arbor.Security.CapabilityStore do
 
         case replaced_id do
           nil ->
-            state = add_capability_to_state(state, cap)
-            _ = persist_capability(cap, acknowledged: false)
-            emit_capability_signal(:capability_granted, cap)
-            {:reply, {:ok, :stored}, state}
+            case persist_capability(cap, acknowledged: true) do
+              :ok ->
+                state = add_capability_to_state(state, cap)
+                emit_capability_signal(:capability_granted, cap)
+                {:reply, {:ok, :stored}, state}
+
+              {:error, _} = error ->
+                {:reply, error, state}
+            end
 
           id ->
             existing_cap = Map.fetch!(state.by_id, id)
@@ -987,27 +1019,27 @@ defmodule Arbor.Security.CapabilityStore do
         {:reply, {:error, :not_found}, state}
 
       cap ->
-        state =
-          state
-          |> deindex_resource(cap)
-          |> update_in([:by_id], &Map.delete(&1, capability_id))
-          |> update_in([:by_principal, cap.principal_id], fn ids ->
-            List.delete(ids || [], capability_id)
-          end)
-          |> update_in([:stats, :total_revoked], &(&1 + 1))
+        case delete_persisted_capability(capability_id) do
+          :ok ->
+            next =
+              state
+              |> revoke_capability_ids([capability_id])
+              |> update_in([:stats, :total_revoked], &(&1 + 1))
 
-        delete_persisted_capability(capability_id)
-        emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
-        {:reply, :ok, state}
+            emit_revocation_signal(:capability_revoked, [capability_id], cap.principal_id)
+            {:reply, :ok, next}
+
+          {:error, _} = error ->
+            {:reply, error, state}
+        end
     end
   end
 
   defp exec_revoke_all(principal_id, state) do
-    cap_ids = Map.get(state.by_principal, principal_id, [])
+    requested_ids = Map.get(state.by_principal, principal_id, [])
+    {cap_ids, failed} = delete_capability_ids(requested_ids)
     count = length(cap_ids)
     revoked_caps = Enum.map(cap_ids, &Map.get(state.by_id, &1))
-
-    Enum.each(cap_ids, &delete_persisted_capability/1)
 
     state =
       Enum.reduce(revoked_caps, state, fn
@@ -1020,14 +1052,14 @@ defmodule Arbor.Security.CapabilityStore do
       |> update_in([:by_id], fn by_id ->
         Enum.reduce(cap_ids, by_id, &Map.delete(&2, &1))
       end)
-      |> put_in([:by_principal, principal_id], [])
+      |> put_in([:by_principal, principal_id], requested_ids -- cap_ids)
       |> update_in([:stats, :total_revoked], &(&1 + count))
 
     if count > 0 do
       emit_revocation_signal(:capabilities_revoked_all, cap_ids, principal_id)
     end
 
-    {:reply, {:ok, count}, state}
+    {:reply, reduction_result(count, failed), state}
   end
 
   defp exec_revoke_by_scope(scope_field, scope_value, state) do
@@ -1036,8 +1068,8 @@ defmodule Arbor.Security.CapabilityStore do
       |> Enum.filter(fn {_id, cap} -> Map.get(cap, scope_field) == scope_value end)
       |> Enum.map(fn {id, _cap} -> id end)
 
+    {matching_ids, failed} = delete_capability_ids(matching_ids)
     count = length(matching_ids)
-    Enum.each(matching_ids, &delete_persisted_capability/1)
 
     state =
       state
@@ -1048,7 +1080,7 @@ defmodule Arbor.Security.CapabilityStore do
       emit_revocation_signal(:capabilities_scope_revoked, matching_ids, nil)
     end
 
-    {:reply, {:ok, count}, state}
+    {:reply, reduction_result(count, failed), state}
   end
 
   defp exec_cascade_revoke(capability_id, state) do
@@ -1059,9 +1091,8 @@ defmodule Arbor.Security.CapabilityStore do
       _cap ->
         # Collect all capability IDs to revoke (this one + all children recursively)
         all_ids = collect_cascade_ids(state, [capability_id], [])
+        {all_ids, failed} = delete_capability_ids(all_ids)
         count = length(all_ids)
-
-        Enum.each(all_ids, &delete_persisted_capability/1)
 
         state =
           state
@@ -1070,9 +1101,15 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_cascade_revoked], &(&1 + count))
 
         emit_revocation_signal(:capabilities_cascade_revoked, all_ids, nil)
-        {:reply, {:ok, count}, state}
+        {:reply, reduction_result(count, failed), state}
     end
   end
+
+  defp delete_capability_ids(ids),
+    do: Enum.split_with(ids, &(delete_persisted_capability(&1) == :ok))
+
+  defp reduction_result(count, []), do: {:ok, count}
+  defp reduction_result(count, failed), do: {:error, {:partial_revocation, count, length(failed)}}
 
   defp exec_acknowledged_put(signed_cap, state) do
     # Arm a bounded, fail-closed resource intent BEFORE any potentially
@@ -1435,7 +1472,8 @@ defmodule Arbor.Security.CapabilityStore do
     if expired_ids == [] do
       state
     else
-      Enum.each(expired_ids, &delete_persisted_capability/1)
+      {expired_ids, _failed} = delete_capability_ids(expired_ids)
+      expired_entries = Enum.filter(expired_entries, fn {id, _cap} -> id in expired_ids end)
 
       state
       |> remove_expired_from_resource_index(expired_entries)
@@ -2790,15 +2828,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp acknowledged_cas_insert(%Capability{} = cap) do
     if Process.whereis(@cap_store) do
-      data = Serializer.serialize(cap)
-      record = Record.new(cap.id, data)
-
-      case AuthorityStore.acknowledged_compare_and_swap(
-             cap.id,
-             :not_found,
-             record,
-             name: @cap_store
-           ) do
+      case CapabilityMutationAudit.put(cap, :create) do
         {:ok, _stored} -> {:ok, :inserted}
         {:error, :conflict} -> {:error, :conflict}
         {:error, _reason} -> {:error, :cas_failed}
@@ -2814,11 +2844,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp acknowledged_cas_delete(capability_id, %Record{} = observed) do
     if Process.whereis(@cap_store) do
-      case AuthorityStore.acknowledged_compare_and_delete(
-             capability_id,
-             observed,
-             name: @cap_store
-           ) do
+      case CapabilityMutationAudit.delete(capability_id, observed) do
         :ok -> :ok
         {:error, :conflict} -> {:error, :conflict}
         {:error, _reason} -> {:error, :cas_delete_failed}
@@ -3044,7 +3070,7 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp authoritative_delete_persisted_capability(capability_id) do
     if Process.whereis(@cap_store) do
-      case AuthorityStore.acknowledged_delete(capability_id, name: @cap_store) do
+      case CapabilityMutationAudit.delete(capability_id) do
         :ok ->
           :ok
 
@@ -3076,17 +3102,9 @@ defmodule Arbor.Security.CapabilityStore do
       {:error, reason}
   end
 
-  defp persist_capability(cap, opts) do
+  defp persist_capability(cap, _opts) do
     if Process.whereis(@cap_store) do
-      data = Serializer.serialize(cap)
-      record = Record.new(cap.id, data)
-
-      result =
-        if Keyword.get(opts, :acknowledged, false) do
-          AuthorityStore.acknowledged_put(cap.id, record, name: @cap_store)
-        else
-          AuthorityStore.put(cap.id, record, name: @cap_store)
-        end
+      result = CapabilityMutationAudit.put(cap, :upsert)
 
       case result do
         :ok ->
@@ -3104,9 +3122,7 @@ defmodule Arbor.Security.CapabilityStore do
           {:error, :invalid_persistence_result}
       end
     else
-      if Keyword.get(opts, :acknowledged, false),
-        do: {:error, :capability_store_unavailable},
-        else: :ok
+      {:error, :capability_store_unavailable}
     end
   catch
     _, reason ->
@@ -3115,18 +3131,14 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp delete_persisted_capability(cap_id) do
-    if Process.whereis(@cap_store) do
-      AuthorityStore.delete(cap_id, name: @cap_store)
-    end
-
-    :ok
-  catch
-    _, reason ->
-      Logger.warning("Failed to delete persisted capability #{cap_id}: #{inspect(reason)}")
-      :ok
+    authoritative_delete_persisted_capability(cap_id)
   end
 
   defp restore_from_store(state) do
+    # Reconcile journal facts from authoritative storage only. Never replay a
+    # prepared grant or invent an outcome while storage is unavailable.
+    _ = CapabilityMutationAudit.reconcile()
+
     case Process.whereis(@cap_store) do
       pid when is_pid(pid) ->
         restore_from_available_store(state)

@@ -267,7 +267,7 @@ defmodule Arbor.Security.AuthorityStoreTest do
     assert {:ok, [{"k", ^stored}]} = AuthorityStore.authoritative_entries(name: name)
 
     assert :ok = AuthorityStore.acknowledged_delete("k", name: name)
-    assert :sys.get_state(pid).entries == %{}
+    assert {:ok, {:tombstone, _generation}} = AuthorityStore.authoritative_entry("k", name: name)
 
     assert {:ok, reinserted} =
              AuthorityStore.acknowledged_compare_and_swap(

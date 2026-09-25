@@ -636,7 +636,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
     unique = :erlang.unique_integer([:positive])
 
     %Capability{
-      id: "cap_disclosure_test_#{unique}",
+      id: "cap_" <> token,
       resource_uri: "arbor://egress/disclose/" <> token,
       principal_id: agent_id,
       granted_at: DateTime.utc_now(),

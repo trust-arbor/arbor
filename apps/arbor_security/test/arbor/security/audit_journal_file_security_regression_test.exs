@@ -133,7 +133,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
 
     header =
       @magic <>
-        <<1_000_000::32-big>> <>
+        <<4_194_305::32-big>> <>
         AuditJournalFileCore.genesis_digest() <> AuditJournalFileCore.genesis_digest()
 
     assert byte_size(header) == 72
@@ -150,7 +150,7 @@ defmodule Arbor.Security.AuditJournalFileSecurityRegressionTest do
     path = handle.path
     assert :ok = AuditJournalFile.close(handle)
 
-    residue = @magic <> <<0, 0, 0x81>>
+    residue = @magic <> <<0, 0x40, 1>>
     File.write!(path, residue)
     File.chmod!(path, 0o600)
 

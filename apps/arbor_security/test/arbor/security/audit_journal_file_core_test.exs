@@ -15,10 +15,10 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
   describe "limits and empty consume" do
     test "exposes frozen frame bounds" do
       assert FileCore.header_size() == 72
-      assert FileCore.max_payload_bytes() == 32_768
-      assert FileCore.max_frame_bytes() == 32_840
-      assert FileCore.max_committed_frames() == 48
-      assert FileCore.max_file_bytes() == 1_609_159
+      assert FileCore.max_payload_bytes() == 4_194_304
+      assert FileCore.max_frame_bytes() == 4_194_376
+      assert FileCore.max_committed_frames() == 4096
+      assert FileCore.max_file_bytes() == 21_266_503
       assert byte_size(FileCore.genesis_digest()) == 32
     end
 
@@ -111,8 +111,8 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
   end
 
   describe "oversized declared length" do
-    test "header payload_len=1_000_000 on a 72-byte binary is oversized_frame without a payload" do
-      header = oversized_header(1_000_000)
+    test "header above the snapshot payload bound is oversized_frame without a payload" do
+      header = oversized_header(4_194_305)
       assert byte_size(header) == 72
       assert FileCore.decode_header(header) == {:error, :oversized_frame}
 
@@ -123,8 +123,8 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
                {:error, :oversized_frame}
     end
 
-    test "payload_len=32769 header is oversized_frame" do
-      suffix = @magic <> <<32_769::32-big>>
+    test "payload_len=4194305 header is oversized_frame" do
+      suffix = @magic <> <<4_194_305::32-big>>
 
       assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) ==
                {:error, :oversized_frame}
@@ -133,7 +133,7 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
   describe "incomplete length prefix" do
     test "impossible 7-byte length prefix is oversized_frame not torn" do
-      suffix = @magic <> <<0, 0, 0x81>>
+      suffix = @magic <> <<0, 0x40, 1>>
       assert byte_size(suffix) == 7
 
       assert FileCore.classify_suffix(suffix, FileCore.genesis_digest()) ==
@@ -145,7 +145,7 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
 
     test "impossible 5-byte and 6-byte length prefixes are oversized_frame" do
       five = @magic <> <<1>>
-      six = @magic <> <<0, 1>>
+      six = @magic <> <<0, 0x41>>
 
       assert FileCore.classify_suffix(five, FileCore.genesis_digest()) ==
                {:error, :oversized_frame}
@@ -699,7 +699,9 @@ defmodule Arbor.Security.AuditJournalFileCoreTest do
                FileCore.classify_source_reproof({:error, :digest_mismatch}, :sync_failed)
 
       assert {:error, :malformed} = FileCore.classify_source_reproof(:ok, "sync_failed")
-      assert {:error, :malformed} = FileCore.classify_source_reproof({:error, "eio"}, :sync_failed)
+
+      assert {:error, :malformed} =
+               FileCore.classify_source_reproof({:error, "eio"}, :sync_failed)
     end
 
     test "encode_compacted returns malformed for snapshots through canonical_snapshot_bytes" do

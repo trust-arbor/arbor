@@ -13,8 +13,8 @@ defmodule Arbor.Security.AuditJournalOwner do
   and `:closed` poison as `{:not_committed, :source_invalid}`.
   `{:publish_uncertain, _}` poisons as `{:commit_uncertain, reason}`.
 
-  Not a generic store. Historian delivery and grant/revoke wiring are later
-  slices.
+  Not a generic store. CapabilityStore prepares and observes mutations; the
+  registered Historian consumer acknowledges exact durable event content.
   """
 
   use GenServer
@@ -22,10 +22,11 @@ defmodule Arbor.Security.AuditJournalOwner do
   alias Arbor.Security.AuditJournalCore
   alias Arbor.Security.AuditJournalFile
   alias Arbor.Security.Config
+  alias Arbor.Security.Contracts.AuditJournal
 
   @allowed_opts if(Mix.env() == :test,
-                  do: [:mode, :root, :reason, :name],
-                  else: [:mode, :root, :reason]
+                  do: [:mode, :root, :reason, :name, :capacity_profile],
+                  else: [:mode, :root, :reason, :capacity_profile]
                 )
   @disabled_reasons [:disabled, :activation_only]
 
@@ -67,6 +68,23 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   @spec pending_operations() :: {:ok, [map()]} | {:error, :journal_unavailable}
   def pending_operations, do: do_query(__MODULE__, :pending_operations)
+
+  @doc false
+  def prepare(intent), do: safe_call(__MODULE__, {:prepare, intent}, :append)
+
+  @doc false
+  def observe(operation_id, observation),
+    do: safe_call(__MODULE__, {:observe, operation_id, observation}, :append)
+
+  @doc false
+  def pending_intents, do: do_query(__MODULE__, :pending_intents)
+
+  @doc false
+  def delivery_batch, do: do_query(__MODULE__, :delivery_batch)
+
+  @doc false
+  def acknowledge_delivery(id, digest),
+    do: safe_call(__MODULE__, {:acknowledge_delivery, id, digest}, :append)
 
   if Mix.env() == :test do
     @doc false
@@ -119,8 +137,8 @@ defmodule Arbor.Security.AuditJournalOwner do
      )}
   end
 
-  def init(%{mode: :ephemeral}) do
-    {:ok, core} = AuditJournalCore.new()
+  def init(%{mode: :ephemeral, capacity_profile: profile}) do
+    {:ok, core} = AuditJournalCore.new(profile)
 
     {:ok,
      owner_state(
@@ -134,8 +152,12 @@ defmodule Arbor.Security.AuditJournalOwner do
      )}
   end
 
-  def init(%{mode: :durable, root: root}) do
-    case AuditJournalFile.open(root: root) do
+  def init(%{mode: :durable, root: root, capacity_profile: profile}) do
+    opened =
+      with {:ok, handle} <- AuditJournalFile.open(root: root),
+           do: AuditJournalFile.ensure_capacity_profile(handle, profile)
+
+    case opened do
       {:ok, handle} ->
         torn? = handle.torn_tail != nil
 
@@ -189,6 +211,77 @@ defmodule Arbor.Security.AuditJournalOwner do
     {:reply, build_pending_operations(state), state}
   end
 
+  def handle_call(:pending_intents, _from, state) do
+    {:reply, {:ok, AuditJournalCore.pending_intents(state.core)}, state}
+  end
+
+  def handle_call(:delivery_batch, from, state) do
+    reply =
+      if authorized_consumer?(from),
+        do: {:ok, AuditJournalCore.delivery_batch(state.core)},
+        else: {:error, :unauthorized_audit_consumer}
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:acknowledge_delivery, id, digest}, from, state) do
+    cond do
+      not authorized_consumer?(from) ->
+        {:reply, {:error, :unauthorized_audit_consumer}, state}
+
+      not AuditJournalCore.acknowledgement_matches?(state.core, id, digest) ->
+        {:reply, {:error, :audit_content_conflict}, state}
+
+      true ->
+        case AuditJournalCore.operation(state.core, id) do
+          {:ok, %{"status" => "delivered"}} -> {:reply, {:ok, :idempotent}, state}
+          _ -> handle_call({:append, mutation_record(id, "delivered", timestamp())}, from, state)
+        end
+    end
+  end
+
+  def handle_call({:prepare, raw}, from, state) do
+    case AuditJournal.admit_intent(raw) do
+      {:ok, intent} -> prepare_admitted(intent, from, state)
+      _ -> {:reply, {:error, :malformed}, state}
+    end
+  end
+
+  def handle_call({:observe, operation_id, observation}, from, state)
+      when observation == :applied or
+             observation in [
+               {:rejected, "before_mismatch"},
+               {:rejected, "identity_conflict"},
+               {:rejected, "not_found"},
+               {:rejected, "cas_conflict"}
+             ] do
+    case AuditJournalCore.operation(state.core, operation_id) do
+      {:ok, %{"intent" => intent, "status" => "prepared"}} ->
+        {type, data} =
+          case observation do
+            :applied ->
+              {"effect_applied",
+               %{"kind" => "applied", "after_fingerprint" => intent["after_fingerprint"]}}
+
+            {:rejected, reason} ->
+              {"effect_rejected", %{"kind" => "rejected", "reason" => reason}}
+          end
+
+        record = mutation_record(operation_id, type, timestamp()) |> Map.put("observation", data)
+        handle_call({:append, record}, from, state)
+
+      {:ok, %{"status" => status}}
+      when status in ["effect_applied", "delivered"] and observation == :applied ->
+        {:reply, {:ok, :idempotent}, state}
+
+      _ ->
+        {:reply, {:error, :out_of_order}, state}
+    end
+  end
+
+  def handle_call({:observe, _id, _observation}, _from, state),
+    do: {:reply, {:error, :malformed}, state}
+
   if Mix.env() == :test do
     @impl true
     def handle_call({:__test_inject__, :clear}, _from, state) do
@@ -235,6 +328,25 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   defp apply_durable_append(state, raw) do
     finish_durable_append(AuditJournalFile.append(state.handle, raw), state, raw, :first)
+  end
+
+  defp timestamp, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  defp authorized_consumer?({pid, _tag}) do
+    case Config.authority_audit_consumer_name() do
+      name when is_atom(name) and not is_nil(name) -> pid == Process.whereis(name)
+      _ -> false
+    end
+  end
+
+  defp mutation_record(operation_id, type, occurred_at) do
+    %{
+      "version" => 1,
+      "kind" => "arbor.security.authority_mutation_record.v1",
+      "record_type" => type,
+      "operation_id" => operation_id,
+      "occurred_at" => occurred_at
+    }
   end
 
   defp finish_durable_append({:ok, handle}, state, _raw, _phase) do
@@ -351,6 +463,30 @@ defmodule Arbor.Security.AuditJournalOwner do
     }
   end
 
+  defp prepare_admitted(intent, from, state) do
+    case AuditJournalCore.operation(state.core, intent["operation_id"]) do
+      {:ok, %{"intent" => original, "status" => status}} ->
+        {:reply, {:ok, original, status}, state}
+
+      {:ok, _terminal} ->
+        {:reply, {:error, :operation_terminal}, state}
+
+      :error ->
+        prepared = mutation_record(intent["operation_id"], "prepared", intent["prepared_at"])
+
+        {:reply, reply, next} =
+          handle_call({:append, Map.put(prepared, "intent", intent)}, from, state)
+
+        result =
+          case reply do
+            {:ok, _} -> {:ok, intent, "prepared"}
+            error -> error
+          end
+
+        {:reply, result, next}
+    end
+  end
+
   defp build_status(state) do
     case core_pending_summary(state) do
       {:ok, summary} ->
@@ -449,9 +585,13 @@ defmodule Arbor.Security.AuditJournalOwner do
 
   defp admit_boot_opts(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
+    profile = Keyword.get(opts, :capacity_profile, :small)
 
-    if is_atom(name) do
-      admit_mode(opts, name)
+    if is_atom(name) and profile in [:small, :operational] do
+      case admit_mode(opts, name) do
+        {:ok, boot} -> {:ok, Map.put(boot, :capacity_profile, profile)}
+        error -> error
+      end
     else
       {:error, :invalid_opts}
     end

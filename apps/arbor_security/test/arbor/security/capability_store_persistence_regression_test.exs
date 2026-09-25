@@ -55,6 +55,38 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.DeleteFailingJ
 
   @impl true
   def exists?(key, opts \\ []), do: JSONFile.exists?(key, opts)
+
+  defdelegate authoritative_entry(key, opts), to: JSONFile
+  defdelegate durability_class(opts), to: JSONFile
+
+  def compare_and_create(key, expected, value, opts),
+    do:
+      with_failure(@put_failures_key, :injected_put_failure, fn ->
+        JSONFile.compare_and_create(key, expected, value, opts)
+      end)
+
+  def compare_and_swap(key, expected, value, opts),
+    do:
+      with_failure(@put_failures_key, :injected_put_failure, fn ->
+        JSONFile.compare_and_swap(key, expected, value, opts)
+      end)
+
+  def compare_and_delete(key, expected, opts),
+    do:
+      with_failure(@delete_failures_key, :injected_delete_failure, fn ->
+        JSONFile.compare_and_delete(key, expected, opts)
+      end)
+
+  defp with_failure(key, reason, effect) do
+    case :persistent_term.get(key, 0) do
+      count when count > 0 ->
+        :persistent_term.put(key, count - 1)
+        {:error, reason}
+
+      _ ->
+        effect.()
+    end
+  end
 end
 
 defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest.CasUnsupportedJSONFile do
@@ -103,6 +135,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
   alias Arbor.Security.Config
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Store.JSONFile
+  alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestBootstrap
 
   @tag :fast
@@ -173,7 +206,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     DeleteFailingJSONFile.fail_deletes(1)
 
-    assert {:error, {:capability_replacement_failed, :outcome_unknown}} =
+    assert {:error, {:capability_replacement_failed, :conflict}} =
              Security.grant(principal: principal_id, resource: resource_uri)
 
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
@@ -195,8 +228,13 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
     original_id = original.id
     DeleteFailingJSONFile.fail_puts(1)
 
-    assert {:error, {:capability_replacement_failed, :outcome_unknown}} =
-             CapabilityStore.put(original)
+    # An unchanged record is now correctly idempotent; change the signed body
+    # so this fixture still reaches the exact replacement CAS.
+    changed = %{original | metadata: %{replacement_fixture: true}}
+    {:ok, changed} = SystemAuthority.sign_capability(changed)
+
+    assert {:error, {:capability_replacement_failed, :conflict}} =
+             CapabilityStore.put(changed)
 
     assert {:ok, [%{id: ^original_id}]} = Security.list_capabilities(principal_id)
 
@@ -220,7 +258,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     result = Security.grant(principal: principal_id, resource: resource_uri)
     assert {:error, {:capability_replacement_outcome_unknown, details}} = result
-    assert details.original == :outcome_unknown
+    assert details.original == :conflict
 
     assert {:ok, persisted_ids} = AuthorityStore.authoritative_list(name: @capability_store)
     assert original_id in persisted_ids
@@ -417,9 +455,14 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
       assert {:error, :not_found} =
                AuthorityStore.authoritative_get(det_id, name: @capability_store)
 
-      # An ordinary (non-CAS) cap seeds live + durable; its acknowledged revoke
-      # also fails closed on the CAS-unsupported backend without evicting live.
-      {:ok, seeded} = Security.grant(principal: principal, resource: resource)
+      # Both public creation lanes require exact mutation support. Seed a
+      # historical signed record through the real JSON backend, then reload it
+      # under the deliberately unsupported adapter to exercise the revoke gate.
+      assert {:error, _} = Security.grant(principal: principal, resource: resource)
+      {:ok, seeded} = Capability.new(principal_id: principal, resource_uri: resource)
+      {:ok, seeded} = SystemAuthority.sign_capability(seeded)
+      seed_durable_capabilities!(backend_dir, seeded, 1)
+      restart_capability_store()
       assert {:error, :outcome_unknown} = Security.acknowledged_revoke(seeded.id)
 
       assert {:ok, :authorized} =
@@ -617,7 +660,7 @@ defmodule Arbor.Security.CapabilityStorePersistenceRegressionTest do
 
     filler_count = total_count - 1
 
-    for i <- 1..filler_count do
+    for i <- 1..filler_count//1 do
       id = "cap_hydrate_filler_#{i}"
       principal = "agent_capability_store_hydrate_filler_#{i}"
       resource = "arbor://fs/read/capability-store-hydrate-filler-#{i}"

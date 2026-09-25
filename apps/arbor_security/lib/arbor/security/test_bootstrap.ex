@@ -71,9 +71,9 @@ defmodule Arbor.Security.TestBootstrap do
       Arbor.Security.SigningAuthorityStateOwner,
       Arbor.Security.SigningAuthorityBroker,
       Arbor.Security.Constraint.RateLimiter,
+      Arbor.Security.AuditJournalOwner,
       Arbor.Security.CapabilityStore,
       Arbor.Security.Reflex.Registry,
-      Arbor.Security.AuditJournalOwner,
       Arbor.Security.DeliveryReceiptBroker
     ]
 
@@ -306,10 +306,10 @@ defmodule Arbor.Security.TestBootstrap do
           {Arbor.Security.SigningAuthorityStateOwner, broker_token: token},
           {Arbor.Security.SigningAuthorityBroker, state_owner_token: token},
           {Arbor.Security.Constraint.RateLimiter, []},
-          {Arbor.Security.CapabilityStore, []},
-          {Arbor.Security.Reflex.Registry, []},
           {Arbor.Security.AuditJournalOwner,
            Arbor.Security.Config.audit_journal_start_opts(snapshot)},
+          {Arbor.Security.CapabilityStore, []},
+          {Arbor.Security.Reflex.Registry, []},
           {Arbor.Security.DeliveryReceiptBroker, []}
         ]
         |> Enum.map(&Supervisor.child_spec(&1, []))

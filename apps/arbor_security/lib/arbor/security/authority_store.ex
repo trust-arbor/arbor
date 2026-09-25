@@ -57,6 +57,18 @@ defmodule Arbor.Security.AuthorityStore do
   def authoritative_get(key, opts),
     do: GenServer.call(store_name!(opts), {:authoritative_get, key})
 
+  @doc false
+  def authoritative_entry(key, opts),
+    do: GenServer.call(store_name!(opts), {:authoritative_entry, key})
+
+  @doc false
+  def acknowledged_compare_and_create(key, expected, replacement, opts),
+    do:
+      GenServer.call(
+        store_name!(opts),
+        {:acknowledged_compare_and_create, key, expected, replacement}
+      )
+
   @spec authoritative_list(keyword()) :: {:ok, [String.t()]} | {:error, atom()}
   def authoritative_list(opts),
     do: GenServer.call(store_name!(opts), {:authoritative_list, nil})
@@ -141,6 +153,20 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp handle_authoritative_call({:authoritative_get, key}, _from, state) do
     {:reply, get_record(state, key), state}
+  end
+
+  defp handle_authoritative_call({:authoritative_entry, key}, _from, state) do
+    {:reply, get_entry(state, key), state}
+  end
+
+  defp handle_authoritative_call(
+         {:acknowledged_compare_and_create, key, expected, replacement},
+         _from,
+         state
+       ) do
+    state = invalidate_startup_entries(state)
+    {reply, state} = compare_and_create(state, key, expected, replacement)
+    {:reply, reply, state}
   end
 
   defp handle_authoritative_call({:authoritative_list, nil}, _from, state) do
@@ -416,6 +442,31 @@ defmodule Arbor.Security.AuthorityStore do
   defp normalize_live_value({:ok, _malformed}, _key), do: {:error, :invalid_backend_response}
   defp normalize_live_value(:not_found, _key), do: {:error, :not_found}
 
+  defp get_entry(_state, key) when not is_binary(key), do: {:error, :invalid_key}
+
+  defp get_entry(%{backend: nil, entries: entries}, key),
+    do: {:ok, Map.get(entries, key, :absent)}
+
+  defp get_entry(state, key) do
+    if function_exported?(state.backend, :authoritative_entry, 2) do
+      case guarded_backend(fn -> state.backend.authoritative_entry(key, state.backend_opts) end) do
+        {:returned, {:ok, entry}} -> validate_entry(key, entry)
+        _ -> {:error, :backend_unavailable}
+      end
+    else
+      {:error, :unsupported}
+    end
+  end
+
+  defp validate_entry(_key, :absent), do: {:ok, :absent}
+
+  defp validate_entry(_key, {:tombstone, generation} = entry)
+       when is_integer(generation) and generation > 0 and generation < 9_007_199_254_740_991,
+       do: {:ok, entry}
+
+  defp validate_entry(key, %Record{} = record), do: validate_record(key, record)
+  defp validate_entry(_key, _entry), do: {:error, :invalid_backend_response}
+
   defp validate_record(key, %Record{} = record) do
     if Revision.key_mismatch?(key, record),
       do: {:error, :key_mismatch},
@@ -536,8 +587,14 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp apply_ephemeral_put(entries, key, replacement) do
     case Map.fetch(entries, key) do
-      {:ok, %Record{} = current} -> Revision.advance_cas_update(current, replacement)
-      :error -> {:ok, Revision.advance_ephemeral_insert(replacement)}
+      {:ok, %Record{} = current} ->
+        Revision.advance_cas_update(current, replacement)
+
+      {:ok, {:tombstone, generation}} ->
+        {:ok, Revision.advance_cas_insert_from_tombstone(generation, replacement)}
+
+      :error ->
+        {:ok, Revision.advance_ephemeral_insert(replacement)}
     end
   end
 
@@ -579,7 +636,7 @@ defmodule Arbor.Security.AuthorityStore do
     do: {{:error, :invalid_key}, state}
 
   defp do_delete(%{persistence_mode: :ephemeral} = state, key, _acknowledged?) do
-    {:ok, %{state | entries: Map.delete(state.entries, key)}}
+    {:ok, retain_ephemeral_tombstone(state, key)}
   end
 
   defp do_delete(state, key, acknowledged?) do
@@ -618,6 +675,9 @@ defmodule Arbor.Security.AuthorityStore do
 
   defp ephemeral_cas(:absent, :not_found, replacement),
     do: {:ok, Revision.advance_ephemeral_insert(replacement)}
+
+  defp ephemeral_cas({:tombstone, generation}, :not_found, replacement),
+    do: {:ok, Revision.advance_cas_insert_from_tombstone(generation, replacement)}
 
   defp ephemeral_cas(%Record{} = current, {:value, expected}, replacement) do
     if Revision.cas_matches?(current, expected),
@@ -667,6 +727,59 @@ defmodule Arbor.Security.AuthorityStore do
     end
   end
 
+  defp compare_and_create(state, key, expected, replacement) do
+    with :ok <- validate_mutation(key, replacement),
+         :ok <- validate_creation_fence(expected) do
+      create_for_mode(state, key, expected, replacement)
+    else
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp validate_creation_fence(:absent), do: :ok
+
+  defp validate_creation_fence({:tombstone, generation})
+       when is_integer(generation) and generation > 0 and generation < 9_007_199_254_740_991,
+       do: :ok
+
+  defp validate_creation_fence(_), do: {:error, :invalid_expected}
+
+  defp create_for_mode(%{backend: nil} = state, key, expected, replacement) do
+    with :ok <- ensure_ephemeral_capacity(state, key),
+         true <- Map.get(state.entries, key, :absent) == expected do
+      stored =
+        case expected do
+          :absent ->
+            Revision.advance_cas_insert(replacement)
+
+          {:tombstone, generation} ->
+            Revision.advance_cas_insert_from_tombstone(generation, replacement)
+        end
+
+      {{:ok, stored}, %{state | entries: Map.put(state.entries, key, stored)}}
+    else
+      false -> {{:error, :conflict}, state}
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp create_for_mode(state, key, expected, replacement) do
+    if function_exported?(state.backend, :compare_and_create, 4) do
+      reply =
+        case guarded_backend(fn ->
+               state.backend.compare_and_create(key, expected, replacement, state.backend_opts)
+             end) do
+          {:returned, {:ok, %Record{} = stored}} -> validate_record(key, stored)
+          {:returned, {:error, :conflict}} -> {:error, :conflict}
+          _ -> {:error, :outcome_unknown}
+        end
+
+      {reply, state}
+    else
+      {{:error, :unsupported}, state}
+    end
+  end
+
   defp do_compare_and_delete(state, key, expected) do
     with :ok <- validate_expected_record(key, expected) do
       case state.persistence_mode do
@@ -682,13 +795,20 @@ defmodule Arbor.Security.AuthorityStore do
     case Map.get(state.entries, key, :absent) do
       %Record{} = current ->
         if Revision.cas_matches?(current, expected) do
-          {:ok, %{state | entries: Map.delete(state.entries, key)}}
+          {:ok, retain_ephemeral_tombstone(state, key)}
         else
           {{:error, :conflict}, state}
         end
 
       _other ->
         {{:error, :conflict}, state}
+    end
+  end
+
+  defp retain_ephemeral_tombstone(state, key) do
+    case Revision.to_tombstone(Map.get(state.entries, key, :absent)) do
+      :absent -> state
+      tombstone -> %{state | entries: Map.put(state.entries, key, tombstone)}
     end
   end
 
