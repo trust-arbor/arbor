@@ -52,9 +52,6 @@ defmodule Arbor.Cartographer.MixProject do
       # Mesh for capability-based routing (uncomment when ready)
       # {:mesh, github: "eigr/mesh"},
 
-      # Note: arbor_security and arbor_signals integrations will be added
-      # during implementation phase when those libraries are ready
-
       # Dev/test
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
