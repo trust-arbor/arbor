@@ -186,9 +186,7 @@ defmodule Arbor.Orchestrator.SecurityQualification do
             if node.handler_module == Arbor.Orchestrator.Handlers.ComputeHandler and
                  Map.get(attrs, "use_tools") in [true, "true"] and
                  is_nil(Map.get(attrs, "tools")) do
-              if selected == [],
-                do: Map.put(attrs, "use_tools", false),
-                else: Map.put(attrs, "tools", Enum.join(selected, ","))
+              manifest_selected_tools(attrs, selected)
             else
               attrs
             end
@@ -209,6 +207,11 @@ defmodule Arbor.Orchestrator.SecurityQualification do
   end
 
   defp manifest_graph(_, _), do: {:error, :unsupported_qualified_tool_selection}
+
+  defp manifest_selected_tools(attrs, []), do: Map.put(attrs, "use_tools", false)
+
+  defp manifest_selected_tools(attrs, selected),
+    do: Map.put(attrs, "tools", Enum.join(selected, ","))
 
   defp manifest_action_attrs(node, attrs) do
     if node.handler_module == Arbor.Orchestrator.Handlers.ExecHandler and

@@ -11,8 +11,8 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.LLM.Adapter.ReqLLM, as: ReqLLMAdapter
   alias Arbor.LLM.Client
-  alias Arbor.Orchestrator.Session
   alias Arbor.Orchestrator.Handlers.{LlmHandler, RoutingHandler}
+  alias Arbor.Orchestrator.Session
   alias Arbor.Persistence
   alias Arbor.Security
   alias Arbor.Security.AuditJournalOwner
