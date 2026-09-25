@@ -424,6 +424,7 @@ defmodule Arbor.Agent.Eval.SecurityJourney do
               max_turns: 3,
               tool_taint: %Taint{level: :untrusted, sensitivity: :internal},
               llm_call_authorizer: authorizer,
+              timeout_ms: setup.timeout,
               max_response_bytes: 65_536,
               req_http_options: [retry: false, redirect: false]
             )
